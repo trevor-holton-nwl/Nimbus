@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pandas
+numpy
+openpyxl
+psycopg[binary]
+psycopg_pool
+pydantic
+python-dotenv

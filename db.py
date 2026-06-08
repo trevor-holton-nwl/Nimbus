@@ -1,0 +1,918 @@
+"""
+NIMBUS 2.0 — Postgres data layer.
+
+This module is the single home for all Postgres connection management,
+schema-aware queries, and Excel-upload ingestion.  brain.py imports the
+public API from here; nothing else in the project should hold a connection.
+
+Connection string is hardcoded for the POC, mirroring how INPUT_FILE /
+COLOR_FILE are hardcoded in brain.py.  Swap to env vars / Azure managed
+identity at the migration step.
+"""
+import hashlib
+import io
+import os
+import uuid
+
+from dotenv import load_dotenv
+import pandas as pd
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
+
+load_dotenv()
+
+# =========================
+# CONNECTION
+# =========================
+PG_HOST = os.getenv("PG_HOST", "localhost")
+PG_PORT = int(os.getenv("PG_PORT", "5432"))
+PG_DB   = os.getenv("PG_DB",   "nimbus")
+PG_USER = os.getenv("PG_USER", "postgres")
+PG_PASS = os.getenv("PG_PASS", "")
+
+# Pool + safety knobs. Defaults are tuned for the stateless read path (every
+# request issues a DB query, so the old max_size=5 became a bottleneck under
+# concurrency / multiple workers). All env-overridable with sane defaults —
+# no secret handling here, just operational tuning.
+PG_POOL_MIN = int(os.environ.get("NIMBUS_PG_POOL_MIN", "2"))   # 2 warm conns = no cold-start latency
+PG_POOL_MAX = int(os.environ.get("NIMBUS_PG_POOL_MAX", "20"))
+PG_POOL_TIMEOUT = float(os.environ.get("NIMBUS_PG_POOL_TIMEOUT", "10"))  # s to wait for a free conn
+PG_STATEMENT_TIMEOUT_MS = int(os.environ.get("NIMBUS_PG_STATEMENT_TIMEOUT_MS", "30000"))
+
+# statement_timeout is set as a libpq startup option so it survives the pool's
+# per-checkin transaction reset (a `SET` inside a rolled-back tx would be lost).
+CONN_STR = (
+    f"host={PG_HOST} port={PG_PORT} dbname={PG_DB} "
+    f"user={PG_USER} password={PG_PASS} "
+    f"options='-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}'"
+)
+
+# min_size=2 keeps warm connections ready so the first /tasks load doesn't pay
+# connection setup latency. Overridable to 0 via env var if needed at import time.
+_pool = ConnectionPool(
+    CONN_STR,
+    min_size=PG_POOL_MIN,
+    max_size=PG_POOL_MAX,
+    timeout=PG_POOL_TIMEOUT,
+    open=True,
+)
+
+
+# =========================
+# HELPERS (lifted from brain.py so brain.py doesn't have to know about them)
+# =========================
+def clean(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names: strip → uppercase → spaces to underscores."""
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(" ", "_")
+    )
+    return df
+
+
+def _str_id(val) -> str:
+    """Normalize a SAP numeric ID — strips Excel float suffix: '1000261702.0' → '1000261702'."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    s = str(val).strip()
+    if s.endswith('.0') and s[:-2].lstrip('-').isdigit():
+        return s[:-2]
+    return s
+
+
+def make_id(production_order, material_number) -> str:
+    """MD5 of 'PRODUCTION_ORDER|MATERIAL_NUMBER' — deterministic across reloads."""
+    key = f"{_str_id(production_order)}|{_str_id(material_number)}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+# =========================
+# QUERIES — read
+# =========================
+# Shared projection for the orders read path. Column aliases are the contract the
+# frontend/brain.py rely on; user scheduling overrides take precedence over the
+# SAP-source dates via COALESCE so callers only ever see one start/end per order.
+_ORDERS_SELECT = """
+    SELECT
+        id,
+        production_order      AS "PRODUCTION_ORDER",
+        material_number       AS "MATERIAL_NUMBER",
+        material_description  AS "MATERIAL_DESCRIPTION",
+        o.production_line     AS "PRODUCTION_LINE",
+        pl.plant              AS "PLANT",
+        COALESCE(scheduled_start, basic_start_date) AS "BASIC_START_DATE",
+        COALESCE(scheduled_end,   basic_finish_date) AS "BASIC_FINISH_DATE",
+        basic_start_date      AS "ORIGINAL_START_DATE",
+        basic_finish_date     AS "ORIGINAL_END_DATE",
+        (scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
+        run_time              AS "RUN_TIME",
+        color                 AS "COLOR",
+        order_quantity        AS "ORDER_QUANTITY_(GMEIN)",
+        form_size             AS "FORM_SIZE",
+        notes                 AS "NOTES",
+        firming_indicator     AS "FIRMING_INDICATOR"
+    FROM orders o
+    LEFT JOIN production_lines pl ON pl.production_line = o.production_line
+"""
+
+
+def load_orders_df() -> pd.DataFrame:
+    """
+    Return ALL orders as a DataFrame. Used by diagnostics/admin paths only —
+    the hot /tasks read path uses query_orders() with server-side scoping.
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(_ORDERS_SELECT)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def query_orders(plant: str | None = None, line: str | None = None,
+                 limit: int | None = None, offset: int | None = None) -> pd.DataFrame:
+    """
+    Server-side-scoped orders read for the stateless /tasks path.
+
+    The scaling unit is the PLANT: pass `plant=` to bound the result to a single
+    plant (~70 lines) so we never materialize the whole order book. `line=`
+    narrows further. `limit`/`offset` are a coarse guard rail for unscoped
+    tooling queries only — finish-to-start links are coherent only within a
+    plant/line scope, never across a blind offset window.
+
+    All filter values are bound as parameters (no string interpolation).
+    Rows are ordered by (production_line, effective start) so brain.py's
+    per-line link builder sees each line contiguously.
+    """
+    sql = _ORDERS_SELECT
+    where, params = [], []
+    if plant:
+        where.append('pl.plant = %s')
+        params.append(plant)
+    if line:
+        where.append('o.production_line = %s')
+        params.append(line)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += '\n    ORDER BY o.production_line, COALESCE(scheduled_start, basic_start_date)'
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    if offset:
+        sql += " OFFSET %s"
+        params.append(int(offset))
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def count_orders(plant: str | None = None, line: str | None = None) -> int:
+    """Row count for a plant/line scope — for pagination totals / tooling."""
+    sql = "SELECT COUNT(*) FROM orders o LEFT JOIN production_lines pl ON pl.production_line = o.production_line"
+    where, params = [], []
+    if plant:
+        where.append('pl.plant = %s')
+        params.append(plant)
+    if line:
+        where.append('o.production_line = %s')
+        params.append(line)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def upload_audit_log(limit: int = 50) -> list[dict]:
+    """Recent uploads, newest first, for the Admin Cockpit history card."""
+    sql = """
+        SELECT batch_id, filename, row_count,
+               inserted_count, updated_count, uploaded_at, warnings
+        FROM upload_audit
+        ORDER BY uploaded_at DESC
+        LIMIT %s
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    return [
+        {
+            "batch_id": str(r[0]),
+            "filename": r[1],
+            "row_count": r[2],
+            "inserted": r[3],
+            "updated": r[4],
+            "uploaded_at": r[5].isoformat() if r[5] else None,
+            "warnings": r[6] or [],
+        }
+        for r in rows
+    ]
+
+
+# =========================
+# QUERIES — write
+# =========================
+def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
+    """
+    Persist a manual drag/drop or override edit by writing to
+    scheduled_start / scheduled_end.  Never touches the SAP-source columns
+    so the next upload doesn't have to think about user edits.
+    """
+    if start_date is None and end_date is None:
+        return {"status": "ok", "updated": 0}
+    sets, params = [], []
+    if start_date is not None:
+        sets.append("scheduled_start = %s")
+        params.append(start_date)
+    if end_date is not None:
+        sets.append("scheduled_end = %s")
+        params.append(end_date)
+    sets.append("updated_at = NOW()")
+    params.append(task_id)
+    sql = f"UPDATE orders SET {', '.join(sets)} WHERE id = %s"
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        updated = cur.rowcount
+        conn.commit()
+    return {"status": "ok", "updated": updated}
+
+
+# Uniform statement for batched edits: COALESCE keeps the existing value when a
+# field is not part of this edit (matches the single-field semantics of
+# update_task_dates — this path never NULLs out a previously-set override).
+_BULK_UPDATE_SQL = """
+    UPDATE orders SET
+        scheduled_start = COALESCE(%s, scheduled_start),
+        scheduled_end   = COALESCE(%s, scheduled_end),
+        updated_at      = NOW()
+    WHERE id = %s
+"""
+
+
+def update_task_dates_bulk(items: list[dict]) -> dict:
+    """
+    Persist a batch of start/end edits in a SINGLE transaction (one commit),
+    replacing the old commit-per-row path. Each item: {id, start, end} where
+    start/end are datetime|None.
+
+    Inverted ranges are rejected by validating each edit against the row's
+    *effective* current dates (so updating only start still checks against the
+    existing end). Unknown ids are reported, not written.
+
+    Returns {applied, persisted, failed, invalid, not_found}.
+    """
+    applied = persisted = failed = invalid = not_found = 0
+    if not items:
+        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0, "not_found": 0}
+
+    ids = [it["id"] for it in items if it.get("id")]
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id,
+                   COALESCE(scheduled_start, basic_start_date)  AS eff_start,
+                   COALESCE(scheduled_end,   basic_finish_date) AS eff_end
+            FROM orders WHERE id = ANY(%s)
+            FOR UPDATE
+            """,
+            (ids,),
+        )
+        eff = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+        valid_rows = []
+        for it in items:
+            tid = it.get("id")
+            start, end = it.get("start"), it.get("end")
+            if not tid or (start is None and end is None):
+                invalid += 1
+                continue
+            if tid not in eff:
+                not_found += 1
+                continue
+            cur_start, cur_end = eff[tid]
+            new_start = start if start is not None else cur_start
+            new_end   = end   if end   is not None else cur_end
+            if new_start is not None and new_end is not None and new_end <= new_start:
+                invalid += 1
+                continue
+            valid_rows.append((start, end, tid))
+
+        if valid_rows:
+            try:
+                cur.executemany(_BULK_UPDATE_SQL, valid_rows)
+                conn.commit()
+                persisted = applied = len(valid_rows)
+            except Exception:
+                conn.rollback()
+                failed = len(valid_rows)
+                raise
+    return {"applied": applied, "persisted": persisted, "failed": failed,
+            "invalid": invalid, "not_found": not_found}
+
+
+def update_task_note(task_id: str, notes) -> dict:
+    """Persist a user-written note for an order. Pass None to clear."""
+    sql = "UPDATE orders SET notes = %s, updated_at = NOW() WHERE id = %s"
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (notes or None, task_id))
+        updated = cur.rowcount
+        conn.commit()
+    return {"status": "ok", "updated": updated}
+
+
+def purge_orders_by_date(start, end) -> dict:
+    """DELETE rows whose effective end date (scheduled_end, falling back to basic_finish_date) falls in [start, end]."""
+    sql = "DELETE FROM orders WHERE COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s"
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (start, end))
+        deleted = cur.rowcount
+        conn.commit()
+    return {"status": "ok", "deleted": deleted}
+
+
+def clear_upload_audit() -> dict:
+    """Delete all rows from upload_audit."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM upload_audit")
+        deleted = cur.rowcount
+        conn.commit()
+    return {"status": "ok", "deleted": deleted}
+
+
+# =========================
+# DIAGNOSTICS / HEALTH
+# =========================
+def get_health_stats() -> dict:
+    """Fast aggregate query for the health-bar endpoint. Single round-trip."""
+    import time
+    t0 = time.monotonic()
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*)                 AS total_orders,
+                    COUNT(scheduled_start)   AS user_overrides
+                FROM orders
+            """)
+            row = cur.fetchone()
+            total_orders  = int(row[0]) if row else 0
+            user_overrides = int(row[1]) if row else 0
+
+            cur.execute("""
+                SELECT filename, uploaded_at
+                FROM upload_audit
+                ORDER BY uploaded_at DESC
+                LIMIT 1
+            """)
+            audit = cur.fetchone()
+
+        ping_ms = round((time.monotonic() - t0) * 1000)
+        return {
+            "connected":        True,
+            "ping_ms":          ping_ms,
+            "total_orders":     total_orders,
+            "user_overrides":   user_overrides,
+            "last_upload_file": audit[0] if audit else None,
+            "last_upload_at":   audit[1].isoformat() if (audit and audit[1]) else None,
+        }
+    except Exception as e:
+        return {
+            "connected":        False,
+            "ping_ms":          round((time.monotonic() - t0) * 1000),
+            "error":            str(e),
+            "total_orders":     0,
+            "user_overrides":   0,
+            "last_upload_file": None,
+            "last_upload_at":   None,
+        }
+
+
+def get_db_deep_stats() -> dict:
+    """Per-column null analysis, date range, and per-line breakdown."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*)                                                    AS total,
+                    COUNT(CASE WHEN basic_start_date  IS NULL THEN 1 END)      AS null_start,
+                    COUNT(CASE WHEN basic_finish_date IS NULL THEN 1 END)      AS null_end,
+                    COUNT(CASE WHEN color IS NULL OR color = '' THEN 1 END)    AS null_color,
+                    COUNT(CASE WHEN production_line IS NULL
+                               OR  production_line = '' THEN 1 END)            AS null_line,
+                    COUNT(CASE WHEN material_description IS NULL
+                               OR  material_description = '' THEN 1 END)       AS null_desc,
+                    COUNT(CASE WHEN run_time IS NULL THEN 1 END)               AS null_runtime,
+                    MIN(COALESCE(scheduled_start, basic_start_date))           AS min_date,
+                    MAX(COALESCE(scheduled_end,   basic_finish_date))          AS max_date
+                FROM orders
+            """)
+            r = cur.fetchone()
+
+            cur.execute("""
+                SELECT production_line, COUNT(*) AS cnt
+                FROM orders
+                GROUP BY production_line
+                ORDER BY cnt DESC
+            """)
+            by_line = {(row[0] or "unknown"): int(row[1]) for row in cur.fetchall()}
+
+        return {
+            "total":          int(r[0]) if r else 0,
+            "null_start":     int(r[1]) if r else 0,
+            "null_end":       int(r[2]) if r else 0,
+            "null_color":     int(r[3]) if r else 0,
+            "null_line":      int(r[4]) if r else 0,
+            "null_desc":      int(r[5]) if r else 0,
+            "null_runtime":   int(r[6]) if r else 0,
+            "date_range": {
+                "min": r[7].isoformat() if (r and r[7]) else None,
+                "max": r[8].isoformat() if (r and r[8]) else None,
+            },
+            "by_line": by_line,
+        }
+    except Exception as e:
+        return {"error": str(e), "total": 0, "by_line": {}}
+
+
+def get_pool_stats() -> dict:
+    """Connection pool metrics from psycopg_pool."""
+    try:
+        stats = _pool.get_stats()
+        return {
+            "pool_min":           stats.get("pool_min", 0),
+            "pool_max":           stats.get("pool_max", 0),
+            "pool_size":          stats.get("pool_size", 0),
+            "pool_available":     stats.get("pool_available", 0),
+            "requests_waiting":   stats.get("requests_waiting", 0),
+            "requests_completed": stats.get("requests_completed", 0),
+            "requests_errors":    stats.get("requests_errors", 0),
+            "returns_bad":        stats.get("returns_bad", 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_db_server_info() -> dict:
+    """PostgreSQL version, uptime, DB size, and max_connections setting."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    version(),
+                    pg_postmaster_start_time(),
+                    current_database(),
+                    pg_size_pretty(pg_database_size(current_database()))
+            """)
+            row = cur.fetchone()
+            cur.execute("SHOW max_connections")
+            max_conn = (cur.fetchone() or [None])[0]
+        return {
+            "version":         row[0] if row else None,
+            "started_at":      row[1].isoformat() if (row and row[1]) else None,
+            "database":        row[2] if row else None,
+            "db_size":         row[3] if row else None,
+            "max_connections": max_conn,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_db_table_stats() -> list:
+    """pg_stat_user_tables: live/dead rows, vacuum freshness, and total size."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    relname,
+                    n_live_tup,
+                    n_dead_tup,
+                    ROUND(
+                        CASE WHEN (n_live_tup + n_dead_tup) > 0
+                             THEN 100.0 * n_dead_tup / (n_live_tup + n_dead_tup)
+                             ELSE 0 END, 1)                       AS dead_pct,
+                    last_vacuum,
+                    last_autovacuum,
+                    last_analyze,
+                    last_autoanalyze,
+                    pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+                    n_mod_since_analyze
+                FROM pg_stat_user_tables
+                ORDER BY n_dead_tup DESC
+            """)
+            rows = cur.fetchall()
+        return [
+            {
+                "table":             r[0],
+                "live_rows":         int(r[1]),
+                "dead_rows":         int(r[2]),
+                "dead_pct":          float(r[3]),
+                "last_vacuum":       r[4].isoformat()     if r[4] else None,
+                "last_autovacuum":   r[5].isoformat()     if r[5] else None,
+                "last_analyze":      r[6].isoformat()     if r[6] else None,
+                "last_autoanalyze":  r[7].isoformat()     if r[7] else None,
+                "total_size":        r[8],
+                "mods_since_analyze": int(r[9]),
+                "needs_vacuum":      float(r[3]) > 20,
+                "needs_analyze":     int(r[9]) > max(int(r[1]) * 0.1, 100),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def get_db_connection_activity() -> dict:
+    """pg_stat_activity: connection state counts + non-idle queries."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT state, COUNT(*) AS cnt
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                GROUP BY state
+                ORDER BY cnt DESC
+            """)
+            by_state = {(r[0] or "unknown"): int(r[1]) for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT
+                    pid,
+                    state,
+                    EXTRACT(EPOCH FROM (NOW() - query_start))::int AS duration_s,
+                    LEFT(query, 150)                               AS query_snippet,
+                    wait_event_type,
+                    wait_event,
+                    application_name
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND state NOT IN ('idle')
+                  AND query_start IS NOT NULL
+                  AND pid <> pg_backend_pid()
+                ORDER BY query_start ASC
+                LIMIT 15
+            """)
+            long_running = [
+                {
+                    "pid":             r[0],
+                    "state":           r[1],
+                    "duration_s":      r[2],
+                    "query":           r[3],
+                    "wait_event_type": r[4],
+                    "wait_event":      r[5],
+                    "application":     r[6],
+                }
+                for r in cur.fetchall()
+            ]
+
+        return {
+            "total":        sum(by_state.values()),
+            "by_state":     by_state,
+            "long_running": long_running,
+        }
+    except Exception as e:
+        return {"error": str(e), "total": 0, "by_state": {}, "long_running": []}
+
+
+def get_db_lock_waits() -> list:
+    """Blocked/blocking lock pairs. Non-empty means live lock contention."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    blocked.pid                                                 AS blocked_pid,
+                    LEFT(ba.query, 150)                                         AS blocked_query,
+                    blocking.pid                                                AS blocking_pid,
+                    LEFT(ka.query, 150)                                         AS blocking_query,
+                    blocked.locktype                                            AS lock_type,
+                    EXTRACT(EPOCH FROM (NOW() - ba.query_start))::int          AS blocked_for_s
+                FROM pg_locks blocked
+                JOIN pg_stat_activity ba     ON ba.pid  = blocked.pid
+                JOIN pg_locks blocking       ON blocking.pid != blocked.pid
+                                            AND blocking.granted = TRUE
+                                            AND blocked.relation IS NOT DISTINCT FROM blocking.relation
+                JOIN pg_stat_activity ka     ON ka.pid  = blocking.pid
+                WHERE NOT blocked.granted
+                  AND ba.datname = current_database()
+                LIMIT 20
+            """)
+            rows = cur.fetchall()
+        return [
+            {
+                "blocked_pid":    r[0],
+                "blocked_query":  r[1],
+                "blocking_pid":   r[2],
+                "blocking_query": r[3],
+                "lock_type":      r[4],
+                "blocked_for_s":  r[5],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def get_db_index_usage() -> list:
+    """pg_stat_user_indexes: scan counts, tuple reads, and index sizes."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    relname                                           AS table_name,
+                    indexrelname                                      AS index_name,
+                    idx_scan                                          AS scans,
+                    idx_tup_read                                      AS tuples_read,
+                    idx_tup_fetch                                     AS tuples_fetched,
+                    pg_size_pretty(pg_relation_size(indexrelid))      AS index_size
+                FROM pg_stat_user_indexes
+                ORDER BY idx_scan DESC
+            """)
+            rows = cur.fetchall()
+        return [
+            {
+                "table":          r[0],
+                "index":          r[1],
+                "scans":          int(r[2]),
+                "tuples_read":    int(r[3]),
+                "tuples_fetched": int(r[4]),
+                "index_size":     r[5],
+                "unused":         int(r[2]) == 0,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def get_db_slow_queries(limit: int = 10) -> dict:
+    """Top slow queries via pg_stat_statements; returns available=False if extension absent."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')"
+            )
+            available = bool(cur.fetchone()[0])
+            if not available:
+                return {"available": False, "queries": []}
+
+            cur.execute("""
+                SELECT
+                    LEFT(query, 200)                         AS query,
+                    calls,
+                    ROUND(total_exec_time::numeric, 1)       AS total_ms,
+                    ROUND(mean_exec_time::numeric, 1)        AS mean_ms,
+                    ROUND(stddev_exec_time::numeric, 1)      AS stddev_ms,
+                    rows
+                FROM pg_stat_statements
+                WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                ORDER BY mean_exec_time DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+        return {
+            "available": True,
+            "queries": [
+                {
+                    "query":     r[0],
+                    "calls":     int(r[1]),
+                    "total_ms":  float(r[2]),
+                    "mean_ms":   float(r[3]),
+                    "stddev_ms": float(r[4]),
+                    "rows":      int(r[5]),
+                }
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e), "queries": []}
+
+
+def get_db_sequence_health() -> list:
+    """All user sequences with exhaustion risk percentage (pg_sequences, PG 10+)."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    schemaname,
+                    sequencename,
+                    data_type,
+                    last_value,
+                    min_value,
+                    max_value,
+                    increment_by,
+                    cycle
+                FROM pg_sequences
+                WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY schemaname, sequencename
+            """)
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            schema, name, dtype, last, minv, maxv, inc, cycle = r
+            last_v  = last if last is not None else (minv or 0)
+            minv_n  = minv or 0
+            rng     = (maxv - minv_n) if (maxv and maxv != minv_n) else 1
+            used_pct = round(100.0 * (last_v - minv_n) / rng, 2) if rng > 0 else 0.0
+            status   = "ok" if (cycle or used_pct < 80) else ("warn" if used_pct < 95 else "err")
+            result.append({
+                "schema":    schema,
+                "name":      name,
+                "data_type": dtype,
+                "last_value": last_v,
+                "max_value":  maxv,
+                "used_pct":   used_pct,
+                "cycles":     cycle,
+                "status":     status,
+            })
+        return result
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+# =========================
+# INGESTION
+# =========================
+_UPSERT_SQL = """
+    INSERT INTO orders (
+        id, production_order, material_number, material_description,
+        production_line, basic_start_date, basic_finish_date,
+        run_time, color, order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    ON CONFLICT (id) DO UPDATE SET
+        production_order      = EXCLUDED.production_order,
+        material_number       = EXCLUDED.material_number,
+        material_description  = EXCLUDED.material_description,
+        production_line       = EXCLUDED.production_line,
+        basic_start_date      = EXCLUDED.basic_start_date,
+        basic_finish_date     = EXCLUDED.basic_finish_date,
+        run_time              = EXCLUDED.run_time,
+        color                 = EXCLUDED.color,
+        order_quantity        = EXCLUDED.order_quantity,
+        form_size             = EXCLUDED.form_size,
+        firming_indicator     = EXCLUDED.firming_indicator,
+        upload_batch_id       = EXCLUDED.upload_batch_id,
+        updated_at            = NOW()
+    RETURNING (xmax = 0) AS inserted
+"""
+# Deliberately NOT in the UPDATE SET: scheduled_start, scheduled_end.
+# That's the whole point — user drag/drop edits survive a re-upload.
+
+
+def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
+    """
+    Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,
+    upsert into orders, and write an upload_audit row.
+
+    Returns: {status, batch_id, raw_row_count, inserted, updated, warnings}.
+    """
+    batch_id = str(uuid.uuid4())
+    warnings: list[dict] = []
+
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception as e:
+        return {"status": "error", "message": f"Could not parse xlsx: {e}",
+                "raw_row_count": 0, "inserted": 0, "updated": 0,
+                "warnings": [], "batch_id": batch_id}
+
+    raw_row_count = len(df)
+    df = clean(df)
+
+    # SAP exports sometimes use "ORDER" instead of "PRODUCTION_ORDER"
+    if "ORDER" in df.columns and "PRODUCTION_ORDER" not in df.columns:
+        df = df.rename(columns={"ORDER": "PRODUCTION_ORDER"})
+
+    required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
+    missing = required - set(df.columns)
+    if missing:
+        return {"status": "error",
+                "message": f"Uploaded file is missing required columns: {sorted(missing)}",
+                "raw_row_count": raw_row_count, "inserted": 0, "updated": 0,
+                "warnings": [], "batch_id": batch_id}
+
+    # ---------- Date hygiene (mirrors brain.py:102-127) ----------
+    df["BASIC_START_DATE"] = pd.to_datetime(df["BASIC_START_DATE"], errors="coerce")
+    if "BASIC_FINISH_DATE" not in df.columns:
+        df["BASIC_FINISH_DATE"] = pd.NaT
+    df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
+    df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
+
+    bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
+    df.loc[bad, "BASIC_FINISH_DATE"] = df.loc[bad, "BASIC_START_DATE"] + pd.Timedelta(hours=1)
+
+    bad_start = df["BASIC_START_DATE"].isna()
+    if bad_start.any():
+        warnings.append({
+            "level": "error",
+            "msg": f"{int(bad_start.sum())} row(s) dropped — unparseable BASIC_START_DATE",
+        })
+    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
+
+    df["RUN_TIME"] = pd.to_numeric(
+        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(1.0, index=df.index),
+        errors="coerce",
+    ).fillna(1.0)
+    mask_notime = df["BASIC_FINISH_DATE"].dt.hour == 0
+    df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
+        df.loc[mask_notime, "BASIC_START_DATE"]
+        + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
+    )
+
+    qcol = "ORDER_QUANTITY_(GMEIN)"
+    if qcol in df.columns:
+        df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
+
+    # ---------- IDs + dedup (mirrors brain.py:131-150) ----------
+    df["id"] = df.apply(
+        lambda r: make_id(r.get("PRODUCTION_ORDER", ""),
+                          r.get("MATERIAL_NUMBER", "")),
+        axis=1,
+    )
+    dup_counts = df.groupby("id").cumcount()
+    if (dup_counts > 0).any():
+        warnings.append({
+            "level": "warn",
+            "msg": f"{int((dup_counts > 0).sum())} duplicate IDs suffixed (ORDER|MATERIAL not unique)",
+        })
+        df.loc[dup_counts > 0, "id"] = (
+            df.loc[dup_counts > 0, "id"].astype(str)
+            + "_"
+            + dup_counts[dup_counts > 0].astype(str)
+        )
+
+    # ---------- Build row tuples ----------
+    def _v(row, col):
+        if col not in df.columns:
+            return None
+        val = row.get(col)
+        return None if pd.isna(val) else val
+
+    def _ts(val):
+        return val.to_pydatetime() if pd.notna(val) else None
+
+    rows = []
+    for _, r in df.iterrows():
+        rows.append((
+            r["id"],
+            _str_id(r.get("PRODUCTION_ORDER", "")),
+            _str_id(r.get("MATERIAL_NUMBER", "")),
+            _v(r, "MATERIAL_DESCRIPTION"),
+            _v(r, "PRODUCTION_LINE"),
+            _ts(r["BASIC_START_DATE"]),
+            _ts(r["BASIC_FINISH_DATE"]),
+            float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
+            _v(r, "COLOR"),
+            float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
+            _v(r, "FORM_SIZE"),
+            _v(r, "FIRMING_INDICATOR"),
+            batch_id,
+        ))
+
+    # ---------- Upsert + audit ----------
+    # Chunked executemany(returning=True): commits every 500 rows so a large upload
+    # never holds a table lock for the full duration of the transaction. Each chunk
+    # is idempotent (ON CONFLICT DO UPDATE), so a mid-upload failure leaves a
+    # consistent partial state the user can recover from by re-uploading.
+    _UPSERT_CHUNK = 500
+    inserted = 0
+    updated = 0
+    with _pool.connection() as conn, conn.cursor() as cur:
+        for i in range(0, len(rows), _UPSERT_CHUNK):
+            chunk = rows[i:i + _UPSERT_CHUNK]
+            cur.executemany(_UPSERT_SQL, chunk, returning=True)
+            while True:
+                rec = cur.fetchone()
+                if rec is not None:
+                    if rec[0]:
+                        inserted += 1
+                    else:
+                        updated += 1
+                if not cur.nextset():
+                    break
+            conn.commit()
+        cur.execute(
+            """
+            INSERT INTO upload_audit
+                (batch_id, filename, row_count, inserted_count, updated_count, warnings)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
+        )
+        conn.commit()
+
+    lines = sorted({str(v) for v in df["PRODUCTION_LINE"].dropna().unique()}) \
+        if "PRODUCTION_LINE" in df.columns else []
+
+    return {
+        "status": "ok",
+        "batch_id": batch_id,
+        "raw_row_count": raw_row_count,
+        "inserted": inserted,
+        "updated": updated,
+        "lines": lines,
+        "warnings": warnings,
+    }

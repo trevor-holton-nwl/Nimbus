@@ -1,0 +1,2313 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<script>
+// Lock page zoom — Gantt timeline zoom via scroll is unaffected
+(function () {
+  window.addEventListener('wheel', function (e) {
+    if (e.ctrlKey) e.preventDefault();
+  }, { passive: false });
+  window.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) &&
+        (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '_' || e.key === '0')) {
+      e.preventDefault();
+    }
+  }, { capture: true });
+})();
+</script>
+<title>NIMBUS — Production Scheduling</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧹</text></svg>">
+
+<!-- Fonts: Archivo (display) + Public Sans (body) + JetBrains Mono (data) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Timeline (unchanged — vis-timeline is still the best open Gantt for drag+drop) -->
+<script crossorigin="anonymous" src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+
+<!-- AG Grid Community — MIT licensed, chosen for best-in-class inline editing + filtering + pinning + validation -->
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/dist/ag-grid-community.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-grid.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-theme-quartz.css" rel="stylesheet">
+
+<!-- Chart.js for dashboard utilization visualizations -->
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+<!-- Flatpickr — styled date picker for optimization modal -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13"></script>
+
+<!-- Build identifier — bump on every deploy so static assets are cache-busted
+     and so exported diagnostics bundles can be tied back to a specific build. -->
+<script>window.NIMBUS_BUILD_ID = '2026-05-20-a';</script>
+<link rel="stylesheet" href="styles.css?v=2026-05-20-a">
+
+<style>
+/* ── Dashboard Filter Bar ───────────────────────────────────── */
+.dash-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 0 18px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #e8e4dc;
+  margin-bottom: 24px;
+}
+.dash-filter-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: #9a9285;
+  font-family: 'Public Sans', sans-serif;
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+.dash-filter-group { position: relative; }
+.dash-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: 'Public Sans', sans-serif;
+  font-weight: 500;
+  border: 1.5px solid #d5d1c8;
+  border-radius: 6px;
+  background: #faf9f5;
+  color: #3d3628;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s;
+  line-height: 1.4;
+}
+.dash-filter-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dash-filter-btn:not(:disabled):hover {
+  border-color: #b8791a;
+  background: #fff;
+}
+.dash-filter-btn.active {
+  border-color: #b8791a;
+  background: #fdf4e7;
+  color: #7a4f0e;
+  font-weight: 600;
+}
+.dash-filter-arrow { font-size: 10px; opacity: 0.55; }
+.dash-filter-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 190px;
+  background: #fff;
+  border: 1.5px solid #d5d1c8;
+  border-radius: 8px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.11);
+  z-index: 300;
+  padding: 5px 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.dash-filter-dropdown label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-family: 'Public Sans', sans-serif;
+  color: #3d3628;
+  cursor: pointer;
+  transition: background 0.1s;
+  user-select: none;
+}
+.dash-filter-dropdown label:hover { background: #f5f0e8; }
+.dash-filter-dropdown input[type="checkbox"] {
+  accent-color: #b8791a;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.dash-filter-clear {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: 'Public Sans', sans-serif;
+  font-weight: 600;
+  border: 1.5px solid #c0392b;
+  border-radius: 6px;
+  background: transparent;
+  color: #c0392b;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.dash-filter-clear:hover { background: #fff0ee; }
+.dash-filter-hint {
+  font-size: 11px;
+  color: #b5b0a8;
+  font-family: 'Public Sans', sans-serif;
+  margin-left: 4px;
+}
+
+/* ── Utilization Heatmap ─────────────────────────────────────── */
+.hm-scroll-wrap {
+  max-height: 405px;   /* ~10 data rows (34px) + header + gaps */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong, #c7c6bd) transparent;
+}
+.hm-scroll-wrap::-webkit-scrollbar { width: 6px; }
+.hm-scroll-wrap::-webkit-scrollbar-track { background: transparent; }
+.hm-scroll-wrap::-webkit-scrollbar-thumb { background: var(--line-strong, #c7c6bd); border-radius: 3px; }
+.hm-grid {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+}
+.hm-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #ffffff;
+}
+.hm-day-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-bottom: 5px;
+}
+.hm-dow {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Public Sans', sans-serif;
+  letter-spacing: 0.06em;
+  color: #6b6558;
+}
+.hm-date {
+  font-size: 9px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #9a9285;
+}
+.hm-line-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  color: #3d3628;
+  padding-right: 4px;
+  white-space: nowrap;
+}
+.hm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.hm-cell {
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 2px;
+  min-height: 34px;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  cursor: default;
+  transition: filter 0.12s, outline-color 0.12s;
+}
+.hm-cell:hover {
+  filter: brightness(1.12);
+  outline: 2px solid rgba(255,255,255,0.55);
+  outline-offset: -2px;
+  position: relative;
+  z-index: 1;
+}
+.hm-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 10px;
+  font-family: 'Public Sans', sans-serif;
+  color: #9a9285;
+  letter-spacing: 0.03em;
+}
+.hm-grad {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, #ede8de, #c8a95a, #c96a1a, #991b1b);
+}
+/* Heatmap dark-mode overrides */
+body.dark .hm-sticky { background: var(--bg-elev); }
+body.dark .hm-dow { color: var(--fg); }
+body.dark .hm-date { color: var(--fg-mute); }
+body.dark .hm-line-label { color: var(--fg); }
+body.dark .hm-legend { color: var(--fg-mute); }
+body.dark .hm-grad {
+  background: linear-gradient(to right, #252730, #7a5a18, #a8520f, #b32a1f);
+}
+body.dark .hm-cell:hover {
+  outline-color: rgba(255,255,255,0.35);
+}
+
+/* ── Projected-Lateness Heatmap (A1) ─────────────────────────── */
+.panel-head-controls { display: flex; align-items: center; gap: 12px; }
+.lateness-horizon-group {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+.lateness-horizon-group .seg-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: 'Public Sans', sans-serif;
+  border: 0;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  border-right: 1px solid var(--line);
+}
+.lateness-horizon-group .seg-btn:last-child { border-right: 0; }
+.lateness-horizon-group .seg-btn.active {
+  background: var(--accent, #b8791a);
+  color: #ffffff;
+}
+.lh-scroll-wrap {
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong, #c7c6bd) transparent;
+}
+.lh-scroll-wrap::-webkit-scrollbar { width: 6px; }
+.lh-scroll-wrap::-webkit-scrollbar-track { background: transparent; }
+.lh-scroll-wrap::-webkit-scrollbar-thumb { background: var(--line-strong, #c7c6bd); border-radius: 3px; }
+.lh-grid { display: grid; gap: 3px; width: 100%; }
+.lh-sticky { position: sticky; top: 0; z-index: 2; background: #ffffff; }
+.lh-corner { background: #ffffff; }
+.lh-day-head { display: flex; flex-direction: column; align-items: center; padding-bottom: 5px; }
+.lh-dow {
+  font-size: 10px; font-weight: 700;
+  font-family: 'Public Sans', sans-serif;
+  letter-spacing: 0.06em; color: #6b6558;
+}
+.lh-date { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: #9a9285; }
+.lh-line-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  color: #3d3628; padding-right: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lh-line-name { overflow: hidden; text-overflow: ellipsis; }
+.lh-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.lh-cell {
+  border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  padding: 7px 2px; min-height: 32px;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  transition: filter 0.12s, outline-color 0.12s;
+}
+.lh-cell:hover {
+  filter: brightness(1.12);
+  outline: 2px solid rgba(255,255,255,0.55);
+  outline-offset: -2px;
+  position: relative; z-index: 1;
+}
+.lh-legend {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px;
+  font-size: 10px; font-family: 'Public Sans', sans-serif;
+  color: #9a9285; letter-spacing: 0.03em;
+}
+.lh-leg-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.lh-legend-more {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--fg-mute);
+  letter-spacing: 0.02em;
+}
+body.dark .lh-sticky,
+body.dark .lh-corner {
+  background: var(--bg-elev);
+  box-shadow: 0 1px 0 var(--line);
+}
+body.dark .lh-dow { color: var(--fg); }
+body.dark .lh-date { color: var(--fg-mute); }
+body.dark .lh-line-label { color: var(--fg); }
+body.dark .lh-legend { color: var(--fg-mute); }
+body.dark .lh-leg-sw { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06); }
+body.dark .lh-cell { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
+body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
+
+/* Drill-down panel that appears below the lateness heatmap when a cell is clicked. */
+.lateness-drill {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.lh-drill-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: rgba(184,121,26,0.08);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--fg);
+}
+.lh-drill-head strong { font-family: 'JetBrains Mono', monospace; }
+.lh-drill-head span { color: var(--fg-mute); }
+.lh-drill-close {
+  margin-left: auto; border: 0; background: transparent;
+  font-size: 18px; line-height: 1; color: var(--fg-mute); cursor: pointer;
+  padding: 0 4px;
+}
+.lh-drill-close:hover { color: var(--fg); }
+.lh-drill-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 140px 140px 70px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.lh-drill-row:last-child { border-bottom: 0; }
+.lh-drill-row:hover { background: rgba(184,121,26,0.06); }
+.lh-drill-id {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+}
+.lh-drill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.lh-drill-due, .lh-drill-sched { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--fg-mute); }
+.lh-drill-late {
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: #dc2626;
+}
+.lh-drill-more { padding: 6px 12px; font-size: 11px; color: var(--fg-mute); text-align: center; }
+body.dark .lh-drill-head { background: rgba(184,121,26,0.15); }
+body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
+
+/* ── Optimizer Impact Preview (C4) ────────────────────────────── */
+@keyframes optpv-card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes optpv-bar-grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+@keyframes optpv-verdict-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes optpv-pill-pop {
+  0%   { transform: scale(0.6); opacity: 0; }
+  60%  { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+
+.opt-pv-shell {
+  font-family: 'Public Sans', sans-serif;
+}
+
+/* Header chip row — mode / plant / timestamp */
+.opt-pv-header {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 14px 0;
+}
+.opt-pv-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  background: var(--bg-subtle);
+  color: var(--fg-mute);
+  border: 1px solid var(--line);
+}
+.opt-pv-chip-mode {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hot) 100%);
+  color: #fff;
+  border-color: transparent;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.08em;
+  box-shadow: 0 1px 3px rgba(184,121,26,0.30);
+}
+.opt-pv-chip-plant { color: var(--fg); }
+
+/* Hero verdict banner */
+.opt-pv-verdict {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  margin: 0 0 18px 0;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  animation: optpv-verdict-in 0.42s cubic-bezier(0.34, 1.42, 0.64, 1) both;
+}
+.opt-pv-verdict::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 4px;
+}
+.opt-pv-verdict-better {
+  background: linear-gradient(135deg, rgba(22,163,74,0.06) 0%, rgba(22,163,74,0.02) 100%);
+  border-color: rgba(22,163,74,0.25);
+}
+.opt-pv-verdict-better::before { background: #16a34a; }
+.opt-pv-verdict-worse {
+  background: linear-gradient(135deg, rgba(220,38,38,0.06) 0%, rgba(220,38,38,0.02) 100%);
+  border-color: rgba(220,38,38,0.25);
+}
+.opt-pv-verdict-worse::before { background: #dc2626; }
+.opt-pv-verdict-neutral {
+  background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
+  border-color: var(--line);
+}
+.opt-pv-verdict-neutral::before { background: var(--accent); }
+
+.opt-pv-verdict-icon {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 700;
+  background: #fff;
+  flex-shrink: 0;
+}
+.opt-pv-verdict-better .opt-pv-verdict-icon { color: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,0.25); }
+.opt-pv-verdict-worse  .opt-pv-verdict-icon { color: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,0.25); }
+.opt-pv-verdict-neutral .opt-pv-verdict-icon { color: var(--accent); box-shadow: 0 0 0 1px var(--line); }
+
+.opt-pv-verdict-text { min-width: 0; }
+.opt-pv-verdict-title {
+  font-family: 'Archivo', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.opt-pv-verdict-sub {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
+.opt-pv-verdict-score {
+  text-align: center;
+  padding-left: 16px;
+  border-left: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.opt-pv-score-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--fg);
+}
+.opt-pv-verdict-better .opt-pv-score-num { color: #16a34a; }
+.opt-pv-verdict-worse  .opt-pv-score-num { color: #dc2626; }
+.opt-pv-score-of { color: var(--fg-faint); font-weight: 500; font-size: 14px; }
+.opt-pv-score-lbl {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+  margin-top: 4px;
+}
+
+/* KPI card grid */
+.opt-pv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.opt-pv-card {
+  position: relative;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 12px 14px 14px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  animation: optpv-card-in 0.32s ease both;
+}
+.opt-pv-card:nth-child(1) { animation-delay: 0.04s; }
+.opt-pv-card:nth-child(2) { animation-delay: 0.08s; }
+.opt-pv-card:nth-child(3) { animation-delay: 0.12s; }
+.opt-pv-card:nth-child(4) { animation-delay: 0.16s; }
+.opt-pv-card:nth-child(5) { animation-delay: 0.20s; }
+.opt-pv-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--line-strong);
+}
+.opt-pv-card-better { border-top: 2px solid #16a34a; }
+.opt-pv-card-worse  { border-top: 2px solid #dc2626; }
+.opt-pv-card-warn   { border-top: 2px solid #ca8a04; }
+.opt-pv-card-neutral { border-top: 2px solid var(--line-strong); }
+
+.opt-pv-card-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+}
+.opt-pv-card-ico {
+  font-size: 13px;
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.opt-pv-card-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+  flex: 1;
+  min-width: 0;
+}
+.opt-pv-card-help {
+  position: relative;
+  cursor: help;
+  flex-shrink: 0;
+  display: inline-flex;
+  outline: none;
+}
+.opt-pv-help-dot {
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  color: var(--fg-mute);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Public Sans', sans-serif;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line);
+  transition: background 0.15s, color 0.15s;
+}
+.opt-pv-card-help:hover .opt-pv-help-dot,
+.opt-pv-card-help:focus .opt-pv-help-dot {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.opt-pv-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: -6px;
+  width: 230px;
+  padding: 9px 11px;
+  background: #1a1b1f;
+  color: #f5f4ef;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-transform: none;
+  letter-spacing: 0;
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.20);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 0.16s, transform 0.16s;
+  z-index: 10;
+}
+.opt-pv-tip::after {
+  content: '';
+  position: absolute;
+  top: 100%; right: 10px;
+  border: 5px solid transparent;
+  border-top-color: #1a1b1f;
+}
+.opt-pv-card-help:hover .opt-pv-tip,
+.opt-pv-card-help:focus .opt-pv-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Before → After numbers */
+.opt-pv-card-body {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 10px;
+}
+.opt-pv-num { min-width: 0; }
+.opt-pv-num-lbl {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  margin-bottom: 2px;
+}
+.opt-pv-num-val {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+.opt-pv-num-pre .opt-pv-num-val { color: var(--fg-mute); font-weight: 500; }
+.opt-pv-num-unit {
+  font-size: 12px;
+  color: var(--fg-faint);
+  margin-left: 2px;
+  font-weight: 500;
+}
+.opt-pv-arrow {
+  font-size: 16px;
+  color: var(--fg-faint);
+  font-weight: 300;
+  padding: 0 2px;
+}
+.opt-pv-card-better .opt-pv-arrow { color: #16a34a; }
+.opt-pv-card-worse  .opt-pv-arrow { color: #dc2626; }
+.opt-pv-card-warn   .opt-pv-arrow { color: #ca8a04; }
+
+/* Bars — visual scale of pre vs post */
+.opt-pv-bars {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--line);
+}
+.opt-pv-bar-row { display: flex; align-items: center; gap: 8px; }
+.opt-pv-bar-tag {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  width: 28px;
+  flex-shrink: 0;
+}
+.opt-pv-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-subtle);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.opt-pv-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transform-origin: left center;
+  animation: optpv-bar-grow 0.55s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.opt-pv-bar-fill.pre { background: var(--line-strong); animation-delay: 0.05s; }
+.opt-pv-bar-fill.post.better  { background: linear-gradient(90deg, #16a34a, #22c55e); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.worse   { background: linear-gradient(90deg, #dc2626, #ef4444); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.warn    { background: linear-gradient(90deg, #a16207, #ca8a04); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.neutral { background: linear-gradient(90deg, var(--accent), var(--accent-hot)); animation-delay: 0.18s; }
+
+/* Delta pill */
+.opt-pv-delta-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  animation: optpv-pill-pop 0.4s cubic-bezier(0.34, 1.52, 0.64, 1) 0.22s both;
+}
+.opt-pv-delta-pill.better  { background: rgba(22,163,74,0.10); color: #16a34a; }
+.opt-pv-delta-pill.worse   { background: rgba(220,38,38,0.10); color: #dc2626; }
+.opt-pv-delta-pill.warn    { background: rgba(202,138,4,0.12); color: #a16207; }
+.opt-pv-delta-pill.neutral { background: var(--bg-subtle); color: var(--fg-mute); }
+.opt-pv-pill-icon { font-size: 9px; }
+.opt-pv-pct { font-weight: 500; opacity: 0.80; margin-left: 2px; }
+
+/* Footer caption inside body */
+.opt-pv-footer-note {
+  margin-top: 16px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-mute);
+  background: var(--accent-wash);
+  border-radius: var(--r-md);
+  border-left: 3px solid var(--accent);
+}
+.opt-pv-footer-note strong { color: var(--fg); font-weight: 700; }
+
+/* Dark-mode polish */
+body.dark .opt-pv-card { background: var(--bg-elev); }
+body.dark .opt-pv-chip-plant { color: var(--fg); }
+body.dark .opt-pv-verdict-icon { background: var(--bg-strong); }
+body.dark .opt-pv-help-dot { background: var(--bg-strong); }
+body.dark .opt-pv-tip { background: #0d0e10; }
+body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
+
+/* Mobile / narrow modal fallback */
+@media (max-width: 620px) {
+  .opt-pv-grid { grid-template-columns: 1fr; }
+  .opt-pv-verdict { grid-template-columns: auto 1fr; }
+  .opt-pv-verdict-score { display: none; }
+}
+
+/* ── Line Status Panel ──────────────────────────────────────── */
+#line-status-card { display: flex; flex-direction: column; overflow: hidden; }
+#line-status-card .panel-body-flush { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#line-status-panel {
+  padding: 0 0 4px 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong, #c7c6bd) transparent;
+}
+#line-status-panel::-webkit-scrollbar { width: 6px; }
+#line-status-panel::-webkit-scrollbar-track { background: transparent; }
+#line-status-panel::-webkit-scrollbar-thumb { background: var(--line-strong, #c7c6bd); border-radius: 3px; }
+.ls-header {
+  font-family: 'Public Sans', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #9a8f84;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e8e4dc;
+  margin-bottom: 2px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #ffffff;
+}
+.ls-header:hover { background: #ffffff; }
+.ls-header .ls-bar-wrap { overflow: visible; }
+.ls-header .ls-code,
+.ls-header .ls-hours,
+.ls-header .ls-bar-wrap,
+.ls-header .ls-pct,
+.ls-header .ls-co {
+  font-family: 'Public Sans', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: #9a8f84;
+}
+.ls-header .ls-bar-wrap {
+  height: auto;
+  background: none;
+}
+.ls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  font-size: 13px;
+  transition: background 0.12s;
+}
+.ls-row:hover { background: rgba(0,0,0,0.03); }
+.ls-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.ls-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b6459;
+  min-width: 58px;
+  white-space: nowrap;
+}
+.ls-hours {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #5a5047;
+  min-width: 74px;
+  white-space: nowrap;
+}
+.ls-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: rgba(0,0,0,0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.ls-bar { height: 100%; border-radius: 4px; transition: width 0.35s ease; min-width: 4px; }
+.ls-bar.over { opacity: 0.88; }
+.ls-pct {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 38px;
+  text-align: right;
+  color: #3d3530;
+}
+.ls-pct.warn { color: #b45309; }
+.ls-pct.err  { color: #b91c1c; }
+.ls-co {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #9a8f84;
+  min-width: 38px;
+  text-align: right;
+}
+/* Line Status dark-mode overrides */
+body.dark .ls-header,
+body.dark .ls-header:hover {
+  background: var(--bg-elev);
+  border-bottom-color: var(--line);
+  color: var(--fg-mute);
+}
+body.dark .ls-header .ls-code,
+body.dark .ls-header .ls-hours,
+body.dark .ls-header .ls-pct,
+body.dark .ls-header .ls-co { color: var(--fg-mute); }
+body.dark .ls-row:hover { background: rgba(255,255,255,0.04); }
+body.dark .ls-code  { color: var(--fg); }
+body.dark .ls-hours { color: var(--fg-mute); }
+body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
+body.dark .ls-pct      { color: var(--fg); }
+body.dark .ls-pct.warn { color: #e0a93a; }
+body.dark .ls-pct.err  { color: #f06a5a; }
+body.dark .ls-co       { color: var(--fg-mute); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- =========================================================
+       TOP BAR — brand + primary tabs + global actions
+       ========================================================= -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">NIMBUS 🧹</span>
+      <span class="brand-ver"></span>
+    </div>
+
+    <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
+      <label class="hps-label" for="hps-input" data-i18n="ui.plant_label">Plant</label>
+      <div class="hps-combobox" id="hps-combobox">
+        <input type="text" id="hps-input" class="hps-input" placeholder="None" data-i18n-placeholder="ph.select_plant"
+               autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false">
+        <button type="button" class="hps-clear" id="hps-clear" title="Clear plant filter" data-i18n-title="tip.clear_plant_filter" hidden>×</button>
+        <div class="hps-dropdown" id="hps-dropdown" role="listbox" hidden></div>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="home" role="tab">
+        <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
+      </button>
+      <button class="tab-btn" data-tab="gantt" role="tab">
+        <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
+      </button>
+      <button class="tab-btn" data-tab="table" role="tab">
+        <span class="tab-ico">≡</span><span data-i18n="tab.table">Orders</span>
+      </button>
+      <button class="tab-btn" data-tab="masterdata" role="tab">
+        <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Manage Master Data</span>
+      </button>
+      <button class="tab-btn" data-tab="admin" role="tab">
+        <span class="tab-ico">🖥️</span><span data-i18n="tab.admin">Admin Cockpit</span>
+      </button>
+    </nav>
+
+    <div class="topbar-actions">
+      <button id="alert-bell" class="icon-btn" data-i18n-title="tip.click_view_alerts" title="Alerts">
+        <span class="bell">⚐</span>
+        <span class="badge" id="alert-badge" hidden>0</span>
+      </button>
+      <button class="btn btn-primary" data-i18n="btn.save" onclick="NIMBUS.Persistence.saveAll()">Save</button>
+    </div>
+  </header>
+
+  <!-- =========================================================
+       TAB: DASHBOARD
+       ========================================================= -->
+  <section class="tab-panel active" id="home-tab" role="tabpanel">
+    <div class="home-scroll">
+      <div class="home-container">
+
+        <!-- Dashboard line-filter bar (plant selector moved to the top header). -->
+        <div class="dash-filter-bar" id="dash-filter-bar">
+          <span class="dash-filter-label" data-i18n="ui.filter_label">Filter</span>
+
+          <div class="dash-filter-group" id="line-filter-group">
+            <button class="dash-filter-btn" id="line-filter-btn" disabled
+                    onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown')">
+              <span id="line-filter-label">All Lines</span>
+              <span class="dash-filter-arrow">▾</span>
+            </button>
+            <div class="dash-filter-dropdown" id="line-filter-dropdown" hidden></div>
+          </div>
+
+          <button class="dash-filter-clear" id="dash-filter-clear" hidden
+                  onclick="NIMBUS.Dashboard._clearFilters()" data-i18n="btn.clear_filter_line">✕ Clear line filter</button>
+
+          <span class="dash-filter-hint" id="dash-filter-hint"></span>
+        </div>
+
+        <div class="hero-row">
+          <div class="hero-text">
+            <div class="eyebrow" data-i18n="ui.hop_on">Hop On</div>
+            <h1 data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</h1>
+            <p class="sub" data-i18n="ui.hero_subheading">
+              Newell Integrated Batch &amp; Unified Scheduling
+            </p>
+            <div class="hero-actions">
+              <button class="btn btn-primary btn-lg" data-i18n="btn.open_scheduling" onclick="NIMBUS.App.goto('gantt')">Open Scheduling Board →</button>
+              <button class="btn btn-ghost btn-lg" data-i18n="btn.open_orders" onclick="NIMBUS.App.goto('table')">Open Orders →</button>
+            </div>
+          </div>
+          <div class="hero-aside">
+            <h3 class="kpi-section-header" data-i18n="ui.todays_overview">Today's Overview</h3>
+            <div class="kpi-stack" id="kpi-stack"><!-- filled by Dashboard module --></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.util_heatmap">Utilization Heatmap — next 7 days</h3>
+              <span class="panel-hint" data-i18n="ui.util_capacity_hint">% of available capacity · idle → overload</span>
+            </header>
+            <div class="panel-body" style="padding:12px 16px 16px;">
+              <div id="util-heatmap-panel"></div>
+            </div>
+          </div>
+
+          <div class="panel" id="line-status-card">
+            <header class="panel-head">
+              <h3><span data-i18n="ui.line_status_title">Line Status</span> <span style="color:#9a8f84;font-weight:400;font-size:12px;letter-spacing:0.04em;">· LIVE</span></h3>
+              <span class="panel-hint" data-i18n="ui.line_status_hint">util / capacity / next CO</span>
+            </header>
+            <div class="panel-body panel-body-flush">
+              <div id="line-status-panel"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.active_alerts">Active alerts</h3>
+              <span class="panel-hint" id="alert-summary-count">0 open</span>
+            </header>
+            <div class="panel-body panel-body-flush">
+              <div id="alert-summary-list" class="alert-summary-list"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.fixed_orders">Fixed orders</h3>
+              <span class="panel-hint" data-i18n="ui.locked_optimizer">Locked from the optimizer</span>
+            </header>
+            <div class="panel-body panel-body-flush">
+              <div id="fixed-list" class="fixed-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <header class="panel-head">
+            <h3 data-i18n="ui.projected_lateness">Projected lateness — vs SAP plan</h3>
+            <div class="panel-head-controls">
+              <span class="panel-hint" data-i18n="ui.lateness_hint">cumulative late hours per line / day · click a cell to inspect</span>
+              <div class="lateness-horizon-group" id="lateness-horizon-group">
+                <button class="seg-btn" data-h="7">7d</button>
+                <button class="seg-btn active" data-h="14">14d</button>
+                <button class="seg-btn" data-h="28">28d</button>
+              </div>
+            </div>
+          </header>
+          <div class="panel-body" style="padding:12px 16px 16px;">
+            <div id="lateness-heatmap-panel"></div>
+            <div id="lateness-drill" class="lateness-drill" hidden></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================
+       TAB: TIMELINE
+       ========================================================= -->
+  <section class="tab-panel" id="gantt-tab" role="tabpanel">
+    <div class="gantt-toolbar">
+      <div class="group">
+        <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
+        <button class="seg-btn" data-view="day" data-i18n="btn.day">Day</button>
+        <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
+      </div>
+      <div class="sep-v"></div>
+      <div class="group">
+        <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view">⊡ Fit</button>
+        <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now">⊙ Now</button>
+      </div>
+      <div class="spacer"></div>
+      <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize">📈 Optimize</button>
+      <div class="sep-v"></div>
+      <button class="seg-btn sandbox-btn" onclick="NIMBUS.Sandbox.enter()" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
+      <div class="sep-v"></div>
+      <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule">⎙ Print</button>
+    </div>
+
+    <!-- Gantt filter bar (below toolbar) -->
+    <div class="gantt-filterbar" id="gantt-filterbar">
+      <div class="gantt-line-filter-group">
+        <button class="flt-sel gantt-line-btn" id="gantt-flt-line-btn"
+                onclick="NIMBUS.GanttFilter._toggleLineDropdown()">
+          <span id="gantt-flt-line-label">All Lines</span>
+          <span style="margin-left:4px;opacity:.6;">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="gantt-line-dropdown" hidden></div>
+      </div>
+      <div class="gantt-line-filter-group">
+        <button class="flt-sel gantt-line-btn" id="gantt-flt-color-btn"
+                onclick="NIMBUS.GanttFilter._toggleColorDropdown()">
+          <span id="gantt-flt-color-label">All Colors</span>
+          <span style="margin-left:4px;opacity:.6;">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="gantt-color-dropdown" hidden></div>
+      </div>
+      <div class="gantt-line-filter-group">
+        <button class="flt-sel gantt-line-btn" id="gantt-flt-form-btn"
+                onclick="NIMBUS.GanttFilter._toggleFormDropdown()">
+          <span id="gantt-flt-form-label">All Forms</span>
+          <span style="margin-left:4px;opacity:.6;">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="gantt-form-dropdown" hidden></div>
+      </div>
+      <input  id="flt-text"  class="flt-input" type="search" placeholder="Search orders…" data-i18n-placeholder="ph.search_orders">
+      <span class="flt-badge-wrap" id="flt-badge-wrap" hidden><span class="flt-badge" id="flt-badge"></span></span>
+      <button class="btn btn-ghost sm" id="flt-clear" data-i18n="btn.clear">✕ Clear</button>
+    </div>
+
+    <div class="main-row">
+      <aside class="side side-left" id="left-sidebar">
+        <header class="side-head">
+          <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
+          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('left')">◀</button>
+        </header>
+        <div id="hierarchy"></div>
+        <div class="resize-handle rh-right" data-side="left"></div>
+      </aside>
+
+      <div class="timeline-wrap">
+        <!-- Navigator minimap -->
+        <div id="timeline-nav"></div>
+        <!-- Dependency overlay SVG -->
+        <svg id="dep-overlay" aria-hidden="true"></svg>
+        <div id="vis-timeline"></div>
+        <!-- Empty-state overlay shown when no plant is selected -->
+        <div id="timeline-empty-overlay" class="timeline-empty-overlay" hidden></div>
+      </div>
+
+      <aside class="side side-right" id="right-sidebar">
+        <header class="side-head">
+          <h4 data-i18n="ui.sidebar_inspector">Inspector</h4>
+          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('right')">✕</button>
+        </header>
+        <div class="inspector-body" id="inspector-body">
+          <div class="empty-state" data-i18n="empty.select_order">Select an order to inspect.</div>
+        </div>
+        <div class="resize-handle rh-left" data-side="right"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- =========================================================
+       TAB: ORDERS (AG Grid)
+       ========================================================= -->
+  <section class="tab-panel" id="table-tab" role="tabpanel">
+    <div class="table-toolbar">
+      <input id="quick-filter" class="input" type="search" placeholder="Quick filter orders, material, line…" data-i18n-placeholder="ph.quick_filter">
+      <div class="spacer"></div>
+      <button class="btn btn-ghost btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize">📈 Optimize</button>
+      <div class="sep-v"></div>
+      <button class="btn btn-ghost sandbox-btn" onclick="NIMBUS.Sandbox.enter()" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
+      <button class="btn btn-ghost" data-i18n="btn.export_csv" onclick="NIMBUS.Table.exportCsv()">Export CSV</button>
+      <button class="btn btn-ghost" data-i18n="btn.fix_selected" onclick="NIMBUS.Table.fixSelected(true)">Fix selected</button>
+      <button class="btn btn-ghost" data-i18n="btn.unfix_selected" onclick="NIMBUS.Table.fixSelected(false)">Unfix selected</button>
+      <button class="btn btn-primary" data-i18n="btn.override_date" onclick="NIMBUS.Table.openOverrideModal()">Override date…</button>
+    </div>
+
+    <!-- Orders filter chip bar (one-click planner-aware filters) -->
+    <div class="table-filterbar" id="table-filterbar">
+      <span class="dash-filter-label" data-i18n="ui.filter_label">Filter</span>
+
+      <div class="dash-filter-group">
+        <button class="dash-filter-btn" id="tbl-flt-line-btn" disabled
+                onclick="NIMBUS.Table._toggleChipDropdown('line')">
+          <span id="tbl-flt-line-label">All Lines</span>
+          <span class="dash-filter-arrow">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="tbl-flt-line-dropdown" hidden></div>
+      </div>
+
+      <div class="dash-filter-group">
+        <button class="dash-filter-btn" id="tbl-flt-color-btn" disabled
+                onclick="NIMBUS.Table._toggleChipDropdown('color')">
+          <span id="tbl-flt-color-label">All Colors</span>
+          <span class="dash-filter-arrow">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="tbl-flt-color-dropdown" hidden></div>
+      </div>
+
+      <div class="dash-filter-group">
+        <button class="dash-filter-btn" id="tbl-flt-status-btn" disabled
+                onclick="NIMBUS.Table._toggleChipDropdown('status')">
+          <span id="tbl-flt-status-label">All Statuses</span>
+          <span class="dash-filter-arrow">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="tbl-flt-status-dropdown" hidden></div>
+      </div>
+
+      <div class="dash-filter-group">
+        <button class="dash-filter-btn" id="tbl-flt-date-btn" disabled
+                onclick="NIMBUS.Table._toggleChipDropdown('date')">
+          <span id="tbl-flt-date-label">Any date</span>
+          <span class="dash-filter-arrow">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="tbl-flt-date-dropdown" hidden></div>
+      </div>
+
+      <button class="dash-filter-clear" id="tbl-flt-clear" hidden
+              onclick="NIMBUS.Table._clearChipFilters()" data-i18n="btn.clear_filters">✕ Clear filters</button>
+
+      <span class="dash-filter-hint" id="tbl-flt-hint"></span>
+    </div>
+
+    <div id="ag-grid" class="ag-theme-quartz"></div>
+  </section>
+
+  <!-- =========================================================
+       TAB: MANAGE MASTER DATA — wraps Production Lines + Plant
+       ========================================================= -->
+  <section class="tab-panel" id="masterdata-tab" role="tabpanel">
+    <nav class="admin-subtabs md-master-subtabs" role="tablist">
+      <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
+      <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
+    </nav>
+
+    <!-- SUB-PANE: PRODUCTION LINES -->
+    <div id="md-master-lines-pane">
+      <div class="lines-split">
+        <div class="lines-nav" id="lines-nav"></div>
+        <div class="cal-scroll">
+          <div class="cal-container">
+            <header class="cal-head">
+              <div style="flex:1;">
+                <h2 data-i18n="ui.prod_lines_h2">Production Lines</h2>
+                <p class="sub" data-i18n="ui.prod_lines_sub">Configure capacity buffers, bottleneck flags, and working hours per production line. Plant-level hours and blackouts act as the outer constraint.</p>
+              </div>
+              <div id="lines-filter-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"></div>
+            </header>
+            <div id="lines-body"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SUB-PANE: PLANT (MM03-style inner tabs) -->
+    <div id="md-master-plant-pane" hidden style="flex-direction:column;height:100%;overflow:hidden;">
+
+      <!-- Inner tab strip -->
+      <nav class="admin-subtabs plant-inner-tabs" role="tablist"
+           style="padding:0 24px;border-top:1px solid var(--border);margin-top:0;flex-shrink:0;">
+        <button class="sub-subtab active" data-plant-tab="general" role="tab"
+                onclick="NIMBUS.Plant.gotoTab('general')" data-i18n="tab.general">General</button>
+        <button class="sub-subtab" data-plant-tab="optimization" role="tab"
+                onclick="NIMBUS.Plant.gotoTab('optimization')" data-i18n="tab.optimization">Optimization</button>
+        <button class="sub-subtab" data-plant-tab="settings" role="tab"
+                onclick="NIMBUS.Plant.gotoTab('settings')" data-i18n="tab.system_settings">System Settings</button>
+      </nav>
+
+      <!-- Inner pane: General -->
+      <div id="plant-tab-general" class="cal-scroll" style="flex:1;overflow-y:auto;">
+        <div class="cal-container">
+          <div class="plant-two-col">
+            <div class="panel" id="plant-hours-panel">
+              <header class="panel-head"><h3 data-i18n="ui.plant_working_hours">Plant Working Hours</h3></header>
+              <div class="panel-body panel-body-hours" id="plant-hours-body"></div>
+            </div>
+            <div class="panel" id="plant-blackouts-panel">
+              <header class="panel-head">
+                <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
+                <button class="btn btn-ghost sm" onclick="NIMBUS.Plant.openBlockModal()" data-i18n="btn.add_block">+ Add</button>
+              </header>
+              <div class="panel-body panel-body-flush">
+                <div id="plant-blocks-stats"></div>
+                <div id="plant-blocks-list" class="blocks-list"></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.production_lines_panel">Production Lines</h3>
+              <span class="panel-hint" id="plant-lines-count"></span>
+              <button id="plant-roster-toggle" class="btn btn-ghost sm"
+                      onclick="NIMBUS.Plant.toggleRosterList()"
+                      style="padding:2px 8px;font-size:12px;">▼</button>
+            </header>
+            <div id="plant-roster-wrap" style="display:none;max-height:392px;overflow-y:auto;">
+              <div class="panel-body panel-body-flush" id="plant-lines-roster"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inner pane: Optimization -->
+      <div id="plant-tab-optimization" class="cal-scroll" hidden style="flex:1;overflow-y:auto;">
+        <div class="cal-container">
+          <div class="panel" id="plant-opt-panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.optimization_options">Optimization Options</h3>
+              <span class="panel-hint" data-i18n="ui.opt_options_hint">Plant-specific color wheel and priority settings</span>
+            </header>
+            <div class="panel-body" id="plant-opt-body">
+              <div class="cw-loading"><span class="cw-spin"></span>Loading…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inner pane: System Settings (content injected by App._renderSettingsPane) -->
+      <div id="plant-tab-settings" class="cal-scroll" hidden style="flex:1;overflow-y:auto;"></div>
+
+    </div>
+  </section>
+
+  <!-- =========================================================
+       TAB: ADMIN COCKPIT — upload orders, purge data, view logs + upload history
+       ========================================================= -->
+  <section class="tab-panel" id="admin-tab" role="tabpanel">
+    <div class="admin-scroll">
+      <div class="admin-container">
+        <header class="admin-head">
+          <div>
+            <h2 data-i18n="tab.admin">Admin Cockpit</h2>
+            <p class="sub" data-i18n="ui.admin_sub">System health, data pipeline diagnostics, upload, purge, and application log.</p>
+          </div>
+        </header>
+
+        <!-- ADMIN SUB-TAB STRIP -->
+        <nav class="admin-subtabs" role="tablist">
+          <button class="admin-subtab active" data-sub="overview" role="tab" data-i18n="tab.overview">Overview</button>
+          <button class="admin-subtab" data-sub="manage" role="tab" data-i18n="tab.manage_data_tables">Manage Data Tables</button>
+        </nav>
+
+        <!-- OVERVIEW PANE -->
+        <div id="admin-overview-pane">
+
+          <!-- HEALTH STATUS BAR — always visible above sub-subtabs -->
+          <div class="admin-health-bar" id="admin-health-bar">
+            <div class="admin-health-chip" id="admin-health-db">
+              <span class="admin-health-dot"></span>
+              <span class="admin-health-label" data-i18n="ui.health_db">DB —</span>
+            </div>
+            <div class="admin-health-sep"></div>
+            <div class="admin-health-chip" id="admin-health-orders">
+              <span class="admin-health-label" data-i18n="ui.health_orders">— orders</span>
+            </div>
+            <div class="admin-health-sep"></div>
+            <div class="admin-health-chip" id="admin-health-overrides">
+              <span class="admin-health-label" data-i18n="ui.health_overrides">— user overrides</span>
+            </div>
+            <div class="admin-health-sep"></div>
+            <div class="admin-health-chip" id="admin-health-color">
+              <span class="admin-health-dot"></span>
+              <span class="admin-health-label" data-i18n="ui.health_color">Color wheel —</span>
+            </div>
+            <div class="admin-health-sep"></div>
+            <div class="admin-health-chip" id="admin-health-loaded">
+              <span class="admin-health-label">—</span>
+            </div>
+            <div class="admin-health-sep"></div>
+            <div class="admin-health-chip" id="admin-health-pool">
+              <span class="admin-health-dot"></span>
+              <span class="admin-health-label" data-i18n="ui.health_pool">Pool —</span>
+            </div>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost sm" id="admin-health-refresh" data-i18n="btn.health_refresh" data-i18n-title="tip.health_refresh" title="Refresh health">↻ Health</button>
+          </div>
+
+          <!-- OVERVIEW SUB-SUBTAB STRIP -->
+          <nav class="admin-subtabs admin-ov-tabs" role="tablist">
+            <button class="sub-subtab active" data-ov-tab="diagnostics" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('diagnostics')" data-i18n="tab.diagnostics">Diagnostics</button>
+            <button class="sub-subtab" data-ov-tab="data-ops" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('data-ops')" data-i18n="tab.data_operations">Data Operations</button>
+            <button class="sub-subtab" data-ov-tab="logs" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('logs')" data-i18n="tab.logs_audit">Logs &amp; Audit</button>
+          </nav>
+
+          <!-- PANE: DIAGNOSTICS -->
+          <div id="admin-ov-diagnostics">
+
+            <!-- CLIENT DIAGNOSTICS -->
+            <div id="admin-diagnostics-pane" class="admin-section"></div>
+
+            <div class="admin-grid">
+
+              <!-- DATA PIPELINE -->
+              <div class="panel admin-card admin-card-wide" id="admin-pipeline-card">
+                <header class="panel-head">
+                  <h3><span data-i18n="ui.data_pipeline">Data pipeline</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.pipeline_help">End-to-end path from database load to rendered Gantt tasks. Click any step to expand details. High drop counts between stages indicate data quality issues; color misses mean SKUs not mapped in the color wheel. If drops grow after a reload, investigate the source data.</span></span></h3>
+                  <span class="panel-hint" data-i18n="ui.pipeline_hint">Click any step for details</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-pipeline-refresh" data-i18n="btn.refresh">↻ Refresh</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-pipeline" class="admin-pipeline"></div>
+                  <div id="admin-pipeline-detail" class="admin-pipeline-detail"></div>
+                </div>
+              </div>
+
+              <!-- BACKEND WARNINGS -->
+              <div class="panel admin-card admin-card-wide" id="admin-bwarn-card">
+                <header class="panel-head">
+                  <h3><span data-i18n="ui.backend_warnings">Backend warnings</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.backend_warn_help">Non-fatal messages logged by the backend during the last data load — e.g. missing fields or unparseable dates. A growing list signals worsening upstream data quality. Forward recurring warnings to the data team, then use POST /reload after fixing the source file to clear them.</span></span></h3>
+                  <span class="panel-hint" id="admin-bwarn-count" data-i18n="ui.bwarn_hint">from last data load</span>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-backend-warnings" class="admin-bwarn-list"></div>
+                </div>
+              </div>
+
+              <!-- DB DEEP DIVE -->
+              <div class="panel admin-card admin-card-wide" id="admin-db-deep-card">
+                <header class="panel-head">
+                  <h3><span data-i18n="ui.db_deep_dive">Database deep dive</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.db_deep_help">Live introspection of the Postgres database. Requires a healthy DB connection. Expand any section to drill into pool health, query performance, lock contention, index efficiency, and sequence capacity.</span></span></h3>
+                  <span class="panel-hint" data-i18n="ui.db_deep_hint">Pool · Server · Table health · Connections · Lock waits · Indexes · Slow queries · Sequences</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-db-deep-refresh" data-i18n="btn.refresh">↻ Refresh</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-db-deep" class="admin-db-deep"></div>
+                </div>
+              </div>
+
+            </div><!-- /admin-grid diagnostics -->
+          </div><!-- /admin-ov-diagnostics -->
+
+          <!-- PANE: DATA OPERATIONS -->
+          <div id="admin-ov-data-ops" hidden>
+            <div class="admin-grid">
+
+              <!-- UPLOAD -->
+              <div class="panel admin-card" id="admin-upload">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.upload_order_schedule">Upload order schedule</h3>
+                </header>
+                <div class="panel-body">
+                  <div class="ord-dropzone" id="admin-upload-zone" tabindex="0" role="button"
+                       aria-label="Click or drag an xlsx file to upload">
+                    <input type="file" id="admin-upload-file" accept=".xlsx,.xls" hidden>
+                    <div class="ord-drop-inner">
+                      <div class="ord-drop-icon">📥</div>
+                      <div class="ord-drop-text" data-i18n="ui.drop_xlsx">Drop your .xlsx here</div>
+                      <div class="ord-drop-hint" data-i18n="ui.drop_xlsx_hint">or click to browse — sequence_testing format · upserted by order ID</div>
+                    </div>
+                  </div>
+                  <div class="ord-file-info" id="admin-upload-info" hidden>
+                    <span class="ord-file-icon">📄</span>
+                    <span class="ord-file-name" id="admin-upload-fname"></span>
+                    <span class="ord-file-size" id="admin-upload-fsize"></span>
+                    <button class="btn btn-ghost sm ord-file-clear" id="admin-upload-clear" title="Clear selection" data-i18n-title="tip.clear_selection">✕</button>
+                  </div>
+                  <div class="ord-actions" id="admin-upload-actions" hidden>
+                    <button class="btn btn-primary" id="admin-upload-btn" data-i18n="btn.upload_ingest">⬆ Upload &amp; Ingest</button>
+                  </div>
+                  <div class="admin-status" id="admin-upload-status"></div>
+                </div>
+              </div>
+
+              <!-- PURGE -->
+              <div class="panel admin-card" id="admin-purge">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.purge_orders">Purge orders by date range</h3>
+                  <span class="panel-hint" data-i18n="ui.purge_hint">Deletes orders whose effective end date falls inclusively in the range</span>
+                </header>
+                <div class="panel-body">
+                  <div class="form-row form-row-2">
+                    <div>
+                      <label data-i18n="ui.start_date">Start date</label>
+                      <input type="text" id="admin-purge-start" readonly>
+                    </div>
+                    <div>
+                      <label data-i18n="ui.end_date">End date</label>
+                      <input type="text" id="admin-purge-end" readonly>
+                    </div>
+                  </div>
+                  <div id="admin-past-count" class="form-row"></div>
+                  <div class="form-row">
+                    <button class="btn btn-ghost" id="admin-purge-btn" data-i18n="btn.purge_range">🗑️ Purge range</button>
+                  </div>
+                  <div class="admin-status" id="admin-purge-status"></div>
+                </div>
+              </div>
+
+              <!-- UPLOAD HISTORY -->
+              <div class="panel admin-card admin-card-wide" id="admin-audit">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.upload_history">Upload history</h3>
+                  <span class="panel-hint" data-i18n="ui.upload_history_hint">Last 50 uploads — click row to expand warnings</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-audit-clear" data-i18n="btn.clear_history">✕ Clear history</button>
+                  <button class="btn btn-ghost sm" id="admin-audit-reload" data-i18n="btn.refresh">↻ Refresh</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-audit-list" class="admin-audit-list"></div>
+                </div>
+              </div>
+
+            </div><!-- /admin-grid data-ops -->
+          </div><!-- /admin-ov-data-ops -->
+
+          <!-- PANE: LOGS & AUDIT -->
+          <div id="admin-ov-logs" hidden>
+            <div class="admin-grid">
+
+              <!-- BACKEND EVENT LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-backend-log-card">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.backend_event_log">Backend event log</h3>
+                  <span class="panel-hint" id="admin-backend-log-count" data-i18n="ui.backend_log_hint">Server-side structured events — loads, errors, DB issues, slow requests</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-backend-log-refresh" data-i18n="btn.refresh">↻ Refresh</button>
+                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="btn.clear">✕ Clear</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div class="admin-log-filter">
+                    <select id="admin-backend-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
+                      <option value="all" data-i18n="ui.all_levels">All levels</option>
+                      <option value="error" data-i18n="ui.level_error">Error</option>
+                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
+                      <option value="info" data-i18n="ui.level_info">Info</option>
+                    </select>
+                  </div>
+                  <div id="admin-backend-log-list" class="admin-log-list"></div>
+                </div>
+              </div>
+
+              <!-- APPLICATION LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-logs">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.app_log">Application log</h3>
+                  <span class="panel-hint" id="admin-log-counts" data-i18n="ui.loading">0 entries</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-log-reload" data-i18n="btn.reload_data">↻ Reload data</button>
+                  <button class="btn btn-ghost sm" id="admin-log-cache" data-i18n="btn.clear_cache">⊘ Clear cache</button>
+                  <button class="btn btn-ghost sm" id="admin-log-copy" data-i18n="btn.copy_all">⎘ Copy all</button>
+                  <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
+                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="btn.clear">✕ Clear</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div class="admin-log-filter">
+                    <select id="admin-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
+                      <option value="all" data-i18n="ui.all_levels">All levels</option>
+                      <option value="error" data-i18n="ui.level_error">Error</option>
+                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
+                      <option value="info" data-i18n="ui.level_info">Info</option>
+                    </select>
+                    <select id="admin-log-filter-scope" title="Filter by scope" data-i18n-title="tip.filter_by_scope">
+                      <option value="all" data-i18n="ui.all_scopes">All scopes</option>
+                    </select>
+                    <input type="search" id="admin-log-search" class="admin-log-search" placeholder="Search messages…" data-i18n-placeholder="ph.search_messages">
+                  </div>
+                  <div id="admin-log-list" class="admin-log-list"></div>
+                </div>
+              </div>
+
+              <!-- OPTIMIZATION & COLOR WHEEL AUDIT LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-audit-log">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.opt_audit_log">Optimization &amp; Color Wheel log</h3>
+                  <span class="panel-hint" data-i18n="ui.opt_audit_hint">Color wheel uploads, replacements, deletes, and optimization runs — persisted on disk</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="btn.clear_log">✕ Clear log</button>
+                  <button class="btn btn-ghost sm" id="admin-audit-log-reload" data-i18n="btn.refresh">↻ Refresh</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-audit-log-list" class="admin-audit-list"></div>
+                </div>
+              </div>
+
+            </div><!-- /admin-grid logs -->
+          </div><!-- /admin-ov-logs -->
+
+        </div><!-- /admin-overview-pane -->
+
+        <!-- MANAGE PLANT DATA PANE -->
+        <div id="admin-manage-pane" hidden>
+          <nav class="md-tabs" role="tablist">
+            <button class="md-tab active" data-md-tab="subnetworks" role="tab" data-i18n="tab.subnetworks">Subnetworks</button>
+            <button class="md-tab" data-md-tab="plants" role="tab" data-i18n="tab.plants">Plants</button>
+            <button class="md-tab" data-md-tab="production_lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
+            <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
+            <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
+          </nav>
+          <div id="md-host"></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+</div><!-- /.app -->
+
+<!-- =========================================================
+     ALERT DRAWER (slide-in)
+     ========================================================= -->
+<aside class="alert-drawer" id="alert-drawer">
+  <header class="drawer-head">
+    <h3 data-i18n="ui.alerts_title">Alerts</h3>
+    <div>
+      <button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismissAll()" data-i18n="btn.dismiss_all">Dismiss all</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Alerts.toggleDrawer()">✕</button>
+    </div>
+  </header>
+  <div class="drawer-body" id="alert-drawer-body"></div>
+</aside>
+
+<!-- =========================================================
+     CONTEXT MENU (right-click on timeline items)
+     ========================================================= -->
+<div class="ctx-menu" id="ctx-menu" hidden>
+  <button data-action="fix" data-i18n="ctx.fix_order">🔒 Fix this order</button>
+  <button data-action="unfix" data-i18n="ctx.unfix_order">🔓 Unfix this order</button>
+  <div class="ctx-sep"></div>
+  <button data-action="override" data-i18n="ctx.override_datetime">📅 Override date / time…</button>
+  <div class="ctx-sep"></div>
+  <button data-action="inspect" data-i18n="ctx.open_inspector">👁 Open in inspector</button>
+</div>
+
+<!-- =========================================================
+     MODAL: Date Override
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-override" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3>Override order date</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Order</label>
+        <div class="readonly" id="ovr-order"></div>
+      </div>
+      <div class="form-row">
+        <label>New start date / time</label>
+        <input type="text" id="ovr-start" readonly>
+      </div>
+      <div class="form-row">
+        <label>New production line</label>
+        <select id="ovr-line"></select>
+      </div>
+      <div class="form-row chk-row">
+        <label class="chk">
+          <input type="checkbox" id="ovr-fix">
+          <span>Also fix this order (lock from optimizer)</span>
+        </label>
+      </div>
+      <div class="hint">
+        The duration (run time) is preserved. End time is computed from the run-time value.
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-override')">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Table.applyOverride()">Apply override</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Blackout block editor
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-block" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 id="block-modal-title">Blackout block</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-block')">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Production line</label>
+        <select id="blk-line"></select>
+      </div>
+      <div class="form-row form-row-2">
+        <div>
+          <label>Start</label>
+          <input type="text" id="blk-start" readonly>
+        </div>
+        <div>
+          <label>End</label>
+          <input type="text" id="blk-end" readonly>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Reason</label>
+        <input type="text" id="blk-reason" placeholder="Maintenance, cleaning, shift change…" data-i18n-placeholder="ph.blackout_reason_line">
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-block')">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Calendar.saveBlockFromModal()">Save block</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Print / Export Orders
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-print" hidden>
+  <div class="modal" style="max-width:860px;">
+    <header class="modal-head">
+      <h3>Export Orders</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-print')">✕</button>
+    </header>
+    <div class="modal-body" style="padding:16px;">
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;">From <input type="text" id="print-start" class="input" style="font-size:13px;" readonly></label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;">To <input type="text" id="print-end" class="input" style="font-size:13px;" readonly></label>
+        <button class="btn btn-ghost sm" onclick="NIMBUS.Printer.preview()">Preview</button>
+      </div>
+      <div id="print-results" style="margin-top:14px;overflow:auto;max-height:460px;"></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-print')">Cancel</button>
+      <button class="btn btn-ghost" id="print-export-csv" onclick="NIMBUS.Printer.exportCsv()">⬇ Export CSV</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Printer.print()">⎙ Print</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Plant blackout block editor
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-plant-block" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3>Add plant blackout</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-plant-block')">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-row form-row-2">
+        <div>
+          <label>Start</label>
+          <input type="text" id="plant-blk-start" readonly>
+        </div>
+        <div>
+          <label>End</label>
+          <input type="text" id="plant-blk-end" readonly>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Reason</label>
+        <input type="text" id="plant-blk-reason" placeholder="Holiday, shutdown, deep clean…" data-i18n-placeholder="ph.blackout_reason_plant">
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-plant-block')">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Plant.savePlantBlockFromModal()">Save block</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Production Lines blackout block editor
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-lines-block" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3>Add line blackout</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-lines-block')">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Production line</label>
+        <select id="lines-blk-line"></select>
+      </div>
+      <div class="form-row form-row-2">
+        <div>
+          <label>Start</label>
+          <input type="text" id="lines-blk-start" readonly>
+        </div>
+        <div>
+          <label>End</label>
+          <input type="text" id="lines-blk-end" readonly>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Reason</label>
+        <input type="text" id="lines-blk-reason" placeholder="Maintenance, cleaning, shift change…" data-i18n-placeholder="ph.blackout_reason_line">
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-lines-block')">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.ProdLines.saveBlockFromModal()">Save block</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Optimize Settings
+     ========================================================= -->
+<div class="modal-backdrop opt-backdrop" id="modal-optimize" hidden
+     onclick="if(event.target===this)NIMBUS.OptimizeDialog.close()">
+  <div class="opt-modal">
+    <div class="opt-header">
+      <div class="opt-header-icon">📈</div>
+      <div class="opt-header-text">
+        <div class="opt-header-title">Optimization Settings</div>
+      </div>
+      <div class="opt-header-plant">
+        <div class="opt-plant-select" id="opt-plant-select">
+          <button class="opt-plant-trigger" id="opt-plant-trigger" type="button"
+                  onclick="NIMBUS.OptimizeDialog.toggleDropdown()">
+            <span class="opt-plant-trigger-label" id="opt-plant-trigger-label">Select plant…</span>
+            <span class="opt-plant-trigger-arrow">▾</span>
+          </button>
+          <div class="opt-plant-dropdown" id="opt-plant-dropdown" hidden>
+            <div class="opt-plant-search-wrap">
+              <input class="opt-plant-search" id="opt-plant-search" type="text"
+                     placeholder="Search plants…" data-i18n-placeholder="ph.search_plants" autocomplete="off"
+                     oninput="NIMBUS.OptimizeDialog.filterPlants(this.value)">
+            </div>
+            <ul class="opt-plant-list" id="opt-plant-list" role="listbox"></ul>
+          </div>
+        </div>
+        <span id="opt-wheel-badge" class="opt-wheel-badge compact none" title="No wheel loaded" data-i18n-title="tip.no_wheel_loaded">
+          <span class="owb-icon">○</span>
+        </span>
+      </div>
+      <button class="opt-close" onclick="NIMBUS.OptimizeDialog.close()">✕</button>
+    </div>
+
+    <div class="opt-body">
+
+      <!-- ── Time Window ── -->
+      <div class="opt-section">
+        <div class="opt-section-key">Window</div>
+        <div class="opt-section-ctrl">
+          <div class="opt-window-row">
+            <div class="opt-presets">
+              <button class="opt-preset-chip" data-preset="horizon" onclick="NIMBUS.OptimizeDialog.applyPreset('horizon')">Alert Horizon</button>
+              <button class="opt-preset-chip" data-preset="2w"     onclick="NIMBUS.OptimizeDialog.applyPreset('2w')">2 Weeks</button>
+              <button class="opt-preset-chip" data-preset="custom" onclick="NIMBUS.OptimizeDialog.applyPreset('custom')">Custom</button>
+            </div>
+            <div class="opt-date-summary" id="opt-date-summary"></div>
+          </div>
+          <div class="opt-date-row" id="opt-date-row">
+            <div class="opt-date-field">
+              <label>From</label>
+              <button type="button" class="opt-date-btn" id="opt-start-btn"
+                      onclick="NIMBUS.OptimizeDialog.openFromPicker()">Select date…</button>
+            </div>
+            <div class="opt-date-arrow">→</div>
+            <div class="opt-date-field">
+              <label>To</label>
+              <button type="button" class="opt-date-btn" id="opt-end-btn"
+                      onclick="NIMBUS.OptimizeDialog.openToPicker()">Select date…</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Scope (whole plant vs. specific lines) ── -->
+      <div class="opt-section opt-scope-section">
+        <div class="opt-section-key">Scope</div>
+        <div class="opt-section-ctrl">
+          <div class="opt-scope-toggle" role="radiogroup" aria-label="Optimization scope">
+            <button type="button" class="opt-scope-btn active" data-scope="plant"
+                    onclick="NIMBUS.OptimizeDialog.setScope('plant')">Whole plant</button>
+            <button type="button" class="opt-scope-btn" data-scope="lines"
+                    onclick="NIMBUS.OptimizeDialog.setScope('lines')">Specific lines</button>
+          </div>
+          <div class="opt-lines-panel" id="opt-lines-panel" hidden>
+            <div class="opt-lines-toolbar">
+              <input type="text" id="opt-line-search" class="opt-line-search"
+                     placeholder="Search lines…" data-i18n-placeholder="ph.search_lines" autocomplete="off"
+                     oninput="NIMBUS.OptimizeDialog.filterLines(this.value)">
+              <button type="button" class="opt-line-mini"
+                      onclick="NIMBUS.OptimizeDialog.selectAllLines(true)">Select all</button>
+              <button type="button" class="opt-line-mini"
+                      onclick="NIMBUS.OptimizeDialog.selectAllLines(false)">Clear</button>
+            </div>
+            <ul id="opt-lines-list" class="opt-lines-list" role="listbox" aria-multiselectable="true"></ul>
+            <div class="opt-lines-count" id="opt-lines-count">0 of 0 selected</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Strategy ── -->
+      <div class="opt-section">
+        <div class="opt-section-key">Strategy</div>
+        <div class="opt-section-ctrl">
+          <div class="opt-strategy-row">
+            <button class="opt-strategy-pill" data-mode="spt"
+                    title="Shortest processing first — minimize average completion time" data-i18n-title="tip.spt_mode"
+                    onclick="NIMBUS.OptimizeDialog.selectMode('spt')">
+              <span class="osp-icon">⚡</span><span>SPT</span>
+            </button>
+            <button class="opt-strategy-pill" data-mode="changeover"
+                    title="Group by color &amp; form — cut setup time between runs" data-i18n-title="tip.changeover_mode"
+                    onclick="NIMBUS.OptimizeDialog.selectMode('changeover')">
+              <span class="osp-icon">🔁</span><span>Min Changeover</span>
+            </button>
+            <button class="opt-strategy-pill" data-mode="combined"
+                    title="Balanced SPT + changeover for best overall throughput" data-i18n-title="tip.combined_mode"
+                    onclick="NIMBUS.OptimizeDialog.selectMode('combined')">
+              <span class="osp-icon">✨</span><span>Smart</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Options ── -->
+      <div class="opt-section">
+        <div class="opt-section-key">Options</div>
+        <div class="opt-section-ctrl">
+          <div class="opt-check-row">
+            <label class="opt-check">
+              <input type="checkbox" id="opt-chk-fixed" checked>
+              <span class="opt-check-box"></span>
+              <span>Respect fixed orders</span>
+            </label>
+            <label class="opt-check">
+              <input type="checkbox" id="opt-chk-calendar" checked>
+              <span class="opt-check-box"></span>
+              <span>Respect calendar blackouts</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /opt-body -->
+
+    <div class="opt-footer">
+      <button class="btn btn-ghost" onclick="NIMBUS.OptimizeDialog.close()">Cancel</button>
+      <button class="btn opt-run-btn" id="opt-run-btn" onclick="NIMBUS.OptimizeDialog.run()">
+        <span class="opt-run-icon">📈</span>Run Optimization
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Optimizer From Date picker
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-opt-from" hidden style="z-index:4000"
+     onclick="if(event.target===this)NIMBUS.OptimizeDialog.cancelFromPicker()">
+  <div class="modal" style="max-width:340px">
+    <header class="modal-head">
+      <h3>From Date</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelFromPicker()">✕</button>
+    </header>
+    <div class="modal-body" style="padding:12px">
+      <div id="opt-from-cal"></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.OptimizeDialog.cancelFromPicker()">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.OptimizeDialog.commitFrom()">OK</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Optimizer To Date picker
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-opt-to" hidden style="z-index:4000"
+     onclick="if(event.target===this)NIMBUS.OptimizeDialog.cancelToPicker()">
+  <div class="modal" style="max-width:340px">
+    <header class="modal-head">
+      <h3>To Date</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelToPicker()">✕</button>
+    </header>
+    <div class="modal-body" style="padding:12px">
+      <div id="opt-to-cal"></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.OptimizeDialog.cancelToPicker()">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.OptimizeDialog.commitTo()">OK</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Optimizer Impact Preview (C4)
+     Shown after an optimization run with pre/post KPI comparison.
+     Apply keeps the new schedule; Discard reverts to the snapshot.
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-opt-preview" hidden>
+  <div class="modal" style="max-width:760px;">
+    <header class="modal-head">
+      <h3>Optimization impact preview</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizerPreview.discard()">✕</button>
+    </header>
+    <div class="modal-body" id="opt-preview-body" style="padding:18px 20px;">
+      <!-- Filled by OptimizerPreview._render() -->
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost"   onclick="NIMBUS.OptimizerPreview.discard()">↶ Discard</button>
+      <button class="btn btn-primary" onclick="NIMBUS.OptimizerPreview.apply()">✓ Apply changes</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Color Wheel Viewer
+     ========================================================= -->
+<div class="modal-backdrop cw-viewer-backdrop" id="modal-cw-viewer" hidden
+     onclick="if(event.target===this)NIMBUS.ColorWheelViewer.close()">
+  <div class="cw-viewer-modal">
+
+    <div class="opt-header">
+      <div class="opt-header-icon">🎨</div>
+      <div class="opt-header-text">
+        <div class="opt-header-title">Color Wheel &middot; <span id="cw-viewer-plant-name">—</span></div>
+        <div class="opt-header-sub" id="cw-viewer-meta">—</div>
+      </div>
+      <button class="opt-close" onclick="NIMBUS.ColorWheelViewer.close()">✕</button>
+    </div>
+
+    <div class="cw-viewer-toolbar">
+      <div class="cw-search-wrap">
+        <span class="cw-search-icon">🔍</span>
+        <input type="search" id="cw-viewer-search" class="cw-search-input" placeholder="Search colors…" data-i18n-placeholder="ph.search_colors"
+               oninput="NIMBUS.ColorWheelViewer.search(this.value)">
+      </div>
+      <div class="cw-sort-group">
+        <span class="cw-sort-label">Sort:</span>
+        <button class="cw-sort-btn active" data-sort="priority"
+                onclick="NIMBUS.ColorWheelViewer.sort('priority')">Priority</button>
+        <button class="cw-sort-btn" data-sort="name"
+                onclick="NIMBUS.ColorWheelViewer.sort('name')">A → Z</button>
+      </div>
+      <span class="cw-count-badge" id="cw-viewer-count"></span>
+    </div>
+
+    <div class="cw-viewer-list" id="cw-viewer-list">
+      <div class="cw-loading"><span class="cw-spin"></span>Loading…</div>
+    </div>
+
+    <div class="cw-viewer-footer">
+      <button class="btn btn-ghost" onclick="NIMBUS.ColorWheelViewer.close()">Close</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Edit Calendar  (per production line)
+     ========================================================= -->
+<div class="cal-edit-backdrop" id="modal-edit-calendar" hidden
+     onclick="if(event.target===this)NIMBUS.EditCalendar.close()">
+  <div class="cal-edit-modal">
+
+    <div class="opt-header">
+      <div class="opt-header-icon">🗓️</div>
+      <div class="opt-header-text">
+        <div class="opt-header-title">Edit Calendar</div>
+        <div class="opt-header-sub">
+          <span id="cal-edit-line-name">—</span>
+          <span class="cal-edit-plant-tag" id="cal-edit-plant-name"></span>
+        </div>
+      </div>
+      <button class="opt-close" onclick="NIMBUS.EditCalendar.close()">✕</button>
+    </div>
+
+    <div class="cal-edit-body">
+
+      <!-- Quick Presets -->
+      <div class="opt-section">
+        <div class="opt-section-label">Quick Presets</div>
+        <div class="opt-presets">
+          <button class="opt-preset-chip cal-preset-chip" data-preset="mf"
+                  onclick="NIMBUS.EditCalendar.applyPreset('mf')">Weekdays (M–F)</button>
+          <button class="opt-preset-chip cal-preset-chip" data-preset="ms"
+                  onclick="NIMBUS.EditCalendar.applyPreset('ms')">Mon–Sat</button>
+          <button class="opt-preset-chip cal-preset-chip" data-preset="all"
+                  onclick="NIMBUS.EditCalendar.applyPreset('all')">All 7 Days</button>
+        </div>
+      </div>
+
+      <!-- Weekly Schedule -->
+      <div class="opt-section">
+        <div class="opt-section-label">Weekly Schedule</div>
+        <div class="cal-day-rows">
+
+          <div class="cal-day-row" id="cal-edit-row-0">
+            <span class="cal-day-label">Sun</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-0"
+                     onchange="NIMBUS.EditCalendar.onToggle(0,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-0" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-0" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-0">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-1">
+            <span class="cal-day-label">Mon</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-1"
+                     onchange="NIMBUS.EditCalendar.onToggle(1,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-1" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-1" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-1">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-2">
+            <span class="cal-day-label">Tue</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-2"
+                     onchange="NIMBUS.EditCalendar.onToggle(2,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-2" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-2" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-2">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-3">
+            <span class="cal-day-label">Wed</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-3"
+                     onchange="NIMBUS.EditCalendar.onToggle(3,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-3" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-3" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-3">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-4">
+            <span class="cal-day-label">Thu</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-4"
+                     onchange="NIMBUS.EditCalendar.onToggle(4,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-4" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-4" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-4">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-5">
+            <span class="cal-day-label">Fri</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-5"
+                     onchange="NIMBUS.EditCalendar.onToggle(5,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-5" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-5" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-5">—</span>
+          </div>
+
+          <div class="cal-day-row" id="cal-edit-row-6">
+            <span class="cal-day-label">Sat</span>
+            <label class="cal-day-toggle-wrap">
+              <input type="checkbox" id="cal-edit-toggle-6"
+                     onchange="NIMBUS.EditCalendar.onToggle(6,this.checked)">
+              <span class="cal-toggle-track"></span>
+              <span class="cal-toggle-thumb"></span>
+            </label>
+            <div class="cal-day-times">
+              <input type="text" id="cal-edit-start-6" class="input cal-time-input" readonly placeholder="--:--">
+              <span class="cal-time-sep">→</span>
+              <input type="text" id="cal-edit-end-6" class="input cal-time-input" readonly placeholder="--:--">
+            </div>
+            <span class="cal-day-badge-hrs" id="cal-edit-badge-6">—</span>
+          </div>
+
+        </div>
+        <button class="cal-copy-plant-btn" onclick="NIMBUS.EditCalendar.copyFromPlant()">
+          ↩ Copy from Plant schedule
+        </button>
+      </div>
+
+    </div><!-- /cal-edit-body -->
+
+    <div class="opt-footer">
+      <button class="btn btn-ghost" onclick="NIMBUS.EditCalendar.close()">Cancel</button>
+      <button class="btn opt-run-btn" onclick="NIMBUS.EditCalendar.save()">
+        <span class="opt-run-icon">🗓️</span>Save Changes
+      </button>
+    </div>
+
+  </div><!-- /cal-edit-modal -->
+</div>
+
+<!-- Sandbox banner (injected by Sandbox.enter()) -->
+<div id="sandbox-banner" hidden></div>
+
+<!-- =========================================================
+     CONFIRM MODAL (reusable, driven by Modal.confirm())
+     ========================================================= -->
+<div class="modal-backdrop" id="confirm-modal" hidden>
+  <div class="modal modal-sm">
+    <header class="modal-head">
+      <h3 id="confirm-title">Confirm</h3>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('confirm-modal')">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="confirm-message" id="confirm-message"></p>
+      <div class="confirm-detail" id="confirm-detail" hidden></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" id="confirm-cancel-btn">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok-btn">Confirm</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     ADD COLUMN MODAL
+     ========================================================= -->
+<div class="modal-backdrop" id="md-addcol-modal" hidden>
+  <div class="modal modal-sm">
+    <header class="modal-head">
+      <h3>Add Column</h3>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-addcol-modal')">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="md-warn-banner">
+        ⚠️ This permanently modifies the database schema. Adding a column cannot be undone without a migration.
+      </div>
+      <div class="form-row">
+        <label>Column ID <span class="form-hint">(internal name, lowercase letters/digits/underscore)</span></label>
+        <input type="text" id="md-col-name" class="input" placeholder="e.g. site_code" data-i18n-placeholder="ph.col_id_example">
+      </div>
+      <div class="form-row">
+        <label>Display Label <span class="form-hint">(what the header shows)</span></label>
+        <input type="text" id="md-col-label" class="input" placeholder="e.g. Site Code" data-i18n-placeholder="ph.col_label_example">
+      </div>
+      <div class="form-row">
+        <label>Type</label>
+        <select id="md-col-type" class="input">
+          <option value="TEXT">TEXT</option>
+          <option value="INTEGER">INTEGER</option>
+          <option value="NUMERIC">NUMERIC</option>
+          <option value="BOOLEAN">BOOLEAN</option>
+          <option value="DATE">DATE</option>
+          <option value="TIMESTAMP">TIMESTAMP</option>
+        </select>
+      </div>
+      <div class="form-row" id="md-col-length-row" hidden>
+        <label>Precision, Scale <span class="form-hint">(e.g. 10,2 for NUMERIC)</span></label>
+        <input type="text" id="md-col-length" class="input" placeholder="10,2" data-i18n-placeholder="ph.col_precision">
+      </div>
+      <div class="form-row">
+        <label class="form-check-label">
+          <input type="checkbox" id="md-col-nullable" checked>
+          Allow NULL
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Default Value <span class="form-hint">(required if Allow NULL is unchecked)</span></label>
+        <input type="text" id="md-col-default" class="input" placeholder="optional" data-i18n-placeholder="ph.col_default_optional">
+      </div>
+      <div class="admin-status" id="md-addcol-error" style="color:var(--err)"></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('md-addcol-modal')">Cancel</button>
+      <button class="btn btn-primary" id="md-addcol-confirm-btn">Add Column</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     RENAME LABEL MODAL
+     ========================================================= -->
+<div class="modal-backdrop" id="md-renamelabel-modal" hidden>
+  <div class="modal modal-sm">
+    <header class="modal-head">
+      <h3>Rename Column Label</h3>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-renamelabel-modal')">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="form-hint" id="md-rename-note"></p>
+      <div class="form-row">
+        <label>New Display Label</label>
+        <input type="text" id="md-rename-label-input" class="input">
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('md-renamelabel-modal')">Cancel</button>
+      <button class="btn btn-primary" id="md-rename-confirm-btn">Save Label</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-stack"></div>
+
+<script src="locales/en.js"></script>
+<script src="locales/es.js"></script>
+<script src="locales/fr.js"></script>
+<script src="locales/de.js"></script>
+<script src="locales/pt.js"></script>
+<script src="app.js?v=2026-05-20-a"></script>
+<script src="nimbus-intelligence.js?v=2026-05-20-a"></script>
+</body>
+</html>
