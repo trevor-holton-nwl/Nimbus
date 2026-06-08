@@ -1239,7 +1239,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
       </select>
       <div class="sep-v"></div>
       <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period">‹</button>
-      <span id="labor-horizon-label" style="font-size:11px;padding:0 6px;color:var(--fg-mute);white-space:nowrap;"></span>
+      <input id="labor-horizon-input" class="labor-horizon-input" readonly placeholder="Jump to week…" title="Click to jump to any week">
       <button class="seg-btn" id="labor-next" onclick="NIMBUS.LaborPlanning.nextHorizon()" title="Next period">›</button>
       <select id="labor-span-sel" class="labor-span-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
         <option value="4">4 wks</option>

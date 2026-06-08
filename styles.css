@@ -4629,6 +4629,13 @@ body.dark .sub-subtab.active { color: #ffffff; }
   border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--bg); color: var(--fg); cursor: pointer;
 }
+.labor-horizon-input {
+  padding: 3px 8px; font-size: 11px; height: 28px; min-width: 100px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--fg-mute); cursor: pointer;
+  text-align: center; white-space: nowrap;
+}
+.labor-horizon-input:hover { border-color: var(--accent); color: var(--fg); }
 
 /* Active seg-btn for labor sub-tabs — amber pill matching Gantt */
 .labor-toolbar .seg-btn[data-labor-sub].active {

@@ -1993,14 +1993,16 @@ const NIMBUS = (function () {
     // ── State ────────────────────────────────────────────────────────────────
     let _horizonOffset = 0;    // weeks offset from today's Monday
     let _horizonSpan   = 12;   // number of weeks in view
-    let _selectedGroup = '';   // '' = all groups; used to scope Line Plan / Capacity
+    let _selectedGroup = '';   // '' = all groups; used to scope all sub-tabs
     let _aggrData      = {};   // { [plant]: { [grp]: { [period]: avail_hours } } }
     let _lineData      = {};   // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
     let _groups        = [];   // sorted unique pl_group values for current plant
+    let _displayGroups = [];   // currently rendered subset (respects _selectedGroup filter)
     let _weeks         = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
     let _selRange      = null; // { r0,c0,r1,c1 } lasso rectangle, or null
     let _dragging      = false;
     let _dragAnchor    = null;
+    let _fpHorizon     = null; // Flatpickr instance for the date-jump input
 
     // ── Date helpers ─────────────────────────────────────────────────────────
     function _isoWeek(date) {
@@ -2219,7 +2221,7 @@ const NIMBUS = (function () {
       const { r0, c0, r1, c1 } = _selRange;
       const g = document.getElementById('labor-grid'); if (!g) return;
       for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-        const grp = _groups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
+        const grp = _displayGroups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
         const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
         inp?.closest('td')?.classList.add('lp-selected-td');
       }
@@ -2242,7 +2244,7 @@ const NIMBUS = (function () {
       const cleared = [], prev = [];
       const g = document.getElementById('labor-grid');
       for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-        const grp = _groups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
+        const grp = _displayGroups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
         prev.push({ pl_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
         if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
         delete _aggrData[plant][grp][period];
@@ -2281,7 +2283,7 @@ const NIMBUS = (function () {
       for (let r = r0; r <= r1; r++) {
         const cols = [];
         for (let c = c0; c <= c1; c++) {
-          const grp = _groups[r]; const period = _weeks[c]?.key;
+          const grp = _displayGroups[r]; const period = _weeks[c]?.key;
           const ah = grp && period ? (_aggrData[plant]?.[grp]?.[period] ?? null) : null;
           cols.push(ah != null ? String(ah) : '');
         }
@@ -2299,8 +2301,9 @@ const NIMBUS = (function () {
       const thS = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;position:sticky;top:0;z-index:1;';
       const tdS = 'padding:6px 8px;border-bottom:1px solid var(--line);';
       const inS = 'width:72px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font-family:inherit;';
+      _displayGroups = _selectedGroup ? _groups.filter(g => g === _selectedGroup) : _groups;
       const totals = {}; _weeks.forEach(w => { totals[w.key] = 0; });
-      const groupRows = _groups.map(grp => {
+      const groupRows = _displayGroups.map(grp => {
         const cells = _weeks.map(w => {
           const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
           return `<td style="${tdS};text-align:center;">
@@ -2336,7 +2339,7 @@ const NIMBUS = (function () {
         if (!e.ctrlKey && !e.metaKey) { if (!e.target.closest('.lp-selected-td')) _clearSelection(); return; }
         const inp = e.target.closest('.lp-cell'); if (!inp) return;
         e.preventDefault();
-        const ri = _groups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
         _dragging = true; _dragAnchor = { row: ri, col: ci };
         _selRange = { r0: ri, c0: ci, r1: ri, c1: ci }; _renderSelection();
@@ -2345,7 +2348,7 @@ const NIMBUS = (function () {
         if (!_dragging) return;
         const td = e.target.closest('td'); if (!td) return;
         const inp = td.querySelector('.lp-cell'); if (!inp) return;
-        const ri = _groups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
         _selRange = { r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci), r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci) };
         _renderSelection();
@@ -2392,10 +2395,10 @@ const NIMBUS = (function () {
         e.preventDefault();
         const text = e.clipboardData.getData('text/plain'); if (!text) return;
         const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
-        const cellMatrix = _groups.map(grp => _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)));
+        const cellMatrix = _displayGroups.map(grp => _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)));
         let anchorRow = 0, anchorCol = 0;
         if (anchor) {
-          anchorRow = Math.max(0, _groups.indexOf(anchor.dataset.group));
+          anchorRow = Math.max(0, _displayGroups.indexOf(anchor.dataset.group));
           anchorCol = Math.max(0, _weeks.findIndex(w => w.key === anchor.dataset.period));
         }
         if (!_aggrData[plant]) _aggrData[plant] = {};
@@ -2403,7 +2406,7 @@ const NIMBUS = (function () {
         clipRows.forEach((clipCols, r) => {
           clipCols.forEach((val, c) => {
             const ri = anchorRow + r, ci = anchorCol + c;
-            if (ri >= _groups.length || ci >= _weeks.length) return;
+            if (ri >= _displayGroups.length || ci >= _weeks.length) return;
             const inp = cellMatrix[ri]?.[ci]; if (!inp) return;
             const raw = val.trim().replace(/,/g, '');
             const ah  = raw === '' ? null : parseFloat(raw);
@@ -2713,13 +2716,28 @@ const NIMBUS = (function () {
     function _renderToolbar(plant) {
       const groupSel = document.getElementById('labor-group-select');
       if (groupSel) {
-        const prev = groupSel.value;
+        const prev = _selectedGroup || groupSel.value;
         groupSel.innerHTML = `<option value="">All</option>` +
           _groups.map(g => `<option value="${g.replace(/"/g,'&quot;')}"${g===prev?' selected':''}>${g}</option>`).join('');
-        if (!_selectedGroup && _groups.includes(prev)) _selectedGroup = prev;
+        if (prev && _groups.includes(prev)) _selectedGroup = prev;
       }
-      const label = document.getElementById('labor-horizon-label');
-      if (label && _weeks.length) label.textContent = `${_weeks[0].label} — ${_weeks[_weeks.length-1].label}`;
+      // Flatpickr date-jump: lazily init, then sync to current horizon start
+      if (_weeks.length) {
+        if (!_fpHorizon) {
+          _fpHorizon = flatpickr('#labor-horizon-input', {
+            dateFormat: 'M j, Y',
+            onChange(dates) {
+              if (!dates[0]) return;
+              const now = new Date();
+              const todayMon = new Date(now);
+              todayMon.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+              _horizonOffset = Math.round((dates[0] - todayMon) / (7 * 86400000));
+              render();
+            },
+          });
+        }
+        _fpHorizon.setDate(_weeks[0].monday, false);
+      }
       const badge = document.getElementById('labor-plant-badge');
       if (badge) badge.textContent = plant || '—';
     }
@@ -2782,11 +2800,13 @@ const NIMBUS = (function () {
         _selectedGroup = group;
         const plant = Store.selectedPlant; if (!plant) return;
         const sub = App._laborSub;
-        if (sub === 'line-plan')  _renderLinePlan(plant);
-        else if (sub === 'capacity') _renderCapacity(plant);
+        if (sub === 'aggregate')     _renderAggregate(plant);
+        else if (sub === 'line-plan')  _renderLinePlan(plant);
+        else if (sub === 'capacity')   _renderCapacity(plant);
+        else if (sub === 'exceptions') _renderExceptions(plant);
       },
-      prevHorizon() { _horizonOffset--; render(); },
-      nextHorizon() { _horizonOffset++; render(); },
+      prevHorizon() { _horizonOffset -= _horizonSpan; render(); },
+      nextHorizon() { _horizonOffset += _horizonSpan; render(); },
       setSpan(n) {
         _horizonSpan = n;
         const sel = document.getElementById('labor-span-sel'); if (sel) sel.value = n;
