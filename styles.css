@@ -4631,7 +4631,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
   background: var(--bg-elev); border: 1px solid var(--line);
   border-radius: var(--r-md); box-shadow: var(--shadow-md);
-  min-width: 160px; display: flex; flex-direction: column;
+  min-width: 160px;
 }
 .lp-group-scroll {
   max-height: 220px; overflow-y: auto; padding: 6px 0;
