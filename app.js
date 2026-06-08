@@ -1991,13 +1991,13 @@ const NIMBUS = (function () {
      ========================================================================== */
   const LaborPlanning = (() => {
     // ── State ────────────────────────────────────────────────────────────────
-    let _horizonOffset = 0;    // weeks offset from today's Monday
-    let _horizonSpan   = 12;   // number of weeks in view
-    let _selectedGroup = '';   // '' = all groups; used to scope all sub-tabs
-    let _aggrData      = {};   // { [plant]: { [grp]: { [period]: avail_hours } } }
-    let _lineData      = {};   // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
-    let _groups        = [];   // sorted unique pl_group values for current plant
-    let _displayGroups = [];   // currently rendered subset (respects _selectedGroup filter)
+    let _horizonOffset  = 0;         // weeks offset from today's Monday
+    let _horizonSpan    = 12;        // number of weeks in view
+    let _selectedGroups = new Set(); // empty = all groups; used to scope all sub-tabs
+    let _aggrData       = {};        // { [plant]: { [grp]: { [period]: avail_hours } } }
+    let _lineData       = {};        // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
+    let _groups         = [];        // sorted unique pl_group values for current plant
+    let _displayGroups  = [];        // currently rendered subset (respects _selectedGroups filter)
     let _weeks         = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
     let _selRange      = null; // { r0,c0,r1,c1 } lasso rectangle, or null
     let _dragging      = false;
@@ -2301,7 +2301,7 @@ const NIMBUS = (function () {
       const thS = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;position:sticky;top:0;z-index:1;';
       const tdS = 'padding:6px 8px;border-bottom:1px solid var(--line);';
       const inS = 'width:72px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font-family:inherit;';
-      _displayGroups = _selectedGroup ? _groups.filter(g => g === _selectedGroup) : _groups;
+      _displayGroups = _selectedGroups.size ? _groups.filter(g => _selectedGroups.has(g)) : _groups;
       const totals = {}; _weeks.forEach(w => { totals[w.key] = 0; });
       const groupRows = _displayGroups.map(grp => {
         const cells = _weeks.map(w => {
@@ -2454,7 +2454,7 @@ const NIMBUS = (function () {
     // ── Line Plan sub-tab ────────────────────────────────────────────────────
     async function _renderLinePlan(plant) {
       const grid = document.getElementById('labor-line-grid'); if (!grid) return;
-      const group = _selectedGroup || _groups[0] || '';
+      const group = (_selectedGroups.size === 1 ? [..._selectedGroups][0] : null) || _groups[0] || '';
       if (!group) {
         grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a group from the toolbar to view the line plan.</div>`; return;
       }
@@ -2584,7 +2584,7 @@ const NIMBUS = (function () {
     // ── Capacity sub-tab ─────────────────────────────────────────────────────
     async function _renderCapacity(plant) {
       const container = document.getElementById('labor-capacity-grid'); if (!container) return;
-      const scopeGroup = _selectedGroup || null;
+      const scopeGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
       await _fetchLines(plant, scopeGroup);
       const lines = (Store._state.masterData?.lines || [])
         .filter(l => l.plant === plant && (!scopeGroup || l.pl_group === scopeGroup))
@@ -2714,12 +2714,25 @@ const NIMBUS = (function () {
 
     // ── Toolbar update ───────────────────────────────────────────────────────
     function _renderToolbar(plant) {
-      const groupSel = document.getElementById('labor-group-select');
-      if (groupSel) {
-        const prev = _selectedGroup || groupSel.value;
-        groupSel.innerHTML = `<option value="">All</option>` +
-          _groups.map(g => `<option value="${g.replace(/"/g,'&quot;')}"${g===prev?' selected':''}>${g}</option>`).join('');
-        if (prev && _groups.includes(prev)) _selectedGroup = prev;
+      // Group multi-select button label
+      const lbl = document.getElementById('lp-group-label');
+      if (lbl) {
+        if (_selectedGroups.size === 0)           lbl.textContent = 'All Groups';
+        else if (_selectedGroups.size === 1)      lbl.textContent = [..._selectedGroups][0];
+        else                                      lbl.textContent = `${_selectedGroups.size} groups`;
+      }
+      // Rebuild dropdown checkboxes (keeps checked state in sync)
+      const drop = document.getElementById('lp-group-dropdown');
+      if (drop) {
+        drop.innerHTML = _groups.map(g => `
+          <label class="lp-group-chk-row">
+            <input type="checkbox" value="${g.replace(/"/g,'&quot;')}"${_selectedGroups.has(g) ? ' checked' : ''}
+              onchange="NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)">
+            ${g}
+          </label>`).join('') +
+          `<div class="lp-group-chk-footer">
+            <button class="btn btn-sm" onclick="NIMBUS.LaborPlanning.clearGroupFilter()">Clear</button>
+          </div>`;
       }
       // Flatpickr date-jump: lazily init, then sync to current horizon start
       if (_weeks.length) {
@@ -2796,14 +2809,35 @@ const NIMBUS = (function () {
 
     return {
       init, render,
-      onGroupChange(group) {
-        _selectedGroup = group;
+      onGroupToggle(group, checked) {
+        if (checked) _selectedGroups.add(group); else _selectedGroups.delete(group);
+        _renderToolbar(Store.selectedPlant || '');
         const plant = Store.selectedPlant; if (!plant) return;
         const sub = App._laborSub;
-        if (sub === 'aggregate')     _renderAggregate(plant);
+        if (sub === 'aggregate')       _renderAggregate(plant);
         else if (sub === 'line-plan')  _renderLinePlan(plant);
         else if (sub === 'capacity')   _renderCapacity(plant);
         else if (sub === 'exceptions') _renderExceptions(plant);
+      },
+      clearGroupFilter() {
+        _selectedGroups.clear();
+        _renderToolbar(Store.selectedPlant || '');
+        const plant = Store.selectedPlant; if (!plant) return;
+        const sub = App._laborSub;
+        if (sub === 'aggregate')       _renderAggregate(plant);
+        else if (sub === 'line-plan')  _renderLinePlan(plant);
+        else if (sub === 'capacity')   _renderCapacity(plant);
+        else if (sub === 'exceptions') _renderExceptions(plant);
+      },
+      toggleGroupDropdown(e) {
+        e?.stopPropagation();
+        const drop = document.getElementById('lp-group-dropdown');
+        if (!drop) return;
+        drop.hidden = !drop.hidden;
+        if (!drop.hidden) {
+          const close = ev => { if (!drop.contains(ev.target) && ev.target.id !== 'lp-group-btn') { drop.hidden = true; document.removeEventListener('click', close); } };
+          setTimeout(() => document.addEventListener('click', close), 0);
+        }
       },
       prevHorizon() { _horizonOffset -= _horizonSpan; render(); },
       nextHorizon() { _horizonOffset += _horizonSpan; render(); },

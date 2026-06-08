@@ -1233,10 +1233,12 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <button class="seg-btn" data-labor-sub="inputs" onclick="NIMBUS.App.gotoLaborSub('inputs')">Inputs</button>
       </div>
       <div class="sep-v"></div>
-      <label style="font-size:11px;color:var(--fg-mute);white-space:nowrap;" for="labor-group-select">Group</label>
-      <select id="labor-group-select" class="labor-group-sel" onchange="NIMBUS.LaborPlanning.onGroupChange(this.value)">
-        <option value="">All</option>
-      </select>
+      <div class="lp-group-filter" id="lp-group-filter">
+        <button class="seg-btn lp-group-btn" id="lp-group-btn" onclick="NIMBUS.LaborPlanning.toggleGroupDropdown(event)">
+          <span id="lp-group-label">All Groups</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+        </button>
+        <div class="lp-group-dropdown" id="lp-group-dropdown" hidden></div>
+      </div>
       <div class="sep-v"></div>
       <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period">‹</button>
       <input id="labor-horizon-input" class="labor-horizon-input" readonly placeholder="Jump to week…" title="Click to jump to any week">
