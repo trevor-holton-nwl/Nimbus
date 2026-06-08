@@ -200,7 +200,7 @@ window.__NIMBUS_LOCALES.en = {
   'ph.search_lines':                   'Search lines…',
   'ph.add_note':                       'Add a note…',
   'ph.search_commands':                'Search commands, orders, lines…',
-  'ph.select_plant':                   'Select plant…',
+  'ph.select_plant':                   'Select',
   'ph.name_scenario':                  'Name this scenario…',
   'ph.search_table':                   'Search {{table}}…',
 
@@ -224,7 +224,7 @@ window.__NIMBUS_LOCALES.en = {
   'tab.home':                          'Dashboard',
   'tab.gantt':                         'Scheduling Board',
   'tab.table':                         'Orders',
-  'tab.masterdata':                    'Manage Master Data',
+  'tab.masterdata':                    'Master Data',
   'tab.admin':                         'Admin Cockpit',
 
   /* ── Empty state messages ────────────────────────────────────────────────── */
