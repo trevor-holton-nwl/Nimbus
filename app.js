@@ -1991,6 +1991,11 @@ const NIMBUS = (function () {
   const LaborPlanning = (() => {
     const WEEKS = 12;
     let _data   = {};   // { [plant]: { [grp]: { [period]: headcount } } }
+    let _groups = [];
+    let _weeks  = [];
+    let _selRange   = null;  // { r0, c0, r1, c1 } rectangular index range, or null
+    let _dragging   = false;
+    let _dragAnchor = null;  // { row, col }
 
     function _isoWeek(date) {
       const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -2040,6 +2045,118 @@ const NIMBUS = (function () {
       }
     }
 
+    function _clearSelection() {
+      _selRange = null; _dragging = false; _dragAnchor = null;
+      document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
+    }
+
+    function _renderSelection() {
+      document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
+      if (!_selRange) return;
+      const { r0, c0, r1, c1 } = _selRange;
+      const g = document.getElementById('labor-grid');
+      if (!g) return;
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          const grp = _groups[r]; const period = _weeks[c]?.key;
+          if (!grp || !period) continue;
+          const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+          inp?.closest('td')?.classList.add('lp-selected-td');
+        }
+      }
+    }
+
+    function _deleteSelected() {
+      if (!_selRange) return;
+      const plant = Store.selectedPlant; if (!plant) return;
+      if (!_data[plant]) _data[plant] = {};
+      const { r0, c0, r1, c1 } = _selRange;
+      const cleared = [], prev = [];
+      const g = document.getElementById('labor-grid');
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          const grp = _groups[r]; const period = _weeks[c]?.key;
+          if (!grp || !period) continue;
+          prev.push({ pl_group: grp, period, headcount: _data[plant]?.[grp]?.[period] ?? null });
+          if (!_data[plant][grp]) _data[plant][grp] = {};
+          delete _data[plant][grp][period];
+          cleared.push({ pl_group: grp, period, headcount: null });
+          if (g) {
+            const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+            if (inp) inp.value = '';
+          }
+        }
+      }
+      if (!cleared.length) return;
+      if (g) _updateTotals(g, _weeks);
+      _clearSelection();
+      const subnetwork = (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+      UndoStack.push(`Delete ${cleared.length} labor cell${cleared.length !== 1 ? 's' : ''}`, () => {
+        if (!_data[plant]) _data[plant] = {};
+        prev.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
+          if (!_data[plant][grp]) _data[plant][grp] = {};
+          if (oldHc == null) delete _data[plant][grp][period];
+          else               _data[plant][grp][period] = oldHc;
+        });
+        const g2 = document.getElementById('labor-grid');
+        if (g2) {
+          prev.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
+            const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+            if (el) el.value = oldHc != null ? oldHc : '';
+          });
+          _updateTotals(g2, _rollingWeeks());
+        }
+        fetch(`${Config.API_BASE}/labor-plan`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          body: JSON.stringify({ subnetwork, plant, cells: prev }),
+        }).catch(e => ErrorLog.error('labor', `Undo delete failed: ${e.message}`));
+      });
+      fetch(`${Config.API_BASE}/labor-plan`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+        body: JSON.stringify({ subnetwork, plant, cells: cleared }),
+      }).catch(e => Toast.show(`Delete save failed: ${e.message}`, 'error'));
+    }
+
+    function _copySelected() {
+      if (!_selRange) return;
+      const plant = Store.selectedPlant;
+      const { r0, c0, r1, c1 } = _selRange;
+      const rows = [];
+      for (let r = r0; r <= r1; r++) {
+        const cols = [];
+        for (let c = c0; c <= c1; c++) {
+          const grp = _groups[r]; const period = _weeks[c]?.key;
+          const hc = grp && period ? (_data[plant]?.[grp]?.[period] ?? null) : null;
+          cols.push(hc != null ? String(hc) : '');
+        }
+        rows.push(cols.join('\t'));
+      }
+      const count = (r1 - r0 + 1) * (c1 - c0 + 1);
+      navigator.clipboard.writeText(rows.join('\n'))
+        .then(() => Toast.show(`Copied ${count} cell${count !== 1 ? 's' : ''}`, 'success'))
+        .catch(() => Toast.show('Copy failed — check clipboard permissions', 'error'));
+    }
+
+    function _onLPKeyDown(e) {
+      if (!_selRange) return;
+      if (App._currentTab !== 'labor') return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopImmediatePropagation();
+        _clearSelection(); return;
+      }
+      if (e.key === 'Delete' || (e.key === 'Backspace' && !e.target?.classList.contains('lp-cell'))) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        _deleteSelected(); return;
+      }
+      if (mod && e.key.toLowerCase() === 'c') {
+        e.preventDefault(); e.stopImmediatePropagation();
+        _copySelected(); return;
+      }
+    }
+
     async function render() {
       const grid     = document.getElementById('labor-grid');
       const badgeEl  = document.getElementById('labor-plant-badge');
@@ -2059,8 +2176,11 @@ const NIMBUS = (function () {
         return;
       }
 
+      _clearSelection();
       const weeks  = _rollingWeeks();
       const planMap = await _fetchPlan(plant);
+      _groups = groups;
+      _weeks  = weeks;
 
       const thStyle = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--surface,#fff);border-bottom:2px solid var(--border,#e2e8f0);white-space:nowrap;';
       const tdStyle = 'padding:6px 8px;border-bottom:1px solid var(--border,#f1f5f9);';
@@ -2110,6 +2230,39 @@ const NIMBUS = (function () {
 
       const subnetwork = (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
 
+      // Ctrl+drag lasso selection
+      grid.addEventListener('mousedown', e => {
+        if (!e.ctrlKey && !e.metaKey) {
+          if (!e.target.closest('.lp-selected-td')) _clearSelection();
+          return;
+        }
+        const inp = e.target.closest('.lp-cell');
+        if (!inp) return;
+        e.preventDefault();
+        const ri = _groups.indexOf(inp.dataset.group);
+        const ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        if (ri < 0 || ci < 0) return;
+        _dragging = true;
+        _dragAnchor = { row: ri, col: ci };
+        _selRange = { r0: ri, c0: ci, r1: ri, c1: ci };
+        _renderSelection();
+      });
+      grid.addEventListener('mousemove', e => {
+        if (!_dragging) return;
+        const td = e.target.closest('td');
+        if (!td) return;
+        const inp = td.querySelector('.lp-cell');
+        if (!inp) return;
+        const ri = _groups.indexOf(inp.dataset.group);
+        const ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        if (ri < 0 || ci < 0) return;
+        _selRange = {
+          r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci),
+          r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci),
+        };
+        _renderSelection();
+      });
+
       grid.querySelectorAll('.lp-cell').forEach(inp => {
         inp.onchange = async function() {
           const grp    = this.dataset.group;
@@ -2118,12 +2271,32 @@ const NIMBUS = (function () {
           const hc     = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
           if (hc !== null) this.value = hc;
 
+          const oldHc = _data[plant]?.[grp]?.[period] ?? null;
+
           if (!_data[plant]) _data[plant] = {};
           if (!_data[plant][grp]) _data[plant][grp] = {};
           if (hc === null) delete _data[plant][grp][period];
           else             _data[plant][grp][period] = hc;
 
           _updateTotals(grid, weeks);
+
+          UndoStack.push(`Labor: ${grp} / ${period}`, () => {
+            if (!_data[plant]) _data[plant] = {};
+            if (!_data[plant][grp]) _data[plant][grp] = {};
+            if (oldHc == null) delete _data[plant][grp][period];
+            else               _data[plant][grp][period] = oldHc;
+            const g = document.getElementById('labor-grid');
+            if (g) {
+              const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+              if (el) el.value = oldHc != null ? oldHc : '';
+              _updateTotals(g, _rollingWeeks());
+            }
+            fetch(`${Config.API_BASE}/labor-plan`, {
+              method:  'POST',
+              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+              body:    JSON.stringify({ subnetwork, plant, cells: [{ pl_group: grp, period, headcount: oldHc }] }),
+            }).catch(e => ErrorLog.error('labor', `Undo save failed: ${e.message}`));
+          });
 
           try {
             await fetch(`${Config.API_BASE}/labor-plan`, {
@@ -2166,6 +2339,7 @@ const NIMBUS = (function () {
 
           if (!_data[plant]) _data[plant] = {};
           const changedCells = [];
+          const prevCells = [];
 
           clipRows.forEach((clipCols, r) => {
             clipCols.forEach((val, c) => {
@@ -2179,6 +2353,7 @@ const NIMBUS = (function () {
               if (hc !== null && (isNaN(hc) || hc < 0)) return; // skip non-numeric / negative
               const grp    = inp.dataset.group;
               const period = inp.dataset.period;
+              prevCells.push({ pl_group: grp, period, headcount: _data[plant]?.[grp]?.[period] ?? null });
               inp.value = hc !== null ? hc : '';
               if (!_data[plant][grp]) _data[plant][grp] = {};
               if (hc === null) delete _data[plant][grp][period];
@@ -2189,6 +2364,29 @@ const NIMBUS = (function () {
 
           if (!changedCells.length) return;
           _updateTotals(grid, weeks);
+
+          UndoStack.push(`Undo paste (${changedCells.length} labor value${changedCells.length !== 1 ? 's' : ''})`, () => {
+            if (!_data[plant]) _data[plant] = {};
+            prevCells.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
+              if (!_data[plant][grp]) _data[plant][grp] = {};
+              if (oldHc == null) delete _data[plant][grp][period];
+              else               _data[plant][grp][period] = oldHc;
+            });
+            const g = document.getElementById('labor-grid');
+            if (g) {
+              prevCells.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
+                const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+                if (el) el.value = oldHc != null ? oldHc : '';
+              });
+              _updateTotals(g, _rollingWeeks());
+            }
+            fetch(`${Config.API_BASE}/labor-plan`, {
+              method:  'POST',
+              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+              body:    JSON.stringify({ subnetwork, plant, cells: prevCells }),
+            }).catch(e => ErrorLog.error('labor', `Undo save failed: ${e.message}`));
+          });
+
           Toast.show(`Pasted ${changedCells.length} value${changedCells.length !== 1 ? 's' : ''}`, 'success');
 
           try {
@@ -2219,6 +2417,8 @@ const NIMBUS = (function () {
     }
 
     function init() {
+      document.addEventListener('keydown', _onLPKeyDown, { capture: true });
+      document.addEventListener('mouseup', () => { _dragging = false; });
       Store.subscribe(evt => {
         if ((evt.type === 'plant:selected' || evt.type === 'master-data-changed') && App._currentTab === 'labor') {
           if (evt.type === 'plant:selected') delete _data[evt.plant];
@@ -12506,13 +12706,18 @@ saveAll() {
     gotoGanttSub(sub) {
       if (!['timeline', 'orders'].includes(sub)) return;
       App._ganttSub = sub;
-      document.querySelectorAll('.gantt-subtabs .sub-subtab').forEach(b => {
+      document.querySelectorAll('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(b => {
         b.classList.toggle('active', b.dataset.ganttSub === sub);
       });
       const timelinePane = document.getElementById('gantt-sub-timeline');
       const ordersPane   = document.getElementById('gantt-sub-orders');
       if (timelinePane) timelinePane.style.display = sub === 'timeline' ? 'flex' : 'none';
       if (ordersPane)   ordersPane.style.display   = sub === 'orders'   ? 'flex' : 'none';
+      const show = sub === 'timeline';
+      ['gantt-zoom-controls', 'gantt-zoom-sep', 'gantt-fit-controls'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = show ? '' : 'none';
+      });
       if (sub === 'orders') {
         setTimeout(() => Table._api && Table._api.sizeColumnsToFit(), 30);
       } else {

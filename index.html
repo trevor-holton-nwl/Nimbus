@@ -1063,22 +1063,20 @@ body.dark .ls-co       { color: var(--fg-mute); }
        TAB: TIMELINE
        ========================================================= -->
   <section class="tab-panel" id="gantt-tab" role="tabpanel">
-    <!-- Sub-tab strip: Gantt Timeline | Orders -->
-    <nav class="admin-subtabs gantt-subtabs" role="tablist" style="flex:0 0 auto;padding:0 16px;border-bottom:1px solid var(--border,#e2e8f0);">
-      <button class="sub-subtab active" data-gantt-sub="timeline" onclick="NIMBUS.App.gotoGanttSub('timeline')" role="tab">Gantt Timeline</button>
-      <button class="sub-subtab" data-gantt-sub="orders" onclick="NIMBUS.App.gotoGanttSub('orders')" role="tab">Orders</button>
-    </nav>
-
-    <!-- Pane: Gantt Timeline -->
-    <div id="gantt-sub-timeline" style="flex:1;min-height:0;display:flex;flex-direction:column;">
+    <!-- Toolbar: view toggles + zoom + actions (always visible) -->
     <div class="gantt-toolbar">
       <div class="group">
+        <button class="seg-btn active" data-gantt-sub="timeline" onclick="NIMBUS.App.gotoGanttSub('timeline')">Gantt Timeline</button>
+        <button class="seg-btn" data-gantt-sub="orders" onclick="NIMBUS.App.gotoGanttSub('orders')">Orders</button>
+      </div>
+      <div class="sep-v"></div>
+      <div class="group" id="gantt-zoom-controls">
         <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
         <button class="seg-btn" data-view="day" data-i18n="btn.day">Day</button>
         <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
       </div>
-      <div class="sep-v"></div>
-      <div class="group">
+      <div class="sep-v" id="gantt-zoom-sep"></div>
+      <div class="group" id="gantt-fit-controls">
         <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view">⊡ Fit</button>
         <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now">⊙ Now</button>
       </div>
@@ -1089,6 +1087,9 @@ body.dark .ls-co       { color: var(--fg-mute); }
       <div class="sep-v"></div>
       <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule">⎙ Print</button>
     </div>
+
+    <!-- Pane: Gantt Timeline -->
+    <div id="gantt-sub-timeline" style="flex:1;min-height:0;display:flex;flex-direction:column;">
 
     <!-- Gantt filter bar (below toolbar) -->
     <div class="gantt-filterbar" id="gantt-filterbar">

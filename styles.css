@@ -4610,3 +4610,10 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .adm-help-tip::after { content:''; position:absolute; top:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-top-color:#1a1a2e; }
 .adm-help:hover .adm-help-tip,
 .adm-help:focus-within .adm-help-tip { opacity:1; }
+
+/* ── Labor Planning — lasso cell selection ─────────────────────────────── */
+td.lp-selected-td {
+  background: color-mix(in srgb, var(--accent, #daa520) 18%, transparent) !important;
+  outline: 1px solid var(--accent, #daa520);
+  outline-offset: -1px;
+}
