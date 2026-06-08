@@ -2001,9 +2001,11 @@ const NIMBUS = (function () {
       return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
     }
 
-    function _weekLabel(key) {
-      // 'YYYY-Www' → 'Www'
-      return key.slice(5);
+    function _weekLabel(monday) {
+      const m = String(monday.getMonth() + 1).padStart(2, '0');
+      const d = String(monday.getDate()).padStart(2, '0');
+      const y = String(monday.getFullYear()).slice(-2);
+      return `${m}/${d}/${y}`;
     }
 
     function _rollingWeeks() {
@@ -2014,7 +2016,7 @@ const NIMBUS = (function () {
       for (let i = 0; i < WEEKS; i++) {
         const d = new Date(monday);
         d.setDate(monday.getDate() + i * 7);
-        weeks.push({ key: _isoWeek(d), label: _weekLabel(_isoWeek(d)) });
+        weeks.push({ key: _isoWeek(d), label: _weekLabel(new Date(d)) });
       }
       return weeks;
     }
@@ -2062,7 +2064,7 @@ const NIMBUS = (function () {
 
       const thStyle = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--surface,#fff);border-bottom:2px solid var(--border,#e2e8f0);white-space:nowrap;';
       const tdStyle = 'padding:6px 8px;border-bottom:1px solid var(--border,#f1f5f9);';
-      const inputStyle = 'width:60px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--border,#e2e8f0);border-radius:4px;background:var(--bg,#fff);';
+      const inputStyle = 'width:68px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--border,#e2e8f0);border-radius:4px;background:var(--bg,#fff);';
 
       const weekHeaders = weeks.map(w => `<th style="${thStyle}">${w.label}</th>`).join('');
       const totals = {};
@@ -2135,6 +2137,72 @@ const NIMBUS = (function () {
           }
         };
       });
+
+      // Excel paste: clipboard TSV → anchor at focused cell, spread right then down, batch save.
+      const table = grid.querySelector('table');
+      if (table) {
+        table.addEventListener('paste', async function(e) {
+          const anchor = document.activeElement?.classList.contains('lp-cell') ? document.activeElement : null;
+          e.preventDefault();
+          const text = e.clipboardData.getData('text/plain');
+          if (!text) return;
+
+          // Parse clipboard as TSV
+          const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
+
+          // Build 2D cell matrix [groupIdx][weekIdx]
+          const cellMatrix = groups.map(grp =>
+            weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`))
+          );
+
+          // Anchor position
+          let anchorRow = 0, anchorCol = 0;
+          if (anchor) {
+            anchorRow = groups.indexOf(anchor.dataset.group);
+            anchorCol = weeks.findIndex(w => w.key === anchor.dataset.period);
+            if (anchorRow < 0) anchorRow = 0;
+            if (anchorCol < 0) anchorCol = 0;
+          }
+
+          if (!_data[plant]) _data[plant] = {};
+          const changedCells = [];
+
+          clipRows.forEach((clipCols, r) => {
+            clipCols.forEach((val, c) => {
+              const ri = anchorRow + r;
+              const ci = anchorCol + c;
+              if (ri >= groups.length || ci >= weeks.length) return;
+              const inp = cellMatrix[ri]?.[ci];
+              if (!inp) return;
+              const raw = val.trim().replace(/,/g, ''); // strip thousand-separators
+              const hc  = raw === '' ? null : parseFloat(raw);
+              if (hc !== null && (isNaN(hc) || hc < 0)) return; // skip non-numeric / negative
+              const grp    = inp.dataset.group;
+              const period = inp.dataset.period;
+              inp.value = hc !== null ? hc : '';
+              if (!_data[plant][grp]) _data[plant][grp] = {};
+              if (hc === null) delete _data[plant][grp][period];
+              else             _data[plant][grp][period] = hc;
+              changedCells.push({ pl_group: grp, period, headcount: hc });
+            });
+          });
+
+          if (!changedCells.length) return;
+          _updateTotals(grid, weeks);
+          Toast.show(`Pasted ${changedCells.length} value${changedCells.length !== 1 ? 's' : ''}`, 'success');
+
+          try {
+            await fetch(`${Config.API_BASE}/labor-plan`, {
+              method:  'POST',
+              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+              body:    JSON.stringify({ subnetwork, plant, cells: changedCells }),
+            }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); });
+          } catch (e) {
+            Toast.show(`Paste save failed: ${e.message}`, 'error');
+            ErrorLog.error('labor', `Paste save failed: ${e.message}`);
+          }
+        });
+      }
     }
 
     function _updateTotals(grid, weeks) {
