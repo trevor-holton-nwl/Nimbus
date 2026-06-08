@@ -114,6 +114,7 @@ COLOR_WHEEL_DIR = r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Te
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
     load_color_wheels(COLOR_FILE)
+    md.ensure_labor_plan_table()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -1048,6 +1049,33 @@ async def md_rename_label(table: str, column: str, request: Request):
 def md_audit(limit: int = 100):
     """Return the most recent N master-data change audit entries."""
     return {"entries": md.list_audit(limit)}
+
+
+# =============================================================================
+# LABOR PLANNING — planned headcount by line group × ISO week
+# =============================================================================
+
+@api.get("/labor-plan")
+def labor_plan_get(plant: str):
+    """Return all labor-plan cells for the given plant."""
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant query param is required")
+    return md.load_labor_plan(plant)
+
+
+@api.post("/labor-plan")
+async def labor_plan_post(request: Request):
+    """Upsert or delete labor-plan cells. Payload: { subnetwork, plant, cells:[{pl_group, period, headcount}] }"""
+    body = await request.json()
+    try:
+        return md.upsert_labor_plan(
+            subnetwork=body.get("subnetwork", ""),
+            plant=body.get("plant", ""),
+            cells=body.get("cells", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # =============================================================================

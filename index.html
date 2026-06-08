@@ -929,8 +929,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
       <button class="tab-btn" data-tab="gantt" role="tab">
         <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
       </button>
-      <button class="tab-btn" data-tab="table" role="tab">
-        <span class="tab-ico">≡</span><span data-i18n="tab.table">Orders</span>
+      <button class="tab-btn" data-tab="labor" role="tab">
+        <span class="tab-ico">👷</span><span>Labor Planning</span>
       </button>
       <button class="tab-btn" data-tab="masterdata" role="tab">
         <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Manage Master Data</span>
@@ -1063,6 +1063,14 @@ body.dark .ls-co       { color: var(--fg-mute); }
        TAB: TIMELINE
        ========================================================= -->
   <section class="tab-panel" id="gantt-tab" role="tabpanel">
+    <!-- Sub-tab strip: Gantt Timeline | Orders -->
+    <nav class="admin-subtabs gantt-subtabs" role="tablist" style="flex:0 0 auto;padding:0 16px;border-bottom:1px solid var(--border,#e2e8f0);">
+      <button class="sub-subtab active" data-gantt-sub="timeline" onclick="NIMBUS.App.gotoGanttSub('timeline')" role="tab">Gantt Timeline</button>
+      <button class="sub-subtab" data-gantt-sub="orders" onclick="NIMBUS.App.gotoGanttSub('orders')" role="tab">Orders</button>
+    </nav>
+
+    <!-- Pane: Gantt Timeline -->
+    <div id="gantt-sub-timeline" style="flex:1;min-height:0;display:flex;flex-direction:column;">
     <div class="gantt-toolbar">
       <div class="group">
         <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
@@ -1144,12 +1152,10 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="resize-handle rh-left" data-side="right"></div>
       </aside>
     </div>
-  </section>
+    </div><!-- #gantt-sub-timeline -->
 
-  <!-- =========================================================
-       TAB: ORDERS (AG Grid)
-       ========================================================= -->
-  <section class="tab-panel" id="table-tab" role="tabpanel">
+    <!-- Pane: Orders (moved from top-level #table-tab) -->
+    <div id="gantt-sub-orders" style="flex:1;min-height:0;display:none;flex-direction:column;">
     <div class="table-toolbar">
       <input id="quick-filter" class="input" type="search" placeholder="Quick filter orders, material, line…" data-i18n-placeholder="ph.quick_filter">
       <div class="spacer"></div>
@@ -1209,6 +1215,24 @@ body.dark .ls-co       { color: var(--fg-mute); }
     </div>
 
     <div id="ag-grid" class="ag-theme-quartz"></div>
+    </div><!-- #gantt-sub-orders -->
+  </section>
+
+  <!-- =========================================================
+       TAB: LABOR PLANNING
+       ========================================================= -->
+  <section class="tab-panel" id="labor-tab" role="tabpanel">
+    <div class="home-scroll">
+      <div class="home-container" style="max-width:none;padding:24px 32px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
+          <h2 style="margin:0;font-size:18px;font-weight:700;">Aggregate Labor Planning</h2>
+          <span class="plant-badge" id="labor-plant-badge">—</span>
+          <div class="spacer"></div>
+          <span style="font-size:12px;color:var(--text-muted,#64748b);">Planned headcount by production line group · week</span>
+        </div>
+        <div id="labor-grid"></div>
+      </div>
+    </div>
   </section>
 
   <!-- =========================================================

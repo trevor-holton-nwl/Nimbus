@@ -622,7 +622,8 @@ const NIMBUS = (function () {
         bufferPct: 0,
         bufferHours: 0,
         bottleneck: false,
-        excludeFromOpt: false
+        excludeFromOpt: false,
+        plGroup: '',
       };
     },
     setLineSetting(line, patch, source) {
@@ -1435,6 +1436,7 @@ const NIMBUS = (function () {
           <th style="${thStyle}">${t('ui.line_label')}</th>
           <th style="${thStyle}">${t('ui.roster_important_flags')}</th>
           <th style="${thStyle}">${t('ui.roster_schedule')}</th>
+          <th style="${thStyle}">Production Line Group</th>
           <th style="${thStyleBlank}"></th>
         </tr></thead>
         <tbody>
@@ -1458,11 +1460,15 @@ const NIMBUS = (function () {
               </div>`;
             }).join('');
             const safeId = line.replace(/'/g, "\\'");
+            const plgVal = (ls.plGroup || '').replace(/"/g, '&quot;');
             return `<tr style="border-bottom:1px solid var(--border,#f1f5f9);">
               <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${line}</div></td>
               <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}</td>
               <td style="padding:8px 12px;">
                 <div style="display:flex;gap:6px;align-items:flex-start;">${schedCells}</div>
+              </td>
+              <td style="padding:8px 12px;">
+                <input type="text" class="input roster-plgroup-input" style="width:120px;font-size:12px;" value="${plgVal}" data-line="${line}" placeholder="—">
               </td>
               <td style="padding:8px 12px;text-align:right;">
                 <button class="btn btn-ghost sm" onclick="NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);">Edit →</button>
@@ -1471,6 +1477,15 @@ const NIMBUS = (function () {
           }).join('')}
         </tbody>
       </table>`;
+
+      roster.querySelectorAll('.roster-plgroup-input').forEach(inp => {
+        inp.onchange = function() {
+          const val = this.value.trim();
+          Store.setLineSetting(this.dataset.line, { plGroup: val }, 'plant-roster');
+          MasterData.syncLineSettings(this.dataset.line, { plGroup: val });
+          Toast.show(t('toast.line_settings_updated'), 'success');
+        };
+      });
 
       const wrap = document.getElementById('plant-roster-wrap');
       const btn  = document.getElementById('plant-roster-toggle');
@@ -1754,6 +1769,10 @@ const NIMBUS = (function () {
             <input type="number" class="input buf-pct-input" ${ls.bufferUnit !== 'pct' ? 'style="display:none"' : ''} min="0" max="100" step="1" value="${ls.bufferPct || 0}" data-line="${line}">
             <input type="number" class="input buf-hrs-input" ${ls.bufferUnit !== 'hours' ? 'style="display:none"' : ''} min="0" step="0.25" value="${ls.bufferHours || 0}" data-line="${line}">
           </span>
+          <span class="ld-buffer">
+            <span class="ld-buffer-label">Production Line Group</span>
+            <input type="text" class="input plgroup-input" style="width:140px;" value="${(ls.plGroup||'').replace(/"/g,'&quot;')}" data-line="${line}" placeholder="e.g. PREMIUM">
+          </span>
         </div>
         <div class="ld-section">
           <div class="ld-section-head">
@@ -1908,6 +1927,15 @@ const NIMBUS = (function () {
           Toast.show(t('toast.buffer_updated'), 'success');
         };
       });
+
+      body.querySelectorAll('.plgroup-input').forEach(inp => {
+        inp.onchange = function() {
+          const val = this.value.trim();
+          Store.setLineSetting(this.dataset.line, { plGroup: val }, 'prodlines');
+          MasterData.syncLineSettings(this.dataset.line, { plGroup: val });
+          Toast.show(t('toast.line_settings_updated'), 'success');
+        };
+      });
     },
 
     _fmtHour(h) {
@@ -1956,6 +1984,183 @@ const NIMBUS = (function () {
       ProdLines._renderDetail(ProdLines._activeNavLine);
     }
   };
+
+  /* =============================================================================
+     LABOR PLANNING — aggregate headcount grid: line group × rolling ISO weeks
+     ========================================================================== */
+  const LaborPlanning = (() => {
+    const WEEKS = 12;
+    let _data   = {};   // { [plant]: { [grp]: { [period]: headcount } } }
+
+    function _isoWeek(date) {
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+      return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+    }
+
+    function _weekLabel(key) {
+      // 'YYYY-Www' → 'Www'
+      return key.slice(5);
+    }
+
+    function _rollingWeeks() {
+      const weeks = [];
+      const now = new Date();
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+      for (let i = 0; i < WEEKS; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i * 7);
+        weeks.push({ key: _isoWeek(d), label: _weekLabel(_isoWeek(d)) });
+      }
+      return weeks;
+    }
+
+    async function _fetchPlan(plant) {
+      if (_data[plant]) return _data[plant];
+      try {
+        const res = await fetch(`${Config.API_BASE}/labor-plan?plant=${encodeURIComponent(plant)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const map = {};
+        (json.rows || []).forEach(r => {
+          if (!map[r.pl_group]) map[r.pl_group] = {};
+          map[r.pl_group][r.period] = r.headcount;
+        });
+        _data[plant] = map;
+        return map;
+      } catch (e) {
+        ErrorLog.warn('labor', `Failed to fetch labor plan for ${plant}: ${e.message}`);
+        return {};
+      }
+    }
+
+    async function render() {
+      const grid     = document.getElementById('labor-grid');
+      const badgeEl  = document.getElementById('labor-plant-badge');
+      if (!grid) return;
+
+      const plant = Store.selectedPlant;
+      if (badgeEl) badgeEl.textContent = plant || '—';
+      if (!plant) {
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a plant in the top bar to view labor planning.</div>`;
+        return;
+      }
+
+      const mdLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant);
+      const groups = [...new Set(mdLines.map(r => r.pl_group).filter(Boolean))].sort();
+      if (!groups.length) {
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production line groups defined for this plant. Assign groups in <strong>Manage Master Data → Production Lines</strong>.</div>`;
+        return;
+      }
+
+      const weeks  = _rollingWeeks();
+      const planMap = await _fetchPlan(plant);
+
+      const thStyle = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--surface,#fff);border-bottom:2px solid var(--border,#e2e8f0);white-space:nowrap;';
+      const tdStyle = 'padding:6px 8px;border-bottom:1px solid var(--border,#f1f5f9);';
+      const inputStyle = 'width:60px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--border,#e2e8f0);border-radius:4px;background:var(--bg,#fff);';
+
+      const weekHeaders = weeks.map(w => `<th style="${thStyle}">${w.label}</th>`).join('');
+      const totals = {};
+      weeks.forEach(w => { totals[w.key] = 0; });
+
+      const groupRows = groups.map(grp => {
+        const cells = weeks.map(w => {
+          const hc = planMap[grp]?.[w.key];
+          if (hc != null) totals[w.key] += hc;
+          return `<td style="${tdStyle};text-align:center;">
+            <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="1" style="${inputStyle}" value="${hc != null ? hc : ''}" placeholder="—">
+          </td>`;
+        }).join('');
+        return `<tr>
+          <td style="${tdStyle};font-weight:600;white-space:nowrap;min-width:140px;">${grp}</td>
+          ${cells}
+        </tr>`;
+      }).join('');
+
+      const totalCells = weeks.map(w => {
+        const v = totals[w.key];
+        return `<td style="${tdStyle};text-align:center;font-weight:700;">${v || '—'}</td>`;
+      }).join('');
+
+      grid.innerHTML = `
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead>
+              <tr>
+                <th style="${thStyle};min-width:140px;">Production Line Group</th>
+                ${weekHeaders}
+              </tr>
+            </thead>
+            <tbody>
+              ${groupRows}
+              <tr style="border-top:2px solid var(--border,#e2e8f0);">
+                <td style="${tdStyle};font-weight:700;">TOTAL</td>
+                ${totalCells}
+              </tr>
+            </tbody>
+          </table>
+        </div>`;
+
+      const subnetwork = (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+
+      grid.querySelectorAll('.lp-cell').forEach(inp => {
+        inp.onchange = async function() {
+          const grp    = this.dataset.group;
+          const period = this.dataset.period;
+          const raw    = this.value.trim();
+          const hc     = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
+          if (hc !== null) this.value = hc;
+
+          if (!_data[plant]) _data[plant] = {};
+          if (!_data[plant][grp]) _data[plant][grp] = {};
+          if (hc === null) delete _data[plant][grp][period];
+          else             _data[plant][grp][period] = hc;
+
+          _updateTotals(grid, weeks);
+
+          try {
+            await fetch(`${Config.API_BASE}/labor-plan`, {
+              method:  'POST',
+              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+              body:    JSON.stringify({ subnetwork, plant, cells: [{ pl_group: grp, period, headcount: hc }] }),
+            }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); });
+          } catch (e) {
+            Toast.show(`Labor plan save failed: ${e.message}`, 'error');
+            ErrorLog.error('labor', `Save failed: ${e.message}`);
+          }
+        };
+      });
+    }
+
+    function _updateTotals(grid, weeks) {
+      const plant = Store.selectedPlant;
+      if (!plant || !_data[plant]) return;
+      const tds = grid.querySelectorAll('tbody tr:last-child td');
+      weeks.forEach((w, i) => {
+        const total = Object.values(_data[plant]).reduce((sum, periods) => {
+          const v = periods[w.key];
+          return sum + (v != null ? v : 0);
+        }, 0);
+        if (tds[i + 1]) tds[i + 1].textContent = total || '—';
+      });
+    }
+
+    function init() {
+      Store.subscribe(evt => {
+        if ((evt.type === 'plant:selected' || evt.type === 'master-data-changed') && App._currentTab === 'labor') {
+          if (evt.type === 'plant:selected') delete _data[evt.plant];
+          render();
+        }
+      });
+    }
+
+    return { init, render };
+  })();
 
   /* =============================================================================
      EDIT CALENDAR — per-line working hours modal.
@@ -12068,6 +12273,7 @@ saveAll() {
   const App = {
     _currentTab: 'home',
     _currentMasterSub: 'lines',
+    _ganttSub: 'timeline',
     _pausables: new Set(),
 
     // Register any object with pause()/resume() to be auto-paused on tab hide.
@@ -12196,6 +12402,9 @@ saveAll() {
     },
 
     goto(tab) {
+      // Redirect legacy 'table' references to the Orders sub-tab inside Scheduling Board
+      if (tab === 'table') { App.goto('gantt'); App.gotoGanttSub('orders'); return; }
+
       // Collapse line accordions when leaving the masterdata tab entirely
       if (App._currentTab === 'masterdata' && tab !== 'masterdata') {
         document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
@@ -12211,15 +12420,7 @@ saveAll() {
         b.classList.toggle('active', b.dataset.tab === tab);
       });
       if (tab === 'gantt') {
-        setTimeout(() => {
-          Timeline.redraw(); Timeline.rebuild(); Hierarchy.render();
-          GanttFilter._apply();
-          TimelineNav.render();
-          if (DependencyOverlay._enabled) DependencyOverlay.render();
-        }, 30);
-      } else if (tab === 'table') {
-        // AG Grid needs a sizeColumnsToFit after becoming visible
-        setTimeout(() => Table._api && Table._api.sizeColumnsToFit(), 30);
+        App.gotoGanttSub(App._ganttSub || 'timeline');
       } else if (tab === 'home') {
         setTimeout(() => Dashboard.render(), 30);
       } else if (tab === 'masterdata') {
@@ -12229,6 +12430,30 @@ saveAll() {
         }, 30);
       } else if (tab === 'admin') {
         setTimeout(() => AdminCockpit.render(), 30);
+      } else if (tab === 'labor') {
+        setTimeout(() => LaborPlanning.render(), 30);
+      }
+    },
+
+    gotoGanttSub(sub) {
+      if (!['timeline', 'orders'].includes(sub)) return;
+      App._ganttSub = sub;
+      document.querySelectorAll('.gantt-subtabs .sub-subtab').forEach(b => {
+        b.classList.toggle('active', b.dataset.ganttSub === sub);
+      });
+      const timelinePane = document.getElementById('gantt-sub-timeline');
+      const ordersPane   = document.getElementById('gantt-sub-orders');
+      if (timelinePane) timelinePane.style.display = sub === 'timeline' ? 'flex' : 'none';
+      if (ordersPane)   ordersPane.style.display   = sub === 'orders'   ? 'flex' : 'none';
+      if (sub === 'orders') {
+        setTimeout(() => Table._api && Table._api.sizeColumnsToFit(), 30);
+      } else {
+        setTimeout(() => {
+          Timeline.redraw(); Timeline.rebuild(); Hierarchy.render();
+          GanttFilter._apply();
+          TimelineNav.render();
+          if (DependencyOverlay._enabled) DependencyOverlay.render();
+        }, 30);
       }
     },
 
@@ -13198,6 +13423,7 @@ saveAll() {
       if ('bufferUnit'     in patch) updatedRow.buffer_type     = patch.bufferUnit === 'pct' ? '%' : 'hrs';
       if ('bufferPct'      in patch) updatedRow.buffer_percent  = patch.bufferPct;
       if ('bufferHours'    in patch) updatedRow.buffer_hours    = patch.bufferHours;
+      if ('plGroup'        in patch) updatedRow.pl_group        = patch.plGroup || null;
 
       // Update cache row and clear any stale dirty flag so MasterData table stays consistent.
       state.rows[rowIdx] = updatedRow;
@@ -13306,8 +13532,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try { Hierarchy.init();   } catch (e) { ErrorLog.error('boot', `Hierarchy.init: ${e.message}`); }
     try { Dashboard.init();   } catch (e) { ErrorLog.error('boot', `Dashboard.init: ${e.message}`); }
     try { ContextMenu.init(); } catch (e) { ErrorLog.error('boot', `ContextMenu.init: ${e.message}`); }
-    try { GanttFilter.init(); } catch (e) { ErrorLog.error('boot', `GanttFilter.init: ${e.message}`); }
-    try { AdminCockpit.init();} catch (e) { ErrorLog.error('boot', `AdminCockpit.init: ${e.message}`); }
+    try { GanttFilter.init();     } catch (e) { ErrorLog.error('boot', `GanttFilter.init: ${e.message}`); }
+    try { AdminCockpit.init();    } catch (e) { ErrorLog.error('boot', `AdminCockpit.init: ${e.message}`); }
+    try { LaborPlanning.init();   } catch (e) { ErrorLog.error('boot', `LaborPlanning.init: ${e.message}`); }
 
     // Refresh plant-aware modules when master data changes.
     // Writes lineSettings directly (no per-line emit) and fires a single coalesced
@@ -13332,6 +13559,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ls.bufferPct = parseFloat(row.buffer_percent) || 0;
               if (row.buffer_hours != null && row.buffer_hours !== '')
                 ls.bufferHours = parseFloat(row.buffer_hours) || 0;
+              ls.plGroup = row.pl_group || '';
               if (JSON.stringify(ls) !== before) touched++;
             });
           }

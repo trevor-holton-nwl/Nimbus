@@ -170,6 +170,32 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_occurred_at ON admin_audit(occurred_at DESC);
 
 -- ----------------------------------------------------------------------------
+-- Production Line Group column (added via Admin DDL; schema.sql ensures it
+-- survives a fresh-DB migration without requiring a manual ALTER TABLE).
+-- ----------------------------------------------------------------------------
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS pl_group TEXT;
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)
+VALUES ('production_lines', 'pl_group', 'Production Line Group', FALSE, 4)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- Labor Planning — planned headcount by line group × ISO week
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS labor_plan (
+    subnetwork  TEXT    NOT NULL,
+    plant       TEXT    NOT NULL,
+    pl_group    TEXT    NOT NULL,
+    period      TEXT    NOT NULL,   -- ISO week key: 'YYYY-Www'
+    headcount   NUMERIC,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subnetwork, plant, pl_group, period),
+    FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_labor_plan_plant ON labor_plan(plant);
+
+-- ----------------------------------------------------------------------------
 -- Seed data (idempotent — safe to re-run)
 -- ----------------------------------------------------------------------------
 INSERT INTO subnetworks (code, name) VALUES

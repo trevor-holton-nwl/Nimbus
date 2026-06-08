@@ -403,6 +403,81 @@ def list_audit(limit: int = 100) -> list[dict]:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Labor Planning — planned headcount by line group × ISO week
+# ---------------------------------------------------------------------------
+
+def ensure_labor_plan_table() -> None:
+    """Idempotent: create the labor_plan table if it does not yet exist."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS labor_plan (
+                subnetwork  TEXT    NOT NULL,
+                plant       TEXT    NOT NULL,
+                pl_group    TEXT    NOT NULL,
+                period      TEXT    NOT NULL,
+                headcount   NUMERIC,
+                created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (subnetwork, plant, pl_group, period),
+                FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_labor_plan_plant ON labor_plan(plant)")
+        conn.commit()
+
+
+def load_labor_plan(plant: str) -> dict:
+    """Return all labor-plan cells for the given plant."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT pl_group, period, headcount FROM labor_plan WHERE plant = %s ORDER BY pl_group, period",
+            (plant,),
+        )
+        rows = [{"pl_group": r[0], "period": r[1], "headcount": float(r[2]) if r[2] is not None else None}
+                for r in cur.fetchall()]
+    return {"rows": rows}
+
+
+def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
+    """Upsert or delete labor-plan cells. A null/empty headcount deletes the cell."""
+    if not subnetwork or not plant:
+        raise ValueError("subnetwork and plant are required")
+    upserted = deleted = 0
+    with _pool.connection() as conn, conn.cursor() as cur:
+        for cell in cells:
+            grp    = cell.get("pl_group", "")
+            period = cell.get("period", "")
+            hc     = cell.get("headcount")
+            if not grp or not period:
+                continue
+            if hc is None or hc == "":
+                cur.execute(
+                    "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s AND pl_group=%s AND period=%s",
+                    (subnetwork, plant, grp, period),
+                )
+                deleted += cur.rowcount
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO labor_plan (subnetwork, plant, pl_group, period, headcount)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (subnetwork, plant, pl_group, period)
+                    DO UPDATE SET headcount = EXCLUDED.headcount, updated_at = NOW()
+                    """,
+                    (subnetwork, plant, grp, period, hc),
+                )
+                upserted += 1
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('labor_plan', 'upsert', %s, %s)",
+            (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
+        )
+        conn.commit()
+    return {"upserted": upserted, "deleted": deleted}
+
+
 def known_plant_line_codes() -> dict:
     """Return all plant and production-line codes for upload validation."""
     with _pool.connection() as conn, conn.cursor() as cur:
