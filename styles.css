@@ -226,6 +226,11 @@ h1, h2, h3, h4 {
 .seg-btn.active {
   background: var(--primary); color: var(--primary-fg); border-color: var(--primary);
 }
+.gantt-toolbar .seg-btn[data-gantt-sub].active {
+  background: var(--accent); border-color: var(--accent);
+  color: #fff; font-weight: 600;
+  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+}
 .btn-optimize {
   background: transparent;
   border-color: var(--line);
