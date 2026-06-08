@@ -2724,13 +2724,16 @@ const NIMBUS = (function () {
       // Rebuild dropdown checkboxes (keeps checked state in sync)
       const drop = document.getElementById('lp-group-dropdown');
       if (drop) {
-        drop.innerHTML = _groups.map(g => `
-          <label class="lp-group-chk-row">
-            <input type="checkbox" value="${g.replace(/"/g,'&quot;')}"${_selectedGroups.has(g) ? ' checked' : ''}
-              onchange="NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)">
-            ${g}
-          </label>`).join('') +
-          `<div class="lp-group-chk-footer">
+        drop.innerHTML =
+          `<div class="lp-group-scroll">` +
+          _groups.map(g => `
+            <label class="lp-group-chk-row">
+              <input type="checkbox" value="${g.replace(/"/g,'&quot;')}"${_selectedGroups.has(g) ? ' checked' : ''}
+                onchange="NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)">
+              ${g}
+            </label>`).join('') +
+          `</div>
+          <div class="lp-group-chk-footer">
             <button class="btn btn-sm" onclick="NIMBUS.LaborPlanning.clearGroupFilter()">Clear</button>
           </div>`;
       }
