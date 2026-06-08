@@ -14296,6 +14296,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ErrorLog, AdminCockpit,
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
-    PlantSelector, EmptyState, MasterData, WelcomeSplash
+    PlantSelector, EmptyState, MasterData, WelcomeSplash,
+    LaborPlanning
   };
 })();
