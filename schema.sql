@@ -179,14 +179,14 @@ VALUES ('production_lines', 'pl_group', 'Production Line Group', FALSE, 4)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
--- Labor Planning — planned headcount by line group × ISO week
+-- Labor Planning — aggregate available labor hours by line group × ISO week
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS labor_plan (
     subnetwork  TEXT    NOT NULL,
     plant       TEXT    NOT NULL,
     pl_group    TEXT    NOT NULL,
     period      TEXT    NOT NULL,   -- ISO week key: 'YYYY-Www'
-    headcount   NUMERIC,
+    avail_hours NUMERIC,
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     PRIMARY KEY (subnetwork, plant, pl_group, period),
@@ -194,6 +194,26 @@ CREATE TABLE IF NOT EXISTS labor_plan (
         ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_labor_plan_plant ON labor_plan(plant);
+
+-- Migrate from old headcount column if it still exists
+ALTER TABLE labor_plan ADD COLUMN IF NOT EXISTS avail_hours NUMERIC;
+UPDATE labor_plan SET avail_hours = headcount WHERE avail_hours IS NULL AND headcount IS NOT NULL;
+
+-- Labor Plan Line — available labor hours per production line per calendar day
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS labor_plan_line (
+    subnetwork      TEXT    NOT NULL,
+    plant           TEXT    NOT NULL,
+    production_line TEXT    NOT NULL,
+    day             TEXT    NOT NULL,   -- ISO date 'YYYY-MM-DD'
+    avail_hours     NUMERIC,
+    source          TEXT    NOT NULL DEFAULT 'auto_split',  -- 'auto_split'|'calendar'|'override'
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subnetwork, plant, production_line, day)
+);
+CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant ON labor_plan_line(plant);
+CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant_line ON labor_plan_line(plant, production_line);
 
 -- ----------------------------------------------------------------------------
 -- Seed data (idempotent — safe to re-run)

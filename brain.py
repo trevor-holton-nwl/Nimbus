@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
     load_color_wheels(COLOR_FILE)
     md.ensure_labor_plan_table()
+    md.ensure_labor_plan_line_table()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -1052,12 +1053,13 @@ def md_audit(limit: int = 100):
 
 
 # =============================================================================
-# LABOR PLANNING — planned headcount by line group × ISO week
+# LABOR PLANNING — available labor hours by line group × ISO week (aggregate)
+#                  and by production line × calendar day (line-level)
 # =============================================================================
 
 @api.get("/labor-plan")
 def labor_plan_get(plant: str):
-    """Return all labor-plan cells for the given plant."""
+    """Return all aggregate labor-plan cells (avail_hours) for the given plant."""
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
     return md.load_labor_plan(plant)
@@ -1065,10 +1067,33 @@ def labor_plan_get(plant: str):
 
 @api.post("/labor-plan")
 async def labor_plan_post(request: Request):
-    """Upsert or delete labor-plan cells. Payload: { subnetwork, plant, cells:[{pl_group, period, headcount}] }"""
+    """Upsert or delete aggregate labor-plan cells. Payload: { subnetwork, plant, cells:[{pl_group, period, avail_hours}] }"""
     body = await request.json()
     try:
         return md.upsert_labor_plan(
+            subnetwork=body.get("subnetwork", ""),
+            plant=body.get("plant", ""),
+            cells=body.get("cells", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@api.get("/labor-plan/line")
+def labor_plan_line_get(plant: str, group: str | None = None, from_date: str | None = None, to_date: str | None = None):
+    """Return line-level available-hours cells for the given plant, optionally filtered by group and date range."""
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant query param is required")
+    return md.load_labor_plan_line(plant, group=group, from_date=from_date, to_date=to_date)
+
+
+@api.post("/labor-plan/line")
+async def labor_plan_line_post(request: Request):
+    """Upsert or delete line-level labor cells. Payload: { subnetwork, plant, cells:[{production_line, day, avail_hours, source}] }"""
+    body = await request.json()
+    try:
+        return md.upsert_labor_plan_line(
             subnetwork=body.get("subnetwork", ""),
             plant=body.get("plant", ""),
             cells=body.get("cells", []),

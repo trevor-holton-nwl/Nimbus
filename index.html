@@ -1223,16 +1223,52 @@ body.dark .ls-co       { color: var(--fg-mute); }
        TAB: LABOR PLANNING
        ========================================================= -->
   <section class="tab-panel" id="labor-tab" role="tabpanel">
-    <div class="home-scroll">
-      <div class="home-container" style="max-width:none;padding:24px 32px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
-          <h2 style="margin:0;font-size:18px;font-weight:700;">Aggregate Labor Planning</h2>
-          <span class="plant-badge" id="labor-plant-badge">—</span>
-          <div class="spacer"></div>
-          <span style="font-size:12px;color:var(--text-muted,#64748b);">Planned headcount by production line group · week</span>
-        </div>
-        <div id="labor-grid"></div>
+    <!-- Toolbar -->
+    <div class="labor-toolbar" id="labor-toolbar">
+      <div class="group">
+        <button class="seg-btn active" data-labor-sub="aggregate" onclick="NIMBUS.App.gotoLaborSub('aggregate')">Aggregate</button>
+        <button class="seg-btn" data-labor-sub="line-plan" onclick="NIMBUS.App.gotoLaborSub('line-plan')">Line Plan</button>
+        <button class="seg-btn" data-labor-sub="capacity" onclick="NIMBUS.App.gotoLaborSub('capacity')">Capacity</button>
+        <button class="seg-btn" data-labor-sub="exceptions" onclick="NIMBUS.App.gotoLaborSub('exceptions')">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
+        <button class="seg-btn" data-labor-sub="inputs" onclick="NIMBUS.App.gotoLaborSub('inputs')">Inputs</button>
       </div>
+      <div class="sep-v"></div>
+      <label style="font-size:11px;color:var(--fg-mute);white-space:nowrap;" for="labor-group-select">Group</label>
+      <select id="labor-group-select" class="labor-group-sel" onchange="NIMBUS.LaborPlanning.onGroupChange(this.value)">
+        <option value="">All</option>
+      </select>
+      <div class="sep-v"></div>
+      <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period">‹</button>
+      <span id="labor-horizon-label" style="font-size:11px;padding:0 6px;color:var(--fg-mute);white-space:nowrap;"></span>
+      <button class="seg-btn" id="labor-next" onclick="NIMBUS.LaborPlanning.nextHorizon()" title="Next period">›</button>
+      <select id="labor-span-sel" class="labor-span-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
+        <option value="4">4 wks</option>
+        <option value="8">8 wks</option>
+        <option value="12" selected>12 wks</option>
+        <option value="16">16 wks</option>
+      </select>
+      <div class="spacer"></div>
+      <span class="plant-badge" id="labor-plant-badge">—</span>
+    </div>
+
+    <!-- KPI strip -->
+    <div class="labor-kpi-strip" id="labor-kpi-strip"></div>
+
+    <!-- Sub-panes -->
+    <div id="labor-sub-aggregate" class="labor-sub-pane">
+      <div id="labor-grid"></div>
+    </div>
+    <div id="labor-sub-line-plan" class="labor-sub-pane" style="display:none;">
+      <div id="labor-line-grid"></div>
+    </div>
+    <div id="labor-sub-capacity" class="labor-sub-pane" style="display:none;">
+      <div id="labor-capacity-grid"></div>
+    </div>
+    <div id="labor-sub-exceptions" class="labor-sub-pane" style="display:none;">
+      <div id="labor-exceptions-list"></div>
+    </div>
+    <div id="labor-sub-inputs" class="labor-sub-pane" style="display:none;">
+      <div id="labor-inputs-pane"></div>
     </div>
   </section>
 

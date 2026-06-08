@@ -4616,9 +4616,106 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .adm-help:hover .adm-help-tip,
 .adm-help:focus-within .adm-help-tip { opacity:1; }
 
-/* ── Labor Planning — lasso cell selection ─────────────────────────────── */
+/* ── Labor Planning 2.0 ──────────────────────────────────────────────────── */
+
+/* Toolbar */
+.labor-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 24px; border-bottom: 1px solid var(--line);
+  background: var(--bg-elev); flex-shrink: 0;
+}
+.labor-group-sel, .labor-span-sel {
+  padding: 3px 8px; font-size: 12px; height: 28px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+
+/* Active seg-btn for labor sub-tabs — amber pill matching Gantt */
+.labor-toolbar .seg-btn[data-labor-sub].active {
+  background: var(--accent); border-color: var(--accent);
+  color: #fff; font-weight: 600;
+  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+}
+
+/* Exception count badge inside the Exceptions button */
+.labor-exc-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--err); color: #fff;
+  font-size: 10px; font-weight: 700; margin-left: 4px;
+}
+
+/* KPI strip */
+.labor-kpi-strip {
+  display: flex; gap: 12px; align-items: stretch;
+  padding: 10px 24px; border-bottom: 1px solid var(--line);
+  background: var(--bg); flex-shrink: 0; flex-wrap: wrap;
+}
+.lp-kpi-tile {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 14px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--bg-elev); min-width: 110px;
+}
+.lp-kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-mute); font-weight: 600; }
+.lp-kpi-val   { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--fg); line-height: 1.2; }
+.lp-kpi-sub   { font-size: 11px; color: var(--fg-faint); }
+.lp-kpi-warn  { border-color: var(--warn-soft); background: var(--warn-soft); }
+.lp-kpi-err   { border-color: var(--err-soft);  background: var(--err-soft); }
+.lp-kpi-warn .lp-kpi-val { color: var(--warn); }
+.lp-kpi-err  .lp-kpi-val { color: var(--err); }
+
+/* Sub-panes */
+.labor-sub-pane {
+  flex: 1; overflow: auto; padding: 16px 24px;
+  display: flex; flex-direction: column;
+}
+
+/* Pin marker on overridden Line Plan cells */
+.lp-pin { font-size: 8px; color: var(--accent); margin-left: 2px; vertical-align: super; pointer-events: none; }
+
+/* Lasso selection highlight (Aggregate) */
 td.lp-selected-td {
   background: color-mix(in srgb, var(--accent, #daa520) 18%, transparent) !important;
   outline: 1px solid var(--accent, #daa520);
   outline-offset: -1px;
 }
+
+/* Capacity heatmap */
+.lp-cap-note { font-size: 11px; color: var(--fg-mute); margin-bottom: 6px; }
+.lp-hm-wrap  { overflow-x: auto; margin-top: 4px; }
+.lp-hm-grid  { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
+.lp-hm-corner { background: var(--bg-elev); }
+.lp-hm-head  { background: var(--bg-elev); display: flex; flex-direction: column; align-items: center; padding: 4px 6px; font-size: 11px; }
+.lp-hm-dow   { font-weight: 600; color: var(--fg-mute); }
+.lp-hm-date  { color: var(--fg-faint); font-size: 10px; }
+.lp-hm-label { background: var(--bg-elev); padding: 4px 8px; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.lp-hm-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.lp-hm-cell  { padding: 5px 4px; text-align: center; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+.lp-hm-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--fg-mute); }
+.lp-hm-grad  { flex: 1; max-width: 140px; height: 10px; border-radius: 5px; background: linear-gradient(to right, #ede8de, #c8a95a, #c96a1a, #991b1b); }
+
+/* Exceptions list */
+.lp-exc-summary { font-size: 13px; font-weight: 600; color: var(--fg-mute); margin-bottom: 10px; }
+.lp-exc-list    { display: flex; flex-direction: column; gap: 4px; }
+.lp-exc-row {
+  display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+  border-radius: var(--r-md); border: 1px solid var(--line); background: var(--bg-elev);
+  font-size: 12px;
+}
+.lp-exc-err  { border-left: 3px solid var(--err); }
+.lp-exc-warn { border-left: 3px solid var(--warn); }
+.lp-exc-sev  { font-size: 14px; width: 18px; flex-shrink: 0; }
+.lp-exc-err  .lp-exc-sev  { color: var(--err); }
+.lp-exc-warn .lp-exc-sev { color: var(--warn); }
+.lp-exc-line { font-weight: 600; min-width: 100px; }
+.lp-exc-day  { font-family: 'JetBrains Mono', monospace; color: var(--fg-mute); min-width: 90px; }
+.lp-exc-msg  { flex: 1; }
+.lp-exc-fix  { flex-shrink: 0; }
+
+/* Inputs pane */
+.lp-inputs-section { margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--line); max-width: 640px; }
+.lp-inputs-section:last-child { border-bottom: none; }
+.lp-input-row   { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.lp-input-label { font-size: 12px; font-weight: 600; color: var(--fg); min-width: 140px; padding-top: 5px; }
+.lp-input-sel   { padding: 4px 8px; font-size: 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg); color: var(--fg); }
+.lp-input-hint  { font-size: 11px; color: var(--fg-mute); max-width: 340px; padding-top: 5px; line-height: 1.5; }

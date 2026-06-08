@@ -1986,17 +1986,23 @@ const NIMBUS = (function () {
   };
 
   /* =============================================================================
-     LABOR PLANNING — aggregate headcount grid: line group × rolling ISO weeks
+     LABOR PLANNING — aggregate-to-line available labor hours planning
+     Sub-tabs: Aggregate · Line Plan · Capacity · Exceptions · Inputs
      ========================================================================== */
   const LaborPlanning = (() => {
-    const WEEKS = 12;
-    let _data   = {};   // { [plant]: { [grp]: { [period]: headcount } } }
-    let _groups = [];
-    let _weeks  = [];
-    let _selRange   = null;  // { r0, c0, r1, c1 } rectangular index range, or null
-    let _dragging   = false;
-    let _dragAnchor = null;  // { row, col }
+    // ── State ────────────────────────────────────────────────────────────────
+    let _horizonOffset = 0;    // weeks offset from today's Monday
+    let _horizonSpan   = 12;   // number of weeks in view
+    let _selectedGroup = '';   // '' = all groups; used to scope Line Plan / Capacity
+    let _aggrData      = {};   // { [plant]: { [grp]: { [period]: avail_hours } } }
+    let _lineData      = {};   // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
+    let _groups        = [];   // sorted unique pl_group values for current plant
+    let _weeks         = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
+    let _selRange      = null; // { r0,c0,r1,c1 } lasso rectangle, or null
+    let _dragging      = false;
+    let _dragAnchor    = null;
 
+    // ── Date helpers ─────────────────────────────────────────────────────────
     function _isoWeek(date) {
       const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
       const dayNum = d.getUTCDay() || 7;
@@ -2013,21 +2019,64 @@ const NIMBUS = (function () {
       return `${m}/${d}/${y}`;
     }
 
-    function _rollingWeeks() {
-      const weeks = [];
-      const now = new Date();
+    function _computeWeeks() {
+      const now    = new Date();
       const monday = new Date(now);
-      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-      for (let i = 0; i < WEEKS; i++) {
-        const d = new Date(monday);
-        d.setDate(monday.getDate() + i * 7);
-        weeks.push({ key: _isoWeek(d), label: _weekLabel(new Date(d)) });
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7) + _horizonOffset * 7);
+      const weeks = [];
+      for (let i = 0; i < _horizonSpan; i++) {
+        const d = new Date(monday); d.setDate(monday.getDate() + i * 7);
+        weeks.push({ key: _isoWeek(d), label: _weekLabel(new Date(d)), monday: new Date(d) });
       }
       return weeks;
     }
 
-    async function _fetchPlan(plant) {
-      if (_data[plant]) return _data[plant];
+    function _isoWeekToMonday(isoKey) {
+      const [year, week] = isoKey.split('-W');
+      const y = parseInt(year, 10), w = parseInt(week, 10);
+      const jan4 = new Date(y, 0, 4);
+      const dow  = jan4.getDay() || 7;
+      const week1Mon = new Date(jan4); week1Mon.setDate(jan4.getDate() - (dow - 1));
+      const monday   = new Date(week1Mon); monday.setDate(week1Mon.getDate() + (w - 1) * 7);
+      return monday;
+    }
+
+    // ── Backend helpers ───────────────────────────────────────────────────────
+    function _subnetwork(plant) {
+      return (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+    }
+
+    async function _saveAggregate(subnetwork, plant, cells) {
+      try {
+        const r = await fetch(`${Config.API_BASE}/labor-plan`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          body: JSON.stringify({ subnetwork, plant, cells }),
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      } catch (e) {
+        Toast.show(`Labor plan save failed: ${e.message}`, 'error');
+        ErrorLog.error('labor', `Save aggregate failed: ${e.message}`);
+      }
+    }
+
+    async function _saveLines(subnetwork, plant, cells) {
+      if (!cells.length) return;
+      try {
+        const r = await fetch(`${Config.API_BASE}/labor-plan/line`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          body: JSON.stringify({ subnetwork, plant, cells }),
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      } catch (e) {
+        Toast.show(`Line plan save failed: ${e.message}`, 'error');
+        ErrorLog.error('labor', `Save lines failed: ${e.message}`);
+      }
+    }
+
+    async function _fetchAggregate(plant) {
+      if (_aggrData[plant]) return _aggrData[plant];
       try {
         const res = await fetch(`${Config.API_BASE}/labor-plan?plant=${encodeURIComponent(plant)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2035,16 +2084,130 @@ const NIMBUS = (function () {
         const map = {};
         (json.rows || []).forEach(r => {
           if (!map[r.pl_group]) map[r.pl_group] = {};
-          map[r.pl_group][r.period] = r.headcount;
+          map[r.pl_group][r.period] = r.avail_hours;
         });
-        _data[plant] = map;
+        _aggrData[plant] = map;
         return map;
       } catch (e) {
-        ErrorLog.warn('labor', `Failed to fetch labor plan for ${plant}: ${e.message}`);
+        ErrorLog.warn('labor', `Fetch aggregate failed for ${plant}: ${e.message}`);
         return {};
       }
     }
 
+    async function _fetchLines(plant, group) {
+      const w0 = _weeks[0], wN = _weeks[_weeks.length - 1];
+      const from_date = Util.dayKey(w0.monday);
+      const toDate    = new Date(wN.monday); toDate.setDate(wN.monday.getDate() + 6);
+      const to_date   = Util.dayKey(toDate);
+      try {
+        let url = `${Config.API_BASE}/labor-plan/line?plant=${encodeURIComponent(plant)}&from_date=${from_date}&to_date=${to_date}`;
+        if (group) url += `&group=${encodeURIComponent(group)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        if (!_lineData[plant]) _lineData[plant] = {};
+        (json.rows || []).forEach(r => {
+          if (!_lineData[plant][r.production_line]) _lineData[plant][r.production_line] = {};
+          _lineData[plant][r.production_line][r.day] = { avail_hours: r.avail_hours, source: r.source };
+        });
+      } catch (e) {
+        ErrorLog.warn('labor', `Fetch lines failed: ${e.message}`);
+      }
+    }
+
+    // ── Disaggregation ───────────────────────────────────────────────────────
+    function _disaggregate(plant, group, periodKey, groupHours) {
+      const lines = (Store._state.masterData?.lines || [])
+        .filter(l => l.plant === plant && l.pl_group === group)
+        .map(l => l.production_line);
+      if (!lines.length) return [];
+
+      const monday = _isoWeekToMonday(periodKey);
+      const openSlots = [];
+      lines.forEach(line => {
+        for (let d = 0; d < 7; d++) {
+          const date = new Date(monday); date.setDate(monday.getDate() + d);
+          if (Calendar.effectiveCapacityHours(line, date) > 0)
+            openSlots.push({ line, date, dayKey: Util.dayKey(date) });
+        }
+      });
+      if (!openSlots.length) return [];
+
+      const pinnedHours = openSlots.reduce((sum, s) => {
+        const d = _lineData[plant]?.[s.line]?.[s.dayKey];
+        return (d && d.source === 'override') ? sum + (d.avail_hours || 0) : sum;
+      }, 0);
+      const free = openSlots.filter(s => {
+        const d = _lineData[plant]?.[s.line]?.[s.dayKey];
+        return !d || d.source !== 'override';
+      });
+      if (!free.length) return [];
+      const perSlot = Math.max(0, (groupHours || 0) - pinnedHours) / free.length;
+      const rounded = Math.round(perSlot * 10) / 10;
+      return free.map(s => ({ production_line: s.line, day: s.dayKey, avail_hours: rounded, source: 'auto_split' }));
+    }
+
+    // ── KPI strip ────────────────────────────────────────────────────────────
+    function _renderKPIs(plant) {
+      const strip = document.getElementById('labor-kpi-strip');
+      if (!strip || !plant) { if (strip) strip.innerHTML = ''; return; }
+
+      const planMap = _aggrData[plant] || {};
+      let totalAvail = 0;
+      _groups.forEach(g => _weeks.forEach(w => {
+        const v = planMap[g]?.[w.key]; if (v != null) totalAvail += v;
+      }));
+
+      const horizonStart = _weeks[0]?.monday || new Date();
+      const horizonDays  = Math.min(_horizonSpan * 7, 90);
+      const matrix = Utilization.computeMatrix(horizonStart, horizonDays);
+      const plantLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant).map(r => r.production_line);
+      let totalRequired = 0;
+      plantLines.forEach(line => {
+        const lm = matrix[line]; if (!lm) return;
+        Object.values(lm).forEach(cell => { totalRequired += cell.scheduled || 0; });
+      });
+
+      const diff     = totalAvail - totalRequired;
+      const headroom = totalAvail > 0 ? Math.round((diff / totalAvail) * 100) : 0;
+      const hSev     = headroom < 0 ? 'err' : headroom < 15 ? 'warn' : '';
+
+      let shortfalls = 0;
+      plantLines.forEach(line => {
+        const lm = matrix[line]; if (!lm) return;
+        Object.entries(lm).forEach(([dayKey, cell]) => {
+          if (!cell.scheduled) return;
+          const ld   = _lineData[plant]?.[line]?.[dayKey];
+          const avail = ld?.avail_hours != null ? ld.avail_hours : (cell.effectiveCapacity || 0);
+          if (cell.scheduled > avail + 0.05) shortfalls++;
+        });
+      });
+
+      const fmtH = h => h >= 1000 ? `${(h / 1000).toFixed(1)}k` : h.toFixed(0);
+      strip.innerHTML = `
+        <div class="lp-kpi-tile">
+          <span class="lp-kpi-label">Available</span>
+          <span class="lp-kpi-val">${fmtH(totalAvail)}h</span>
+          <span class="lp-kpi-sub">${_horizonSpan} wk horizon</span>
+        </div>
+        <div class="lp-kpi-tile">
+          <span class="lp-kpi-label">Required</span>
+          <span class="lp-kpi-val">${fmtH(totalRequired)}h</span>
+          <span class="lp-kpi-sub">from scheduled orders</span>
+        </div>
+        <div class="lp-kpi-tile${hSev ? ' lp-kpi-' + hSev : ''}">
+          <span class="lp-kpi-label">Headroom</span>
+          <span class="lp-kpi-val">${headroom}%</span>
+          <span class="lp-kpi-sub">${fmtH(Math.abs(diff))}h ${diff >= 0 ? 'surplus' : 'deficit'}</span>
+        </div>
+        <div class="lp-kpi-tile${shortfalls > 0 ? ' lp-kpi-err' : ''}">
+          <span class="lp-kpi-label">Shortfalls</span>
+          <span class="lp-kpi-val">${shortfalls}</span>
+          <span class="lp-kpi-sub">line·day cells</span>
+        </div>`;
+    }
+
+    // ── Aggregate sub-tab ────────────────────────────────────────────────────
     function _clearSelection() {
       _selRange = null; _dragging = false; _dragAnchor = null;
       document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
@@ -2054,69 +2217,60 @@ const NIMBUS = (function () {
       document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
       if (!_selRange) return;
       const { r0, c0, r1, c1 } = _selRange;
-      const g = document.getElementById('labor-grid');
-      if (!g) return;
-      for (let r = r0; r <= r1; r++) {
-        for (let c = c0; c <= c1; c++) {
-          const grp = _groups[r]; const period = _weeks[c]?.key;
-          if (!grp || !period) continue;
-          const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-          inp?.closest('td')?.classList.add('lp-selected-td');
-        }
+      const g = document.getElementById('labor-grid'); if (!g) return;
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+        const grp = _groups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
+        const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+        inp?.closest('td')?.classList.add('lp-selected-td');
       }
+    }
+
+    function _updateAggrTotals(grid) {
+      const plant = Store.selectedPlant; if (!plant || !_aggrData[plant]) return;
+      const tds = grid.querySelectorAll('tbody tr:last-child td');
+      _weeks.forEach((w, i) => {
+        const total = Object.values(_aggrData[plant]).reduce((sum, p) => sum + (p[w.key] ?? 0), 0);
+        if (tds[i + 1]) tds[i + 1].textContent = total > 0 ? total.toFixed(1) : '—';
+      });
     }
 
     function _deleteSelected() {
       if (!_selRange) return;
       const plant = Store.selectedPlant; if (!plant) return;
-      if (!_data[plant]) _data[plant] = {};
+      if (!_aggrData[plant]) _aggrData[plant] = {};
       const { r0, c0, r1, c1 } = _selRange;
       const cleared = [], prev = [];
       const g = document.getElementById('labor-grid');
-      for (let r = r0; r <= r1; r++) {
-        for (let c = c0; c <= c1; c++) {
-          const grp = _groups[r]; const period = _weeks[c]?.key;
-          if (!grp || !period) continue;
-          prev.push({ pl_group: grp, period, headcount: _data[plant]?.[grp]?.[period] ?? null });
-          if (!_data[plant][grp]) _data[plant][grp] = {};
-          delete _data[plant][grp][period];
-          cleared.push({ pl_group: grp, period, headcount: null });
-          if (g) {
-            const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-            if (inp) inp.value = '';
-          }
-        }
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+        const grp = _groups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
+        prev.push({ pl_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
+        if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+        delete _aggrData[plant][grp][period];
+        cleared.push({ pl_group: grp, period, avail_hours: null });
+        const inp = g?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+        if (inp) inp.value = '';
       }
       if (!cleared.length) return;
-      if (g) _updateTotals(g, _weeks);
+      if (g) _updateAggrTotals(g);
       _clearSelection();
-      const subnetwork = (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+      const sn = _subnetwork(plant);
       UndoStack.push(`Delete ${cleared.length} labor cell${cleared.length !== 1 ? 's' : ''}`, () => {
-        if (!_data[plant]) _data[plant] = {};
-        prev.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
-          if (!_data[plant][grp]) _data[plant][grp] = {};
-          if (oldHc == null) delete _data[plant][grp][period];
-          else               _data[plant][grp][period] = oldHc;
+        if (!_aggrData[plant]) _aggrData[plant] = {};
+        prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+          if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+          if (old == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = old;
         });
         const g2 = document.getElementById('labor-grid');
         if (g2) {
-          prev.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
+          prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
             const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-            if (el) el.value = oldHc != null ? oldHc : '';
+            if (el) el.value = old != null ? old : '';
           });
-          _updateTotals(g2, _rollingWeeks());
+          _updateAggrTotals(g2);
         }
-        fetch(`${Config.API_BASE}/labor-plan`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-          body: JSON.stringify({ subnetwork, plant, cells: prev }),
-        }).catch(e => ErrorLog.error('labor', `Undo delete failed: ${e.message}`));
+        _saveAggregate(sn, plant, prev);
       });
-      fetch(`${Config.API_BASE}/labor-plan`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-        body: JSON.stringify({ subnetwork, plant, cells: cleared }),
-      }).catch(e => Toast.show(`Delete save failed: ${e.message}`, 'error'));
+      _saveAggregate(sn, plant, cleared);
     }
 
     function _copySelected() {
@@ -2128,8 +2282,8 @@ const NIMBUS = (function () {
         const cols = [];
         for (let c = c0; c <= c1; c++) {
           const grp = _groups[r]; const period = _weeks[c]?.key;
-          const hc = grp && period ? (_data[plant]?.[grp]?.[period] ?? null) : null;
-          cols.push(hc != null ? String(hc) : '');
+          const ah = grp && period ? (_aggrData[plant]?.[grp]?.[period] ?? null) : null;
+          cols.push(ah != null ? String(ah) : '');
         }
         rows.push(cols.join('\t'));
       }
@@ -2139,281 +2293,476 @@ const NIMBUS = (function () {
         .catch(() => Toast.show('Copy failed — check clipboard permissions', 'error'));
     }
 
-    function _onLPKeyDown(e) {
-      if (!_selRange) return;
-      if (App._currentTab !== 'labor') return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (e.key === 'Escape') {
-        e.preventDefault(); e.stopImmediatePropagation();
-        _clearSelection(); return;
-      }
-      if (e.key === 'Delete' || (e.key === 'Backspace' && !e.target?.classList.contains('lp-cell'))) {
-        e.preventDefault(); e.stopImmediatePropagation();
-        _deleteSelected(); return;
-      }
-      if (mod && e.key.toLowerCase() === 'c') {
-        e.preventDefault(); e.stopImmediatePropagation();
-        _copySelected(); return;
-      }
-    }
-
-    async function render() {
-      const grid     = document.getElementById('labor-grid');
-      const badgeEl  = document.getElementById('labor-plant-badge');
-      if (!grid) return;
-
-      const plant = Store.selectedPlant;
-      if (badgeEl) badgeEl.textContent = plant || '—';
-      if (!plant) {
-        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a plant in the top bar to view labor planning.</div>`;
-        return;
-      }
-
-      const mdLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant);
-      const groups = [...new Set(mdLines.map(r => r.pl_group).filter(Boolean))].sort();
-      if (!groups.length) {
-        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production line groups defined for this plant. Assign groups in <strong>Manage Master Data → Production Lines</strong>.</div>`;
-        return;
-      }
-
-      _clearSelection();
-      const weeks  = _rollingWeeks();
-      const planMap = await _fetchPlan(plant);
-      _groups = groups;
-      _weeks  = weeks;
-
-      const thStyle = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--surface,#fff);border-bottom:2px solid var(--border,#e2e8f0);white-space:nowrap;';
-      const tdStyle = 'padding:6px 8px;border-bottom:1px solid var(--border,#f1f5f9);';
-      const inputStyle = 'width:68px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--border,#e2e8f0);border-radius:4px;background:var(--bg,#fff);';
-
-      const weekHeaders = weeks.map(w => `<th style="${thStyle}">${w.label}</th>`).join('');
-      const totals = {};
-      weeks.forEach(w => { totals[w.key] = 0; });
-
-      const groupRows = groups.map(grp => {
-        const cells = weeks.map(w => {
-          const hc = planMap[grp]?.[w.key];
-          if (hc != null) totals[w.key] += hc;
-          return `<td style="${tdStyle};text-align:center;">
-            <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="1" style="${inputStyle}" value="${hc != null ? hc : ''}" placeholder="—">
+    async function _renderAggregate(plant) {
+      const grid = document.getElementById('labor-grid'); if (!grid) return;
+      const planMap = await _fetchAggregate(plant);
+      const thS = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;position:sticky;top:0;z-index:1;';
+      const tdS = 'padding:6px 8px;border-bottom:1px solid var(--line);';
+      const inS = 'width:72px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font-family:inherit;';
+      const totals = {}; _weeks.forEach(w => { totals[w.key] = 0; });
+      const groupRows = _groups.map(grp => {
+        const cells = _weeks.map(w => {
+          const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
+          return `<td style="${tdS};text-align:center;">
+            <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="0.5" style="${inS}" value="${ah != null ? ah : ''}" placeholder="—">
           </td>`;
         }).join('');
-        return `<tr>
-          <td style="${tdStyle};font-weight:600;white-space:nowrap;min-width:140px;">${grp}</td>
-          ${cells}
-        </tr>`;
+        return `<tr><td style="${tdS};font-weight:600;white-space:nowrap;min-width:140px;">${grp}</td>${cells}</tr>`;
       }).join('');
-
-      const totalCells = weeks.map(w => {
+      const totalCells = _weeks.map(w => {
         const v = totals[w.key];
-        return `<td style="${tdStyle};text-align:center;font-weight:700;">${v || '—'}</td>`;
+        return `<td style="${tdS};text-align:center;font-weight:700;font-family:'JetBrains Mono',monospace;">${v > 0 ? v.toFixed(1) : '—'}</td>`;
       }).join('');
-
       grid.innerHTML = `
         <div style="overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;font-size:13px;">
-            <thead>
-              <tr>
-                <th style="${thStyle};min-width:140px;">Production Line Group</th>
-                ${weekHeaders}
-              </tr>
-            </thead>
+            <thead><tr>
+              <th style="${thS};min-width:140px;">Group</th>
+              ${_weeks.map(w => `<th style="${thS}">${w.label}</th>`).join('')}
+            </tr></thead>
             <tbody>
               ${groupRows}
-              <tr style="border-top:2px solid var(--border,#e2e8f0);">
-                <td style="${tdStyle};font-weight:700;">TOTAL</td>
-                ${totalCells}
+              <tr style="border-top:2px solid var(--line);">
+                <td style="${tdS};font-weight:700;">TOTAL</td>${totalCells}
               </tr>
             </tbody>
           </table>
-        </div>`;
+        </div>
+        <p style="margin-top:8px;font-size:11px;color:var(--fg-faint);">Ctrl+drag to select · Delete to clear · Ctrl+C to copy · Paste from Excel · Values in hours</p>`;
 
-      const subnetwork = (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+      const sn = _subnetwork(plant);
 
-      // Ctrl+drag lasso selection
       grid.addEventListener('mousedown', e => {
-        if (!e.ctrlKey && !e.metaKey) {
-          if (!e.target.closest('.lp-selected-td')) _clearSelection();
-          return;
-        }
-        const inp = e.target.closest('.lp-cell');
-        if (!inp) return;
+        if (!e.ctrlKey && !e.metaKey) { if (!e.target.closest('.lp-selected-td')) _clearSelection(); return; }
+        const inp = e.target.closest('.lp-cell'); if (!inp) return;
         e.preventDefault();
-        const ri = _groups.indexOf(inp.dataset.group);
-        const ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const ri = _groups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
-        _dragging = true;
-        _dragAnchor = { row: ri, col: ci };
-        _selRange = { r0: ri, c0: ci, r1: ri, c1: ci };
-        _renderSelection();
+        _dragging = true; _dragAnchor = { row: ri, col: ci };
+        _selRange = { r0: ri, c0: ci, r1: ri, c1: ci }; _renderSelection();
       });
       grid.addEventListener('mousemove', e => {
         if (!_dragging) return;
-        const td = e.target.closest('td');
-        if (!td) return;
-        const inp = td.querySelector('.lp-cell');
-        if (!inp) return;
-        const ri = _groups.indexOf(inp.dataset.group);
-        const ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const td = e.target.closest('td'); if (!td) return;
+        const inp = td.querySelector('.lp-cell'); if (!inp) return;
+        const ri = _groups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
-        _selRange = {
-          r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci),
-          r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci),
-        };
+        _selRange = { r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci), r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci) };
         _renderSelection();
       });
 
       grid.querySelectorAll('.lp-cell').forEach(inp => {
         inp.onchange = async function() {
-          const grp    = this.dataset.group;
-          const period = this.dataset.period;
-          const raw    = this.value.trim();
-          const hc     = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
-          if (hc !== null) this.value = hc;
-
-          const oldHc = _data[plant]?.[grp]?.[period] ?? null;
-
-          if (!_data[plant]) _data[plant] = {};
-          if (!_data[plant][grp]) _data[plant][grp] = {};
-          if (hc === null) delete _data[plant][grp][period];
-          else             _data[plant][grp][period] = hc;
-
-          _updateTotals(grid, weeks);
-
-          UndoStack.push(`Labor: ${grp} / ${period}`, () => {
-            if (!_data[plant]) _data[plant] = {};
-            if (!_data[plant][grp]) _data[plant][grp] = {};
-            if (oldHc == null) delete _data[plant][grp][period];
-            else               _data[plant][grp][period] = oldHc;
-            const g = document.getElementById('labor-grid');
-            if (g) {
-              const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-              if (el) el.value = oldHc != null ? oldHc : '';
-              _updateTotals(g, _rollingWeeks());
+          const grp = this.dataset.group, period = this.dataset.period;
+          const raw = this.value.trim();
+          const ah  = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
+          if (ah !== null) this.value = ah;
+          const oldAh = _aggrData[plant]?.[grp]?.[period] ?? null;
+          if (!_aggrData[plant]) _aggrData[plant] = {};
+          if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+          if (ah === null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = ah;
+          _updateAggrTotals(grid);
+          _renderKPIs(plant);
+          if (ah !== null) {
+            const splits = _disaggregate(plant, grp, period, ah);
+            if (splits.length) {
+              if (!_lineData[plant]) _lineData[plant] = {};
+              splits.forEach(c => {
+                if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
+                _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
+              });
+              _saveLines(sn, plant, splits);
             }
-            fetch(`${Config.API_BASE}/labor-plan`, {
-              method:  'POST',
-              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-              body:    JSON.stringify({ subnetwork, plant, cells: [{ pl_group: grp, period, headcount: oldHc }] }),
-            }).catch(e => ErrorLog.error('labor', `Undo save failed: ${e.message}`));
-          });
-
-          try {
-            await fetch(`${Config.API_BASE}/labor-plan`, {
-              method:  'POST',
-              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-              body:    JSON.stringify({ subnetwork, plant, cells: [{ pl_group: grp, period, headcount: hc }] }),
-            }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); });
-          } catch (e) {
-            Toast.show(`Labor plan save failed: ${e.message}`, 'error');
-            ErrorLog.error('labor', `Save failed: ${e.message}`);
           }
+          UndoStack.push(`Labor: ${grp} / ${period}`, () => {
+            if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+            if (oldAh == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = oldAh;
+            const el = document.getElementById('labor-grid')?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+            if (el) el.value = oldAh != null ? oldAh : '';
+            _updateAggrTotals(document.getElementById('labor-grid'));
+            _saveAggregate(sn, plant, [{ pl_group: grp, period, avail_hours: oldAh }]);
+          });
+          await _saveAggregate(sn, plant, [{ pl_group: grp, period, avail_hours: ah }]);
         };
       });
 
-      // Excel paste: clipboard TSV → anchor at focused cell, spread right then down, batch save.
       const table = grid.querySelector('table');
-      if (table) {
-        table.addEventListener('paste', async function(e) {
-          const anchor = document.activeElement?.classList.contains('lp-cell') ? document.activeElement : null;
-          e.preventDefault();
-          const text = e.clipboardData.getData('text/plain');
-          if (!text) return;
-
-          // Parse clipboard as TSV
-          const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
-
-          // Build 2D cell matrix [groupIdx][weekIdx]
-          const cellMatrix = groups.map(grp =>
-            weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`))
-          );
-
-          // Anchor position
-          let anchorRow = 0, anchorCol = 0;
-          if (anchor) {
-            anchorRow = groups.indexOf(anchor.dataset.group);
-            anchorCol = weeks.findIndex(w => w.key === anchor.dataset.period);
-            if (anchorRow < 0) anchorRow = 0;
-            if (anchorCol < 0) anchorCol = 0;
-          }
-
-          if (!_data[plant]) _data[plant] = {};
-          const changedCells = [];
-          const prevCells = [];
-
-          clipRows.forEach((clipCols, r) => {
-            clipCols.forEach((val, c) => {
-              const ri = anchorRow + r;
-              const ci = anchorCol + c;
-              if (ri >= groups.length || ci >= weeks.length) return;
-              const inp = cellMatrix[ri]?.[ci];
-              if (!inp) return;
-              const raw = val.trim().replace(/,/g, ''); // strip thousand-separators
-              const hc  = raw === '' ? null : parseFloat(raw);
-              if (hc !== null && (isNaN(hc) || hc < 0)) return; // skip non-numeric / negative
-              const grp    = inp.dataset.group;
-              const period = inp.dataset.period;
-              prevCells.push({ pl_group: grp, period, headcount: _data[plant]?.[grp]?.[period] ?? null });
-              inp.value = hc !== null ? hc : '';
-              if (!_data[plant][grp]) _data[plant][grp] = {};
-              if (hc === null) delete _data[plant][grp][period];
-              else             _data[plant][grp][period] = hc;
-              changedCells.push({ pl_group: grp, period, headcount: hc });
-            });
+      if (table) table.addEventListener('paste', async e => {
+        const anchor = document.activeElement?.classList.contains('lp-cell') ? document.activeElement : null;
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain'); if (!text) return;
+        const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
+        const cellMatrix = _groups.map(grp => _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)));
+        let anchorRow = 0, anchorCol = 0;
+        if (anchor) {
+          anchorRow = Math.max(0, _groups.indexOf(anchor.dataset.group));
+          anchorCol = Math.max(0, _weeks.findIndex(w => w.key === anchor.dataset.period));
+        }
+        if (!_aggrData[plant]) _aggrData[plant] = {};
+        const changed = [], prev = [], allSplits = [];
+        clipRows.forEach((clipCols, r) => {
+          clipCols.forEach((val, c) => {
+            const ri = anchorRow + r, ci = anchorCol + c;
+            if (ri >= _groups.length || ci >= _weeks.length) return;
+            const inp = cellMatrix[ri]?.[ci]; if (!inp) return;
+            const raw = val.trim().replace(/,/g, '');
+            const ah  = raw === '' ? null : parseFloat(raw);
+            if (ah !== null && (isNaN(ah) || ah < 0)) return;
+            const grp = inp.dataset.group, period = inp.dataset.period;
+            prev.push({ pl_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
+            inp.value = ah !== null ? ah : '';
+            if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+            if (ah === null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = ah;
+            changed.push({ pl_group: grp, period, avail_hours: ah });
+            if (ah !== null) allSplits.push(..._disaggregate(plant, grp, period, ah));
           });
-
-          if (!changedCells.length) return;
-          _updateTotals(grid, weeks);
-
-          UndoStack.push(`Undo paste (${changedCells.length} labor value${changedCells.length !== 1 ? 's' : ''})`, () => {
-            if (!_data[plant]) _data[plant] = {};
-            prevCells.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
-              if (!_data[plant][grp]) _data[plant][grp] = {};
-              if (oldHc == null) delete _data[plant][grp][period];
-              else               _data[plant][grp][period] = oldHc;
-            });
-            const g = document.getElementById('labor-grid');
-            if (g) {
-              prevCells.forEach(({ pl_group: grp, period, headcount: oldHc }) => {
-                const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-                if (el) el.value = oldHc != null ? oldHc : '';
-              });
-              _updateTotals(g, _rollingWeeks());
-            }
-            fetch(`${Config.API_BASE}/labor-plan`, {
-              method:  'POST',
-              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-              body:    JSON.stringify({ subnetwork, plant, cells: prevCells }),
-            }).catch(e => ErrorLog.error('labor', `Undo save failed: ${e.message}`));
-          });
-
-          Toast.show(`Pasted ${changedCells.length} value${changedCells.length !== 1 ? 's' : ''}`, 'success');
-
-          try {
-            await fetch(`${Config.API_BASE}/labor-plan`, {
-              method:  'POST',
-              headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-              body:    JSON.stringify({ subnetwork, plant, cells: changedCells }),
-            }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); });
-          } catch (e) {
-            Toast.show(`Paste save failed: ${e.message}`, 'error');
-            ErrorLog.error('labor', `Paste save failed: ${e.message}`);
-          }
         });
-      }
+        if (!changed.length) return;
+        _updateAggrTotals(grid); _renderKPIs(plant);
+        if (allSplits.length) {
+          if (!_lineData[plant]) _lineData[plant] = {};
+          allSplits.forEach(c => {
+            if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
+            _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
+          });
+          _saveLines(sn, plant, allSplits);
+        }
+        UndoStack.push(`Undo paste (${changed.length} labor value${changed.length !== 1 ? 's' : ''})`, () => {
+          if (!_aggrData[plant]) _aggrData[plant] = {};
+          prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+            if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
+            if (old == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = old;
+          });
+          const g = document.getElementById('labor-grid');
+          if (g) {
+            prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+              const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+              if (el) el.value = old != null ? old : '';
+            });
+            _updateAggrTotals(g);
+          }
+          _saveAggregate(sn, plant, prev);
+        });
+        Toast.show(`Pasted ${changed.length} value${changed.length !== 1 ? 's' : ''}`, 'success');
+        await _saveAggregate(sn, plant, changed);
+      });
     }
 
-    function _updateTotals(grid, weeks) {
-      const plant = Store.selectedPlant;
-      if (!plant || !_data[plant]) return;
-      const tds = grid.querySelectorAll('tbody tr:last-child td');
-      weeks.forEach((w, i) => {
-        const total = Object.values(_data[plant]).reduce((sum, periods) => {
-          const v = periods[w.key];
-          return sum + (v != null ? v : 0);
-        }, 0);
-        if (tds[i + 1]) tds[i + 1].textContent = total || '—';
+    // ── Line Plan sub-tab ────────────────────────────────────────────────────
+    async function _renderLinePlan(plant) {
+      const grid = document.getElementById('labor-line-grid'); if (!grid) return;
+      const group = _selectedGroup || _groups[0] || '';
+      if (!group) {
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a group from the toolbar to view the line plan.</div>`; return;
+      }
+      const lines = (Store._state.masterData?.lines || [])
+        .filter(l => l.plant === plant && l.pl_group === group).map(l => l.production_line).sort();
+      if (!lines.length) {
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines in group <strong>${group}</strong>.</div>`; return;
+      }
+      await _fetchLines(plant, group);
+
+      // Build day columns
+      const days = [];
+      _weeks.forEach(w => {
+        for (let d = 0; d < 7; d++) {
+          const date = new Date(w.monday); date.setDate(w.monday.getDate() + d);
+          days.push({ date, dayKey: Util.dayKey(date), weekKey: w.key });
+        }
       });
+
+      const horizonStart = _weeks[0].monday;
+      const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
+      const sn = _subnetwork(plant);
+
+      const isDark = document.body.classList.contains('dark');
+      function lerpRGB(a, b, t) {
+        const p = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+        const ca = p(a), cb = p(b);
+        return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
+      }
+      const idle = isDark ? '#252730' : '#ede8de', low = isDark ? '#7a5a18' : '#c8a95a',
+            mid  = isDark ? '#a8520f' : '#c96a1a', hot = isDark ? '#b32a1f' : '#991b1b';
+      function heatBg(ratio) {
+        if (ratio <= 0)   return idle;
+        if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
+        if (ratio <= 1.0) return lerpRGB(low, mid, (ratio - 0.5) / 0.5);
+        return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
+      }
+
+      const thS = 'padding:5px 6px;font-size:11px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;text-align:center;position:sticky;top:0;z-index:1;min-width:52px;';
+      const tdL = 'padding:6px 8px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap;min-width:120px;font-size:12px;';
+      const tdC = 'padding:4px 5px;border-bottom:1px solid var(--line);text-align:center;';
+      const weekStarts = new Set(_weeks.map(w => Util.dayKey(w.monday)));
+
+      const dayHeaders = days.map(d => {
+        const wb = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
+        return `<th style="${thS}${wb}">${d.date.getMonth()+1}/${d.date.getDate()}</th>`;
+      }).join('');
+
+      const lineRows = lines.map(line => {
+        const cells = days.map(d => {
+          const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
+          const ld   = _lineData[plant]?.[line]?.[d.dayKey];
+          const calCap = Calendar.effectiveCapacityHours(line, d.date);
+          const avail  = ld?.avail_hours != null ? ld.avail_hours : calCap;
+          const req    = utilMatrix[line]?.[d.dayKey]?.scheduled || 0;
+          const ratio  = avail > 0 ? req / avail : (req > 0 ? 2 : 0);
+          const bg     = avail === 0 ? 'var(--bg-subtle)' : heatBg(ratio);
+          const isOvr  = ld?.source === 'override';
+          const title  = `${line} · ${d.dayKey} | Available: ${avail.toFixed(1)}h | Required: ${req.toFixed(1)}h | Cal cap: ${calCap.toFixed(1)}h${isOvr ? ' | Pinned' : ''}`;
+          return `<td style="${tdC}${wb}background:${bg};" title="${title}">
+            <input type="number" class="lp-line-cell" data-line="${line.replace(/"/g,'&quot;')}" data-day="${d.dayKey}" min="0" step="0.5"
+              style="width:46px;text-align:center;padding:2px 4px;font-size:11px;font-family:'JetBrains Mono',monospace;border:none;background:transparent;color:var(--fg);"
+              value="${avail > 0 ? avail : ''}">${isOvr ? '<span class="lp-pin" title="Overridden">●</span>' : ''}</td>`;
+        }).join('');
+        return `<tr><td style="${tdL}">${line}</td>${cells}</tr>`;
+      }).join('');
+
+      grid.innerHTML = `
+        <div style="margin-bottom:8px;font-size:12px;color:var(--fg-mute);">Group: <strong>${group}</strong> · ${lines.length} lines · Hover for detail · ● = overridden (right-click to reset)</div>
+        <div style="overflow:auto;max-height:calc(100vh - 260px);">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr><th style="${thS};min-width:120px;text-align:left;">Line</th>${dayHeaders}</tr></thead>
+            <tbody>${lineRows}</tbody>
+          </table>
+        </div>`;
+
+      grid.querySelectorAll('.lp-line-cell').forEach(inp => {
+        inp.onchange = async function() {
+          const line = this.dataset.line, day = this.dataset.day;
+          const raw  = this.value.trim();
+          const ah   = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
+          if (ah !== null) this.value = ah;
+          if (!_lineData[plant]) _lineData[plant] = {};
+          if (!_lineData[plant][line]) _lineData[plant][line] = {};
+          const old    = _lineData[plant][line][day];
+          const oldAh  = old?.avail_hours ?? null, oldSrc = old?.source ?? 'auto_split';
+          const newSrc = ah !== null ? 'override' : 'auto_split';
+          if (ah === null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: ah, source: 'override' };
+          const td = this.closest('td');
+          if (td) {
+            let pin = td.querySelector('.lp-pin');
+            if (ah !== null) { if (!pin) { pin = document.createElement('span'); pin.className = 'lp-pin'; pin.title = 'Overridden'; pin.textContent = '●'; td.appendChild(pin); } }
+            else if (pin) pin.remove();
+          }
+          UndoStack.push(`Line plan: ${line} / ${day}`, () => {
+            if (!_lineData[plant][line]) _lineData[plant][line] = {};
+            if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
+            const el = grid.querySelector(`.lp-line-cell[data-line="${line.replace(/"/g,'&quot;')}"][data-day="${day}"]`);
+            if (el) el.value = oldAh != null ? oldAh : '';
+            _saveLines(sn, plant, [{ production_line: line, day, avail_hours: oldAh, source: oldSrc }]);
+          });
+          await _saveLines(sn, plant, [{ production_line: line, day, avail_hours: ah, source: newSrc }]);
+        };
+
+        inp.addEventListener('contextmenu', e => {
+          e.preventDefault();
+          const line = inp.dataset.line, day = inp.dataset.day;
+          if (_lineData[plant]?.[line]?.[day]?.source !== 'override') return;
+          const grp = (Store._state.masterData?.lines || []).find(l => l.production_line === line && l.plant === plant)?.pl_group;
+          if (!grp) return;
+          const periodKey = _weeks.find(w => {
+            for (let d = 0; d < 7; d++) { const dd = new Date(w.monday); dd.setDate(w.monday.getDate() + d); if (Util.dayKey(dd) === day) return true; }
+          })?.key;
+          if (!periodKey) return;
+          const groupHours = _aggrData[plant]?.[grp]?.[periodKey]; if (groupHours == null) return;
+          const splits = _disaggregate(plant, grp, periodKey, groupHours);
+          const resetCell = splits.find(c => c.production_line === line && c.day === day); if (!resetCell) return;
+          _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
+          inp.value = resetCell.avail_hours || '';
+          inp.closest('td')?.querySelector('.lp-pin')?.remove();
+          _saveLines(sn, plant, [{ production_line: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
+          Toast.show(`Reset ${line} · ${day} to even-split`, 'success');
+        });
+      });
+    }
+
+    // ── Capacity sub-tab ─────────────────────────────────────────────────────
+    async function _renderCapacity(plant) {
+      const container = document.getElementById('labor-capacity-grid'); if (!container) return;
+      const scopeGroup = _selectedGroup || null;
+      await _fetchLines(plant, scopeGroup);
+      const lines = (Store._state.masterData?.lines || [])
+        .filter(l => l.plant === plant && (!scopeGroup || l.pl_group === scopeGroup))
+        .map(l => l.production_line).sort();
+      if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines for this plant.</div>`; return; }
+
+      const horizonStart = _weeks[0].monday;
+      const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
+      const displayDays  = Math.min(14, _horizonSpan * 7);
+      const days = [];
+      for (let i = 0; i < displayDays; i++) {
+        const d = new Date(horizonStart); d.setDate(horizonStart.getDate() + i);
+        days.push({ date: d, dayKey: Util.dayKey(d) });
+      }
+
+      const isDark = document.body.classList.contains('dark');
+      function lerpRGB(a, b, t) {
+        const p = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+        const ca = p(a), cb = p(b);
+        return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
+      }
+      const idle = isDark ? '#252730' : '#ede8de', low = isDark ? '#7a5a18' : '#c8a95a',
+            mid  = isDark ? '#a8520f' : '#c96a1a', hot = isDark ? '#b32a1f' : '#991b1b';
+      function heatBg(ratio) {
+        if (ratio <= 0)   return idle;
+        if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
+        if (ratio <= 1.0) return lerpRGB(low, mid, (ratio - 0.5) / 0.5);
+        return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
+      }
+      function heatText(ratio) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#3d3628' : '#fff'); }
+
+      const cols = `100px repeat(${days.length}, 1fr)`;
+      let html = `<p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + scopeGroup : ''}</p>
+        <div class="lp-hm-wrap"><div class="lp-hm-grid" style="grid-template-columns:${cols}">`;
+      html += `<div class="lp-hm-corner"></div>`;
+      days.forEach(d => {
+        const dow = d.date.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+        html += `<div class="lp-hm-head"><span class="lp-hm-dow">${dow}</span><span class="lp-hm-date">${d.date.getMonth()+1}/${d.date.getDate()}</span></div>`;
+      });
+      lines.forEach((line, li) => {
+        const dot = Config.COLORS[li % Config.COLORS.length];
+        html += `<div class="lp-hm-label"><span class="lp-hm-dot" style="background:${dot}"></span>${line}</div>`;
+        days.forEach(d => {
+          const req    = utilMatrix[line]?.[d.dayKey]?.scheduled || 0;
+          const ld     = _lineData[plant]?.[line]?.[d.dayKey];
+          const calCap = utilMatrix[line]?.[d.dayKey]?.effectiveCapacity || 0;
+          const avail  = ld?.avail_hours != null ? ld.avail_hours : calCap;
+          const ratio  = avail > 0 ? req / avail : (req > 0 ? 2 : 0);
+          const bg     = heatBg(ratio), tc = heatText(ratio);
+          const lbl    = avail > 0 ? `${req.toFixed(0)}/${avail.toFixed(0)}` : '—';
+          html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${line} · ${d.dayKey} | Req: ${req.toFixed(1)}h | Avail: ${avail.toFixed(1)}h | ${Math.round(ratio*100)}%">${lbl}</div>`;
+        });
+      });
+      html += `</div></div><div class="lp-hm-legend"><span>idle</span><div class="lp-hm-grad"></div><span>overload</span></div>`;
+      container.innerHTML = html;
+    }
+
+    // ── Exceptions sub-tab ───────────────────────────────────────────────────
+    async function _renderExceptions(plant) {
+      const container = document.getElementById('labor-exceptions-list'); if (!container) return;
+      await _fetchLines(plant, null);
+      const lines = (Store._state.masterData?.lines || []).filter(l => l.plant === plant).map(l => l.production_line);
+      const horizonStart = _weeks[0].monday;
+      const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
+      const exceptions = [];
+      lines.forEach(line => {
+        const lm = utilMatrix[line]; if (!lm) return;
+        Object.entries(lm).forEach(([dayKey, cell]) => {
+          if (!cell.scheduled && !cell.capacity) return;
+          const ld    = _lineData[plant]?.[line]?.[dayKey];
+          const avail = ld?.avail_hours != null ? ld.avail_hours : (cell.effectiveCapacity || 0);
+          const req   = cell.scheduled || 0, calCap = cell.capacity || 0;
+          if (req > avail + 0.05 && req > 0)
+            exceptions.push({ sev: 'err',  line, day: dayKey, msg: `${req.toFixed(1)}h required, ${avail.toFixed(1)}h available — ${(req - avail).toFixed(1)}h short` });
+          else if (avail > calCap + 0.05 && calCap > 0)
+            exceptions.push({ sev: 'warn', line, day: dayKey, msg: `${avail.toFixed(1)}h planned exceeds ${calCap.toFixed(1)}h calendar capacity` });
+        });
+      });
+      exceptions.sort((a, b) => (a.sev === 'err' ? -1 : 1) - (b.sev === 'err' ? -1 : 1) || a.day.localeCompare(b.day));
+
+      const badge = document.getElementById('labor-exc-badge');
+      if (badge) { badge.textContent = exceptions.length; badge.hidden = exceptions.length === 0; }
+
+      if (!exceptions.length) {
+        container.innerHTML = `<div class="empty-state" style="padding:40px 0;">✓ No exceptions in the current horizon.</div>`; return;
+      }
+      const rows = exceptions.map(ex => `
+        <div class="lp-exc-row lp-exc-${ex.sev}">
+          <span class="lp-exc-sev">${ex.sev === 'err' ? '▲' : '⚠'}</span>
+          <span class="lp-exc-line">${ex.line}</span>
+          <span class="lp-exc-day">${ex.day}</span>
+          <span class="lp-exc-msg">${ex.msg}</span>
+          <button class="btn btn-sm lp-exc-fix" onclick="NIMBUS.App.gotoLaborSub('line-plan')">Line Plan →</button>
+        </div>`).join('');
+      container.innerHTML = `<div class="lp-exc-summary">${exceptions.length} exception${exceptions.length !== 1 ? 's' : ''}</div><div class="lp-exc-list">${rows}</div>`;
+    }
+
+    // ── Inputs sub-tab ───────────────────────────────────────────────────────
+    function _renderInputs() {
+      const container = document.getElementById('labor-inputs-pane'); if (!container) return;
+      container.innerHTML = `
+        <div class="lp-inputs-section">
+          <h3 style="font-size:14px;font-weight:700;margin:0 0 12px;">Disaggregation</h3>
+          <div class="lp-input-row">
+            <label class="lp-input-label">Default split mode</label>
+            <select class="lp-input-sel"><option selected>Even split (equal hours per open day)</option></select>
+            <span class="lp-input-hint">Aggregate group/week hours divide evenly across each line's open working days. Right-click any Line Plan cell to reset an override to even-split.</span>
+          </div>
+        </div>
+        <div class="lp-inputs-section">
+          <h3 style="font-size:14px;font-weight:700;margin:0 0 12px;">Horizon</h3>
+          <div class="lp-input-row">
+            <label class="lp-input-label">Week span</label>
+            <select class="lp-input-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
+              <option value="4" ${_horizonSpan===4?'selected':''}>4 weeks</option>
+              <option value="8" ${_horizonSpan===8?'selected':''}>8 weeks</option>
+              <option value="12" ${_horizonSpan===12?'selected':''}>12 weeks</option>
+              <option value="16" ${_horizonSpan===16?'selected':''}>16 weeks</option>
+            </select>
+          </div>
+        </div>
+        <div class="lp-inputs-section">
+          <h3 style="font-size:14px;font-weight:700;margin:0 0 4px;">Aggregate ↔ Line reconciliation</h3>
+          <p style="font-size:12px;color:var(--fg-mute);margin:0;">When aggregate hours are saved, the system auto-splits to lines via even split across open working days. Overridden line·day cells are pinned (●) and do not re-split until manually reset.</p>
+        </div>`;
+    }
+
+    // ── Toolbar update ───────────────────────────────────────────────────────
+    function _renderToolbar(plant) {
+      const groupSel = document.getElementById('labor-group-select');
+      if (groupSel) {
+        const prev = groupSel.value;
+        groupSel.innerHTML = `<option value="">All</option>` +
+          _groups.map(g => `<option value="${g.replace(/"/g,'&quot;')}"${g===prev?' selected':''}>${g}</option>`).join('');
+        if (!_selectedGroup && _groups.includes(prev)) _selectedGroup = prev;
+      }
+      const label = document.getElementById('labor-horizon-label');
+      if (label && _weeks.length) label.textContent = `${_weeks[0].label} — ${_weeks[_weeks.length-1].label}`;
+      const badge = document.getElementById('labor-plant-badge');
+      if (badge) badge.textContent = plant || '—';
+    }
+
+    // ── Main render ──────────────────────────────────────────────────────────
+    async function render() {
+      _weeks = _computeWeeks();
+      const plant = Store.selectedPlant;
+      if (!plant) {
+        ['labor-grid','labor-line-grid','labor-capacity-grid','labor-exceptions-list','labor-inputs-pane'].forEach(id => {
+          const el = document.getElementById(id); if (el) el.innerHTML = '';
+        });
+        const grid = document.getElementById('labor-grid');
+        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a plant in the top bar to view labor planning.</div>`;
+        document.getElementById('labor-plant-badge')?.setAttribute && (document.getElementById('labor-plant-badge').textContent = '—');
+        document.getElementById('labor-kpi-strip') && (document.getElementById('labor-kpi-strip').innerHTML = '');
+        return;
+      }
+      const mdLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant);
+      _groups = [...new Set(mdLines.map(r => r.pl_group).filter(Boolean))].sort();
+      if (!_groups.length) {
+        const grid = document.getElementById('labor-grid');
+        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production line groups defined for this plant. Assign groups in <strong>Master Data → Production Lines</strong>.</div>`;
+        return;
+      }
+      _renderToolbar(plant);
+      _renderKPIs(plant);
+      const sub = App._laborSub || 'aggregate';
+      if (sub === 'aggregate')   await _renderAggregate(plant);
+      else if (sub === 'line-plan')  await _renderLinePlan(plant);
+      else if (sub === 'capacity')   await _renderCapacity(plant);
+      else if (sub === 'exceptions') await _renderExceptions(plant);
+      else if (sub === 'inputs')     _renderInputs();
+    }
+
+    function _onLPKeyDown(e) {
+      if (!_selRange || App._currentTab !== 'labor') return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); _clearSelection(); return; }
+      if (e.key === 'Delete' || (e.key === 'Backspace' && !e.target?.classList.contains('lp-cell'))) {
+        e.preventDefault(); e.stopImmediatePropagation(); _deleteSelected(); return;
+      }
+      if (mod && e.key.toLowerCase() === 'c') { e.preventDefault(); e.stopImmediatePropagation(); _copySelected(); return; }
     }
 
     function init() {
@@ -2421,13 +2770,29 @@ const NIMBUS = (function () {
       document.addEventListener('mouseup', () => { _dragging = false; });
       Store.subscribe(evt => {
         if ((evt.type === 'plant:selected' || evt.type === 'master-data-changed') && App._currentTab === 'labor') {
-          if (evt.type === 'plant:selected') delete _data[evt.plant];
+          if (evt.type === 'plant:selected') { delete _aggrData[evt.plant]; delete _lineData[evt.plant]; }
           render();
         }
       });
     }
 
-    return { init, render };
+    return {
+      init, render,
+      onGroupChange(group) {
+        _selectedGroup = group;
+        const plant = Store.selectedPlant; if (!plant) return;
+        const sub = App._laborSub;
+        if (sub === 'line-plan')  _renderLinePlan(plant);
+        else if (sub === 'capacity') _renderCapacity(plant);
+      },
+      prevHorizon() { _horizonOffset--; render(); },
+      nextHorizon() { _horizonOffset++; render(); },
+      setSpan(n) {
+        _horizonSpan = n;
+        const sel = document.getElementById('labor-span-sel'); if (sel) sel.value = n;
+        render();
+      },
+    };
   })();
 
   /* =============================================================================
@@ -12542,6 +12907,7 @@ saveAll() {
     _currentTab: 'home',
     _currentMasterSub: 'lines',
     _ganttSub: 'timeline',
+    _laborSub: 'aggregate',
     _pausables: new Set(),
 
     // Register any object with pause()/resume() to be auto-paused on tab hide.
@@ -12699,7 +13065,7 @@ saveAll() {
       } else if (tab === 'admin') {
         setTimeout(() => AdminCockpit.render(), 30);
       } else if (tab === 'labor') {
-        setTimeout(() => LaborPlanning.render(), 30);
+        setTimeout(() => App.gotoLaborSub(App._laborSub || 'aggregate'), 30);
       }
     },
 
@@ -12727,6 +13093,23 @@ saveAll() {
           TimelineNav.render();
           if (DependencyOverlay._enabled) DependencyOverlay.render();
         }, 30);
+      }
+    },
+
+    gotoLaborSub(sub) {
+      const valid = ['aggregate','line-plan','capacity','exceptions','inputs'];
+      if (!valid.includes(sub)) return;
+      App._laborSub = sub;
+      document.querySelectorAll('.labor-toolbar .seg-btn[data-labor-sub]').forEach(b => {
+        b.classList.toggle('active', b.dataset.laborSub === sub);
+      });
+      valid.forEach(s => {
+        const el = document.getElementById(`labor-sub-${s}`);
+        if (el) el.style.display = s === sub ? 'flex' : 'none';
+      });
+      if (App._currentTab === 'labor') {
+        const plant = Store.selectedPlant;
+        if (plant) setTimeout(() => LaborPlanning.render(), 30);
       }
     },
 
