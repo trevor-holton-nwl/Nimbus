@@ -2454,16 +2454,16 @@ const NIMBUS = (function () {
     // ── Line Plan sub-tab ────────────────────────────────────────────────────
     async function _renderLinePlan(plant) {
       const grid = document.getElementById('labor-line-grid'); if (!grid) return;
-      const group = (_selectedGroups.size === 1 ? [..._selectedGroups][0] : null) || _groups[0] || '';
-      if (!group) {
-        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a group from the toolbar to view the line plan.</div>`; return;
+      // Show all groups unless user has filtered to specific ones
+      const visibleGroups = _displayGroups.length ? _displayGroups : _groups;
+      const fetchGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
+      const allLinesMeta = (Store._state.masterData?.lines || [])
+        .filter(l => l.plant === plant && visibleGroups.includes(l.pl_group))
+        .sort((a, b) => visibleGroups.indexOf(a.pl_group) - visibleGroups.indexOf(b.pl_group) || a.production_line.localeCompare(b.production_line));
+      if (!allLinesMeta.length) {
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines for this plant.</div>`; return;
       }
-      const lines = (Store._state.masterData?.lines || [])
-        .filter(l => l.plant === plant && l.pl_group === group).map(l => l.production_line).sort();
-      if (!lines.length) {
-        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines in group <strong>${group}</strong>.</div>`; return;
-      }
-      await _fetchLines(plant, group);
+      await _fetchLines(plant, fetchGroup);
 
       // Build day columns
       const days = [];
@@ -2493,7 +2493,7 @@ const NIMBUS = (function () {
         return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
       }
 
-      const thS = 'padding:5px 6px;font-size:11px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;text-align:center;position:sticky;top:0;z-index:1;min-width:52px;';
+      const thS = 'padding:5px 6px;font-size:11px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;text-align:center;position:sticky;top:0;z-index:3;min-width:52px;';
       const tdL = 'padding:6px 8px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap;min-width:120px;font-size:12px;';
       const tdC = 'padding:4px 5px;border-bottom:1px solid var(--line);text-align:center;';
       const weekStarts = new Set(_weeks.map(w => Util.dayKey(w.monday)));
@@ -2503,7 +2503,16 @@ const NIMBUS = (function () {
         return `<th style="${thS}${wb}">${d.date.getMonth()+1}/${d.date.getDate()}</th>`;
       }).join('');
 
-      const lineRows = lines.map(line => {
+      const showGroupHeaders = visibleGroups.length > 1;
+      const thGrp = `padding:5px 8px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--bg-subtle);color:var(--accent);position:sticky;z-index:2;`;
+      let lastGroup = null;
+      const lineRows = allLinesMeta.map(lm => {
+        const line = lm.production_line;
+        let groupRow = '';
+        if (showGroupHeaders && lm.pl_group !== lastGroup) {
+          lastGroup = lm.pl_group;
+          groupRow = `<tr><td class="lp-group-hdr" style="${thGrp}" colspan="${days.length + 1}">${lm.pl_group}</td></tr>`;
+        }
         const cells = days.map(d => {
           const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
           const ld   = _lineData[plant]?.[line]?.[d.dayKey];
@@ -2519,17 +2528,24 @@ const NIMBUS = (function () {
               style="width:46px;text-align:center;padding:2px 4px;font-size:11px;font-family:'JetBrains Mono',monospace;border:none;background:transparent;color:var(--fg);"
               value="${avail > 0 ? avail : ''}">${isOvr ? '<span class="lp-pin" title="Overridden">●</span>' : ''}</td>`;
         }).join('');
-        return `<tr><td style="${tdL}">${line}</td>${cells}</tr>`;
+        return groupRow + `<tr><td style="${tdL}">${line}</td>${cells}</tr>`;
       }).join('');
 
+      const groupLabel = _selectedGroups.size === 0
+        ? `All groups (${visibleGroups.length})`
+        : visibleGroups.length === 1 ? `<strong>${visibleGroups[0]}</strong>` : `<strong>${visibleGroups.length} groups</strong>`;
       grid.innerHTML = `
-        <div style="margin-bottom:8px;font-size:12px;color:var(--fg-mute);">Group: <strong>${group}</strong> · ${lines.length} lines · Hover for detail · ● = overridden (right-click to reset)</div>
+        <div style="margin-bottom:8px;font-size:12px;color:var(--fg-mute);">${groupLabel} · ${allLinesMeta.length} lines · Hover for detail · ● = overridden (right-click to reset)</div>
         <div style="overflow:auto;max-height:calc(100vh - 260px);">
-          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <table style="width:100%;border-collapse:separate;border-spacing:0;font-size:12px;">
             <thead><tr><th style="${thS};min-width:120px;text-align:left;">Line</th>${dayHeaders}</tr></thead>
             <tbody>${lineRows}</tbody>
           </table>
         </div>`;
+
+      // Sticky group headers: offset by actual thead height so they dock below column headers
+      const theadH = grid.querySelector('thead tr')?.offsetHeight || 27;
+      grid.querySelectorAll('.lp-group-hdr').forEach(td => { td.style.top = theadH + 'px'; });
 
       grid.querySelectorAll('.lp-line-cell').forEach(inp => {
         inp.onchange = async function() {
@@ -6159,7 +6175,7 @@ const NIMBUS = (function () {
       const newStart = Util.parseDate(document.getElementById('ovr-start').value);
       const newLine  = document.getElementById('ovr-line').value;
       const alsoFix  = document.getElementById('ovr-fix').checked;
-      if (!newStart) { Toast.show(t('toast.invalid_date'), 'error'); return; }
+      if (!newStart) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
 
       const dur = Util.runHours(t) * 3600000;
       const snapped = Util.snap(newStart);
@@ -6177,7 +6193,7 @@ const NIMBUS = (function () {
       // but we DO recompute alerts so conflicts become visible.
       Alerts.scheduleRecompute();
       Modal.close('modal-override');
-      Toast.show(alsoFix ? t('toast.order_overridden_fixed') : t('toast.order_overridden'), 'success');
+      Toast.show(alsoFix ? window.t('toast.order_overridden_fixed') : window.t('toast.order_overridden'), 'success');
     },
 
     exportCsv() {
@@ -6361,8 +6377,11 @@ const NIMBUS = (function () {
 
     show(task) {
       // Refuse to inspect tasks that don't belong to the current plant scope.
-      if (Store.selectedPlant
-          && Store.getPlantForLine(task.PRODUCTION_LINE) !== Store.selectedPlant) {
+      // Only block when the task's plant is positively known and wrong — if
+      // getPlantForLine returns null (line unmapped), allow inspection rather
+      // than silently failing.
+      const taskPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || null;
+      if (Store.selectedPlant && taskPlant && taskPlant !== Store.selectedPlant) {
         Toast.show(t('toast.order_belongs_other_plant'), 'warn');
         return;
       }
@@ -6486,7 +6505,7 @@ const NIMBUS = (function () {
         ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
         : `${days >= 0 ? '+' : ''}${(deltaMs / 3600000).toFixed(1)}h`;
       const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
-      return `<span class="insp-var ${cls}" title="${t('ui.insp_variance_shifted')}">${txt}</span>`;
+      return `<span class="insp-var ${cls}" title="${window.t('ui.insp_variance_shifted')}">${txt}</span>`;
     },
 
     _onFieldChange(field, value) {
@@ -6497,7 +6516,7 @@ const NIMBUS = (function () {
       const changes = {};
       if (field === 'start_date') {
         const d = Util.parseDate(value);
-        if (!d) { Toast.show(t('toast.invalid_date'), 'error'); return; }
+        if (!d) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
         changes.start_date = Util.snap(d);
         const dur = Util.runHours(t) * 3600000;
         if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
@@ -8920,7 +8939,8 @@ const NIMBUS = (function () {
             setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, 220);
           }
         } else if (evt.ids.length === 1) {
-          const t = Store.tasks[evt.ids[0]];
+          const id = evt.ids[0];
+          const t = Store.tasks[id] ?? Store.tasksArr.find(task => String(task.id) === id);
           if (t) Inspector.show(t);
         } else {
           Interaction._showMultiInspector();
