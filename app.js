@@ -4075,41 +4075,100 @@ const NIMBUS = (function () {
          the same (line, day) around the change.
      ========================================================================== */
   const Engine = {
-    /** Pick a sort comparator for the given optimisation mode.
-     *  colorMap (optional): COLOR→order_y overrides from a plant-specific wheel. */
-    _comparator(mode, colorMap) {
+    /* ----- Per-plant switchable constraints (phased registry) -------------
+       CONSTRAINT_CATALOG is the single place a constraint type is declared.
+       Today only 'colorWheel' maps to an optimizer sort term; tooling and
+       others will be added here + given a term in _sortTerms when their data
+       exists. Per-plant config (which constraints are enabled, in what order)
+       lives in plants.constraints JSONB, surfaced on
+       Store._state.masterData.plants[*].constraints. */
+    CONSTRAINT_CATALOG: [
+      { key: 'colorWheel', label: 'Color wheel',
+        desc: 'Sequence orders by color-wheel priority to minimize color changeovers.' },
+      // { key: 'tooling', label: 'Tooling', desc: '...' },  // added when the attribute exists
+    ],
+
+    /** Ordered constraint config stored for a plant, or null if never configured. */
+    constraintsFor(plant) {
+      const row = Store._state.masterData?.plants?.find(p => p.plant === plant);
+      const list = row && row.constraints;
+      return Array.isArray(list) ? list : null;
+    },
+
+    /** Is a given constraint enabled for this plant? Unconfigured default:
+     *  colorWheel ON (a no-op when the plant has no wheel — every lookup then
+     *  returns 999999), everything else OFF. So "respect a wheel where one
+     *  exists" emerges without a synchronous wheel probe in the optimizer. */
+    constraintEnabled(plant, key) {
+      const c = Engine.constraintsFor(plant)?.find(x => x.key === key);
+      if (c) return !!c.enabled;
+      return key === 'colorWheel';
+    },
+
+    /** Enabled constraint keys for a plant, in configured order (defaults applied). */
+    activeConstraintKeys(plant) {
+      const list = Engine.constraintsFor(plant);
+      if (Array.isArray(list) && list.length) {
+        return list.filter(c => c.enabled)
+                   .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+                   .map(c => c.key);
+      }
+      return Engine.CONSTRAINT_CATALOG
+        .filter(c => Engine.constraintEnabled(plant, c.key))
+        .map(c => c.key);
+    },
+
+    /** Ordered list of sort terms for a mode — the single source of truth for
+     *  optimizer ordering, shared by _comparator and runAndApply's decorate
+     *  sort (so the two can no longer drift). Each term is
+     *  { get(task)->key, cmp(keyA,keyB)->number }. The colorWheel term is
+     *  included only when that constraint is enabled for the plant, which is
+     *  what makes the wheel switchable per plant. */
+    _sortTerms(mode, opts = {}) {
+      const { plant, colorMap } = opts;
+      const numCmp = (a, b) => a - b;
+      const strCmp = (a, b) => a.localeCompare(b);
+
       if (mode === 'spt') {
-        return (a, b) => Util.runHours(a) - Util.runHours(b);
+        return [{ get: t => Util.runHours(t), cmp: numCmp }];
       }
       if (mode === 'changeover' || mode === 'combined') {
-        // 'changeover' minimizes setups by grouping identical attributes adjacently
-        // (color → form → material); run time only breaks final ties.
-        // 'combined' keeps the color+form changeover grouping but runs the SHORTEST job
-        // first within each group (SPT), trading a little grouping for better flow time.
-        // The two modes now produce genuinely different sequences (previously identical).
-        const sptWithinGroup = (mode === 'combined');
-        return (a, b) => {
-          const oa = colorMap
-            ? (colorMap[Util.norm(a.COLOR)] ?? 999999)
-            : (a.ORDER_Y ?? 999999);
-          const ob = colorMap
-            ? (colorMap[Util.norm(b.COLOR)] ?? 999999)
-            : (b.ORDER_Y ?? 999999);
-          if (oa !== ob) return oa - ob;
-          const fa = Util.norm(a.FORM_SIZE), fb = Util.norm(b.FORM_SIZE);
-          if (fa !== fb) return fa.localeCompare(fb);
-          if (sptWithinGroup) {
-            const ha = Util.runHours(a), hb = Util.runHours(b);
-            if (ha !== hb) return ha - hb;
-            return Util.norm(a.MATERIAL_NUMBER).localeCompare(Util.norm(b.MATERIAL_NUMBER));
+        // 'changeover' groups identical attributes adjacently to minimize setups;
+        // 'combined' keeps that grouping but runs the shortest job first within
+        // each group (SPT). Domain constraints (color now, tooling later) come
+        // FIRST, in the plant's configured order; the intrinsic form / material /
+        // hours heuristic always follows as the tail.
+        const terms = [];
+        for (const key of Engine.activeConstraintKeys(plant)) {
+          if (key === 'colorWheel') {
+            terms.push({
+              get: t => colorMap ? (colorMap[Util.norm(t.COLOR)] ?? 999999) : (t.ORDER_Y ?? 999999),
+              cmp: numCmp,
+            });
           }
-          const ma = Util.norm(a.MATERIAL_NUMBER), mb = Util.norm(b.MATERIAL_NUMBER);
-          if (ma !== mb) return ma.localeCompare(mb);
-          return Util.runHours(a) - Util.runHours(b);
-        };
+          // future: if (key === 'tooling') terms.push({ get: ..., cmp: ... });
+        }
+        terms.push({ get: t => Util.norm(t.FORM_SIZE), cmp: strCmp });
+        if (mode === 'combined') {
+          terms.push({ get: t => Util.runHours(t), cmp: numCmp });
+          terms.push({ get: t => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
+        } else {
+          terms.push({ get: t => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
+          terms.push({ get: t => Util.runHours(t), cmp: numCmp });
+        }
+        return terms;
       }
-      // Default: preserve input order
-      return () => 0;
+      return []; // default: preserve input order
+    },
+
+    /** Comparator built from _sortTerms — kept for callers that want a plain
+     *  comparator. runAndApply uses the decorate variant for the Schwartzian win. */
+    _comparator(mode, opts = {}) {
+      const terms = Engine._sortTerms(mode, opts);
+      return (a, b) => {
+        for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
+        return 0;
+      };
     },
 
     /** Main optimiser. Groups by line, optionally respects fixed + calendar.
@@ -4126,7 +4185,7 @@ const NIMBUS = (function () {
       const colorMap        = opts.colorMap        ?? null;
       const respectFixed    = opts.respectFixed    ?? (document.getElementById('chk-respect-fixed')?.checked    ?? true);
       const respectCalendar = opts.respectCalendar ?? (document.getElementById('chk-respect-calendar')?.checked ?? true);
-      const comparator = Engine._comparator(mode, colorMap);
+      const sortTerms = Engine._sortTerms(mode, { plant, colorMap });
 
       const horizonStart = opts.startDate
         ? new Date(opts.startDate)
@@ -4169,38 +4228,21 @@ const NIMBUS = (function () {
           !(respectFixed && Store.isFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
         );
 
-        // Schwartzian transform for changeover/combined: pre-compute normalized
-        // sort keys once per task instead of recomputing on every comparison.
-        // Sort order mirrors `_comparator` exactly (V8 Array.sort is stable since ES2019):
-        //   changeover → color → form → material → hours (pure setup grouping)
-        //   combined   → color → form → hours → material (SPT within each group)
-        if (mode === 'changeover' || mode === 'combined') {
-          const decorated = freeTasks.map(t => ({
-            t,
-            o: colorMap ? (colorMap[Util.norm(t.COLOR)] ?? 999999) : (t.ORDER_Y ?? 999999),
-            f: Util.norm(t.FORM_SIZE),
-            m: Util.norm(t.MATERIAL_NUMBER),
-            h: Util.runHours(t),
-          }));
-          if (mode === 'combined') {
-            decorated.sort((a, b) =>
-              (a.o - b.o) ||
-              a.f.localeCompare(b.f) ||
-              (a.h - b.h) ||
-              a.m.localeCompare(b.m)
-            );
-          } else {
-            decorated.sort((a, b) =>
-              (a.o - b.o) ||
-              a.f.localeCompare(b.f) ||
-              a.m.localeCompare(b.m) ||
-              (a.h - b.h)
-            );
+        // Schwartzian transform: decorate each task once with its ordered sort
+        // keys (from Engine._sortTerms — the single source of truth, so this can
+        // no longer drift from _comparator), then sort by comparing keys
+        // positionally. Works for every mode; the color key is present only when
+        // the plant's colorWheel constraint is enabled, which is what makes the
+        // wheel switchable per plant.
+        const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
+        decorated.sort((a, b) => {
+          for (let i = 0; i < sortTerms.length; i++) {
+            const c = sortTerms[i].cmp(a.k[i], b.k[i]);
+            if (c) return c;
           }
-          freeTasks = decorated.map(d => d.t);
-        } else {
-          freeTasks.sort(comparator);
-        }
+          return 0;
+        });
+        freeTasks = decorated.map(d => d.t);
         fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
 
         // Cursor floor is max(horizonStart, now): extending "From" backwards
@@ -4752,8 +4794,11 @@ const NIMBUS = (function () {
         }
       }
 
-      // Confirm if no wheel and using changeover/combined mode
-      if (!wheelUsed && (_mode === 'changeover' || _mode === 'combined')) {
+      // Confirm only when the plant WANTS color (colorWheel constraint enabled)
+      // but no wheel is loaded. If the plant has switched color off, optimizing
+      // without it is intentional — don't nag.
+      const colorWheelOn = Engine.constraintEnabled(plant, 'colorWheel');
+      if (colorWheelOn && !wheelUsed && (_mode === 'changeover' || _mode === 'combined')) {
         const ok = await Modal.confirm({ title: t('modal.no_color_wheel_confirm_msg', { plant }) });
         if (!ok) { OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
       }
@@ -10624,6 +10669,17 @@ saveAll() {
       document.getElementById('admin-health-refresh')?.addEventListener('click', AdminCockpit._renderHealth);
       document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
       document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
+      document.getElementById('admin-db-deep')?.addEventListener('click', async e => {
+        const btn = e.target.closest('[data-maint-action]');
+        if (!btn) return;
+        const action = btn.dataset.maintAction;
+        const table  = btn.dataset.maintTable || null;
+        if (action === 'vacuum-analyze' && !table) {
+          const ok = await Modal.confirm({ title: t('ui.maint_vacuum_all_confirm'), confirmLabel: t('btn.run') });
+          if (!ok) return;
+        }
+        AdminCockpit._runMaintenance(action, table, btn);
+      });
       document.getElementById('admin-backend-log-refresh')?.addEventListener('click', AdminCockpit._renderBackendLog);
       document.getElementById('admin-backend-log-clear')?.addEventListener('click', AdminCockpit._clearBackendLog);
       document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', e => {
@@ -11369,6 +11425,27 @@ saveAll() {
         });
     },
 
+    async _runMaintenance(action, table, triggerBtn) {
+      const label = triggerBtn ? triggerBtn.textContent : action;
+      if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = t('ui.maint_running'); }
+      const body = table ? { table } : {};
+      try {
+        const r = await fetch(`${Config.API_BASE}/maintenance/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(res => res.json());
+        if (!r.ok) throw new Error(r.error || 'maintenance failed');
+        Toast.show(t('ui.maint_done', { label }), 'success');
+        ErrorLog.info('admin', `Maintenance: ${action} ${table || '(all)'} ok`);
+        AdminCockpit._renderDbDeep();
+      } catch (e) {
+        Toast.show(t('ui.maint_failed', { label, msg: e.message }), 'error');
+        ErrorLog.error('admin', `Maintenance: ${action} ${table || '(all)'} failed: ${e.message}`);
+        if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = label; }
+      }
+    },
+
     _getFilteredEntries() {
       const { level, scope, search } = AdminCockpit._logFilter;
       return ErrorLog.entries().filter(e => {
@@ -11491,6 +11568,15 @@ saveAll() {
               hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), body => {
             if (hasTableErr) { body.textContent = tables[0].error; return; }
             if (!tables.length) { body.textContent = t('empty.no_user_tables'); return; }
+            const strip = document.createElement('div');
+            strip.className = 'db-maint-strip';
+            const vacAllBtn = document.createElement('button');
+            vacAllBtn.className = 'db-maint-global-btn';
+            vacAllBtn.dataset.maintAction = 'vacuum-analyze';
+            vacAllBtn.dataset.maintTable = '';
+            vacAllBtn.textContent = t('ui.maint_vacuum_all');
+            strip.appendChild(vacAllBtn);
+            body.appendChild(strip);
             body.appendChild(AdminCockpit._dbTableCards(tables));
           }, false, t('ui.diag_desc_table_health'));
 
@@ -11765,6 +11851,25 @@ saveAll() {
           vacAt: vacAt ? AdminCockpit._relTime(new Date(vacAt)) : t('ui.diag_vacuum_never'),
         });
         card.appendChild(row2);
+
+        const actions = document.createElement('div');
+        actions.className = 'db-maint-actions';
+        const urgentVA = tbl.needs_vacuum || tbl.needs_analyze;
+        const urgentA  = tbl.needs_analyze;
+        const vaBtn = document.createElement('button');
+        vaBtn.className = `db-maint-btn${urgentVA ? ' db-maint-btn--urgent' : ''}`;
+        vaBtn.dataset.maintAction = 'vacuum-analyze';
+        vaBtn.dataset.maintTable = tbl.table;
+        vaBtn.textContent = 'VACUUM ANALYZE';
+        const aBtn = document.createElement('button');
+        aBtn.className = `db-maint-btn${urgentA ? ' db-maint-btn--urgent' : ''}`;
+        aBtn.dataset.maintAction = 'analyze';
+        aBtn.dataset.maintTable = tbl.table;
+        aBtn.textContent = 'ANALYZE';
+        actions.appendChild(vaBtn);
+        actions.appendChild(aBtn);
+        card.appendChild(actions);
+
         wrap.appendChild(card);
       }
       return wrap;
@@ -13282,6 +13387,14 @@ saveAll() {
               </div>
             </div>
 
+            <div class="panel">
+              <header class="panel-head"><h3>${t('ui.constraints_title')}</h3></header>
+              <div class="panel-body">
+                <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">${t('ui.constraints_sub')}</p>
+                <div id="sys-constraints-list" class="constraint-list"></div>
+              </div>
+            </div>
+
           </div>
         </div></div>`;
 
@@ -13333,6 +13446,95 @@ saveAll() {
 
       alertDaysInp.addEventListener('change', saveAlert);
       confDaysInp.addEventListener('change', saveConf);
+
+      // --- Scheduling constraints (switchable, per-plant) ---------------------
+      // Ordered list [{key, enabled, order}] backed by plants.constraints JSONB.
+      // Only colorWheel is wired into the optimizer today; the catalog/order/UI
+      // are the first step toward a general per-plant constraint registry.
+      const consListEl = pane.querySelector('#sys-constraints-list');
+      let consState = [];
+      let _wheelPresent = null;  // null = unknown until the wheel probe returns
+
+      function renderConstraints() {
+        if (!consListEl) return;
+        consListEl.innerHTML = consState.map((c, i) => {
+          const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === c.key) || { label: c.key, desc: '' };
+          const noWheel = (c.key === 'colorWheel' && _wheelPresent === false);
+          return `
+            <div class="constraint-row" data-key="${c.key}">
+              <div class="cons-reorder">
+                <button class="cons-up" ${i === 0 ? 'disabled' : ''} title="${t('ui.move_up')}">▲</button>
+                <button class="cons-dn" ${i === consState.length - 1 ? 'disabled' : ''} title="${t('ui.move_down')}">▼</button>
+              </div>
+              <div class="cons-meta">
+                <div class="cons-label">${cat.label}</div>
+                <div class="cons-desc">${cat.desc}${noWheel ? ` <span class="cons-warn">${t('ui.constraint_no_wheel')}</span>` : ''}</div>
+              </div>
+              <label class="cons-toggle">
+                <input type="checkbox" ${c.enabled ? 'checked' : ''}>
+                <span>${c.enabled ? t('ui.constraint_on') : t('ui.constraint_off')}</span>
+              </label>
+            </div>`;
+        }).join('');
+
+        consListEl.querySelectorAll('.constraint-row').forEach(rowEl => {
+          const key = rowEl.dataset.key;
+          rowEl.querySelector('.cons-toggle input').addEventListener('change', e => {
+            const c = consState.find(x => x.key === key);
+            if (c) c.enabled = e.target.checked;
+            renderConstraints();
+            saveConstraints();
+          });
+          rowEl.querySelector('.cons-up').addEventListener('click', () => moveConstraint(key, -1));
+          rowEl.querySelector('.cons-dn').addEventListener('click', () => moveConstraint(key, +1));
+        });
+      }
+
+      function moveConstraint(key, dir) {
+        const i = consState.findIndex(x => x.key === key);
+        const j = i + dir;
+        if (i < 0 || j < 0 || j >= consState.length) return;
+        [consState[i], consState[j]] = [consState[j], consState[i]];
+        renderConstraints();
+        saveConstraints();
+      }
+
+      async function saveConstraints() {
+        if (!plantRow) { Toast.show(t('toast.no_plant_selected'), 'warn'); return; }
+        consState.forEach((c, idx) => { c.order = idx + 1; });
+        const payload = consState.map(c => ({ key: c.key, enabled: c.enabled, order: c.order }));
+        plantRow.constraints = payload;  // update Store so the optimizer sees it immediately
+        try {
+          await fetch(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
+            method:  'POST',
+            headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+            body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
+          });
+        } catch (e) {
+          Toast.show(t('toast.constraints_save_failed', { msg: e.message }), 'error');
+        }
+      }
+
+      (function initConstraints() {
+        const stored = Array.isArray(plantRow?.constraints) ? plantRow.constraints : null;
+        consState = Engine.CONSTRAINT_CATALOG.map((cat, i) => {
+          const s = stored?.find(x => x.key === cat.key);
+          return {
+            key:     cat.key,
+            enabled: s ? !!s.enabled : Engine.constraintEnabled(plantName, cat.key),
+            order:   (s && Number.isFinite(s.order)) ? s.order : i + 1,
+          };
+        }).sort((a, b) => a.order - b.order);
+        renderConstraints();
+        // Probe whether a wheel is actually uploaded (hint only — the toggle works
+        // regardless, since enabling color with no wheel is a harmless no-op).
+        if (plantName) {
+          fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(4000) })
+            .then(r => r.ok ? r.json() : null)
+            .then(b => { _wheelPresent = !!(b && b.entries && b.entries.length); renderConstraints(); })
+            .catch(() => {});
+        }
+      })();
     },
 
     toggleSide(which) {

@@ -110,6 +110,20 @@ def list_rows(table: str) -> dict:
         )
         rows = [dict(zip(col_names, r)) for r in cur.fetchall()]
 
+        # Plants carry a JSONB `constraints` column (per-plant switchable
+        # constraint config). It is intentionally NOT registered in
+        # column_metadata, so it never appears as an editable grid column — but
+        # we attach it to each row dict so the frontend (Settings pane +
+        # optimizer) can read it alongside the visible columns.
+        if table == 'plants':
+            try:
+                cur.execute("SELECT subnetwork, plant, constraints FROM plants")
+                cmap = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+                for row in rows:
+                    row['constraints'] = cmap.get((row.get('subnetwork'), row.get('plant')))
+            except Exception:
+                pass  # column not migrated yet — leave it absent
+
     return {"columns": columns, "rows": rows}
 
 
@@ -379,6 +393,60 @@ def rename_label(table: str, column_name: str, new_label: str, user_email: str |
         conn.commit()
 
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Per-plant switchable constraints (colorWheel now; tooling/others later)
+# ---------------------------------------------------------------------------
+def ensure_plant_constraints_column() -> None:
+    """Idempotent: add plants.constraints JSONB — per-plant ordered constraint
+    config [{key, enabled, order}, ...]. Deliberately kept out of
+    column_metadata so it never shows as an editable Master Data grid column."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS constraints JSONB")
+        conn.commit()
+
+
+def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
+                          user_email: str | None = None) -> dict:
+    """Persist a plant's ordered constraint config. Each entry is normalized to
+    {key:str, enabled:bool, order:int}. The plant row must already exist."""
+    if not plant:
+        raise ValueError("plant is required")
+    if not isinstance(constraints, list):
+        raise ValueError("constraints must be a list")
+
+    clean: list[dict] = []
+    for c in constraints:
+        if not isinstance(c, dict) or "key" not in c:
+            raise ValueError("each constraint requires a 'key'")
+        clean.append({
+            "key":     str(c["key"]),
+            "enabled": bool(c.get("enabled", False)),
+            "order":   int(c.get("order", 0)),
+        })
+
+    params: list = [Jsonb(clean), plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET constraints = %s, updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_constraints', %s, %s)",
+            (Jsonb({"plant": plant, "constraints": clean}), user_email),
+        )
+        conn.commit()
+
+    return {"status": "ok", "plant": plant, "constraints": clean}
 
 
 def list_audit(limit: int = 100) -> list[dict]:

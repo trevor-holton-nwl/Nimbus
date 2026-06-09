@@ -7,13 +7,9 @@
      TimeMachine     — IndexedDB-backed history scrubber
      Confidence      — live 0-100 schedule health score + sparkline
      (Alert cells are now native vis-timeline background items — see app.js)
-     Briefing        — session-diff briefing on app load
      RipplePreview   — Alt-hover downstream-shift preview
      Diff            — snapshot diff viewer
      Patterns        — sequence-pair learning from drags
-     Forecast        — 4-week capacity outlook strip
-     Voice           — Web Speech command driver
-     Haptic          — Gamepad API rumble alerts
    ============================================================================= */
 (function () {
   'use strict';
@@ -305,14 +301,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   border:1px solid var(--line); border-radius:3px; padding:1px 5px; color:var(--fg-mute); white-space:nowrap; flex-shrink:0; }
 .ni-diff-line-summary { margin-top:10px; padding:8px 10px; background:var(--bg-subtle);
   border-radius:var(--r-md); font-size:11.5px; color:var(--fg-mute); line-height:1.7; }
-
-/* ── Voice indicator ──────────────────────────────────── */
-#ni-voice-ind { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
-  padding:8px 18px; background:var(--primary); color:var(--primary-fg);
-  border-radius:20px; font-size:12px; font-weight:600; display:none; z-index:9999;
-  align-items:center; gap:7px; box-shadow:var(--shadow-md); }
-#ni-voice-ind.on { display:flex; }
-
 
 
 /* ── Generic breakdown dialog ────────────────────────── */
@@ -2062,103 +2050,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   };
 
 
-  /* ==========================================================================
-     VOICE — Web Speech API command driver
-     ========================================================================== */
-  const Voice = {
-    _rec:       null,
-    _listening: false,
-    _ind:       null,
-
-    init() {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) return;
-      Voice._rec = new SR();
-      Voice._rec.lang = 'en-US';
-      Voice._rec.interimResults = false;
-      Voice._rec.onresult = e => Voice._handle(e.results[0][0].transcript);
-      Voice._rec.onerror  = () => Voice._setListening(false);
-      Voice._rec.onend    = () => Voice._setListening(false);
-
-      document.addEventListener('keydown', e => {
-        if (e.code === 'Space' && e.target === document.body && !Voice._listening) {
-          e.preventDefault();
-          Voice.start();
-        }
-      });
-      Voice._injectIndicator();
-    },
-
-    _injectIndicator() {
-      const ind = document.createElement('div');
-      ind.id = 'ni-voice-ind';
-      ind.innerHTML = t('ui.listening');
-      document.body.appendChild(ind);
-      Voice._ind = ind;
-    },
-
-    _setListening(on) {
-      Voice._listening = on;
-      if (Voice._ind) Voice._ind.classList.toggle('on', on);
-    },
-
-    start() {
-      if (Voice._listening || !Voice._rec) return;
-      try { Voice._rec.start(); Voice._setListening(true); } catch {}
-    },
-
-    _handle(text) {
-      const t = text.toLowerCase().trim();
-      Toast.show(t('toast.voice_heard', { text }), 'info', 2000);
-      if (/optim/.test(t))                          { NIMBUS.OptimizeDialog?.open?.(); return; }
-      if (/zoom.*(fit|all)|fit.*(all|zoom)/.test(t)){ NIMBUS.Timeline?.zoomToFit?.(); return; }
-      if (/now|today/.test(t))                      { NIMBUS.Timeline?.gotoNow?.(); return; }
-      if (/what.if|sandbox/.test(t))                 { NIMBUS.Sandbox?.enter?.(); return; }
-      if (/confidence/.test(t))                     { Confidence.showBreakdown(); return; }
-      if (/time machine|history/.test(t))           { TimeMachine.openUI(); return; }
-      if (/diff|compare/.test(t))                   { Diff.showUI(); return; }
-      Toast.show(t('toast.voice_not_recognized'), 'warn', 3000);
-    }
-  };
-
-  /* ==========================================================================
-     HAPTIC — Gamepad API rumble on critical alerts
-     ========================================================================== */
-  const Haptic = {
-    _enabled: false,
-
-    init() {
-      window.addEventListener('gamepadconnected', e => {
-        Haptic._enabled = true;
-        Toast.show(t('toast.gamepad_connected', { id: e.gamepad.id.substring(0,30) }), 'info', 3500);
-      });
-      window.addEventListener('gamepaddisconnected', () => { Haptic._enabled = false; });
-      Store.subscribe(evt => {
-        if (!Haptic._enabled) return;
-        if (['tasks:bulk','tasks:bulkUpdate','task:update'].includes(evt.type)) {
-          const errs = (Store.alerts||[]).filter(a => a.sev === 'err').length;
-          if (errs >= 3)      Haptic._rumble('strong');
-          else if (errs >= 1) Haptic._rumble('light');
-        }
-      });
-    },
-
-    _rumble(intensity) {
-      const gps = navigator.getGamepads?.() || [];
-      const gp  = [...gps].find(g => g);
-      if (!gp) return;
-      const actuator = gp.vibrationActuator || gp.hapticActuators?.[0];
-      if (!actuator) return;
-      const ms = intensity === 'strong' ? 280 : 90;
-      const mag = intensity === 'strong' ? 0.75 : 0.35;
-      try {
-        if (typeof actuator.playEffect === 'function')
-          actuator.playEffect('dual-rumble', { startDelay:0, duration:ms, weakMagnitude:mag/2, strongMagnitude:mag });
-        else if (typeof actuator.pulse === 'function')
-          actuator.pulse(mag, ms);
-      } catch {}
-    }
-  };
 
   /* ==========================================================================
      EXPOSE + BOOT
@@ -2218,8 +2109,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     Diff,
     LangSwitcher,
     Patterns,
-    Voice,
-    Haptic,
     DarkMode
   });
 
@@ -2231,8 +2120,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       TimeMachine.init();
       Confidence.init();
       Patterns.init();
-      Haptic.init();
-      Voice.init();
       setTimeout(() => { RipplePreview.init(); }, 220);
     }).catch(e => {
       console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e);
@@ -2241,8 +2128,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       TimeMachine.init(); // monkey-patches UndoStack.push; must run even without IDB
       Confidence.init();
       Patterns.init();
-      Haptic.init();
-      Voice.init();
       setTimeout(() => { RipplePreview.init(); }, 220);
     });
   }

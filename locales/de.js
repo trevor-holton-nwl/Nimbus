@@ -102,6 +102,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.no_valid_rows':               'Keine gültigen Zeilen zum Einfügen',
   'toast.no_plant_selected':           'Kein Werk ausgewählt',
   'toast.horizon_save_failed':         'Horizont speichern fehlgeschlagen: {{msg}}',
+  'toast.constraints_save_failed':     'Speichern der Einschränkung fehlgeschlagen: {{msg}}',
   'toast.voice_heard':                 '🎤 "{{text}}"',
   'toast.voice_not_recognized':        'Sprache: nicht erkannt. Versuchen Sie "optimieren", "zoom anpassen", "vergleichen".',
   'toast.gamepad_connected':           '🎮 Gamepad verbunden — haptische Alarme aktiviert für "{{id}}"',
@@ -303,6 +304,13 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sandbox_on':                     '🔮 Szenario AKTIV',
   'ui.sandbox_off':                    '🔮 Was-wäre-wenn',
   'ui.system_settings_title':          'Systemeinstellungen',
+  'ui.constraints_title':              'Planungseinschränkungen',
+  'ui.constraints_sub':                'Wählen Sie, welche Einschränkungen der Optimierer für dieses Werk berücksichtigt und in welcher Reihenfolge. Deaktivierte Einschränkungen werden ignoriert; Aufträge, die von keiner Einschränkung erfasst werden, werden immer zuletzt eingeplant — sie werden nie entfernt.',
+  'ui.constraint_on':                  'Berücksichtigt',
+  'ui.constraint_off':                 'Ignoriert',
+  'ui.constraint_no_wheel':            'Kein Farbrad für dieses Werk hochgeladen — keine Wirkung, bis eines hinzugefügt wird.',
+  'ui.move_up':                        'Nach oben',
+  'ui.move_down':                      'Nach unten',
   'ui.alert_horizon_title':            'Warnungshorizont',
   'ui.conf_horizon_title':             'Vertrauens-Score-Horizont',
   'ui.show_alerts_within':             'Warnungen für die nächsten anzeigen',
@@ -837,6 +845,15 @@ window.__NIMBUS_LOCALES.de = {
   'ui.diag_table_dead':                'Inaktiv',
   'ui.diag_table_row2':                '{{live}} aktiv · {{dead}} inaktiv ({{deadPct}}%) · vacuum: {{vacAt}}',
   'ui.diag_vacuum_never':              'nie',
+
+  /* ── Tabellenwartungsaktionen ─────────────────────────────────────────────── */
+  'ui.maint_running':                  'Wird ausgeführt…',
+  'ui.maint_done':                     '{{label}} abgeschlossen — Statistiken aktualisiert',
+  'ui.maint_failed':                   '{{label}} fehlgeschlagen: {{msg}}',
+  'ui.maint_vacuum_all':               'VACUUM ANALYZE Alle Tabellen',
+  'ui.maint_vacuum_all_confirm':       'VACUUM ANALYZE auf allen Tabellen ausführen? Dies ist sicher, aber I/O-intensiv — am besten außerhalb der Stoßzeiten.',
+  'btn.run':                           'Ausführen',
+
   'ui.diag_no_level_events':           'Keine Ereignisse der Stufe {{level}}.',
 
   /* ── Client diagnostics panel ────────────────────────────────────────────── */

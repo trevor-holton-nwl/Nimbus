@@ -102,6 +102,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.no_valid_rows':               'Nenhuma linha válida para colar',
   'toast.no_plant_selected':           'Nenhuma planta selecionada',
   'toast.horizon_save_failed':         'Falha ao salvar horizonte: {{msg}}',
+  'toast.constraints_save_failed':     'Falha ao salvar a restrição: {{msg}}',
   'toast.voice_heard':                 '🎤 "{{text}}"',
   'toast.voice_not_recognized':        'Voz: não reconhecida. Tente "otimizar", "zoom total", "comparar".',
   'toast.gamepad_connected':           '🎮 Controle conectado — alertas hápticos ativados para "{{id}}"',
@@ -303,6 +304,13 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.sandbox_on':                     '🔮 Cenário ATIVO',
   'ui.sandbox_off':                    '🔮 Hipótese',
   'ui.system_settings_title':          'Configurações do Sistema',
+  'ui.constraints_title':              'Restrições de Programação',
+  'ui.constraints_sub':                'Escolha quais restrições o otimizador respeita para esta planta e em que ordem. Restrições desativadas são ignoradas; ordens não cobertas por uma restrição são sempre sequenciadas por último — nunca são descartadas.',
+  'ui.constraint_on':                  'Respeitada',
+  'ui.constraint_off':                 'Ignorada',
+  'ui.constraint_no_wheel':            'Nenhuma roda de cores carregada para esta planta — sem efeito até que uma seja adicionada.',
+  'ui.move_up':                        'Mover para cima',
+  'ui.move_down':                      'Mover para baixo',
   'ui.alert_horizon_title':            'Horizonte de Alertas',
   'ui.conf_horizon_title':             'Horizonte da Pontuação de Confiança',
   'ui.show_alerts_within':             'Mostrar alertas nos próximos',
@@ -837,6 +845,15 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.diag_table_dead':                'Mortas',
   'ui.diag_table_row2':                '{{live}} ativas · {{dead}} mortas ({{deadPct}}%) · vacuum: {{vacAt}}',
   'ui.diag_vacuum_never':              'nunca',
+
+  /* ── Ações de manutenção de tabelas ──────────────────────────────────────── */
+  'ui.maint_running':                  'Executando…',
+  'ui.maint_done':                     '{{label}} concluído — estatísticas atualizadas',
+  'ui.maint_failed':                   '{{label}} falhou: {{msg}}',
+  'ui.maint_vacuum_all':               'VACUUM ANALYZE Todas as Tabelas',
+  'ui.maint_vacuum_all_confirm':       'Executar VACUUM ANALYZE em todas as tabelas? É seguro, mas pode ser intensivo em I/O — prefira horários de baixa atividade.',
+  'btn.run':                           'Executar',
+
   'ui.diag_no_level_events':           'Nenhum evento de nível {{level}}.',
 
   /* ── Client diagnostics panel ────────────────────────────────────────────── */

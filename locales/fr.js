@@ -102,6 +102,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.no_valid_rows':               'Aucune ligne valide à coller',
   'toast.no_plant_selected':           'Aucune usine sélectionnée',
   'toast.horizon_save_failed':         'Échec de l\'enregistrement de l\'horizon : {{msg}}',
+  'toast.constraints_save_failed':     'Échec de l\'enregistrement de la contrainte : {{msg}}',
   'toast.voice_heard':                 '🎤 "{{text}}"',
   'toast.voice_not_recognized':        'Voix : non reconnue. Essayez "optimiser", "zoom total", "comparer".',
   'toast.gamepad_connected':           '🎮 Manette connectée — alertes haptiques activées pour "{{id}}"',
@@ -303,6 +304,13 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.sandbox_on':                     '🔮 Scénario ACTIF',
   'ui.sandbox_off':                    '🔮 Hypothèse',
   'ui.system_settings_title':          'Paramètres Système',
+  'ui.constraints_title':              'Contraintes de Planification',
+  'ui.constraints_sub':                'Choisissez quelles contraintes l\'optimiseur respecte pour cette usine, et dans quel ordre. Les contraintes désactivées sont ignorées ; les ordres non couverts par une contrainte sont toujours planifiés en dernier — ils ne sont jamais supprimés.',
+  'ui.constraint_on':                  'Respectée',
+  'ui.constraint_off':                 'Ignorée',
+  'ui.constraint_no_wheel':            'Aucune roue chromatique chargée pour cette usine — sans effet tant qu\'aucune n\'est ajoutée.',
+  'ui.move_up':                        'Monter',
+  'ui.move_down':                      'Descendre',
   'ui.alert_horizon_title':            'Horizon d\'Alertes',
   'ui.conf_horizon_title':             'Horizon du Score de Confiance',
   'ui.show_alerts_within':             'Afficher les alertes dans les prochains',
@@ -837,6 +845,15 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.diag_table_dead':                'Mortes',
   'ui.diag_table_row2':                '{{live}} actives · {{dead}} mortes ({{deadPct}}%) · vacuum : {{vacAt}}',
   'ui.diag_vacuum_never':              'jamais',
+
+  /* ── Actions de maintenance des tables ───────────────────────────────────── */
+  'ui.maint_running':                  'En cours…',
+  'ui.maint_done':                     '{{label}} terminé — statistiques actualisées',
+  'ui.maint_failed':                   '{{label}} échoué : {{msg}}',
+  'ui.maint_vacuum_all':               'VACUUM ANALYZE Toutes les tables',
+  'ui.maint_vacuum_all_confirm':       'Exécuter VACUUM ANALYZE sur toutes les tables ? C\'est sans danger mais intensif en I/O — de préférence en dehors des heures de pointe.',
+  'btn.run':                           'Exécuter',
+
   'ui.diag_no_level_events':           'Aucun événement de niveau {{level}}.',
 
   /* ── Client diagnostics panel ────────────────────────────────────────────── */

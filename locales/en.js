@@ -102,6 +102,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.no_valid_rows':               'No valid rows to paste',
   'toast.no_plant_selected':           'No plant selected',
   'toast.horizon_save_failed':         'Horizon save failed: {{msg}}',
+  'toast.constraints_save_failed':     'Constraint save failed: {{msg}}',
   'toast.voice_heard':                 '🎤 "{{text}}"',
   'toast.voice_not_recognized':        'Voice: not recognized. Try "optimize", "zoom fit", "compare".',
   'toast.gamepad_connected':           '🎮 Gamepad connected — haptic alerts enabled for "{{id}}"',
@@ -438,6 +439,13 @@ window.__NIMBUS_LOCALES.en = {
   'ui.audit_log_col_plant':            'Plant',
   'ui.audit_log_col_details':          'Details',
   'ui.system_settings_title':          'System Settings',
+  'ui.constraints_title':              'Scheduling Constraints',
+  'ui.constraints_sub':                'Choose which constraints the optimizer respects for this plant, and in what order. Disabled constraints are ignored; orders not covered by a constraint always sequence last — they are never dropped.',
+  'ui.constraint_on':                  'Respected',
+  'ui.constraint_off':                 'Ignored',
+  'ui.constraint_no_wheel':            'No color wheel uploaded for this plant — no effect until one is added.',
+  'ui.move_up':                        'Move up',
+  'ui.move_down':                      'Move down',
   'ui.system_settings_sub':            'Configure scheduling horizons for {{plant}}. Changes take effect immediately and are persisted to plant master data.',
   'ui.alert_horizon_title':            'Alert Horizon',
   'ui.conf_horizon_title':             'Confidence Score Horizon',
@@ -814,6 +822,14 @@ window.__NIMBUS_LOCALES.en = {
   'ui.diag_table_dead':                'Dead',
   'ui.diag_table_row2':                '{{live}} live · {{dead}} dead ({{deadPct}}%) · vacuum: {{vacAt}}',
   'ui.diag_vacuum_never':              'never',
+
+  /* ── Admin cockpit — table maintenance actions ───────────────────────────── */
+  'ui.maint_running':                  'Running…',
+  'ui.maint_done':                     '{{label}} complete — stats refreshed',
+  'ui.maint_failed':                   '{{label}} failed: {{msg}}',
+  'ui.maint_vacuum_all':               'VACUUM ANALYZE All Tables',
+  'ui.maint_vacuum_all_confirm':       'Run VACUUM ANALYZE on all tables? This is safe but I/O-intensive — best during off-peak hours.',
+  'btn.run':                           'Run',
 
   /* ── Admin cockpit — backend log ─────────────────────────────────────────── */
   'ui.diag_no_level_events':           'No {{level}}-level events.',

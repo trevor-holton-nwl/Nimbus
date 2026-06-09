@@ -31,7 +31,7 @@ import sys
 import time
 import uuid
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -116,6 +116,7 @@ async def lifespan(app: FastAPI):
     load_color_wheels(COLOR_FILE)
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
+    md.ensure_plant_constraints_column()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -345,9 +346,11 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
 def apply_color_merge(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
     Apply per-plant color-wheel priority (with global fallback) to a possibly
-    plant-filtered DataFrame. Adds ORDER_Y, excludes color-miss rows, returns
-    (df, stats). Reads wheels from the GLOBAL_CW / PLANT_CWS module cache —
-    callers should ensure load_color_wheels() has been invoked at least once.
+    plant-filtered DataFrame. Adds ORDER_Y. Orders whose color isn't in any
+    wheel are NOT dropped — they are assigned last priority (999999) so they
+    sequence after listed colors. Returns (df, stats). Reads wheels from the
+    GLOBAL_CW / PLANT_CWS module cache — callers should ensure
+    load_color_wheels() has been invoked at least once.
     """
     stats: dict = {
         "color_merge_misses": 0,
@@ -379,13 +382,17 @@ def apply_color_merge(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
         df = df.drop(columns=["PLANT_SAFE"], errors="ignore")
 
+        # Orders whose COLOR isn't found in any wheel are NOT dropped — they flow
+        # through and sequence LAST via ORDER_Y = 999999 below. Color wheels are
+        # plant-optional (and switchable per plant on the frontend), so a missing
+        # match must never remove an order from the schedule. We still record the
+        # unlisted colors so the diagnostics panel can surface them.
         miss_mask = df["ORDER_Y"].isna()
         color_miss = int(miss_mask.sum())
         if color_miss:
             missed = sorted(df.loc[miss_mask, "COLOR"].dropna().unique().tolist())
             stats["color_merge_misses"] = color_miss
             stats["missed_colors"] = missed
-            df = df[~miss_mask].reset_index(drop=True)
 
         df["ORDER_Y"] = pd.to_numeric(df["ORDER_Y"], errors="coerce").fillna(999999)
     except Exception as e:
@@ -479,6 +486,8 @@ def get_diagnostics_deep():
                 "missed":          len(missed),
                 "missed_colors":   sorted(missed),
                 "missed_order_count": int(DIAGNOSTICS.get("color_merge_misses", 0)),
+                # Unlisted colors are sequenced last (ORDER_Y 999999), never dropped.
+                "missed_behavior": "sequenced_last",
             })
     except Exception as e:
         color_stats["error"] = str(e)
@@ -1052,6 +1061,25 @@ def md_audit(limit: int = 100):
     return {"entries": md.list_audit(limit)}
 
 
+@api.post("/master-data/plants/{plant}/constraints")
+async def md_set_plant_constraints(plant: str, request: Request):
+    """Persist a plant's switchable-constraint config (ordered list).
+
+    Payload: { subnetwork?, constraints: [{ key, enabled, order }, ...] }
+    Only 'colorWheel' is consumed today; the ordered list is the first step
+    toward a general per-plant constraint registry (tooling, etc.)."""
+    body = await request.json()
+    try:
+        return md.set_plant_constraints(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            constraints=body.get("constraints", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # =============================================================================
 # LABOR PLANNING — available labor hours by line group × ISO week (aggregate)
 #                  and by production line × calendar day (line-level)
@@ -1126,6 +1154,37 @@ def get_diagnostics_db():
         "sequences":    db.get_db_sequence_health(),
         "fetched_at":   pd.Timestamp.utcnow().isoformat(),
     }
+
+
+# =============================================================================
+# DB MAINTENANCE — safe, non-locking operations exposed to Admin Cockpit
+# Excluded intentionally: VACUUM FULL (exclusive lock), REINDEX TABLE (ShareLock),
+# terminate-idle (kills app's own pool connections), reset-stats (destroys forensics).
+# =============================================================================
+
+@api.post("/maintenance/vacuum-analyze")
+async def maintenance_vacuum_analyze(body: dict = Body(default={})):
+    table = body.get("table") or None
+    _log_event("info", "maintenance", f"VACUUM ANALYZE {'all tables' if not table else table}")
+    try:
+        result = db.run_vacuum_analyze(table)
+        return {"ok": True, **result}
+    except Exception as e:
+        _log_event("error", "maintenance", f"VACUUM ANALYZE failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@api.post("/maintenance/analyze")
+async def maintenance_analyze(body: dict = Body(default={})):
+    table = body.get("table")
+    if not table:
+        return {"ok": False, "error": "table is required"}
+    _log_event("info", "maintenance", f"ANALYZE {table}")
+    try:
+        return {"ok": True, **db.run_analyze(table)}
+    except Exception as e:
+        _log_event("error", "maintenance", f"ANALYZE {table} failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 # =============================================================================

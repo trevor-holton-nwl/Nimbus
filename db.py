@@ -16,6 +16,7 @@ import uuid
 
 from dotenv import load_dotenv
 import pandas as pd
+import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -730,6 +731,52 @@ def get_db_sequence_health() -> list:
         return result
     except Exception as e:
         return [{"error": str(e)}]
+
+
+# =========================
+# DB MAINTENANCE
+# =========================
+_MAINT_TABLE_ALLOWLIST: set | None = None
+
+
+def _get_maint_table_allowlist() -> set:
+    """Lazily build an allowlist of real table names to prevent SQL injection in DDL commands."""
+    global _MAINT_TABLE_ALLOWLIST
+    if _MAINT_TABLE_ALLOWLIST is None:
+        with _pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT relname FROM pg_stat_user_tables"
+            ).fetchall()
+        _MAINT_TABLE_ALLOWLIST = {r[0] for r in rows}
+    return _MAINT_TABLE_ALLOWLIST
+
+
+def run_vacuum_analyze(table: str | None = None) -> dict:
+    """
+    VACUUM ANALYZE one table or all known tables.
+    Uses a dedicated direct connection (autocommit=True) — VACUUM cannot run inside
+    a transaction block, and we must not pollute the pool connection's autocommit state.
+    """
+    allowed = _get_maint_table_allowlist()
+    if table and table not in allowed:
+        raise ValueError(f"Unknown table: {table}")
+    targets = [table] if table else sorted(allowed)
+    results = {}
+    with psycopg.connect(CONN_STR, autocommit=True) as conn:
+        for t in targets:
+            conn.execute(f"VACUUM ANALYZE {t}")
+            results[t] = "ok"
+    return {"results": results}
+
+
+def run_analyze(table: str) -> dict:
+    """ANALYZE one table to refresh query planner statistics. Safe, non-locking."""
+    allowed = _get_maint_table_allowlist()
+    if table not in allowed:
+        raise ValueError(f"Unknown table: {table}")
+    with psycopg.connect(CONN_STR, autocommit=True) as conn:
+        conn.execute(f"ANALYZE {table}")
+    return {"table": table, "status": "ok"}
 
 
 # =========================
