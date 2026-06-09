@@ -9861,6 +9861,20 @@ const NIMBUS = (function () {
             ErrorLog.warn('persistence', 'Backend returned zero rows — nothing to render');
             Toast.show(t('toast.backend_zero_orders'), 'warn');
             Store.setTasks([], 'persistence');
+            Persistence._currentLoadedPlant = plant;
+            // Still fetch master-data so plants/lines with no orders appear in Master Data tabs.
+            Promise.all([
+              fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+              fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+            ]).then(([pData, lData]) => {
+              if (pData || lData) {
+                Store._state.masterData = {
+                  plants: pData?.rows ?? [],
+                  lines:  lData?.rows ?? [],
+                };
+                Store.emit({ type: 'master-data-changed', source: 'persistence' });
+              }
+            }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`));
             return;
           }
 
