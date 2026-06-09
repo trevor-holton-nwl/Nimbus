@@ -632,7 +632,10 @@ const NIMBUS = (function () {
       this.emit({ type: 'lineSettings:change', line, source });
     },
     getPlantForLine(line) {
-      return (this._state.lineSettings[line] || {}).plant || null;
+      const fromSettings = (this._state.lineSettings[line] || {}).plant;
+      if (fromSettings) return fromSettings;
+      const mdLine = (this._state.masterData?.lines ?? []).find(r => r.production_line === line);
+      return mdLine?.plant ?? null;
     },
     setSelectedPlant(plant, source) {
       const next = plant || null;
@@ -663,6 +666,10 @@ const NIMBUS = (function () {
       }
       Object.keys(this._state.calendars).forEach(l => set.add(l));
       Object.keys(this._state.lineSettings).forEach(l => set.add(l));
+      // Master table is authoritative — include lines regardless of order attachment.
+      (this._state.masterData?.lines ?? []).forEach(r => {
+        if (r.production_line) set.add(r.production_line);
+      });
       return [...set];
     },
     tasksForSelectedPlant() {
