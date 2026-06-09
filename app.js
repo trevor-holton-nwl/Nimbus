@@ -14300,13 +14300,14 @@ document.addEventListener('DOMContentLoaded', () => {
               if (row.buffer_hours != null && row.buffer_hours !== '')
                 ls.bufferHours = parseFloat(row.buffer_hours) || 0;
               ls.plGroup = row.pl_group || '';
+              ls.plant   = row.plant    || null;
               if (JSON.stringify(ls) !== before) touched++;
             });
           }
         } catch (e) { ErrorLog.error('boot', `master-data lineSettings sync: ${e.message}`); }
         if (touched) Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
         try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
-        try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub === 'lines') ProdLines.render(); } catch {}
+        try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub !== 'plant') ProdLines.render(); } catch {}
       }
     });
     try { Plant.init();       } catch (e) { ErrorLog.error('boot', `Plant.init: ${e.message}`); }
