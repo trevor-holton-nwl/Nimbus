@@ -3240,11 +3240,106 @@ const NIMBUS = (function () {
   })();
 
   /* =============================================================================
+     COMPUTE — singleton Web Worker wrapper for off-main-thread computation.
+     Alerts.recompute and Utilization pre-warming post through here.
+     Falls back to synchronous (main-thread) compute if the worker is unavailable.
+     ========================================================================== */
+  const Compute = (() => {
+    let _worker = null;
+    let _dead   = false;
+    let _seq    = 0;
+    const _pending = new Map(); // id → { resolve, reject }
+
+    function _init() {
+      if (_dead || _worker) return _worker;
+      try {
+        _worker = new Worker('nimbus-worker.js');
+        _worker.onmessage = ({ data }) => {
+          const p = _pending.get(data.id);
+          if (!p) return;
+          _pending.delete(data.id);
+          if (data.type === 'ERROR') p.reject(new Error(data.error));
+          else p.resolve(data);
+        };
+        _worker.onerror = () => {
+          for (const p of _pending.values()) p.reject(new Error('worker error'));
+          _pending.clear();
+          _worker = null;
+          _dead   = true;
+        };
+      } catch (e) {
+        _dead = true;
+        return null;
+      }
+      return _worker;
+    }
+
+    function _post(type, payload) {
+      const w = _init();
+      if (!w) return Promise.reject(new Error('worker unavailable'));
+      return new Promise((resolve, reject) => {
+        const id = ++_seq;
+        _pending.set(id, { resolve, reject });
+        w.postMessage({ type, id, payload });
+      });
+    }
+
+    function _snap() {
+      return {
+        tasks:        Store.tasksArr,
+        blocks:       Store._state.blocks,
+        plantBlocks:  Store._state.plantBlocks,
+        calendars:    Store._state.calendars,
+        plants:       Store._state.plants,
+        lineSettings: Store._state.lineSettings,
+        masterData:   Store._state.masterData,
+      };
+    }
+
+    return {
+      available() { return !_dead && typeof Worker !== 'undefined'; },
+
+      alerts(opts, dismissed) {
+        return _post('ALERTS', {
+          ..._snap(),
+          dismissed: [...(dismissed || [])],
+          opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
+        });
+      },
+
+      utilization(startMs, days) {
+        return _post('UTILIZATION', { ..._snap(), startMs, days });
+      },
+    };
+  })();
+
+  /* =============================================================================
      ALERTS — detect and maintain the active alert list.
      Re-runs on any task/block/calendar change. Alerts are de-duplicated by id.
      ========================================================================== */
   const Alerts = {
     recompute(opts = {}) {
+      if (Compute.available()) {
+        const reqRev = Store._rev || 0;
+        Compute.alerts(opts, Alerts._dismissed)
+          .then(({ alerts, elapsed }) => {
+            if ((Store._rev || 0) !== reqRev) return; // stale result — a newer compute is in-flight
+            const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
+            if (onlyLines) {
+              const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
+              Store.setAlerts(retained.concat(alerts), 'alerts');
+            } else {
+              Store.setAlerts(alerts, 'alerts');
+            }
+            Alerts._lastMs = elapsed;
+          })
+          .catch(() => Alerts._recomputeSync(opts));
+        return;
+      }
+      Alerts._recomputeSync(opts);
+    },
+
+    _recomputeSync(opts = {}) {
       const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       // Incremental scope: when opts.lines is a non-empty Set, recompute alerts only for
       // those lines and splice them into the existing list (merge at the end). Callers that
@@ -4060,6 +4155,27 @@ const NIMBUS = (function () {
       return out;
     }
   };
+
+  // Pre-warm Utilization._cache in the worker after bulk task mutations so the
+  // next synchronous computeMatrix call returns instantly from cache.
+  Store.subscribe(evt => {
+    if (!Compute.available()) return;
+    if (evt.type !== 'tasks:bulk' && evt.type !== 'tasks:bulkUpdate' && evt.type !== 'task:update') return;
+    const startMs = Util.startOfDay(new Date()).getTime();
+    const rev     = Store._rev || 0;
+    Compute.utilization(startMs, 7)
+      .then(({ matrix }) => {
+        if ((Store._rev || 0) !== rev) return; // stale — a newer mutation arrived
+        for (const line of Object.keys(matrix)) {
+          for (const k of Object.keys(matrix[line])) {
+            const row = matrix[line][k];
+            row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean);
+          }
+        }
+        Utilization._cache = { key: `${startMs}|7|${rev}`, matrix };
+      })
+      .catch(() => {});
+  });
 
   /* =============================================================================
      ENGINE — scheduling + optimisation.
