@@ -543,31 +543,31 @@ def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str 
     """Upsert or delete aggregate labor-plan cells. A null/empty avail_hours deletes the cell."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
-    upserted = deleted = 0
+    valid = [c for c in cells if c.get("pl_group") and c.get("period")]
+    to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
+    to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:
-        for cell in cells:
-            grp    = cell.get("pl_group", "")
-            period = cell.get("period", "")
-            ah     = cell.get("avail_hours")
-            if not grp or not period:
-                continue
-            if ah is None or ah == "":
-                cur.execute(
-                    "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s AND pl_group=%s AND period=%s",
-                    (subnetwork, plant, grp, period),
-                )
-                deleted += cur.rowcount
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO labor_plan (subnetwork, plant, pl_group, period, avail_hours)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (subnetwork, plant, pl_group, period)
-                    DO UPDATE SET avail_hours = EXCLUDED.avail_hours, updated_at = NOW()
-                    """,
-                    (subnetwork, plant, grp, period, ah),
-                )
-                upserted += 1
+        deleted = 0
+        if to_delete:
+            cur.execute(
+                "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s"
+                " AND (pl_group, period) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+                (subnetwork, plant,
+                 [c["pl_group"] for c in to_delete],
+                 [c["period"] for c in to_delete]),
+            )
+            deleted = cur.rowcount
+        upserted = 0
+        if to_upsert:
+            cur.executemany(
+                "INSERT INTO labor_plan (subnetwork, plant, pl_group, period, avail_hours)"
+                " VALUES (%s, %s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, pl_group, period)"
+                " DO UPDATE SET avail_hours = EXCLUDED.avail_hours, updated_at = NOW()",
+                [(subnetwork, plant, c["pl_group"], c["period"], c["avail_hours"])
+                 for c in to_upsert],
+            )
+            upserted = len(to_upsert)
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES ('labor_plan', 'upsert', %s, %s)",
@@ -616,32 +616,34 @@ def upsert_labor_plan_line(subnetwork: str, plant: str, cells: list, user_email:
     """Upsert or delete line-level labor cells."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
-    upserted = deleted = 0
+    valid = [c for c in cells if c.get("production_line") and c.get("day")]
+    to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
+    to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:
-        for cell in cells:
-            line   = cell.get("production_line", "")
-            day    = cell.get("day", "")
-            ah     = cell.get("avail_hours")
-            source = cell.get("source", "auto_split")
-            if not line or not day:
-                continue
-            if ah is None or ah == "":
-                cur.execute(
-                    "DELETE FROM labor_plan_line WHERE subnetwork=%s AND plant=%s AND production_line=%s AND day=%s",
-                    (subnetwork, plant, line, day),
-                )
-                deleted += cur.rowcount
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO labor_plan_line (subnetwork, plant, production_line, day, avail_hours, source)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (subnetwork, plant, production_line, day)
-                    DO UPDATE SET avail_hours = EXCLUDED.avail_hours, source = EXCLUDED.source, updated_at = NOW()
-                    """,
-                    (subnetwork, plant, line, day, ah, source),
-                )
-                upserted += 1
+        deleted = 0
+        if to_delete:
+            cur.execute(
+                "DELETE FROM labor_plan_line WHERE subnetwork=%s AND plant=%s"
+                " AND (production_line, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+                (subnetwork, plant,
+                 [c["production_line"] for c in to_delete],
+                 [c["day"] for c in to_delete]),
+            )
+            deleted = cur.rowcount
+        upserted = 0
+        if to_upsert:
+            cur.executemany(
+                "INSERT INTO labor_plan_line"
+                " (subnetwork, plant, production_line, day, avail_hours, source)"
+                " VALUES (%s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, production_line, day)"
+                " DO UPDATE SET avail_hours = EXCLUDED.avail_hours,"
+                " source = EXCLUDED.source, updated_at = NOW()",
+                [(subnetwork, plant, c["production_line"], c["day"],
+                  c["avail_hours"], c.get("source", "auto_split"))
+                 for c in to_upsert],
+            )
+            upserted = len(to_upsert)
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES ('labor_plan_line', 'upsert', %s, %s)",

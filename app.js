@@ -2010,6 +2010,8 @@ const NIMBUS = (function () {
     let _dragging      = false;
     let _dragAnchor    = null;
     let _fpHorizon     = null; // Flatpickr instance for the date-jump input
+    let _cellGrid      = null; // [r][c] -> <td> cache for the Aggregate grid (built per render)
+    let _selTds        = new Set(); // currently-highlighted <td>s, for incremental lasso diffing
 
     // ── Date helpers ─────────────────────────────────────────────────────────
     function _isoWeek(date) {
@@ -2142,18 +2144,9 @@ const NIMBUS = (function () {
       });
       if (!openSlots.length) return [];
 
-      const pinnedHours = openSlots.reduce((sum, s) => {
-        const d = _lineData[plant]?.[s.line]?.[s.dayKey];
-        return (d && d.source === 'override') ? sum + (d.avail_hours || 0) : sum;
-      }, 0);
-      const free = openSlots.filter(s => {
-        const d = _lineData[plant]?.[s.line]?.[s.dayKey];
-        return !d || d.source !== 'override';
-      });
-      if (!free.length) return [];
-      const perSlot = Math.max(0, (groupHours || 0) - pinnedHours) / free.length;
+      const perSlot = Math.max(0, (groupHours || 0)) / openSlots.length;
       const rounded = Math.round(perSlot * 10) / 10;
-      return free.map(s => ({ production_line: s.line, day: s.dayKey, avail_hours: rounded, source: 'auto_split' }));
+      return openSlots.map(s => ({ production_line: s.line, day: s.dayKey, avail_hours: rounded, source: 'auto_split' }));
     }
 
     // ── KPI strip ────────────────────────────────────────────────────────────
@@ -2219,19 +2212,25 @@ const NIMBUS = (function () {
     // ── Aggregate sub-tab ────────────────────────────────────────────────────
     function _clearSelection() {
       _selRange = null; _dragging = false; _dragAnchor = null;
-      document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
+      _selTds.forEach(td => td.classList.remove('lp-selected-td'));
+      _selTds.clear();
     }
 
+    // Incremental lasso paint: diff the new rectangle against the previously
+    // highlighted set so each mousemove only touches cells whose membership
+    // changed (O(changed)), instead of clearing + re-querying the whole grid.
     function _renderSelection() {
-      document.querySelectorAll('.lp-selected-td').forEach(el => el.classList.remove('lp-selected-td'));
-      if (!_selRange) return;
-      const { r0, c0, r1, c1 } = _selRange;
-      const g = document.getElementById('labor-grid'); if (!g) return;
-      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-        const grp = _displayGroups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
-        const inp = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
-        inp?.closest('td')?.classList.add('lp-selected-td');
+      const next = new Set();
+      if (_selRange && _cellGrid) {
+        const { r0, c0, r1, c1 } = _selRange;
+        for (let r = r0; r <= r1; r++) {
+          const row = _cellGrid[r]; if (!row) continue;
+          for (let c = c0; c <= c1; c++) { const td = row[c]; if (td) next.add(td); }
+        }
       }
+      _selTds.forEach(td => { if (!next.has(td)) td.classList.remove('lp-selected-td'); });
+      next.forEach(td => { if (!_selTds.has(td)) td.classList.add('lp-selected-td'); });
+      _selTds = next;
     }
 
     function _updateAggrTotals(grid) {
@@ -2305,61 +2304,68 @@ const NIMBUS = (function () {
     async function _renderAggregate(plant) {
       const grid = document.getElementById('labor-grid'); if (!grid) return;
       const planMap = await _fetchAggregate(plant);
-      const thS = 'padding:8px 10px;font-size:12px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;position:sticky;top:0;z-index:1;';
-      const tdS = 'padding:6px 8px;border-bottom:1px solid var(--line);';
-      const inS = 'width:72px;text-align:center;padding:3px 6px;font-size:13px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font-family:inherit;';
       _displayGroups = _selectedGroups.size ? _groups.filter(g => _selectedGroups.has(g)) : _groups;
       const totals = {}; _weeks.forEach(w => { totals[w.key] = 0; });
       const groupRows = _displayGroups.map(grp => {
         const cells = _weeks.map(w => {
           const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
-          return `<td style="${tdS};text-align:center;">
-            <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="0.5" style="${inS}" value="${ah != null ? ah : ''}" placeholder="—">
+          return `<td>
+            <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
           </td>`;
         }).join('');
-        return `<tr><td style="${tdS};font-weight:600;white-space:nowrap;min-width:140px;">${grp}</td>${cells}</tr>`;
+        return `<tr><td>${grp}</td>${cells}</tr>`;
       }).join('');
       const totalCells = _weeks.map(w => {
         const v = totals[w.key];
-        return `<td style="${tdS};text-align:center;font-weight:700;font-family:'JetBrains Mono',monospace;">${v > 0 ? v.toFixed(1) : '—'}</td>`;
+        return `<td>${v > 0 ? v.toFixed(1) : '—'}</td>`;
       }).join('');
       grid.innerHTML = `
-        <div style="overflow-x:auto;">
-          <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <div class="lp-card lp-card-scroll">
+          <table class="lp-table">
             <thead><tr>
-              <th style="${thS};min-width:140px;">Group</th>
-              ${_weeks.map(w => `<th style="${thS}">${w.label}</th>`).join('')}
+              <th>Group</th>
+              ${_weeks.map(w => `<th>${w.label}</th>`).join('')}
             </tr></thead>
             <tbody>
               ${groupRows}
-              <tr style="border-top:2px solid var(--line);">
-                <td style="${tdS};font-weight:700;">TOTAL</td>${totalCells}
+              <tr class="lp-total-row">
+                <td>TOTAL</td>${totalCells}
               </tr>
             </tbody>
           </table>
         </div>
-        <p style="margin-top:8px;font-size:11px;color:var(--fg-faint);">Ctrl+drag to select · Delete to clear · Ctrl+C to copy · Paste from Excel · Values in hours</p>`;
+        <p class="lp-hint">Ctrl+drag to select · Delete to clear · Ctrl+C to copy · Paste from Excel · Values in hours</p>`;
+
+      // Build [row][col] -> <td> cache so the lasso paint never queries the DOM.
+      _cellGrid = _displayGroups.map(grp =>
+        _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)?.closest('td') || null));
+      _selTds = new Set();
 
       const sn = _subnetwork(plant);
 
-      grid.addEventListener('mousedown', e => {
-        if (!e.ctrlKey && !e.metaKey) { if (!e.target.closest('.lp-selected-td')) _clearSelection(); return; }
-        const inp = e.target.closest('.lp-cell'); if (!inp) return;
-        e.preventDefault();
-        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
-        if (ri < 0 || ci < 0) return;
-        _dragging = true; _dragAnchor = { row: ri, col: ci };
-        _selRange = { r0: ri, c0: ci, r1: ri, c1: ci }; _renderSelection();
-      });
-      grid.addEventListener('mousemove', e => {
-        if (!_dragging) return;
-        const td = e.target.closest('td'); if (!td) return;
-        const inp = td.querySelector('.lp-cell'); if (!inp) return;
-        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
-        if (ri < 0 || ci < 0) return;
-        _selRange = { r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci), r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci) };
-        _renderSelection();
-      });
+      // Lasso drag listeners attach once to the persistent #labor-grid element
+      // (innerHTML is replaced on every render but the container is not).
+      if (!grid._lpDragWired) {
+        grid._lpDragWired = true;
+        grid.addEventListener('mousedown', e => {
+          if (!e.ctrlKey && !e.metaKey) { if (!e.target.closest('.lp-selected-td')) _clearSelection(); return; }
+          const inp = e.target.closest('.lp-cell'); if (!inp) return;
+          e.preventDefault();
+          const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+          if (ri < 0 || ci < 0) return;
+          _dragging = true; _dragAnchor = { row: ri, col: ci };
+          _selRange = { r0: ri, c0: ci, r1: ri, c1: ci }; _renderSelection();
+        });
+        grid.addEventListener('mousemove', e => {
+          if (!_dragging) return;
+          const td = e.target.closest('td'); if (!td) return;
+          const inp = td.querySelector('.lp-cell'); if (!inp) return;
+          const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+          if (ri < 0 || ci < 0) return;
+          _selRange = { r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci), r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci) };
+          _renderSelection();
+        });
+      }
 
       grid.querySelectorAll('.lp-cell').forEach(inp => {
         inp.onchange = async function() {
@@ -2500,25 +2506,21 @@ const NIMBUS = (function () {
         return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
       }
 
-      const thS = 'padding:5px 6px;font-size:11px;font-weight:600;background:var(--bg-elev);border-bottom:2px solid var(--line);white-space:nowrap;text-align:center;position:sticky;top:0;z-index:3;min-width:52px;';
-      const tdL = 'padding:6px 8px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap;min-width:120px;font-size:12px;';
-      const tdC = 'padding:4px 5px;border-bottom:1px solid var(--line);text-align:center;';
       const weekStarts = new Set(_weeks.map(w => Util.dayKey(w.monday)));
 
       const dayHeaders = days.map(d => {
         const wb = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
-        return `<th style="${thS}${wb}">${d.date.getMonth()+1}/${d.date.getDate()}</th>`;
+        return `<th style="width:52px;min-width:52px;${wb}">${d.date.getMonth()+1}/${d.date.getDate()}</th>`;
       }).join('');
 
       const showGroupHeaders = visibleGroups.length > 1;
-      const thGrp = `padding:5px 8px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--bg-subtle);color:var(--accent);position:sticky;z-index:2;`;
       let lastGroup = null;
       const lineRows = allLinesMeta.map(lm => {
         const line = lm.production_line;
         let groupRow = '';
         if (showGroupHeaders && lm.pl_group !== lastGroup) {
           lastGroup = lm.pl_group;
-          groupRow = `<tr><td class="lp-group-hdr" style="${thGrp}" colspan="${days.length + 1}">${lm.pl_group}</td></tr>`;
+          groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${lm.pl_group}</td></tr>`;
         }
         const cells = days.map(d => {
           const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
@@ -2530,22 +2532,17 @@ const NIMBUS = (function () {
           const bg     = avail === 0 ? 'var(--bg-subtle)' : heatBg(ratio);
           const isOvr  = ld?.source === 'override';
           const title  = `${line} · ${d.dayKey} | Available: ${avail.toFixed(1)}h | Required: ${req.toFixed(1)}h | Cal cap: ${calCap.toFixed(1)}h${isOvr ? ' | Pinned' : ''}`;
-          return `<td style="${tdC}${wb}background:${bg};" title="${title}">
+          return `<td class="${isOvr ? 'lp-ovr' : ''}" style="${wb}background:${bg};padding:3px 4px;" title="${title}">
             <input type="number" class="lp-line-cell" data-line="${line.replace(/"/g,'&quot;')}" data-day="${d.dayKey}" min="0" step="0.5"
-              style="width:46px;text-align:center;padding:2px 4px;font-size:11px;font-family:'JetBrains Mono',monospace;border:none;background:transparent;color:var(--fg);"
-              value="${avail > 0 ? avail : ''}">${isOvr ? '<span class="lp-pin" title="Overridden">●</span>' : ''}</td>`;
+              value="${avail > 0 ? avail : ''}"></td>`;
         }).join('');
-        return groupRow + `<tr><td style="${tdL}">${line}</td>${cells}</tr>`;
+        return groupRow + `<tr><td>${line}</td>${cells}</tr>`;
       }).join('');
 
-      const groupLabel = _selectedGroups.size === 0
-        ? `All groups (${visibleGroups.length})`
-        : visibleGroups.length === 1 ? `<strong>${visibleGroups[0]}</strong>` : `<strong>${visibleGroups.length} groups</strong>`;
       grid.innerHTML = `
-        <div style="margin-bottom:8px;font-size:12px;color:var(--fg-mute);">${groupLabel} · ${allLinesMeta.length} lines · Hover for detail · ● = overridden (right-click to reset)</div>
-        <div style="overflow:auto;max-height:calc(100vh - 260px);">
-          <table style="width:100%;border-collapse:separate;border-spacing:0;font-size:12px;">
-            <thead><tr><th style="${thS};min-width:120px;text-align:left;">Line</th>${dayHeaders}</tr></thead>
+        <div class="lp-card lp-card-scroll">
+          <table class="lp-table">
+            <thead><tr><th>Line</th>${dayHeaders}</tr></thead>
             <tbody>${lineRows}</tbody>
           </table>
         </div>`;
@@ -2567,11 +2564,7 @@ const NIMBUS = (function () {
           const newSrc = ah !== null ? 'override' : 'auto_split';
           if (ah === null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: ah, source: 'override' };
           const td = this.closest('td');
-          if (td) {
-            let pin = td.querySelector('.lp-pin');
-            if (ah !== null) { if (!pin) { pin = document.createElement('span'); pin.className = 'lp-pin'; pin.title = 'Overridden'; pin.textContent = '●'; td.appendChild(pin); } }
-            else if (pin) pin.remove();
-          }
+          if (td) td.classList.toggle('lp-ovr', ah !== null);
           UndoStack.push(`Line plan: ${line} / ${day}`, () => {
             if (!_lineData[plant][line]) _lineData[plant][line] = {};
             if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
@@ -2597,7 +2590,7 @@ const NIMBUS = (function () {
           const resetCell = splits.find(c => c.production_line === line && c.day === day); if (!resetCell) return;
           _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
           inp.value = resetCell.avail_hours || '';
-          inp.closest('td')?.querySelector('.lp-pin')?.remove();
+          inp.closest('td')?.classList.remove('lp-ovr');
           _saveLines(sn, plant, [{ production_line: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
           Toast.show(`Reset ${line} · ${day} to even-split`, 'success');
         });
@@ -2640,7 +2633,8 @@ const NIMBUS = (function () {
       function heatText(ratio) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#3d3628' : '#fff'); }
 
       const cols = `100px repeat(${days.length}, 1fr)`;
-      let html = `<p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + scopeGroup : ''}</p>
+      let html = `<div class="lp-card" style="padding:14px 16px;">
+        <p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + scopeGroup : ''}</p>
         <div class="lp-hm-wrap"><div class="lp-hm-grid" style="grid-template-columns:${cols}">`;
       html += `<div class="lp-hm-corner"></div>`;
       days.forEach(d => {
@@ -2661,7 +2655,7 @@ const NIMBUS = (function () {
           html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${line} · ${d.dayKey} | Req: ${req.toFixed(1)}h | Avail: ${avail.toFixed(1)}h | ${Math.round(ratio*100)}%">${lbl}</div>`;
         });
       });
-      html += `</div></div><div class="lp-hm-legend"><span>idle</span><div class="lp-hm-grad"></div><span>overload</span></div>`;
+      html += `</div></div><div class="lp-hm-legend"><span>idle</span><div class="lp-hm-grad"></div><span>overload</span></div></div>`;
       container.innerHTML = html;
     }
 
@@ -2710,7 +2704,7 @@ const NIMBUS = (function () {
       const container = document.getElementById('labor-inputs-pane'); if (!container) return;
       container.innerHTML = `
         <div class="lp-inputs-section">
-          <h3 style="font-size:14px;font-weight:700;margin:0 0 12px;">Disaggregation</h3>
+          <h3 class="lp-inputs-title">Disaggregation</h3>
           <div class="lp-input-row">
             <label class="lp-input-label">Default split mode</label>
             <select class="lp-input-sel"><option selected>Even split (equal hours per open day)</option></select>
@@ -2718,7 +2712,7 @@ const NIMBUS = (function () {
           </div>
         </div>
         <div class="lp-inputs-section">
-          <h3 style="font-size:14px;font-weight:700;margin:0 0 12px;">Horizon</h3>
+          <h3 class="lp-inputs-title">Horizon</h3>
           <div class="lp-input-row">
             <label class="lp-input-label">Week span</label>
             <select class="lp-input-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
@@ -2730,7 +2724,7 @@ const NIMBUS = (function () {
           </div>
         </div>
         <div class="lp-inputs-section">
-          <h3 style="font-size:14px;font-weight:700;margin:0 0 4px;">Aggregate ↔ Line reconciliation</h3>
+          <h3 class="lp-inputs-title">Aggregate ↔ Line reconciliation</h3>
           <p style="font-size:12px;color:var(--fg-mute);margin:0;">When aggregate hours are saved, the system auto-splits to lines via even split across open working days. Overridden line·day cells are pinned (●) and do not re-split until manually reset.</p>
         </div>`;
     }
@@ -6690,18 +6684,17 @@ const NIMBUS = (function () {
         </details>`;
       }).join('');
 
-      el.querySelectorAll('details.line-group').forEach(det => {
-        det.addEventListener('toggle', () => {
-          det.querySelector('.line-expand').textContent = det.open ? '−' : '+';
+      if (!Hierarchy._delegated) {
+        Hierarchy._delegated = true;
+        el.addEventListener('click', e => {
+          const item = e.target.closest('.hier-item');
+          if (item) Timeline.focus(item.dataset.id);
         });
-      });
-
-      el.querySelectorAll('.hier-item').forEach(row => {
-        row.onclick = () => {
-          const id = row.dataset.id;
-          Timeline.focus(id);
-        };
-      });
+        el.addEventListener('toggle', e => {
+          const det = e.target.closest('details.line-group');
+          if (det) det.querySelector('.line-expand').textContent = det.open ? '−' : '+';
+        }, true);
+      }
     }
   };
 
@@ -7787,14 +7780,14 @@ const NIMBUS = (function () {
         }
       });
 
+      const _fltPairs = [
+        [document.getElementById('gantt-flt-line-btn'),  document.getElementById('gantt-line-dropdown')],
+        [document.getElementById('gantt-flt-color-btn'), document.getElementById('gantt-color-dropdown')],
+        [document.getElementById('gantt-flt-form-btn'),  document.getElementById('gantt-form-dropdown')],
+      ];
       document.addEventListener('click', e => {
-        for (const [btnId, dropId] of [
-          ['gantt-flt-line-btn',  'gantt-line-dropdown'],
-          ['gantt-flt-color-btn', 'gantt-color-dropdown'],
-          ['gantt-flt-form-btn',  'gantt-form-dropdown'],
-        ]) {
-          const btn  = document.getElementById(btnId);
-          const drop = document.getElementById(dropId);
+        if (_fltPairs.every(([, d]) => !d || d.hidden)) return;
+        for (const [btn, drop] of _fltPairs) {
           if (drop && !drop.hidden && btn && !btn.contains(e.target) && !drop.contains(e.target)) {
             drop.hidden = true;
           }

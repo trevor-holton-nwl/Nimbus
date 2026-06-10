@@ -113,6 +113,7 @@ COLOR_WHEEL_DIR = r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Te
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
+    _migrate_audit_log()
     load_color_wheels(COLOR_FILE)
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
@@ -293,15 +294,24 @@ def _cw_write_meta(meta: dict) -> None:
     with open(_cw_meta_path(), 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
 
-def _cw_append_audit(entry: dict) -> None:
+def _migrate_audit_log() -> None:
+    """Convert a legacy JSON-array audit file to JSON-Lines (idempotent, runs at startup)."""
+    path = _cw_audit_path()
     try:
-        with open(_cw_audit_path(), encoding='utf-8') as f:
-            log = json.load(f)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        if content.strip().startswith('['):
+            old = json.loads(content)
+            with open(path, 'w', encoding='utf-8') as f:
+                for e in old:
+                    f.write(json.dumps(e) + '\n')
     except (FileNotFoundError, json.JSONDecodeError):
-        log = []
-    log.append(entry)
-    with open(_cw_audit_path(), 'w', encoding='utf-8') as f:
-        json.dump(log, f, indent=2)
+        pass
+
+
+def _cw_append_audit(entry: dict) -> None:
+    with open(_cw_audit_path(), 'a', encoding='utf-8') as f:
+        f.write(json.dumps(entry) + '\n')
 
 
 def load_color_wheels(color_file: str = COLOR_FILE) -> None:
@@ -853,24 +863,27 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
 
     path = _cw_path(plant)
     is_replace = os.path.isfile(path)
-    with open(path, 'wb') as fh:
-        fh.write(raw)
-
     row_count = len(cw_df)
     ts = datetime.utcnow().isoformat() + "Z"
     user = request.headers.get("X-User", "system")
     action = "color_wheel_replace" if is_replace else "color_wheel_upload"
+    fname = file.filename or "upload.xlsx"
 
-    meta = _cw_read_meta()
-    meta[plant] = {
-        "uploaded_at": ts, "uploaded_by": user,
-        "filename": file.filename or "upload.xlsx", "row_count": row_count,
-    }
-    _cw_write_meta(meta)
-    _cw_append_audit({
-        "ts": ts, "user": user, "action": action, "plant": plant,
-        "details": {"filename": file.filename, "row_count": row_count, "replaced": is_replace},
-    })
+    def _do_file_ops():
+        with open(path, 'wb') as fh:
+            fh.write(raw)
+        meta = _cw_read_meta()
+        meta[plant] = {
+            "uploaded_at": ts, "uploaded_by": user,
+            "filename": fname, "row_count": row_count,
+        }
+        _cw_write_meta(meta)
+        _cw_append_audit({
+            "ts": ts, "user": user, "action": action, "plant": plant,
+            "details": {"filename": fname, "row_count": row_count, "replaced": is_replace},
+        })
+
+    await run_in_threadpool(_do_file_ops)
     # Color-merge runs per-request from the cache; refresh it so the new wheel
     # takes effect on the next /tasks call without requiring a full /reload.
     await run_in_threadpool(load_color_wheels, COLOR_FILE)
@@ -942,16 +955,23 @@ def list_color_wheels():
 @api.get("/audit/log")
 def get_audit_log(limit: int = 200):
     """Return the most recent N audit log entries, newest first."""
+    log = []
     try:
         with open(_cw_audit_path(), encoding='utf-8') as f:
-            log = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        log = []
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    log.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except FileNotFoundError:
+        pass
     return {"entries": list(reversed(log[-limit:]))}
 
 
 @api.post("/audit/log")
-async def append_audit_log(entry: dict, request: Request):
+def append_audit_log(entry: dict, request: Request):
     """Frontend-triggered audit entry (e.g. optimization_run events)."""
     entry.setdefault("ts", datetime.utcnow().isoformat() + "Z")
     entry.setdefault("user", request.headers.get("X-User", "system"))
@@ -963,8 +983,7 @@ async def append_audit_log(entry: dict, request: Request):
 def clear_audit_log():
     """Wipe the full audit log."""
     try:
-        with open(_cw_audit_path(), 'w', encoding='utf-8') as f:
-            json.dump([], f)
+        open(_cw_audit_path(), 'w', encoding='utf-8').close()
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not clear audit log: {e}")
@@ -983,20 +1002,18 @@ def md_list(table: str):
 
 
 @api.post("/master-data/{table}/cascade-preview")
-async def md_cascade_preview(table: str, request: Request):
+def md_cascade_preview(table: str, body: dict = Body(default={})):
     """Preview cascading deletes before committing. Payload: { deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    body = await request.json()
     return md.cascade_preview(table, body.get("deletes", []))
 
 
 @api.post("/master-data/{table}/bulk")
-async def md_bulk(table: str, request: Request):
+def md_bulk(table: str, request: Request, body: dict = Body(default={})):
     """Apply upserts and deletes in one transaction. Payload: { upserts: row[], deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    body = await request.json()
     try:
         return md.bulk_apply(
             table,
@@ -1008,11 +1025,10 @@ async def md_bulk(table: str, request: Request):
 
 
 @api.post("/master-data/{table}/columns")
-async def md_add_column(table: str, request: Request):
+def md_add_column(table: str, request: Request, body: dict = Body(default={})):
     """Add a new user-defined column to a master-data table. Payload: { column_name, sql_type, length?, nullable?, default?, display_label? }"""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    body = await request.json()
     try:
         return md.add_column(
             table=table,
@@ -1029,7 +1045,7 @@ async def md_add_column(table: str, request: Request):
 
 
 @api.delete("/master-data/{table}/columns/{column}")
-async def md_drop_column(table: str, column: str, request: Request):
+def md_drop_column(table: str, column: str, request: Request):
     """Drop a user-defined column from a master-data table (system columns are protected)."""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
@@ -1040,11 +1056,10 @@ async def md_drop_column(table: str, column: str, request: Request):
 
 
 @api.patch("/master-data/{table}/columns/{column}")
-async def md_rename_label(table: str, column: str, request: Request):
+def md_rename_label(table: str, column: str, request: Request, body: dict = Body(default={})):
     """Update the display_label of an existing column. Payload: { display_label: str }"""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    body = await request.json()
     try:
         return md.rename_label(
             table, column,
@@ -1062,13 +1077,12 @@ def md_audit(limit: int = 100):
 
 
 @api.post("/master-data/plants/{plant}/constraints")
-async def md_set_plant_constraints(plant: str, request: Request):
+def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(default={})):
     """Persist a plant's switchable-constraint config (ordered list).
 
     Payload: { subnetwork?, constraints: [{ key, enabled, order }, ...] }
     Only 'colorWheel' is consumed today; the ordered list is the first step
     toward a general per-plant constraint registry (tooling, etc.)."""
-    body = await request.json()
     try:
         return md.set_plant_constraints(
             subnetwork=body.get("subnetwork", ""),
@@ -1094,9 +1108,8 @@ def labor_plan_get(plant: str):
 
 
 @api.post("/labor-plan")
-async def labor_plan_post(request: Request):
+def labor_plan_post(request: Request, body: dict = Body(default={})):
     """Upsert or delete aggregate labor-plan cells. Payload: { subnetwork, plant, cells:[{pl_group, period, avail_hours}] }"""
-    body = await request.json()
     try:
         return md.upsert_labor_plan(
             subnetwork=body.get("subnetwork", ""),
@@ -1117,9 +1130,8 @@ def labor_plan_line_get(plant: str, group: str | None = None, from_date: str | N
 
 
 @api.post("/labor-plan/line")
-async def labor_plan_line_post(request: Request):
+def labor_plan_line_post(request: Request, body: dict = Body(default={})):
     """Upsert or delete line-level labor cells. Payload: { subnetwork, plant, cells:[{production_line, day, avail_hours, source}] }"""
-    body = await request.json()
     try:
         return md.upsert_labor_plan_line(
             subnetwork=body.get("subnetwork", ""),
@@ -1163,7 +1175,7 @@ def get_diagnostics_db():
 # =============================================================================
 
 @api.post("/maintenance/vacuum-analyze")
-async def maintenance_vacuum_analyze(body: dict = Body(default={})):
+def maintenance_vacuum_analyze(body: dict = Body(default={})):
     table = body.get("table") or None
     _log_event("info", "maintenance", f"VACUUM ANALYZE {'all tables' if not table else table}")
     try:
@@ -1175,7 +1187,7 @@ async def maintenance_vacuum_analyze(body: dict = Body(default={})):
 
 
 @api.post("/maintenance/analyze")
-async def maintenance_analyze(body: dict = Body(default={})):
+def maintenance_analyze(body: dict = Body(default={})):
     table = body.get("table")
     if not table:
         return {"ok": False, "error": "table is required"}

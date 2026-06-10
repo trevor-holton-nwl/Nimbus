@@ -46,6 +46,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_line         ON orders(production_line);
 -- (db.query_orders ORDER BY production_line, effective start). Supersedes
 -- relying on the two single-column indexes above for that access pattern.
 CREATE INDEX IF NOT EXISTS idx_orders_line_start   ON orders(production_line, basic_start_date);
+-- Matches db.query_orders() ORDER BY exactly: per-line scan ordered by effective start.
+-- Supersedes idx_orders_line_start for the /tasks read path when scheduled_start is set.
+CREATE INDEX IF NOT EXISTS idx_orders_line_eff_start
+  ON orders(production_line, COALESCE(scheduled_start, basic_start_date));
 
 -- Defense-in-depth: reject inverted user-scheduled ranges at the DB layer too
 -- (the app already validates in update_task_dates_bulk). NOT VALID so the

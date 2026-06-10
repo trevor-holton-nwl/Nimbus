@@ -30,7 +30,7 @@ This is the primary long-term scalability constraint for every feature in NIMBUS
 
 **Backend:**
 ```bash
-pip install fastapi uvicorn pandas numpy openpyxl "psycopg[binary]" psycopg_pool pydantic
+pip install fastapi uvicorn pandas numpy openpyxl "psycopg[binary]" psycopg_pool pydantic python-dotenv
 python brain.py
 # Runs on http://localhost:8000
 ```
@@ -39,7 +39,6 @@ For backend iteration with auto-reload (since `python brain.py` does not reload 
 ```bash
 uvicorn brain:api --reload --port 8000
 ```
-Orders are loaded from **Postgres** (see `db.py`) once at startup via FastAPI's `lifespan` context manager into the in-memory `DATA` DataFrame; use `POST /reload` to re-query the DB without restarting. A local Postgres instance must be running — connection settings are in `db.py`.
 
 **Frontend:** Serve `index.html` over HTTP (cannot open as `file://` due to CORS). Any static file server works:
 ```bash
@@ -49,23 +48,50 @@ python -m http.server 9000
 
 No build step — JavaScript and CSS are loaded directly; all libraries come from CDN.
 
+## Database Setup
+
+Postgres must be running locally. Bootstrap the schema once:
+```bash
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -c "CREATE DATABASE nimbus;"
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -d nimbus -f schema.sql
+```
+
+Connection credentials are read from environment variables (via `.env` file in the project root, loaded by `python-dotenv`):
+```
+PG_HOST=localhost
+PG_PORT=5432
+PG_DB=nimbus
+PG_USER=postgres
+PG_PASS=your_password
+```
+
+Pool tuning knobs (all optional): `NIMBUS_PG_POOL_MIN`, `NIMBUS_PG_POOL_MAX`, `NIMBUS_PG_POOL_TIMEOUT`, `NIMBUS_PG_STATEMENT_TIMEOUT_MS`.
+
+> ⚠️ **Machine-specific paths:** `COLOR_FILE` and `COLOR_WHEEL_DIR` in `brain.py` are still hardcoded absolute paths. Update these constants when running on a new machine. Move them to env vars before any hosted deployment — see `MIGRATION.md`.
+
 ## Data Sources
 
-**Orders live in Postgres**, not Excel. `db.py` owns all connection management and queries; `brain.py` calls `db.load_orders_df()` at startup and on `POST /reload`, and user reschedules are persisted back to the `orders` table (`scheduled_start` / `scheduled_end`). Excel is no longer the source of truth for the schedule.
+**Orders live in Postgres**, not Excel. `db.py` owns all connection management and queries; `brain.py` is **stateless** — it holds no in-memory order cache. Every `GET /tasks` request queries the DB directly via `db.query_orders()`. This allows multiple uvicorn workers or replicas without shared state.
 
 - **Order ingest** — `POST /upload` accepts a `sequence_testing`-shaped `.xlsx` and upserts rows into the `orders` table (`db.ingest_orders_from_excel`).
-- **Color wheels** — still file-based: a global `color_wheel.xlsx` (`COLOR_FILE` constant in `brain.py`) plus per-plant `color_wheel_<PLANT>.xlsx` files under `COLOR_WHEEL_DIR`, uploaded via the Plant tab.
-- **Master data** — `master_data.py` backs the `/master-data/*` endpoints (plants, production lines, custom columns) against Postgres.
+- **Color wheels** — still file-based: a global `color_wheel.xlsx` (`COLOR_FILE` in `brain.py`) plus per-plant `color_wheel_<PLANT>.xlsx` files under `COLOR_WHEEL_DIR`, uploaded via the Plant tab. These are cached in `GLOBAL_CW` / `PLANT_CWS` at startup and on `POST /reload`.
+- **Master data** — `master_data.py` backs the `/master-data/*` endpoints (plants, production lines, custom columns) against Postgres. All dynamic SQL goes through `psycopg.sql.Identifier` / parameterized placeholders — no raw string interpolation.
 
-> ⚠️ **Security:** `db.py` currently hard-codes the Postgres connection string (including the password) for the POC. Move it to env vars / Azure Key Vault before any hosted deployment — see `MIGRATION.md`.
+## Deployment Notes
+
+- **`POST /reload`** refreshes the in-process color-wheel file cache only. It does **not** reload orders (they are never cached — every `/tasks` request hits Postgres).
+- **`APP_VERSION`** in `app.js` and **`NIMBUS_BUILD_ID`** in `index.html` must be kept in sync and bumped on every deploy to bust static asset caches.
+- Structured JSON logs are emitted to stdout (`nimbus.*` logger tree, one JSON object per line). `x-request-id` is threaded through every request so frontend `ErrorLog` entries can be joined to backend logs for support.
 
 ## Architecture
 
-### Frontend (`app.js` — ~31 sequential IIFE modules, ~13,100 lines; plus `nimbus-intelligence.js`)
+### Frontend (`app.js` — ~32 sequential IIFE modules; plus `nimbus-intelligence.js`)
 
 All modules are plain vanilla JS IIFEs that execute top-to-bottom and attach to a single `window.NIMBUS` namespace. The module load order matters — each module can only reference modules declared above it.
 
 A second frontend file, **`nimbus-intelligence.js`** (~2,200 lines, loaded after `app.js` in `index.html`), extends `window.NIMBUS` with the intelligence layer: `CommandPalette` (Cmd+K), `NeedsEngine`, `TimeMachine`, `Confidence`, `RipplePreview`, `Diff`, `Patterns`, `Voice`, `Haptic`, and `DarkMode`. Depth varies by module — `CommandPalette` and `NeedsEngine` are the most mature.
+
+**Localization:** `locales/` holds i18n string maps (en, de, es, fr, pt). Loaded after `nimbus-intelligence.js`.
 
 **Core layers (bottom-up dependency order):**
 
@@ -75,27 +101,31 @@ A second frontend file, **`nimbus-intelligence.js`** (~2,200 lines, loaded after
 | State | `Store` | Reactive pub/sub; single source of truth. All state lives here. |
 | Domain | `Calendar`, `Alerts`, `Utilization`, `Engine` | Business logic that reads/writes Store |
 | Infrastructure | `ErrorLog`, `DataIntegrity`, `Toast`, `Modal`, `UndoStack` | Cross-cutting concerns |
-| UI components | `Timeline`, `Table`, `Inspector`, `Hierarchy`, `Dashboard`, `UtilStrip`, `ContextMenu`, `Selection` | Render and respond to Store changes |
+| Master Data UI | `Plant`, `ProdLines`, `LaborPlanning` | Plant/line management tabs; labor plan editor |
+| UI components | `Timeline`, `Table`, `Inspector`, `Hierarchy`, `Dashboard`, `UtilStrip`, `TimelineNav`, `GanttFilter`, `DependencyOverlay`, `ContextMenu`, `Selection` | Render and respond to Store changes |
+| What-if | `Sandbox` | Sandboxed simulation / what-if preview; isolated Store copy |
 | Input | `Interaction` | Unified click/keyboard/drag pipeline; calls Engine and mutates Store |
 | Data | `Persistence` | Backend fetch, localStorage cache (`nimbus.state.v3`), auto-save |
-| Boot | `App` | Tab switching, side-panel resize, initialization sequence |
+| Boot | `PlantSelector`, `AdminCockpit`, `Printer`, `App` | Plant picker, upload/data management, print/export, tab switching |
 
 **State flow:** User action → `Interaction` → mutate `Store` → `Store.publish()` → subscribed UI modules re-render.
 
 **Undo:** `UndoStack` (10 levels) wraps any destructive Store mutation. Always snapshot before calling Engine optimization or bulk drag operations.
 
-### Backend (`brain.py` — FastAPI, ~1,060 lines; data layer in `db.py` ~750 lines, `master_data.py` ~410 lines)
+**Known plants:** `Config.KNOWN_PLANTS` (`['5512', '1006']`) seeds the plant selector. Add new plant codes here when onboarding a new plant.
+
+### Backend (`brain.py` — FastAPI; data layer in `db.py`, `master_data.py`)
 
 `brain.py` exposes ~30 endpoints (tasks, diagnostics, upload/purge/audit, color wheels, master data, backend logs). The most load-bearing:
-- `GET /tasks` — task list with finish-to-start links and metadata; supports `?plant=` server-side scoping (no limit/offset pagination yet)
+- `GET /tasks` — task list with finish-to-start links and metadata; supports `?plant=` server-side scoping (no limit/offset pagination yet). Calls `db.query_orders()` on every request — no cache.
 - `GET /diagnostics` / `GET /diagnostics/deep` — load statistics and DB stats
-- `POST /reload` — re-query orders from Postgres without restarting
+- `POST /reload` — refreshes color-wheel file cache (`GLOBAL_CW` / `PLANT_CWS`); does **not** affect orders
 - `POST /task/update` — update one task's start/end
 - `POST /tasks/update` — bulk update (the frontend autosave path; payload `{ tasks, blocks?, calendars? }`)
 - `POST /tasks/bulk_update` — flat-list alias for external tooling
 - `POST /upload` — ingest a `sequence_testing`-shaped `.xlsx` into the `orders` table
 
-All three `/update` endpoints share one helper, `_apply_task_date_updates()`, which validates payloads via the `TaskDateUpdate` Pydantic model, mutates the in-memory `DATA`, and **persists each edit to Postgres** (`scheduled_start` / `scheduled_end`). On a DB-write failure the in-memory mutation is rolled back so `DATA` and the DB stay consistent; inverted ranges (end ≤ start) are rejected. `POST /reload` discards in-memory edits and re-queries the DB.
+All three `/update` endpoints call `db.update_task_dates_bulk()`, which validates payloads, **persists each edit to Postgres** (`scheduled_start` / `scheduled_end`), and rejects inverted ranges (end ≤ start). A DB-write failure leaves Postgres unchanged (single transaction). `POST /reload` does not touch orders.
 
 Task IDs are MD5 hashes of `f"{PRODUCTION_ORDER}|{MATERIAL_NUMBER}"` computed by `make_id()` in `db.py`. Because the hash excludes time, IDs are stable across reloads and reschedules — the frontend relies on this for keying drag/edit operations.
 
@@ -152,4 +182,4 @@ With `altInput: true`, existing `.value` reads in save functions keep working �
 
 ### Files
 
-`styles.css` (~4,600 lines) is present and uses a CSS-variable design-token system with a dark-mode layer. (`nimbus-interaction.js` was previously a separate file, but the `Interaction` module is now inlined into `app.js`.) Note that `index.html` also carries ~850 lines of inline `<style>` that have not yet been migrated into `styles.css`.
+`styles.css` (~4,600 lines) uses a CSS-variable design-token system with a dark-mode layer. `index.html` also carries ~850 lines of inline `<style>` that have not yet been migrated into `styles.css`. (`nimbus-interaction.js` was previously a separate file, but the `Interaction` module is now inlined into `app.js`.)
