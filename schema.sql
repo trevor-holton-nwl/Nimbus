@@ -199,9 +199,21 @@ CREATE TABLE IF NOT EXISTS labor_plan (
 );
 CREATE INDEX IF NOT EXISTS idx_labor_plan_plant ON labor_plan(plant);
 
--- Migrate from old headcount column if it still exists
+-- Migrate from old headcount column if it still exists.
+-- Guarded with a DO block + dynamic SQL: on a fresh DB the `headcount` column
+-- does not exist, and referencing it directly in a plain UPDATE would raise
+-- "column does not exist" at plan time (before WHERE is evaluated), aborting
+-- the script. EXECUTE defers parsing until we've confirmed the column exists.
 ALTER TABLE labor_plan ADD COLUMN IF NOT EXISTS avail_hours NUMERIC;
-UPDATE labor_plan SET avail_hours = headcount WHERE avail_hours IS NULL AND headcount IS NOT NULL;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'labor_plan' AND column_name = 'headcount'
+  ) THEN
+    EXECUTE 'UPDATE labor_plan SET avail_hours = headcount WHERE avail_hours IS NULL AND headcount IS NOT NULL';
+  END IF;
+END $$;
 
 -- Labor Plan Line — available labor hours per production line per calendar day
 -- ----------------------------------------------------------------------------
