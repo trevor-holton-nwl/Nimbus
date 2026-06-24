@@ -755,7 +755,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _buildPanel() {
       const fab = document.createElement('button');
       fab.id = 'ni-cmd-fab';
-      fab.setAttribute('aria-label', 'Open command palette');
+      fab.setAttribute('aria-label', NIMBUS.Util.t('aria.open_command_palette'));
       fab.textContent = '🧹';
       fab.addEventListener('click', () => {
         if (fab.classList.contains('ni-fab-locked')) return;
@@ -768,7 +768,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const panel = document.createElement('div');
       panel.id = 'ni-cmd-panel';
       panel.setAttribute('role', 'dialog');
-      panel.setAttribute('aria-label', 'Command palette');
+      panel.setAttribute('aria-label', NIMBUS.Util.t('aria.command_palette'));
       panel.innerHTML = `
         <div class="ni-cp-search-row">
           <svg class="ni-cp-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor">

@@ -2,7 +2,6 @@ fastapi
 uvicorn
 python-multipart
 pandas
-numpy
 openpyxl
 psycopg[binary]
 psycopg_pool

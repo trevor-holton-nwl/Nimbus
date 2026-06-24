@@ -54,6 +54,11 @@ h1, h2, h3, h4 {
   --ok-soft:  #d8ecdf;
   --warn:     #b57a0a;
   --warn-soft:#f6e5bd;
+  --warn-vivid:#f39c12;            /* vivid amber — distinct from the muted --warn */
+  --tab-admin-bg:       #f3f4f6;   /* Admin tab tint (light) */
+  --tab-admin-bg-hover: #e5e7eb;
+  --tab-md-bg:          #f0fdf4;   /* Master Data tab tint (light) */
+  --tab-md-bg-hover:    #dcfce7;
   --err:      #b1362a;
   --err-soft: #f4d5d0;
   --info:     #2d5f8c;
@@ -134,30 +139,30 @@ h1, h2, h3, h4 {
 
 /* Admin Cockpit tab — desaturated idle chip */
 .tab-btn[data-tab="admin"]:not(.active) {
-  background: #f3f4f6;
+  background: var(--tab-admin-bg);
   border-color: transparent;
 }
 .tab-btn[data-tab="admin"]:not(.active):hover {
-  background: #e5e7eb;
+  background: var(--tab-admin-bg-hover);
   border-color: transparent;
 }
 /* Admin Cockpit tab — saturated gray when active */
 .tab-btn[data-tab="admin"].active {
-  background: #e5e7eb;
+  background: var(--tab-admin-bg-hover);
 }
 
 /* Manage Master Data tab — desaturated idle chip */
 .tab-btn[data-tab="masterdata"]:not(.active) {
-  background: #f0fdf4;
+  background: var(--tab-md-bg);
   border-color: transparent;
 }
 .tab-btn[data-tab="masterdata"]:not(.active):hover {
-  background: #dcfce7;
+  background: var(--tab-md-bg-hover);
   border-color: transparent;
 }
 /* Manage Master Data tab — saturated green when active */
 .tab-btn[data-tab="masterdata"].active {
-  background: #dcfce7;
+  background: var(--tab-md-bg-hover);
 }
 
 /* Top-bar actions */
@@ -552,28 +557,6 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .gantt-toolbar .group { display: flex; gap: 4px; }
 .spacer { flex: 1; }
 .sep-v { width: 1px; height: 22px; background: var(--line); }
-
-.util-strip {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; font-family: 'JetBrains Mono', monospace;
-  color: var(--fg-mute);
-}
-.util-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 8px;
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  background: var(--bg-elev);
-}
-.util-chip .dot { width: 6px; height: 6px; border-radius: 50%; }
-.util-chip.ok   .dot { background: var(--ok); }
-.util-chip.warn .dot { background: var(--warn); }
-.util-chip.err  .dot { background: var(--err); }
-.util-chip .pct { font-weight: 600; color: var(--fg); }
-.util-alert-label {
-  font-weight: 700; color: var(--err); margin-right: 4px;
-  letter-spacing: 0.04em; font-size: 10px;
-}
 
 .main-row {
   flex: 1;
@@ -2781,7 +2764,7 @@ input.lines-nav-input:focus {
   transition: background 0.3s;
 }
 .admin-health-dot.ok   { background: #27ae60; box-shadow: 0 0 4px rgba(39,174,96,0.5); }
-.admin-health-dot.warn { background: #f39c12; box-shadow: 0 0 4px rgba(243,156,18,0.5); }
+.admin-health-dot.warn { background: var(--warn-vivid); box-shadow: 0 0 4px rgba(243,156,18,0.5); }
 .admin-health-dot.err  { background: #c0392b; box-shadow: 0 0 4px rgba(192,57,43,0.5); }
 .admin-health-label { color: var(--fg); }
 
@@ -2806,7 +2789,7 @@ input.lines-nav-input:focus {
 }
 .admin-pipeline-step:hover { background: var(--accent-wash); }
 .admin-pipeline-step.ok   { border-color: #27ae60; }
-.admin-pipeline-step.warn { border-color: #f39c12; background: rgba(243,156,18,0.04); }
+.admin-pipeline-step.warn { border-color: var(--warn-vivid); background: rgba(243,156,18,0.04); }
 .admin-pipeline-step.err  { border-color: #c0392b; background: rgba(192,57,43,0.05); }
 .admin-pipeline-step-count {
   font-size: 20px;
@@ -2955,7 +2938,7 @@ input.lines-nav-input:focus {
   border-left: 3px solid transparent;
 }
 .admin-bwarn-row.admin-bwarn-error { border-left-color: #c0392b; background: rgba(192,57,43,0.04); }
-.admin-bwarn-row.admin-bwarn-warn  { border-left-color: #f39c12; background: rgba(243,156,18,0.04); }
+.admin-bwarn-row.admin-bwarn-warn  { border-left-color: var(--warn-vivid); background: rgba(243,156,18,0.04); }
 .admin-bwarn-row.admin-bwarn-info  { border-left-color: var(--info,#3498db); }
 .admin-bwarn-meta { display: flex; align-items: center; gap: 8px; }
 .admin-bwarn-lvl {
@@ -4149,6 +4132,7 @@ body.dark {
   /* Semantic */
   --ok:       #3d9962;  --ok-soft:   #0e2e1d;
   --warn:     #d09010;  --warn-soft: #2e2008;
+  --tab-md-bg: #1c3d28;  --tab-md-bg-hover: #224830;  /* Master Data tab — dark green in dark mode */
   --err:      #d94a3a;  --err-soft:  #2e1210;
   --info:     #4a88c8;  --info-soft: #10203c;
 
@@ -4335,7 +4319,7 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
   min-width: 2px;
 }
 .admin-db-fillbar-fill.ok   { background: linear-gradient(90deg, #27ae60, #2ecc71); }
-.admin-db-fillbar-fill.warn { background: linear-gradient(90deg, #d09010, #f39c12); }
+.admin-db-fillbar-fill.warn { background: linear-gradient(90deg, #d09010, var(--warn-vivid)); }
 .admin-db-fillbar-fill.err  { background: linear-gradient(90deg, #c0392b, #e74c3c); }
 .admin-db-fillbar-lbl { font-size: 11px; color: var(--fg-mute); white-space: nowrap; }
 
@@ -4350,7 +4334,7 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 }
 .admin-db-stackbar-seg          { height: 100%; min-width: 4px; }
 .admin-db-stackbar-seg.state-active { background: #e74c3c; }
-.admin-db-stackbar-seg.state-xit    { background: #f39c12; }
+.admin-db-stackbar-seg.state-xit    { background: var(--warn-vivid); }
 .admin-db-stackbar-seg.state-idle   { background: #27ae60; }
 .admin-db-stackbar-seg.state-other  { background: var(--fg-faint); }
 .admin-db-stackbar-legend { display: flex; gap: 8px; margin-top: 7px; flex-wrap: wrap; }
@@ -4414,7 +4398,7 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 }
 .db-maint-btn:hover    { background: var(--bg-subtle); color: var(--fg); }
 .db-maint-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.db-maint-btn--urgent  { border-color: rgba(243,156,18,0.6); color: #f39c12; }
+.db-maint-btn--urgent  { border-color: rgba(243,156,18,0.6); color: var(--warn-vivid); }
 .db-maint-btn--urgent:hover { background: rgba(243,156,18,0.08); }
 
 .db-maint-global-btn {
@@ -4460,7 +4444,7 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 }
 .admin-db-hbar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--accent), #e0a018); min-width: 2px; }
 .admin-db-hbar-fill.unused { background: var(--warn); opacity: 0.45; }
-.admin-db-hbar-fill.warn   { background: linear-gradient(90deg, #d09010, #f39c12); }
+.admin-db-hbar-fill.warn   { background: linear-gradient(90deg, #d09010, var(--warn-vivid)); }
 .admin-db-hbar-fill.err    { background: linear-gradient(90deg, #c0392b, #e74c3c); }
 .admin-db-hbar-val  { font-size: 11px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; min-width: 52px; text-align: right; color: var(--fg); }
 .admin-db-hbar-size { font-size: 10px; color: var(--fg-faint); min-width: 48px; text-align: right; }
@@ -4521,10 +4505,8 @@ body.dark .tab-btn[data-tab="admin"]:not(.active) { background: #2a2c36; border-
 body.dark .tab-btn[data-tab="admin"]:not(.active):hover { background: #32343f; }
 body.dark .tab-btn[data-tab="admin"].active { background: #32343f; }
 
-/* Manage Master Data tab — dark green in dark mode */
-body.dark .tab-btn[data-tab="masterdata"]:not(.active) { background: #1c3d28; border-color: transparent; }
-body.dark .tab-btn[data-tab="masterdata"]:not(.active):hover { background: #224830; }
-body.dark .tab-btn[data-tab="masterdata"].active { background: #224830; }
+/* Manage Master Data tab dark-green is now driven by the --tab-md-bg / --tab-md-bg-hover
+   token overrides in the body.dark block above — the tab-btn rules use those vars. */
 
 /* Active tab + sub-sub tab text → white in dark mode */
 body.dark .tab-btn[data-tab="masterdata"].active,
@@ -4916,3 +4898,15 @@ td.lp-selected-td {
 .cons-warn  { color: var(--warn); font-weight: 600; }
 .cons-toggle { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 12px; color: var(--fg-mute); cursor: pointer; }
 .cons-toggle input { cursor: pointer; }
+
+/* ── Admin Thread Profiler ─────────────────────────────────────────────── */
+.admin-perf-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono, monospace); }
+.admin-perf-table th { text-align: left; padding: 5px 10px; border-bottom: 2px solid var(--border); color: var(--fg-mute); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.admin-perf-table td { padding: 4px 10px; border-bottom: 1px solid var(--border-subtle); white-space: nowrap; }
+.admin-perf-table tbody tr:hover td { background: var(--bg-subtle); }
+.admin-perf-table .perf-name { font-weight: 600; color: var(--fg); white-space: nowrap; }
+.admin-perf-table .perf-ago  { color: var(--fg-faint); font-size: 11px; }
+.admin-perf-table .admin-perf-empty { text-align: center; color: var(--fg-mute); padding: 24px; font-style: italic; }
+.perf-ok   { color: var(--ok,  #2f7a4d); }
+.perf-warn { color: var(--warn, #b8791a); font-weight: 600; }
+.perf-hot  { color: var(--err,  #c0392b); font-weight: 700; }

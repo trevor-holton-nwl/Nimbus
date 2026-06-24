@@ -30,6 +30,9 @@ PG_PORT = int(os.getenv("PG_PORT", "5432"))
 PG_DB   = os.getenv("PG_DB",   "nimbus")
 PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASS = os.getenv("PG_PASS", "")
+# Azure Database for PostgreSQL Flexible Server requires TLS — set PG_SSLMODE=require
+# in .env when pointing at Azure. Default "prefer" keeps local dev unchanged.
+PG_SSLMODE = os.getenv("PG_SSLMODE", "prefer")
 
 # Pool + safety knobs. Defaults are tuned for the stateless read path (every
 # request issues a DB query, so the old max_size=5 became a bottleneck under
@@ -44,7 +47,7 @@ PG_STATEMENT_TIMEOUT_MS = int(os.environ.get("NIMBUS_PG_STATEMENT_TIMEOUT_MS", "
 # per-checkin transaction reset (a `SET` inside a rolled-back tx would be lost).
 CONN_STR = (
     f"host={PG_HOST} port={PG_PORT} dbname={PG_DB} "
-    f"user={PG_USER} password={PG_PASS} "
+    f"user={PG_USER} password={PG_PASS} sslmode={PG_SSLMODE} "
     f"options='-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}'"
 )
 
@@ -113,7 +116,12 @@ _ORDERS_SELECT = """
         order_quantity        AS "ORDER_QUANTITY_(GMEIN)",
         form_size             AS "FORM_SIZE",
         notes                 AS "NOTES",
-        firming_indicator     AS "FIRMING_INDICATOR"
+        firming_indicator     AS "FIRMING_INDICATOR",
+        -- Optimistic-concurrency token. xmin is the txid that last wrote the row;
+        -- it changes on every UPDATE, gives exact integer equality (no timestamp
+        -- precision/tz fragility), and needs no schema column. Cast via text because
+        -- xmin's native type (xid) has no direct bigint cast.
+        o.xmin::text::bigint  AS "ROW_VERSION"
     FROM orders o
     LEFT JOIN production_lines pl ON pl.production_line = o.production_line
 """
@@ -188,6 +196,36 @@ def count_orders(plant: str | None = None, line: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
+def get_task_versions(ids: list[str]) -> list[dict]:
+    """
+    Lean refetch for optimistic-concurrency conflict reconciliation: current effective
+    dates + xmin row version for specific order ids only. No color-merge / link
+    machinery — the client uses this to overwrite the stale copies a concurrent edit
+    changed underneath it.
+    """
+    if not ids:
+        return []
+    sql = """
+        SELECT id,
+               COALESCE(scheduled_start, basic_start_date)  AS eff_start,
+               COALESCE(scheduled_end,   basic_finish_date) AS eff_end,
+               xmin::text::bigint                           AS row_version
+        FROM orders WHERE id = ANY(%s)
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (ids,))
+        rows = cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "start_date": r[1].strftime("%Y-%m-%dT%H:%M:%S") if r[1] else None,
+            "end_date":   r[2].strftime("%Y-%m-%dT%H:%M:%S") if r[2] else None,
+            "row_version": int(r[3]) if r[3] is not None else None,
+        }
+        for r in rows
+    ]
+
+
 def upload_audit_log(limit: int = 50) -> list[dict]:
     """Recent uploads, newest first, for the Admin Cockpit history card."""
     sql = """
@@ -242,18 +280,6 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
     return {"status": "ok", "updated": updated}
 
 
-# Uniform statement for batched edits: COALESCE keeps the existing value when a
-# field is not part of this edit (matches the single-field semantics of
-# update_task_dates — this path never NULLs out a previously-set override).
-_BULK_UPDATE_SQL = """
-    UPDATE orders SET
-        scheduled_start = COALESCE(%s, scheduled_start),
-        scheduled_end   = COALESCE(%s, scheduled_end),
-        updated_at      = NOW()
-    WHERE id = %s
-"""
-
-
 def update_task_dates_bulk(items: list[dict]) -> dict:
     """
     Persist a batch of start/end edits in a SINGLE transaction (one commit),
@@ -264,11 +290,22 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
     *effective* current dates (so updating only start still checks against the
     existing end). Unknown ids are reported, not written.
 
-    Returns {applied, persisted, failed, invalid, not_found}.
+    Optimistic concurrency: each item may carry `base_version` (the xmin the client
+    last saw) and `force`. Under the FOR UPDATE lock we read each row's current xmin;
+    if `base_version` is provided, doesn't match, and `force` is falsy, the edit is
+    rejected and the id is reported in `stale` (no write). Forced edits and edits with
+    no base_version write unconditionally (backward-compatible). Persisted rows return
+    their NEW xmin in `versions` so the client can re-stamp without a self-conflict on
+    its next edit.
+
+    Returns {applied, persisted, failed, invalid, not_found, stale, versions}.
     """
     applied = persisted = failed = invalid = not_found = 0
+    stale: list[str] = []
+    versions: dict[str, int] = {}
     if not items:
-        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0, "not_found": 0}
+        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
+                "not_found": 0, "stale": [], "versions": {}}
 
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -276,15 +313,16 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             """
             SELECT id,
                    COALESCE(scheduled_start, basic_start_date)  AS eff_start,
-                   COALESCE(scheduled_end,   basic_finish_date) AS eff_end
+                   COALESCE(scheduled_end,   basic_finish_date) AS eff_end,
+                   xmin::text::bigint                           AS row_version
             FROM orders WHERE id = ANY(%s)
             FOR UPDATE
             """,
             (ids,),
         )
-        eff = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        eff = {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
 
-        valid_rows = []
+        update_rows = []
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
@@ -294,25 +332,47 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             if tid not in eff:
                 not_found += 1
                 continue
-            cur_start, cur_end = eff[tid]
+            cur_start, cur_end, cur_ver = eff[tid]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
             if new_start is not None and new_end is not None and new_end <= new_start:
                 invalid += 1
                 continue
-            valid_rows.append((start, end, tid))
+            base_version = it.get("base_version")
+            if not it.get("force") and base_version is not None and base_version != cur_ver:
+                stale.append(tid)   # someone else wrote since the client's read
+                continue
+            update_rows.append((start, end, tid))
 
-        if valid_rows:
+        if update_rows:
             try:
-                cur.executemany(_BULK_UPDATE_SQL, valid_rows)
+                # Single statement: COALESCE keeps the unedited field; explicit casts on the
+                # VALUES columns are required because an all-NULL column would otherwise be
+                # of unknown type. RETURNING o.xmin gives each row's post-write version, using
+                # the identical xmin::text::bigint expression as the /tasks read path.
+                placeholders = ", ".join(["(%s::timestamp, %s::timestamp, %s::text)"] * len(update_rows))
+                params = [v for row in update_rows for v in row]
+                sql = f"""
+                    UPDATE orders o
+                    SET scheduled_start = COALESCE(v.s, o.scheduled_start),
+                        scheduled_end   = COALESCE(v.e, o.scheduled_end),
+                        updated_at      = NOW()
+                    FROM (VALUES {placeholders}) AS v(s, e, id)
+                    WHERE o.id = v.id
+                    RETURNING o.id, o.xmin::text::bigint AS new_version
+                """
+                cur.execute(sql, params)
+                for rid, rver in cur.fetchall():
+                    versions[rid] = int(rver)
                 conn.commit()
-                persisted = applied = len(valid_rows)
+                persisted = applied = len(versions)
             except Exception:
                 conn.rollback()
-                failed = len(valid_rows)
+                failed = len(update_rows)
                 raise
     return {"applied": applied, "persisted": persisted, "failed": failed,
-            "invalid": invalid, "not_found": not_found}
+            "invalid": invalid, "not_found": not_found,
+            "stale": stale, "versions": versions}
 
 
 def update_task_note(task_id: str, notes) -> dict:

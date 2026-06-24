@@ -60,6 +60,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',
   'toast.saved_to_backend':            'Salvo no servidor',
   'toast.partial_db_save':             '⚠ Apenas {{persisted}}/{{total}} ordens chegaram ao banco de dados — verifique os registros',
+  'toast.concurrent_edit_conflict':    '⚠ {{count}} ordem(ns) foram alteradas por outra pessoa — atualizadas para a versão mais recente',
   'toast.backend_zero_orders':         'Servidor retornou zero ordens — verifique o registro do brain.py',
   'toast.backend_unreachable_cache':   '⚠ Servidor inacessível — exibindo dados em cache. Algumas ordens podem estar faltando.',
   'toast.backend_recovered':           'Servidor recuperado — recarregando dados',
@@ -896,4 +897,49 @@ window.__NIMBUS_LOCALES.pt = {
   'modal.ls_inv_total':                'Total: {{size}} KB em {{count}} chave(s)',
   'modal.ls_inv_snapshot':             'Último snapshot: {{size}} KB · {{status}}',
   'modal.ls_inventory_top_keys':       'Principais chaves por tamanho:',
+
+  /* ── Keys added in en.js after last locale sync — MISSING TRANSLATION ── */
+  'toast.undone_label':                'Undone: {{label}}',                        // MISSING TRANSLATION
+  'ui.pool_unavailable':               'Pool unavailable',                          // MISSING TRANSLATION
+  'ui.not_loaded':                     'Not loaded',                                // MISSING TRANSLATION
+  'ui.backend_unreachable':            'Backend unreachable',                       // MISSING TRANSLATION
+  'ui.color_wheel_miss':               'Color wheel — {{count}} miss{{plural}}',    // MISSING TRANSLATION
+  'ui.color_wheel_all_matched':        'Color wheel — all matched',                 // MISSING TRANSLATION
+  'ui.all_plants':                     'All plants',                                // MISSING TRANSLATION
+  'ui.on_plant_label':                 'on plant',                                  // MISSING TRANSLATION
+  // Dashboard KPI tiles
+  'kpi.orders_today':                  'Orders today',                              // MISSING TRANSLATION
+  'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
+  'kpi.overdue_backlog':               'Overdue backlog',                           // MISSING TRANSLATION
+  'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
+  'kpi.all_open_past_finish':          'all open orders past finish',               // MISSING TRANSLATION
+  'kpi.conflicts_pending':             'Conflicts pending',                         // MISSING TRANSLATION
+  'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
+  'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION
+  'kpi.open_alerts':                   'Open alerts',                               // MISSING TRANSLATION
+  'kpi.warn_err_summary':              '{{w}} warn · {{e}} err',                    // MISSING TRANSLATION
+  'kpi.capacity_headroom_7d':          'Capacity Headroom Next 7D',                 // MISSING TRANSLATION
+  'kpi.avg_used':                      '{{p}}% avg used',                           // MISSING TRANSLATION
+  'kpi.no_data':                       'no data',                                   // MISSING TRANSLATION
+  'kpi.fixed_orders':                  'Fixed orders',                              // MISSING TRANSLATION
+  'kpi.locked_from_optimiser':         'locked from optimiser',                     // MISSING TRANSLATION
+  // Empty states & loading
+  'ui.loading':                        'Loading…',                                  // MISSING TRANSLATION
+  'ui.select_plant_hours':             'Select a plant in the top bar to manage its hours.',  // MISSING TRANSLATION
+  'ui.select_plant_labor':             'Select a plant in the top bar to view labor planning.',  // MISSING TRANSLATION
+  'empty.no_production_lines_plant':   'No production lines for this plant.',       // MISSING TRANSLATION
+  'empty.no_line_groups_plant':        'No production line groups defined for this plant. Assign groups in <strong>Master Data → Production Lines</strong>.', // MISSING TRANSLATION
+  'empty.printer_no_orders':           'No orders in this range.',                  // MISSING TRANSLATION
+  'empty.select_plant_title':          'Select a plant to begin',                   // MISSING TRANSLATION
+  'empty.select_plant_msg':            'Use the <strong>Plant</strong> selector in the top bar to choose which plant to view across NIMBUS.', // MISSING TRANSLATION
+  // Color wheel viewer
+  'empty.cw_no_wheel_for_plant':       'No color wheel uploaded for plant <strong>{{plant}}</strong>.<br><span style="color:var(--fg-mute);font-size:12px;">Upload one in the Plant tab → Optimization Options.</span>', // MISSING TRANSLATION
+  'empty.cw_no_file':                  'No file uploaded',                          // MISSING TRANSLATION
+  'empty.cw_no_search_match':          'No colors match your search.',              // MISSING TRANSLATION
+  'empty.cw_no_entries':               'No entries in this wheel.',                 // MISSING TRANSLATION
+  // ARIA labels
+  'aria.help':                         'Help',                                      // MISSING TRANSLATION
+  'aria.welcome_dialog':               'Welcome to NIMBUS — select a plant to begin', // MISSING TRANSLATION
+  'aria.open_command_palette':         'Open command palette',                      // MISSING TRANSLATION
+  'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
 };

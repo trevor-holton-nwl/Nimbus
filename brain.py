@@ -529,7 +529,7 @@ def reload_data():
                    global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
         return {"status": "ok", "diagnostics": _diag_snapshot()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Reload failed: {e}") from e
 
 
 def _diag_snapshot() -> dict:
@@ -596,8 +596,8 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     link_id_counter = 1
     links = []
 
-    for prod_line, group in df.groupby("PRODUCTION_LINE"):
-        group = group.sort_values("BASIC_START_DATE")
+    for prod_line, group_raw in df.groupby("PRODUCTION_LINE"):
+        group = group_raw.sort_values("BASIC_START_DATE")
         prev_task_id = None
 
         for _, row in group.iterrows():
@@ -628,6 +628,9 @@ def get_tasks(plant: str | None = None, line: str | None = None,
                 "FORM_SIZE": row.get("FORM_SIZE"),
                 "notes": row.get("NOTES"),
                 "firmed": row.get("FIRMING_INDICATOR") == "X",
+                # Optimistic-concurrency token (Postgres xmin). The client echoes it
+                # back on edit so the server can reject writes computed from stale data.
+                "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
             })
 
             if prev_task_id:
@@ -658,10 +661,18 @@ def get_tasks(plant: str | None = None, line: str | None = None,
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
 class TaskDateUpdate(BaseModel):
-    """One task's optional start/end edit. Unknown fields are ignored."""
+    """One task's optional start/end edit. Unknown fields are ignored.
+
+    Optimistic concurrency: `base_version` is the xmin the client last saw for this
+    row. The write is rejected (reported as `stale`) if the row's current xmin differs,
+    unless `force` is set. `force=True` is used for authoritative bulk reschedules
+    (the optimizer), which intentionally overwrite regardless of concurrent edits.
+    """
     id: str
     start_date: str | None = None
     end_date: str | None = None
+    base_version: int | None = None
+    force: bool = False
 
 
 class TasksUpdatePayload(BaseModel):
@@ -678,9 +689,11 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
 
     Single source of truth for /task/update, /tasks/update and /tasks/bulk_update.
     Inverted ranges are validated against each row's effective current dates and
-    counted as `invalid`; unknown ids are counted as `not_found`.
+    counted as `invalid`; unknown ids are counted as `not_found`. Edits whose
+    `base_version` no longer matches the row (a concurrent write landed first) are
+    rejected and reported in `stale` unless `force` is set.
 
-    Returns { applied, persisted, failed, invalid, not_found }.
+    Returns { applied, persisted, failed, invalid, not_found, stale, versions }.
     """
     norm: list[dict] = []
     invalid = 0
@@ -692,10 +705,12 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
         end_dt   = _to_pydt(it.end_date)   if it.end_date   else None
         if start_dt is None and end_dt is None:
             continue
-        norm.append({"id": it.id, "start": start_dt, "end": end_dt})
+        norm.append({"id": it.id, "start": start_dt, "end": end_dt,
+                     "base_version": it.base_version, "force": it.force})
 
     if not norm:
-        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid, "not_found": 0}
+        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
+                "not_found": 0, "stale": [], "versions": {}}
 
     try:
         res = db.update_task_dates_bulk(norm)
@@ -703,7 +718,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
         _log_event("error", "db", "Bulk task-date persist failed (transaction rolled back)",
                    count=len(norm), error=str(e))
         return {"applied": 0, "persisted": 0, "failed": len(norm),
-                "invalid": invalid, "not_found": 0}
+                "invalid": invalid, "not_found": 0, "stale": [], "versions": {}}
     res["invalid"] = res.get("invalid", 0) + invalid
     return res
 
@@ -712,15 +727,18 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
 def update_task(task: TaskDateUpdate):
     """
     Update a single task's start/end and persist to DB.
-    Payload: { id: str, start_date?: ISO, end_date?: ISO }
-    Response: 200 { status: "ok", persisted, failed } | 400 invalid range | 404 not found
+    Payload: { id, start_date?, end_date?, base_version?, force? }
+    Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
+    A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
+    client can refetch and warn uniformly with the bulk path.
     """
     res = _apply_task_date_updates([task])
     if res.get("not_found"):
         raise HTTPException(status_code=404, detail="Task not found")
     if res.get("invalid"):
         raise HTTPException(status_code=400, detail="Invalid date range (end must be after start)")
-    return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"]}
+    return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"],
+            "stale": res.get("stale", []), "versions": res.get("versions", {})}
 
 
 @api.post("/task/note")
@@ -739,7 +757,7 @@ def update_task_note(payload: dict):
         return db.update_task_note(task_id, notes)
     except Exception as e:
         _log_event("error", "db", "Note persist failed", task_id=task_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Note persist failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Note persist failed: {e}") from e
 
 
 # Frontend calls /tasks/update (plural) with {tasks, blocks, calendars}; keep
@@ -749,36 +767,59 @@ def update_task_note(payload: dict):
 def tasks_update(payload: TasksUpdatePayload):
     """
     Bulk-update task dates and persist to DB (one transaction).
-    Payload: { tasks: [{ id, start_date?, end_date? }], blocks?, calendars? }
-    Response: { status: "ok", updated, persisted, failed, invalid, not_found }
+    Payload: { tasks: [{ id, start_date?, end_date?, base_version?, force? }], blocks?, calendars? }
+    Response: { status, updated, persisted, failed, invalid, not_found, stale, versions }
     """
     res = _apply_task_date_updates(payload.tasks)
     total = len(payload.tasks)
+    stale = res.get("stale", [])
     if res["persisted"] < total:
         _log_event("warn", "db", "Bulk update: some tasks not persisted",
                    total=total, persisted=res["persisted"], failed=res["failed"],
-                   invalid=res["invalid"], not_found=res.get("not_found", 0))
+                   invalid=res["invalid"], not_found=res.get("not_found", 0),
+                   stale=len(stale))
     return {"status": "ok", "updated": total, "persisted": res["persisted"],
             "failed": res["failed"], "invalid": res["invalid"],
-            "not_found": res.get("not_found", 0)}
+            "not_found": res.get("not_found", 0),
+            "stale": stale, "versions": res.get("versions", {})}
 
 
 @api.post("/tasks/bulk_update")
 def bulk_update(tasks: list[TaskDateUpdate]):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-    Payload: [{ id, start_date?, end_date? }]
-    Response: { status: "ok", updated, persisted, failed, invalid, not_found }
+    Payload: [{ id, start_date?, end_date?, base_version?, force? }]
+    Response: { status, updated, persisted, failed, invalid, not_found, stale, versions }
     """
     res = _apply_task_date_updates(tasks)
     total = len(tasks)
+    stale = res.get("stale", [])
     if res["persisted"] < total:
         _log_event("warn", "db", "bulk_update: some tasks not persisted",
                    total=total, persisted=res["persisted"], failed=res["failed"],
-                   invalid=res["invalid"], not_found=res.get("not_found", 0))
+                   invalid=res["invalid"], not_found=res.get("not_found", 0),
+                   stale=len(stale))
     return {"status": "ok", "updated": total, "persisted": res["persisted"],
             "failed": res["failed"], "invalid": res["invalid"],
-            "not_found": res.get("not_found", 0)}
+            "not_found": res.get("not_found", 0),
+            "stale": stale, "versions": res.get("versions", {})}
+
+
+class TaskRefreshPayload(BaseModel):
+    """Ids the client needs to reconcile after a concurrency conflict."""
+    ids: list[str] = []
+
+
+@api.post("/tasks/refresh")
+def tasks_refresh(payload: TaskRefreshPayload):
+    """
+    Lean refetch of specific orders' current dates + row_version, for optimistic-
+    concurrency conflict reconciliation. Returns only what the client needs to
+    overwrite its stale copies — no links, no color merge.
+    Payload: { ids: [str] }
+    Response: { data: [{ id, start_date, end_date, row_version }] }
+    """
+    return {"data": db.get_task_versions(payload.ids)}
 
 
 # =========================
@@ -828,7 +869,7 @@ def purge_orders(payload: dict):
         start = datetime.fromisoformat(str(payload["start_date"]).replace("Z", ""))
         end   = datetime.fromisoformat(str(payload["end_date"]).replace("Z", ""))
     except (KeyError, ValueError, TypeError) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid date range: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid date range: {e}") from e
     result = db.purge_orders_by_date(start, end)
     if result.get("status") == "ok":
         _log_event("info", "purge", "Orders purged by date range",
@@ -867,7 +908,7 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse xlsx: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not parse xlsx: {e}") from e
 
     path = _cw_path(plant)
     is_replace = os.path.isfile(path)
@@ -918,7 +959,7 @@ def get_color_wheel(plant: str):
         meta = _cw_read_meta().get(plant, {})
         return {"plant": plant, "entries": entries, "meta": meta}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not read color wheel: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not read color wheel: {e}") from e
 
 
 @api.delete("/color-wheel/{plant}")
@@ -992,7 +1033,7 @@ def clear_audit_log():
         open(_cw_audit_path(), 'w', encoding='utf-8').close()
         return {"status": "ok"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not clear audit log: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not clear audit log: {e}") from e
 
 
 # =============================================================================
@@ -1027,7 +1068,7 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.post("/master-data/{table}/columns")
@@ -1047,7 +1088,7 @@ def md_add_column(table: str, request: Request, body: dict = Body(default={})):
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.delete("/master-data/{table}/columns/{column}")
@@ -1058,7 +1099,7 @@ def md_drop_column(table: str, column: str, request: Request):
     try:
         return md.drop_column(table, column, user_email=request.headers.get("x-user-email"))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.patch("/master-data/{table}/columns/{column}")
@@ -1073,7 +1114,7 @@ def md_rename_label(table: str, column: str, request: Request, body: dict = Body
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.get("/master-data/_audit")
@@ -1097,7 +1138,7 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =============================================================================
@@ -1124,7 +1165,7 @@ def labor_plan_post(request: Request, body: dict = Body(default={})):
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.get("/labor-plan/line")
@@ -1146,7 +1187,7 @@ def labor_plan_line_post(request: Request, body: dict = Body(default={})):
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # =============================================================================

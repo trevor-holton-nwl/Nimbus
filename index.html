@@ -1433,6 +1433,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
                     onclick="NIMBUS.AdminCockpit.gotoOvTab('data-ops')" data-i18n="tab.data_operations">Data Operations</button>
             <button class="sub-subtab" data-ov-tab="logs" role="tab"
                     onclick="NIMBUS.AdminCockpit.gotoOvTab('logs')" data-i18n="tab.logs_audit">Logs &amp; Audit</button>
+            <button class="sub-subtab" data-ov-tab="thread" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('thread')">Thread</button>
           </nav>
 
           <!-- PANE: DIAGNOSTICS -->
@@ -1629,6 +1631,36 @@ body.dark .ls-co       { color: var(--fg-mute); }
 
             </div><!-- /admin-grid logs -->
           </div><!-- /admin-ov-logs -->
+
+          <!-- PANE: THREAD PROFILER -->
+          <div id="admin-ov-thread" hidden>
+            <div class="panel admin-card admin-card-wide" style="margin:12px 0;">
+              <header class="panel-head">
+                <h3>Main Thread Profiler</h3>
+                <span class="panel-hint">Per-operation timing — last/P50/P95/max over the last 100 samples. Red ≥ 50 ms, yellow ≥ 16 ms (one frame).</span>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost sm" id="admin-thread-clear">✕ Clear</button>
+              </header>
+              <div class="panel-body panel-body-flush">
+                <table class="admin-perf-table">
+                  <thead>
+                    <tr>
+                      <th>Operation</th>
+                      <th>Last</th>
+                      <th>P50</th>
+                      <th>P95</th>
+                      <th>Max</th>
+                      <th>Calls</th>
+                      <th>Last run</th>
+                    </tr>
+                  </thead>
+                  <tbody id="admin-perf-tbody">
+                    <tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div><!-- /admin-ov-thread -->
 
         </div><!-- /admin-overview-pane -->
 

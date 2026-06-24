@@ -68,6 +68,10 @@ const NIMBUS = (function () {
   const Config = {
     API_BASE:         'http://localhost:8000',
     STEP_MS:          15 * 60 * 1000,          // 15-minute snap
+    MS_MIN:           60 * 1000,               // 1 minute in ms
+    MS_HOUR:          60 * 60 * 1000,          // 1 hour in ms
+    MS_DAY:           24 * 60 * 60 * 1000,     // 1 day in ms
+    ANIM_MS:          220,                     // CSS-coupled: must outlast .side-right / .alert-drawer transition 0.22s
     DEFAULT_SHIFT:    [7, 19],                  // 7:00 → 19:00 (12h shift)
     WEEKEND_OFF:      true,                     // Sat/Sun closed by default
     TZ:               'America/New_York',
@@ -84,7 +88,8 @@ const NIMBUS = (function () {
     DEFAULT_PLANT:      null,
     KNOWN_PLANTS:       ['5512', '1006'],
     CENTER_ON_CLICK:    true,                       // set false to disable click-to-center in Gantt
-    DEBUG_BLOCKS:       true                        // when true, Store.addBlock/addPlantBlock console.trace every push (for diagnosing duplicate-add bugs)
+    DEBUG_BLOCKS:       true,                       // when true, Store.addBlock/addPlantBlock console.trace every push (for diagnosing duplicate-add bugs)
+    CONCURRENCY_CHECK:  true                         // optimistic-concurrency guard on task writes. Set false to force every write (legacy last-write-wins) if the guard misbehaves in a multi-user pilot.
   };
 
   /* =============================================================================
@@ -187,7 +192,7 @@ const NIMBUS = (function () {
         else { total += curE - curS; curS = s; curE = e; }
       }
       total += curE - curS;
-      return total / 3600000;
+      return total / Config.MS_HOUR;
     },
 
     // "2h 30m"
@@ -207,6 +212,19 @@ const NIMBUS = (function () {
       const p = n => String(n).padStart(2, '0');
       return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
            + `T${p(date.getHours())}:${p(date.getMinutes())}`;
+    },
+
+    // Flatpickr datetime-picker factory — single source for the NIMBUS amber
+    // datetime config (30-min step, alt display). `extra` extends/overrides
+    // (e.g. an onChange handler). Accepts a selector string or element; returns
+    // the flatpickr instance. The date-only (Printer/AdminCockpit) and
+    // OptimizeDialog (1-min, inline) pickers intentionally do NOT use this.
+    fpDatetime(sel, extra = {}) {
+      return flatpickr(sel, {
+        enableTime: true, dateFormat: 'Y-m-d\\TH:i',
+        altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
+        ...extra,
+      });
     },
 
     // Clamp a Date to a [min,max] window.
@@ -230,7 +248,7 @@ const NIMBUS = (function () {
     startOfDay(d) { const x = Util.parseDate(d); if (!x) return null; x.setHours(0,0,0,0); return x; },
 
     // Add minutes.
-    addMin(d, min) { return new Date(d.getTime() + min * 60000); },
+    addMin(d, min) { return new Date(d.getTime() + min * Config.MS_MIN); },
 
     // Short, stable id (used for blocks / alerts).
     uid(prefix) {
@@ -291,7 +309,7 @@ const NIMBUS = (function () {
       const end = Util.scheduledEnd(t);
       const due = Util.sapDueDate(t);
       if (!end || !due) return 0;
-      const diff = (end.getTime() - due.getTime()) / 3600000;
+      const diff = (end.getTime() - due.getTime()) / Config.MS_HOUR;
       return diff > 0 ? diff : 0;
     },
 
@@ -328,7 +346,7 @@ const NIMBUS = (function () {
         const lh = Util.latenessHours(t);
         if (lh > 0) { lateCount++; lateH += lh; }
       }
-      const span_h = (minStart === Infinity || maxEnd === -Infinity) ? 0 : (maxEnd - minStart) / 3600000;
+      const span_h = (minStart === Infinity || maxEnd === -Infinity) ? 0 : (maxEnd - minStart) / Config.MS_HOUR;
       // Peak utilization from the existing Utilization matrix (uses Calendar capacities).
       let peak = 0;
       try {
@@ -361,6 +379,169 @@ const NIMBUS = (function () {
   };
 
   window.t = (key, vars) => Util.t(key, vars);
+
+  /* =============================================================================
+     VIRTUAL LIST — minimal padding-based windowing helper.
+     Renders only the items visible in the scroll viewport plus a buffer,
+     using paddingTop/paddingBottom spacers so the scrollbar reflects true height.
+
+     Usage (fixed height):
+       const vl = new VirtualList(scrollEl, { rowH: 36, renderFn: (item) => '<div>...</div>' });
+       vl.update(items);
+
+     Usage (variable height — e.g. expandable rows):
+       const vl = new VirtualList(scrollEl, { getRowH: (item) => item.open ? 120 : 36, renderFn });
+       vl.update(items);
+     ========================================================================== */
+  class VirtualList {
+    constructor(scrollEl, { rowH, getRowH, renderFn, mountEl, buffer = 5 } = {}) {
+      this._scroll   = scrollEl;
+      this._mount    = mountEl || scrollEl;
+      this._fixedH   = typeof rowH === 'number' ? rowH : null;
+      this._getRowH  = getRowH || null;
+      this._renderFn = renderFn;
+      this._buf      = buffer;
+      this._items    = [];
+      this._offsets  = null;
+      this._inner    = document.createElement('div');
+      this._mount.appendChild(this._inner);
+      this._onScroll = () => this._paint();
+      scrollEl.addEventListener('scroll', this._onScroll, { passive: true });
+    }
+
+    update(items) {
+      this._items = items;
+      if (this._getRowH) {
+        const n = items.length;
+        this._offsets = new Float64Array(n + 1);
+        for (let i = 0; i < n; i++) {
+          this._offsets[i + 1] = this._offsets[i] + this._getRowH(items[i]);
+        }
+      }
+      this._paint();
+    }
+
+    _totalH() {
+      if (this._fixedH !== null) return this._items.length * this._fixedH;
+      return this._offsets ? this._offsets[this._items.length] : 0;
+    }
+
+    _offsetOf(i) {
+      if (this._fixedH !== null) return i * this._fixedH;
+      return this._offsets ? this._offsets[i] : 0;
+    }
+
+    _paint() {
+      const n = this._items.length;
+      if (!n) {
+        this._inner.style.paddingTop = '0';
+        this._inner.style.paddingBottom = '0';
+        this._inner.innerHTML = '';
+        return;
+      }
+      const scrollTop = this._scroll.scrollTop;
+      const viewH     = this._scroll.clientHeight || 600;
+      const buf       = this._buf;
+      let lo, hi;
+
+      if (this._fixedH !== null) {
+        lo = Math.max(0, Math.floor(scrollTop / this._fixedH) - buf);
+        hi = Math.min(n, Math.ceil((scrollTop + viewH) / this._fixedH) + buf);
+      } else {
+        // Binary search for first item whose bottom edge is below scrollTop
+        let l = 0, r = n - 1;
+        while (l < r) {
+          const m = (l + r) >> 1;
+          if (this._offsets[m + 1] <= scrollTop) l = m + 1; else r = m;
+        }
+        lo = Math.max(0, l - buf);
+        // Walk forward until item top exceeds viewport bottom
+        let e = lo;
+        while (e < n && this._offsets[e] < scrollTop + viewH) e++;
+        hi = Math.min(n, e + buf);
+      }
+
+      this._inner.style.paddingTop    = this._offsetOf(lo) + 'px';
+      this._inner.style.paddingBottom = (this._totalH() - this._offsetOf(hi)) + 'px';
+
+      let html = '';
+      for (let i = lo; i < hi; i++) html += this._renderFn(this._items[i], i);
+      this._inner.innerHTML = html;
+    }
+
+    destroy() {
+      this._scroll.removeEventListener('scroll', this._onScroll);
+      this._inner.remove();
+      this._items = [];
+    }
+  }
+
+  /* =============================================================================
+     PERF MONITOR — ring-buffer profiler for main-thread operations.
+     Records named operation durations and exposes rolling p50/p95/max stats.
+     AdminCockpit "Thread" tab reads PerfMonitor.all() to render the task-manager view.
+     ========================================================================== */
+  const PerfMonitor = (() => {
+    const _MAX = 100;
+    const _buckets = new Map(); // name → { buf: Float32Array, head, count, last, lastTs }
+    const _listeners = new Set();
+    let _notifyTimer = null;
+
+    function record(name, ms) {
+      let b = _buckets.get(name);
+      if (!b) {
+        b = { buf: new Float32Array(_MAX), head: 0, count: 0, last: 0, lastTs: 0 };
+        _buckets.set(name, b);
+      }
+      b.buf[b.head % _MAX] = ms;
+      b.head++;
+      b.count++;
+      b.last   = ms;
+      b.lastTs = Date.now();
+      _notify();
+    }
+
+    function time(name, fn) {
+      const t = performance.now();
+      const r = fn();
+      record(name, performance.now() - t);
+      return r;
+    }
+
+    function stats(name) {
+      const b = _buckets.get(name);
+      if (!b) return null;
+      const n = Math.min(b.count, _MAX);
+      const sorted = Array.from(b.buf.subarray(0, n)).sort((a, c) => a - c);
+      return {
+        last:   b.last,
+        lastTs: b.lastTs,
+        count:  b.count,
+        p50:    sorted[Math.floor(n * 0.50)] ?? 0,
+        p95:    sorted[Math.floor(n * 0.95)] ?? 0,
+        max:    sorted[n - 1] ?? 0,
+      };
+    }
+
+    function all() {
+      return [..._buckets.keys()].map(k => ({ name: k, ...stats(k) }));
+    }
+
+    function clear() { _buckets.clear(); _notify(); }
+    function subscribe(fn) { _listeners.add(fn); }
+
+    function _notify() {
+      if (_notifyTimer) return;
+      _notifyTimer = setTimeout(() => { _notifyTimer = null; _listeners.forEach(fn => fn()); }, 250);
+    }
+
+    return { record, time, stats, all, clear, subscribe };
+  })();
+
+  const VL_HIER_LINE_H = 38;
+  const VL_HIER_TASK_H = 28;
+  const VL_LS_ROW_H    = 36;
+  const VL_ALERT_ROW_H = 72;
 
   /* =============================================================================
      STORE — single reactive source of truth.
@@ -403,7 +584,8 @@ const NIMBUS = (function () {
     isFixed(id)     { return this._state.fixedIds.has(String(id)); },
 
     /* ----- subscription ---------------------------------------------------- */
-    subscribe(fn) {
+    subscribe(fn, label) {
+      if (label) fn._pmLabel = label;
       this._listeners.add(fn);
       return () => this._listeners.delete(fn);
     },
@@ -413,7 +595,9 @@ const NIMBUS = (function () {
       // cache key by memoized read-models (e.g. Utilization.computeMatrix).
       this._rev = (this._rev || 0) + 1;
       for (const l of this._listeners) {
+        const _t = performance.now();
         try { l(event); } catch (e) { console.error('[Store] listener error:', e); }
+        finally { PerfMonitor.record('store:' + (l._pmLabel || l.name || '?'), performance.now() - _t); }
       }
     },
 
@@ -841,7 +1025,7 @@ const NIMBUS = (function () {
     dailyCapacityHours(line, date) {
       const win = Calendar.workWindow(line, date);
       if (!win) return 0;
-      const winHours = (win[1] - win[0]) / 3600000;
+      const winHours = (win[1] - win[0]) / Config.MS_HOUR;
 
       const plant = Store.getPlantForLine(line);
       const intervals = [];
@@ -1026,9 +1210,9 @@ const NIMBUS = (function () {
           const wh = cal[d];
           const off = !wh;
           html += `<td><div class="hours-cell ${off ? 'off':''}" data-line="${line}" data-day="${d}">
-            <input type="time" class="hours-start" value="${off ? '' : Calendar._hToT(wh[0])}">
+            <input type="text" class="hours-start" value="${off ? '' : Calendar._hToT(wh[0])}">
             <span class="dash">–</span>
-            <input type="time" class="hours-end" value="${off ? '' : Calendar._hToT(wh[1])}">
+            <input type="text" class="hours-end" value="${off ? '' : Calendar._hToT(wh[1])}">
           </div></td>`;
         }
         html += `</tr>`;
@@ -1123,16 +1307,10 @@ const NIMBUS = (function () {
         Calendar._getLines().map(l => `<option value="${l}">${l}</option>`).join('');
 
       const now = new Date(); now.setMinutes(0, 0, 0);
-      const plus1 = new Date(now.getTime() + 3600000);
+      const plus1 = new Date(now.getTime() + Config.MS_HOUR);
       if (!Calendar._fpBlkStart) {
-        Calendar._fpBlkStart = flatpickr('#blk-start', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
-        Calendar._fpBlkEnd = flatpickr('#blk-end', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
+        Calendar._fpBlkStart = Util.fpDatetime('#blk-start');
+        Calendar._fpBlkEnd   = Util.fpDatetime('#blk-end');
       }
       Calendar._fpBlkStart.setDate(now, false);
       Calendar._fpBlkEnd.setDate(plus1, false);
@@ -1191,7 +1369,7 @@ const NIMBUS = (function () {
           const badge = document.querySelector('#md-master-plant-pane .plant-badge');
           if (badge) badge.textContent = Store.selectedPlant || '—';
         }
-      });
+      }, 'Plant');
     },
 
     render() {
@@ -1238,7 +1416,7 @@ const NIMBUS = (function () {
       const body = document.getElementById('plant-hours-body');
       if (!body) return;
       const plantName = Store.selectedPlant;
-      if (!plantName) { body.innerHTML = '<p class="plant-no-sel">Select a plant in the top bar to manage its hours.</p>'; return; }
+      if (!plantName) { body.innerHTML = `<p class="plant-no-sel">${t('ui.select_plant_hours')}</p>`; return; }
       Store.ensurePlant(plantName);
       const plant = Store.plants[plantName];
 
@@ -1385,7 +1563,7 @@ const NIMBUS = (function () {
       if (statsEl) {
         if (blocks.length) {
           const totalDays = blocks.reduce((acc, b) =>
-            acc + Math.ceil((Util.parseDate(b.end) - Util.parseDate(b.start)) / 86400000), 0);
+            acc + Math.ceil((Util.parseDate(b.end) - Util.parseDate(b.start)) / Config.MS_DAY), 0);
           const chevron = Plant._blocksCollapsed ? '▼' : '▲';
           statsEl.innerHTML = `<div class="plant-blk-stats" style="display:flex;align-items:center;justify-content:space-between;">
             <div style="display:flex;align-items:center;gap:16px;">
@@ -1502,16 +1680,10 @@ const NIMBUS = (function () {
 
     openBlockModal() {
       const now = new Date(); now.setMinutes(0, 0, 0);
-      const plus1 = new Date(now.getTime() + 3600000);
+      const plus1 = new Date(now.getTime() + Config.MS_HOUR);
       if (!Plant._fpBlkStart) {
-        Plant._fpBlkStart = flatpickr('#plant-blk-start', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
-        Plant._fpBlkEnd = flatpickr('#plant-blk-end', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
+        Plant._fpBlkStart = Util.fpDatetime('#plant-blk-start');
+        Plant._fpBlkEnd   = Util.fpDatetime('#plant-blk-end');
       }
       Plant._fpBlkStart.setDate(now, false);
       Plant._fpBlkEnd.setDate(plus1, false);
@@ -1543,7 +1715,7 @@ const NIMBUS = (function () {
       if (!panel) return;
       // Show spinner while fetching metadata
       const body = panel.querySelector('.panel-body');
-      if (body) body.innerHTML = '<div class="cw-loading"><span class="cw-spin"></span>Loading…</div>';
+      if (body) body.innerHTML = `<div class="cw-loading"><span class="cw-spin"></span>${t('ui.loading')}</div>`;
 
       fetch(`${Config.API_BASE}/color-wheels`, { signal: AbortSignal.timeout(6000) })
         .then(r => r.ok ? r.json() : Promise.reject())
@@ -1801,7 +1973,7 @@ const NIMBUS = (function () {
         </div>
       </div>`;
 
-      ProdLines._wireInputs(body);
+      ProdLines._ensureDelegated();
     },
 
     _renderNav(allLines, shownLines) {
@@ -1892,56 +2064,53 @@ const NIMBUS = (function () {
       return lineRows + plantRows;
     },
 
-    _wireInputs(body) {
-      body.querySelectorAll('.line-bottleneck-chk').forEach(chk => {
-        chk.onchange = function() {
-          Store.setLineSetting(this.dataset.line, { bottleneck: this.checked }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { bottleneck: this.checked });
+    // Delegated ONCE on the persistent #lines-body container (survives the
+    // innerHTML re-renders in _renderDetail), replacing the old per-render
+    // _wireInputs that re-bound 6 querySelectorAll loops every edit. Every
+    // control carries data-line; .buf-unit-btn also carries data-unit.
+    _ensureDelegated() {
+      if (ProdLines._delegated) return;
+      const body = document.getElementById('lines-body');
+      if (!body) return;
+      ProdLines._delegated = true;
+
+      body.addEventListener('change', (e) => {
+        const el = e.target;
+        const line = el.dataset && el.dataset.line;
+        if (!line) return;
+        if (el.classList.contains('line-bottleneck-chk')) {
+          Store.setLineSetting(line, { bottleneck: el.checked }, 'prodlines');
+          MasterData.syncLineSettings(line, { bottleneck: el.checked });
           Toast.show(t('toast.line_settings_updated'), 'success');
-        };
-      });
-
-      body.querySelectorAll('.line-excl-opt-chk').forEach(chk => {
-        chk.onchange = function() {
-          Store.setLineSetting(this.dataset.line, { excludeFromOpt: this.checked }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { excludeFromOpt: this.checked });
+        } else if (el.classList.contains('line-excl-opt-chk')) {
+          Store.setLineSetting(line, { excludeFromOpt: el.checked }, 'prodlines');
+          MasterData.syncLineSettings(line, { excludeFromOpt: el.checked });
           Toast.show(t('toast.line_settings_updated'), 'success');
-        };
-      });
-
-      body.querySelectorAll('.buf-unit-btn').forEach(btn => {
-        btn.onclick = function() {
-          Store.setLineSetting(this.dataset.line, { bufferUnit: this.dataset.unit }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { bufferUnit: this.dataset.unit });
-          ProdLines._renderDetail(ProdLines._activeNavLine);
-        };
-      });
-
-      body.querySelectorAll('.buf-pct-input').forEach(inp => {
-        inp.onchange = function() {
-          const val = Math.max(0, Math.min(100, +this.value || 0));
-          Store.setLineSetting(this.dataset.line, { bufferPct: val }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { bufferPct: val });
+        } else if (el.classList.contains('buf-pct-input')) {
+          const val = Math.max(0, Math.min(100, +el.value || 0));
+          Store.setLineSetting(line, { bufferPct: val }, 'prodlines');
+          MasterData.syncLineSettings(line, { bufferPct: val });
           Toast.show(t('toast.buffer_updated'), 'success');
-        };
-      });
-
-      body.querySelectorAll('.buf-hrs-input').forEach(inp => {
-        inp.onchange = function() {
-          const val = Math.max(0, +this.value || 0);
-          Store.setLineSetting(this.dataset.line, { bufferHours: val }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { bufferHours: val });
+        } else if (el.classList.contains('buf-hrs-input')) {
+          const val = Math.max(0, +el.value || 0);
+          Store.setLineSetting(line, { bufferHours: val }, 'prodlines');
+          MasterData.syncLineSettings(line, { bufferHours: val });
           Toast.show(t('toast.buffer_updated'), 'success');
-        };
+        } else if (el.classList.contains('plgroup-input')) {
+          const val = el.value.trim();
+          Store.setLineSetting(line, { plGroup: val }, 'prodlines');
+          MasterData.syncLineSettings(line, { plGroup: val });
+          Toast.show(t('toast.line_settings_updated'), 'success');
+        }
       });
 
-      body.querySelectorAll('.plgroup-input').forEach(inp => {
-        inp.onchange = function() {
-          const val = this.value.trim();
-          Store.setLineSetting(this.dataset.line, { plGroup: val }, 'prodlines');
-          MasterData.syncLineSettings(this.dataset.line, { plGroup: val });
-          Toast.show(t('toast.line_settings_updated'), 'success');
-        };
+      body.addEventListener('click', (e) => {
+        const btn = e.target.closest('.buf-unit-btn');
+        if (!btn) return;
+        const line = btn.dataset.line;
+        Store.setLineSetting(line, { bufferUnit: btn.dataset.unit }, 'prodlines');
+        MasterData.syncLineSettings(line, { bufferUnit: btn.dataset.unit });
+        ProdLines._renderDetail(ProdLines._activeNavLine);
       });
     },
 
@@ -1960,16 +2129,10 @@ const NIMBUS = (function () {
       if (line) lineSel.value = line;
 
       const now = new Date(); now.setMinutes(0, 0, 0);
-      const plus1 = new Date(now.getTime() + 3600000);
+      const plus1 = new Date(now.getTime() + Config.MS_HOUR);
       if (!ProdLines._fpBlkStart) {
-        ProdLines._fpBlkStart = flatpickr('#lines-blk-start', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
-        ProdLines._fpBlkEnd = flatpickr('#lines-blk-end', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
+        ProdLines._fpBlkStart = Util.fpDatetime('#lines-blk-start');
+        ProdLines._fpBlkEnd   = Util.fpDatetime('#lines-blk-end');
       }
       ProdLines._fpBlkStart.setDate(now, false);
       ProdLines._fpBlkEnd.setDate(plus1, false);
@@ -2019,7 +2182,7 @@ const NIMBUS = (function () {
       const dayNum = d.getUTCDay() || 7;
       d.setUTCDate(d.getUTCDate() + 4 - dayNum);
       const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-      const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+      const weekNo = Math.ceil((((d - yearStart) / Config.MS_DAY) + 1) / 7);
       return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
     }
 
@@ -2474,7 +2637,7 @@ const NIMBUS = (function () {
         .filter(l => l.plant === plant && visibleGroups.includes(l.pl_group))
         .sort((a, b) => visibleGroups.indexOf(a.pl_group) - visibleGroups.indexOf(b.pl_group) || a.production_line.localeCompare(b.production_line));
       if (!allLinesMeta.length) {
-        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines for this plant.</div>`; return;
+        grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('empty.no_production_lines_plant')}</div>`; return;
       }
       await _fetchLines(plant, fetchGroup);
 
@@ -2605,7 +2768,7 @@ const NIMBUS = (function () {
       const lines = (Store._state.masterData?.lines || [])
         .filter(l => l.plant === plant && (!scopeGroup || l.pl_group === scopeGroup))
         .map(l => l.production_line).sort();
-      if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production lines for this plant.</div>`; return; }
+      if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('empty.no_production_lines_plant')}</div>`; return; }
 
       const horizonStart = _weeks[0].monday;
       const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
@@ -2764,7 +2927,7 @@ const NIMBUS = (function () {
               const now = new Date();
               const todayMon = new Date(now);
               todayMon.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-              _horizonOffset = Math.round((dates[0] - todayMon) / (7 * 86400000));
+              _horizonOffset = Math.round((dates[0] - todayMon) / (7 * Config.MS_DAY));
               render();
             },
           });
@@ -2784,7 +2947,7 @@ const NIMBUS = (function () {
           const el = document.getElementById(id); if (el) el.innerHTML = '';
         });
         const grid = document.getElementById('labor-grid');
-        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">Select a plant in the top bar to view labor planning.</div>`;
+        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('ui.select_plant_labor')}</div>`;
         document.getElementById('labor-plant-badge')?.setAttribute && (document.getElementById('labor-plant-badge').textContent = '—');
         document.getElementById('labor-kpi-strip') && (document.getElementById('labor-kpi-strip').innerHTML = '');
         return;
@@ -2793,7 +2956,7 @@ const NIMBUS = (function () {
       _groups = [...new Set(mdLines.map(r => r.pl_group).filter(Boolean))].sort();
       if (!_groups.length) {
         const grid = document.getElementById('labor-grid');
-        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">No production line groups defined for this plant. Assign groups in <strong>Master Data → Production Lines</strong>.</div>`;
+        if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('empty.no_line_groups_plant')}</div>`;
         return;
       }
       _renderToolbar(plant);
@@ -2824,7 +2987,7 @@ const NIMBUS = (function () {
           if (evt.type === 'plant:selected') { delete _aggrData[evt.plant]; delete _lineData[evt.plant]; }
           render();
         }
-      });
+      }, 'Labor');
     }
 
     return {
@@ -3151,9 +3314,9 @@ const NIMBUS = (function () {
         })
         .catch(err => {
           _entries = [];
-          if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">No color wheel uploaded for plant <strong>${_esc(_plant)}</strong>.<br><span style="color:var(--fg-mute);font-size:12px;">Upload one in the Plant tab → Optimization Options.</span></div>`;
+          if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${t('empty.cw_no_wheel_for_plant', { plant: _esc(_plant) })}</div>`;
           const metaEl = document.getElementById('cw-viewer-meta');
-          if (metaEl) metaEl.textContent = err.message.includes('404') ? 'No file uploaded' : err.message;
+          if (metaEl) metaEl.textContent = err.message.includes('404') ? t('empty.cw_no_file') : err.message;
         });
     }
 
@@ -3184,7 +3347,7 @@ const NIMBUS = (function () {
       if (countEl) countEl.textContent = `${data.length} color${data.length !== 1 ? 's' : ''}`;
 
       if (!data.length) {
-        listEl.innerHTML = `<div class="cw-viewer-empty">${_search ? 'No colors match your search.' : 'No entries in this wheel.'}</div>`;
+        listEl.innerHTML = `<div class="cw-viewer-empty">${_search ? t('empty.cw_no_search_match') : t('empty.cw_no_entries')}</div>`;
         return;
       }
 
@@ -3280,18 +3443,46 @@ const NIMBUS = (function () {
       return new Promise((resolve, reject) => {
         const id = ++_seq;
         _pending.set(id, { resolve, reject });
+        const _cloneT0 = performance.now();
         w.postMessage({ type, id, payload });
+        PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
       });
     }
 
     function _snap() {
+      const plant = Store.selectedPlant;
+      if (!plant) {
+        // No plant selected — nothing is rendered; fall back to the global snapshot.
+        return {
+          tasks:        Store.tasksArr,
+          blocks:       Store._state.blocks,
+          plantBlocks:  Store._state.plantBlocks,
+          calendars:    Store._state.calendars,
+          plants:       Store._state.plants,
+          lineSettings: Store._state.lineSettings,
+          masterData:   Store._state.masterData,
+        };
+      }
+      // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
+      // on the main thread on every postMessage (the dominant main-thread cost of the
+      // Worker.* round trip), so we send only the selected plant's data. calendars and
+      // lineSettings MUST be scoped too: computeUtilization derives its line set from
+      // Object.keys(calendars), and those maps accumulate entries for every line visited
+      // this session — an unscoped map would make the worker compute (and clone back) a
+      // matrix for lines that aren't even on screen.
+      const lines = new Set(Store.linesForSelectedPlant());
+      const pick = obj => {
+        const out = {};
+        for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
+        return out;
+      };
       return {
-        tasks:        Store.tasksArr,
-        blocks:       Store._state.blocks,
-        plantBlocks:  Store._state.plantBlocks,
-        calendars:    Store._state.calendars,
-        plants:       Store._state.plants,
-        lineSettings: Store._state.lineSettings,
+        tasks:        Store.tasksByPlant(plant),
+        blocks:       Store._state.blocks.filter(b => !b.line || lines.has(b.line)),
+        plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+        calendars:    pick(Store._state.calendars),
+        plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+        lineSettings: pick(Store._state.lineSettings),
         masterData:   Store._state.masterData,
       };
     }
@@ -3300,15 +3491,18 @@ const NIMBUS = (function () {
       available() { return !_dead && typeof Worker !== 'undefined'; },
 
       alerts(opts, dismissed) {
+        const _t0 = performance.now();
         return _post('ALERTS', {
           ..._snap(),
           dismissed: [...(dismissed || [])],
           opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
-        });
+        }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
       },
 
       utilization(startMs, days) {
-        return _post('UTILIZATION', { ..._snap(), startMs, days });
+        const _t0 = performance.now();
+        return _post('UTILIZATION', { ..._snap(), startMs, days })
+          .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
       },
     };
   })();
@@ -3438,7 +3632,7 @@ const NIMBUS = (function () {
           if (!win) {
             reason = `the ${line} or plant calendar is closed that day-of-week`;
           } else {
-            const winHrs = (win[1] - win[0]) / 3600000;
+            const winHrs = (win[1] - win[0]) / Config.MS_HOUR;
             const plant = Store.getPlantForLine(line);
             const dayStart = new Date(dateObj); dayStart.setHours(0,0,0,0);
             const dayEnd   = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
@@ -3449,7 +3643,7 @@ const NIMBUS = (function () {
               const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
               if (!s || !e) continue;
               if (s >= dayEnd || e <= dayStart) continue;
-              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / 3600000;
+              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / Config.MS_HOUR;
               if (ov > 0) {
                 intervals.push({ s, e });
                 labels.push(`${b.line ? 'line' : 'global line'}${b.reason ? ` "${b.reason}"` : ''} ${ov.toFixed(1)}h`);
@@ -3460,7 +3654,7 @@ const NIMBUS = (function () {
               const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
               if (!s || !e) continue;
               if (s >= dayEnd || e <= dayStart) continue;
-              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / 3600000;
+              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / Config.MS_HOUR;
               if (ov > 0) {
                 intervals.push({ s, e });
                 labels.push(`${b.plant ? 'plant' : 'global plant'}${b.reason ? ` "${b.reason}"` : ''} ${ov.toFixed(1)}h`);
@@ -3562,6 +3756,7 @@ const NIMBUS = (function () {
         Store.setAlerts(kept, 'alerts');
       }
       Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
+      PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);
     },
 
     _dismissed: new Set(),
@@ -3591,8 +3786,8 @@ const NIMBUS = (function () {
         // toolbar's "day" mode (3 × 24h) so the segmented control stays honest.
         if (t.start_date) {
           const center = t.start_date.getTime();
-          const start = new Date(center - 1.5 * 24 * 3600000);
-          const end   = new Date(center + 1.5 * 24 * 3600000);
+          const start = new Date(center - 1.5 * 24 * Config.MS_HOUR);
+          const end   = new Date(center + 1.5 * 24 * Config.MS_HOUR);
           Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
         }
         Timeline._tl.setSelection([String(a.taskId)]);
@@ -3741,7 +3936,7 @@ const NIMBUS = (function () {
             <div class="ac-head-row">
               <span class="ac-title">${esc(line)}</span>
               <span class="ac-date">${dateLabel}</span>
-              <button class="ac-x" data-act="close" aria-label="Close">×</button>
+              <button class="ac-x" data-act="close" aria-label="${t('btn.close')}">×</button>
             </div>
             <div class="ac-verdict ac-verdict-${verdictSev}">
               ${errCt ? '🔴' : '🟡'} ${esc(verdict)}
@@ -3812,80 +4007,53 @@ const NIMBUS = (function () {
       if (isOpen) Alerts._renderDrawer();
     },
 
+    _renderAlertRow(a) {
+      const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
+      const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+      const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
+      const override = (a.type === 'closed' || a.type === 'fixed-closed' || a.type === 'fixed-out-of-hours') && a.taskId != null;
+      return `<div class="alert-row alert-${a.sev}" data-id="${esc(a.id)}">` +
+        `<span class="alert-ico">${sevIcon[a.sev] || '•'}</span>` +
+        `<span class="alert-msg">${esc(a.msg)}</span>` +
+        `<div class="alert-actions">` +
+          (a.taskId != null ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.focus('${esc(a.id)}')">${t('btn.go_to')}</button>` : '') +
+          (fixable  ? `<button class="btn-fix" title="${t('tip.fix_alert')}" onclick="NIMBUS.Alerts.applyFix('${esc(a.id)}')">${t('btn.fix_it')}</button>` : '') +
+          (override ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')">${t('btn.override')}</button>` : '') +
+          `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismiss('${esc(a.id)}')">${t('btn.dismiss')}</button>` +
+        `</div></div>`;
+    },
+
     _renderDrawer() {
       const body = document.getElementById('alert-drawer-body');
       if (!body) return;
       const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * 60000) : null;
+      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
       const alerts = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
       const hiddenCount = Store.alerts.length - alerts.length;
+
       if (!alerts.length) {
+        if (Alerts._drawerVL) { Alerts._drawerVL.destroy(); Alerts._drawerVL = null; }
         body.innerHTML = `<div class="empty-state" style="padding:24px;color:#888;">${t('empty.no_active_alerts')}</div>`;
         return;
       }
-      const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
-      body.innerHTML = '';
-      alerts.forEach(a => {
-        const row = document.createElement('div');
-        row.className = `alert-row alert-${a.sev}`;
-        row.dataset.id = a.id;
 
-        const ico = document.createElement('span');
-        ico.className = 'alert-ico';
-        ico.textContent = sevIcon[a.sev] || '•';
+      if (!Alerts._drawerVL) {
+        body.innerHTML = '';
+        Alerts._drawerVL = new VirtualList(body, {
+          rowH: VL_ALERT_ROW_H,
+          renderFn: (a) => Alerts._renderAlertRow(a),
+          mountEl: body,
+        });
+      }
+      Alerts._drawerVL.update(alerts);
 
-        const msg = document.createElement('span');
-        msg.className = 'alert-msg';
-        msg.textContent = a.msg;
-
-        const actions = document.createElement('div');
-        actions.className = 'alert-actions';
-
-        if (a.taskId != null) {
-          const gotoBtn = document.createElement('button');
-          gotoBtn.className = 'btn btn-ghost sm';
-          gotoBtn.textContent = t('btn.go_to');
-          gotoBtn.onclick = () => NIMBUS.Alerts.focus(a.id);
-          actions.appendChild(gotoBtn);
-        }
-
-        // Fix-it button for actionable alert types
-        const fixable = ['overlap', 'blackout', 'overload'].includes(a.type);
-        if (fixable) {
-          const fixBtn = document.createElement('button');
-          fixBtn.className = 'btn-fix';
-          fixBtn.textContent = t('btn.fix_it');
-          fixBtn.title = t('tip.fix_alert');
-          fixBtn.onclick = () => NIMBUS.Alerts.applyFix(a.id);
-          actions.appendChild(fixBtn);
-        } else if (a.type === 'closed' || a.type === 'fixed-closed' || a.type === 'fixed-out-of-hours') {
-          if (a.taskId != null) {
-            const ovrBtn = document.createElement('button');
-            ovrBtn.className = 'btn btn-ghost sm';
-            ovrBtn.textContent = t('btn.override');
-            ovrBtn.onclick = () => { NIMBUS.Alerts.toggleDrawer(); NIMBUS.Table._openOverrideModalForId(a.taskId); };
-            actions.appendChild(ovrBtn);
-          }
-        }
-
-        const dismissBtn = document.createElement('button');
-        dismissBtn.className = 'btn btn-ghost sm';
-        dismissBtn.textContent = t('btn.dismiss');
-        dismissBtn.onclick = () => NIMBUS.Alerts.dismiss(a.id);
-        actions.appendChild(dismissBtn);
-
-        row.appendChild(ico);
-        row.appendChild(msg);
-        row.appendChild(actions);
-        body.appendChild(row);
-      });
       if (hiddenCount > 0) {
-        const note = document.createElement('div');
-        note.style.cssText = 'padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);';
         const hzDays = Math.max(1, Math.round(hz / 1440));
-        note.textContent = `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.`;
-        body.appendChild(note);
+        body.insertAdjacentHTML('beforeend',
+          `<div style="padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);">` +
+          `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.</div>`);
       }
     },
 
@@ -3897,7 +4065,7 @@ const NIMBUS = (function () {
         const task = Store.tasks[a.taskId];
         if (!task || !task.start_date) { Toast.show(t('toast.cannot_fix_task'), 'error'); return; }
         const line = task.PRODUCTION_LINE || 'Unknown';
-        const dur  = (task.end_date - task.start_date) || Util.runHours(task) * 3600000 || 3600000;
+        const dur  = (task.end_date - task.start_date) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
         // For overlap: start searching from end of the overlapping peer
         let searchFrom = task.start_date;
@@ -3934,7 +4102,7 @@ const NIMBUS = (function () {
       const bell  = document.getElementById('alert-bell');
       const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * 60000) : null;
+      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
       const visible = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
       const n = visible.length;
       if (n > 0) {
@@ -4003,6 +4171,7 @@ const NIMBUS = (function () {
       if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
         return Utilization._cache.matrix;
       }
+      const _pmT0u = performance.now();
       const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
       const matrix = {};
       const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
@@ -4058,7 +4227,7 @@ const NIMBUS = (function () {
         for (const key of Object.keys(lineRows)) {
           const row = lineRows[key];
           const dayStartMs = row.date.getTime();
-          const dayEndMs   = dayStartMs + 86400000;
+          const dayEndMs   = dayStartMs + Config.MS_DAY;
           if (tEndMs <= dayStartMs || tStartMs >= dayEndMs) continue;
           if (!Calendar.workWindow(line, row.date)) continue;
           const overlapMs = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
@@ -4076,6 +4245,7 @@ const NIMBUS = (function () {
         }
       }
       if (cacheable) Utilization._cache = { key: cacheKey, matrix };
+      PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
       return matrix;
     },
 
@@ -4156,11 +4326,10 @@ const NIMBUS = (function () {
     }
   };
 
-  // Pre-warm Utilization._cache in the worker after bulk task mutations so the
-  // next synchronous computeMatrix call returns instantly from cache.
-  Store.subscribe(evt => {
+  // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
+  // call returns instantly from cache.
+  Utilization._prewarm = function () {
     if (!Compute.available()) return;
-    if (evt.type !== 'tasks:bulk' && evt.type !== 'tasks:bulkUpdate' && evt.type !== 'task:update') return;
     const startMs = Util.startOfDay(new Date()).getTime();
     const rev     = Store._rev || 0;
     Compute.utilization(startMs, 7)
@@ -4175,7 +4344,16 @@ const NIMBUS = (function () {
         Utilization._cache = { key: `${startMs}|7|${rev}`, matrix };
       })
       .catch(() => {});
-  });
+  };
+  // Debounced so a drag-storm / autoReflow burst (many task:update/bulkUpdate events in
+  // quick succession) collapses into ONE worker round-trip — i.e. one synchronous
+  // structured-clone of the snapshot — instead of one per mutation.
+  let _prewarmTimer = null;
+  Store.subscribe(evt => {
+    if (evt.type !== 'tasks:bulk' && evt.type !== 'tasks:bulkUpdate' && evt.type !== 'task:update') return;
+    if (_prewarmTimer) clearTimeout(_prewarmTimer);
+    _prewarmTimer = setTimeout(() => { _prewarmTimer = null; Utilization._prewarm(); }, 200);
+  }, 'Utilization.prewarm');
 
   /* =============================================================================
      ENGINE — scheduling + optimisation.
@@ -4286,6 +4464,8 @@ const NIMBUS = (function () {
      *  opts.plant restricts to lines belonging to that plant.
      *  opts.colorMap pre-fetched color→order_y priority map from plant wheel. */
     runAndApply(mode = 'combined', opts = {}) {
+      const _pmT0e = performance.now();
+      let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
       if (!Store.tasksArr.length) { Toast.show(t('toast.no_tasks_to_optimise'), 'error'); return; }
       const plant           = opts.plant           ?? Store.selectedPlant;
       if (!plant) {
@@ -4300,7 +4480,7 @@ const NIMBUS = (function () {
       const horizonStart = opts.startDate
         ? new Date(opts.startDate)
         : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
-      const horizonEnd   = opts.endDate   ? new Date(opts.endDate)          : new Date(horizonStart.getTime() + 35 * 24 * 3600000);
+      const horizonEnd   = opts.endDate   ? new Date(opts.endDate)          : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
       const isAged       = t => t.end_date   && t.end_date   < horizonStart;
       const isOutOfWin   = t => t.start_date && t.start_date > horizonEnd;
 
@@ -4375,7 +4555,7 @@ const NIMBUS = (function () {
         // Walk through free tasks, jumping past each fixed task we encounter.
         let fixIdx = 0;
         for (const t of freeTasks) {
-          const durMs = Util.runHours(t) * 3600000;
+          const durMs = Util.runHours(t) * Config.MS_HOUR;
           if (durMs <= 0) continue;
 
           // Alternate between fixed-task collision check and calendar adjustment
@@ -4397,7 +4577,9 @@ const NIMBUS = (function () {
 
             // Step 2: advance past any closed/blackout region.
             if (respectCalendar) {
+              const _calT0 = performance.now();
               cursor = Calendar.nextAvailable(line, cursor, durMs);
+              _pmCalMs += performance.now() - _calT0;
             }
 
             // If cursor didn't move, both constraints are satisfied — done.
@@ -4414,7 +4596,7 @@ const NIMBUS = (function () {
               { line, taskId: t.id });
           }
 
-          const start = new Date(Math.round(cursor.getTime() / 60000) * 60000);
+          const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
           const end   = new Date(start.getTime() + durMs);
           patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
           cursor = new Date(end);
@@ -4428,7 +4610,13 @@ const NIMBUS = (function () {
       if (patches.length) Store.updateMany(patches, 'engine');
       Store._state.meta.lastOptimize = new Date();
       Alerts.clearDismissed();
-      Alerts.recompute();
+      // Route through the adaptive debounce instead of a direct synchronous recompute:
+      // keeps the heavy alert pass off the tail of the placement loop and lets it
+      // coalesce with the updateMany cascade rather than firing a second worker clone
+      // in the same tick.
+      Alerts.scheduleRecompute();
+      PerfMonitor.record('Engine.calendar', _pmCalMs);
+      PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
     },
 
     /** After a manual edit to one task, re-flow subsequent unfixed orders on the
@@ -4701,7 +4889,7 @@ const NIMBUS = (function () {
     function _updateSummary() {
       const el = document.getElementById('opt-date-summary');
       if (!el || !_start || !_end) return;
-      const days = Math.round((_end - _start) / 86400000);
+      const days = Math.round((_end - _start) / Config.MS_DAY);
       el.innerHTML =
         `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayDate(_end)}</span>` +
         `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
@@ -4727,7 +4915,7 @@ const NIMBUS = (function () {
         const now = new Date();
         now.setSeconds(0, 0);
         _start = new Date(now);
-        _end   = new Date(now.getTime() + days * 86400000);
+        _end   = new Date(now.getTime() + days * Config.MS_DAY);
         _fpStart?.setDate(_start, false);
         _fpEnd?.setDate(_end, false);
         const sb = document.getElementById('opt-start-btn');
@@ -4919,7 +5107,7 @@ const NIMBUS = (function () {
         colorMap,
         lines:           linesScope,
         startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
-        endDate:         _end   ?? new Date(Date.now() + 28 * 86400000),
+        endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
         respectFixed:    sfEl?.checked ?? true,
         respectCalendar: scEl?.checked ?? true,
       };
@@ -5121,7 +5309,7 @@ const NIMBUS = (function () {
       const idx = _visible.indexOf(entry);
       if (idx !== -1) _visible.splice(idx, 1);
       entry.el.classList.add('leaving');
-      setTimeout(() => entry.el.remove(), 220);
+      setTimeout(() => entry.el.remove(), Config.ANIM_MS);
     }
 
     function _evictOne() {
@@ -5213,10 +5401,15 @@ const NIMBUS = (function () {
     _nextColorIdx: 0,
     _unsubStore:   null,
     _suppressEvents: false,       // guard to prevent self-triggered loops
+    _conflictSrc: null,           // alerts array reference — invalidates cache when it changes
+    _conflictSet: null,           // Set<String(taskId)> built once per alerts array identity
+    _visEl:       null,           // cached #vis-timeline element (set in init)
+    _ganttTab:    null,           // cached #gantt-tab element (see _ganttActive)
 
     init() {
       const container = document.getElementById('vis-timeline');
       if (!container) return;
+      Timeline._visEl = container;
 
       Timeline._items  = new vis.DataSet([]);
       Timeline._groups = new vis.DataSet([]);
@@ -5274,7 +5467,7 @@ const NIMBUS = (function () {
       // full-height grid overlay inside .vis-content. Matching the wrong one
       // would inflate axisH to container height and poison the cache.
       const _calibrate = () => {
-        const c = document.getElementById('vis-timeline');
+        const c = Timeline._visEl;
         if (!c) return;
         const sampleItem = c.querySelector('.vis-panel.vis-center .vis-foreground .vis-item');
         const axisEl = c.querySelector('.vis-panel.vis-top .vis-time-axis')
@@ -5313,7 +5506,7 @@ const NIMBUS = (function () {
           const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
           const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
           if (typeof hz === 'number') {
-            const hzEnd = new Date(now.getTime() + hz * 60000);
+            const hzEnd = new Date(now.getTime() + hz * Config.MS_MIN);
             for (const id of Timeline._alertHorizonIds) {
               if (Timeline._items.get(id)) updates.push({ id, start: now, end: hzEnd });
             }
@@ -5323,7 +5516,14 @@ const NIMBUS = (function () {
       }, 1000);
 
       /* ----- subscribe to store changes ----------------------------------- */
-      Timeline._unsubStore = Store.subscribe(evt => Timeline._onStore(evt));
+      Timeline._unsubStore = Store.subscribe(evt => Timeline._onStore(evt), 'Timeline');
+    },
+
+    // Cached lookup for the (static) #gantt-tab; lazily caches on first call so
+    // init order can't leave it null. Replaces 4 inline getElementById checks.
+    _ganttActive() {
+      if (!Timeline._ganttTab) Timeline._ganttTab = document.getElementById('gantt-tab');
+      return Timeline._ganttTab ? Timeline._ganttTab.classList.contains('active') : false;
     },
 
     /** Handle store updates: refresh vis-timeline WITHOUT echoing back. */
@@ -5332,7 +5532,7 @@ const NIMBUS = (function () {
       if (evt.source === 'timeline') return;
 
       if (evt.type === 'plant:selected') {
-        if (document.getElementById('gantt-tab')?.classList.contains('active')) {
+        if (Timeline._ganttActive()) {
           Timeline.rebuild();
         } else {
           Timeline._renderEmptyOverlay();
@@ -5343,17 +5543,19 @@ const NIMBUS = (function () {
       if (evt.type === 'tasks:bulk' || evt.type === 'blocks:change'
           || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change') {
         // Only do a full rebuild when the gantt tab is active; otherwise
-        // the next goto('gantt') will call rebuild() anyway.
-        if (document.getElementById('gantt-tab')?.classList.contains('active')) {
-          Timeline.rebuild();
+        // the next goto('gantt') will call rebuild() anyway. Coalesced to one rAF so
+        // back-to-back data events don't each run the full diff inside Store.emit.
+        if (Timeline._ganttActive()) {
+          Timeline._scheduleRebuild();
         }
       } else if (evt.type === 'tasks:bulkUpdate') {
         // Patch individual items — avoids groups.clear() which resets vertical scroll.
         // Skip tasks on lines hidden by the Gantt line filter, otherwise their items
         // get added to the DataSet and the filter visually "leaks" on optimize runs.
-        if (document.getElementById('gantt-tab')?.classList.contains('active')) {
+        if (Timeline._ganttActive()) {
           const sel = (typeof GanttFilter !== 'undefined') ? GanttFilter._selectedLines : null;
           const filtered = sel && sel.size > 0;
+          const _pmT0patch = performance.now();
           for (const id of (evt.ids || [])) {
             if (filtered) {
               const t = Store.tasks[id];
@@ -5361,6 +5563,7 @@ const NIMBUS = (function () {
             }
             Timeline._applyTaskPatch(String(id));
           }
+          PerfMonitor.record('Timeline.patchLoop', performance.now() - _pmT0patch);
         }
       } else if (evt.type === 'task:update' && evt.id != null) {
         Timeline._applyTaskPatch(String(evt.id));
@@ -5368,21 +5571,13 @@ const NIMBUS = (function () {
         // just re-render those items' className
         for (const id of evt.ids) Timeline._applyTaskPatch(String(id));
       } else if (evt.type === 'alerts:change') {
-        if (document.getElementById('gantt-tab')?.classList.contains('active')) {
-          // Patch plant tasks to refresh conflict-order className — avoids
-          // groups.clear() in rebuild() which resets vertical scroll. Honor the
-          // line filter so hidden lines don't briefly flash in before rebuild().
-          const sel = (typeof GanttFilter !== 'undefined') ? GanttFilter._selectedLines : null;
-          const filtered = sel && sel.size > 0;
-          for (const t of Store.tasksForSelectedPlant()) {
-            if (!t.start_date || !t.end_date) continue;
-            if (filtered && !sel.has(t.PRODUCTION_LINE || 'Unknown')) continue;
-            Timeline._applyTaskPatch(String(t.id));
-          }
-          // Reconcile alert-cell background items via the diff-based rebuild.
-          // rebuild() is cheap (only changed items add/update/remove) and is the
-          // established pattern for blackout blocks.
-          Timeline.rebuild();
+        Timeline._conflictSrc = null; // invalidate conflict-set cache; rebuild() will repopulate
+        if (Timeline._ganttActive()) {
+          // rebuild() already recomputes the conflict-order className for every task
+          // via its desired-map diff AND reconciles the alert-cell background items, so
+          // the old per-task _applyTaskPatch loop here was pure duplicate work. Just run
+          // the (coalesced) diff rebuild.
+          Timeline._scheduleRebuild();
         }
       }
     },
@@ -5398,12 +5593,25 @@ const NIMBUS = (function () {
       } finally { Timeline._suppressEvents = false; }
     },
 
+    // Returns a Set of String task IDs that have an active alert. Memoized on the
+    // Store.alerts array identity — rebuilt O(alerts) once, then O(1) per task lookup.
+    _conflictIds() {
+      const src = Store.alerts;
+      if (Timeline._conflictSrc !== src) {
+        const s = new Set();
+        for (const a of src) if (a.taskId != null) s.add(String(a.taskId));
+        Timeline._conflictSrc = src;
+        Timeline._conflictSet = s;
+      }
+      return Timeline._conflictSet;
+    },
+
     /** Build an item object for a task. */
     _itemForTask(t) {
       const line = t.PRODUCTION_LINE || 'Unknown';
       const ci = Timeline._colorIndex(line);
       const fixed = Store.isFixed(t.id);
-      const conflict = Store.alerts.some(a => String(a.taskId) === String(t.id));
+      const conflict = Timeline._conflictIds().has(String(t.id));
       const label = t.text || t.ORDER || String(t.id);
       const cls = ['lc-' + ci];
       if (fixed) cls.push('fixed-order');
@@ -5436,11 +5644,25 @@ const NIMBUS = (function () {
         type: 'background'
       };
     },
+    /** Coalesce data-event-driven rebuilds into a single requestAnimationFrame so
+     *  multiple Store emits in one tick (e.g. tasks:bulkUpdate then alerts:change from
+     *  the same operation) don't each run the full diff synchronously inside Store.emit.
+     *  User-initiated rebuilds (goto-gantt, drag-end, plant switch) still call rebuild()
+     *  directly for immediate feedback. */
+    _scheduleRebuild() {
+      if (Timeline._rebuildRaf) return;
+      Timeline._rebuildRaf = requestAnimationFrame(() => {
+        Timeline._rebuildRaf = null;
+        Timeline.rebuild();
+      });
+    },
+
     /** Diff-based rebuild: compare desired item set to current DataSet contents
      *  and emit minimal add/update/remove operations. Preserves selection and
      *  avoids the clear/add flicker of a wholesale replacement.               */
     rebuild() {
       if (!Timeline._items || !Timeline._groups) return;
+      const _pmT0t = performance.now();
       Timeline._renderEmptyOverlay();
       // Save the current viewport so groups.clear() + re-add doesn't auto-fit.
       const savedWindow = Timeline._tl ? Timeline._tl.getWindow() : null;
@@ -5493,6 +5715,7 @@ const NIMBUS = (function () {
       });
 
       /* ---- desired items ---------------------------------------------------- */
+      const _pmT0desired = performance.now();
       const desired = new Map();
       for (const t of scopedTasks) {
         const item = Timeline._itemForTask(t);
@@ -5554,7 +5777,7 @@ const NIMBUS = (function () {
         const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
         if (typeof hz === 'number') {
           const hzNow = new Date();
-          const hzEnd = new Date(hzNow.getTime() + hz * 60000);
+          const hzEnd = new Date(hzNow.getTime() + hz * Config.MS_MIN);
           for (const line of visibleLines) {
             desired.set(`alert-horizon-zone-${line}`, {
               id:        `alert-horizon-zone-${line}`,
@@ -5598,6 +5821,9 @@ const NIMBUS = (function () {
         desired.set(String(item.id), item);
       }
 
+      PerfMonitor.record('Timeline.rebuild.desiredMap', performance.now() - _pmT0desired);
+
+      const _pmT0diff = performance.now();
       const existingIds = new Set(Timeline._items.getIds().map(String));
       const toAdd = [], toUpdate = [], toRemove = [];
       for (const [id, data] of desired) {
@@ -5617,6 +5843,9 @@ const NIMBUS = (function () {
       const groupsToAdd      = groupData.filter(g => !existingGroupIds.has(String(g.id)));
       const groupsToUpdate   = groupData.filter(g =>  existingGroupIds.has(String(g.id)));
 
+      PerfMonitor.record('Timeline.rebuild.diff', performance.now() - _pmT0diff);
+
+      const _pmT0flush = performance.now();
       Timeline._suppressEvents = true;
       try {
         if (groupsToRemove.length) Timeline._groups.remove(groupsToRemove);
@@ -5628,6 +5857,7 @@ const NIMBUS = (function () {
       } finally {
         Timeline._suppressEvents = false;
       }
+      PerfMonitor.record('Timeline.rebuild.dsFlush', performance.now() - _pmT0flush);
 
       // Re-sync selection with what still exists. Guard for pre-install rebuilds.
       if (typeof Selection !== 'undefined') {
@@ -5650,11 +5880,12 @@ const NIMBUS = (function () {
       if (savedWindow && Timeline._tl) {
         Timeline._tl.setWindow(savedWindow.start, savedWindow.end, { animation: false });
       }
+      PerfMonitor.record('Timeline.rebuild', performance.now() - _pmT0t);
     },
 
     _fitHeight(groupCount) {
       if (!Timeline._tl) return;
-      const container = document.getElementById('vis-timeline');
+      const container = Timeline._visEl;
       if (!container) return;
       const containerH = container.clientHeight;
       if (containerH <= 0 || groupCount <= 0) {
@@ -5686,13 +5917,13 @@ const NIMBUS = (function () {
       let start, end;
       if (mode === 'hour') {
         start = Util.startOfDay(now);
-        end   = new Date(start.getTime() + 24 * 3600000);
+        end   = new Date(start.getTime() + 24 * Config.MS_HOUR);
       } else if (mode === 'day') {
         start = Util.startOfDay(now);
-        end   = new Date(start.getTime() + 3 * 24 * 3600000);
+        end   = new Date(start.getTime() + 3 * 24 * Config.MS_HOUR);
       } else {
         start = Util.startOfDay(now);
-        end   = new Date(start.getTime() + 7 * 24 * 3600000);
+        end   = new Date(start.getTime() + 7 * 24 * Config.MS_HOUR);
       }
       Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
       document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
@@ -5725,7 +5956,7 @@ const NIMBUS = (function () {
       const minT = Math.min(...tasks.map(t => t.start_date.getTime()));
       const maxT = Math.max(...tasks.map(t => t.end_date.getTime()));
       const span = maxT - minT;
-      const pad  = span * 0.05 || 3600000;
+      const pad  = span * 0.05 || Config.MS_HOUR;
       Timeline._tl.setWindow(new Date(minT - pad), new Date(maxT + pad), { animation: { duration: 400 } });
     },
 
@@ -5733,8 +5964,8 @@ const NIMBUS = (function () {
       if (!Timeline._tl) return;
       const now = new Date();
       Timeline._tl.setWindow(
-        new Date(now.getTime() - 4 * 3600000),
-        new Date(now.getTime() + 4 * 3600000),
+        new Date(now.getTime() - 4 * Config.MS_HOUR),
+        new Date(now.getTime() + 4 * Config.MS_HOUR),
         { animation: { duration: 300 } }
       );
     },
@@ -5897,7 +6128,7 @@ const NIMBUS = (function () {
       agGrid.createGrid(el, gridOptions);
 
       // Re-render rows whenever relevant store slices change.
-      Store.subscribe(evt => Table._onStore(evt));
+      Store.subscribe(evt => Table._onStore(evt), 'Table');
 
       // Outside-click closes any open chip dropdown. Capture phase so AG Grid
       // (which can stopPropagation on some interactions) doesn't swallow the event.
@@ -6036,8 +6267,8 @@ const NIMBUS = (function () {
       const drop = document.getElementById('tbl-flt-date-dropdown');
       if (!drop) return;
       const today = Util.startOfDay(new Date());
-      const tomorrow = new Date(today.getTime() + 86400000);
-      const next7 = new Date(today.getTime() + 7 * 86400000);
+      const tomorrow = new Date(today.getTime() + Config.MS_DAY);
+      const next7 = new Date(today.getTime() + 7 * Config.MS_DAY);
       const cur = Table._chipFilters.dateKey;
       // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
       // longer ranges set status='atrisk-or-window' via dedicated keys.
@@ -6135,7 +6366,7 @@ const NIMBUS = (function () {
       let dateLabel = t('ui.any_date');
       if (f.dateKey) {
         const todayKey = Util.dayKey(Util.startOfDay(new Date()));
-        const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date()).getTime() + 86400000));
+        const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date()).getTime() + Config.MS_DAY));
         if (f.dateKey === todayKey) dateLabel = t('ui.today');
         else if (f.dateKey === tomorrowKey) dateLabel = t('ui.tomorrow');
         else dateLabel = f.dateKey;
@@ -6234,13 +6465,13 @@ const NIMBUS = (function () {
         if (!d) { Toast.show(t('toast.invalid_date'), 'error'); Table._api.refreshCells({ rowNodes: [p.node] }); return; }
         changes.start_date = Util.snap(d);
         // recompute end based on RUN_TIME
-        const dur = Util.runHours(p.data) * 3600000;
+        const dur = Util.runHours(p.data) * Config.MS_HOUR;
         if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
       } else if (field === 'RUN_TIME') {
         const h = parseFloat(p.newValue) || 0;
         changes.RUN_TIME = h;
         if (p.data.start_date) {
-          changes.end_date = new Date(p.data.start_date.getTime() + h * 3600000);
+          changes.end_date = new Date(p.data.start_date.getTime() + h * Config.MS_HOUR);
         }
       } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
         changes[field] = parseFloat(p.newValue) || 0;
@@ -6268,7 +6499,7 @@ const NIMBUS = (function () {
         const rightSidebar = document.getElementById('right-sidebar');
         if (rightSidebar) {
           rightSidebar.classList.remove('collapsed');
-          setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, 220);
+          setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
         }
         Inspector.show(task);
       }
@@ -6316,10 +6547,7 @@ const NIMBUS = (function () {
       Table._selectedId = id;
       document.getElementById('ovr-order').textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.PRODUCTION_LINE || '—'}`;
       if (!Table._fpOvrStart) {
-        Table._fpOvrStart = flatpickr('#ovr-start', {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
-        });
+        Table._fpOvrStart = Util.fpDatetime('#ovr-start');
       }
       Table._fpOvrStart.setDate(t.start_date, false);
       const sel = document.getElementById('ovr-line');
@@ -6339,7 +6567,7 @@ const NIMBUS = (function () {
       const alsoFix  = document.getElementById('ovr-fix').checked;
       if (!newStart) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
 
-      const dur = Util.runHours(t) * 3600000;
+      const dur = Util.runHours(t) * Config.MS_HOUR;
       const snapped = Util.snap(newStart);
       const newEnd = new Date(snapped.getTime() + dur);
 
@@ -6534,7 +6762,7 @@ const NIMBUS = (function () {
           if (t) Inspector._render(t);
           else Inspector.clear();
         }
-      });
+      }, 'Inspector');
     },
 
     show(task) {
@@ -6610,7 +6838,7 @@ const NIMBUS = (function () {
             <div class="insp-val">${task.original_end_date ? Util.fmtDT(task.original_end_date) : '—'}</div></div>
           <div class="insp-row"><label>${t('ui.insp_updated_start')}</label>
             <div class="insp-val">
-              <input type="datetime-local" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
+              <input type="text" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
               ${Inspector._varianceBadge(task)}
             </div></div>
           <div class="insp-row"><label>${t('ui.insp_updated_end')}</label>
@@ -6647,9 +6875,7 @@ const NIMBUS = (function () {
       // Upgrade start_date to Flatpickr datetime picker
       const _dtEl = body.querySelector('[data-field="start_date"]');
       if (_dtEl) {
-        flatpickr(_dtEl, {
-          enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-          altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
+        Util.fpDatetime(_dtEl, {
           onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
         });
       }
@@ -6665,7 +6891,7 @@ const NIMBUS = (function () {
       const days = deltaMs / (24 * 3600 * 1000);
       const txt = Math.abs(days) >= 1
         ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
-        : `${days >= 0 ? '+' : ''}${(deltaMs / 3600000).toFixed(1)}h`;
+        : `${days >= 0 ? '+' : ''}${(deltaMs / Config.MS_HOUR).toFixed(1)}h`;
       const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
       return `<span class="insp-var ${cls}" title="${window.t('ui.insp_variance_shifted')}">${txt}</span>`;
     },
@@ -6680,12 +6906,12 @@ const NIMBUS = (function () {
         const d = Util.parseDate(value);
         if (!d) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
         changes.start_date = Util.snap(d);
-        const dur = Util.runHours(t) * 3600000;
+        const dur = Util.runHours(t) * Config.MS_HOUR;
         if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
       } else if (field === 'RUN_TIME') {
         const h = parseFloat(value) || 0;
         changes.RUN_TIME = h;
-        if (t.start_date) changes.end_date = new Date(t.start_date.getTime() + h * 3600000);
+        if (t.start_date) changes.end_date = new Date(t.start_date.getTime() + h * Config.MS_HOUR);
       } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
         changes[field] = parseFloat(value) || 0;
       } else if (field === 'notes') {
@@ -6729,88 +6955,130 @@ const NIMBUS = (function () {
      HIERARCHY — left sidebar with per-line order lists + utilisation chip.
      ========================================================================== */
   const Hierarchy = {
+    _open:      new Set(),
+    _lineItems: [],
+    _vl:        null,
+
+    _renderPending: false,
+
+    _scheduleRender() {
+      if (Hierarchy._renderPending) return;
+      Hierarchy._renderPending = true;
+      requestAnimationFrame(() => {
+        Hierarchy._renderPending = false;
+        Hierarchy.render();
+      });
+    },
+
     init() {
       Store.subscribe(evt => {
         if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
-            || evt.type === 'task:update' || evt.type === 'calendar:change'
-            || evt.type === 'blocks:change' || evt.type === 'fixed:change'
-            || evt.type === 'plant:selected' || evt.type === 'lineSettings:change') {
+            || evt.type === 'task:update') {
+          // Defer bulk/task updates to the next frame so multiple same-tick emits
+          // (e.g. optimize + autoReflow) coalesce into one render.
+          Hierarchy._scheduleRender();
+        } else if (evt.type === 'calendar:change' || evt.type === 'blocks:change'
+            || evt.type === 'fixed:change' || evt.type === 'plant:selected'
+            || evt.type === 'lineSettings:change') {
           Hierarchy.render();
         }
-      });
+      }, 'Hierarchy');
+    },
+
+    _itemH(item) {
+      return VL_HIER_LINE_H + (Hierarchy._open.has(item.name) ? item.tasks.length * VL_HIER_TASK_H : 0);
+    },
+
+    _renderItem(item) {
+      const open = Hierarchy._open.has(item.name);
+      const chip = item.pct != null
+        ? `<span class="line-util ${item.sev}">${item.pct}%</span>`
+        : `<span class="line-util">—</span>`;
+      return `<details class="line-group" data-line="${item.name}"${open ? ' open' : ''}>` +
+        `<summary>` +
+        `<span class="line-expand">${open ? '−' : '+'}</span>` +
+        `<span class="line-dot" style="background:${item.color}"></span>` +
+        `<span>${item.name}</span>` +
+        `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
+        `${chip}</summary>` +
+        (open ? item.tasks.map((tk, i) => {
+          const fixed = Store.isFixed(tk.id);
+          return `<div class="hier-item${fixed ? ' fixed' : ''}" data-id="${tk.id}">` +
+            (fixed ? '<span class="lock-ico">🔒</span>' : '') +
+            `<span>[${i + 1}] ${tk.ORDER || tk.id}</span></div>`;
+        }).join('') : '') +
+        `</details>`;
     },
 
     render() {
       const el = document.getElementById('hierarchy');
       if (!el) return;
       if (!Store.selectedPlant) {
+        if (Hierarchy._vl) { Hierarchy._vl.destroy(); Hierarchy._vl = null; }
         EmptyState.render(el, {
           title: t('empty.no_plant_selected'),
           msg:   t('empty.no_plant_hierarchy')
         });
         return;
       }
+
       const lines = {};
-      for (const t of Store.tasksForSelectedPlant()) {
-        const k = t.PRODUCTION_LINE || 'Unknown';
-        (lines[k] ||= []).push(t);
+      for (const tk of Store.tasksForSelectedPlant()) {
+        const k = tk.PRODUCTION_LINE || 'Unknown';
+        (lines[k] ||= []).push(tk);
       }
-      // Include plant-assigned lines that currently have no orders.
       for (const l of Store.linesForSelectedPlant()) {
         if (!lines[l]) lines[l] = [];
       }
       const lineNames = Object.keys(lines).sort();
-      const visibleLineNames = (GanttFilter?._selectedLines?.size > 0)
+      const visibleNames = (GanttFilter?._selectedLines?.size > 0)
         ? lineNames.filter(l => GanttFilter._selectedLines.has(l))
         : lineNames;
+
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
 
-      el.innerHTML = visibleLineNames.map(line => {
-        const ci = Timeline._colorIndex(line);
+      Hierarchy._lineItems = visibleNames.map(name => {
+        const ci    = Timeline._colorIndex(name);
         const color = Config.COLORS[ci % Config.COLORS.length];
-        const arr = lines[line]
-          .filter(t => t.start_date >= todayStart && t.start_date <= todayEnd)
-          .sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
-        const endingToday = lines[line].filter(
-          t => t.end_date && t.end_date >= todayStart && t.end_date <= todayEnd
+        const tasks = lines[name]
+          .filter(tk => tk.start_date >= todayStart && tk.start_date <= todayEnd)
+          .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+        const endingToday = lines[name].filter(
+          tk => tk.end_date && tk.end_date >= todayStart && tk.end_date <= todayEnd
         );
-        const runH      = endingToday.reduce((s, t) => s + Util.runHours(t), 0);
-        const cap       = Calendar.dailyCapacityHours(line, todayStart);
+        const runH      = endingToday.reduce((s, tk) => s + Util.runHours(tk), 0);
+        const cap       = Calendar.dailyCapacityHours(name, todayStart);
         const utilRatio = cap > 0 ? runH / cap : (runH > 0 ? 1 : 0);
         const pct       = runH > 0 ? Math.round(utilRatio * 100) : null;
         const sev       = Utilization.sev(utilRatio);
-        const chip = pct != null ? `<span class="line-util ${sev}">${pct}%</span>` : `<span class="line-util">—</span>`;
-        return `<details class="line-group">
-          <summary>
-            <span class="line-expand">+</span>
-            <span class="line-dot" style="background:${color}"></span>
-            <span>${line}</span>
-            <span style="color:var(--fg-faint);font-weight:500;">(${arr.length})</span>
-            ${chip}
-          </summary>
-          ${arr.map((t, i) => {
-            const fixed = Store.isFixed(t.id);
-            const label = `[${i + 1}] ${t.ORDER || t.id}`;
-            return `<div class="hier-item ${fixed ? 'fixed' : ''}" data-id="${t.id}">
-              ${fixed ? '<span class="lock-ico">🔒</span>' : ''}
-              <span>${label}</span>
-            </div>`;
-          }).join('')}
-        </details>`;
-      }).join('');
+        return { name, tasks, color, pct, sev };
+      });
 
-      if (!Hierarchy._delegated) {
-        Hierarchy._delegated = true;
+      if (!Hierarchy._vl) {
+        el.innerHTML = '';
+        Hierarchy._vl = new VirtualList(el, {
+          getRowH:   (item) => Hierarchy._itemH(item),
+          renderFn:  (item) => Hierarchy._renderItem(item),
+          mountEl:   el,
+          buffer:    4,
+        });
+
         el.addEventListener('click', e => {
           const item = e.target.closest('.hier-item');
           if (item) Timeline.focus(item.dataset.id);
         });
         el.addEventListener('toggle', e => {
           const det = e.target.closest('details.line-group');
-          if (det) det.querySelector('.line-expand').textContent = det.open ? '−' : '+';
+          if (!det) return;
+          if (det.open) Hierarchy._open.add(det.dataset.line);
+          else          Hierarchy._open.delete(det.dataset.line);
+          det.querySelector('.line-expand').textContent = det.open ? '−' : '+';
+          Hierarchy._vl.update(Hierarchy._lineItems);
         }, true);
       }
+
+      Hierarchy._vl.update(Hierarchy._lineItems);
     }
   };
 
@@ -6849,7 +7117,7 @@ const NIMBUS = (function () {
           clearTimeout(Dashboard._renderDebounced);
           Dashboard._renderDebounced = setTimeout(() => Dashboard.render(), 300);
         }
-      });
+      }, 'Dashboard');
       // Close line-filter dropdown on outside click
       document.addEventListener('click', e => {
         if (!e.target.closest('#line-filter-group')) {
@@ -7034,7 +7302,6 @@ const NIMBUS = (function () {
       const nowDt = new Date();
 
       const todayOrders = tasks.filter(t => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
-      const ordersLabel = 'Orders today';
 
       // Overdue backlog: every order whose end_date is in the past and isn't marked complete.
       // No status enum exists today, so end_date<now is the strongest proxy for "overdue".
@@ -7044,7 +7311,7 @@ const NIMBUS = (function () {
       const plantLines = new Set(Store.linesForSelectedPlant());
       const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
       const alertHz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-      const alertCutoff = typeof alertHz === 'number' ? new Date(Date.now() + alertHz * 60000) : null;
+      const alertCutoff = typeof alertHz === 'number' ? new Date(Date.now() + alertHz * Config.MS_MIN) : null;
       const visibleAlerts = Store.alerts.filter(a => {
         if (a.line && !plantLines.has(a.line)) return false;
         if (alertCutoff && a.time && a.time > alertCutoff) return false;
@@ -7073,27 +7340,27 @@ const NIMBUS = (function () {
       const fixedCount = tasks.filter(t => Store.isFixed(t.id)).length;
 
       const tiles = [
-        { k: ordersLabel,             v: String(todayOrders.length),
-          d: `${tasks.length} total`,
+        { k: t('kpi.orders_today'),             v: String(todayOrders.length),
+          d: t('kpi.orders_total', { n: tasks.length }),
           action: 'orders-today' },
-        { k: 'Overdue backlog',       v: String(lateCount),
-          d: lateCount === 0 ? 'no backlog' : 'all open orders past finish',
+        { k: t('kpi.overdue_backlog'),           v: String(lateCount),
+          d: lateCount === 0 ? t('kpi.no_backlog') : t('kpi.all_open_past_finish'),
           cls: lateSev === 'err' ? 'err' : '',
           action: 'late' },
-        { k: 'Conflicts pending',     v: String(errAlerts),
-          d: errAlerts === 0 ? 'none blocking' : 'blocking — fix now',
+        { k: t('kpi.conflicts_pending'),         v: String(errAlerts),
+          d: errAlerts === 0 ? t('kpi.none_blocking') : t('kpi.blocking_fix_now'),
           cls: conflictCls,
           action: 'conflicts' },
-        { k: 'Open alerts',           v: String(openAlerts),
-          d: `${warnAlerts} warn · ${errAlerts} err`,
+        { k: t('kpi.open_alerts'),               v: String(openAlerts),
+          d: t('kpi.warn_err_summary', { w: warnAlerts, e: errAlerts }),
           cls: alertCls,
           action: 'alerts' },
-        { k: 'Capacity Headroom Next 7D',  v: `${headroom}%`,
-          d: pctN > 0 ? `${Math.round(avgUtil * 100)}% avg used` : 'no data',
+        { k: t('kpi.capacity_headroom_7d'),      v: `${headroom}%`,
+          d: pctN > 0 ? t('kpi.avg_used', { p: Math.round(avgUtil * 100) }) : t('kpi.no_data'),
           cls: headroomSev === 'err' ? 'err' : headroomSev === 'warn' ? 'warn' : '',
           action: 'headroom' },
-        { k: 'Fixed orders',          v: String(fixedCount),
-          d: 'locked from optimiser',
+        { k: t('kpi.fixed_orders'),              v: String(fixedCount),
+          d: t('kpi.locked_from_optimiser'),
           action: 'fixed' },
       ];
 
@@ -7314,7 +7581,7 @@ const NIMBUS = (function () {
       if (!dt) return '—';
       const ms = dt - now;
       if (ms <= 0) return 'now';
-      const mins = Math.round(ms / 60000);
+      const mins = Math.round(ms / Config.MS_MIN);
       if (mins < 60) return `+${mins}m`;
       const hrs = Math.round(mins / 60);
       if (hrs < 24) return `+${hrs}h`;
@@ -7329,10 +7596,11 @@ const NIMBUS = (function () {
       const esc   = s => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
       const byLine = {};
-      for (const t of tasks) { const l = t.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(t); }
+      for (const tk of tasks) { const l = tk.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
       const lines = Object.keys(byLine).sort();
 
       if (!lines.length) {
+        if (Dashboard._lsVL) { Dashboard._lsVL.destroy(); Dashboard._lsVL = null; }
         el.innerHTML = `<div class="empty-state" style="padding:24px;text-align:center;">${t('empty.no_data_loaded')}</div>`;
         return;
       }
@@ -7340,16 +7608,8 @@ const NIMBUS = (function () {
       const matrix   = Utilization.computeMatrix(now, 1, tasks);
       const todayKey = Util.dayKey(Util.startOfDay(now));
 
-      const header = `<div class="ls-row ls-header">
-        <div class="ls-dot" style="visibility:hidden"></div>
-        <div class="ls-code">Line</div>
-        <div class="ls-hours">Hours</div>
-        <div class="ls-bar-wrap" style="background:none">Utilization</div>
-        <div class="ls-pct">%</div>
-        <div class="ls-co">Next CO</div>
-      </div>`;
-
-      el.innerHTML = header + lines.map(line => {
+      // Pre-compute row data so renderFn is a pure template with no heavy closures.
+      const rowData = lines.map(line => {
         const ci    = Timeline._colorIndex(line);
         const color = Config.COLORS[ci % Config.COLORS.length];
         const u     = matrix[line]?.[todayKey];
@@ -7361,19 +7621,34 @@ const NIMBUS = (function () {
         const sev     = u ? Utilization.sev(u.pct, overloadAt) : 'ok';
         const barW    = Math.min(pct, 100);
         const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
+        const sorted  = byLine[line].slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+        const nxtCO   = Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now);
+        return { line, color, sched, cap, effCap, pct, sev, barW, isOver, nxtCO };
+      });
 
-        const sorted = byLine[line].slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-        const nxtCO  = Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now);
-
-        return `<div class="ls-row">
-          <div class="ls-dot" style="background:${color}"></div>
-          <div class="ls-code">${esc(line)}</div>
-          <div class="ls-hours" title="${cap}h total capacity">${sched}/${effCap}h</div>
-          <div class="ls-bar-wrap"><div class="ls-bar${isOver ? ' over' : ''}" style="width:${barW}%;background:${color}"></div></div>
-          <div class="ls-pct${sev !== 'ok' ? ' ' + sev : ''}">${pct}%</div>
-          <div class="ls-co">${esc(nxtCO)}</div>
-        </div>`;
-      }).join('');
+      if (!Dashboard._lsVL) {
+        el.innerHTML = '';
+        const hdr = document.createElement('div');
+        hdr.innerHTML = `<div class="ls-dot" style="visibility:hidden"></div>` +
+          `<div class="ls-code">Line</div><div class="ls-hours">Hours</div>` +
+          `<div class="ls-bar-wrap" style="background:none">Utilization</div>` +
+          `<div class="ls-pct">%</div><div class="ls-co">Next CO</div>`;
+        hdr.className = 'ls-row ls-header';
+        el.appendChild(hdr);
+        Dashboard._lsVL = new VirtualList(el, {
+          rowH: VL_LS_ROW_H,
+          renderFn: (d) =>
+            `<div class="ls-row">` +
+            `<div class="ls-dot" style="background:${d.color}"></div>` +
+            `<div class="ls-code">${esc(d.line)}</div>` +
+            `<div class="ls-hours" title="${d.cap}h total capacity">${d.sched}/${d.effCap}h</div>` +
+            `<div class="ls-bar-wrap"><div class="ls-bar${d.isOver ? ' over' : ''}" style="width:${d.barW}%;background:${d.color}"></div></div>` +
+            `<div class="ls-pct${d.sev !== 'ok' ? ' ' + d.sev : ''}">${d.pct}%</div>` +
+            `<div class="ls-co">${esc(d.nxtCO)}</div></div>`,
+          mountEl: el,
+        });
+      }
+      Dashboard._lsVL.update(rowData);
     },
 
     _renderAlertSummary() {
@@ -7384,7 +7659,7 @@ const NIMBUS = (function () {
       const plantLines = new Set(Store.linesForSelectedPlant());
       const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * 60000) : null;
+      const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
       const alerts = Store.alerts.filter(a => {
         if (a.line && !plantLines.has(a.line)) return false;
         if (Dashboard._filterLines.size > 0 && a.line && !Dashboard._filterLines.has(a.line)) return false;
@@ -7447,7 +7722,7 @@ const NIMBUS = (function () {
       setTimeout(() => {
         if (Timeline._tl) {
           const dayStart    = new Date(dateStr + 'T00:00:00');
-          const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * 3600000);
+          const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
           Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
           document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
             b.classList.toggle('active', b.dataset.view === 'day');
@@ -7726,7 +8001,7 @@ const NIMBUS = (function () {
             || evt.type === 'blocks:change') {
           setTimeout(() => TimelineNav.render(), 50);
         }
-      });
+      }, 'TimelineNav');
 
       window.addEventListener('resize', Util.debounce(() => TimelineNav.render(), 100));
       setTimeout(() => TimelineNav.render(), 200);
@@ -7739,7 +8014,7 @@ const NIMBUS = (function () {
       const pixelW = rect.width || el.offsetWidth || 800;
       const today = new Date(); today.setHours(0, 0, 0, 0);
       const scheduleMin = today.getTime();
-      const scheduleMax = scheduleMin + 42 * 86400000;
+      const scheduleMax = scheduleMin + 42 * Config.MS_DAY;
       return { scheduleMin, scheduleMax, pixelW };
     },
 
@@ -7760,7 +8035,7 @@ const NIMBUS = (function () {
 
       const _today = new Date(); _today.setHours(0, 0, 0, 0);
       const scheduleMin = _today.getTime();
-      const scheduleMax = scheduleMin + 42 * 86400000;
+      const scheduleMax = scheduleMin + 42 * Config.MS_DAY;
       const totalMs = scheduleMax - scheduleMin;
 
       const toX = ms => ((ms - scheduleMin) / totalMs) * cssW;
@@ -7777,7 +8052,7 @@ const NIMBUS = (function () {
       ctx.fillRect(0, 0, cssW, cssH);
 
       // Draw per-day utilization heat bands
-      const matrix = Utilization.computeMatrix(new Date(scheduleMin), Math.ceil(totalMs / 86400000) + 2);
+      const matrix = Utilization.computeMatrix(new Date(scheduleMin), Math.ceil(totalMs / Config.MS_DAY) + 2);
       const SEV_COLORS = { ok: 'rgba(47,122,77,0.25)', warn: 'rgba(230,180,0,0.40)', err: 'rgba(210,150,0,0.55)' };
       for (const line of Object.keys(matrix)) {
         for (const [dayKey, row] of Object.entries(matrix[line])) {
@@ -7785,7 +8060,7 @@ const NIMBUS = (function () {
           const sev = Utilization.sev(row.pct);
           if (sev === 'ok') continue;
           const dayStart = new Date(dayKey + 'T00:00:00').getTime();
-          const dayEnd   = dayStart + 86400000;
+          const dayEnd   = dayStart + Config.MS_DAY;
           const x1 = Math.max(0, toX(dayStart));
           const x2 = Math.min(cssW, toX(dayEnd));
           ctx.fillStyle = SEV_COLORS[sev];
@@ -7794,7 +8069,7 @@ const NIMBUS = (function () {
       }
 
       // Day dividers — snap to local midnight so labels match vis-timeline's local-time headers
-      const dayMs = 86400000;
+      const dayMs = Config.MS_DAY;
       const _firstDayLocal = new Date(scheduleMin);
       _firstDayLocal.setHours(0, 0, 0, 0);
       const firstDay = _firstDayLocal.getTime();
@@ -7894,7 +8169,7 @@ const NIMBUS = (function () {
           GanttFilter._refreshLineBtn();
           setTimeout(() => GanttFilter._apply(), 80);
         }
-      });
+      }, 'GanttFilter');
 
       const _fltPairs = [
         [document.getElementById('gantt-flt-line-btn'),  document.getElementById('gantt-line-dropdown')],
@@ -8173,7 +8448,7 @@ const NIMBUS = (function () {
             || evt.type === 'task:update') {
           setTimeout(() => DependencyOverlay.render(), 60);
         }
-      });
+      }, 'DependencyOverlay');
     },
 
     highlightChain(taskId) {
@@ -8285,8 +8560,8 @@ const NIMBUS = (function () {
           const isCritical = maxLen > 0 && (getLen(targetId) || 0) >= maxLen - 1;
 
           let cls = 'ok';
-          if (gapMs > 15 * 60000) cls = 'gap';
-          else if (Math.abs(gapMs) <= 15 * 60000) cls = 'tight';
+          if (gapMs > 15 * Config.MS_MIN) cls = 'gap';
+          else if (Math.abs(gapMs) <= 15 * Config.MS_MIN) cls = 'tight';
           if (isHighlighted) cls = 'highlight';
           else if (isCritical) cls = 'critical';
 
@@ -8489,7 +8764,7 @@ const NIMBUS = (function () {
     snapshotTasks(ids) {
       return ids.map(id => {
         const t = Store.tasks[id];
-        return t ? Util.clone(t) : null;
+        return t ? structuredClone(t) : null;
       }).filter(Boolean);
     },
     restoreTasks(snapshot) {
@@ -8558,13 +8833,16 @@ const NIMBUS = (function () {
       // block the main thread with the optimizer. Single rAF schedules a frame
       // but synchronous work afterward can still preempt the paint.
       requestAnimationFrame(() => requestAnimationFrame(() => {
+        const _optTotalT0 = performance.now();
         try {
           // Snapshot every task in the plant — the optimizer may touch any of
           // them transitively (auto-reflow can ripple beyond the chosen window
           // / lines), so the undo snapshot must stay unfiltered.
           const scopedTasks = Store.tasksByPlant(plant);
           const ids = scopedTasks.map(t => t.id);
+          const _snapT0 = performance.now();
           const snapshot = UndoStack.snapshotTasks(ids);
+          PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
           // KPI inputs are scoped to what the user actually selected on screen 1 —
           // time window and (optionally) a subset of lines. Otherwise the before/after
@@ -8582,14 +8860,18 @@ const NIMBUS = (function () {
           };
 
           // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+          const _preKpiT0 = performance.now();
           const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14);
+          PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
 
           // Run the optimizer in place.
           Engine.runAndApply(mode, opts);
 
           // Post-KPIs from the now-mutated Store, filtered to the same scope.
           const postTasks = Store.tasksByPlant(plant).filter(inScope);
+          const _postKpiT0 = performance.now();
           const postKpis  = Util.scheduleKpis(postTasks, 14);
+          PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
           OptimizerPreview._snapshot = snapshot;
           OptimizerPreview._preKpis  = preKpis;
@@ -8609,6 +8891,8 @@ const NIMBUS = (function () {
             + '</div>';
           }
           footBtns.forEach(b => { b.disabled = false; });
+        } finally {
+          PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
         }
       }));
     },
@@ -9087,7 +9371,7 @@ const NIMBUS = (function () {
           const rs = document.getElementById('right-sidebar');
           if (rs && rs.classList.contains('collapsed')) {
             rs.classList.remove('collapsed');
-            setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, 220);
+            setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
           }
         }
 
@@ -9097,7 +9381,7 @@ const NIMBUS = (function () {
           const rs = document.getElementById('right-sidebar');
           if (rs && !rs.classList.contains('collapsed')) {
             rs.classList.add('collapsed');
-            setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, 220);
+            setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
           }
         } else if (evt.ids.length === 1) {
           const id = evt.ids[0];
@@ -9627,7 +9911,7 @@ const NIMBUS = (function () {
             const st = Store.tasks[sid];
             if (!st || !st.start_date) continue;
             const sNewStart = new Date(st.start_date.getTime() + deltaMs);
-            const sNewEnd   = new Date(st.end_date  ? st.end_date.getTime() + deltaMs : sNewStart.getTime() + Util.runHours(st) * 3600000);
+            const sNewEnd   = new Date(st.end_date  ? st.end_date.getTime() + deltaMs : sNewStart.getTime() + Util.runHours(st) * Config.MS_HOUR);
             const sNewLine  = lineMoved ? newLine : (st.PRODUCTION_LINE || 'Unknown');
             companionPatches.push({ id: sid, changes: { start_date: sNewStart, end_date: sNewEnd, PRODUCTION_LINE: sNewLine } });
 
@@ -9955,6 +10239,8 @@ const NIMBUS = (function () {
   const Persistence = {
     _currentLoadedPlant: null,  // plant whose tasks are currently in Store (null = all plants)
     _dirtyIds: new Set(),       // task ids mutated since last successful backend save
+    _forceIds: new Set(),       // dirty ids written by an authoritative bulk op (optimize) —
+                                // these skip the optimistic-concurrency version check on save
 
     // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
     _lastLoad: {
@@ -10445,7 +10731,7 @@ const NIMBUS = (function () {
           for (let i = 0; i < count; i++) {
             const run = +(0.5 + Math.random() * 2.5).toFixed(2);
             const start = new Date(cursor);
-            const end   = new Date(cursor.getTime() + run * 3600000);
+            const end   = new Date(cursor.getTime() + run * Config.MS_HOUR);
             tasks.push({
               id: String(id),
               text: `ORD-${String(id).padStart(4, '0')}`,
@@ -10458,7 +10744,7 @@ const NIMBUS = (function () {
               'ORDER_QUANTITY_(GMEIN)': 500 + Math.round(Math.random() * 4000),
               RUN_TIME: run,
               BASIC_START_DATE: new Date(dayDate),
-              BASIC_FINISH_DATE: new Date(dayDate.getTime() + 12 * 3600000),
+              BASIC_FINISH_DATE: new Date(dayDate.getTime() + 12 * Config.MS_HOUR),
               start_date: start,
               end_date:   end
             });
@@ -10498,7 +10784,17 @@ saveAll() {
       const dirtyTasks = Persistence._dirtyIds.size > 0
         ? Store.tasksArr.filter(t => Persistence._dirtyIds.has(String(t.id)))
         : [];
-      const body = JSON.stringify({ tasks: dirtyTasks, blocks: Store.blocks, calendars: Store.calendars });
+      // Send only the fields the backend consumes, plus the optimistic-concurrency
+      // token (row_version → base_version). Optimize-dirtied ids carry force=true so an
+      // authoritative reschedule never false-conflicts with a concurrent editor.
+      const taskPayload = dirtyTasks.map(t => ({
+        id:           t.id,
+        start_date:   t.start_date,
+        end_date:     t.end_date,
+        base_version: t.row_version ?? null,
+        force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
+      }));
+      const body = JSON.stringify({ tasks: taskPayload, blocks: Store.blocks, calendars: Store.calendars });
 
       // Retry up to 3 times on network failures; don't retry 4xx (server rejections).
       const _post = (attempt) => fetch(`${Config.API_BASE}/tasks/update`, {
@@ -10520,9 +10816,29 @@ saveAll() {
       _post(1)
         .then(result => {
           Persistence._dirtyIds.clear();
+          Persistence._forceIds.clear();
+          // Re-stamp each persisted task with its NEW row_version so the next edit
+          // carries a fresh token — without this the client would self-conflict on its
+          // own previous write. Direct field set, no emit (metadata only).
+          const versions = result.versions || {};
+          for (const id of Object.keys(versions)) {
+            const tk = Store.tasks[id];
+            if (tk) tk.row_version = versions[id];
+          }
+          // Concurrency conflicts: rows a concurrent editor changed since our read.
+          // Refetch them to the server's truth and warn — the local edit is discarded
+          // (last-writer-loses is the honest semantics here).
+          const stale = result.stale || [];
+          if (stale.length) {
+            ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
+            Persistence._refreshTasks(stale);
+            Toast.show(t('toast.concurrent_edit_conflict', { count: stale.length }), 'warn', 7000);
+          }
           const persisted = result.persisted ?? 0;
           const total     = result.updated   ?? 0;
-          if (persisted < total) {
+          if (stale.length) {
+            // Conflicts already surfaced their own toast; don't also claim a partial-save error.
+          } else if (persisted < total) {
             ErrorLog.warn('persistence', `Partial DB save: ${persisted}/${total} persisted`, result);
             Toast.show(t('toast.partial_db_save', { persisted, total }), 'warn', 6000);
           } else {
@@ -10539,6 +10855,38 @@ saveAll() {
             Toast.show(t('toast.saved_locally'), 'info');
           }
         });
+    },
+
+    /** Optimistic-concurrency reconciliation: pull the server's current dates +
+     *  row_version for orders a concurrent editor changed underneath us, and overwrite
+     *  the stale local copies. Writes _state directly and emits ONCE with source
+     *  'refresh' — the dirty/autosave subscribers ignore that source so we don't
+     *  re-dirty or write the rows we just pulled (see project_store_fanout). */
+    _refreshTasks(ids) {
+      if (!ids || !ids.length) return;
+      fetch(`${Config.API_BASE}/tasks/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(({ data }) => {
+          const applied = [];
+          for (const row of (data || [])) {
+            const tk = Store.tasks[String(row.id)];
+            if (!tk) continue;
+            tk.start_date  = Util.parseDate(row.start_date);
+            tk.end_date    = Util.parseDate(row.end_date);
+            tk.row_version = row.row_version;
+            Persistence._dirtyIds.delete(String(row.id));
+            Persistence._forceIds.delete(String(row.id));
+            applied.push(String(row.id));
+          }
+          if (applied.length) {
+            Store.emit({ type: 'tasks:bulkUpdate', ids: applied, source: 'refresh' });
+          }
+        })
+        .catch(e => ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids));
     },
 
     /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
@@ -10717,10 +11065,11 @@ saveAll() {
       AdminCockpit._activeOvTab = tab;
       document.querySelectorAll('.admin-ov-tabs .sub-subtab').forEach(b =>
         b.classList.toggle('active', b.dataset.ovTab === tab));
-      ['diagnostics', 'data-ops', 'logs'].forEach(t => {
+      ['diagnostics', 'data-ops', 'logs', 'thread'].forEach(t => {
         const el = document.getElementById(`admin-ov-${t}`);
         if (el) el.hidden = (t !== tab);
       });
+      if (tab === 'thread') AdminCockpit._refreshThreadPane();
     },
 
     _setSub(sub) {
@@ -10817,6 +11166,15 @@ saveAll() {
         }
       });
 
+      document.getElementById('admin-thread-clear')?.addEventListener('click', () => {
+        PerfMonitor.clear();
+        AdminCockpit._refreshThreadPane();
+      });
+
+      PerfMonitor.subscribe(() => {
+        if (AdminCockpit._activeOvTab === 'thread') AdminCockpit._refreshThreadPane();
+      });
+
       Store.subscribe(evt => {
         if (evt.type === 'tasks:bulk') {
           const panel = document.getElementById('admin-tab');
@@ -10825,7 +11183,7 @@ saveAll() {
             setTimeout(() => AdminCockpit._renderPipeline(), 50);
           }
         }
-      });
+      }, 'AdminCockpit');
 
       document.addEventListener('mouseover', e => {
         const el = e.target.closest?.('.adm-help');
@@ -11614,7 +11972,7 @@ saveAll() {
               const hEl = document.createElement('span');
               hEl.className = 'adm-help';
               hEl.tabIndex = 0;
-              hEl.setAttribute('aria-label', 'Help');
+              hEl.setAttribute('aria-label', t('aria.help'));
               hEl.addEventListener('click', e => e.stopPropagation());
               const hDot = document.createElement('span');
               hDot.className = 'adm-help-dot';
@@ -12142,7 +12500,7 @@ saveAll() {
       const host = document.getElementById('admin-backend-log-list');
       const countEl = document.getElementById('admin-backend-log-count');
       if (!host) return;
-      host.innerHTML = '<div class="admin-log-empty">Loading…</div>';
+      host.innerHTML = `<div class="admin-log-empty">${t('ui.loading')}</div>`;
 
       AdminCockpit._backendLogAbort?.abort();
       AdminCockpit._backendLogAbort = new AbortController();
@@ -12555,6 +12913,43 @@ saveAll() {
     },
 
     /* ---------------------------------------------------------------------
+       THREAD PROFILER PANEL — PerfMonitor ring-buffer stats table.
+       Rendered into #admin-ov-thread on tab activation and on each
+       PerfMonitor notification (debounced 250 ms by PerfMonitor itself).
+       --------------------------------------------------------------------- */
+    _refreshThreadPane() {
+      const tbody = document.getElementById('admin-perf-tbody');
+      if (!tbody) return;
+      const rows = PerfMonitor.all();
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>`;
+        return;
+      }
+      rows.sort((a, b) => b.last - a.last);
+      const fmt = ms => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
+      const cls = ms => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
+      const ago = ts => {
+        if (!ts) return '—';
+        const s = Math.round((Date.now() - ts) / 1000);
+        if (s < 2)  return 'just now';
+        if (s < 60) return `${s}s ago`;
+        return `${Math.round(s / 60)}m ago`;
+      };
+      tbody.innerHTML = rows.map(r => {
+        const c = cls(r.last);
+        return `<tr>
+          <td class="perf-name">${r.name}</td>
+          <td class="${c}">${fmt(r.last)} ms</td>
+          <td class="${cls(r.p50)}">${fmt(r.p50)} ms</td>
+          <td class="${cls(r.p95)}">${fmt(r.p95)} ms</td>
+          <td class="${cls(r.max)}">${fmt(r.max)} ms</td>
+          <td>${r.count}</td>
+          <td class="perf-ago">${ago(r.lastTs)}</td>
+        </tr>`;
+      }).join('');
+    },
+
+    /* ---------------------------------------------------------------------
        DIAGNOSTICS PANEL — client-side health summary, "Reset client state",
        diagnostics bundle export. Renders into #admin-diagnostics-pane.
        --------------------------------------------------------------------- */
@@ -12768,7 +13163,7 @@ saveAll() {
       Printer._rows = rows;
 
       if (!rows.length) {
-        host.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No orders in this range.</p>';
+        host.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">${t('empty.printer_no_orders')}</p>`;
         return;
       }
 
@@ -12874,9 +13269,8 @@ saveAll() {
   const EmptyState = {
     render(container, opts = {}) {
       if (!container) return;
-      const title = opts.title || 'Select a plant to begin';
-      const msg = opts.msg ||
-        'Use the <strong>Plant</strong> selector in the top bar to choose which plant to view across NIMBUS.';
+      const title = opts.title || t('empty.select_plant_title');
+      const msg = opts.msg || t('empty.select_plant_msg');
       const icon = opts.icon || '◨';
       container.innerHTML =
         `<div class="nimbus-empty-state">
@@ -12947,7 +13341,7 @@ saveAll() {
         if (evt.type === 'tasks:bulk' || evt.type === 'lineSettings:change') {
           PlantSelector._refreshOptions();
         }
-      });
+      }, 'PlantSelector');
 
       PlantSelector._refreshOptions();
       PlantSelector._reflectSelection();
@@ -13075,7 +13469,7 @@ saveAll() {
       root.className = 'welcome-splash';
       root.setAttribute('role', 'dialog');
       root.setAttribute('aria-modal', 'true');
-      root.setAttribute('aria-label', 'Welcome to NIMBUS — select a plant to begin');
+      root.setAttribute('aria-label', t('aria.welcome_dialog'));
 
       const card = document.createElement('div');
       card.className = 'welcome-splash-card';
@@ -13185,7 +13579,7 @@ saveAll() {
 
         Store.subscribe(evt => {
           if (evt.type === 'plant:selected' && evt.plant) WelcomeSplash.dismiss();
-        });
+        }, 'WelcomeSplash');
 
         // Pause the rAF loop when the tab is hidden so we're not burning CPU
         // doing layout thrash for a viewport nobody is looking at.
@@ -13271,22 +13665,33 @@ saveAll() {
         b.addEventListener('click', e => { if (e.target === b) Modal.close(b.id); });
       });
 
-      /* Autosave on store mutations */
-      Store.subscribe(() => Persistence._autosave());
+      /* Autosave on store mutations. Skip 'refresh' — those rows came FROM the server
+         during conflict reconciliation, so writing them back would be a pointless echo. */
+      Store.subscribe(evt => { if (evt.source !== 'refresh') Persistence._autosave(); }, 'Persistence.autosave');
 
-      /* Track which tasks need to be written to the backend on next saveAll() */
+      /* Track which tasks need to be written to the backend on next saveAll(). Optimize
+         ('engine' source) marks its ids force so the authoritative reschedule bypasses
+         the version check. 'refresh' is ignored — _refreshTasks already reconciled those. */
       Store.subscribe(evt => {
-        if (evt.type === 'task:update')      Persistence._dirtyIds.add(String(evt.id));
-        if (evt.type === 'tasks:bulkUpdate') evt.ids.forEach(id => Persistence._dirtyIds.add(String(id)));
-        if (evt.type === 'tasks:bulk')       Persistence._dirtyIds.clear();
-      });
+        if (evt.source === 'refresh') return;
+        const force = evt.source === 'engine';
+        if (evt.type === 'task:update') {
+          Persistence._dirtyIds.add(String(evt.id));
+          if (force) Persistence._forceIds.add(String(evt.id));
+        }
+        if (evt.type === 'tasks:bulkUpdate') evt.ids.forEach(id => {
+          Persistence._dirtyIds.add(String(id));
+          if (force) Persistence._forceIds.add(String(id));
+        });
+        if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+      }, 'Persistence.dirty');
 
       /* Reload tasks when the user switches to a different plant */
       Store.subscribe(evt => {
         if (evt.type === 'plant:selected' && evt.plant && evt.source !== 'restore') {
           Persistence.loadForPlant(evt.plant);
         }
-      });
+      }, 'Persistence.plantLoad');
 
       /* Keep alerts + dashboard in sync */
       Store.subscribe(evt => {
@@ -13321,7 +13726,7 @@ saveAll() {
           ProdLines._lineFilter = '';
           if (onMaster('lines')) ProdLines.render();
         }
-      });
+      }, 'App.sync');
 
       /* Redraw on window resize */
       window.addEventListener('resize', Util.debounce(() => {
@@ -13655,7 +14060,7 @@ saveAll() {
           if (btn) btn.textContent = el.classList.contains('collapsed') ? '▶' : '◀';
         }
       }
-      setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, 220);
+      setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
     },
 
     _wireResize(side, el) {
@@ -14634,7 +15039,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
         try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub !== 'plant') ProdLines.render(); } catch {}
       }
-    });
+    }, 'App.masterData');
     try { Plant.init();       } catch (e) { ErrorLog.error('boot', `Plant.init: ${e.message}`); }
     try { PlantSelector.init();  } catch (e) { ErrorLog.error('boot', `PlantSelector.init: ${e.message}`); }
     try { WelcomeSplash.init();  } catch (e) { ErrorLog.error('boot', `WelcomeSplash.init: ${e.message}`); }
@@ -14666,7 +15071,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Anchor Gantt to today as the leftmost column on first visit (3-day Day view).
         setTimeout(() => Timeline.setView('day'), 200);
       }
-    });
+    }, 'App.firstLoad');
     // Stateless backend: scope the first load to the remembered plant so boot
     // doesn't pull every plant's order book. We intentionally do NOT set
     // Store.selectedPlant here — that keeps selectedPlant null so WelcomeSplash
