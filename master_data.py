@@ -108,7 +108,7 @@ def list_rows(table: str) -> dict:
                 order=sql.SQL(", ").join(sql.Identifier(c) for c in col_names[:list(_KEY_COLUMNS[table]).__len__()]),
             )
         )
-        rows = [dict(zip(col_names, r)) for r in cur.fetchall()]
+        rows = [dict(zip(col_names, r, strict=True)) for r in cur.fetchall()]
 
         # Plants carry a JSONB `constraints` column (per-plant switchable
         # constraint config). It is intentionally NOT registered in
@@ -198,7 +198,7 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # --- Upserts ---
         for row in upserts:
             # Only pass columns that actually exist in the table (guard against stale client)
-            col_names = [c for c in row.keys() if c not in SYSTEM_COLUMNS]
+            col_names = [c for c in row if c not in SYSTEM_COLUMNS]
             if not col_names:
                 continue
             col_sql     = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)

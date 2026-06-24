@@ -119,7 +119,7 @@ A second frontend file, **`nimbus-intelligence.js`** (~2,200 lines, loaded after
 ### Backend (`brain.py` — FastAPI; data layer in `db.py`, `master_data.py`)
 
 `brain.py` exposes ~30 endpoints (tasks, diagnostics, upload/purge/audit, color wheels, master data, backend logs). The most load-bearing:
-- `GET /tasks` — task list with finish-to-start links and metadata; supports `?plant=` server-side scoping (no limit/offset pagination yet). Calls `db.query_orders()` on every request — no cache.
+- `GET /tasks` — task list with finish-to-start links and metadata; supports `?plant=`/`?line=` server-side scoping plus optional `?limit=`/`?offset=` pagination (`meta.total` carries the full filtered row count when paging). Calls `db.query_orders()` on every request — no cache.
 - `GET /diagnostics` / `GET /diagnostics/deep` — load statistics and DB stats
 - `POST /reload` — refreshes color-wheel file cache (`GLOBAL_CW` / `PLANT_CWS`); does **not** affect orders
 - `POST /task/update` — update one task's start/end

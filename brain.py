@@ -31,12 +31,12 @@ import sys
 import time
 import uuid
 import pandas as pd
-from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -327,7 +327,7 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
         if "ORDER" in gdf.columns:
             gdf = gdf.rename(columns={"ORDER": "ORDER_Y"})
         gdf["COLOR"] = gdf["COLOR"].astype(str).str.upper().str.strip()
-        g_cw = dict(zip(gdf["COLOR"], pd.to_numeric(gdf["ORDER_Y"], errors="coerce")))
+        g_cw = dict(zip(gdf["COLOR"], pd.to_numeric(gdf["ORDER_Y"], errors="coerce"), strict=True))
     except Exception:
         pass
 
@@ -343,7 +343,7 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
                     pdf = pdf.rename(columns={"ORDER": "ORDER_Y"})
                 pdf["COLOR"] = pdf["COLOR"].astype(str).str.upper().str.strip()
                 p_cws[m.group(1).upper()] = dict(
-                    zip(pdf["COLOR"], pd.to_numeric(pdf["ORDER_Y"], errors="coerce"))
+                    zip(pdf["COLOR"], pd.to_numeric(pdf["ORDER_Y"], errors="coerce"), strict=True)
                 )
             except Exception:
                 pass
@@ -556,7 +556,10 @@ def _clean_id(v):
 
 @api.get("/tasks")
 def get_tasks(plant: str | None = None, line: str | None = None,
-              limit: int | None = None, offset: int | None = None):
+              limit: int | None = Query(default=None, ge=1, le=10000,
+                  description="Max rows to return. Omit for the full plant-scoped list."),
+              offset: int | None = Query(default=None, ge=0,
+                  description="Rows to skip before returning (for paging).")):
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
@@ -566,7 +569,10 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     rail for unscoped tooling (links are only coherent within a plant/line scope).
     Color merge still runs per-request from the in-process color-wheel cache.
     Response: { data: Task[], links: Link[], meta: DiagnosticsDict }
+    When ?limit/?offset= are supplied, meta.total carries the full filtered
+    row count (ignoring limit/offset) so callers can paginate.
     """
+    paging = limit is not None or offset is not None
     df = db.query_orders(plant=plant, line=line, limit=limit, offset=offset)
     if df is None or df.empty:
         return {"data": [], "links": [],
@@ -575,6 +581,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
                          "raw_row_count": 0, "unique_id_count": 0,
                          "color_merge_misses": 0, "missed_colors": [],
                          "emitted_task_count": 0, "color_merge_ms": 0,
+                         "total": (db.count_orders(plant=plant, line=line) if paging else 0),
                          "loaded_at": DIAGNOSTICS.get("loaded_at"),
                          "source_file": "postgres://nimbus/orders"}}
 
@@ -643,6 +650,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     meta["pre_color_merge_count"] = pre_merge_count
     meta["raw_row_count"] = pre_merge_count
     meta["unique_id_count"] = len(data)
+    meta["total"] = db.count_orders(plant=plant, line=line) if paging else len(data)
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -961,10 +969,8 @@ def get_audit_log(limit: int = 200):
             for line in f:
                 if not line.strip():
                     continue
-                try:
+                with suppress(json.JSONDecodeError):
                     log.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
     except FileNotFoundError:
         pass
     return {"entries": list(reversed(log[-limit:]))}
@@ -1177,7 +1183,7 @@ def get_diagnostics_db():
 @api.post("/maintenance/vacuum-analyze")
 def maintenance_vacuum_analyze(body: dict = Body(default={})):
     table = body.get("table") or None
-    _log_event("info", "maintenance", f"VACUUM ANALYZE {'all tables' if not table else table}")
+    _log_event("info", "maintenance", f"VACUUM ANALYZE {table if table else 'all tables'}")
     try:
         result = db.run_vacuum_analyze(table)
         return {"ok": True, **result}
