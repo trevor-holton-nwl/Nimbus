@@ -286,9 +286,29 @@ def add_column(
         if cur.fetchone():
             raise ValueError(f"Column {column_name!r} already exists in {table}.")
 
-        # Build type fragment
+        # Build type fragment. NUMERIC carries a request-supplied precision[,scale].
+        # sql.SQL() is a trusted-literal wrapper, NOT an escaper, so the raw value must
+        # never be composed in. Validate it as precision[,scale] and rebuild the
+        # fragment from parsed integers via sql.Literal (which renders bare numeric
+        # tokens) — closing the DDL-injection sink.
         if sql_type_upper == "NUMERIC" and length:
-            type_sql = sql.SQL("NUMERIC({})").format(sql.SQL(str(length)))
+            m = re.fullmatch(r"\s*(\d{1,4})\s*(?:,\s*(\d{1,4})\s*)?", str(length))
+            if not m:
+                raise ValueError(
+                    f"Invalid NUMERIC precision/scale: {length!r} (expected e.g. '10' or '10,2')."
+                )
+            precision = int(m.group(1))
+            scale = int(m.group(2)) if m.group(2) is not None else None
+            if not (1 <= precision <= 1000):
+                raise ValueError("NUMERIC precision must be between 1 and 1000.")
+            if scale is not None and not (0 <= scale <= precision):
+                raise ValueError("NUMERIC scale must be between 0 and precision.")
+            if scale is None:
+                type_sql = sql.SQL("NUMERIC({})").format(sql.Literal(precision))
+            else:
+                type_sql = sql.SQL("NUMERIC({},{})").format(
+                    sql.Literal(precision), sql.Literal(scale)
+                )
         else:
             type_sql = sql.SQL(sql_type_upper)
 

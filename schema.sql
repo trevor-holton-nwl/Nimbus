@@ -118,6 +118,35 @@ CREATE INDEX IF NOT EXISTS idx_lines_plant ON production_lines(subnetwork, plant
 -- Plant-only index: the stateless /tasks join filters by plant alone, which the
 -- composite above (subnetwork-leading) can't serve efficiently.
 CREATE INDEX IF NOT EXISTS idx_lines_plant_only ON production_lines(plant);
+-- Line-code index: the order->plant derivation (ingest, backfill, re-attribution)
+-- looks up production_lines by production_line alone, which the subnetwork-leading
+-- composite PK cannot serve efficiently.
+CREATE INDEX IF NOT EXISTS idx_lines_production_line ON production_lines(production_line);
+
+-- ----------------------------------------------------------------------------
+-- orders.plant — per-order plant attribution. Placed AFTER production_lines so the
+-- backfill below can resolve the line→plant mapping. The /tasks read path now selects
+-- o.plant directly instead of LEFT JOINing production_lines on the line code alone,
+-- which fanned out / mis-attributed orders when a line code is reused across plants.
+-- Ingest sets plant from a WERKS/PLANT upload column when present, else derives it from
+-- the line→plant mapping (db.ingest_orders_from_excel). Idempotent: ADD COLUMN IF NOT
+-- EXISTS + a NULL-only backfill, safe to re-run.
+--   ⚠ Re-run schema.sql after deploying this change, or GET /tasks errors on the
+--     missing orders.plant column (the read path references o.plant). See MIGRATION.md.
+-- ----------------------------------------------------------------------------
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant TEXT;
+CREATE INDEX IF NOT EXISTS idx_orders_plant ON orders(plant);
+-- Partial index: the post-line-change re-attribution and ingest derivation scan
+-- orders WHERE plant IS NULL; a plain btree won't serve IS NULL efficiently, so
+-- index just the NULL-plant rows by line (kept tiny — most rows are attributed).
+CREATE INDEX IF NOT EXISTS idx_orders_plant_null ON orders(production_line) WHERE plant IS NULL;
+UPDATE orders o
+   SET plant = (
+       SELECT pl.plant FROM production_lines pl
+        WHERE pl.production_line = o.production_line
+        ORDER BY pl.plant LIMIT 1
+   )
+ WHERE o.plant IS NULL;
 
 -- ============================================================================
 -- MATERIAL MASTER DATA

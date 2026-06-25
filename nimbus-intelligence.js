@@ -612,7 +612,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     resolveIntent(text) {
-      const t = text.trim().toLowerCase();
+      const q = text.trim().toLowerCase();
       const bank = [
         {
           keywords: ['freeze', 'lock', 'fix all', 'pin'],
@@ -685,10 +685,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
       ];
 
-      const results = bank.filter(intent => intent.keywords.some(kw => t.includes(kw)));
+      const results = bank.filter(intent => intent.keywords.some(kw => q.includes(kw)));
       if (!results.length) {
         // Loose word-level fallback
-        const words = t.split(/\s+/);
+        const words = q.split(/\s+/);
         return bank
           .filter(intent => intent.keywords.some(kw => words.some(w => kw.includes(w) && w.length > 2)))
           .slice(0, 3)
@@ -2025,15 +2025,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     _observe(movedId) {
-      const t = Store.tasks[movedId];
-      if (!t?.PRODUCTION_LINE || !t.start_date) return;
+      const task = Store.tasks[movedId];
+      if (!task?.PRODUCTION_LINE || !task.start_date) return;
       const sorted = Store.tasksArr
-        .filter(x => x.PRODUCTION_LINE === t.PRODUCTION_LINE && x.start_date)
+        .filter(x => x.PRODUCTION_LINE === task.PRODUCTION_LINE && x.start_date)
         .sort((a,b) => a.start_date - b.start_date);
       const idx = sorted.findIndex(x => x.id === movedId);
       if (idx > 0) {
         const prev = sorted[idx - 1];
-        const key  = `${Util.norm(prev.COLOR)}→${Util.norm(t.COLOR)}`;
+        const key  = `${Util.norm(prev.COLOR)}→${Util.norm(task.COLOR)}`;
         Patterns._pairs[key] = (Patterns._pairs[key] || 0) + 1;
         localStorage.setItem(Patterns._LS_KEY, JSON.stringify(Patterns._pairs));
         if (Patterns._pairs[key] === Patterns._THRESHOLD)

@@ -31,7 +31,7 @@ import sys
 import time
 import uuid
 import pandas as pd
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -138,14 +138,41 @@ async def lifespan(app: FastAPI):
 
 api = FastAPI(lifespan=lifespan)
 
+# CORS. The frontend uses header-based identity and sends NO cookies/credentials, so
+# allow_credentials MUST be False — a wildcard origin combined with credentials is
+# rejected by the CORS spec (browsers refuse it; Starlette won't echo "*"). Origins
+# default to "*" (any dev origin works for credential-less requests) but can be pinned
+# for hosting via NIMBUS_ALLOWED_ORIGINS (comma-separated). Set an explicit allowlist
+# before any internet-facing deployment.
+_origins_env = os.getenv("NIMBUS_ALLOWED_ORIGINS", "*").strip()
+ALLOWED_ORIGINS = (
+    ["*"] if _origins_env == "*"
+    else [o.strip() for o in _origins_env.split(",") if o.strip()]
+)
+
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["x-request-id"],
 )
+
+# Optional shared-secret guard for destructive / DDL / maintenance routes. It is a
+# NO-OP until NIMBUS_API_KEY is set in the environment, so the (login-less) frontend
+# keeps working untouched in dev; set the env var AND have admin clients send the
+# matching X-API-Key header to lock these routes down for a hosted deployment.
+# NOTE: this is a deployment-config patch, NOT user-level auth — actor identity is
+# still taken from spoofable X-User / x-user-email headers. Proper per-user auth/SSO
+# with server-verified identity is the real fix (see MIGRATION.md → "User security").
+NIMBUS_API_KEY = os.getenv("NIMBUS_API_KEY")
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)):
+    if NIMBUS_API_KEY and x_api_key != NIMBUS_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # Request-ID middleware: accept inbound x-request-id, generate one if missing,
 # echo it back on the response, and log slow requests with the id so frontend
@@ -825,7 +852,7 @@ def tasks_refresh(payload: TaskRefreshPayload):
 # =========================
 # ADMIN COCKPIT — upload, purge, audit
 # =========================
-@api.post("/upload")
+@api.post("/upload", dependencies=[Depends(require_api_key)])
 async def upload_orders(file: UploadFile = File(...)):
     """
     Receive an xlsx file (sequence_testing-shaped) and upsert into the orders
@@ -857,7 +884,7 @@ async def upload_orders(file: UploadFile = File(...)):
     return result
 
 
-@api.post("/purge")
+@api.post("/purge", dependencies=[Depends(require_api_key)])
 def purge_orders(payload: dict):
     """
     payload: { start_date: ISO, end_date: ISO } — both inclusive.
@@ -1056,22 +1083,33 @@ def md_cascade_preview(table: str, body: dict = Body(default={})):
     return md.cascade_preview(table, body.get("deletes", []))
 
 
-@api.post("/master-data/{table}/bulk")
+@api.post("/master-data/{table}/bulk", dependencies=[Depends(require_api_key)])
 def md_bulk(table: str, request: Request, body: dict = Body(default={})):
     """Apply upserts and deletes in one transaction. Payload: { upserts: row[], deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
     try:
-        return md.bulk_apply(
+        result = md.bulk_apply(
             table,
             ops={"upserts": body.get("upserts", []), "deletes": body.get("deletes", [])},
             user_email=request.headers.get("x-user-email"),
         )
+        # Adding/editing production lines may let orders uploaded before the line
+        # existed resolve their materialized plant. Re-derive NULL-plant orders so they
+        # stop being invisible to the plant-scoped read path (best-effort, non-fatal).
+        if table == "production_lines":
+            try:
+                n = db.reattribute_null_plant_orders()
+                if n:
+                    _log_event("info", "db", "Re-attributed orders to plant after line change", count=n)
+            except Exception as e:
+                _log_event("warn", "db", "Plant re-attribution after line change failed", error=str(e))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/master-data/{table}/columns")
+@api.post("/master-data/{table}/columns", dependencies=[Depends(require_api_key)])
 def md_add_column(table: str, request: Request, body: dict = Body(default={})):
     """Add a new user-defined column to a master-data table. Payload: { column_name, sql_type, length?, nullable?, default?, display_label? }"""
     if table not in md.ALLOWED_TABLES:
@@ -1091,7 +1129,7 @@ def md_add_column(table: str, request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.delete("/master-data/{table}/columns/{column}")
+@api.delete("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key)])
 def md_drop_column(table: str, column: str, request: Request):
     """Drop a user-defined column from a master-data table (system columns are protected)."""
     if table not in md.ALLOWED_TABLES:
@@ -1102,7 +1140,7 @@ def md_drop_column(table: str, column: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.patch("/master-data/{table}/columns/{column}")
+@api.patch("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key)])
 def md_rename_label(table: str, column: str, request: Request, body: dict = Body(default={})):
     """Update the display_label of an existing column. Payload: { display_label: str }"""
     if table not in md.ALLOWED_TABLES:
@@ -1123,7 +1161,7 @@ def md_audit(limit: int = 100):
     return {"entries": md.list_audit(limit)}
 
 
-@api.post("/master-data/plants/{plant}/constraints")
+@api.post("/master-data/plants/{plant}/constraints", dependencies=[Depends(require_api_key)])
 def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(default={})):
     """Persist a plant's switchable-constraint config (ordered list).
 
@@ -1221,7 +1259,7 @@ def get_diagnostics_db():
 # terminate-idle (kills app's own pool connections), reset-stats (destroys forensics).
 # =============================================================================
 
-@api.post("/maintenance/vacuum-analyze")
+@api.post("/maintenance/vacuum-analyze", dependencies=[Depends(require_api_key)])
 def maintenance_vacuum_analyze(body: dict = Body(default={})):
     table = body.get("table") or None
     _log_event("info", "maintenance", f"VACUUM ANALYZE {table if table else 'all tables'}")
@@ -1233,7 +1271,7 @@ def maintenance_vacuum_analyze(body: dict = Body(default={})):
         return {"ok": False, "error": str(e)}
 
 
-@api.post("/maintenance/analyze")
+@api.post("/maintenance/analyze", dependencies=[Depends(require_api_key)])
 def maintenance_analyze(body: dict = Body(default={})):
     table = body.get("table")
     if not table:

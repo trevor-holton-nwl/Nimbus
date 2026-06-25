@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-05-20-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-06-25-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -4086,12 +4086,23 @@ const NIMBUS = (function () {
         Toast.show(t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
 
       } else if (a.type === 'overload') {
-        // Scope the combined optimizer to just this line+day
+        // Scope the combined optimizer to just this line+day so the optimize and the
+        // undo snapshot cover the SAME tasks. (Passing no opts re-optimized the whole
+        // plant over a 35-day horizon while the snapshot only captured one line+day,
+        // so undo silently lost every cross-line / cross-day move.)
         const line = a.line, day = Util.dayKey(a.time || new Date());
+        const dayStart = Util.startOfDay(a.time || new Date());
+        const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
+        // Snapshot a SUPERSET of what the optimizer can move: every task on this line
+        // that runAndApply would NOT treat as aged/out-of-window — i.e. its free-set
+        // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
+        // dayKey(start) missed cross-midnight orders and lost them on undo.
         const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
-          (t.PRODUCTION_LINE || 'Unknown') === line && t.start_date && Util.dayKey(t.start_date) === day
+          (t.PRODUCTION_LINE || 'Unknown') === line &&
+          (!t.end_date   || t.end_date   >= dayStart) &&
+          (!t.start_date || t.start_date <= dayEnd)
         ).map(t => t.id));
-        Engine.runAndApply('combined');
+        Engine.runAndApply('combined', { lines: [line], startDate: dayStart, endDate: dayEnd });
         UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
         Alerts.dismiss(alertId);
       }
@@ -6789,6 +6800,8 @@ const NIMBUS = (function () {
       if (!body) return;
       if (!task) { Inspector.clear(); return; }
 
+      // Order fields originate from uploaded Excel — escape before innerHTML.
+      const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
       const fixed = Store.isFixed(task.id);
       const lineOptions = Table._getLineOptions();
       const relAlerts = Store.alerts.filter(a => String(a.taskId) === String(task.id));
@@ -6797,35 +6810,35 @@ const NIMBUS = (function () {
         ${fixed ? `<div class="insp-fix-banner">${t('ui.insp_fixed_banner')}</div>` : ''}
         ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
           <h4 style="color:var(--err);">⚐ ${t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
-          ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${a.msg}</div>`).join('')}
+          ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${esc(a.msg)}</div>`).join('')}
         </div>` : ''}
 
         <div class="insp-card">
           <h4>${t('ui.insp_order_section')}</h4>
           <div class="insp-row"><label>${t('ui.insp_id')}</label>
-            <div class="insp-val">${task.id}</div></div>
+            <div class="insp-val">${esc(task.id)}</div></div>
             <div class="insp-row"><label>${t('ui.insp_order')}</label>
-            <div class="insp-val">${task.ORDER || task.id}</div></div>
+            <div class="insp-val">${esc(task.ORDER || task.id)}</div></div>
           <div class="insp-row"><label>${t('ui.insp_material_no')}</label>
-            <div class="insp-val">${task.MATERIAL_NUMBER || '—'}</div></div>
+            <div class="insp-val">${esc(task.MATERIAL_NUMBER || '—')}</div></div>
           <div class="insp-row"><label>${t('ui.insp_material_desc')}</label>
-            <div class="insp-val">${task.MATERIAL_DESCRIPTION || '—'}</div></div>
+            <div class="insp-val">${esc(task.MATERIAL_DESCRIPTION || '—')}</div></div>
           <div class="insp-row"><label>${t('ui.insp_qty')}</label>
-            <div class="insp-val">${task['ORDER_QUANTITY_(GMEIN)'] || 0}</div></div>
+            <div class="insp-val">${esc(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>
           <div class="insp-row"><label>${t('ui.insp_color')}</label>
-            <div class="insp-val">${task.COLOR || '—'}</div></div>
+            <div class="insp-val">${esc(task.COLOR || '—')}</div></div>
           <div class="insp-row"><label>${t('ui.insp_form')}</label>
-            <div class="insp-val">${task.FORM_SIZE || '—'}</div></div>
+            <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>
           <div class="insp-row"><label>${t('ui.insp_line')}</label>
             <div class="insp-val"><select data-field="PRODUCTION_LINE">
-              ${lineOptions.map(l => `<option value="${l}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('')}
+              ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
             </select></div></div>
         </div>
 
         <div class="insp-card">
           <h4>${t('ui.insp_notes_section')}</h4>
           <div class="insp-notes-wrap">
-            <textarea data-field="notes" maxlength="500" placeholder="${t('ph.add_note')}" rows="3">${(task.notes || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+            <textarea data-field="notes" maxlength="500" placeholder="${t('ph.add_note')}" rows="3">${esc(task.notes || '')}</textarea>
             <div class="insp-notes-counter"><span id="insp-notes-rem">${500 - (task.notes || '').length}</span> ${t('ui.remaining')}</div>
           </div>
         </div>
@@ -6851,8 +6864,8 @@ const NIMBUS = (function () {
           ${fixed
             ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFix(false)">${t('btn.unfix')}</button>`
             : `<button class="btn btn-primary" onclick="NIMBUS.Inspector.toggleFix(true)">${t('btn.fix_order')}</button>`}
-          <button class="btn" onclick="NIMBUS.Table._openOverrideModalForId('${task.id}')">${t('btn.override_date')}</button>
-          <button class="btn btn-ghost" onclick="NIMBUS.Timeline.focus('${task.id}')">${t('btn.focus')}</button>
+          <button class="btn" data-act="override">${t('btn.override_date')}</button>
+          <button class="btn btn-ghost" data-act="focus">${t('btn.focus')}</button>
         </div>
       `;
 
@@ -6860,6 +6873,10 @@ const NIMBUS = (function () {
       body.querySelectorAll('[data-field]').forEach(el => {
         el.onchange = () => Inspector._onFieldChange(el.dataset.field, el.value);
       });
+      // Action buttons via listeners (id is never concatenated into an HTML attribute).
+      const _id = String(task.id);
+      body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS.Table._openOverrideModalForId(_id));
+      body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS.Timeline.focus(_id));
       // Notes char counter (oninput fires on every keystroke)
       const notesEl = body.querySelector('[data-field="notes"]');
       const notesRemEl = body.querySelector('#insp-notes-rem');
@@ -9220,6 +9237,13 @@ const NIMBUS = (function () {
         btn.style.color = '';
         btn.onclick = () => NIMBUS.Sandbox.enter();
       });
+
+      // Promote is an explicit user action, so persist it (cache + backend) the same
+      // way Cmd/Ctrl+S-in-sandbox already does. Runs AFTER teardown (Sandbox.active is
+      // now false) so saveAll's own Sandbox.exit(true) call no-ops — no recursion.
+      // Without this, "Scenario applied" showed but a reload before a later unrelated
+      // save lost the promoted edits (autosave is suppressed during sandbox).
+      if (apply) NIMBUS.Persistence.saveAll();
     }
   };
 
@@ -9494,6 +9518,7 @@ const NIMBUS = (function () {
       const renderCard = (id) => {
         const t = Store.tasks[id];
         if (!t) return '';
+        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
         const qty = t['ORDER_QUANTITY_(GMEIN)'] ?? '—';
         const run = Util.runHours(t);
         const line = t.PRODUCTION_LINE || '—';
@@ -9513,14 +9538,14 @@ const NIMBUS = (function () {
           ? `<span class="hov-fixed">🔒 fixed</span>` : '';
 
         return `
-          <div class="hov-title">${orderNo} ${fixedBadge}</div>
-          <div class="hov-mat">${matDesc}</div>
+          <div class="hov-title">${esc(orderNo)} ${fixedBadge}</div>
+          <div class="hov-mat">${esc(matDesc)}</div>
           <div class="hov-grid">
-            <span>Qty</span><span>${qty}</span>
+            <span>Qty</span><span>${esc(qty)}</span>
             <span>Run</span><span>${run.toFixed(2)} h</span>
-            <span>Line</span><span>${line}</span>
-            <span>Color</span><span>${color}</span>
-            <span>Form</span><span>${form}</span>
+            <span>Line</span><span>${esc(line)}</span>
+            <span>Color</span><span>${esc(color)}</span>
+            <span>Form</span><span>${esc(form)}</span>
           </div>
           <div class="hov-dates">${startStr} → ${endStr}</div>
           ${alertsHtml}
@@ -10774,7 +10799,10 @@ const NIMBUS = (function () {
     },
 
 saveAll() {
-      if (Sandbox.active) Sandbox.exit(true);
+      // In sandbox, promote-then-save runs through Sandbox.exit(true), which itself
+      // calls saveAll() after teardown — so return here to avoid a double POST (the
+      // re-entrant call below does the single persist).
+      if (Sandbox.active) { Sandbox.exit(true); return; }
       Persistence._saveCache();
 
       // Only send tasks that changed since the last successful save. The backend
@@ -10815,6 +10843,10 @@ saveAll() {
 
       _post(1)
         .then(result => {
+          // Clear dirty/force tracking. Within an HTTP 200, every sent id is either
+          // persisted (in versions), stale (refetched below, last-writer-loses), or
+          // terminal (not_found/invalid — not retryable as-is); none should stay dirty,
+          // so clearing both sets is correct. A corrected edit re-dirties its id.
           Persistence._dirtyIds.clear();
           Persistence._forceIds.clear();
           // Re-stamp each persisted task with its NEW row_version so the next edit
@@ -14328,6 +14360,11 @@ saveAll() {
       const isNew = state.added.some(r => _rowKey(table, r) === key);
       const isDeleted = state.deleted.has(key);
       const isDirty = state.dirty.has(key);
+      // Render pending (dirty) values over the saved baseline so an in-progress edit
+      // survives a re-render (add/paste/delete all call _renderTable). For added rows
+      // the dirty entry IS the added row object, so rowView resolves to the same values.
+      const _dirtyPatch = state.dirty.get(key);
+      const rowView = _dirtyPatch ? { ...row, ..._dirtyPatch } : row;
 
       const tr = document.createElement('tr');
       tr.dataset.rowKey = key;
@@ -14346,20 +14383,20 @@ saveAll() {
         if (fkSources[col.column_name] && !isNew) {
           // For existing rows, key columns are read-only.
           if (col.is_locked) {
-            td.textContent = row[col.column_name] ?? '';
+            td.textContent = rowView[col.column_name] ?? '';
           } else {
-            td.appendChild(_fkSelect(table, col.column_name, row[col.column_name], fkSources[col.column_name], key));
+            td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], fkSources[col.column_name], key));
           }
         } else if (fkSources[col.column_name] && isNew) {
-          td.appendChild(_fkSelect(table, col.column_name, row[col.column_name], fkSources[col.column_name], key));
+          td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], fkSources[col.column_name], key));
         } else if (col.is_locked && !isNew) {
           // Key columns on saved rows are read-only.
-          td.textContent = row[col.column_name] ?? '';
+          td.textContent = rowView[col.column_name] ?? '';
         } else {
           const cell = document.createElement('div');
           cell.contentEditable = isDeleted ? 'false' : 'true';
           cell.className = 'md-cell';
-          cell.textContent = row[col.column_name] ?? '';
+          cell.textContent = rowView[col.column_name] ?? '';
           cell.dataset.col = col.column_name;
           cell.dataset.rowKey = key;
           cell.oninput = () => _markDirty(table, key, col.column_name, cell.textContent);
@@ -14435,7 +14472,17 @@ saveAll() {
     function _markDirty(table, rowKey, colName, value) {
       const state = _cache[table];
       if (!state) return;
-      const patch = state.dirty.get(rowKey) || _getRowByKey(table, rowKey) || {};
+      // An existing dirty entry accumulates further edits. For a row's FIRST edit start
+      // the patch from a SHALLOW COPY of the live baseline, so the baseline in
+      // state.rows is never mutated in place — EXCEPT for newly-added rows, which ARE
+      // their own working copy in state.added and are intentionally edited in place
+      // (_save reads them from there; copying one would leave the added entry blank and
+      // trip the "missing key columns" guard in _save).
+      let patch = state.dirty.get(rowKey);
+      if (!patch) {
+        const addedRow = (state.added || []).find(r => _rowKey(table, r) === rowKey);
+        patch = addedRow ? addedRow : { ..._getRowByKey(table, rowKey) };
+      }
       patch[colName] = value;
       state.dirty.set(rowKey, patch);
       // Update the tr class to show dirty highlight.

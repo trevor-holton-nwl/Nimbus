@@ -187,3 +187,68 @@ Ordered (user-assigned managed identity + Key Vault **before** the apps — a sy
 4. **Conflict guardrail:** two sessions on the same plant edit the same order; second save gets 409 + Toast, not a silent overwrite.
 5. **Config externalization:** grep images/source for `Mavdob8808!`, `localhost:8000`, and Windows `C:\...Scheduler` paths — all gone from runtime config.
 6. **Azure pilot:** run `DEPLOYMENT.md` into a test resource group; frontend external URL loads, `/api/*` proxies to internal backend, Key Vault secret refs resolve, color wheels survive a backend revision restart.
+
+---
+
+## Addendum — Pre-migration audit remediation (applied 2026-06-25)
+
+> These are **audit fixes applied ahead of** the Azure workstreams above — additive and
+> backward-compatible (no env set ⇒ behaves as before). They do **not** replace the
+> workstreams; where they overlap (auth, CORS), the workstream is still the real fix.
+
+### User security — the hole is *patched*, not *closed* (relates to Workstream 3)
+
+The destructive / DDL / maintenance endpoints (`/upload`, `/purge`, `/master-data/{table}/bulk`,
+`/master-data/{table}/columns` ADD/DROP/rename, `/master-data/plants/{plant}/constraints`,
+`/maintenance/*`) now carry an **optional shared-secret guard** (`brain.py` `require_api_key`):
+
+- **No-op until `NIMBUS_API_KEY` is set** — local/dev runs unchanged.
+- When set, those routes require a matching `X-API-Key` header (else `401`).
+- **To enable for a non-Azure host:** set `NIMBUS_API_KEY` on the backend **and** make admin
+  clients send `X-API-Key`. The current frontend does **not** send it yet, so enabling the key
+  without wiring the frontend will break the in-app admin actions — wire it first.
+
+**This is NOT user-level security.** Actor identity is *still* read from spoofable
+`X-User` / `x-user-email` headers, so audit attribution remains untrustworthy. The real fix is
+**Workstream 3 (Entra ID SSO)** — server-verified per-user identity that replaces both the trusted
+headers and this stopgap key. Treat `NIMBUS_API_KEY` as a deployment-config lock for the gap
+between now and SSO, nothing more. Per-plant RBAC remains the documented fast-follow (WS3 seam).
+
+CORS was also corrected: `allow_credentials=False` (the frontend sends no cookies) and origins
+from `NIMBUS_ALLOWED_ORIGINS` (default `*`), removing the spec-invalid `*`+credentials combo.
+Workstream 6 (same-origin reverse proxy) still supersedes this once hosted.
+
+### orders.plant — schema migration required (relates to roadmap multi-plant scaling)
+
+The `/tasks` read path previously derived an order's plant by `LEFT JOIN production_lines` on the
+**line code alone**. At 50+ plants a reused line code would fan out / mis-attribute orders
+(duplicate task ids, inflated counts, wrong plant). Fixed by materializing plant **onto the order**:
+
+- **`schema.sql`** now adds `orders.plant TEXT` + `idx_orders_plant` and backfills it from the
+  line→plant mapping (idempotent, NULL-only).
+- **`db.py`** reads `o.plant` directly and **no longer joins** `production_lines`; ingest sets
+  `plant` from a `WERKS`/`PLANT` upload column when present, else derives it from the line mapping
+  (post-upsert, scoped to the batch). Re-uploads keep an existing derived plant (`COALESCE`).
+- **⚠ Deployment ordering:** the code references `o.plant`, so **`schema.sql` MUST be re-run**
+  before this backend serves traffic, or `GET /tasks` errors on the missing column. (Consistent
+  with how schema.sql already carries migrations.)
+
+**Still open for true multi-plant (fast-follow, before line codes are reused across plants):**
+- **Authoritative plant at ingest.** Today plant is line-derived when the upload omits it, which is
+  only unambiguous while line codes are globally unique. Add a real source — a `PLANT`/`WERKS`
+  column in the `sequence_testing` export (already read if present) **or** a plant picker in the
+  upload UI applied to the whole file.
+- **`make_id` collision.** Ids are `MD5(production_order|material_number)`, plant-independent. If the
+  same `(production_order, material_number)` legitimately exists in two plants, ids collide; the
+  id scheme must incorporate plant before that scenario is real.
+- **Re-attribution.** A materialized `orders.plant` does not track later master-data changes the way
+  the old per-request join did. Two cases: **(1)** an order uploaded *before* its line exists in master
+  data gets `plant=NULL` and is invisible to the plant-scoped read path — now **self-healed by a
+  re-derivation hook** that runs after any `production_lines` bulk change
+  (`db.reattribute_null_plant_orders`, called from `POST /master-data/{table}/bulk`); lines added
+  directly via `psql` (not the app) still need a `schema.sql` re-run to backfill. **(2)** re-uploading
+  an order onto a *different line* now self-heals: the upsert resets `plant` to NULL when the line
+  changed and no explicit plant was supplied, and the post-upsert derivation re-resolves it from the
+  new line. **(3)** the one remaining gap — reassigning an existing *line* to a different *plant* in
+  master data (the order's line is unchanged) — does not move already-attributed orders; a targeted
+  re-derivation (compare stored plant vs the current line→plant mapping) or a re-upload would be needed.

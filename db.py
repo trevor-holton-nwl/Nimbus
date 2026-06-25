@@ -105,7 +105,7 @@ _ORDERS_SELECT = """
         material_number       AS "MATERIAL_NUMBER",
         material_description  AS "MATERIAL_DESCRIPTION",
         o.production_line     AS "PRODUCTION_LINE",
-        pl.plant              AS "PLANT",
+        o.plant               AS "PLANT",
         COALESCE(scheduled_start, basic_start_date) AS "BASIC_START_DATE",
         COALESCE(scheduled_end,   basic_finish_date) AS "BASIC_FINISH_DATE",
         basic_start_date      AS "ORIGINAL_START_DATE",
@@ -123,7 +123,6 @@ _ORDERS_SELECT = """
         -- xmin's native type (xid) has no direct bigint cast.
         o.xmin::text::bigint  AS "ROW_VERSION"
     FROM orders o
-    LEFT JOIN production_lines pl ON pl.production_line = o.production_line
 """
 
 
@@ -157,7 +156,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
     sql = _ORDERS_SELECT
     where, params = [], []
     if plant:
-        where.append('pl.plant = %s')
+        where.append('o.plant = %s')
         params.append(plant)
     if line:
         where.append('o.production_line = %s')
@@ -180,10 +179,10 @@ def query_orders(plant: str | None = None, line: str | None = None,
 
 def count_orders(plant: str | None = None, line: str | None = None) -> int:
     """Row count for a plant/line scope — for pagination totals / tooling."""
-    sql = "SELECT COUNT(*) FROM orders o LEFT JOIN production_lines pl ON pl.production_line = o.production_line"
+    sql = "SELECT COUNT(*) FROM orders o"
     where, params = [], []
     if plant:
-        where.append('pl.plant = %s')
+        where.append('o.plant = %s')
         params.append(plant)
     if line:
         where.append('o.production_line = %s')
@@ -194,6 +193,36 @@ def count_orders(plant: str | None = None, line: str | None = None) -> int:
         cur.execute(sql, params)
         row = cur.fetchone()
     return int(row[0]) if row else 0
+
+
+def reattribute_null_plant_orders() -> int:
+    """
+    Re-derive orders.plant where it is still NULL, from the line->plant master-data
+    mapping. Call this after production_lines change so orders uploaded BEFORE their
+    line existed in master data become plant-attributed and stop being invisible to
+    the plant-scoped read path. The old LEFT-JOIN read path self-healed automatically
+    on every request; a materialized plant does not, so this is the explicit hook.
+    Idempotent: only NULL-plant rows whose line now exists are touched. Returns the
+    number of orders re-attributed.
+    """
+    sql = """
+        UPDATE orders o
+           SET plant = (
+               SELECT pl.plant FROM production_lines pl
+                WHERE pl.production_line = o.production_line
+                ORDER BY pl.plant LIMIT 1
+           )
+         WHERE o.plant IS NULL
+           AND EXISTS (
+               SELECT 1 FROM production_lines pl
+                WHERE pl.production_line = o.production_line
+           )
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        n = cur.rowcount
+        conn.commit()
+    return n
 
 
 def get_task_versions(ids: list[str]) -> list[dict]:
@@ -845,15 +874,24 @@ def run_analyze(table: str) -> dict:
 _UPSERT_SQL = """
     INSERT INTO orders (
         id, production_order, material_number, material_description,
-        production_line, basic_start_date, basic_finish_date,
+        production_line, plant, basic_start_date, basic_finish_date,
         run_time, color, order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
         material_description  = EXCLUDED.material_description,
         production_line       = EXCLUDED.production_line,
+        -- Plant: an explicitly uploaded plant always wins; otherwise, if the LINE
+        -- changed on this re-upload, reset to NULL so the post-upsert derivation
+        -- re-resolves it from the NEW line (matches the old join's self-healing);
+        -- otherwise keep the existing (already-derived) plant.
+        plant                 = CASE
+            WHEN EXCLUDED.plant IS NOT NULL THEN EXCLUDED.plant
+            WHEN EXCLUDED.production_line IS DISTINCT FROM orders.production_line THEN NULL
+            ELSE orders.plant
+        END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
         run_time              = EXCLUDED.run_time,
@@ -892,6 +930,10 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     # SAP exports sometimes use "ORDER" instead of "PRODUCTION_ORDER"
     if "ORDER" in df.columns and "PRODUCTION_ORDER" not in df.columns:
         df = df.rename(columns={"ORDER": "PRODUCTION_ORDER"})
+    # SAP plant column is commonly "WERKS"; normalize to PLANT. When neither is
+    # present the per-order plant is derived from the line→plant mapping after upsert.
+    if "WERKS" in df.columns and "PLANT" not in df.columns:
+        df = df.rename(columns={"WERKS": "PLANT"})
 
     required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
     missing = required - set(df.columns)
@@ -969,6 +1011,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             _str_id(r.get("MATERIAL_NUMBER", "")),
             _v(r, "MATERIAL_DESCRIPTION"),
             _v(r, "PRODUCTION_LINE"),
+            _v(r, "PLANT"),
             _ts(r["BASIC_START_DATE"]),
             _ts(r["BASIC_FINISH_DATE"]),
             float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
@@ -1001,6 +1044,22 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 if not cur.nextset():
                     break
             conn.commit()
+        # Materialize plant for rows this upload didn't carry one for, deriving it from
+        # the line→plant master-data mapping (LIMIT 1 keeps it deterministic even if a
+        # line code is ever shared across plants). Scoped to this batch.
+        cur.execute(
+            """
+            UPDATE orders o
+               SET plant = (
+                   SELECT pl.plant FROM production_lines pl
+                    WHERE pl.production_line = o.production_line
+                    ORDER BY pl.plant LIMIT 1
+               )
+             WHERE o.upload_batch_id = %s AND o.plant IS NULL
+            """,
+            (batch_id,),
+        )
+        conn.commit()
         cur.execute(
             """
             INSERT INTO upload_audit
