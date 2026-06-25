@@ -60,8 +60,18 @@ def _row_key(table: str, row: dict) -> tuple:
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
-def list_rows(table: str) -> dict:
-    """Return column metadata + data rows for the given table."""
+def list_rows(table: str, limit: int | None = None, offset: int | None = None,
+              plant: str | None = None) -> dict:
+    """
+    Return column metadata + data rows for the given table.
+
+    Optional server-side scoping (all default to current full-catalog behavior):
+      - `plant`: filter to rows whose `plant` column matches (only honored when
+        the table actually has a `plant` column; ignored otherwise).
+      - `limit`/`offset`: parameterized LIMIT/OFFSET page window.
+    When any of these are supplied, `meta.total` carries the full row count for
+    the same filter (ignoring limit/offset) so callers can paginate.
+    """
     _assert_table(table)
 
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -97,43 +107,80 @@ def list_rows(table: str) -> dict:
         col_names = [c["column_name"] for c in columns]
 
         if not col_names:
-            return {"columns": [], "rows": []}
+            return {"columns": [], "rows": [], "meta": {"total": 0}}
 
-        # Fetch rows with only the visible columns.
+        # Optional plant filter — only when the table actually has a plant column.
+        where_sql = sql.SQL("")
+        where_params: list = []
+        if plant and "plant" in col_names:
+            where_sql = sql.SQL(" WHERE {col} = %s").format(col=sql.Identifier("plant"))
+            where_params = [plant]
+
+        # Fetch rows with only the visible columns (plant filter + page window).
         select_idents = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)
-        cur.execute(
-            sql.SQL("SELECT {cols} FROM {tbl} ORDER BY {order}").format(
-                cols=select_idents,
-                tbl=sql.Identifier(table),
-                order=sql.SQL(", ").join(sql.Identifier(c) for c in col_names[:list(_KEY_COLUMNS[table]).__len__()]),
-            )
+        query = sql.SQL("SELECT {cols} FROM {tbl}").format(
+            cols=select_idents,
+            tbl=sql.Identifier(table),
+        ) + where_sql + sql.SQL(" ORDER BY {order}").format(
+            order=sql.SQL(", ").join(sql.Identifier(c) for c in col_names[:list(_KEY_COLUMNS[table]).__len__()]),
         )
+        params = list(where_params)
+        if limit is not None:
+            query += sql.SQL(" LIMIT %s")
+            params.append(int(limit))
+        if offset:
+            query += sql.SQL(" OFFSET %s")
+            params.append(int(offset))
+        cur.execute(query, params)
         rows = [dict(zip(col_names, r, strict=True)) for r in cur.fetchall()]
+
+        # Total row count for the same (plant) filter. A separate COUNT is only
+        # needed when a page window is applied; otherwise `rows` already holds the
+        # whole filtered set, so len(rows) is the total (avoids a redundant scan).
+        if limit is not None or offset:
+            cur.execute(
+                sql.SQL("SELECT COUNT(*) FROM {tbl}").format(tbl=sql.Identifier(table)) + where_sql,
+                where_params,
+            )
+            total = int(cur.fetchone()[0])
+        else:
+            total = len(rows)
 
         # Plants carry a JSONB `constraints` column (per-plant switchable
         # constraint config). It is intentionally NOT registered in
         # column_metadata, so it never appears as an editable grid column — but
         # we attach it to each row dict so the frontend (Settings pane +
-        # optimizer) can read it alongside the visible columns.
+        # optimizer) can read it alongside the visible columns. Scope the fetch
+        # to the plants on this page so a paged/filtered request never re-scans
+        # the whole table.
         if table == 'plants':
             try:
-                cur.execute("SELECT subnetwork, plant, constraints FROM plants")
-                cmap = {(r[0], r[1]): r[2] for r in cur.fetchall()}
-                for row in rows:
-                    row['constraints'] = cmap.get((row.get('subnetwork'), row.get('plant')))
+                page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
+                if page_plants:
+                    cur.execute(
+                        "SELECT subnetwork, plant, constraints FROM plants WHERE plant = ANY(%s)",
+                        (page_plants,),
+                    )
+                    cmap = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+                    for row in rows:
+                        row['constraints'] = cmap.get((row.get('subnetwork'), row.get('plant')))
             except Exception:
                 pass  # column not migrated yet — leave it absent
 
-    return {"columns": columns, "rows": rows}
+    return {"columns": columns, "rows": rows, "meta": {"total": total}}
 
 
 def cascade_preview(table: str, deletes: list[dict]) -> dict:
-    """Return how many child rows would cascade-delete if these rows are removed."""
-    _assert_table(table)
-    if not deletes:
-        return {"plants": 0, "production_lines": 0}
+    """Return how many child rows would cascade-delete if these rows are removed.
 
-    result = {"plants": 0, "production_lines": 0}
+    The result dict carries every child-table key that can ever appear (seeded to 0)
+    so the delete-confirmation UI always has a stable shape to render.
+    """
+    _assert_table(table)
+    # Seed all child-table keys so a missing branch reads as 0, not "absent".
+    result = {"plants": 0, "production_lines": 0, "material_plants": 0}
+    if not deletes:
+        return result
 
     with _pool.connection() as conn, conn.cursor() as cur:
         if table == "subnetworks":
@@ -159,6 +206,16 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
                     )
                     plines += int(cur.fetchone()[0])
             result["production_lines"] = plines
+
+        elif table == "materials":
+            # material_plants FK: material_id REFERENCES materials(material_id) ON DELETE CASCADE.
+            material_ids = [d.get("material_id") for d in deletes if d.get("material_id")]
+            if material_ids:
+                cur.execute(
+                    "SELECT COUNT(*) FROM material_plants WHERE material_id = ANY(%s)",
+                    (material_ids,),
+                )
+                result["material_plants"] = int(cur.fetchone()[0])
 
     return result
 

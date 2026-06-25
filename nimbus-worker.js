@@ -118,8 +118,12 @@ function _dayWindow(workHours, date) {
   const wh = workHours[d.getDay()];
   if (!wh) return null;
   const [h1, h2] = wh;
-  const start = new Date(d); start.setHours(h1, 0, 0, 0);
-  const end   = new Date(d); end.setHours(h2, 0, 0, 0);
+  // Mirror of app.js Calendar._dayWindow: h1/h2 are fractional hours (8.5 = 08:30);
+  // setHours() truncates the hour arg, so split the minutes out or 08:30 → 08:00.
+  const hh1 = Math.floor(h1), mm1 = Math.round((h1 - hh1) * 60);
+  const hh2 = Math.floor(h2), mm2 = Math.round((h2 - hh2) * 60);
+  const start = new Date(d); start.setHours(hh1, mm1, 0, 0);
+  const end   = new Date(d); end.setHours(hh2, mm2, 0, 0);
   return [start, end];
 }
 
@@ -165,27 +169,55 @@ function workWindow(line, date, calendars, plants, lineSettings, masterData) {
   return result;
 }
 
-function dailyCapacityHours(line, date, calendars, plants, lineSettings, masterData, blocks, plantBlocks) {
+// Mirror of app.js Calendar._indexCapacityBlocks: pre-parse + bucket blocks once so a
+// tight (line × day) loop reuses parsed Date objects instead of re-parsing each cell.
+function _indexCapacityBlocks(blocks, plantBlocks) {
+  const lineBlocks = new Map(), globalLine = [], plantBlocksIdx = new Map(), globalPlant = [];
+  for (const b of blocks) {
+    const s = parseDate(b.start), e = parseDate(b.end);
+    if (!s || !e) continue;
+    if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push({ s, e }); }
+    else globalLine.push({ s, e });
+  }
+  for (const b of plantBlocks) {
+    const s = parseDate(b.start), e = parseDate(b.end);
+    if (!s || !e) continue;
+    if (b.plant) { let a = plantBlocksIdx.get(b.plant); if (!a) plantBlocksIdx.set(b.plant, a = []); a.push({ s, e }); }
+    else globalPlant.push({ s, e });
+  }
+  return { lineBlocks, globalLine, plantBlocks: plantBlocksIdx, globalPlant };
+}
+
+function dailyCapacityHours(line, date, calendars, plants, lineSettings, masterData, blocks, plantBlocks, idx) {
   const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
   if (!win) return 0;
   const winHours = (win[1] - win[0]) / 3600000;
   const plant = getPlantForLine(line, lineSettings, masterData);
-  const intervals = [];
-  for (const b of blocks) {
-    if (b.line && b.line !== line) continue;
-    const s = parseDate(b.start), e = parseDate(b.end);
-    if (s && e) intervals.push({ s, e });
-  }
-  for (const b of plantBlocks) {
-    if (b.plant && b.plant !== plant) continue;
-    const s = parseDate(b.start), e = parseDate(b.end);
-    if (s && e) intervals.push({ s, e });
+  let intervals;
+  if (idx) {
+    intervals = [];
+    const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) intervals.push(x);
+    for (const x of idx.globalLine) intervals.push(x);
+    const pb = idx.plantBlocks.get(plant); if (pb) for (const x of pb) intervals.push(x);
+    for (const x of idx.globalPlant) intervals.push(x);
+  } else {
+    intervals = [];
+    for (const b of blocks) {
+      if (b.line && b.line !== line) continue;
+      const s = parseDate(b.start), e = parseDate(b.end);
+      if (s && e) intervals.push({ s, e });
+    }
+    for (const b of plantBlocks) {
+      if (b.plant && b.plant !== plant) continue;
+      const s = parseDate(b.start), e = parseDate(b.end);
+      if (s && e) intervals.push({ s, e });
+    }
   }
   return Math.max(0, winHours - mergedOverlapHours(win, intervals));
 }
 
-function effectiveCapacityHours(line, date, calendars, plants, lineSettings, masterData, blocks, plantBlocks) {
-  const full = dailyCapacityHours(line, date, calendars, plants, lineSettings, masterData, blocks, plantBlocks);
+// Mirror of app.js Calendar.effectiveFromCapacity — the single buffer formula.
+function effectiveFromCapacity(line, full, lineSettings) {
   const ls = lineSettings[line];
   if (!ls) return full;
   if (ls.bufferUnit === 'pct'   && ls.bufferPct   > 0) return full * (1 - ls.bufferPct / 100);
@@ -262,14 +294,21 @@ function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSett
     byLineDay[`${line}|${day}`].hours += runHours(t);
     byLineDay[`${line}|${day}`].tasks.push(t);
   }
+  // Bucket the already-parsed blocks (zero re-parse) for the per-(line,day) capacity calls.
+  const _capIdx = { lineBlocks: new Map(), globalLine: [], plantBlocks: new Map(), globalPlant: [] };
+  for (const b of parsedBlocks) {
+    if (b.line) { let a = _capIdx.lineBlocks.get(b.line); if (!a) _capIdx.lineBlocks.set(b.line, a = []); a.push({ s: b.s, e: b.e }); }
+    else _capIdx.globalLine.push({ s: b.s, e: b.e });
+  }
+  for (const b of parsedPlantBlocks) {
+    if (b.plant) { let a = _capIdx.plantBlocks.get(b.plant); if (!a) _capIdx.plantBlocks.set(b.plant, a = []); a.push({ s: b.s, e: b.e }); }
+    else _capIdx.globalPlant.push({ s: b.s, e: b.e });
+  }
   for (const k of Object.keys(byLineDay)) {
     const { line, day, hours } = byLineDay[k];
     const dateObj = new Date(day + 'T12:00:00');
-    const cap = dailyCapacityHours(line, dateObj, calendars, plants, lineSettings, masterData, blocks, plantBlocks);
-    const ls = lineSettings[line];
-    let effCap = cap;
-    if (ls?.bufferUnit === 'pct'   && ls.bufferPct   > 0) effCap = cap * (1 - ls.bufferPct / 100);
-    else if (ls?.bufferUnit === 'hours' && ls.bufferHours > 0) effCap = Math.max(0, cap - ls.bufferHours);
+    const cap = dailyCapacityHours(line, dateObj, calendars, plants, lineSettings, masterData, blocks, plantBlocks, _capIdx);
+    const effCap = effectiveFromCapacity(line, cap, lineSettings);
 
     if (effCap > 0 && hours > effCap * OVERLOAD_THRESHOLD) {
       alerts.push({
@@ -400,17 +439,19 @@ function computeUtilization({ tasks, lineSettings, calendars, plants, blocks, pl
   const lines = new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'));
   Object.keys(calendars).forEach(l => lines.add(l));
 
+  const blockIdx = _indexCapacityBlocks(blocks, plantBlocks);
   const matrix = {};
   for (const line of lines) {
     matrix[line] = {};
     for (let i = 0; i < days; i++) {
       const d = new Date(start); d.setDate(start.getDate() + i);
       const key = dayKey(d);
+      const cap = dailyCapacityHours(line, d, calendars, plants, lineSettings, masterData, blocks, plantBlocks, blockIdx);
       matrix[line][key] = {
         date:              d,
         scheduled:         0,
-        capacity:          dailyCapacityHours(line, d, calendars, plants, lineSettings, masterData, blocks, plantBlocks),
-        effectiveCapacity: effectiveCapacityHours(line, d, calendars, plants, lineSettings, masterData, blocks, plantBlocks),
+        capacity:          cap,
+        effectiveCapacity: effectiveFromCapacity(line, cap, lineSettings),
         tasks:             []
       };
     }

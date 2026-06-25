@@ -341,6 +341,19 @@ def _cw_append_audit(entry: dict) -> None:
         f.write(json.dumps(entry) + '\n')
 
 
+def _parse_color_wheel(path: str) -> dict:
+    """
+    Read one per-plant color-wheel .xlsx into a {COLOR: ORDER_Y} dict (colors
+    upper/stripped, order coerced numeric). Shared by load_color_wheels and the
+    single-plant refresh so the per-plant parse rules can't drift between them.
+    """
+    pdf = db.clean(pd.read_excel(path))
+    if "ORDER" in pdf.columns and "ORDER_Y" not in pdf.columns:
+        pdf = pdf.rename(columns={"ORDER": "ORDER_Y"})
+    pdf["COLOR"] = pdf["COLOR"].astype(str).str.upper().str.strip()
+    return dict(zip(pdf["COLOR"], pd.to_numeric(pdf["ORDER_Y"], errors="coerce"), strict=True))
+
+
 def load_color_wheels(color_file: str = COLOR_FILE) -> None:
     """
     Populate the GLOBAL_CW / PLANT_CWS module-level cache from disk.
@@ -365,13 +378,7 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
             if not m:
                 continue
             try:
-                pdf = db.clean(pd.read_excel(os.path.join(COLOR_WHEEL_DIR, fname)))
-                if "ORDER" in pdf.columns and "ORDER_Y" not in pdf.columns:
-                    pdf = pdf.rename(columns={"ORDER": "ORDER_Y"})
-                pdf["COLOR"] = pdf["COLOR"].astype(str).str.upper().str.strip()
-                p_cws[m.group(1).upper()] = dict(
-                    zip(pdf["COLOR"], pd.to_numeric(pdf["ORDER_Y"], errors="coerce"), strict=True)
-                )
+                p_cws[m.group(1).upper()] = _parse_color_wheel(os.path.join(COLOR_WHEEL_DIR, fname))
             except Exception:
                 pass
 
@@ -380,7 +387,29 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
     CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
 
 
-def apply_color_merge(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def _reload_one_plant_wheel(plant: str) -> None:
+    """
+    Refresh the PLANT_CWS cache entry for a single plant from its own file —
+    used after an upload/delete so we don't os.listdir + re-parse every wheel.
+    Pops the key when the file is absent (delete path). The key derivation
+    matches load_color_wheels() exactly: _cw_safe_name(plant) (which equals the
+    regex capture .upper() of the on-disk color_wheel_<safe>.xlsx filename).
+    """
+    global PLANT_CWS, CW_LOADED_AT
+    key = _cw_safe_name(plant)
+    path = _cw_path(plant)
+    if not os.path.isfile(path):
+        PLANT_CWS.pop(key, None)
+        CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
+        return
+    try:
+        PLANT_CWS[key] = _parse_color_wheel(path)
+    except Exception:
+        pass
+    CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
+
+
+def apply_color_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd.DataFrame, dict]:
     """
     Apply per-plant color-wheel priority (with global fallback) to a possibly
     plant-filtered DataFrame. Adds ORDER_Y. Orders whose color isn't in any
@@ -388,6 +417,10 @@ def apply_color_merge(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     sequence after listed colors. Returns (df, stats). Reads wheels from the
     GLOBAL_CW / PLANT_CWS module cache — callers should ensure
     load_color_wheels() has been invoked at least once.
+
+    When `plant` is supplied (the /tasks path already has a plant-scoped df),
+    only that plant's wheel is consulted — we skip the loop over every plant's
+    wheel. `plant=None` preserves the original all-plants behavior.
     """
     stats: dict = {
         "color_merge_misses": 0,
@@ -408,10 +441,16 @@ def apply_color_merge(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         df = df.drop(columns=["ORDER_Y"], errors="ignore")
         df["ORDER_Y"] = None
 
-        for plant_key, cw_map in PLANT_CWS.items():
-            mask = df["PLANT_SAFE"] == plant_key
-            if mask.any():
-                df.loc[mask, "ORDER_Y"] = df.loc[mask, "COLOR"].map(cw_map)
+        if plant:
+            # Scoped path: only this plant's wheel matters for a plant-scoped df.
+            cw_map = PLANT_CWS.get(_cw_safe_name(plant))
+            if cw_map:
+                df["ORDER_Y"] = df["COLOR"].map(cw_map)
+        else:
+            for plant_key, cw_map in PLANT_CWS.items():
+                mask = df["PLANT_SAFE"] == plant_key
+                if mask.any():
+                    df.loc[mask, "ORDER_Y"] = df.loc[mask, "COLOR"].map(cw_map)
 
         still_missing = df["ORDER_Y"].isna()
         if still_missing.any() and GLOBAL_CW:
@@ -504,17 +543,19 @@ def get_diagnostics_deep():
     db_deep = db.get_db_deep_stats()
 
     # Color wheel analysis against the colors currently in the orders table.
-    # On-demand admin panel, so a full color column read from the DB is acceptable.
+    # Source distinct colors from the DB (color column only — no full-table load)
+    # and the wheel from the already-cached GLOBAL_CW dict (no Excel re-read).
     color_stats: dict = {"error": None, "total_in_orders": 0, "matched": 0,
                          "missed": 0, "missed_colors": DIAGNOSTICS.get("missed_colors", [])}
     try:
-        orders_df = db.load_orders_df()
-        if os.path.isfile(COLOR_FILE) and not orders_df.empty:
-            color_df = db.clean(pd.read_excel(COLOR_FILE))
-            if "ORDER" in color_df.columns:
-                color_df = color_df.rename(columns={"ORDER": "ORDER_Y"})
-            wheel_colors = set(color_df["COLOR"].astype(str).str.upper().str.strip().dropna())
-            order_colors = set(orders_df["COLOR"].astype(str).str.upper().str.strip().dropna())
+        # Normalize order colors the same way GLOBAL_CW keys are (upper/strip).
+        order_colors = {
+            c.upper().strip()
+            for c in db.distinct_order_colors()
+            if c is not None and str(c).strip()
+        }
+        wheel_colors = set(GLOBAL_CW.keys())
+        if order_colors:
             missed = order_colors - wheel_colors
             color_stats.update({
                 "total_in_orders": len(order_colors),
@@ -600,24 +641,33 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     row count (ignoring limit/offset) so callers can paginate.
     """
     paging = limit is not None or offset is not None
+    # A request with no plant, no line, and no explicit limit would materialize the
+    # entire order book. Refuse it — plant is the scaling unit, so callers must scope
+    # by ?plant=/?line=, or bound an unscoped tooling pull with ?limit=.
+    if plant is None and line is None and limit is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("Specify ?plant= (or ?line=) to scope the request, or ?limit= "
+                    "for a bounded unscoped tooling pull — refusing to load the full order book."),
+        )
     df = db.query_orders(plant=plant, line=line, limit=limit, offset=offset)
     if df is None or df.empty:
-        return {"data": [], "links": [],
-                "meta": {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
-                         "line_filter_active": line, "pre_color_merge_count": 0,
-                         "raw_row_count": 0, "unique_id_count": 0,
-                         "color_merge_misses": 0, "missed_colors": [],
-                         "emitted_task_count": 0, "color_merge_ms": 0,
-                         "total": (db.count_orders(plant=plant, line=line) if paging else 0),
-                         "loaded_at": DIAGNOSTICS.get("loaded_at"),
-                         "source_file": "postgres://nimbus/orders"}}
+        empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
+                      "line_filter_active": line, "pre_color_merge_count": 0,
+                      "raw_row_count": 0, "unique_id_count": 0,
+                      "color_merge_misses": 0, "missed_colors": [],
+                      "emitted_task_count": 0, "color_merge_ms": 0,
+                      "total": (db.count_orders(plant=plant, line=line) if paging else 0),
+                      "loaded_at": DIAGNOSTICS.get("loaded_at"),
+                      "source_file": "postgres://nimbus/orders"}
+        return {"data": [], "links": [], "meta": empty_meta}
 
     # Drop rows with no usable start date (query can't enforce this without
     # losing the NULL diagnostic), then color-merge the scoped subset.
     df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
     pre_merge_count = len(df)
 
-    df, cm_stats = apply_color_merge(df)
+    df, cm_stats = apply_color_merge(df, plant=plant)
     df = df.astype(object).where(pd.notna(df), other=None)
     data = []
     link_id_counter = 1
@@ -920,7 +970,7 @@ def clear_upload_audit():
 # COLOR WHEEL ENDPOINTS
 # =========================
 
-@api.post("/color-wheel/{plant}")
+@api.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key)])
 async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...)):
     """Upload or replace a plant-specific color wheel xlsx."""
     raw = await file.read()
@@ -960,9 +1010,10 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
         })
 
     await run_in_threadpool(_do_file_ops)
-    # Color-merge runs per-request from the cache; refresh it so the new wheel
-    # takes effect on the next /tasks call without requiring a full /reload.
-    await run_in_threadpool(load_color_wheels, COLOR_FILE)
+    # Color-merge runs per-request from the cache; refresh ONLY this plant's wheel
+    # so the new wheel takes effect on the next /tasks call without re-reading
+    # every plant's file (or requiring a full /reload).
+    await run_in_threadpool(_reload_one_plant_wheel, plant)
     return {"status": "ok", "row_count": row_count, "action": action, "replaced": is_replace}
 
 
@@ -989,7 +1040,7 @@ def get_color_wheel(plant: str):
         raise HTTPException(status_code=500, detail=f"Could not read color wheel: {e}") from e
 
 
-@api.delete("/color-wheel/{plant}")
+@api.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key)])
 def delete_color_wheel(plant: str, request: Request):
     """Delete a plant's uploaded color wheel file."""
     path = _cw_path(plant)
@@ -1005,13 +1056,22 @@ def delete_color_wheel(plant: str, request: Request):
         "ts": ts, "user": user, "action": "color_wheel_delete", "plant": plant,
         "details": {"filename": filename},
     })
-    load_color_wheels(COLOR_FILE)
+    # File already removed above — drop just this plant's cache entry rather than
+    # re-reading the whole directory.
+    _reload_one_plant_wheel(plant)
     return {"status": "ok"}
 
 
 @api.get("/color-wheels")
-def list_color_wheels():
-    """List all plants with uploaded color wheels and their metadata."""
+def list_color_wheels(
+        limit: int | None = Query(default=None, ge=1, le=100000,
+            description="Max color wheels to return. Omit for the full listing."),
+        offset: int | None = Query(default=None, ge=0,
+            description="Wheels to skip before returning (for paging).")):
+    """List plants with uploaded color wheels and their metadata.
+
+    Optional ?limit=/?offset= page the listing (default = full catalog). When
+    supplied, meta.total carries the full count so callers can paginate."""
     meta = _cw_read_meta()
     # Cross-reference with actual files in case meta is stale after manual deletion
     if os.path.isdir(COLOR_WHEEL_DIR):
@@ -1021,7 +1081,16 @@ def list_color_wheels():
             safe_key = fname[len("color_wheel_"):-len(".xlsx")]
             if not any(_cw_safe_name(p) == safe_key for p in meta):
                 meta[safe_key] = {"uploaded_at": None, "row_count": None, "filename": fname}
-    return {"plants": meta}
+
+    if limit is None and offset is None:
+        return {"plants": meta}
+
+    # Page a deterministic (key-sorted) slice; meta.total is the full count.
+    total = len(meta)
+    start = offset or 0
+    items = sorted(meta.items())
+    items = items[start:] if limit is None else items[start:start + int(limit)]
+    return {"plants": dict(items), "meta": {"total": total}}
 
 
 # =========================
@@ -1068,11 +1137,21 @@ def clear_audit_log():
 # =============================================================================
 
 @api.get("/master-data/{table}")
-def md_list(table: str):
-    """List all rows for a master-data table (subnetworks | plants | production_lines)."""
+def md_list(table: str,
+            limit: int | None = Query(default=None, ge=1, le=100000,
+                description="Max rows to return. Omit for the full table."),
+            offset: int | None = Query(default=None, ge=0,
+                description="Rows to skip before returning (for paging)."),
+            plant: str | None = Query(default=None,
+                description="Filter to one plant (only honored for tables with a plant column).")):
+    """List rows for a master-data table (subnetworks | plants | production_lines | ...).
+
+    Optional ?limit=/?offset=/?plant= scope the result server-side; all default
+    to the full-catalog behavior. When supplied, meta.total carries the full
+    filtered row count for paging."""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    return md.list_rows(table)
+    return md.list_rows(table, limit=limit, offset=offset, plant=plant)
 
 
 @api.post("/master-data/{table}/cascade-preview")

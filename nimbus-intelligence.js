@@ -1161,15 +1161,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _panel:     null,
 
     init() {
+      // Auto-snapshots are debounced (R20): a burst of undoable actions (drag-storm,
+      // optimize + auto-reflow) used to deep-copy the ENTIRE task array and write
+      // IndexedDB synchronously on EVERY UndoStack.push. Coalescing to one snapshot
+      // ~1s after activity settles keeps that work off the hot push path. Manual
+      // snapshot() calls (explicit checkpoints) stay immediate.
+      TimeMachine._snapshotAuto = Util.debounce(
+        label => TimeMachine.snapshot(label, { auto: true }), 1000
+      );
       const origPush = UndoStack.push.bind(UndoStack);
       UndoStack.push = (label, undoFn) => {
         origPush(label, undoFn);
-        TimeMachine.snapshot(label, { auto: true });
+        TimeMachine._snapshotAuto(label);
       };
       Store.subscribe(evt => {
         if (['tasks:bulk','tasks:bulkUpdate'].includes(evt.type) &&
             evt.source !== 'undo' && evt.source !== 'time-machine') {
-          TimeMachine.snapshot(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update', { auto: true });
+          TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
         }
       });
       IntelDB.getAll('snapshots').then(rows => {
@@ -1294,6 +1302,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (evt?.type === 'plant:selected') {
           Confidence._history = [];
           Confidence._score   = 100;
+          // Force the next _recompute past its skip-if-unchanged guard (R21): a plant
+          // switch reset the badge above and must repaint it even if alerts/_rev match.
+          Confidence._lastAlertsSrc = null;
+          Confidence._lastRev = null;
           const scoreEl = document.getElementById('ni-conf-score');
           if (scoreEl) { scoreEl.textContent = '—'; scoreEl.style.color = ''; }
           const sparkCtx = document.getElementById('ni-conf-spark')?.getContext('2d');
@@ -1305,7 +1317,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._recomputeDebounced();
       });
       const origRecompute = Alerts.recompute.bind(Alerts);
-      Alerts.recompute = () => { origRecompute(); Confidence._recomputeDebounced(); };
+      Alerts.recompute = (...args) => { const r = origRecompute(...args); Confidence._recomputeDebounced(); return r; };
       setTimeout(Confidence._recompute, 600);
     },
 
@@ -1324,7 +1336,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     _recompute() {
+      // Skip when neither alerts nor task data changed since the last score (R21):
+      // _recompute is wrapped onto EVERY Alerts.recompute and task mutation, and the
+      // matrix build below is expensive. Store.alerts is reassigned on every change
+      // (stable array identity) and Store._rev bumps on every mutation, so this pair
+      // fully captures the inputs. plant:selected nulls these to force a repaint.
       const alerts = Store.alerts || [];
+      const rev = Store._rev || 0;
+      if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
+      Confidence._lastAlertsSrc = alerts;
+      Confidence._lastRev = rev;
+
       const tasks  = Store.tasksArr;
       if (!tasks.length) { Confidence._apply(100); return; }
 

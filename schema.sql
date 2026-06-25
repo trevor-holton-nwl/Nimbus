@@ -140,13 +140,19 @@ CREATE INDEX IF NOT EXISTS idx_orders_plant ON orders(plant);
 -- orders WHERE plant IS NULL; a plain btree won't serve IS NULL efficiently, so
 -- index just the NULL-plant rows by line (kept tiny — most rows are attributed).
 CREATE INDEX IF NOT EXISTS idx_orders_plant_null ON orders(production_line) WHERE plant IS NULL;
+-- Only derive plant when the line code maps to EXACTLY ONE plant. A line code shared
+-- across plants cannot be attributed from the code alone, so those rows are left NULL
+-- (the app surfaces this) instead of being silently assigned to the lowest plant code.
 UPDATE orders o
    SET plant = (
-       SELECT pl.plant FROM production_lines pl
+       SELECT MIN(pl.plant) FROM production_lines pl
         WHERE pl.production_line = o.production_line
-        ORDER BY pl.plant LIMIT 1
    )
- WHERE o.plant IS NULL;
+ WHERE o.plant IS NULL
+   AND (
+       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+        WHERE pl.production_line = o.production_line
+   ) = 1;
 
 -- ============================================================================
 -- MATERIAL MASTER DATA

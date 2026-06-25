@@ -11,6 +11,7 @@ identity at the migration step.
 """
 import hashlib
 import io
+import logging
 import os
 import uuid
 
@@ -21,6 +22,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 load_dotenv()
+
+# Child of brain.py's `nimbus.*` structured-logging tree (propagates up).
+log = logging.getLogger("nimbus.db")
 
 # =========================
 # CONNECTION
@@ -195,6 +199,18 @@ def count_orders(plant: str | None = None, line: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
+def distinct_order_colors() -> list[str]:
+    """
+    Distinct non-NULL color values across the orders table. Used by the
+    diagnostics color-coverage panel instead of a full-table load — only the
+    color column is read, so the DB does the de-dup and no DataFrame is built.
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT color FROM orders WHERE color IS NOT NULL")
+        rows = cur.fetchall()
+    return [r[0] for r in rows]
+
+
 def reattribute_null_plant_orders() -> int:
     """
     Re-derive orders.plant where it is still NULL, from the line->plant master-data
@@ -204,24 +220,49 @@ def reattribute_null_plant_orders() -> int:
     on every request; a materialized plant does not, so this is the explicit hook.
     Idempotent: only NULL-plant rows whose line now exists are touched. Returns the
     number of orders re-attributed.
+
+    A line code shared across plants CANNOT be attributed correctly from the code
+    alone, so such rows are left NULL (and logged) rather than silently assigned to
+    the lexically-lowest plant. The authoritative fix is an explicit plant column on
+    upload + a plant-aware make_id (see MIGRATION.md).
     """
     sql = """
         UPDATE orders o
            SET plant = (
-               SELECT pl.plant FROM production_lines pl
+               SELECT MIN(pl.plant) FROM production_lines pl
                 WHERE pl.production_line = o.production_line
-                ORDER BY pl.plant LIMIT 1
            )
          WHERE o.plant IS NULL
-           AND EXISTS (
-               SELECT 1 FROM production_lines pl
+           AND (
+               SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
                 WHERE pl.production_line = o.production_line
-           )
+           ) = 1
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql)
         n = cur.rowcount
+        # Report (don't guess) lines that map to >1 plant and so stay unattributed.
+        cur.execute(
+            """
+            SELECT o.production_line, COUNT(*)
+              FROM orders o
+             WHERE o.plant IS NULL
+               AND (
+                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                    WHERE pl.production_line = o.production_line
+               ) > 1
+             GROUP BY o.production_line
+            """
+        )
+        ambiguous = cur.fetchall()
         conn.commit()
+    if ambiguous:
+        total = sum(int(r[1]) for r in ambiguous)
+        lines = ", ".join(str(r[0]) for r in ambiguous)
+        log.warning(
+            "reattribute_null_plant_orders: %d order(s) left unattributed — "
+            "line code(s) shared across multiple plants: %s", total, lines,
+        )
     return n
 
 
@@ -327,14 +368,20 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
     their NEW xmin in `versions` so the client can re-stamp without a self-conflict on
     its next edit.
 
-    Returns {applied, persisted, failed, invalid, not_found, stale, versions}.
+    Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
+    not_found_ids, stale, versions}. invalid_ids / not_found_ids carry the actual ids
+    (not just counts) so the client can stop retrying terminally-rejected rows while
+    still keeping genuinely-unpersisted rows dirty for a retry.
     """
-    applied = persisted = failed = invalid = not_found = 0
+    applied = persisted = failed = 0
     stale: list[str] = []
+    invalid_ids: list[str] = []
+    not_found_ids: list[str] = []
     versions: dict[str, int] = {}
     if not items:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
-                "not_found": 0, "stale": [], "versions": {}}
+                "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+                "stale": [], "versions": {}}
 
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -356,16 +403,16 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
             if not tid or (start is None and end is None):
-                invalid += 1
+                invalid_ids.append(tid)
                 continue
             if tid not in eff:
-                not_found += 1
+                not_found_ids.append(tid)
                 continue
             cur_start, cur_end, cur_ver = eff[tid]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
             if new_start is not None and new_end is not None and new_end <= new_start:
-                invalid += 1
+                invalid_ids.append(tid)
                 continue
             base_version = it.get("base_version")
             if not it.get("force") and base_version is not None and base_version != cur_ver:
@@ -400,7 +447,8 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                 failed = len(update_rows)
                 raise
     return {"applied": applied, "persisted": persisted, "failed": failed,
-            "invalid": invalid, "not_found": not_found,
+            "invalid": len(invalid_ids), "not_found": len(not_found_ids),
+            "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
             "stale": stale, "versions": versions}
 
 
@@ -1045,21 +1093,49 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                     break
             conn.commit()
         # Materialize plant for rows this upload didn't carry one for, deriving it from
-        # the line→plant master-data mapping (LIMIT 1 keeps it deterministic even if a
-        # line code is ever shared across plants). Scoped to this batch.
+        # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
+        # ONE plant; a line code shared across plants is left NULL (and warned) rather
+        # than silently mis-attributed to the lowest plant code. Scoped to this batch.
         cur.execute(
             """
             UPDATE orders o
                SET plant = (
-                   SELECT pl.plant FROM production_lines pl
+                   SELECT MIN(pl.plant) FROM production_lines pl
                     WHERE pl.production_line = o.production_line
-                    ORDER BY pl.plant LIMIT 1
                )
              WHERE o.upload_batch_id = %s AND o.plant IS NULL
+               AND (
+                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                    WHERE pl.production_line = o.production_line
+               ) = 1
             """,
             (batch_id,),
         )
         conn.commit()
+        # Surface (don't guess) rows left NULL because their line maps to >1 plant.
+        cur.execute(
+            """
+            SELECT o.production_line, COUNT(*)
+              FROM orders o
+             WHERE o.upload_batch_id = %s AND o.plant IS NULL
+               AND (
+                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                    WHERE pl.production_line = o.production_line
+               ) > 1
+             GROUP BY o.production_line
+            """,
+            (batch_id,),
+        )
+        ambiguous = cur.fetchall()
+        if ambiguous:
+            n_amb = sum(int(r[1]) for r in ambiguous)
+            lines_amb = ", ".join(str(r[0]) for r in ambiguous)
+            warnings.append({
+                "level": "warn",
+                "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
+                        f"shared across multiple plants: {lines_amb}. Provide an "
+                        f"explicit plant column on upload to resolve."),
+            })
         cur.execute(
             """
             INSERT INTO upload_audit

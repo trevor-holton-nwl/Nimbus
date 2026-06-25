@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-06-25-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-06-25-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -550,6 +550,7 @@ const NIMBUS = (function () {
      ========================================================================== */
   const Store = {
     _tasksByPlant: {},   // plant → [task refs] — derived index rebuilt on setTasks
+    _lineToPlant: {},    // line → plant — O(1) cache for getPlantForLine, rebuilt alongside _tasksByPlant
     _state: {
       tasks:        {},           // id → task object
       dependencies: {},           // targetId → [sourceIds]
@@ -813,11 +814,19 @@ const NIMBUS = (function () {
     setLineSetting(line, patch, source) {
       this.ensureLineSettings(line);
       Object.assign(this._state.lineSettings[line], patch);
+      // Only a `plant` change can move a line between plant buckets — skip the
+      // index/cache rebuild for the common buffer/group/flag edits that can't.
+      if ('plant' in patch) this._rebuildPlantIndex();
       this.emit({ type: 'lineSettings:change', line, source });
     },
     getPlantForLine(line) {
       const fromSettings = (this._state.lineSettings[line] || {}).plant;
       if (fromSettings) return fromSettings;
+      // O(1) cache (line → master-data plant), rebuilt alongside _tasksByPlant. Consulted
+      // before the linear .find fallback so this stays O(1) on hot paths (tasksForSelectedPlant,
+      // worker snapshots, util matrix builds). A miss falls through to the authoritative scan.
+      const cached = this._lineToPlant[line];
+      if (cached !== undefined) return cached;
       const mdLine = (this._state.masterData?.lines ?? []).find(r => r.production_line === line);
       return mdLine?.plant ?? null;
     },
@@ -835,6 +844,13 @@ const NIMBUS = (function () {
       return plant ? (Store._tasksByPlant[plant] || []) : Store.tasksArr;
     },
     _rebuildPlantIndex() {
+      // Rebuild the line → master-data plant cache first so the getPlantForLine calls
+      // below (and on every later hot path) resolve in O(1) instead of scanning lines.
+      const l2p = {};
+      for (const r of (Store._state.masterData?.lines ?? [])) {
+        if (r.production_line && l2p[r.production_line] === undefined) l2p[r.production_line] = r.plant ?? null;
+      }
+      Store._lineToPlant = l2p;
       const idx = {};
       for (const t of Store.tasksArr) {
         const p = t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE);
@@ -859,7 +875,9 @@ const NIMBUS = (function () {
     tasksForSelectedPlant() {
       const plant = this._state.selectedPlant;
       if (!plant) return [];
-      return Store.tasksArr.filter(t => Store.getPlantForLine(t.PRODUCTION_LINE) === plant);
+      // Read straight from the _tasksByPlant index (rebuilt on setTasks / lineSettings /
+      // master-data changes) instead of re-filtering every task via getPlantForLine.
+      return Store.tasksByPlant(plant);
     },
     linesForSelectedPlant() {
       const plant = this._state.selectedPlant;
@@ -885,15 +903,36 @@ const NIMBUS = (function () {
       this.emit({ type: 'alerts:change', source });
     },
     dismissAlert(alertId, source) {
-      const i = this._state.alerts.findIndex(a => a.id === alertId);
-      if (i >= 0) {
-        this._state.alerts.splice(i, 1);
+      const next = this._state.alerts.filter(a => a.id !== alertId);
+      if (next.length !== this._state.alerts.length) {
+        // Reassign (not splice-in-place) so the array identity changes and the
+        // alertsByTask()/Timeline._conflictIds() memos invalidate correctly.
+        this._state.alerts = next;
         this.emit({ type: 'alerts:change', source });
       }
     },
     dismissAllAlerts(source) {
       this._state.alerts = [];
       this.emit({ type: 'alerts:change', source });
+    },
+    /** Map<String taskId, alert[]> for O(1) per-row alert lookups, memoized on the
+     *  Store.alerts array identity (every mutator reassigns the array, so the memo
+     *  invalidates on any change). Replaces O(rows × alerts) Store.alerts.filter()
+     *  scans in grid cell renderers / row-class / popovers (R16). Treat as read-only. */
+    alertsByTask() {
+      if (this._alertsByTaskSrc !== this._state.alerts) {
+        const m = new Map();
+        for (const a of this._state.alerts) {
+          if (a.taskId == null) continue;
+          const k = String(a.taskId);
+          let arr = m.get(k);
+          if (!arr) m.set(k, arr = []);
+          arr.push(a);
+        }
+        this._alertsByTaskSrc = this._state.alerts;
+        this._alertsByTask = m;
+      }
+      return this._alertsByTask;
     },
     setUserSettings(patch, source) {
       Object.assign(this._state.userSettings, patch);
@@ -971,8 +1010,13 @@ const NIMBUS = (function () {
       const wh = workHours[d.getDay()];
       if (!wh) return null;
       const [h1, h2] = wh;
-      const start = new Date(d); start.setHours(h1, 0, 0, 0);
-      const end   = new Date(d); end.setHours(h2, 0, 0, 0);
+      // h1/h2 are fractional hours (e.g. 8.5 = 08:30). setHours() truncates its hour
+      // argument and takes minutes from the 2nd arg, so split out the minutes first —
+      // otherwise 08:30 silently becomes 08:00 and the capacity engine drifts.
+      const hh1 = Math.floor(h1), mm1 = Math.round((h1 - hh1) * 60);
+      const hh2 = Math.floor(h2), mm2 = Math.round((h2 - hh2) * 60);
+      const start = new Date(d); start.setHours(hh1, mm1, 0, 0);
+      const end   = new Date(d); end.setHours(hh2, mm2, 0, 0);
       return [start, end];
     },
 
@@ -1022,22 +1066,54 @@ const NIMBUS = (function () {
     /** Total working hours in a day for a given line, after blackouts. Does not apply buffer.
      *  Uses interval union so overlapping (or accidentally duplicated) blackout
      *  blocks can never double-count and drive capacity negative. */
-    dailyCapacityHours(line, date) {
+    /** Pre-parse + bucket all blackout blocks ONCE so a tight (line × day) loop can
+     *  reuse the parsed Date objects instead of re-parsing every block per cell.
+     *  Pass the returned index as the 3rd arg of dailyCapacityHours. Cheap to build
+     *  (one parse pass over Store.blocks/plantBlocks); build it once per matrix call.
+     *  Distinct from _indexBlocks(plant), which builds the Engine-run _runBlocks cache. */
+    _indexCapacityBlocks() {
+      const lineBlocks = new Map(), globalLine = [], plantBlocks = new Map(), globalPlant = [];
+      for (const b of Store.blocks) {
+        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
+        if (!s || !e) continue;
+        if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push({ s, e }); }
+        else globalLine.push({ s, e });
+      }
+      for (const b of Store.plantBlocks) {
+        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
+        if (!s || !e) continue;
+        if (b.plant) { let a = plantBlocks.get(b.plant); if (!a) plantBlocks.set(b.plant, a = []); a.push({ s, e }); }
+        else globalPlant.push({ s, e });
+      }
+      return { lineBlocks, globalLine, plantBlocks, globalPlant };
+    },
+
+    dailyCapacityHours(line, date, idx) {
       const win = Calendar.workWindow(line, date);
       if (!win) return 0;
       const winHours = (win[1] - win[0]) / Config.MS_HOUR;
 
       const plant = Store.getPlantForLine(line);
-      const intervals = [];
-      for (const b of Store.blocks) {
-        if (b.line && b.line !== line) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
-      }
-      for (const b of Store.plantBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
+      let intervals;
+      if (idx) {
+        // Reuse pre-parsed, bucketed intervals (no parseDate per cell).
+        intervals = [];
+        const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) intervals.push(x);
+        for (const x of idx.globalLine) intervals.push(x);
+        const pb = idx.plantBlocks.get(plant); if (pb) for (const x of pb) intervals.push(x);
+        for (const x of idx.globalPlant) intervals.push(x);
+      } else {
+        intervals = [];
+        for (const b of Store.blocks) {
+          if (b.line && b.line !== line) continue;
+          const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
+          if (s && e) intervals.push({ s, e });
+        }
+        for (const b of Store.plantBlocks) {
+          if (b.plant && b.plant !== plant) continue;
+          const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
+          if (s && e) intervals.push({ s, e });
+        }
       }
 
       const consumed = Util.mergedOverlapHours(win, intervals);
@@ -1046,13 +1122,21 @@ const NIMBUS = (function () {
 
     /** Maximum schedulable hours after deducting the capacity buffer.
      *  Nothing should be scheduled past this value (= total − buffer). */
-    effectiveCapacityHours(line, date) {
-      const full = Calendar.dailyCapacityHours(line, date);
+    /** Apply a line's capacity buffer to an already-computed full-capacity value.
+     *  The single source of truth for the buffer formula — callers that have already
+     *  computed dailyCapacityHours (matrix cells, the alert overload loop) call this
+     *  instead of effectiveCapacityHours so the full-capacity scan is not repeated.
+     *  MUST stay identical to nimbus-worker.js. */
+    effectiveFromCapacity(line, full) {
       const ls = Store.lineSettings[line];
       if (!ls) return full;
       if (ls.bufferUnit === 'pct' && ls.bufferPct > 0) return full * (1 - ls.bufferPct / 100);
       if (ls.bufferUnit === 'hours' && ls.bufferHours > 0) return Math.max(0, full - ls.bufferHours);
       return full;
+    },
+
+    effectiveCapacityHours(line, date) {
+      return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
     },
 
     /** True if `date` is inside the working window and not inside any blackout. */
@@ -2372,6 +2456,11 @@ const NIMBUS = (function () {
         </div>`;
     }
 
+    // Per-edit/paste KPI refresh is debounced (R12): the strip rebuilds an
+    // O(lines × days) matrix walk, and labor editing fires per keystroke/cell —
+    // coalesce rapid edits into one recompute instead of one-per-keystroke.
+    const _renderKPIsDebounced = Util.debounce(_renderKPIs, 350);
+
     // ── Aggregate sub-tab ────────────────────────────────────────────────────
     function _clearSelection() {
       _selRange = null; _dragging = false; _dragAnchor = null;
@@ -2541,7 +2630,7 @@ const NIMBUS = (function () {
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (ah === null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = ah;
           _updateAggrTotals(grid);
-          _renderKPIs(plant);
+          _renderKPIsDebounced(plant);
           if (ah !== null) {
             const splits = _disaggregate(plant, grp, period, ah);
             if (splits.length) {
@@ -2597,7 +2686,7 @@ const NIMBUS = (function () {
           });
         });
         if (!changed.length) return;
-        _updateAggrTotals(grid); _renderKPIs(plant);
+        _updateAggrTotals(grid); _renderKPIsDebounced(plant);
         if (allSplits.length) {
           if (!_lineData[plant]) _lineData[plant] = {};
           allSplits.forEach(c => {
@@ -2678,6 +2767,15 @@ const NIMBUS = (function () {
 
       const showGroupHeaders = visibleGroups.length > 1;
       let lastGroup = null;
+      // Memoize calendar capacity per (line|dayKey) for this render pass — the same
+      // line/date pair is otherwise recomputed across every row build.
+      const _capMemo = new Map();
+      const _capFor = (line, date, dayKey) => {
+        const k = line + '|' + dayKey;
+        let v = _capMemo.get(k);
+        if (v === undefined) { v = Calendar.effectiveCapacityHours(line, date); _capMemo.set(k, v); }
+        return v;
+      };
       const lineRows = allLinesMeta.map(lm => {
         const line = lm.production_line;
         let groupRow = '';
@@ -2688,7 +2786,7 @@ const NIMBUS = (function () {
         const cells = days.map(d => {
           const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
           const ld   = _lineData[plant]?.[line]?.[d.dayKey];
-          const calCap = Calendar.effectiveCapacityHours(line, d.date);
+          const calCap = _capFor(line, d.date, d.dayKey);
           const avail  = ld?.avail_hours != null ? ld.avail_hours : calCap;
           const req    = utilMatrix[line]?.[d.dayKey]?.scheduled || 0;
           const ratio  = avail > 0 ? req / avail : (req > 0 ? 2 : 0);
@@ -2714,50 +2812,52 @@ const NIMBUS = (function () {
       const theadH = grid.querySelector('thead tr')?.offsetHeight || 27;
       grid.querySelectorAll('.lp-group-hdr').forEach(td => { td.style.top = theadH + 'px'; });
 
-      grid.querySelectorAll('.lp-line-cell').forEach(inp => {
-        inp.onchange = async function() {
-          const line = this.dataset.line, day = this.dataset.day;
-          const raw  = this.value.trim();
-          const ah   = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
-          if (ah !== null) this.value = ah;
-          if (!_lineData[plant]) _lineData[plant] = {};
+      // Delegated handlers on the grid container — one 'change' + one 'contextmenu'
+      // listener instead of two per cell (scales to thousands of line-day cells).
+      grid.onchange = async function(e) {
+        const inp = e.target.closest('.lp-line-cell'); if (!inp) return;
+        const line = inp.dataset.line, day = inp.dataset.day;
+        const raw  = inp.value.trim();
+        const ah   = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
+        if (ah !== null) inp.value = ah;
+        if (!_lineData[plant]) _lineData[plant] = {};
+        if (!_lineData[plant][line]) _lineData[plant][line] = {};
+        const old    = _lineData[plant][line][day];
+        const oldAh  = old?.avail_hours ?? null, oldSrc = old?.source ?? 'auto_split';
+        const newSrc = ah !== null ? 'override' : 'auto_split';
+        if (ah === null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: ah, source: 'override' };
+        const td = inp.closest('td');
+        if (td) td.classList.toggle('lp-ovr', ah !== null);
+        UndoStack.push(`Line plan: ${line} / ${day}`, () => {
           if (!_lineData[plant][line]) _lineData[plant][line] = {};
-          const old    = _lineData[plant][line][day];
-          const oldAh  = old?.avail_hours ?? null, oldSrc = old?.source ?? 'auto_split';
-          const newSrc = ah !== null ? 'override' : 'auto_split';
-          if (ah === null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: ah, source: 'override' };
-          const td = this.closest('td');
-          if (td) td.classList.toggle('lp-ovr', ah !== null);
-          UndoStack.push(`Line plan: ${line} / ${day}`, () => {
-            if (!_lineData[plant][line]) _lineData[plant][line] = {};
-            if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
-            const el = grid.querySelector(`.lp-line-cell[data-line="${line.replace(/"/g,'&quot;')}"][data-day="${day}"]`);
-            if (el) el.value = oldAh != null ? oldAh : '';
-            _saveLines(sn, plant, [{ production_line: line, day, avail_hours: oldAh, source: oldSrc }]);
-          });
-          await _saveLines(sn, plant, [{ production_line: line, day, avail_hours: ah, source: newSrc }]);
-        };
-
-        inp.addEventListener('contextmenu', e => {
-          e.preventDefault();
-          const line = inp.dataset.line, day = inp.dataset.day;
-          if (_lineData[plant]?.[line]?.[day]?.source !== 'override') return;
-          const grp = (Store._state.masterData?.lines || []).find(l => l.production_line === line && l.plant === plant)?.pl_group;
-          if (!grp) return;
-          const periodKey = _weeks.find(w => {
-            for (let d = 0; d < 7; d++) { const dd = new Date(w.monday); dd.setDate(w.monday.getDate() + d); if (Util.dayKey(dd) === day) return true; }
-          })?.key;
-          if (!periodKey) return;
-          const groupHours = _aggrData[plant]?.[grp]?.[periodKey]; if (groupHours == null) return;
-          const splits = _disaggregate(plant, grp, periodKey, groupHours);
-          const resetCell = splits.find(c => c.production_line === line && c.day === day); if (!resetCell) return;
-          _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
-          inp.value = resetCell.avail_hours || '';
-          inp.closest('td')?.classList.remove('lp-ovr');
-          _saveLines(sn, plant, [{ production_line: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
-          Toast.show(`Reset ${line} · ${day} to even-split`, 'success');
+          if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
+          const el = grid.querySelector(`.lp-line-cell[data-line="${line.replace(/"/g,'&quot;')}"][data-day="${day}"]`);
+          if (el) el.value = oldAh != null ? oldAh : '';
+          _saveLines(sn, plant, [{ production_line: line, day, avail_hours: oldAh, source: oldSrc }]);
         });
-      });
+        await _saveLines(sn, plant, [{ production_line: line, day, avail_hours: ah, source: newSrc }]);
+      };
+
+      grid.oncontextmenu = function(e) {
+        const inp = e.target.closest('.lp-line-cell'); if (!inp) return;
+        e.preventDefault();
+        const line = inp.dataset.line, day = inp.dataset.day;
+        if (_lineData[plant]?.[line]?.[day]?.source !== 'override') return;
+        const grp = (Store._state.masterData?.lines || []).find(l => l.production_line === line && l.plant === plant)?.pl_group;
+        if (!grp) return;
+        const periodKey = _weeks.find(w => {
+          for (let d = 0; d < 7; d++) { const dd = new Date(w.monday); dd.setDate(w.monday.getDate() + d); if (Util.dayKey(dd) === day) return true; }
+        })?.key;
+        if (!periodKey) return;
+        const groupHours = _aggrData[plant]?.[grp]?.[periodKey]; if (groupHours == null) return;
+        const splits = _disaggregate(plant, grp, periodKey, groupHours);
+        const resetCell = splits.find(c => c.production_line === line && c.day === day); if (!resetCell) return;
+        _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
+        inp.value = resetCell.avail_hours || '';
+        inp.closest('td')?.classList.remove('lp-ovr');
+        _saveLines(sn, plant, [{ production_line: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
+        Toast.show(`Reset ${line} · ${day} to even-split`, 'success');
+      };
     }
 
     // ── Capacity sub-tab ─────────────────────────────────────────────────────
@@ -3416,7 +3516,11 @@ const NIMBUS = (function () {
     function _init() {
       if (_dead || _worker) return _worker;
       try {
-        _worker = new Worker('nimbus-worker.js');
+        // Cache-bust the worker with the build id so a redeployed worker isn't served
+        // stale from the HTTP cache — otherwise mirrored Calendar/Alerts fixes here
+        // would silently diverge from the worker's hand-port. (Config.BUILD_ID tracks
+        // NIMBUS_BUILD_ID, kept in sync with APP_VERSION on every deploy.)
+        _worker = new Worker('nimbus-worker.js?v=' + Config.BUILD_ID);
         _worker.onmessage = ({ data }) => {
           const p = _pending.get(data.id);
           if (!p) return;
@@ -3513,7 +3617,10 @@ const NIMBUS = (function () {
      ========================================================================== */
   const Alerts = {
     recompute(opts = {}) {
-      if (Compute.available()) {
+      // Never post the global (all-line) snapshot to the worker: when no plant is
+      // selected nothing is rendered, so route to the cheap sync path instead of
+      // structured-cloning every line's calendars/lineSettings/masterData across.
+      if (Compute.available() && Store.selectedPlant) {
         const reqRev = Store._rev || 0;
         Compute.alerts(opts, Alerts._dismissed)
           .then(({ alerts, elapsed }) => {
@@ -3597,16 +3704,22 @@ const NIMBUS = (function () {
         byLineDay[`${line}|${day}`].hours += Util.runHours(t);
         byLineDay[`${line}|${day}`].tasks.push(t);
       });
+      // Bucket the already-parsed blocks (zero re-parse) so the per-(line,day)
+      // dailyCapacityHours calls below don't re-iterate Store.blocks for every cell.
+      const _capIdx = { lineBlocks: new Map(), globalLine: [], plantBlocks: new Map(), globalPlant: [] };
+      for (const b of parsedBlocks) {
+        if (b.line) { let a = _capIdx.lineBlocks.get(b.line); if (!a) _capIdx.lineBlocks.set(b.line, a = []); a.push({ s: b.s, e: b.e }); }
+        else _capIdx.globalLine.push({ s: b.s, e: b.e });
+      }
+      for (const b of parsedPlantBlocks) {
+        if (b.plant) { let a = _capIdx.plantBlocks.get(b.plant); if (!a) _capIdx.plantBlocks.set(b.plant, a = []); a.push({ s: b.s, e: b.e }); }
+        else _capIdx.globalPlant.push({ s: b.s, e: b.e });
+      }
       for (const k of Object.keys(byLineDay)) {
         const { line, day, hours } = byLineDay[k];
         const dateObj = new Date(day + 'T12:00:00');
-        const cap = Calendar.dailyCapacityHours(line, dateObj);
-        // Inline effectiveCapacityHours to avoid a second dailyCapacityHours call
-        // (which would re-run workWindow + block iteration for the same line/day).
-        const ls = Store.lineSettings[line];
-        let effCap = cap;
-        if (ls?.bufferUnit === 'pct' && ls.bufferPct > 0) effCap = cap * (1 - ls.bufferPct / 100);
-        else if (ls?.bufferUnit === 'hours' && ls.bufferHours > 0) effCap = Math.max(0, cap - ls.bufferHours);
+        const cap = Calendar.dailyCapacityHours(line, dateObj, _capIdx);
+        const effCap = Calendar.effectiveFromCapacity(line, cap);
         if (effCap > 0 && hours > effCap * Config.OVERLOAD_THRESHOLD) {
           alerts.push({
             id:  `ovl-day-${line}-${day}`,
@@ -4188,16 +4301,21 @@ const NIMBUS = (function () {
       const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
       if (srcTasks === null) Object.keys(Store.calendars).forEach(l => lines.add(l));
 
+      // Pre-parse blackout blocks once for the whole matrix instead of re-parsing every
+      // block on every (line, day) cell. Capacity is computed once per cell and the
+      // buffer applied inline so effectiveCapacityHours does not re-scan.
+      const blockIdx = Calendar._indexCapacityBlocks();
       for (const line of lines) {
         matrix[line] = {};
         for (let i = 0; i < days; i++) {
           const d = new Date(start); d.setDate(start.getDate() + i);
           const key = Util.dayKey(d);
+          const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
           matrix[line][key] = {
             date: d,
             scheduled:         0,
-            capacity:          Calendar.dailyCapacityHours(line, d),
-            effectiveCapacity: Calendar.effectiveCapacityHours(line, d),
+            capacity:          cap,
+            effectiveCapacity: Calendar.effectiveFromCapacity(line, cap),
             tasks:             []
           };
         }
@@ -4283,24 +4401,20 @@ const NIMBUS = (function () {
       const out = {};
       const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
       const dayKeyTarget = Util.dayKey(d);
+      // Pre-parse blackout blocks once; reused for both capacity and the per-task clip below.
+      const blockIdx = Calendar._indexCapacityBlocks();
       for (const line of lines) {
-        const cap = Calendar.dailyCapacityHours(line, d);
-        const effectiveCap = Calendar.effectiveCapacityHours(line, d);
+        const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
+        const effectiveCap = Calendar.effectiveFromCapacity(line, cap);
         const workWin = Calendar.workWindow(line, d);
         let sched = 0;
         if (workWin) {
           const plant = Store.getPlantForLine(line);
           const blackouts = [];
-          for (const b of Store.blocks) {
-            if (b.line && b.line !== line) continue;
-            const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-            if (s && e) blackouts.push({ s, e });
-          }
-          for (const b of Store.plantBlocks) {
-            if (b.plant && b.plant !== plant) continue;
-            const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-            if (s && e) blackouts.push({ s, e });
-          }
+          const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) blackouts.push(x);
+          for (const x of blockIdx.globalLine) blackouts.push(x);
+          const _pb = blockIdx.plantBlocks.get(plant); if (_pb) for (const x of _pb) blackouts.push(x);
+          for (const x of blockIdx.globalPlant) blackouts.push(x);
           for (const t of taskList) {
             if ((t.PRODUCTION_LINE || 'Unknown') !== line) continue;
             if (!t.start_date) continue;
@@ -4340,7 +4454,9 @@ const NIMBUS = (function () {
   // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
   // call returns instantly from cache.
   Utilization._prewarm = function () {
-    if (!Compute.available()) return;
+    // Skip when no plant is selected — _snap would otherwise post the global all-line
+    // snapshot to the worker for a matrix nothing on screen consumes.
+    if (!Compute.available() || !Store.selectedPlant) return;
     const startMs = Util.startOfDay(new Date()).getTime();
     const rev     = Store._rev || 0;
     Compute.utilization(startMs, 7)
@@ -5508,6 +5624,7 @@ const NIMBUS = (function () {
 
       /* ----- live ticker: advance past-zone and alert-horizon-zone every second -- */
       setInterval(() => {
+        if (document.hidden) return; // skip ticker work while the tab is backgrounded
         if (!Timeline._items || !Timeline._pastZoneIds.length) return;
         const now  = new Date();
         const updates = Timeline._pastZoneIds
@@ -5962,7 +6079,11 @@ const NIMBUS = (function () {
 
     zoomToFit() {
       if (!Timeline._tl) return;
-      const tasks = Store.tasksArr.filter(t => t.start_date && t.end_date);
+      // Scope to the selected plant like rebuild() (R4) — otherwise the window spans
+      // every plant's orders and zooms far wider than the visible rows. Also avoids the
+      // Math.min/max(...spread) call-stack risk on a system-wide task array at scale.
+      const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
+        .filter(t => t.start_date && t.end_date);
       if (!tasks.length) return;
       const minT = Math.min(...tasks.map(t => t.start_date.getTime()));
       const maxT = Math.max(...tasks.map(t => t.end_date.getTime()));
@@ -6086,7 +6207,7 @@ const NIMBUS = (function () {
             cellClass: 'cell-date' },
           { headerName: t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
             cellRenderer: p => {
-              const rel = Store.alerts.filter(a => String(a.taskId) === String(p.value));
+              const rel = Store.alertsByTask().get(String(p.value)) || [];
               if (!rel.length) return '';
               const err = rel.some(a => a.sev === 'err');
               const color = err ? 'var(--err)' : 'var(--warn)';
@@ -6185,7 +6306,7 @@ const NIMBUS = (function () {
         if (f.status === 'late' && !(data.end_date && data.end_date < nowDt)) return false;
         if (f.status === 'fixed' && !Store.isFixed(data.id)) return false;
         if (f.status === 'atrisk' || f.status === 'conflict') {
-          const rel = Store.alerts.filter(a => String(a.taskId) === String(data.id));
+          const rel = Store.alertsByTask().get(String(data.id)) || [];
           if (f.status === 'atrisk'  && !rel.some(a => a.sev === 'warn')) return false;
           if (f.status === 'conflict' && !rel.some(a => a.sev === 'err'))  return false;
         }
@@ -6516,7 +6637,7 @@ const NIMBUS = (function () {
       }
     },
    _rowClass(data) {      if (!data) return '';
-      const ids = Store.alerts.filter(a => String(a.taskId) === String(data.id));
+      const ids = Store.alertsByTask().get(String(data.id)) || [];
       if (ids.some(a => a.sev === 'err')) return 'row-alert';
       if (ids.some(a => a.sev === 'warn')) return 'row-warn';
       return '';
@@ -6603,7 +6724,7 @@ const NIMBUS = (function () {
     },
 
     _showAlertPopup(taskId) {
-      const rel = Store.alerts.filter(a => String(a.taskId) === String(taskId));
+      const rel = Store.alertsByTask().get(String(taskId)) || [];
       if (!rel.length) return;
       const t = Store.tasks[taskId];
       const po = t?.PRODUCTION_ORDER || t?.ORDER || String(taskId).slice(0, 8);
@@ -6804,7 +6925,7 @@ const NIMBUS = (function () {
       const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
       const fixed = Store.isFixed(task.id);
       const lineOptions = Table._getLineOptions();
-      const relAlerts = Store.alerts.filter(a => String(a.taskId) === String(task.id));
+      const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
 
       body.innerHTML = `
         ${fixed ? `<div class="insp-fix-banner">${t('ui.insp_fixed_banner')}</div>` : ''}
@@ -6946,20 +7067,28 @@ const NIMBUS = (function () {
       Alerts.scheduleRecompute();
     },
 
-    _persistNote: Util.debounce(function(id, notes) {
-      fetch(`${Config.API_BASE}/task/note`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, notes })
-      })
-        .then(async r => {
-          if (!r.ok) {
-            const body = await r.json().catch(() => ({}));
-            ErrorLog.warn('inspector', `Note rejected (${r.status}): ${body.message || body.detail || ''}`);
-          }
+    // Per-id debounce timers. A single shared debounce timer (the old design) meant a
+    // note on order B within 800ms cancelled order A's pending POST — silent data loss
+    // (R5). Keying the timer by task id isolates each order's save.
+    _noteTimers: {},
+    _persistNote(id, notes) {
+      clearTimeout(Inspector._noteTimers[id]);
+      Inspector._noteTimers[id] = setTimeout(() => {
+        delete Inspector._noteTimers[id];
+        fetch(`${Config.API_BASE}/task/note`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, notes })
         })
-        .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`));
-    }, 800),
+          .then(async r => {
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}));
+              ErrorLog.warn('inspector', `Note rejected (${r.status}): ${body.message || body.detail || ''}`);
+            }
+          })
+          .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`));
+      }, 800);
+    },
 
     toggleFix(fixed) {
       if (!Inspector._currentId) return;
@@ -7274,8 +7403,29 @@ const NIMBUS = (function () {
       Dashboard._renderEmptyState();
       if (!Store.selectedPlant) return;
 
-      Dashboard._renderKPIs();
-      Dashboard._renderHeatmap();
+      // Build the shared filtered task set + 7-day utilization matrix ONCE and hand it
+      // to both _renderKPIs and _renderHeatmap (each otherwise rebuilds an identical
+      // filtered-subset matrix — three full computeMatrix passes per render, two of them
+      // duplicate 7-day work). The 1-day line-status matrix stays its own call.
+      const _now7    = new Date();
+      const _filtered = Dashboard._filteredTasks();
+      // Memoize the 7-day matrix across renders (R14). _filteredTasks scopes by selected
+      // plant + line filter, so the matrix is a pure function of (plant, filterLines,
+      // _rev, today). computeMatrix bypasses its own memo for filtered subsets, so without
+      // this every render (plant change, filter toggle, 300ms-debounced Store events)
+      // rebuilt the whole O(lines×days) matrix from scratch.
+      const _scope = (Store.selectedPlant || '') + '|' + [...Dashboard._filterLines].sort().join(',');
+      const _mkey  = `${Util.startOfDay(_now7).getTime()}|7|${Store._rev || 0}|${_scope}`;
+      let _matrix7;
+      if (Dashboard._matrix7Cache && Dashboard._matrix7Cache.key === _mkey) {
+        _matrix7 = Dashboard._matrix7Cache.matrix;
+      } else {
+        _matrix7 = Utilization.computeMatrix(_now7, 7, _filtered);
+        Dashboard._matrix7Cache = { key: _mkey, matrix: _matrix7 };
+      }
+
+      Dashboard._renderKPIs(_matrix7, _filtered);
+      Dashboard._renderHeatmap(_matrix7);
       Dashboard._renderLineStatus();
       Dashboard._renderAlertSummary();
       Dashboard._renderFixedList();
@@ -7313,8 +7463,8 @@ const NIMBUS = (function () {
       }
     },
 
-    _renderKPIs() {
-      const tasks = Dashboard._filteredTasks();
+    _renderKPIs(matrix7, tasksArg) {
+      const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
       const today = Util.startOfDay(new Date());
       const nowDt = new Date();
 
@@ -7342,7 +7492,8 @@ const NIMBUS = (function () {
       const conflictCls = errAlerts > 0 ? 'err' : '';
 
       // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
-      const matrix7 = Utilization.computeMatrix(new Date(), 7, tasks);
+      // Reuse the matrix built once in render() when provided; recompute standalone otherwise.
+      if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(new Date(), 7, tasks);
       let pctSum = 0, pctN = 0;
       for (const ln of Object.keys(matrix7)) {
         for (const d of Object.keys(matrix7[ln])) {
@@ -7505,11 +7656,12 @@ const NIMBUS = (function () {
       requestAnimationFrame(step);
     },
 
-    _renderHeatmap() {
+    _renderHeatmap(matrix) {
       const container = document.getElementById('util-heatmap-panel');
       if (!container) return;
 
-      const matrix = Utilization.computeMatrix(new Date(), 7, Dashboard._filteredTasks());
+      // Reuse the 7-day matrix built once in render() when provided; recompute standalone otherwise.
+      if (matrix === undefined) matrix = Utilization.computeMatrix(new Date(), 7, Dashboard._filteredTasks());
       const lines = Object.keys(matrix).sort();
 
       if (!lines.length) {
@@ -8047,7 +8199,11 @@ const NIMBUS = (function () {
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, cssW, cssH);
 
-      const tasks = Store.tasksArr.filter(t => t.start_date && t.end_date);
+      // Scope to the selected plant (R17) so the nav strip draws only the current
+      // plant's orders, not every plant's. The utilization heat-band below
+      // (computeMatrix) stays intentionally system-wide.
+      const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
+        .filter(t => t.start_date && t.end_date);
       if (!tasks.length || !Timeline._tl) return;
 
       const _today = new Date(); _today.setHours(0, 0, 0, 0);
@@ -8849,6 +9005,7 @@ const NIMBUS = (function () {
       // Double rAF to ensure the loading skeleton actually paints before we
       // block the main thread with the optimizer. Single rAF schedules a frame
       // but synchronous work afterward can still preempt the paint.
+      let snapshot = null;
       requestAnimationFrame(() => requestAnimationFrame(() => {
         const _optTotalT0 = performance.now();
         try {
@@ -8858,7 +9015,10 @@ const NIMBUS = (function () {
           const scopedTasks = Store.tasksByPlant(plant);
           const ids = scopedTasks.map(t => t.id);
           const _snapT0 = performance.now();
-          const snapshot = UndoStack.snapshotTasks(ids);
+          snapshot = UndoStack.snapshotTasks(ids);
+          // Publish the snapshot BEFORE mutating the Store (R6) so a mid-run throw can
+          // be rolled back in the catch — Engine.runAndApply mutates in place.
+          OptimizerPreview._snapshot = snapshot;
           PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
           // KPI inputs are scoped to what the user actually selected on screen 1 —
@@ -8890,7 +9050,6 @@ const NIMBUS = (function () {
           const postKpis  = Util.scheduleKpis(postTasks, 14);
           PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
-          OptimizerPreview._snapshot = snapshot;
           OptimizerPreview._preKpis  = preKpis;
           OptimizerPreview._postKpis = postKpis;
           OptimizerPreview._mode     = mode;
@@ -8900,6 +9059,13 @@ const NIMBUS = (function () {
           OptimizerPreview._render();
         } catch (err) {
           ErrorLog.error('optimize-preview', err?.message || String(err));
+          // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
+          // the schedule partially mutated otherwise, with no undo path.
+          if (snapshot) {
+            try { UndoStack.restoreTasks(snapshot); Alerts.scheduleRecompute(); }
+            catch (e2) { ErrorLog.error('optimize-preview', `revert failed: ${e2?.message || e2}`); }
+          }
+          OptimizerPreview._snapshot = null;
           if (body) {
             body.innerHTML =
               '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
@@ -9528,7 +9694,7 @@ const NIMBUS = (function () {
         const endStr   = t.end_date   ? Util.fmtDT(t.end_date)   : '—';
         const orderNo  = t.ORDER || t.PRODUCTION_ORDER || t.text || t.id;
         const matDesc  = t.MATERIAL_DESCRIPTION || t.text || '';
-        const rel = Store.alerts.filter(a => String(a.taskId) === String(id));
+        const rel = Store.alertsByTask().get(String(id)) || [];
         const alertsHtml = rel.length
           ? `<div class="hov-alerts">⚐ ${rel.length} alert${rel.length === 1 ? '' : 's'}: ${
               rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
@@ -9642,6 +9808,24 @@ const NIMBUS = (function () {
         return cr.left + frac * (cr.right - cr.left);
       };
 
+      // Snapshot every order item's on-screen rect once. Re-taken on edge-scroll
+      // (items move) but reused across plain pointermove frames, so the hit-test no
+      // longer calls getBoundingClientRect() per item per frame (R18 — layout thrash).
+      const refreshItemRects = (s) => {
+        const itemSet = Timeline._tl && Timeline._tl.itemSet && Timeline._tl.itemSet.items;
+        const m = new Map();
+        if (itemSet) {
+          for (const id of Object.keys(itemSet)) {
+            if (!isOrderId(id)) continue;
+            const box = itemSet[id]?.dom?.box;
+            if (!box) continue;
+            const b = box.getBoundingClientRect();
+            m.set(id, { left: b.left, right: b.right, top: b.top, bottom: b.bottom });
+          }
+        }
+        s.itemRects = m;
+      };
+
       // Shared overlay + hit-test update — called from both pointermove and the
       // edge-scroll RAF so selection expands as the view pans.
       const updateOverlay = (mx, my) => {
@@ -9661,15 +9845,11 @@ const NIMBUS = (function () {
         s.overlay.style.height = (bottom - top)   + 'px';
 
         const rect = { left, right, top, bottom };
-        const itemSet = Timeline._tl && Timeline._tl.itemSet && Timeline._tl.itemSet.items;
-        if (!itemSet) return;
+        if (!s.itemRects) refreshItemRects(s);
 
         const hits = new Set();
-        for (const id of Object.keys(itemSet)) {
-          if (!isOrderId(id)) continue;
-          const box = itemSet[id]?.dom?.box;
-          if (!box) continue;
-          if (_rectsIntersect(rect, box.getBoundingClientRect())) hits.add(id);
+        for (const [id, r] of s.itemRects) {
+          if (_rectsIntersect(rect, r)) hits.add(id);
         }
 
         if (hits.size === s.lastHits.size) {
@@ -9726,7 +9906,7 @@ const NIMBUS = (function () {
             scrolled = true;
           }
 
-          if (scrolled) updateOverlay(s.curMouseX, s.curMouseY);
+          if (scrolled) { refreshItemRects(s); updateOverlay(s.curMouseX, s.curMouseY); }
           Interaction._marqueeRAF = requestAnimationFrame(tick);
         };
         Interaction._marqueeRAF = requestAnimationFrame(tick);
@@ -9777,6 +9957,7 @@ const NIMBUS = (function () {
           Interaction._marquee.scrollDelta = 0;
         }
 
+        refreshItemRects(Interaction._marquee);
         startMarqueeScroll();
       };
 
@@ -10029,6 +10210,21 @@ const NIMBUS = (function () {
       this._ghostDragId = dragId;
       const updates = [];
 
+      // Pre-bucket non-selected, datable tasks by line ONCE per frame (R19) — the old
+      // code re-scanned all of Store.tasksArr for every selected companion, i.e.
+      // O(selected × allTasks) per 60fps frame. Selection (drag id + companions) is
+      // excluded up front so the per-companion check is just an overlap test.
+      const selSet = new Set(Selection.ids().map(String));
+      const peersByLine = new Map();
+      for (const peer of Store.tasksArr) {
+        if (selSet.has(String(peer.id))) continue;
+        if (!peer.start_date || !peer.end_date) continue;
+        const pl = peer.PRODUCTION_LINE || 'Unknown';
+        let arr = peersByLine.get(pl);
+        if (!arr) peersByLine.set(pl, arr = []);
+        arr.push(peer);
+      }
+
       for (const sid of selIds) {
         const st = Store.tasks[sid];
         if (!st || !st.start_date) continue;
@@ -10037,14 +10233,12 @@ const NIMBUS = (function () {
         const item = Timeline._items.get(sid);
         if (!item) continue;
 
-        // Check for ghost collisions with non-selected tasks on same line
+        // Check for ghost collisions with non-selected tasks on same line.
         const line = st.PRODUCTION_LINE || 'Unknown';
-        const hasConflict = Store.tasksArr.some(peer => {
-          if (peer.id === sid || Selection.has(String(peer.id))) return false;
-          if ((peer.PRODUCTION_LINE || 'Unknown') !== line) return false;
-          if (!peer.start_date || !peer.end_date) return false;
-          return ghostStart < peer.end_date && ghostEnd > peer.start_date;
-        });
+        const peers = peersByLine.get(line) || [];
+        const hasConflict = peers.some(peer =>
+          ghostStart < peer.end_date && ghostEnd > peer.start_date
+        );
 
         const baseCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
         updates.push({
@@ -10299,9 +10493,30 @@ const NIMBUS = (function () {
       };
       ErrorLog.info('persistence', `Load requested (force=${force}, plant=${plant ?? 'all'})`);
 
-      const tasksUrl = plant
-        ? `${Config.API_BASE}/tasks?plant=${encodeURIComponent(plant)}`
-        : `${Config.API_BASE}/tasks`;
+      // A plant is the scaling unit — never request the whole order book. With no
+      // plant selected we leave the board empty (WelcomeSplash takes over) and only
+      // load master data so the plant picker is populated and the user can choose one.
+      if (!plant) {
+        ErrorLog.info('persistence', 'No plant selected — skipping /tasks; loading master data for the picker');
+        stats.source = 'backend';
+        Store.setTasks([], 'persistence');
+        Persistence._currentLoadedPlant = null;
+        return Promise.all([
+          fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+          fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+        ]).then(([pData, lData]) => {
+          if (pData || lData) {
+            Store._state.masterData = {
+              plants: pData?.rows ?? [],
+              lines:  lData?.rows ?? [],
+            };
+            Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
+            Store.emit({ type: 'master-data-changed', source: 'persistence' });
+          }
+        }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (no-plant path): ${e.message}`));
+      }
+
+      const tasksUrl = `${Config.API_BASE}/tasks?plant=${encodeURIComponent(plant)}`;
       return fetch(tasksUrl, { signal: AbortSignal.timeout(8000) })
         .then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status} from /tasks`);
@@ -10337,6 +10552,7 @@ const NIMBUS = (function () {
                   plants: pData?.rows ?? [],
                   lines:  lData?.rows ?? [],
                 };
+                Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
                 Store.emit({ type: 'master-data-changed', source: 'persistence' });
               }
             }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`));
@@ -10451,6 +10667,7 @@ const NIMBUS = (function () {
                 plants: pData?.rows ?? [],
                 lines:  lData?.rows ?? [],
               };
+              Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
               Store.emit({ type: 'master-data-changed', source: 'persistence' });
             }
           }).catch(e => {
@@ -10500,7 +10717,7 @@ const NIMBUS = (function () {
               this.timer = null;
               ErrorLog.info('persistence', 'Backend recovered — reloading');
               Toast.show(t('toast.backend_recovered'), 'success', 3000);
-              try { Persistence.load({ force: true }); } catch (e) {
+              try { Persistence.load({ force: true, plant: Persistence._currentLoadedPlant }); } catch (e) {
                 ErrorLog.error('persistence', `Reload after reconnect failed: ${e.message}`);
               }
             })
@@ -10843,12 +11060,6 @@ saveAll() {
 
       _post(1)
         .then(result => {
-          // Clear dirty/force tracking. Within an HTTP 200, every sent id is either
-          // persisted (in versions), stale (refetched below, last-writer-loses), or
-          // terminal (not_found/invalid — not retryable as-is); none should stay dirty,
-          // so clearing both sets is correct. A corrected edit re-dirties its id.
-          Persistence._dirtyIds.clear();
-          Persistence._forceIds.clear();
           // Re-stamp each persisted task with its NEW row_version so the next edit
           // carries a fresh token — without this the client would self-conflict on its
           // own previous write. Direct field set, no emit (metadata only).
@@ -10857,10 +11068,23 @@ saveAll() {
             const tk = Store.tasks[id];
             if (tk) tk.row_version = versions[id];
           }
-          // Concurrency conflicts: rows a concurrent editor changed since our read.
-          // Refetch them to the server's truth and warn — the local edit is discarded
-          // (last-writer-loses is the honest semantics here).
           const stale = result.stale || [];
+          // Clear dirty/force ONLY for ids the backend actually accounted for (R7):
+          // persisted (versions), concurrency-stale (refetched, last-writer-loses), and
+          // terminally rejected (invalid range / not in DB — a corrected edit re-dirties).
+          // Any sent id that is NONE of these — e.g. a row lost between SELECT FOR UPDATE
+          // and the UPDATE — stays dirty so the next save retries it instead of silently
+          // dropping the edit. Previously both sets were .clear()'d unconditionally.
+          const accounted = new Set([
+            ...Object.keys(versions),
+            ...stale,
+            ...(result.invalid_ids || []),
+            ...(result.not_found_ids || []),
+          ].map(String));
+          for (const id of accounted) {
+            Persistence._dirtyIds.delete(id);
+            Persistence._forceIds.delete(id);
+          }
           if (stale.length) {
             ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
             Persistence._refreshTasks(stale);
@@ -10925,7 +11149,7 @@ saveAll() {
     reload() {
       ErrorLog.info('persistence', 'Manual reload triggered — clearing dependencies');
       Store._state.dependencies = {};
-      return Persistence.load({ force: true });
+      return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant });
     },
 
     /** Fetch tasks for a specific plant, replacing whatever is currently in Store.
@@ -12922,7 +13146,14 @@ saveAll() {
             cells.forEach((c, i) => {
               const td = document.createElement('td');
               if (i === 2) {
-                td.innerHTML = `<span style="color:${color};font-weight:600;">${icon} ${action}</span>`;
+                // `action` is server-stored and not whitelisted, so render it as inert
+                // text — never innerHTML — to avoid a stored-XSS sink (R1). icon is from
+                // the fixed ACTION_ICONS map; color is a CSS var, set via style only.
+                const span = document.createElement('span');
+                span.style.color = color;
+                span.style.fontWeight = '600';
+                span.textContent = `${icon} ${action}`;
+                td.appendChild(span);
               } else {
                 td.textContent = c;
               }
@@ -14749,6 +14980,7 @@ saveAll() {
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
             };
+            Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after edit
           }
           Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
         }).catch(() => {
@@ -14998,6 +15230,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { /* longtask API not supported */ }
 
     setInterval(() => {
+      if (document.hidden) return; // skip heap sampling while the tab is backgrounded
       const m = performance && performance.memory;
       if (!m) return;
       const usedMB  = m.usedJSHeapSize  / 1048576;
@@ -15014,6 +15247,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let _lastTick = Date.now();
     setInterval(() => {
       const now   = Date.now();
+      // Skip while backgrounded — but still advance _lastTick so the first tick after the
+      // tab resumes measures only the post-resume gap and doesn't false-positive a "freeze".
+      if (document.hidden) { _lastTick = now; return; }
       const drift = now - _lastTick;
       _lastTick = now;
       if (drift > 2000) {
@@ -15082,7 +15318,13 @@ document.addEventListener('DOMContentLoaded', () => {
             });
           }
         } catch (e) { ErrorLog.error('boot', `master-data lineSettings sync: ${e.message}`); }
-        if (touched) Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
+        if (touched) {
+          // lineSettings[].plant was just rewritten in bulk above via direct writes
+          // (not setLineSetting), so the plant index is stale — rebuild it before the
+          // emit so tasksForSelectedPlant / _tasksByPlant reflect the new assignments.
+          Store._rebuildPlantIndex();
+          Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
+        }
         try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
         try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub !== 'plant') ProdLines.render(); } catch {}
       }
