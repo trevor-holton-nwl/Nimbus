@@ -17,7 +17,11 @@
   // app.js uses `const NIMBUS = ...` — a block-scoped global, not window.NIMBUS.
   // Access it directly by name (resolved at call time through the scope chain).
   if (typeof NIMBUS === 'undefined' || !NIMBUS.Store) {
-    console.error('[NIMBUS.Intelligence] app.js must load first.');
+    // Boot guard: NIMBUS itself is missing, so ErrorLog almost certainly isn't
+    // available either — guard anyway and fall back to console.
+    (window.NIMBUS && window.NIMBUS.ErrorLog
+      ? window.NIMBUS.ErrorLog.warn('intel', 'app.js must load first.', { errorCode: 'internal' })
+      : console.error('[NIMBUS.Intelligence] app.js must load first.'));
     return;
   }
 
@@ -346,7 +350,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             db.createObjectStore('patterns', { keyPath: 'key' });
         };
         req.onsuccess = e => { IntelDB._db = e.target.result; res(IntelDB._db); };
-        req.onerror   = e => { console.warn('[IntelDB]', e.target.error); rej(e.target.error); };
+        req.onerror   = e => {
+          (window.NIMBUS && window.NIMBUS.ErrorLog
+            ? window.NIMBUS.ErrorLog.warn('intel', '[IntelDB] open failed', { err: String(e.target.error), errorCode: 'internal' })
+            : console.warn('[IntelDB]', e.target.error));
+          rej(e.target.error);
+        };
       });
     },
 
@@ -433,7 +442,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             }
           }
         }
-      } catch {}
+      } catch (e) {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'NeedsEngine util scan failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[NeedsEngine] util scan failed', e));
+      }
 
       // Last snapshot age — scoped to current plant only
       const plantSnaps = TimeMachine._plantSnaps();
@@ -460,7 +473,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             t.end_date.getTime() > b.start && (t.start_date?.getTime() ?? 0) < b.end
           )).length;
         }
-      } catch {}
+      } catch (e) {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'NeedsEngine blackout-risk scan failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[NeedsEngine] blackout-risk scan failed', e));
+      }
 
       return {
         errCount:       errAlerts.length,
@@ -1026,7 +1043,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const item = CommandPalette._results[CommandPalette._cursor];
       if (item?.run) {
         if (item.type === 'action') CommandPalette._recent.push(item.label);
-        try { item.run(); } catch (e) { console.warn('[CommandPalette]', e); }
+        try { item.run(); } catch (e) {
+          (window.NIMBUS && window.NIMBUS.ErrorLog
+            ? window.NIMBUS.ErrorLog.warn('intel', 'CommandPalette action failed', { err: String(e), errorCode: 'internal' })
+            : console.warn('[CommandPalette]', e));
+        }
       }
     },
 
@@ -1207,7 +1228,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         snap.id = id || snap.id;
         TimeMachine._snapshots.push(snap);
         IntelDB.pruneSnapshots(200);
-      }).catch(() => {});
+      }).catch(e => {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot persist failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[TimeMachine] snapshot persist failed', e));
+      });
       return snap;
     },
 
@@ -1295,7 +1320,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _recomputeDebounced: null,
 
     init() {
-      try { localStorage.removeItem('nimbus.confHistory'); } catch {}  // clear any previously persisted history
+      try { localStorage.removeItem('nimbus.confHistory'); } catch (e) {  // clear any previously persisted history
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'Confidence history clear failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[Confidence] history clear failed', e));
+      }
       Confidence._recomputeDebounced = Util.debounce(Confidence._recompute, 400);
       Confidence._injectBadge();
       Store.subscribe(evt => {
@@ -2099,8 +2128,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       DarkMode._syncPill();
       Toast.show(isDark ? t('toast.dark_mode_on') : t('toast.light_mode_on'), 'info', 1200);
       // Repaint canvas-painted views whose colors are baked in at draw time.
-      try { NIMBUS.TimelineNav?.render?.(); } catch (e) {}
-      try { NIMBUS.Dashboard?._renderHeatmap?.(); } catch (e) {}
+      try { NIMBUS.TimelineNav?.render?.(); } catch (e) {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode TimelineNav repaint failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[DarkMode] TimelineNav repaint failed', e));
+      }
+      try { NIMBUS.Dashboard?._renderHeatmap?.(); } catch (e) {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode heatmap repaint failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[DarkMode] heatmap repaint failed', e));
+      }
     },
 
     isDark() { return document.body.classList.contains('dark'); }
@@ -2144,7 +2181,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Patterns.init();
       setTimeout(() => { RipplePreview.init(); }, 220);
     }).catch(e => {
-      console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e);
+      (window.NIMBUS && window.NIMBUS.ErrorLog
+        ? window.NIMBUS.ErrorLog.warn('intel', 'IndexedDB unavailable — continuing without persistence.', { err: String(e), errorCode: 'internal' })
+        : console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e));
       CommandPalette.init();
       TimeMachine._snapshots = [];
       TimeMachine.init(); // monkey-patches UndoStack.push; must run even without IDB

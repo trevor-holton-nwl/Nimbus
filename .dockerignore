@@ -1,0 +1,53 @@
+# VCS / planning / docs (not needed at runtime)
+.git
+.gitignore
+.gitattributes
+.planning
+.claude
+docs
+*.md
+
+# Python virtualenv / caches
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# Node / lint tooling (frontend is plain static JS — no build step)
+node_modules
+package.json
+package-lock.json
+eslint.config.js
+pyproject.toml
+
+# Tests
+tests
+
+# Secrets & local-only data
+.env
+.env.*
+*.env
+
+# Sample/seed spreadsheets — color wheels are uploaded at runtime to /data,
+# orders are uploaded via POST /upload (parsed in memory). None ship in the image.
+*.xlsx
+*.XLSX
+
+# Editor / OS noise & scratch
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini
+.playwright-mcp
+
+# The build recipe itself
+Dockerfile
+.dockerignore

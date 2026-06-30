@@ -518,6 +518,8 @@ self.onmessage = function ({ data }) {
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
     }
   } catch (err) {
-    self.postMessage({ type: 'ERROR', id, error: err.message });
+    const out = { type: 'ERROR', id, error: err.message, stack: err.stack, failingType: type };
+    if (id != null) out.jobId = id;
+    self.postMessage(out);
   }
 };

@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-06-25-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-06-25-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -66,7 +66,7 @@ const NIMBUS = (function () {
        KNOWN_PLANTS     plant codes the app is aware of (for plant selector)
      ========================================================================== */
   const Config = {
-    API_BASE:         'http://localhost:8000',
+    API_BASE:         (typeof window !== 'undefined' && window.NIMBUS_API_BASE) || '',  // '' = same-origin (relative URLs); set window.NIMBUS_API_BASE only for a split dev server
     STEP_MS:          15 * 60 * 1000,          // 15-minute snap
     MS_MIN:           60 * 1000,               // 1 minute in ms
     MS_HOUR:          60 * 60 * 1000,          // 1 hour in ms
@@ -283,14 +283,52 @@ const NIMBUS = (function () {
       const t0     = performance.now();
       return fetch(input, { ...init, headers }).then(r => {
         const ms = Math.round(performance.now() - t0);
-        if (!r.ok)        ErrorLog.warn('http', `${method} ${url} → ${r.status} (${ms}ms, ${reqId})`);
-        else if (ms > 2000) ErrorLog.info('http', `slow: ${method} ${url} ${ms}ms (${reqId})`);
+        if (!r.ok) {
+          // Best-effort drain of the error body to extract a backend message — clone()
+          // so the caller still gets an unread body. json() first, then text() fallback.
+          const clone = (() => { try { return r.clone(); } catch { return null; } })();
+          const drain = clone
+            ? clone.json().then(
+                j => (j && (j.message || j.detail)) || null,
+                () => clone.text().then(txt => (txt || '').slice(0, 2000) || null, () => null)
+              )
+            : Promise.resolve(null);
+          drain.then(backendMessage => {
+            const tail = backendMessage ? `: ${backendMessage}` : '';
+            ErrorLog.warn('http', `${method} ${url} → ${r.status} (${ms}ms)${tail}`,
+              { reqId, status: r.status, url, method, ms, backendMessage },
+              { reqId, errorCode: 'http.status' });
+          });
+        } else if (ms > 2000) {
+          ErrorLog.info('http', `slow: ${method} ${url} ${ms}ms`, { reqId, url, method, ms });
+        }
         return r;
       }).catch(e => {
         if (e?.name === 'AbortError') throw e;
-        ErrorLog.error('http', `${method} ${url} failed: ${e.message} (${reqId})`);
+        ErrorLog.error('http', `${method} ${url} failed: ${e.message}`,
+          { reqId, url, method, error: String(e?.message || e) },
+          { reqId, errorCode: 'http.network' });
         throw e;
       });
+    },
+
+    // Parse a non-ok Response body into a structured {message, errorCode, status}.
+    // Best-effort: clones the response (caller keeps the body), reads json() then text().
+    // Used by raw-fetch migration sites so each surfaces the parsed backend body.
+    parseBackendError(resp) {
+      const status = resp?.status ?? 0;
+      const clone  = (() => { try { return resp.clone(); } catch { return null; } })();
+      const read   = clone
+        ? clone.json().then(
+            j => ({ message: (j && (j.message || j.detail)) || null, errorCode: (j && j.error_code) || null }),
+            () => clone.text().then(txt => ({ message: (txt || '').slice(0, 2000) || null, errorCode: null }), () => ({ message: null, errorCode: null }))
+          )
+        : Promise.resolve({ message: null, errorCode: null });
+      return read.then(({ message, errorCode }) => ({
+        message: message || `HTTP ${status}`,
+        errorCode: errorCode || 'http.status',
+        status,
+      }));
     },
 
     // SAP planning baseline finish. NIMBUS keeps this in `original_end_date`
@@ -3525,10 +3563,33 @@ const NIMBUS = (function () {
           const p = _pending.get(data.id);
           if (!p) return;
           _pending.delete(data.id);
-          if (data.type === 'ERROR') p.reject(new Error(data.error));
-          else p.resolve(data);
+          if (data.type === 'ERROR') {
+            // Worker reported a compute failure (see §1.7 contract): carries
+            // error/stack/failingType. Log before rejecting so the failure is
+            // visible even if the caller swallows the rejection.
+            const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
+            ErrorLog.error('worker', wMsg,
+              { failingType: data.failingType, jobId: data.jobId },
+              { errorCode: 'worker.compute', stack: data.stack });
+            p.reject(new Error(data.error));
+          } else {
+            p.resolve(data);
+          }
         };
-        _worker.onerror = () => {
+        _worker.onerror = (ev) => {
+          // Build {message, filename, lineno, colno} from the ErrorEvent and log
+          // BEFORE flipping _dead (the fallback to main-thread compute is permanent
+          // for the session, so this is the only record of why the worker died).
+          const detail = {
+            message:  ev?.message || 'worker error',
+            filename: ev?.filename || '',
+            lineno:   ev?.lineno ?? null,
+            colno:    ev?.colno ?? null,
+          };
+          try {
+            ErrorLog.error('worker', `worker crashed: ${detail.message}`, detail,
+              { errorCode: 'worker.compute' });
+          } catch {}
           for (const p of _pending.values()) p.reject(new Error('worker error'));
           _pending.clear();
           _worker = null;
@@ -3634,7 +3695,10 @@ const NIMBUS = (function () {
             }
             Alerts._lastMs = elapsed;
           })
-          .catch(() => Alerts._recomputeSync(opts));
+          .catch((e) => {
+            ErrorLog.warn('worker', 'compute fell back to main thread', { error: String(e?.message || e) });
+            Alerts._recomputeSync(opts);
+          });
         return;
       }
       Alerts._recomputeSync(opts);
@@ -5318,25 +5382,94 @@ const NIMBUS = (function () {
     _listeners: new Set(),
     _recent: [],            // rolling 60s window of {ts, level} for rate alarms
     _globalsInstalled: false,
+    _droppedCount: 0,       // count of entries evicted past MAX (surfaced as an overflow marker)
+    _breadcrumbs: [],       // rolling ring of recent typed Interaction events (see Interaction._log)
+    BREADCRUMB_MAX: 15,
+    // Per-page-load session id — generated once at module init so all entries from one
+    // page load share an id (lets backend correlate a frontend batch to a session).
+    SESSION_ID: (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
 
-    _push(level, scope, msg, ctx) {
+    // -- Guarded cross-module accessors -------------------------------------
+    // ErrorLog is defined early (before Store / App), so every reach into a
+    // later module is wrapped — a not-yet-ready module must never make a log
+    // push throw.
+    _buildId() {
+      // NIMBUS_BUILD_ID is the deploy build token; Config.BUILD_ID already mirrors it
+      // (falling back to 'dev'). APP_VERSION lives in the cache-bust IIFE, out of scope here.
+      try { return (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || Config.BUILD_ID; }
+      catch { return 'dev'; }
+    },
+    _plant() {
+      try { return (typeof Store !== 'undefined' && Store && Store.selectedPlant) || null; }
+      catch { return null; }
+    },
+    _route() {
+      try {
+        if (typeof App === 'undefined' || !App) return null;
+        const tab = App._currentTab || null;
+        if (tab === 'gantt' && App._ganttSub) return `gantt/${App._ganttSub}`;
+        return tab;
+      } catch { return null; }
+    },
+
+    // Record a typed breadcrumb (called by Interaction._log). Cheap, always on.
+    breadcrumb(type, data) {
+      try {
+        ErrorLog._breadcrumbs.push({ t: Date.now(), type, ...(data && typeof data === 'object' ? { d: data } : {}) });
+        if (ErrorLog._breadcrumbs.length > ErrorLog.BREADCRUMB_MAX) {
+          ErrorLog._breadcrumbs.splice(0, ErrorLog._breadcrumbs.length - ErrorLog.BREADCRUMB_MAX);
+        }
+      } catch {}
+    },
+
+    _push(level, scope, msg, ctx, opts) {
+      // opts (all optional): { reqId, errorCode, stack } — explicit structured fields.
       const e = {
         ts: new Date().toISOString(),
         level, scope, msg,
-        ctx: ctx === undefined ? null : ErrorLog._safeCtx(ctx)
+        ctx: ctx === undefined ? null : ErrorLog._safeCtx(ctx),
       };
+      // Additive structured fields. All optional — old readers ignore unknown keys.
+      if (opts) {
+        if (opts.reqId      != null) e.reqId      = opts.reqId;
+        if (opts.errorCode  != null) e.errorCode  = opts.errorCode;
+        if (opts.stack      != null) e.stack      = opts.stack;
+      }
+      // Central enrichment.
+      if (level === 'error' && !e.stack) {
+        try { e.stack = new Error().stack; } catch {}
+      }
+      e.buildId   = ErrorLog._buildId();
+      e.sessionId = ErrorLog.SESSION_ID;
+      const plant = ErrorLog._plant(); if (plant) e.plant = plant;
+      const route = ErrorLog._route(); if (route) e.route = route;
+      // Attach breadcrumbs to error-level entries for postmortem context.
+      if (level === 'error' && ErrorLog._breadcrumbs.length) {
+        e.ctx = ErrorLog._safeCtx({ ...(e.ctx && typeof e.ctx === 'object' ? e.ctx : (e.ctx != null ? { _ctx: e.ctx } : {})), breadcrumbs: ErrorLog._breadcrumbs.slice() });
+      }
+
       ErrorLog._entries.push(e);
-      if (ErrorLog._entries.length > ErrorLog.MAX) ErrorLog._entries.splice(0, ErrorLog._entries.length - ErrorLog.MAX);
+      if (ErrorLog._entries.length > ErrorLog.MAX) {
+        const drop = ErrorLog._entries.length - ErrorLog.MAX;
+        ErrorLog._entries.splice(0, drop);
+        ErrorLog._droppedCount += drop;
+      }
       ErrorLog._pushRecent(level);
       // mirror to console so power users see it
       const fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
       console[fn](`[${scope}]`, msg, ctx ?? '');
       for (const l of ErrorLog._listeners) { try { l(e); } catch {} }
       ErrorLog._renderBadge();
+      ErrorLog._scheduleSave();
+      if (level === 'error') ErrorLog._scheduleShip(e);
     },
-    info (scope, msg, ctx) { ErrorLog._push('info',  scope, msg, ctx); },
-    warn (scope, msg, ctx) { ErrorLog._push('warn',  scope, msg, ctx); },
-    error(scope, msg, ctx) { ErrorLog._push('error', scope, msg, ctx); },
+    // Optional 4th arg `opts` carries structured {reqId, errorCode, stack}. Callers that
+    // pass only (scope, msg, ctx) keep working unchanged.
+    info (scope, msg, ctx, opts) { ErrorLog._push('info',  scope, msg, ctx, opts); },
+    warn (scope, msg, ctx, opts) { ErrorLog._push('warn',  scope, msg, ctx, opts); },
+    error(scope, msg, ctx, opts) { ErrorLog._push('error', scope, msg, ctx, opts); },
 
     _pushRecent(level) {
       const now = Date.now();
@@ -5363,12 +5496,115 @@ const NIMBUS = (function () {
 
     entries() { return ErrorLog._entries.slice(); },
     countBy(level) { return ErrorLog._entries.filter(e => e.level === level).length; },
+    // Number of entries evicted past MAX since last clear (0 when none dropped).
+    droppedCount() { return ErrorLog._droppedCount; },
     clear() {
       ErrorLog._entries = [];
+      ErrorLog._recent = [];        // clear the rolling rate window so the badge clears immediately
+      ErrorLog._droppedCount = 0;
       ErrorLog._renderBadge();
+      ErrorLog._scheduleSave();
       for (const l of ErrorLog._listeners) { try { l({ cleared: true }); } catch {} }
     },
     subscribe(fn) { ErrorLog._listeners.add(fn); return () => ErrorLog._listeners.delete(fn); },
+
+    /* -----------------------------------------------------------------------
+       DURABILITY — self-contained IndexedDB ring snapshot (own db/store, does
+       NOT touch IntelDB which another module owns). Restored on boot, saved
+       (debounced) on push. Fire-and-forget; never throws into a log push.
+       ----------------------------------------------------------------------- */
+    _DB_NAME:  'nimbus-errorlog',
+    _DB_STORE: 'ring',
+    _dbPromise: null,
+    _openDb() {
+      if (ErrorLog._dbPromise) return ErrorLog._dbPromise;
+      ErrorLog._dbPromise = new Promise((resolve, reject) => {
+        try {
+          if (typeof indexedDB === 'undefined') { resolve(null); return; }
+          const req = indexedDB.open(ErrorLog._DB_NAME, 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(ErrorLog._DB_STORE)) db.createObjectStore(ErrorLog._DB_STORE);
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror   = () => reject(req.error);
+        } catch (e) { reject(e); }
+      }).catch(() => null);
+      return ErrorLog._dbPromise;
+    },
+    _scheduleSave: Util.debounce(function () { ErrorLog._saveNow(); }, 800),
+    _saveNow() {
+      ErrorLog._openDb().then(db => {
+        if (!db) return;
+        try {
+          const tx = db.transaction(ErrorLog._DB_STORE, 'readwrite');
+          // Snapshot the tail (entries are already capped at MAX).
+          tx.objectStore(ErrorLog._DB_STORE).put(ErrorLog._entries.slice(-ErrorLog.MAX), 'entries');
+        } catch {}
+      }).catch(() => {});
+    },
+    /** Restore persisted entries from a previous page load (prepended, capped). */
+    restore() {
+      return ErrorLog._openDb().then(db => {
+        if (!db) return;
+        return new Promise(resolve => {
+          try {
+            const tx  = db.transaction(ErrorLog._DB_STORE, 'readonly');
+            const req = tx.objectStore(ErrorLog._DB_STORE).get('entries');
+            req.onsuccess = () => {
+              const prev = Array.isArray(req.result) ? req.result : [];
+              if (prev.length) {
+                ErrorLog._entries = prev.concat(ErrorLog._entries).slice(-ErrorLog.MAX);
+                ErrorLog._renderBadge();
+              }
+              resolve();
+            };
+            req.onerror = () => resolve();
+          } catch { resolve(); }
+        });
+      }).catch(() => {});
+    },
+
+    /* -----------------------------------------------------------------------
+       SHIP — batch error-level entries to POST /logs/frontend, fire-and-forget,
+       deduped by sessionId+reqId+ts, capped per batch (§1.6).
+       ----------------------------------------------------------------------- */
+    SHIP_BATCH_MAX: 50,
+    _shipQueue: [],
+    _shipSeen: new Set(),
+    _flushShip: Util.debounce(function () { ErrorLog._shipNow(); }, 1500),
+    // Enqueue synchronously (dedupe), then debounce the actual network flush.
+    _scheduleShip(e) { ErrorLog._enqueueShip(e); ErrorLog._flushShip(); },
+    _enqueueShip(e) {
+      const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}`;
+      if (ErrorLog._shipSeen.has(key)) return;
+      ErrorLog._shipSeen.add(key);
+      if (ErrorLog._shipSeen.size > 2000) ErrorLog._shipSeen.clear(); // bound the dedupe set
+      ErrorLog._shipQueue.push({
+        ts: e.ts, level: e.level, scope: e.scope, msg: e.msg,
+        errorCode: e.errorCode, reqId: e.reqId, stack: e.stack,
+        buildId: e.buildId, sessionId: e.sessionId, plant: e.plant, route: e.route,
+        ctx: e.ctx,
+      });
+    },
+    _shipNow() {
+      if (!ErrorLog._shipQueue.length) return;
+      const batch = ErrorLog._shipQueue.splice(0, ErrorLog.SHIP_BATCH_MAX);
+      try {
+        // fire-and-forget; never block UI, swallow all failures (the entries are
+        // still in the local ring + IndexedDB). Use bare fetch (not fetchTraced) so
+        // a failed ship can't recursively enqueue another error-level entry.
+        const url = `${Config.API_BASE}/logs/frontend`;
+        if (typeof fetch === 'function') {
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entries: batch }),
+            keepalive: true,
+          }).catch(() => {});
+        }
+      } catch {}
+    },
 
     _safeCtx(v) {
       try { JSON.stringify(v); return v; }
@@ -7075,18 +7311,23 @@ const NIMBUS = (function () {
       clearTimeout(Inspector._noteTimers[id]);
       Inspector._noteTimers[id] = setTimeout(() => {
         delete Inspector._noteTimers[id];
-        fetch(`${Config.API_BASE}/task/note`, {
+        const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+        Util.fetchTraced(`${Config.API_BASE}/task/note`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
           body: JSON.stringify({ id, notes })
         })
           .then(async r => {
             if (!r.ok) {
-              const body = await r.json().catch(() => ({}));
-              ErrorLog.warn('inspector', `Note rejected (${r.status}): ${body.message || body.detail || ''}`);
+              const parsed = await Util.parseBackendError(r);
+              ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
+                { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
             }
           })
-          .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`));
+          .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
+            { reqId, id }, { reqId, errorCode: 'http.network' }));
       }, 800);
     },
 
@@ -9448,6 +9689,9 @@ const NIMBUS = (function () {
       const entry = { t: Date.now(), type, ...data };
       this._trace.push(entry);
       if (this._trace.length > 200) this._trace.shift();
+      // Always feed the lightweight breadcrumb ring (attached to error-level entries
+      // for postmortem context) — independent of the verbose DEBUG console log.
+      ErrorLog.breadcrumb(type, data);
       if (this.DEBUG) ErrorLog.info('interaction', type, data);
     },
 
@@ -11041,16 +11285,23 @@ saveAll() {
       }));
       const body = JSON.stringify({ tasks: taskPayload, blocks: Store.blocks, calendars: Store.calendars });
 
+      // Stable reqId for this save attempt so the rejection log correlates to the
+      // backend (fetchTraced reuses an x-request-id we already set).
+      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+
       // Retry up to 3 times on network failures; don't retry 4xx (server rejections).
-      const _post = (attempt) => fetch(`${Config.API_BASE}/tasks/update`, {
+      const _post = (attempt) => Util.fetchTraced(`${Config.API_BASE}/tasks/update`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
         body,
       }).then(async r => {
         if (!r.ok) {
-          const bod = await r.json().catch(() => ({}));
-          const msg = bod.message || bod.detail || `HTTP ${r.status}`;
-          const err = new Error(msg); err.httpStatus = r.status; throw err;
+          const parsed = await Util.parseBackendError(r);
+          const err = new Error(parsed.message);
+          err.httpStatus = r.status; err.errorCode = parsed.errorCode; err.reqId = reqId;
+          throw err;
         }
         return r.json();
       }).catch(e => {
@@ -11104,10 +11355,13 @@ saveAll() {
         })
         .catch(e => {
           if (e.httpStatus) {
-            ErrorLog.error('persistence', `Backend rejected save (${e.httpStatus}): ${e.message}`);
+            ErrorLog.error('persistence', `Backend rejected save (${e.httpStatus}): ${e.message}`,
+              { status: e.httpStatus, reqId: e.reqId },
+              { reqId: e.reqId, errorCode: e.errorCode || 'http.status' });
             Toast.show(t('toast.save_rejected', { msg: e.message }), 'error', 6000);
           } else {
-            ErrorLog.warn('persistence', `Backend save failed: ${e.message}`);
+            ErrorLog.warn('persistence', `Backend save failed: ${e.message}`,
+              { reqId }, { reqId, errorCode: 'http.network' });
             Toast.show(t('toast.saved_locally'), 'info');
           }
         });
@@ -11306,8 +11560,8 @@ saveAll() {
   const AdminCockpit = {
     _initialized: false,
     _pendingFile: null,
-    _logFilter: { level: 'all', scope: 'all', search: '' },
-    _backendLogFilter: { level: 'all' },
+    _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '' },
+    _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '' },
     _healthData: null,
     _deepData: null,
     _healthTimer: null,
@@ -12065,15 +12319,19 @@ saveAll() {
       AdminCockpit._setStatus(status, t('toast.uploading_file', { name: f.name }), 'info');
       const fd = new FormData();
       fd.append('file', f);
-      fetch(`${Config.API_BASE}/upload`, { method: 'POST', body: fd })
-        .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+      Util.fetchTraced(`${Config.API_BASE}/upload`, { method: 'POST', body: fd, headers: { 'x-request-id': reqId } })
+        .then(r => r.json().catch(() => ({})).then(j => ({ ok: r.ok, body: j })))
         .then(({ ok, body }) => {
           if (zone) zone.classList.remove('uploading');
           if (btn)  btn.disabled = false;
           if (!ok || body.status !== 'ok') {
-            const msg = body?.message || 'HTTP error';
+            const msg = body?.message || body?.detail || 'HTTP error';
             AdminCockpit._setStatus(status, t('toast.upload_failed', { msg }), 'error');
-            ErrorLog.error('admin', `Upload failed: ${msg}`, body);
+            ErrorLog.error('admin', `Upload failed: ${msg}`, body,
+              { reqId, errorCode: body?.error_code || 'http.status' });
             return;
           }
           const warnCount = body.warnings?.length ?? 0;
@@ -12100,7 +12358,8 @@ saveAll() {
           if (zone) zone.classList.remove('uploading');
           if (btn)  btn.disabled = false;
           AdminCockpit._setStatus(status, t('toast.upload_failed', { msg: e.message }), 'error');
-          ErrorLog.error('admin', `Upload network error: ${e.message}`);
+          ErrorLog.error('admin', `Upload network error: ${e.message}`,
+            { reqId }, { reqId, errorCode: 'http.network' });
         });
     },
 
@@ -12122,16 +12381,20 @@ saveAll() {
       if (!ok) return;
 
       AdminCockpit._setStatus(status, t('toast.purging', { start, end }), 'info');
-      fetch(`${Config.API_BASE}/purge`, {
+      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+      Util.fetchTraced(`${Config.API_BASE}/purge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
         body: JSON.stringify({ start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
       })
-        .then(r => r.json())
+        .then(r => r.json().catch(() => ({})))
         .then(body => {
           if (body.status !== 'ok') {
-            AdminCockpit._setStatus(status, t('toast.purge_failed', { msg: body.message || 'unknown' }), 'error');
-            ErrorLog.error('admin', `Purge failed: ${body.message || 'unknown'}`, body);
+            AdminCockpit._setStatus(status, t('toast.purge_failed', { msg: body.message || body.detail || 'unknown' }), 'error');
+            ErrorLog.error('admin', `Purge failed: ${body.message || body.detail || 'unknown'}`, body,
+              { reqId, errorCode: body?.error_code || 'http.status' });
             return;
           }
           AdminCockpit._setStatus(status, `✓ Deleted ${body.deleted} order${body.deleted === 1 ? '' : 's'}`, 'success');
@@ -12144,7 +12407,8 @@ saveAll() {
         })
         .catch(e => {
           AdminCockpit._setStatus(status, t('toast.purge_failed', { msg: e.message }), 'error');
-          ErrorLog.error('admin', `Purge network error: ${e.message}`);
+          ErrorLog.error('admin', `Purge network error: ${e.message}`,
+            { reqId }, { reqId, errorCode: 'http.network' });
         });
     },
 
@@ -12169,13 +12433,54 @@ saveAll() {
       }
     },
 
+    /* FE↔BE correlation: clicking a reqId pins it as a filter on BOTH panes and
+       refreshes them so the operator sees the matching frontend + backend events. */
+    _correlateReqId(reqId) {
+      if (!reqId) return;
+      AdminCockpit._logFilter.reqId        = reqId;
+      AdminCockpit._backendLogFilter.reqId = reqId;
+      AdminCockpit._renderLogs();
+      AdminCockpit._renderBackendLog();
+    },
+
+    /* Render (or clear) a small "filtering by request <id>" chip at the top of a
+       log list. `onClear` removes the filter. Self-contained: builds the chip if
+       a reqId is set, removes any prior chip otherwise. */
+    _renderReqIdChip(listId, reqId, onClear) {
+      const list = document.getElementById(listId);
+      if (!list || !list.parentElement) return;
+      const chipId = `${listId}-reqid-chip`;
+      let chip = document.getElementById(chipId);
+      if (!reqId) { if (chip) chip.remove(); return; }
+      if (!chip) {
+        chip = document.createElement('div');
+        chip.id = chipId;
+        chip.className = 'admin-log-reqid-chip';
+        list.parentElement.insertBefore(chip, list);
+      }
+      chip.textContent = '';
+      const label = document.createElement('span');
+      label.textContent = `req ${String(reqId).slice(0, 8)}…`;
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'admin-log-reqid-chip-x';
+      x.textContent = '✕';
+      x.title = 'Clear request filter';
+      x.addEventListener('click', () => { onClear(); });
+      chip.appendChild(document.createTextNode('Filtering: '));
+      chip.appendChild(label);
+      chip.appendChild(x);
+    },
+
     _getFilteredEntries() {
-      const { level, scope, search } = AdminCockpit._logFilter;
+      const { level, scope, search, errorCode, reqId } = AdminCockpit._logFilter;
       return ErrorLog.entries().filter(e => {
         if (level !== 'all' && e.level !== level) return false;
         if (scope !== 'all' && e.scope !== scope) return false;
+        if (errorCode && errorCode !== 'all' && e.errorCode !== errorCode) return false;
+        if (reqId && e.reqId !== reqId) return false;
         if (search) {
-          const haystack = `${e.scope} ${e.msg} ${e.ts}`.toLowerCase();
+          const haystack = `${e.scope} ${e.msg} ${e.ts} ${e.errorCode || ''} ${e.reqId || ''}`.toLowerCase();
           if (!haystack.includes(search)) return false;
         }
         return true;
@@ -12764,14 +13069,54 @@ saveAll() {
         ? AbortSignal.any([AdminCockpit._backendLogAbort.signal, AbortSignal.timeout(8000)])
         : AdminCockpit._backendLogAbort.signal;
 
-      const lvl = AdminCockpit._backendLogFilter?.level || 'all';
-      const params = `?limit=200${lvl !== 'all' ? '&level=' + encodeURIComponent(lvl) : ''}`;
+      const bf = AdminCockpit._backendLogFilter || {};
+      // Lazily inject a free-text query input beside the level select (markup is in
+      // index.html which we don't own). Drives the server-side ?q= filter.
+      const lvlSel = document.getElementById('admin-backend-log-filter-level');
+      if (lvlSel && lvlSel.parentElement && !document.getElementById('admin-backend-log-q')) {
+        const qIn = document.createElement('input');
+        qIn.id = 'admin-backend-log-q';
+        qIn.type = 'search';
+        qIn.className = 'input';
+        qIn.placeholder = 'Filter backend (msg / code / category)';
+        qIn.title = 'Server-side free-text filter';
+        qIn.addEventListener('input', Util.debounce(ev => {
+          AdminCockpit._backendLogFilter.q = ev.target.value.trim();
+          AdminCockpit._renderBackendLog();
+        }, 350));
+        lvlSel.insertAdjacentElement('afterend', qIn);
+      }
+      const lvl = bf.level || 'all';
+      const qp = [`limit=200`];
+      if (lvl !== 'all')                  qp.push('level='    + encodeURIComponent(lvl));
+      if (bf.category && bf.category !== 'all') qp.push('category=' + encodeURIComponent(bf.category));
+      if (bf.since)                       qp.push('since='    + encodeURIComponent(bf.since));
+      if (bf.q)                           qp.push('q='        + encodeURIComponent(bf.q));
+      const params = `?${qp.join('&')}`;
+      const reqIdFilter = bf.reqId || '';
+
+      // Reqid-correlation chip on the backend pane.
+      AdminCockpit._renderReqIdChip('admin-backend-log-list', reqIdFilter, () => {
+        AdminCockpit._backendLogFilter.reqId = '';
+        AdminCockpit._renderBackendLog();
+      });
 
       Util.fetchTraced(`${Config.API_BASE}/logs/backend${params}`, { signal: sig })
         .then(r => r.json())
-        .then(({ entries, total }) => {
+        .then(({ entries: rawEntries, total, dropped }) => {
           host.textContent = '';
+          // Client-side reqId correlation filter (server filters category/since/q/level).
+          let entries = rawEntries || [];
+          if (reqIdFilter) entries = entries.filter(e => e.rid === reqIdFilter || e.reqId === reqIdFilter);
           if (countEl) countEl.textContent = t('ui.backend_log_count', { total, shown: entries.length });
+
+          // Overflow marker if the backend reports a dropped count.
+          if (dropped > 0) {
+            const ov = document.createElement('div');
+            ov.className = 'admin-log-older';
+            ov.textContent = `${dropped} older backend entr${dropped === 1 ? 'y' : 'ies'} dropped`;
+            host.appendChild(ov);
+          }
 
           if (!entries.length) {
             const empty = document.createElement('div');
@@ -12805,6 +13150,38 @@ saveAll() {
             head.appendChild(lvlEl);
             head.appendChild(tsEl);
             head.appendChild(scopeEl);
+            if (e.source === 'frontend') {
+              const src = document.createElement('span');
+              src.className = 'admin-log-src';
+              src.textContent = 'FE';
+              src.title = 'Forwarded from a frontend client';
+              head.appendChild(src);
+            }
+            const code = e.error_code || e.errorCode;
+            if (code) {
+              const codeEl = document.createElement('span');
+              codeEl.className = 'admin-log-code';
+              codeEl.textContent = code;
+              codeEl.title = 'Filter by this error code';
+              codeEl.addEventListener('click', ev => {
+                ev.stopPropagation();
+                AdminCockpit._backendLogFilter.q = code;
+                AdminCockpit._renderBackendLog();
+              });
+              head.appendChild(codeEl);
+            }
+            const rid = e.rid || e.reqId;
+            if (rid) {
+              const ridEl = document.createElement('span');
+              ridEl.className = 'admin-log-reqid';
+              ridEl.textContent = `req ${String(rid).slice(0, 8)}`;
+              ridEl.title = `Correlate request ${rid} across the frontend log`;
+              ridEl.addEventListener('click', ev => {
+                ev.stopPropagation();
+                AdminCockpit._correlateReqId(rid);
+              });
+              head.appendChild(ridEl);
+            }
             row.appendChild(head);
 
             const msg = document.createElement('div');
@@ -12872,12 +13249,55 @@ saveAll() {
           if (s === currentScope) opt.selected = true;
           scopeEl.appendChild(opt);
         }
+        // Lazily inject an errorCode filter select beside the scope select (the
+        // markup lives in index.html which we don't own — build it on demand).
+        let codeEl = document.getElementById('admin-log-filter-code');
+        if (!codeEl && scopeEl.parentElement) {
+          codeEl = document.createElement('select');
+          codeEl.id = 'admin-log-filter-code';
+          codeEl.className = scopeEl.className || '';
+          codeEl.title = 'Filter by error code';
+          codeEl.addEventListener('change', ev => {
+            AdminCockpit._logFilter.errorCode = ev.target.value;
+            AdminCockpit._renderLogs();
+          });
+          scopeEl.insertAdjacentElement('afterend', codeEl);
+        }
+        if (codeEl) {
+          const curCode = AdminCockpit._logFilter.errorCode;
+          const codes = [...new Set(allEntries.map(e => e.errorCode).filter(Boolean))].sort();
+          codeEl.textContent = '';
+          const cAll = document.createElement('option');
+          cAll.value = 'all'; cAll.textContent = 'All codes';
+          codeEl.appendChild(cAll);
+          for (const c of codes) {
+            const opt = document.createElement('option');
+            opt.value = c; opt.textContent = c;
+            if (c === curCode) opt.selected = true;
+            codeEl.appendChild(opt);
+          }
+        }
       }
+
+      // Active reqId-correlation chip (set by clicking a reqId in either pane).
+      AdminCockpit._renderReqIdChip('admin-log-list', AdminCockpit._logFilter.reqId, () => {
+        AdminCockpit._logFilter.reqId = '';
+        AdminCockpit._renderLogs();
+      });
 
       const filtered = AdminCockpit._getFilteredEntries();
       const visible = filtered.slice().reverse();
 
       list.textContent = '';
+
+      // Overflow marker — N entries evicted past MAX since last clear.
+      const dropped = ErrorLog.droppedCount();
+      if (dropped > 0) {
+        const ov = document.createElement('div');
+        ov.className = 'admin-log-older';
+        ov.textContent = `${dropped} older entr${dropped === 1 ? 'y' : 'ies'} dropped (ring at ${ErrorLog.MAX})`;
+        list.appendChild(ov);
+      }
 
       if (visible.length === 0) {
         const empty = document.createElement('div');
@@ -12924,6 +13344,29 @@ saveAll() {
         head.appendChild(lvl);
         head.appendChild(ts);
         head.appendChild(scope);
+        if (e.errorCode) {
+          const code = document.createElement('span');
+          code.className = 'admin-log-code';
+          code.textContent = e.errorCode;
+          code.title = 'Filter by this error code';
+          code.addEventListener('click', ev => {
+            ev.stopPropagation();
+            AdminCockpit._logFilter.errorCode = e.errorCode;
+            AdminCockpit._renderLogs();
+          });
+          head.appendChild(code);
+        }
+        if (e.reqId) {
+          const rid = document.createElement('span');
+          rid.className = 'admin-log-reqid';
+          rid.textContent = `req ${String(e.reqId).slice(0, 8)}`;
+          rid.title = `Correlate request ${e.reqId} across the backend log`;
+          rid.addEventListener('click', ev => {
+            ev.stopPropagation();
+            AdminCockpit._correlateReqId(e.reqId);
+          });
+          head.appendChild(rid);
+        }
         row.appendChild(head);
 
         const msg = document.createElement('div');
@@ -13353,7 +13796,8 @@ saveAll() {
           totalErrors: ErrorLog.countBy('error'),
           totalWarns:  ErrorLog.countBy('warn'),
         },
-        errors: ErrorLog.entries().slice(-200),
+        errors: ErrorLog.entries().slice(-500),
+        droppedErrors: ErrorLog.droppedCount(),
       };
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
@@ -14440,9 +14884,17 @@ saveAll() {
       const host = document.getElementById('md-host');
       if (!host) return;
       host.innerHTML = `<div class="md-loading">${t('ui.loading')}</div>`;
+      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
       try {
-        const data = await fetch(`${API}/master-data/${table}`).then(r => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await Util.fetchTraced(`${API}/master-data/${table}`, { headers: { 'x-request-id': reqId } }).then(async r => {
+          if (!r.ok) {
+            // Surface the backend body instead of discarding it.
+            const parsed = await Util.parseBackendError(r);
+            const err = new Error(parsed.message); err.errorCode = parsed.errorCode; err.httpStatus = r.status;
+            throw err;
+          }
           return r.json();
         });
         _cache[table] = {
@@ -14455,7 +14907,8 @@ saveAll() {
         _renderTable(table);
       } catch (e) {
         host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${e.message}</div>`;
-        ErrorLog.error('master-data', `Load failed for ${table}: ${e.message}`);
+        ErrorLog.error('master-data', `Load failed for ${table}: ${e.message}`,
+          { reqId, table, status: e.httpStatus }, { reqId, errorCode: e.errorCode || 'http.network' });
       }
     }
 
@@ -15202,6 +15655,8 @@ saveAll() {
 document.addEventListener('DOMContentLoaded', () => {
     // Global hard-error net (captures stack traces, normalized through ErrorLog).
     ErrorLog.installGlobalHandlers();
+    // Restore the persisted error-log ring from the previous page load (best-effort).
+    try { ErrorLog.restore(); } catch {}
     // Defensively unregister any legacy service workers — none should be installed
     // but a prior experiment could leave one resident.
     if ('serviceWorker' in navigator) {

@@ -252,3 +252,55 @@ The `/tasks` read path previously derived an order's plant by `LEFT JOIN product
   new line. **(3)** the one remaining gap — reassigning an existing *line* to a different *plant* in
   master data (the order's line is unchanged) — does not move already-attributed orders; a targeted
   re-derivation (compare stored plant vs the current line→plant mapping) or a re-upload would be needed.
+
+---
+
+## Addendum — Single-container "just get it running" pilot (planned 2026-06-26)
+
+> A first, deliberately-minimal pilot deploys NIMBUS to **Azure Container Apps as a single
+> container**: FastAPI serves both the JSON API **and** the static frontend (via a `StaticFiles`
+> mount, same-origin), against the existing Azure Postgres, with config as plain Container App
+> env vars and **no SSO**. This is the on-ramp, not the destination — it is simpler than the
+> two-container model in Workstreams 2/6. The deferred-hardening items below remain the plan of
+> record; this addendum records what the pilot changed and where each deferred item lives.
+
+### How the pilot diverges from the runbook above
+- **One container, not two.** FastAPI serves the frontend itself —
+  `api.mount("/", StaticFiles(directory=NIMBUS_STATIC_DIR, html=True))` added as the **last** route
+  in `brain.py` — instead of a separate `nginx` frontend. So the pilot has **no `/config.js`, no
+  `nginx.conf`, no `docker-entrypoint.sh`, no reverse proxy** (WS2/WS6). Same-origin is achieved by
+  the API serving the page directly; CORS is therefore vestigial (`NIMBUS_ALLOWED_ORIGINS=*`,
+  `allow_credentials=False`).
+- **`app.js:69` `API_BASE`** = `(typeof window !== 'undefined' && window.NIMBUS_API_BASE) || ''`.
+  Empty string ⇒ same-origin relative calls. (WS1 specified a `localhost:8000` fallback for the
+  nginx model; the single-container shape defaults to **relative** instead, and local dev runs as
+  the same single-container shape — `uvicorn brain:api`, open `http://localhost:8000/`.)
+- **Color paths** (`COLOR_FILE`/`COLOR_WHEEL_DIR`) are env-driven with the **current Windows path as
+  the local-dev fallback** (so local dev is untouched with no `.env`), set to `/data/...` in the
+  image. (WS1 specified `/app`-relative defaults; the local-fallback form is used to preserve the
+  existing local workflow.)
+- **Registry pull** uses the **ACR admin user** (simplest for a first-timer), not the UAMI (WS7).
+- **Secrets** are **Container App secrets** (`--secrets pg-pass=…` + `secretref:`), not Key Vault (WS7).
+
+### Deferred — where each item lives
+| Deferred item | Status / home |
+|---|---|
+| **Color-wheel durability** — Container Apps `/data` is ephemeral, so uploaded per-plant wheels + `_meta.json` + `_audit_log.json` are **wiped on every restart/redeploy** (orders are safe — they're in Postgres). Keep `--min/max-replicas 1` meanwhile. | **Workstream 5** (Azure Files SMB mount; zero code change beyond the env var). |
+| **Real authentication / login** — the pilot URL is **open to anyone who has it**. | **Workstream 3** (Entra SSO). Interim stopgap: `NIMBUS_API_KEY` (see audit-remediation addendum) — but it guards only destructive *admin* routes, **not** `/tasks` reads or task edits. |
+| **Registry auth without a stored password** (ACR admin user → managed identity). | **Workstream 7** (UAMI + `AcrPull`). |
+| **Postgres network hardening** (allow-Azure firewall → VNet / Private Endpoint). | **Workstream 7** item 4 + **Fork 2**. |
+| **Rotate the committed Postgres password** (`Mavdob8808!` is in git history; current code reads `PG_PASS` from env, so this is a history/secret-hygiene task, not a code change). | **In-scope #8 / Fork 4** — do it regardless; use a fresh password as the pilot's `pg-pass` secret. |
+| **Frontend CDN dependency** *(NEW — not previously tracked; see below)*. | New deferred item, documented below. |
+
+### NEW deferred item — frontend CDN dependency
+`index.html` loads several libraries from **public CDNs in the browser** (not bundled in the image):
+vis-timeline, AG Grid, Chart.js, Flatpickr, and Google Fonts (unpkg / jsdelivr / fonts.googleapis.com).
+Implications for a hosted plant pilot:
+- End users' **browsers** need outbound internet to those CDNs (the container does not). On a
+  locked-down corporate/plant network that blocks public CDNs, the UI breaks — unstyled page, no
+  Gantt timeline, no orders grid.
+- No Content-Security-Policy is set and there is **no Subresource-Integrity** pinning on the CDN
+  `<script>`/`<link>` tags.
+- **Fix (deferred):** vendor these libraries into the repo and serve them from the same container
+  (they would be covered by the existing `StaticFiles` mount), or front them with an approved
+  internal mirror; add SRI hashes + a CSP. **Decide before any network-restricted plant rollout.**

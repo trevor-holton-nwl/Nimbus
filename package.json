@@ -1,0 +1,14 @@
+{
+  "name": "nimbus",
+  "version": "0.0.0",
+  "private": true,
+  "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. No build step; static frontend. This package.json exists only for the ESLint static-analysis gate.",
+  "scripts": {
+    "lint": "eslint app.js nimbus-intelligence.js nimbus-worker.js locales",
+    "lint:errors": "eslint app.js nimbus-intelligence.js nimbus-worker.js locales --quiet"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}

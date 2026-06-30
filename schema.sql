@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS orders (
     order_quantity        NUMERIC,
     form_size             TEXT,
     notes                 TEXT,                -- user annotations; max 500 chars enforced at app layer
+    firming_indicator     TEXT,                -- SAP firming indicator (FIXKZ); read by query_orders + written by ingest upsert
     upload_batch_id       UUID,
     uploaded_at           TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMP NOT NULL DEFAULT NOW()
@@ -58,6 +59,11 @@ ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_sched_range;
 ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
     CHECK (scheduled_start IS NULL OR scheduled_end IS NULL OR scheduled_end > scheduled_start)
     NOT VALID;
+
+-- Migration for databases created before firming_indicator existed. db.py both
+-- reads (query_orders SELECT) and writes (ingest upsert) this column; without it
+-- GET /tasks fails with UndefinedColumn. ADD COLUMN IF NOT EXISTS is idempotent.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS firming_indicator TEXT;
 
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a

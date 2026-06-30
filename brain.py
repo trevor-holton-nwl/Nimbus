@@ -22,6 +22,7 @@ Color wheels are still per-plant .xlsx files under COLOR_WHEEL_DIR, loaded into 
 small in-process cache (GLOBAL_CW / PLANT_CWS); POST /reload refreshes that cache.
 """
 import collections
+import contextvars
 import io
 import json
 import logging
@@ -29,12 +30,15 @@ import os
 import re
 import sys
 import time
+import traceback
 import uuid
 import pandas as pd
+import psycopg
 from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
@@ -52,13 +56,18 @@ import master_data as md
 # logger tree (propagate=False) so we don't fight uvicorn's own handlers.
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        # Prefer the NIMBUS event level/ts when the caller (_log_event) supplied
+        # them via `extra`, so the ring buffer and this JSON line agree on the
+        # canonical level vocab (info|warn|error) and the event timestamp rather
+        # than recomputing them here. Falls back to the stdlib record for any
+        # non-nimbus log that reaches this formatter.
         payload = {
-            "ts":    pd.Timestamp.utcnow().isoformat(),
-            "level": record.levelname.lower(),
+            "ts":    getattr(record, "evt_ts", None) or pd.Timestamp.utcnow().isoformat(),
+            "level": getattr(record, "evt_level", None) or record.levelname.lower(),
             "logger": record.name,
             "msg":   record.getMessage(),
         }
-        for k in ("category", "ctx", "rid"):
+        for k in ("category", "ctx", "rid", "error_code", "error_type"):
             v = getattr(record, k, None)
             if v is not None:
                 payload[k] = v
@@ -79,11 +88,21 @@ def _configure_logging() -> None:
 _configure_logging()
 _evt_log = logging.getLogger("nimbus.event")
 
+# Per-request id, set in request_id_mw and read by _log_event so every structured
+# event auto-carries the rid (both the ring buffer entry and the JSON log line)
+# without threading it through every call site. None outside a request.
+_RID_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar("nimbus_rid", default=None)
+
+
+def _current_rid() -> str | None:
+    """Read the request id from the contextvar (None outside a request)."""
+    return _RID_CTX.get()
+
 # =========================
 # GLOBAL DATA
 # =========================
 # (No in-memory order cache — see module docstring. Orders are queried per request.)
-COLOR_FILE = r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheel.xlsx"
+COLOR_FILE = os.getenv("COLOR_FILE", r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheel.xlsx")
 
 # Color-wheel cache populated by load_color_wheels(); apply_color_merge() reads from these
 # instead of touching disk per request.
@@ -105,7 +124,13 @@ CW_LOADED_AT: str | None = None
 #   _meta.json                 — upload metadata per plant (filename, row count, timestamp, user)
 #   _audit_log.json            — append-only log of all color-wheel + optimization events
 # =============================================================================
-COLOR_WHEEL_DIR = r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheels"
+COLOR_WHEEL_DIR = os.getenv("COLOR_WHEEL_DIR", r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheels")
+
+# Directory holding the frontend served by the StaticFiles mount at the bottom of
+# this file. Default "." = current working dir = repo root, so `uvicorn brain:api`
+# serves the UI locally with zero config. The container image sets NIMBUS_STATIC_DIR
+# to its bundled frontend directory.
+STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR", ".")
 
 # =========================
 # LIFESPAN
@@ -182,22 +207,30 @@ _req_log = logging.getLogger("nimbus.req")
 @api.middleware("http")
 async def request_id_mw(request: Request, call_next):
     rid = request.headers.get("x-request-id") or str(uuid.uuid4())
+    # Stash the rid on the contextvar so _log_event (and any code it reaches in
+    # this request) auto-carries it. Reset on the way out so it never leaks into
+    # a pooled worker's next request.
+    rid_token = _RID_CTX.set(rid)
     t0 = time.perf_counter()
     try:
-        response = await call_next(request)
-    except Exception as exc:
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            ms = int((time.perf_counter() - t0) * 1000)
+            _req_log.exception(f"unhandled {request.method} {request.url.path} {ms}ms rid={rid}: {exc}")
+            _log_event("error", "request", f"Unhandled {request.method} {request.url.path}",
+                       exc=exc, ms=ms)
+            raise
         ms = int((time.perf_counter() - t0) * 1000)
-        _req_log.exception(f"unhandled {request.method} {request.url.path} {ms}ms rid={rid}: {exc}")
-        _log_event("error", "request", f"Unhandled {request.method} {request.url.path}",
-                   ms=ms, rid=rid, error=str(exc))
-        raise
-    ms = int((time.perf_counter() - t0) * 1000)
-    response.headers["x-request-id"] = rid
-    if ms > 1500:
-        _req_log.warning(f"slow {request.method} {request.url.path} {ms}ms rid={rid}")
-        _log_event("warn", "request", f"Slow request: {request.method} {request.url.path}",
-                   ms=ms, rid=rid, status=response.status_code)
-    return response
+        response.headers["x-request-id"] = rid
+        if ms > 1500:
+            _req_log.warning(f"slow {request.method} {request.url.path} {ms}ms rid={rid}")
+            _log_event("warn", "request", f"Slow request: {request.method} {request.url.path}",
+                       ms=ms, status=response.status_code)
+        return response
+    finally:
+        # Clear the rid so it never leaks into the next request on this worker.
+        _RID_CTX.reset(rid_token)
 
 
 # Error semantics: surface real HTTP status codes behind ONE consistent JSON
@@ -230,16 +263,34 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
 async def _value_error_handler(request: Request, exc: ValueError):
     rid = request.headers.get("x-request-id")
     _log_event("warn", "request", f"Bad request {request.method} {request.url.path}",
-               rid=rid, error=str(exc))
+               exc=exc, error_code="validation")
     return _error_response(400, str(exc), rid)
+
+
+@api.exception_handler(psycopg.Error)
+async def _db_error_handler(request: Request, exc: psycopg.Error):
+    # Translate an uncaught DB error (e.g. an IntegrityError surfacing a
+    # constraint violation from a master_data write) into the unified envelope
+    # with the right status + an actionable, leak-free client_message. The full
+    # SQL/traceback stays in the admin log only.
+    info = db.translate_db_error(exc)
+    rid = request.headers.get("x-request-id")
+    _log_event("error", "db", f"DB error {request.method} {request.url.path}",
+               exc=exc, error_code=info["error_code"],
+               sqlstate=info.get("sqlstate"), constraint=info.get("constraint_name"),
+               table=info.get("table_name"))
+    return _error_response(info["http_status"], info["client_message"], rid,
+                           {"x-error-code": info["error_code"]})
 
 
 @api.exception_handler(Exception)
 async def _unhandled_handler(request: Request, exc: Exception):
     # request_id_mw already logged the traceback on the way out; here we just
-    # return a clean JSON 500 (Starlette's default is plain text).
+    # return a clean JSON 500 (Starlette's default is plain text). Per the
+    # client-message policy, leak nothing — just a request-id reference the
+    # operator can join to the full traceback in the backend log.
     rid = request.headers.get("x-request-id")
-    return _error_response(500, "Internal server error", rid)
+    return _error_response(500, f"Internal error — ref: {rid}", rid)
 
 # =========================
 # ENGINE
@@ -269,26 +320,55 @@ _BACKEND_LOG: collections.deque = collections.deque(maxlen=500)
 _LOG_LEVELS = {"info": logging.INFO, "warn": logging.WARNING, "error": logging.ERROR}
 
 
-def _log_event(level: str, category: str, msg: str, **ctx) -> None:
+def _log_event(level: str, category: str, msg: str, *,
+               exc: BaseException | None = None,
+               error_code: str | None = None, **ctx) -> None:
     """Append a structured event to the in-memory ring buffer AND emit it as a
-    JSON line via the nimbus logger (for container log aggregation)."""
+    JSON line via the nimbus logger (for container log aggregation).
+
+    v2 (backward compatible — existing callers pass only positional + **ctx):
+      - `exc`: when given, capture error_type + the formatted traceback into the
+        RING entry (so /logs/backend shows traces, not just str(e)) AND pass
+        exc_info=exc to the logger so the JSON-line 'exc' branch fires.
+      - `error_code`: explicit code; else, when `exc` is a psycopg.Error, derived
+        via db.translate_db_error; else omitted.
+      - `rid`: read from the request contextvar so every event auto-carries it
+        (and populates the _JsonFormatter rid slot)."""
+    ts = pd.Timestamp.utcnow().isoformat()
+    rid = _current_rid()
     entry: dict = {
-        "ts":       pd.Timestamp.utcnow().isoformat(),
+        "ts":       ts,
         "level":    level,
         "category": category,
         "msg":      msg,
     }
+    if rid:
+        entry["rid"] = rid
+    if exc is not None and error_code is None and isinstance(exc, psycopg.Error):
+        error_code = db.translate_db_error(exc).get("error_code")
+    if error_code:
+        entry["error_code"] = error_code
+    error_type = None
+    if exc is not None:
+        error_type = type(exc).__name__
+        entry["error_type"] = error_type
+        entry["exc"] = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
     if ctx:
         entry["ctx"] = {k: (v if isinstance(v, (int, float, bool, type(None))) else str(v))
                         for k, v in ctx.items()}
     _BACKEND_LOG.append(entry)
     _evt_log.log(_LOG_LEVELS.get(level, logging.INFO), msg,
-                 extra={"category": category, "ctx": entry.get("ctx")})
+                 exc_info=exc if exc is not None else None,
+                 extra={"category": category, "ctx": entry.get("ctx"),
+                        "rid": rid, "error_code": error_code, "error_type": error_type,
+                        "evt_level": level, "evt_ts": ts})
 
 
 def _warn(level, msg, **ctx):
     DIAGNOSTICS["warnings"].append({
-        "level": level, "msg": msg, "context": ctx,
+        "level": level, "msg": msg, "ctx": ctx,
         "ts": pd.Timestamp.utcnow().isoformat(),
     })
     _log_event(level, "load", msg, **ctx)
@@ -368,8 +448,11 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
             gdf = gdf.rename(columns={"ORDER": "ORDER_Y"})
         gdf["COLOR"] = gdf["COLOR"].astype(str).str.upper().str.strip()
         g_cw = dict(zip(gdf["COLOR"], pd.to_numeric(gdf["ORDER_Y"], errors="coerce"), strict=True))
-    except Exception:
-        pass
+    except Exception as e:
+        # Degrade (empty global wheel) but record why — a missing/corrupt global
+        # file silently disabling color priority used to be invisible.
+        _log_event("warn", "color_wheel", "Could not read global color wheel",
+                   exc=e, error_code="file.read", filename=color_file)
 
     p_cws: dict = {}
     if os.path.isdir(COLOR_WHEEL_DIR):
@@ -379,8 +462,9 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
                 continue
             try:
                 p_cws[m.group(1).upper()] = _parse_color_wheel(os.path.join(COLOR_WHEEL_DIR, fname))
-            except Exception:
-                pass
+            except Exception as e:
+                _log_event("warn", "color_wheel", "Could not read plant color wheel",
+                           exc=e, error_code="file.read", filename=fname)
 
     GLOBAL_CW = g_cw
     PLANT_CWS = p_cws
@@ -404,8 +488,9 @@ def _reload_one_plant_wheel(plant: str) -> None:
         return
     try:
         PLANT_CWS[key] = _parse_color_wheel(path)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_event("warn", "color_wheel", "Could not refresh plant color wheel",
+                   exc=e, error_code="file.read", plant=plant, filename=path)
     CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
 
 
@@ -597,7 +682,9 @@ def reload_data():
                    global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
         return {"status": "ok", "diagnostics": _diag_snapshot()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Reload failed: {e}") from e
+        _log_event("error", "reload", "Color-wheel reload failed", exc=e)
+        raise HTTPException(status_code=500,
+                            detail=f"Reload failed — ref: {_current_rid()}") from e
 
 
 def _diag_snapshot() -> dict:
@@ -792,10 +879,17 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     try:
         res = db.update_task_dates_bulk(norm)
     except Exception as e:
+        error_code = (db.translate_db_error(e).get("error_code")
+                      if isinstance(e, psycopg.Error) else "db.error")
         _log_event("error", "db", "Bulk task-date persist failed (transaction rolled back)",
-                   count=len(norm), error=str(e))
+                   exc=e, error_code=error_code, count=len(norm))
+        # Honest body signal: the HTTP status stays 200 (per-row reporting
+        # contract), but flag the hard failure + a stable cause so the frontend
+        # can tell a rolled-back persist apart from a partial success.
         return {"applied": 0, "persisted": 0, "failed": len(norm),
-                "invalid": invalid, "not_found": 0, "stale": [], "versions": {}}
+                "invalid": invalid, "not_found": 0, "stale": [], "versions": {},
+                "status": "error", "error_code": error_code,
+                "cause": "Bulk task-date persist failed (transaction rolled back)"}
     res["invalid"] = res.get("invalid", 0) + invalid
     return res
 
@@ -833,8 +927,9 @@ def update_task_note(payload: dict):
     try:
         return db.update_task_note(task_id, notes)
     except Exception as e:
-        _log_event("error", "db", "Note persist failed", task_id=task_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Note persist failed: {e}") from e
+        _log_event("error", "db", "Note persist failed", exc=e, task_id=task_id)
+        raise HTTPException(status_code=500,
+                            detail=f"Note persist failed — ref: {_current_rid()}") from e
 
 
 # Frontend calls /tasks/update (plural) with {tasks, blocks, calendars}; keep
@@ -855,10 +950,16 @@ def tasks_update(payload: TasksUpdatePayload):
                    total=total, persisted=res["persisted"], failed=res["failed"],
                    invalid=res["invalid"], not_found=res.get("not_found", 0),
                    stale=len(stale))
-    return {"status": "ok", "updated": total, "persisted": res["persisted"],
-            "failed": res["failed"], "invalid": res["invalid"],
-            "not_found": res.get("not_found", 0),
-            "stale": stale, "versions": res.get("versions", {})}
+    # Honest body signal: HTTP status stays 200, but surface a hard-failure flag +
+    # cause when the whole transaction rolled back (default 'ok' otherwise).
+    out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
+           "failed": res["failed"], "invalid": res["invalid"],
+           "not_found": res.get("not_found", 0),
+           "stale": stale, "versions": res.get("versions", {})}
+    if res.get("status") == "error":
+        out["error_code"] = res.get("error_code")
+        out["cause"] = res.get("cause")
+    return out
 
 
 @api.post("/tasks/bulk_update")
@@ -876,10 +977,14 @@ def bulk_update(tasks: list[TaskDateUpdate]):
                    total=total, persisted=res["persisted"], failed=res["failed"],
                    invalid=res["invalid"], not_found=res.get("not_found", 0),
                    stale=len(stale))
-    return {"status": "ok", "updated": total, "persisted": res["persisted"],
-            "failed": res["failed"], "invalid": res["invalid"],
-            "not_found": res.get("not_found", 0),
-            "stale": stale, "versions": res.get("versions", {})}
+    out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
+           "failed": res["failed"], "invalid": res["invalid"],
+           "not_found": res.get("not_found", 0),
+           "stale": stale, "versions": res.get("versions", {})}
+    if res.get("status") == "error":
+        out["error_code"] = res.get("error_code")
+        out["cause"] = res.get("cause")
+    return out
 
 
 class TaskRefreshPayload(BaseModel):
@@ -929,8 +1034,11 @@ async def upload_orders(file: UploadFile = File(...)):
                 result.setdefault("warnings", []).append(
                     {"level": "warn", "msg": f"Unknown production line: {ul} — add it in Admin Cockpit > Manage Data Tables"}
                 )
-    except Exception:
-        pass
+    except Exception as e:
+        # Soft-warn enrichment is best-effort; never fail the upload over it — but
+        # log so a broken master-data lookup doesn't silently skip the warnings.
+        _log_event("warn", "upload", "Unknown-line validation skipped",
+                   exc=e, filename=file.filename)
     return result
 
 
@@ -985,7 +1093,13 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse xlsx: {e}") from e
+        _log_event("warn", "color_wheel", "Color-wheel xlsx parse failed",
+                   exc=e, error_code="xlsx.parse", plant=plant,
+                   filename=file.filename)
+        raise HTTPException(
+            status_code=400,
+            detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with COLOR and ORDER columns",
+        ) from e
 
     path = _cw_path(plant)
     is_replace = os.path.isfile(path)
@@ -1037,7 +1151,10 @@ def get_color_wheel(plant: str):
         meta = _cw_read_meta().get(plant, {})
         return {"plant": plant, "entries": entries, "meta": meta}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not read color wheel: {e}") from e
+        _log_event("error", "color_wheel", "Could not read color wheel",
+                   exc=e, error_code="file.read", plant=plant)
+        raise HTTPException(status_code=500,
+                            detail=f"Could not read color wheel — ref: {_current_rid()}") from e
 
 
 @api.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key)])
@@ -1129,7 +1246,9 @@ def clear_audit_log():
         open(_cw_audit_path(), 'w', encoding='utf-8').close()
         return {"status": "ok"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not clear audit log: {e}") from e
+        _log_event("error", "audit", "Could not clear audit log", exc=e)
+        raise HTTPException(status_code=500,
+                            detail=f"Could not clear audit log — ref: {_current_rid()}") from e
 
 
 # =============================================================================
@@ -1346,8 +1465,12 @@ def maintenance_vacuum_analyze(body: dict = Body(default={})):
         result = db.run_vacuum_analyze(table)
         return {"ok": True, **result}
     except Exception as e:
-        _log_event("error", "maintenance", f"VACUUM ANALYZE failed: {e}")
-        return {"ok": False, "error": str(e)}
+        error_code = (db.translate_db_error(e).get("error_code")
+                      if isinstance(e, psycopg.Error) else "db.error")
+        _log_event("error", "maintenance", "VACUUM ANALYZE failed",
+                   exc=e, error_code=error_code, table=table)
+        return {"ok": False, "status": "error", "error_code": error_code,
+                "error": str(e)}
 
 
 @api.post("/maintenance/analyze", dependencies=[Depends(require_api_key)])
@@ -1359,8 +1482,12 @@ def maintenance_analyze(body: dict = Body(default={})):
     try:
         return {"ok": True, **db.run_analyze(table)}
     except Exception as e:
-        _log_event("error", "maintenance", f"ANALYZE {table} failed: {e}")
-        return {"ok": False, "error": str(e)}
+        error_code = (db.translate_db_error(e).get("error_code")
+                      if isinstance(e, psycopg.Error) else "db.error")
+        _log_event("error", "maintenance", "ANALYZE failed",
+                   exc=e, error_code=error_code, table=table)
+        return {"ok": False, "status": "error", "error_code": error_code,
+                "error": str(e)}
 
 
 # =============================================================================
@@ -1368,20 +1495,128 @@ def maintenance_analyze(body: dict = Body(default={})):
 # =============================================================================
 
 @api.get("/logs/backend")
-def get_backend_logs(level: str | None = None, limit: int = 200):
+def get_backend_logs(level: str | None = None, limit: int = 200,
+                     category: str | None = None, since: str | None = None,
+                     q: str | None = None, offset: int = 0):
     """
     Return recent backend events from the in-memory ring buffer, newest first.
-    Optional ?level= filter (info|warn|error); ?limit= caps the result set.
+
+    Filters (all optional, AND-combined, applied before paging):
+      ?level=     info|warn|error (legacy; "all" = no filter)
+      ?category=  exact category match
+      ?since=     ISO-8601 — only entries with ts >= since
+      ?q=         free-text, case-insensitive, matched against msg+category+ctx
+    Paging: ?offset= (rows to skip) + ?limit= (cap). `total` is the full filtered
+    count (pre-paging) so the viewer can show "showing N of total".
     """
     entries = list(reversed(_BACKEND_LOG))
     if level and level != "all":
         entries = [e for e in entries if e.get("level") == level]
-    return {"entries": entries[:limit], "total": len(_BACKEND_LOG)}
+    if category:
+        entries = [e for e in entries if e.get("category") == category]
+    if since:
+        # String ISO compare is correct for the isoformat() values we store
+        # (lexicographic == chronological for a fixed format). Bad input → no-op.
+        entries = [e for e in entries if str(e.get("ts", "")) >= since]
+    if q:
+        needle = q.lower()
+        def _match(e):
+            hay = f"{e.get('msg', '')} {e.get('category', '')} {e.get('ctx', '')}"
+            return needle in hay.lower()
+        entries = [e for e in entries if _match(e)]
+    total = len(entries)
+    if offset:
+        entries = entries[offset:]
+    return {"entries": entries[:limit], "total": total}
 
 
-@api.post("/logs/backend/clear")
-def clear_backend_logs():
-    """Wipe the in-memory backend event log ring buffer."""
+@api.post("/logs/backend/clear", dependencies=[Depends(require_api_key)])
+def clear_backend_logs(request: Request):
+    """Wipe the in-memory backend event log ring buffer. Gated behind the
+    optional shared-secret guard; records the actor that triggered it."""
+    actor = request.headers.get("X-User") or request.headers.get("x-user-email") or "system"
     _BACKEND_LOG.clear()
-    _log_event("info", "admin", "Backend event log cleared by user")
+    _log_event("info", "admin", "Backend event log cleared by user", actor=actor)
     return {"status": "ok"}
+
+
+# =============================================================================
+# FRONTEND LOG SINK — fold browser ErrorLog batches into the same ring buffer
+# =============================================================================
+_FE_MAX_ENTRIES = 50
+_FE_MAX_STACK = 8 * 1024   # 8 KB
+_FE_MAX_MSG = 2 * 1024     # 2 KB
+
+
+def _truncate(s, cap: int):
+    if s is None:
+        return None
+    s = str(s)
+    return s if len(s) <= cap else s[:cap] + "…[truncated]"
+
+
+@api.post("/logs/frontend")
+def ingest_frontend_logs(payload: dict = Body(default={})):
+    """
+    Best-effort sink for browser-side ErrorLog entries. No auth (it is a log
+    sink), but size-bounded: at most 50 entries per batch, stack ≤ 8 KB, msg ≤
+    2 KB. Each entry is folded into the same in-memory ring buffer tagged
+    source:'frontend', category = scope || 'frontend', preserving
+    rid/error_code/stack/level.
+
+    Body: { entries: [ { ts, level, scope, msg, errorCode?, reqId?, stack?,
+            buildId?, sessionId?, plant?, route?, ctx? } ] }
+    Returns: { status:'ok', accepted: N }
+    """
+    raw_entries = payload.get("entries") or []
+    if not isinstance(raw_entries, list):
+        raise HTTPException(status_code=400, detail="entries must be a list")
+    accepted = 0
+    for raw in raw_entries[:_FE_MAX_ENTRIES]:
+        if not isinstance(raw, dict):
+            continue
+        level = raw.get("level")
+        if level == "warning":
+            level = "warn"
+        if level not in ("info", "warn", "error"):
+            level = "info"
+        scope = raw.get("scope")
+        entry: dict = {
+            "ts":       str(raw.get("ts") or pd.Timestamp.utcnow().isoformat()),
+            "level":    level,
+            "category": str(scope) if scope else "frontend",
+            "msg":      _truncate(raw.get("msg"), _FE_MAX_MSG) or "",
+            "source":   "frontend",
+        }
+        rid = raw.get("reqId") or raw.get("rid")
+        if rid:
+            entry["rid"] = str(rid)
+        if raw.get("errorCode"):
+            entry["error_code"] = str(raw.get("errorCode"))
+        stack = _truncate(raw.get("stack"), _FE_MAX_STACK)
+        if stack:
+            entry["exc"] = stack
+        # Preserve the remaining structured fields (buildId/sessionId/plant/route
+        # + any caller ctx) under the ring's ctx slot, scalar-coerced like backend
+        # events. Drop the keys already promoted above.
+        ctx_src = dict(raw.get("ctx") or {})
+        for k in ("buildId", "sessionId", "plant", "route"):
+            if raw.get(k) is not None:
+                ctx_src[k] = raw.get(k)
+        if ctx_src:
+            entry["ctx"] = {k: (v if isinstance(v, (int, float, bool, type(None))) else str(v))
+                            for k, v in ctx_src.items()}
+        _BACKEND_LOG.append(entry)
+        accepted += 1
+    return {"status": "ok", "accepted": accepted}
+
+
+# =============================================================================
+# STATIC FRONTEND  (MUST stay the last route registered)
+# A mount at "/" is a catch-all: every @api.* route above is matched first, so
+# /health, /tasks, /upload, /master-data/*, etc. keep working untouched.
+# Everything else is served from STATIC_DIR: "/" -> index.html, plus /app.js,
+# /styles.css, /nimbus-intelligence.js, /nimbus-worker.js, /locales/*.js.
+# html=True serves index.html at "/" and as the SPA fallback for unknown paths.
+# =============================================================================
+api.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

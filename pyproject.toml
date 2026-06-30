@@ -9,3 +9,10 @@ ignore = ["B008"]                      # FastAPI idiom: Body(...)/File(...)/Quer
 [tool.ruff.lint.per-file-ignores]
 "brain.py" = ["PLW0603"]               # intentional module-level color-wheel cache: GLOBAL_CW / PLANT_CWS / CW_LOADED_AT
 "db.py"    = ["PLW0603"]               # intentional lazy table-allowlist cache: _MAINT_TABLE_ALLOWLIST
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "pg: requires a reachable Postgres database (auto-skipped when the DB is down)",
+]

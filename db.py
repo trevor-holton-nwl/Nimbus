@@ -97,6 +97,74 @@ def make_id(production_order, material_number) -> str:
 
 
 # =========================
+# ERROR TRANSLATION
+# =========================
+# SQLSTATE → stable error_code + HTTP status. brain.py wires this into a
+# psycopg.Error exception handler so an uncaught IntegrityError surfaces as a
+# clean, actionable client message (constraint name, not a raw 500) without ever
+# leaking SQL/paths. master_data.py write funcs let psycopg.Error propagate to
+# that handler rather than collapsing it to a generic 500.
+_SQLSTATE_ERROR_CODES = {
+    "23505": ("db.unique_violation",      409),
+    "23503": ("db.fk_violation",          409),
+    "23502": ("db.not_null",              400),
+    "23514": ("db.check_violation",       400),
+    "57014": ("db.lock_timeout",          503),
+    "40001": ("db.serialization_failure", 503),
+    "40P01": ("db.deadlock",              503),
+}
+
+
+def translate_db_error(exc) -> dict:
+    """Translate a psycopg.Error into a stable {error_code, http_status,
+    client_message, …diag} dict. Unknown SQLSTATEs fall back to db.error/500.
+
+    client_message is safe to show a user (constraint/column name only, never the
+    raw SQL or server paths); the full str(exc)/traceback stays in admin logs."""
+    sqlstate = getattr(exc, "sqlstate", None)
+    diag = getattr(exc, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None) if diag else None
+    table_name      = getattr(diag, "table_name", None) if diag else None
+    column_name     = getattr(diag, "column_name", None) if diag else None
+    detail          = getattr(diag, "message_detail", None) if diag else None
+    hint            = getattr(diag, "message_hint", None) if diag else None
+
+    error_code, http_status = _SQLSTATE_ERROR_CODES.get(sqlstate, ("db.error", 500))
+
+    # Actionable, leak-free client message per error class.
+    if sqlstate == "23505":
+        client_message = (f"Duplicate value violates constraint {constraint_name}"
+                          if constraint_name else "Duplicate value violates a unique constraint")
+    elif sqlstate == "23503":
+        client_message = (f"Still referenced by rows in {table_name}"
+                          if table_name else "Still referenced by related rows")
+    elif sqlstate == "23502":
+        client_message = (f"Required field missing: {column_name}"
+                          if column_name else "A required field is missing")
+    elif sqlstate == "23514":
+        client_message = (f"Value violates constraint {constraint_name}"
+                          if constraint_name else "A value violates a check constraint")
+    elif sqlstate in ("57014",):
+        client_message = "The database operation timed out — please retry"
+    elif sqlstate in ("40001", "40P01"):
+        client_message = "The database is busy — please retry"
+    else:
+        client_message = "A database error occurred"
+
+    return {
+        "error_code":      error_code,
+        "sqlstate":        sqlstate,
+        "constraint_name": constraint_name,
+        "table_name":      table_name,
+        "column_name":     column_name,
+        "detail":          detail,
+        "hint":            hint,
+        "client_message":  client_message,
+        "http_status":     http_status,
+    }
+
+
+# =========================
 # QUERIES — read
 # =========================
 # Shared projection for the orders read path. Column aliases are the contract the
@@ -965,9 +1033,30 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     batch_id = str(uuid.uuid4())
     warnings: list[dict] = []
 
+    def _write_failed_audit(filename_v, row_count_v, error_msg):
+        """Leave a trail for a failed upload. There is no dedicated `status`
+        column on upload_audit, so the failure is recorded as a 'failed' warning
+        entry (read by the Admin Cockpit history card) with inserted/updated=0.
+        Best-effort — never let audit-write trouble mask the original failure."""
+        try:
+            with _pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO upload_audit
+                        (batch_id, filename, row_count, inserted_count, updated_count, warnings)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (batch_id, filename_v, row_count_v, 0, 0,
+                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}])),
+                )
+                conn.commit()
+        except Exception:
+            log.warning("Failed to write failed-upload audit row", extra={"category": "upload"})
+
     try:
         df = pd.read_excel(io.BytesIO(file_bytes))
     except Exception as e:
+        _write_failed_audit(filename, 0, f"Could not parse xlsx: {e}")
         return {"status": "error", "message": f"Could not parse xlsx: {e}",
                 "raw_row_count": 0, "inserted": 0, "updated": 0,
                 "warnings": [], "batch_id": batch_id}
@@ -986,8 +1075,10 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
     missing = required - set(df.columns)
     if missing:
+        msg = f"Uploaded file is missing required columns: {sorted(missing)}"
+        _write_failed_audit(filename, raw_row_count, msg)
         return {"status": "error",
-                "message": f"Uploaded file is missing required columns: {sorted(missing)}",
+                "message": msg,
                 "raw_row_count": raw_row_count, "inserted": 0, "updated": 0,
                 "warnings": [], "batch_id": batch_id}
 
@@ -1078,73 +1169,80 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     _UPSERT_CHUNK = 500
     inserted = 0
     updated = 0
-    with _pool.connection() as conn, conn.cursor() as cur:
-        for i in range(0, len(rows), _UPSERT_CHUNK):
-            chunk = rows[i:i + _UPSERT_CHUNK]
-            cur.executemany(_UPSERT_SQL, chunk, returning=True)
-            while True:
-                rec = cur.fetchone()
-                if rec is not None:
-                    if rec[0]:
-                        inserted += 1
-                    else:
-                        updated += 1
-                if not cur.nextset():
-                    break
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            for i in range(0, len(rows), _UPSERT_CHUNK):
+                chunk = rows[i:i + _UPSERT_CHUNK]
+                cur.executemany(_UPSERT_SQL, chunk, returning=True)
+                while True:
+                    rec = cur.fetchone()
+                    if rec is not None:
+                        if rec[0]:
+                            inserted += 1
+                        else:
+                            updated += 1
+                    if not cur.nextset():
+                        break
+                conn.commit()
+            # Materialize plant for rows this upload didn't carry one for, deriving it from
+            # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
+            # ONE plant; a line code shared across plants is left NULL (and warned) rather
+            # than silently mis-attributed to the lowest plant code. Scoped to this batch.
+            cur.execute(
+                """
+                UPDATE orders o
+                   SET plant = (
+                       SELECT MIN(pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   )
+                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
+                   AND (
+                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   ) = 1
+                """,
+                (batch_id,),
+            )
             conn.commit()
-        # Materialize plant for rows this upload didn't carry one for, deriving it from
-        # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
-        # ONE plant; a line code shared across plants is left NULL (and warned) rather
-        # than silently mis-attributed to the lowest plant code. Scoped to this batch.
-        cur.execute(
-            """
-            UPDATE orders o
-               SET plant = (
-                   SELECT MIN(pl.plant) FROM production_lines pl
-                    WHERE pl.production_line = o.production_line
-               )
-             WHERE o.upload_batch_id = %s AND o.plant IS NULL
-               AND (
-                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                    WHERE pl.production_line = o.production_line
-               ) = 1
-            """,
-            (batch_id,),
-        )
-        conn.commit()
-        # Surface (don't guess) rows left NULL because their line maps to >1 plant.
-        cur.execute(
-            """
-            SELECT o.production_line, COUNT(*)
-              FROM orders o
-             WHERE o.upload_batch_id = %s AND o.plant IS NULL
-               AND (
-                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                    WHERE pl.production_line = o.production_line
-               ) > 1
-             GROUP BY o.production_line
-            """,
-            (batch_id,),
-        )
-        ambiguous = cur.fetchall()
-        if ambiguous:
-            n_amb = sum(int(r[1]) for r in ambiguous)
-            lines_amb = ", ".join(str(r[0]) for r in ambiguous)
-            warnings.append({
-                "level": "warn",
-                "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
-                        f"shared across multiple plants: {lines_amb}. Provide an "
-                        f"explicit plant column on upload to resolve."),
-            })
-        cur.execute(
-            """
-            INSERT INTO upload_audit
-                (batch_id, filename, row_count, inserted_count, updated_count, warnings)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
-        )
-        conn.commit()
+            # Surface (don't guess) rows left NULL because their line maps to >1 plant.
+            cur.execute(
+                """
+                SELECT o.production_line, COUNT(*)
+                  FROM orders o
+                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
+                   AND (
+                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   ) > 1
+                 GROUP BY o.production_line
+                """,
+                (batch_id,),
+            )
+            ambiguous = cur.fetchall()
+            if ambiguous:
+                n_amb = sum(int(r[1]) for r in ambiguous)
+                lines_amb = ", ".join(str(r[0]) for r in ambiguous)
+                warnings.append({
+                    "level": "warn",
+                    "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
+                            f"shared across multiple plants: {lines_amb}. Provide an "
+                            f"explicit plant column on upload to resolve."),
+                })
+            cur.execute(
+                """
+                INSERT INTO upload_audit
+                    (batch_id, filename, row_count, inserted_count, updated_count, warnings)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
+            )
+            conn.commit()
+    except Exception as e:
+        # The transaction is already rolled back by the context manager; leave a
+        # failed-upload trail (separate short txn) before letting the error reach
+        # the psycopg.Error handler in brain.py for translation.
+        _write_failed_audit(filename, raw_row_count, f"Upload persist failed: {e}")
+        raise
 
     lines = sorted({str(v) for v in df["PRODUCTION_LINE"].dropna().unique()}) \
         if "PRODUCTION_LINE" in df.columns else []

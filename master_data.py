@@ -6,12 +6,19 @@ psycopg.sql.Identifier; every type literal is validated against a whitelist
 before being composed with psycopg.sql.SQL; every value goes through a
 parameter placeholder.  The user cannot inject SQL through any of these paths.
 """
+import logging
 import re
+
+import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
 # Import the shared pool from the existing db module.
 from db import _pool
+
+# Child of brain.py's `nimbus.*` structured-logging tree (propagates up), so a
+# narrowed-but-unexpected error class here still reaches the operator log.
+log = logging.getLogger("nimbus.md")
 
 # ---------------------------------------------------------------------------
 # Safety constants
@@ -164,8 +171,13 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                     cmap = {(r[0], r[1]): r[2] for r in cur.fetchall()}
                     for row in rows:
                         row['constraints'] = cmap.get((row.get('subnetwork'), row.get('plant')))
+            except psycopg.errors.UndefinedColumn:
+                pass  # column not migrated yet — leave it absent (expected)
             except Exception:
-                pass  # column not migrated yet — leave it absent
+                # Any other failure is unexpected: degrade (leave constraints
+                # absent) but log it rather than swallowing the whole class.
+                log.warning("Unexpected error attaching plant constraints",
+                            exc_info=True, extra={"category": "master_data"})
 
     return {"columns": columns, "rows": rows, "meta": {"total": total}}
 

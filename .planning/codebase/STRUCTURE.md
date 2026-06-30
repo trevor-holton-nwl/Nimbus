@@ -20,14 +20,13 @@ nimbus/ (project root)
 ├── brain.py                    # Backend FastAPI entry point (~1,264 lines)
 ├── db.py                       # Data layer (Postgres queries, pool, ingest; ~1,025 lines)
 ├── master_data.py              # Safe DDL surface (column metadata, plants/lines CRUD; ~663 lines)
-├── schema.sql                  # Postgres DDL (run once at setup; ~250 lines)
-├── migration_perf.sql          # Performance index migrations
+├── schema.sql                  # Postgres DDL (run once at setup; ~250 lines; includes the perf index)
 ├── requirements.txt            # Python dependencies (fastapi, uvicorn, pandas, psycopg, etc.)
 ├── .env                        # Environment variables (not in git; copied at setup)
 ├── .gitignore                  # Git exclusions (includes .env, __pycache__)
 ├── CLAUDE.md                   # Project instructions (this file; read FIRST)
-├── NIMBUS_VISION.md            # Long-term roadmap and design principles
 ├── MIGRATION.md                # Deployment + migration checklist
+├── docs/archive/               # Archived docs (NIMBUS_VISION.md, AUDIT_RECOMMENDATIONS.md, HOSTING_REQUEST.md)
 ├── .claude/                    # Claude Code workspace config (not in git)
 │   └── settings.json           # Workspace settings
 └── .planning/
