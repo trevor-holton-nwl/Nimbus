@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-06-30-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-06-30-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -15666,14 +15666,16 @@ saveAll() {
 
   /* =============================================================================
      INTERFACE — SAP integration console (Admin → Interface sub-tab)
-     Renders four sections into #sap-interface-host, all driven by the
+     A master-detail console rendered into #sap-interface-host, driven by the
      /sap/interface/* endpoints:
-       (a) transport panel + Test Connection
-       (b) object catalog table (enable/cron/run-now)
-       (c) per-object field-mapping grid (Save)
-       (d) run history (reuses admin-log-* CSS)
-     Dirty-tracking/save logic is local to this module; it does not touch
-     MasterData. Reads use Util.fetchTraced; writes use fetch with x-user-email.
+       • status ribbon  — aggregate health (connection, enabled, last activity, errors)
+       • object rail    — the 6 sync objects (status dot, kind, enable toggle); selects detail
+       • detail pane    — Overview (transport/secret/schedule/checklist + Test connection),
+                          Mapping (SAP→transform→NIMBUS flow + key-column guardrail),
+                          History (run timeline with counts/duration/watermark/error drill-down)
+     Dirty-tracking/save is local to this module; it does not touch MasterData.
+     Reads use Util.fetchTraced; writes use fetch with x-user-email. Reuses NIMBUS
+     component classes (.kpi-tile, .panel, .admin-health-dot, .cal-toggle-*) + a .sap-* block.
      ========================================================================== */
   const Interface = (() => {
     const API = Config.API_BASE;
@@ -15682,10 +15684,37 @@ saveAll() {
     const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
     const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
 
-    let _objects = [];               // last GET /objects payload
-    let _selectedObject = null;      // object_key whose mapping grid is shown
-    // Per-object mapping editor state: { rows:[...], dirty:bool }
+    let _objects = [];               // last GET /objects payload — drives ribbon + rail
+    let _selected = null;            // selected object_key (master selection)
+    let _tab = 'overview';           // active detail tab: 'overview' | 'mapping' | 'history'
+    let _testResult = null;          // last {cls,dot,msg} from a Test-connection click
+    let _lastNewestKey = null;       // object_key of the most-recent run (ribbon deep-link)
+    const _config = {};              // object_key -> GET /config payload (transport/params/has_secret)
+    // Per-object mapping editor state: { rows:[{sap_field,nimbus_column,transform,active}], dirty:bool }
     const _mapState = {};
+
+    // Master upsert keys — MUST mirror sap_sync._MASTER_KEY_COLUMNS. A master object whose
+    // active mapping omits any of these hits a NOT-NULL on upsert, so the editor blocks Save.
+    const MASTER_KEYS = {
+      subnetworks:      ['code'],
+      plants:           ['subnetwork', 'plant'],
+      production_lines: ['subnetwork', 'plant', 'production_line'],
+      materials:        ['material_id'],
+      material_plants:  ['material_id', 'plant'],
+    };
+    // One-line transform descriptions (keys mirror sap_sync.TRANSFORMS).
+    const XHINT = {
+      none: 'pass through unchanged',    alpha: 'ALPHA-pad — e.g. MATNR',
+      strip_zeros: 'drop leading zeros', dats: 'SAP YYYYMMDD → ISO date',
+      tims: 'SAP HHMMSS → time',         decimal: 'packed decimal, trailing sign',
+      uom: 'unit of measure → ISO',      bool_x: "SAP 'X' flag → boolean",
+    };
+    // Transport-specific connection fields (label + example only — scaffolds the params editor).
+    const TRANSPORT_FIELDS = {
+      file_drop: [['path', 'Share / Blob path', '/data/sap_drop'], ['glob', 'File glob', 'plants_*.xlsx']],
+      odata:     [['base_url', 'Service base URL', 'https://sap-gw/odata/ZNIMBUS_SRV'], ['entity_set', 'Entity set', 'PlantSet'], ['filter', '$filter (delta)', 'LAEDA gt {watermark}'], ['page_size', 'Page size', '1000']],
+      rfc:       [['dest', 'RFC destination', 'SAP_PRD'], ['function', 'Function module', 'Z_NIMBUS_GET_PLANTS'], ['batch', 'Batch size', '2000']],
+    };
 
     const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -15702,276 +15731,439 @@ saveAll() {
     async function render() {
       const host = document.getElementById('sap-interface-host');
       if (!host) return;
-      host.innerHTML = `
-        <section class="sap-section" id="sap-transport-panel"></section>
-        <section class="sap-section" id="sap-catalog-panel"></section>
-        <section class="sap-section" id="sap-mapping-panel"></section>
-        <section class="sap-section" id="sap-runs-panel"></section>`;
-      _renderTransportPanel();
-      await _renderCatalog();
-      _renderMappingPanel();
-      _renderRuns();
+      await _reload();
     }
 
-    // -----------------------------------------------------------------------
-    // (a) Transport panel + Test Connection
-    // -----------------------------------------------------------------------
-    function _renderTransportPanel() {
-      const el = document.getElementById('sap-transport-panel');
-      if (!el) return;
-      const opts = TRANSPORTS.map(tr => `<option value="${tr}">${_esc(tr)}</option>`).join('');
-      el.innerHTML = `
-        <h3 class="sap-h3">${_esc(t('ui.sap_transport'))}</h3>
-        <div class="sap-transport-row">
-          <select id="sap-transport-sel" class="md-input">${opts}</select>
-          <button class="btn btn-sm" id="sap-test-conn-btn">${_esc(t('ui.sap_test_connection'))}</button>
-        </div>
-        <textarea id="sap-source-params" class="md-input sap-params"
-          rows="4" placeholder='{ }' spellcheck="false"></textarea>`;
-      document.getElementById('sap-test-conn-btn')?.addEventListener('click', _testConnection);
-    }
-
-    async function _testConnection() {
-      const transport = document.getElementById('sap-transport-sel')?.value || 'file_drop';
-      let source_params = {};
-      const raw = (document.getElementById('sap-source-params')?.value || '').trim();
-      if (raw) {
-        try { source_params = JSON.parse(raw); }
-        catch { Toast.show(t('toast.sap_conn_fail'), 'error'); return; }
-      }
-      try {
-        const res = await fetch(`${API}/sap/interface/test-connection`, {
-          method: 'POST',
-          headers: _writeHeaders(),
-          body: JSON.stringify({ transport, source_params }),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
-          return r.json();
-        });
-        if (res.ok) Toast.show(`${t('toast.sap_conn_ok')}: ${res.detail || ''}`.trim(), 'success');
-        else        Toast.show(`${t('toast.sap_conn_fail')}: ${res.detail || ''}`.trim(), 'warn', 5000);
-      } catch (e) {
-        Toast.show(`${t('toast.sap_conn_fail')}: ${e.message}`, 'error');
-        ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
-      }
-    }
-
-    // -----------------------------------------------------------------------
-    // (b) Object catalog table
-    // -----------------------------------------------------------------------
-    async function _renderCatalog() {
-      const el = document.getElementById('sap-catalog-panel');
-      if (!el) return;
-      el.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
+    // Fetch /objects, then paint the console. Used on first load + after every write.
+    async function _reload() {
+      const host = document.getElementById('sap-interface-host');
+      if (!host) return;
       try {
         const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
         _objects = data.objects || [];
-        if (_selectedObject === null && _objects.length) _selectedObject = _objects[0].object_key;
-
-        const head = `
-          <tr>
-            <th>${_esc(t('ui.sap_field'))}</th>
-            <th>${_esc(t('ui.sap_enabled'))}</th>
-            <th>${_esc(t('ui.sap_schedule'))}</th>
-            <th>${_esc(t('ui.sap_last_run'))}</th>
-            <th>${_esc(t('ui.sap_next_run'))}</th>
-            <th>${_esc(t('ui.sap_last_result'))}</th>
-            <th></th>
-          </tr>`;
-        const body = _objects.map(o => {
-          const lr = o.last_run || null;
-          const status = lr ? (lr.status || 'unknown') : '—';
-          const pillClass = status === 'ok' ? 'success' : (status === 'error' ? 'error' : 'info');
-          const counts = lr
-            ? `+${lr.rows_inserted ?? 0} / ~${lr.rows_updated ?? 0} / !${lr.rows_failed ?? 0}`
-            : '';
-          return `
-            <tr data-object="${_esc(o.object_key)}">
-              <td><button class="sap-obj-link" data-object="${_esc(o.object_key)}">${_esc(o.label || o.object_key)}</button></td>
-              <td><input type="checkbox" class="sap-obj-enabled" data-object="${_esc(o.object_key)}" ${o.enabled ? 'checked' : ''}></td>
-              <td><input type="text" class="md-input sap-obj-cron" data-object="${_esc(o.object_key)}"
-                    value="${_esc(o.schedule_cron || '')}" placeholder="* * * * *" size="14"></td>
-              <td>${lr ? _esc(_fmtTs(lr.started_at)) : '—'}</td>
-              <td>${o.next_run ? _esc(_fmtTs(o.next_run)) : '—'}</td>
-              <td><span class="admin-log-level admin-log-${pillClass}">${_esc(status)}</span> <span class="sap-counts">${_esc(counts)}</span></td>
-              <td><button class="btn btn-sm sap-run-now" data-object="${_esc(o.object_key)}">${_esc(t('ui.sap_run_now'))}</button></td>
-            </tr>`;
-        }).join('');
-
-        el.innerHTML = `
-          <h3 class="sap-h3">${_esc(t('tab.interface'))}</h3>
-          <div class="sap-table-wrap">
-            <table class="md-table sap-catalog-table"><thead>${head}</thead><tbody>${body}</tbody></table>
-          </div>`;
-
-        el.querySelectorAll('.sap-obj-enabled').forEach(cb =>
-          cb.addEventListener('change', () => _saveConfig(cb.dataset.object, { enabled: cb.checked })));
-        el.querySelectorAll('.sap-obj-cron').forEach(inp =>
-          inp.addEventListener('change', () => _saveConfig(inp.dataset.object, { schedule_cron: inp.value.trim() || null })));
-        el.querySelectorAll('.sap-run-now').forEach(btn =>
-          btn.addEventListener('click', () => _runNow(btn.dataset.object, btn)));
-        el.querySelectorAll('.sap-obj-link').forEach(btn =>
-          btn.addEventListener('click', () => { _selectedObject = btn.dataset.object; _renderMappingPanel(); }));
+        if (!_selected || !_objects.some(o => o.object_key === _selected)) {
+          _selected = _objects.length ? _objects[0].object_key : null;
+        }
+        _paint();
       } catch (e) {
-        el.innerHTML = `<div class="md-empty">${_esc(`Failed to load interface objects: ${e.message}`)}</div>`;
+        host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">⚠</div>`
+          + `<div class="sap-empty-t">${_esc(t('ui.sap_load_failed'))}</div>`
+          + `<div class="sap-empty-d">${_esc(e.message)}</div></div>`;
         ErrorLog.error('sap-interface', `Load objects failed: ${e.message}`);
       }
     }
 
-    async function _saveConfig(object, patch) {
+    // Rebuild the whole console from cached _objects (no fetch).
+    function _paint() {
+      const host = document.getElementById('sap-interface-host');
+      if (!host) return;
+      host.innerHTML = `
+        <div class="sap-pagehead">
+          <div>
+            <div class="sap-pagehead-title"><h2>${_esc(t('tab.interface'))}</h2>
+              <span class="sap-flow">SAP ECC <b>━▶</b> NIMBUS</span></div>
+            <div class="sap-pagehead-sub">${_esc(t('ui.sap_subtitle'))}</div>
+          </div>
+          <span class="sap-mode-chip"><span class="admin-health-dot"></span> ${_esc(t('ui.sap_stub_mode'))}</span>
+        </div>
+        ${_renderRibbon()}
+        <div class="sap-console">
+          <div id="sap-rail"></div>
+          <div id="sap-detail"></div>
+        </div>`;
+      host.querySelectorAll('[data-jump]').forEach(tile => tile.addEventListener('click', () => {
+        const j = tile.dataset.jump;
+        if (j === 'errors') { const eo = _objects.find(o => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
+        else if (j === 'last' && _lastNewestKey) { _selected = _lastNewestKey; }
+        _tab = 'history'; _renderRail(); _renderDetail();
+      }));
+      _renderRail();
+      _renderDetail();
+    }
+
+    function _renderRibbon() {
+      const enabled = _objects.filter(o => o.enabled).length;
+      let newest = null, newestObj = null;
+      _objects.forEach(o => {
+        const lr = o.last_run;
+        if (lr && lr.started_at && (!newest || new Date(lr.started_at) > new Date(newest.started_at))) { newest = lr; newestObj = o; }
+      });
+      _lastNewestKey = newestObj ? newestObj.object_key : null;
+      const errs = _objects.filter(o => o.last_run && o.last_run.status === 'error').length;
+      const tile = (k, v, d, cls, act) =>
+        `<div class="kpi-tile${cls ? ' ' + cls : ''}${act ? ' is-actionable' : ''}"${act ? ` data-jump="${act}"` : ''}>`
+        + `<div class="k">${_esc(k)}</div><div class="v">${v}</div><div class="d">${_esc(d)}</div></div>`;
+      const lastV = newest ? `<span class="sap-v-sm">${_esc(_relTime(newest.started_at))}</span>` : '—';
+      const lastD = newest ? `${newestObj.label} · ${newest.triggered_by || 'manual'}` : 'no runs yet';
+      const rowsV = newest ? Number(newest.rows_read || 0).toLocaleString() : '0';
+      const rowsD = newest ? `+${newest.rows_inserted ?? 0} ins / ~${newest.rows_updated ?? 0} upd` : '—';
+      return `<div class="sap-ribbon">
+        ${tile(t('ui.sap_kpi_connection'), 'Stub', 'connectors not live', 'warn', '')}
+        ${tile(t('ui.sap_kpi_objects'), `${enabled} <span class="sap-frac">/ ${_objects.length}</span>`, enabled ? `${_objects.length - enabled} awaiting setup` : 'none enabled', enabled ? '' : 'warn', '')}
+        ${tile(t('ui.sap_kpi_last_activity'), lastV, lastD, '', newest ? 'last' : '')}
+        ${tile(t('ui.sap_kpi_rows'), rowsV, rowsD, '', '')}
+        ${tile(t('ui.sap_kpi_errors'), String(errs), errs ? 'most recent run failed' : 'no failures', errs ? 'err' : '', errs ? 'errors' : '')}
+      </div>`;
+    }
+
+    // -----------------------------------------------------------------------
+    // Object rail (master) + detail shell (Overview / Mapping / History tabs)
+    // -----------------------------------------------------------------------
+    function _renderRail() {
+      const el = document.getElementById('sap-rail');
+      if (!el) return;
+      const rows = _objects.map(o => {
+        const sel = o.object_key === _selected ? ' sap-rail-row-sel' : '';
+        const lr = o.last_run;
+        const dotCls = !lr ? '' : (lr.status === 'ok' ? 'ok' : (lr.status === 'error' ? 'err' : (lr.status === 'running' ? 'warn' : '')));
+        const statusTxt = !lr ? t('ui.sap_never_run')
+          : (lr.status === 'ok' ? `ok · ${_relTime(lr.started_at)}`
+          : (lr.status === 'error' ? `failed · ${_relTime(lr.started_at)}` : lr.status));
+        const kind = o.kind || 'master';
+        return `<div class="sap-rail-row${sel}" data-obj="${_esc(o.object_key)}">
+          <span class="admin-health-dot ${dotCls}"></span>
+          <div class="sap-rail-main">
+            <div class="sap-rail-name">${_esc(o.label || o.object_key)} <span class="sap-kind sap-kind-${_esc(kind)}">${_esc(kind)}</span></div>
+            <div class="sap-rail-meta">${_esc(o.object_key)} · ${_esc(o.transport || 'file_drop')}</div>
+            <div class="sap-rail-status">${_esc(statusTxt)}</div>
+          </div>
+          <label class="cal-day-toggle-wrap sap-railsw" title="${_esc(t('ui.sap_enabled'))}">
+            <input type="checkbox" data-enable="${_esc(o.object_key)}" ${o.enabled ? 'checked' : ''}>
+            <span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span>
+          </label>
+        </div>`;
+      }).join('');
+      el.innerHTML = `<div class="panel">
+        <div class="panel-head"><span class="sap-section-label">${_esc(t('ui.sap_objects'))}</span>
+          <span class="sap-hint">${_objects.filter(o => o.enabled).length} / ${_objects.length}</span></div>
+        <div class="sap-rail">${rows}</div></div>`;
+      el.querySelectorAll('[data-obj]').forEach(r =>
+        r.addEventListener('click', () => { _selected = r.dataset.obj; _testResult = null; _renderRail(); _renderDetail(); }));
+      el.querySelectorAll('[data-enable]').forEach(cb => {
+        cb.addEventListener('click', e => e.stopPropagation());
+        cb.addEventListener('change', () => _saveConfig(cb.dataset.enable, { enabled: cb.checked }, cb.checked ? t('toast.sap_enable_note') : null));
+      });
+    }
+
+    function _renderDetail() {
+      const el = document.getElementById('sap-detail');
+      if (!el) return;
+      const o = _objects.find(x => x.object_key === _selected);
+      if (!o) { el.innerHTML = ''; return; }
+      const kind = o.kind || 'master';
+      const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+      el.innerHTML = `<div class="panel">
+        <div class="sap-detail-head">
+          <span class="sap-detail-name">${_esc(o.label || o.object_key)}</span>
+          <span class="sap-kind sap-kind-${_esc(kind)}">${_esc(kind)}</span>
+          <span class="sap-detail-key">${_esc(o.object_key)}</span>
+          <div class="sap-detail-actions">
+            <button class="btn btn-sm" data-act="dry">${_esc(t('ui.sap_dry_run'))}</button>
+            <button class="btn btn-sm btn-primary" data-act="run">${_esc(t('ui.sap_run_now'))} ▸</button>
+          </div>
+        </div>
+        <div class="sap-tabs">${tabBtn('overview', t('ui.sap_overview'))}${tabBtn('mapping', t('ui.sap_mapping'))}${tabBtn('history', t('ui.sap_history'))}</div>
+        <div class="sap-tabbody" id="sap-tabbody"><div class="md-loading">${_esc(t('ui.loading'))}</div></div>
+      </div>`;
+      el.querySelectorAll('[data-tab]').forEach(b =>
+        b.addEventListener('click', () => { _tab = b.dataset.tab; _renderDetail(); }));
+      el.querySelectorAll('[data-act]').forEach(b =>
+        b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b)));
+      if (_tab === 'overview') _renderOverview(o);
+      else if (_tab === 'mapping') _renderMapping(o);
+      else _renderHistory(o);
+    }
+
+    function _relTime(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts); if (isNaN(d.getTime())) return String(ts);
+      let s = Math.floor((Date.now() - d.getTime()) / 1000); if (s < 0) s = 0;
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+      return `${Math.floor(h / 24)}d ago`;
+    }
+
+    function _cronProse(c) {
+      if (!c) return null;
+      const p = c.trim().split(/\s+/); if (p.length !== 5) return null;
+      const mi = p[0], ho = p[1], dom = p[2], mon = p[3];
+      const pad = x => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
+      if (dom === '*' && mon === '*' && p[4] === '*' && ho !== '*' && mi !== '*') return `Every day at ${pad(ho)}:${pad(mi)}`;
+      if (mi.indexOf('*/') === 0) return `Every ${mi.slice(2)} minutes`;
+      if (ho.indexOf('*/') === 0 && dom === '*') return `Every ${ho.slice(2)} hours`;
+      return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Overview tab — transport config, secret indicator, schedule, checklist
+    // -----------------------------------------------------------------------
+    async function _renderOverview(o) {
+      const body = document.getElementById('sap-tabbody');
+      if (!body) return;
+      let cfg = _config[o.object_key];
+      if (!cfg) {
+        try {
+          cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+          });
+          _config[o.object_key] = cfg;
+        } catch {
+          cfg = { transport: o.transport, source_params: {}, has_secret: false, schedule_cron: o.schedule_cron };
+        }
+      }
+      // bail if the user switched object/tab while awaiting
+      if (document.getElementById('sap-tabbody') !== body || _tab !== 'overview' || _selected !== o.object_key) return;
+
+      const transport = cfg.transport || o.transport || 'file_drop';
+      const cron = cfg.schedule_cron != null ? cfg.schedule_cron : (o.schedule_cron || '');
+      const prose = _cronProse(cron);
+      const lr = o.last_run;
+      const errBanner = (lr && lr.status === 'error')
+        ? `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${_esc(t('ui.sap_last_failed'))} ${_esc(_relTime(lr.started_at))}</b><div class="sap-mono">${_esc(lr.error || '')}</div></div></div>`
+        : '';
+      const secret = cfg.has_secret
+        ? `<div class="sap-chipline"><span class="admin-health-dot ok"></span> ${_esc(t('ui.sap_credential_present'))}</div>`
+        : `<div class="sap-chipline"><span class="admin-health-dot warn"></span> ${_esc(t('ui.sap_no_credential'))}</div>`;
+      const activeMaps = (_mapState[o.object_key]?.rows || []).filter(m => m.active && m.sap_field && m.nimbus_column).length;
+      const steps = [
+        ['01', t('ui.sap_step_transport'), true],
+        ['02', t('ui.sap_step_map'), activeMaps > 0],
+        ['03', t('ui.sap_step_enable'), o.enabled && !!cron],
+        ['04', t('ui.sap_step_test'), false],
+        ['05', t('ui.sap_step_dryrun'), !!(lr && lr.triggered_by === 'dry-run')],
+        ['06', t('ui.sap_step_first'), !!(lr && lr.status === 'ok' && (lr.rows_inserted || 0) > 0)],
+      ];
+      const checklist = steps.map(s =>
+        `<div class="sap-check-step${s[2] ? ' done' : ''}"><span class="sap-check-n">${s[0]}</span><span class="sap-check-mark">${s[2] ? '✓' : ''}</span><span class="sap-check-t">${_esc(s[1])}</span></div>`).join('');
+      const tr = _testResult;
+      const testStrip = tr
+        ? `<div class="sap-test-strip ${tr.cls}"><span class="admin-health-dot ${tr.dot || ''}"></span> ${_esc(tr.msg)}</div>`
+        : `<div class="sap-test-strip"><span class="admin-health-dot"></span> ${_esc(t('ui.sap_not_tested'))}</div>`;
+
+      body.innerHTML = `${errBanner}
+        <div class="sap-ov-grid">
+          <div>
+            <div class="sap-section-label">${_esc(t('ui.sap_connection_section'))}</div>
+            <div class="sap-field"><label>${_esc(t('ui.sap_transport'))}</label>
+              <select id="sap-transport-sel">${TRANSPORTS.map(tp => `<option${tp === transport ? ' selected' : ''}>${tp}</option>`).join('')}</select></div>
+            <div id="sap-transport-fields">${_transportFieldsHTML(transport, cfg.source_params || {})}</div>
+            <div class="sap-secretbox">${secret}<div class="sap-secret-note">${_esc(t('ui.sap_secret_note'))}</div></div>
+            <div class="sap-test-row"><button class="btn" id="sap-test-btn">${_esc(t('ui.sap_test_connection'))}</button></div>
+            ${testStrip}
+          </div>
+          <div>
+            <div class="sap-section-label">${_esc(t('ui.sap_schedule_section'))}</div>
+            <div class="sap-field"><label>${_esc(t('ui.sap_cron'))}</label>
+              <input class="sap-mono" id="sap-cron-input" value="${_esc(cron)}" placeholder="— — — — —">
+              ${prose ? `<div class="sap-cron-prose">${_esc(prose)}<span class="sap-cron-raw">${_esc(cron)}</span></div>` : `<div class="sap-help">${_esc(t('ui.sap_not_scheduled'))}</div>`}</div>
+            <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">ℹ</span><div>${_esc(t('ui.sap_scheduler_note_a'))} <span class="sap-mono">NIMBUS_SAP_SYNC_ENABLED=1</span> ${_esc(t('ui.sap_scheduler_note_b'))}</div></div>
+            <div class="sap-section-label">${_esc(t('ui.sap_delta_section'))}</div>
+            <div class="sap-kv"><span>${_esc(t('ui.sap_last_watermark'))}</span><span class="sap-mono">${_esc(cfg.last_watermark || '— (full load)')}</span></div>
+          </div>
+          <div class="sap-ov-full">
+            <div class="sap-section-label">${_esc(t('ui.sap_checklist'))}</div>
+            <div class="sap-check">${checklist}</div>
+          </div>
+        </div>`;
+
+      document.getElementById('sap-transport-sel')?.addEventListener('change', e => {
+        _config[o.object_key] = { ...(_config[o.object_key] || {}), transport: e.target.value };
+        _testResult = null;
+        _saveConfig(o.object_key, { transport: e.target.value }, null);
+      });
+      document.getElementById('sap-cron-input')?.addEventListener('change', e =>
+        _saveConfig(o.object_key, { schedule_cron: e.target.value.trim() || null }, null));
+      document.getElementById('sap-test-btn')?.addEventListener('click', () => _testConnection(o.object_key, transport));
+    }
+
+    function _transportFieldsHTML(transport, params) {
+      const fields = TRANSPORT_FIELDS[transport] || [];
+      if (!fields.length) return '';
+      return fields.map(f =>
+        `<div class="sap-field"><label>${_esc(f[1])}</label><input class="sap-mono" data-param="${_esc(f[0])}" value="${_esc(params[f[0]] != null ? params[f[0]] : '')}" placeholder="${_esc(f[2])}" spellcheck="false"></div>`).join('');
+    }
+
+    async function _testConnection(object, transport) {
+      const params = {};
+      document.querySelectorAll('#sap-transport-fields [data-param]').forEach(inp => {
+        if (inp.value.trim()) params[inp.dataset.param] = inp.value.trim();
+      });
+      _testResult = { cls: 'info', dot: '', msg: t('ui.sap_testing') };
+      _renderDetail();
+      try {
+        const res = await fetch(`${API}/sap/interface/test-connection`, {
+          method: 'POST', headers: _writeHeaders(),
+          body: JSON.stringify({ transport, source_params: params }),
+        }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+        _testResult = res.ok
+          ? { cls: 'ok', dot: 'ok', msg: `${t('toast.sap_conn_ok')} — ${res.detail || ''}`.trim() }
+          : { cls: 'info', dot: '', msg: res.detail || t('toast.sap_conn_fail') };
+      } catch (e) {
+        _testResult = { cls: 'err', dot: 'err', msg: `${t('toast.sap_conn_fail')} — ${e.message}` };
+        ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
+      }
+      if (_tab === 'overview' && _selected === object) _renderDetail();
+    }
+
+    async function _saveConfig(object, patch, confirmMsg) {
       try {
         await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
-          method: 'POST',
-          headers: _writeHeaders(),
-          body: JSON.stringify(patch),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
-          return r.json();
-        });
-        // Refresh catalog so next_run / derived state stays in sync.
-        await _renderCatalog();
+          method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
+        }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+        if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
+        if (confirmMsg) Toast.show(confirmMsg, 'info');
+        await _reload();
       } catch (e) {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
         ErrorLog.error('sap-interface', `Config save failed for ${object}: ${e.message}`);
+        await _reload();
       }
     }
 
-    async function _runNow(object, btn) {
-      if (btn) { btn.disabled = true; }
+    async function _runNow(object, dryRun, btn) {
+      if (btn) btn.disabled = true;
       try {
         const res = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
-          method: 'POST',
-          headers: _writeHeaders(),
-          body: JSON.stringify({ dry_run: false }),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
-          return r.json();
-        });
+          method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
+        }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
         if (res.status === 'ok') {
-          Toast.show(`${t('toast.sap_sync_done')} (+${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
+          Toast.show(`${dryRun ? t('toast.sap_dryrun_done') : t('toast.sap_sync_done')} (read ${res.rows_read ?? 0} · +${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
         } else {
           Toast.show(`${t('toast.sap_sync_failed')}: ${res.error || ''}`.trim(), 'error', 6000);
         }
-        await _renderCatalog();
-        _renderRuns();
+        await _reload();
       } catch (e) {
         Toast.show(`${t('toast.sap_sync_failed')}: ${e.message}`, 'error');
         ErrorLog.error('sap-interface', `Sync failed for ${object}: ${e.message}`);
       } finally {
-        if (btn) { btn.disabled = false; }
+        if (btn) btn.disabled = false;
       }
     }
 
     // -----------------------------------------------------------------------
-    // (c) Per-object field-mapping grid
+    // Mapping tab — SAP field ━▶ transform ━▶ NIMBUS column flow editor
     // -----------------------------------------------------------------------
-    async function _renderMappingPanel() {
-      const el = document.getElementById('sap-mapping-panel');
-      if (!el) return;
-      const object = _selectedObject;
-      if (!object) { el.innerHTML = ''; return; }
-      el.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
-      try {
-        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`).then(r => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        });
-        _mapState[object] = {
-          rows: (data.mappings || []).map(m => ({
-            sap_field:     m.sap_field || '',
-            nimbus_column: m.nimbus_column || '',
-            transform:     m.transform || 'none',
-            active:        m.active !== false,
-            field_order:   m.field_order ?? 0,
-          })),
-          dirty: false,
-        };
-        _drawMappingGrid(object);
-      } catch (e) {
-        el.innerHTML = `<div class="md-empty">${_esc(`Failed to load mappings: ${e.message}`)}</div>`;
-        ErrorLog.error('sap-interface', `Load mappings failed for ${object}: ${e.message}`);
+    async function _renderMapping(o) {
+      const body = document.getElementById('sap-tabbody');
+      if (!body) return;
+      if (!_mapState[o.object_key]) {
+        body.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
+        try {
+          const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+          });
+          _mapState[o.object_key] = {
+            rows: (data.mappings || []).map(m => ({
+              sap_field: m.sap_field || '', nimbus_column: m.nimbus_column || '',
+              transform: m.transform || 'none', active: m.active !== false,
+            })),
+            dirty: false,
+          };
+        } catch (e) {
+          body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(t('ui.sap_map_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
+          ErrorLog.error('sap-interface', `Load mappings failed for ${o.object_key}: ${e.message}`);
+          return;
+        }
       }
+      if (document.getElementById('sap-tabbody') !== body || _tab !== 'mapping' || _selected !== o.object_key) return;
+      _drawMapping(o);
     }
 
-    function _drawMappingGrid(object) {
-      const el = document.getElementById('sap-mapping-panel');
-      if (!el) return;
-      const state = _mapState[object];
-      if (!state) return;
-      const transOpts = (sel) => TRANSFORMS.map(tr =>
-        `<option value="${tr}" ${tr === sel ? 'selected' : ''}>${_esc(tr)}</option>`).join('');
-      const objLabel = (_objects.find(o => o.object_key === object) || {}).label || object;
-      const body = state.rows.map((m, i) => `
-        <tr data-idx="${i}">
-          <td><input type="text" class="md-input sap-map-cell" data-idx="${i}" data-field="sap_field" value="${_esc(m.sap_field)}"></td>
-          <td><input type="text" class="md-input sap-map-cell" data-idx="${i}" data-field="nimbus_column" value="${_esc(m.nimbus_column)}"></td>
-          <td><select class="md-input sap-map-cell" data-idx="${i}" data-field="transform">${transOpts(m.transform)}</select></td>
-          <td><input type="checkbox" class="sap-map-cell" data-idx="${i}" data-field="active" ${m.active ? 'checked' : ''}></td>
-        </tr>`).join('');
-      el.innerHTML = `
-        <h3 class="sap-h3">${_esc(objLabel)} — ${_esc(t('ui.sap_field'))} → ${_esc(t('ui.sap_nimbus_column'))}</h3>
-        <div class="sap-table-wrap">
-          <table class="md-table sap-mapping-table">
-            <thead><tr>
-              <th>${_esc(t('ui.sap_field'))}</th>
-              <th>${_esc(t('ui.sap_nimbus_column'))}</th>
-              <th>${_esc(t('ui.sap_transform'))}</th>
-              <th>${_esc(t('ui.sap_active'))}</th>
-            </tr></thead>
-            <tbody>${body || `<tr><td colspan="4" class="md-empty">${_esc(t('ui.sap_no_runs'))}</td></tr>`}</tbody>
-          </table>
-        </div>
+    function _drawMapping(o) {
+      const body = document.getElementById('sap-tabbody');
+      const st = _mapState[o.object_key];
+      if (!body || !st) return;
+      const isMaster = (o.kind || 'master') === 'master';
+      const keys = MASTER_KEYS[o.object_key] || [];
+      const rails = `<div class="sap-flow-rails"><span class="sap-fr">▤ ${_esc(t('ui.sap_field'))}</span><span class="sap-fr c">${_esc(t('ui.sap_transform'))}</span><span class="sap-fr r">${_esc(t('ui.sap_nimbus_column'))} ◆</span></div>`;
+
+      if (!st.rows.length) {
+        body.innerHTML = `${isMaster ? _keystrip(o, st) : ''}
+          <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">→</span><div>${isMaster ? _esc(t('ui.sap_map_primer_master')) : _esc(t('ui.sap_map_primer_orders'))}</div></div>
+          ${rails}
+          <div class="sap-ghost-row"><div class="sap-ghost-node">SAP field</div><div class="sap-ghost-mid">transform</div><div class="sap-ghost-node">nimbus_column</div></div>
+          <div class="sap-map-actions"><button class="btn btn-sm" id="sap-add-map">+ ${_esc(t('ui.sap_add_first'))}</button></div>`;
+        document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
+        return;
+      }
+
+      const rows = st.rows.map((m, i) => {
+        const isKey = isMaster && keys.indexOf(m.nimbus_column) > -1;
+        const opts = TRANSFORMS.map(tr => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
+        return `<div class="sap-map-row${m.active ? '' : ' inactive'}" style="animation-delay:${i * 55}ms">
+          <input class="sap-node sap-node-sap" data-idx="${i}" data-f="sap_field" value="${_esc(m.sap_field)}" placeholder="SAP field" spellcheck="false">
+          <span class="sap-wire"><span class="sap-wire-fill" style="animation-delay:${i * 55}ms"></span></span>
+          <span class="sap-xform-wrap${m.transform === 'none' ? ' none' : ''}"><select class="sap-xform${m.transform === 'none' ? ' none' : ''}" data-idx="${i}" data-f="transform">${opts}</select><span class="sap-xform-hint">${_esc(XHINT[m.transform] || '')}</span></span>
+          <span class="sap-node-wrap"><input class="sap-node sap-node-nimbus${isKey ? ' key' : ''}" data-idx="${i}" data-f="nimbus_column" value="${_esc(m.nimbus_column)}" placeholder="nimbus_column" spellcheck="false">${isKey ? '<span class="sap-keytag" title="Key column">🔑</span>' : ''}</span>
+          <span class="sap-row-tools"><label class="cal-day-toggle-wrap sap-rowsw" title="${_esc(t('ui.sap_active'))}"><input type="checkbox" data-idx="${i}" data-f="active" ${m.active ? 'checked' : ''}><span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span></label><button class="sap-icon-btn danger" data-del="${i}" title="Remove">🗑</button></span>
+        </div>`;
+      }).join('');
+
+      let guard = '', blocked = false;
+      if (isMaster && keys.length) {
+        const missing = keys.filter(k => !st.rows.some(m => m.nimbus_column === k && m.active));
+        blocked = missing.length > 0;
+        guard = _keystrip(o, st);
+        if (blocked) {
+          guard += `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${_esc(o.label || o.object_key)} ${_esc(t('ui.sap_upsert_fail'))}</b> ${_esc(t('ui.sap_key_missing'))} <span class="sap-mono">${missing.map(_esc).join(', ')}</span>.</div></div>`;
+        }
+      } else if (!isMaster) {
+        guard = `<div class="sap-help" style="margin-bottom:12px"><span class="sap-mono">production_order</span> ${_esc(t('ui.sap_orders_identity'))}</div>`;
+      }
+
+      body.innerHTML = `${guard}${rails}<div class="sap-flow">${rows}</div>
         <div class="sap-map-actions">
-          <button class="btn btn-sm" id="sap-add-map">+</button>
-          <button class="btn btn-sm btn-primary" id="sap-save-map">${_esc(t('ui.sap_save_mappings'))}</button>
+          <button class="btn btn-sm" id="sap-add-map">+ ${_esc(t('ui.sap_add_mapping'))}</button>
+          <span class="sap-spacer"></span>
+          ${st.dirty ? `<span class="sap-dirty">${_esc(t('ui.sap_unsaved'))}</span>` : ''}
+          <button class="btn btn-sm btn-primary" id="sap-save-map"${blocked ? ` disabled title="${_esc(t('ui.sap_resolve_keys'))}"` : ''}>${_esc(t('ui.sap_save_mappings'))}</button>
         </div>`;
 
-      el.querySelectorAll('.sap-map-cell').forEach(inp => {
-        const evt = inp.type === 'checkbox' ? 'change' : 'input';
-        inp.addEventListener(evt, () => {
-          const idx = +inp.dataset.idx;
-          const field = inp.dataset.field;
-          const row = state.rows[idx];
-          if (!row) return;
-          row[field] = inp.type === 'checkbox' ? inp.checked : inp.value;
-          state.dirty = true;
-        });
+      body.querySelectorAll('[data-f]').forEach(inp => {
+        const isText = inp.tagName === 'INPUT' && inp.type === 'text';
+        const update = () => {
+          const row = st.rows[+inp.dataset.idx]; if (!row) return;
+          row[inp.dataset.f] = inp.type === 'checkbox' ? inp.checked : inp.value;
+          st.dirty = true;
+        };
+        if (isText) { inp.addEventListener('input', update); inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
+        else { inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
       });
-      document.getElementById('sap-add-map')?.addEventListener('click', () => {
-        state.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true, field_order: state.rows.length });
-        state.dirty = true;
-        _drawMappingGrid(object);
-      });
-      document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(object));
+      body.querySelectorAll('[data-del]').forEach(b =>
+        b.addEventListener('click', () => { st.rows.splice(+b.dataset.del, 1); st.dirty = true; _drawMapping(o); }));
+      document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
+      document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(o.object_key));
+    }
+
+    function _keystrip(o, st) {
+      const keys = MASTER_KEYS[o.object_key] || [];
+      if (!keys.length) return '';
+      const chips = keys.map(k => {
+        const ok = st.rows.some(m => m.nimbus_column === k && m.active);
+        return `<span class="sap-keychip${ok ? '' : ' miss'}"><span class="admin-health-dot ${ok ? 'ok' : 'err'}"></span>${_esc(k)}${ok ? '' : ` <span class="sap-req">${_esc(t('ui.sap_required'))}</span>`}</span>`;
+      }).join('');
+      return `<div class="sap-keystrip"><span class="sap-ks-label">${_esc(t('ui.sap_key_columns'))}</span>${chips}</div>`;
     }
 
     async function _saveMappings(object) {
-      const state = _mapState[object];
-      if (!state) return;
-      const mappings = state.rows
+      const st = _mapState[object];
+      if (!st) return;
+      const mappings = st.rows
         .filter(m => m.sap_field.trim() && m.nimbus_column.trim())
-        .map((m, i) => ({
-          sap_field:     m.sap_field.trim(),
-          nimbus_column: m.nimbus_column.trim(),
-          transform:     m.transform || 'none',
-          active:        m.active !== false,
-          field_order:   i,
-        }));
+        .map((m, i) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
       try {
         await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
-          method: 'POST',
-          headers: _writeHeaders(),
-          body: JSON.stringify({ mappings }),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
-          return r.json();
-        });
-        state.dirty = false;
+          method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
+        }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+        delete _mapState[object];
         Toast.show(t('toast.sap_mappings_saved'), 'success');
-        await _renderMappingPanel();
+        await _reload();
       } catch (e) {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
         ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${e.message}`);
@@ -15979,62 +16171,55 @@ saveAll() {
     }
 
     // -----------------------------------------------------------------------
-    // (d) Run history — reuses admin-log-* CSS classes
+    // History tab — run timeline (status, counts, duration, watermark, errors)
     // -----------------------------------------------------------------------
-    async function _renderRuns() {
-      const el = document.getElementById('sap-runs-panel');
-      if (!el) return;
-      el.innerHTML = `
-        <h3 class="sap-h3">${_esc(t('ui.sap_runs_title'))}</h3>
-        <div class="admin-log-list" id="sap-runs-list"><div class="md-loading">${_esc(t('ui.loading'))}</div></div>`;
-      const list = document.getElementById('sap-runs-list');
+    async function _renderHistory(o) {
+      const body = document.getElementById('sap-tabbody');
+      if (!body) return;
+      body.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
       try {
-        const params = new URLSearchParams({ limit: '50' });
-        if (_selectedObject) params.set('object', _selectedObject);
+        const params = new URLSearchParams({ limit: '50', object: o.object_key });
         const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
+        if (document.getElementById('sap-tabbody') !== body || _tab !== 'history' || _selected !== o.object_key) return;
         const runs = data.runs || [];
         if (!runs.length) {
-          if (list) list.innerHTML = `<div class="admin-log-empty">${_esc(t('ui.sap_no_runs'))}</div>`;
+          body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${_esc(t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${_esc(t('ui.sap_no_runs_hint'))}</div><button class="btn btn-sm" data-act-empty="dry">${_esc(t('ui.sap_dry_run'))}</button></div>`;
+          body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
           return;
         }
-        if (list) list.innerHTML = '';
-        runs.forEach(rn => {
-          const status = rn.status || 'unknown';
-          const lvl = status === 'ok' ? 'success' : (status === 'error' ? 'error' : 'info');
-          const row = document.createElement('div');
-          row.className = `admin-log-row admin-log-${lvl}`;
-
-          const head = document.createElement('div');
-          head.className = 'admin-log-head';
-          const time = document.createElement('span');
-          time.className = 'admin-log-time';
-          time.textContent = _fmtTs(rn.started_at);
-          head.appendChild(time);
-          const lvlEl = document.createElement('span');
-          lvlEl.className = `admin-log-level admin-log-${lvl}`;
-          lvlEl.textContent = status;
-          head.appendChild(lvlEl);
-          const scope = document.createElement('span');
-          scope.className = 'admin-log-scope';
-          scope.textContent = rn.object_key || '';
-          head.appendChild(scope);
-          row.appendChild(head);
-
-          const msg = document.createElement('div');
-          msg.className = 'admin-log-msg';
-          const counts = `read ${rn.rows_read ?? 0} · +${rn.rows_inserted ?? 0} / ~${rn.rows_updated ?? 0} / !${rn.rows_failed ?? 0}`;
-          msg.textContent = rn.error ? `${counts} — ${rn.error}` : counts;
-          row.appendChild(msg);
-
-          if (list) list.appendChild(row);
-        });
+        body.innerHTML = `<div class="sap-feed">${runs.map((rn, i) => _runRow(rn, i)).join('')}</div>`;
+        body.querySelectorAll('[data-exp]').forEach(b =>
+          b.addEventListener('click', () => b.closest('.sap-run').classList.toggle('open')));
       } catch (e) {
-        if (list) list.innerHTML = `<div class="admin-log-empty">${_esc(`Failed to load run history: ${e.message}`)}</div>`;
+        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
         ErrorLog.error('sap-interface', `Load runs failed: ${e.message}`);
       }
+    }
+
+    function _runRow(rn, i) {
+      const status = rn.status || 'unknown';
+      const cls = status === 'ok' ? 'ok' : (status === 'error' ? 'err' : 'info');
+      const pill = status === 'ok' ? '<span class="sap-pill ok">ok</span>'
+        : (status === 'error' ? '<span class="sap-pill err">error</span>' : `<span class="sap-pill info">${_esc(status)}</span>`);
+      const dur = _dur(rn.started_at, rn.ended_at);
+      const counts = `read ${rn.rows_read ?? 0} · <span class="ins">+${rn.rows_inserted ?? 0} ins</span> / <span class="upd">~${rn.rows_updated ?? 0} upd</span> / <span class="fail">!${rn.rows_failed ?? 0} fail</span>`;
+      const wm = (rn.watermark_before || rn.watermark_after)
+        ? `<div class="sap-run-wm">watermark ${_esc(rn.watermark_before || '∅')} → ${_esc(rn.watermark_after || '∅')}</div>` : '';
+      const err = rn.error
+        ? `<div class="sap-run-err"><button class="sap-exp" data-exp="${i}">view error ▾</button><pre>${_esc(rn.error)}</pre></div>` : '';
+      return `<div class="sap-run ${cls}"><div class="sap-run-head">${pill}<span class="sap-run-t">${_esc(_fmtTs(rn.started_at))}</span><span class="sap-run-by">${_esc(rn.triggered_by || 'manual')}</span>${dur ? `<span class="sap-run-dur">${_esc(dur)}</span>` : ''}</div><div class="sap-run-counts">${counts}</div>${wm}${err}</div>`;
+    }
+
+    function _dur(a, b) {
+      if (!a || !b) return '';
+      const d = (new Date(b).getTime() - new Date(a).getTime()) / 1000;
+      if (isNaN(d) || d < 0) return '';
+      if (d < 1) return `${Math.round(d * 1000)}ms`;
+      if (d < 60) return `${d.toFixed(1)}s`;
+      return `${Math.floor(d / 60)}m ${Math.round(d % 60)}s`;
     }
 
     function _fmtTs(ts) {
