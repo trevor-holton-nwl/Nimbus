@@ -35,3 +35,7 @@ desktop.ini
 .vscode/
 *.suo
 *.user
+
+# Claude Code — local/transient only (skills, workflows, shared settings ARE committed)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

@@ -228,6 +228,7 @@ window.__NIMBUS_LOCALES.en = {
   'tab.table':                         'Orders',
   'tab.masterdata':                    'Master Data',
   'tab.admin':                         'Admin Cockpit',
+  'tab.interface':                     'Interface',
 
   /* ── Empty state messages ────────────────────────────────────────────────── */
   'empty.select_order':                'Select an order to inspect.',
@@ -917,4 +918,26 @@ window.__NIMBUS_LOCALES.en = {
   'aria.welcome_dialog':               'Welcome to NIMBUS — select a plant to begin',
   'aria.open_command_palette':         'Open command palette',
   'aria.command_palette':              'Command palette',
+
+  /* ── SAP Interface (data sync) ───────────────────────────────────────────── */
+  'ui.sap_transport':                  'Transport',
+  'ui.sap_test_connection':            'Test connection',
+  'ui.sap_run_now':                    'Run now',
+  'ui.sap_enabled':                    'Enabled',
+  'ui.sap_schedule':                   'Schedule',
+  'ui.sap_last_run':                   'Last run',
+  'ui.sap_next_run':                   'Next run',
+  'ui.sap_last_result':                'Last result',
+  'ui.sap_field':                      'SAP field',
+  'ui.sap_nimbus_column':              'NIMBUS column',
+  'ui.sap_transform':                  'Transform',
+  'ui.sap_active':                     'Active',
+  'ui.sap_save_mappings':              'Save mappings',
+  'ui.sap_runs_title':                 'Sync run history',
+  'ui.sap_no_runs':                    'No sync runs yet.',
+  'toast.sap_conn_ok':                 'Connection OK',
+  'toast.sap_conn_fail':               'Connection failed',
+  'toast.sap_sync_done':               'Sync complete',
+  'toast.sap_sync_failed':             'Sync failed',
+  'toast.sap_mappings_saved':          'Field mappings saved',
 };

@@ -7,6 +7,8 @@
 
 NIMBUS is a production scheduling system with a stateless FastAPI backend and a vanilla-JavaScript frontend. Orders live in Postgres; the frontend is a single-page app with 32 sequential modules in `app.js`, plus an intelligence layer in `nimbus-intelligence.js` and an off-thread computation worker (`nimbus-worker.js`). All state is reactive via a centralized Store.
 
+> Updated 2026-06-30 (post-Azure deploy): the backend also serves the static frontend via a `StaticFiles` mount at `/` (single origin), and the app is containerized (`Dockerfile`) and deployed to Azure Container Apps — see `DEPLOYMENT.md`. The diagram below predates that and shows the old separate-frontend split.
+
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │                     Frontend (Browser)                            │

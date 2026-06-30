@@ -43,8 +43,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-06-25-c';</script>
-<link rel="stylesheet" href="styles.css?v=2026-06-25-c">
+<script>window.NIMBUS_BUILD_ID = '2026-06-30-b';</script>
+<link rel="stylesheet" href="styles.css?v=2026-06-30-b">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1388,6 +1388,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <nav class="admin-subtabs" role="tablist">
           <button class="admin-subtab active" data-sub="overview" role="tab" data-i18n="tab.overview">Overview</button>
           <button class="admin-subtab" data-sub="manage" role="tab" data-i18n="tab.manage_data_tables">Manage Data Tables</button>
+          <button class="admin-subtab" data-sub="interface" role="tab" data-i18n="tab.interface">Interface</button>
         </nav>
 
         <!-- OVERVIEW PANE -->
@@ -1675,6 +1676,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
           </nav>
           <div id="md-host"></div>
         </div>
+        <div id="admin-interface-pane" hidden><div id="sap-interface-host"></div></div>
 
       </div>
     </div>
@@ -2397,12 +2399,24 @@ body.dark .ls-co       { color: var(--fg-mute); }
 <!-- Toast container -->
 <div id="toast-stack"></div>
 
-<script src="locales/en.js"></script>
-<script src="locales/es.js"></script>
-<script src="locales/fr.js"></script>
-<script src="locales/de.js"></script>
-<script src="locales/pt.js"></script>
-<script src="app.js?v=2026-06-25-c"></script>
-<script src="nimbus-intelligence.js?v=2026-06-25-c"></script>
+<!-- Locale bootstrap: load ONLY the active locale (plus 'en', which is the runtime
+     fallback dictionary) instead of all five (~350 KB → ~70–140 KB). document.write
+     keeps these synchronous and ordered before app.js with no build step; the language
+     switcher does localStorage + location.reload(), so a switch re-runs this cleanly.
+     Cache-busted with the build id, matching app.js / nimbus-intelligence.js. -->
+<script>
+(function () {
+  var v = window.NIMBUS_BUILD_ID || 'dev';
+  var supported = ['en', 'es', 'fr', 'de', 'pt'];
+  var want = (localStorage.getItem('nimbus.locale') || 'en').toLowerCase();
+  if (supported.indexOf(want) === -1) want = 'en';
+  var load = (want === 'en') ? ['en'] : ['en', want]; // 'en' always present as fallback
+  for (var i = 0; i < load.length; i++) {
+    document.write('<script src="locales/' + load[i] + '.js?v=' + encodeURIComponent(v) + '"><\/script>');
+  }
+})();
+</script>
+<script src="app.js?v=2026-06-30-a"></script>
+<script src="nimbus-intelligence.js?v=2026-06-30-a"></script>
 </body>
 </html>

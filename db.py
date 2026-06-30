@@ -1023,6 +1023,190 @@ _UPSERT_SQL = """
 # That's the whole point — user drag/drop edits survive a re-upload.
 
 
+# Build the per-row tuple in the exact _UPSERT_SQL column order. The SQL VALUES
+# clause expects: id, production_order, material_number, material_description,
+# production_line, plant, basic_start_date, basic_finish_date, run_time, color,
+# order_quantity, form_size, firming_indicator, upload_batch_id.
+_UPSERT_ROW_COLS = (
+    "production_order", "material_number", "material_description",
+    "production_line", "plant", "basic_start_date", "basic_finish_date",
+    "run_time", "color", "order_quantity", "form_size", "firming_indicator",
+)
+
+
+def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
+                  filename: str | None = None, raw_row_count: int | None = None,
+                  warnings: list[dict] | None = None) -> dict:
+    """Shared orders upsert for both the Excel and SAP ingest paths.
+
+    `rows` is a list of dicts keyed by orders columns (production_order,
+    material_number, material_description, production_line, plant,
+    basic_start_date, basic_finish_date, run_time, color, order_quantity,
+    form_size, firming_indicator). The id is computed via make_id() when absent,
+    and a cumulative-count suffix dedups colliding ids (ORDER|MATERIAL not
+    unique). Then a chunked, idempotent ON CONFLICT upsert persists the rows,
+    plant is backfilled from the line→plant master-data mapping for rows that
+    didn't carry one, ambiguous (multi-plant) line codes are surfaced as a
+    warning, and an upload_audit row is written.
+
+    The scheduled_start/scheduled_end/notes non-overwrite lives in _UPSERT_SQL
+    (unchanged) — user drag/drop edits survive a re-ingest.
+
+    Returns: {status:"ok", batch_id, inserted, updated, failed, warnings}.
+    """
+    if batch_id is None:
+        batch_id = str(uuid.uuid4())
+    # filename defaults to f"sap:{source}" when source != "excel" (the SAP path
+    # has no real filename); the Excel adapter always passes one explicitly.
+    if filename is None and source != "excel":
+        filename = f"sap:{source}"
+    if raw_row_count is None:
+        raw_row_count = len(rows)
+    warnings = list(warnings) if warnings is not None else []
+
+    def _write_failed_audit(filename_v, row_count_v, error_msg):
+        """Leave a trail for a failed upsert. There is no dedicated `status`
+        column on upload_audit, so the failure is recorded as a 'failed' warning
+        entry (read by the Admin Cockpit history card) with inserted/updated=0.
+        Best-effort — never let audit-write trouble mask the original failure."""
+        try:
+            with _pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO upload_audit
+                        (batch_id, filename, row_count, inserted_count, updated_count, warnings)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (batch_id, filename_v, row_count_v, 0, 0,
+                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}])),
+                )
+                conn.commit()
+        except Exception:
+            log.warning("Failed to write failed-upload audit row", extra={"category": "upload"})
+
+    # ---------- IDs + dedup (mirrors brain.py:131-150) ----------
+    # Compute id via make_id() when absent, then apply the cumcount-suffix dedup
+    # so colliding ids within this batch get a stable "_<n>" suffix.
+    id_counts: dict[str, int] = {}
+    n_suffixed = 0
+    for row in rows:
+        rid = row.get("id")
+        if not rid:
+            rid = make_id(row.get("production_order", ""), row.get("material_number", ""))
+        seen = id_counts.get(rid, 0)
+        id_counts[rid] = seen + 1
+        if seen > 0:
+            rid = f"{rid}_{seen}"
+            n_suffixed += 1
+        row["id"] = rid
+    if n_suffixed:
+        warnings.append({
+            "level": "warn",
+            "msg": f"{n_suffixed} duplicate IDs suffixed (ORDER|MATERIAL not unique)",
+        })
+
+    # ---------- Build row tuples in _UPSERT_SQL column order ----------
+    tuples = []
+    for row in rows:
+        tuples.append((
+            row["id"],
+            *(row.get(col) for col in _UPSERT_ROW_COLS),
+            batch_id,
+        ))
+
+    # ---------- Upsert + audit ----------
+    # Chunked executemany(returning=True): commits every 500 rows so a large upload
+    # never holds a table lock for the full duration of the transaction. Each chunk
+    # is idempotent (ON CONFLICT DO UPDATE), so a mid-upload failure leaves a
+    # consistent partial state the user can recover from by re-uploading.
+    _UPSERT_CHUNK = 500
+    inserted = 0
+    updated = 0
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            for i in range(0, len(tuples), _UPSERT_CHUNK):
+                chunk = tuples[i:i + _UPSERT_CHUNK]
+                cur.executemany(_UPSERT_SQL, chunk, returning=True)
+                while True:
+                    rec = cur.fetchone()
+                    if rec is not None:
+                        if rec[0]:
+                            inserted += 1
+                        else:
+                            updated += 1
+                    if not cur.nextset():
+                        break
+                conn.commit()
+            # Materialize plant for rows this upload didn't carry one for, deriving it from
+            # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
+            # ONE plant; a line code shared across plants is left NULL (and warned) rather
+            # than silently mis-attributed to the lowest plant code. Scoped to this batch.
+            cur.execute(
+                """
+                UPDATE orders o
+                   SET plant = (
+                       SELECT MIN(pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   )
+                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
+                   AND (
+                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   ) = 1
+                """,
+                (batch_id,),
+            )
+            conn.commit()
+            # Surface (don't guess) rows left NULL because their line maps to >1 plant.
+            cur.execute(
+                """
+                SELECT o.production_line, COUNT(*)
+                  FROM orders o
+                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
+                   AND (
+                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
+                        WHERE pl.production_line = o.production_line
+                   ) > 1
+                 GROUP BY o.production_line
+                """,
+                (batch_id,),
+            )
+            ambiguous = cur.fetchall()
+            if ambiguous:
+                n_amb = sum(int(r[1]) for r in ambiguous)
+                lines_amb = ", ".join(str(r[0]) for r in ambiguous)
+                warnings.append({
+                    "level": "warn",
+                    "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
+                            f"shared across multiple plants: {lines_amb}. Provide an "
+                            f"explicit plant column on upload to resolve."),
+                })
+            cur.execute(
+                """
+                INSERT INTO upload_audit
+                    (batch_id, filename, row_count, inserted_count, updated_count, warnings)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
+            )
+            conn.commit()
+    except Exception as e:
+        # The transaction is already rolled back by the context manager; leave a
+        # failed-upload trail (separate short txn) before letting the error reach
+        # the psycopg.Error handler in brain.py for translation.
+        _write_failed_audit(filename, raw_row_count, f"Upload persist failed: {e}")
+        raise
+
+    return {
+        "status": "ok",
+        "batch_id": batch_id,
+        "inserted": inserted,
+        "updated": updated,
+        "failed": 0,
+        "warnings": warnings,
+    }
+
+
 def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     """
     Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,
@@ -1114,25 +1298,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     if qcol in df.columns:
         df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
 
-    # ---------- IDs + dedup (mirrors brain.py:131-150) ----------
-    df["id"] = df.apply(
-        lambda r: make_id(r.get("PRODUCTION_ORDER", ""),
-                          r.get("MATERIAL_NUMBER", "")),
-        axis=1,
-    )
-    dup_counts = df.groupby("id").cumcount()
-    if (dup_counts > 0).any():
-        warnings.append({
-            "level": "warn",
-            "msg": f"{int((dup_counts > 0).sum())} duplicate IDs suffixed (ORDER|MATERIAL not unique)",
-        })
-        df.loc[dup_counts > 0, "id"] = (
-            df.loc[dup_counts > 0, "id"].astype(str)
-            + "_"
-            + dup_counts[dup_counts > 0].astype(str)
-        )
-
-    # ---------- Build row tuples ----------
+    # ---------- Build per-row dicts (keyed by orders columns) ----------
+    # The id + cumcount dedup, chunked upsert, plant backfill, ambiguous-plant
+    # warning, and upload_audit insert now live in upsert_orders() so the SAP
+    # path can share them. Here we only translate the cleaned DataFrame into the
+    # list[dict] shape upsert_orders consumes.
     def _v(row, col):
         if col not in df.columns:
             return None
@@ -1144,115 +1314,46 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
 
     rows = []
     for _, r in df.iterrows():
-        rows.append((
-            r["id"],
-            _str_id(r.get("PRODUCTION_ORDER", "")),
-            _str_id(r.get("MATERIAL_NUMBER", "")),
-            _v(r, "MATERIAL_DESCRIPTION"),
-            _v(r, "PRODUCTION_LINE"),
-            _v(r, "PLANT"),
-            _ts(r["BASIC_START_DATE"]),
-            _ts(r["BASIC_FINISH_DATE"]),
-            float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
-            _v(r, "COLOR"),
-            float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
-            _v(r, "FORM_SIZE"),
-            _v(r, "FIRMING_INDICATOR"),
-            batch_id,
-        ))
+        rows.append({
+            "production_order": _str_id(r.get("PRODUCTION_ORDER", "")),
+            "material_number": _str_id(r.get("MATERIAL_NUMBER", "")),
+            "material_description": _v(r, "MATERIAL_DESCRIPTION"),
+            "production_line": _v(r, "PRODUCTION_LINE"),
+            "plant": _v(r, "PLANT"),
+            "basic_start_date": _ts(r["BASIC_START_DATE"]),
+            "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
+            "run_time": float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
+            "color": _v(r, "COLOR"),
+            "order_quantity": float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
+            "form_size": _v(r, "FORM_SIZE"),
+            "firming_indicator": _v(r, "FIRMING_INDICATOR"),
+        })
 
-    # ---------- Upsert + audit ----------
-    # Chunked executemany(returning=True): commits every 500 rows so a large upload
-    # never holds a table lock for the full duration of the transaction. Each chunk
-    # is idempotent (ON CONFLICT DO UPDATE), so a mid-upload failure leaves a
-    # consistent partial state the user can recover from by re-uploading.
-    _UPSERT_CHUNK = 500
-    inserted = 0
-    updated = 0
-    try:
-        with _pool.connection() as conn, conn.cursor() as cur:
-            for i in range(0, len(rows), _UPSERT_CHUNK):
-                chunk = rows[i:i + _UPSERT_CHUNK]
-                cur.executemany(_UPSERT_SQL, chunk, returning=True)
-                while True:
-                    rec = cur.fetchone()
-                    if rec is not None:
-                        if rec[0]:
-                            inserted += 1
-                        else:
-                            updated += 1
-                    if not cur.nextset():
-                        break
-                conn.commit()
-            # Materialize plant for rows this upload didn't carry one for, deriving it from
-            # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
-            # ONE plant; a line code shared across plants is left NULL (and warned) rather
-            # than silently mis-attributed to the lowest plant code. Scoped to this batch.
-            cur.execute(
-                """
-                UPDATE orders o
-                   SET plant = (
-                       SELECT MIN(pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
-                   )
-                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
-                   AND (
-                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
-                   ) = 1
-                """,
-                (batch_id,),
-            )
-            conn.commit()
-            # Surface (don't guess) rows left NULL because their line maps to >1 plant.
-            cur.execute(
-                """
-                SELECT o.production_line, COUNT(*)
-                  FROM orders o
-                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
-                   AND (
-                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
-                   ) > 1
-                 GROUP BY o.production_line
-                """,
-                (batch_id,),
-            )
-            ambiguous = cur.fetchall()
-            if ambiguous:
-                n_amb = sum(int(r[1]) for r in ambiguous)
-                lines_amb = ", ".join(str(r[0]) for r in ambiguous)
-                warnings.append({
-                    "level": "warn",
-                    "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
-                            f"shared across multiple plants: {lines_amb}. Provide an "
-                            f"explicit plant column on upload to resolve."),
-                })
-            cur.execute(
-                """
-                INSERT INTO upload_audit
-                    (batch_id, filename, row_count, inserted_count, updated_count, warnings)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
-            )
-            conn.commit()
-    except Exception as e:
-        # The transaction is already rolled back by the context manager; leave a
-        # failed-upload trail (separate short txn) before letting the error reach
-        # the psycopg.Error handler in brain.py for translation.
-        _write_failed_audit(filename, raw_row_count, f"Upload persist failed: {e}")
-        raise
+    result = upsert_orders(
+        rows,
+        batch_id=batch_id,
+        source="excel",
+        filename=filename,
+        raw_row_count=raw_row_count,
+        warnings=warnings,
+    )
+    if result.get("status") != "ok":
+        # upsert_orders already wrote a failed-audit trail and re-raised on a
+        # persist failure; this branch covers any defensive non-ok return.
+        return result
 
     lines = sorted({str(v) for v in df["PRODUCTION_LINE"].dropna().unique()}) \
         if "PRODUCTION_LINE" in df.columns else []
 
+    # Preserve the historical return shape exactly: include raw_row_count + lines
+    # alongside the upsert_orders result (which carries status/batch_id/
+    # inserted/updated/warnings/failed).
     return {
         "status": "ok",
-        "batch_id": batch_id,
+        "batch_id": result["batch_id"],
         "raw_row_count": raw_row_count,
-        "inserted": inserted,
-        "updated": updated,
+        "inserted": result["inserted"],
+        "updated": result["updated"],
         "lines": lines,
-        "warnings": warnings,
+        "warnings": result["warnings"],
     }

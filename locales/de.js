@@ -224,6 +224,7 @@ window.__NIMBUS_LOCALES.de = {
   'tab.table':                         'Aufträge',
   'tab.masterdata':                    'Stammdaten verwalten',
   'tab.admin':                         'Admin-Cockpit',
+  'tab.interface':                     'Schnittstelle',
 
   /* ── Empty state messages ────────────────────────────────────────────────── */
   'empty.select_order':                'Auftrag zum Prüfen auswählen.',

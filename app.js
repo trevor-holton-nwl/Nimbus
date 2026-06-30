@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-06-25-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-06-30-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -4355,7 +4355,12 @@ const NIMBUS = (function () {
     computeMatrix(startDate, days = 7, srcTasks = null) {
       const start = Util.startOfDay(startDate);
       const cacheable = srcTasks === null;
-      const cacheKey = `${start.getTime()}|${days}|${Store._rev || 0}`;
+      // Scope the memo key by selected plant. The worker prewarm (_prewarm) writes a
+      // PLANT-SCOPED matrix; this sync path is otherwise GLOBAL. Without a plant
+      // discriminator (and a matching line set) the two collide under one key and a
+      // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
+      const scope = Store.selectedPlant || 'all';
+      const cacheKey = `${start.getTime()}|${days}|${Store._rev || 0}|${scope}`;
       if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
         return Utilization._cache.matrix;
       }
@@ -4363,7 +4368,13 @@ const NIMBUS = (function () {
       const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
       const matrix = {};
       const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
-      if (srcTasks === null) Object.keys(Store.calendars).forEach(l => lines.add(l));
+      if (srcTasks === null) {
+        // When a plant is selected, scope the line set to that plant's lines so this sync
+        // path and the plant-scoped worker prewarm compute the same matrix under the same
+        // key. With no plant selected, include every visited calendar line (global view).
+        if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lines.add(l));
+        else Object.keys(Store.calendars).forEach(l => lines.add(l));
+      }
 
       // Pre-parse blackout blocks once for the whole matrix instead of re-parsing every
       // block on every (line, day) cell. Capacity is computed once per cell and the
@@ -4521,6 +4532,7 @@ const NIMBUS = (function () {
     // Skip when no plant is selected — _snap would otherwise post the global all-line
     // snapshot to the worker for a matrix nothing on screen consumes.
     if (!Compute.available() || !Store.selectedPlant) return;
+    const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
     const startMs = Util.startOfDay(new Date()).getTime();
     const rev     = Store._rev || 0;
     Compute.utilization(startMs, 7)
@@ -4532,7 +4544,7 @@ const NIMBUS = (function () {
             row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean);
           }
         }
-        Utilization._cache = { key: `${startMs}|7|${rev}`, matrix };
+        Utilization._cache = { key: `${startMs}|7|${rev}|${plant}`, matrix };
       })
       .catch(() => {});
   };
@@ -11588,9 +11600,12 @@ saveAll() {
         b.classList.toggle('active', b.dataset.sub === sub));
       const ov = document.getElementById('admin-overview-pane');
       const mg = document.getElementById('admin-manage-pane');
+      const ifc = document.getElementById('admin-interface-pane');
       if (ov) ov.hidden = (sub !== 'overview');
       if (mg) mg.hidden = (sub !== 'manage');
+      if (ifc) ifc.hidden = (sub !== 'interface');
       if (sub === 'manage') MasterData.render();
+      else if (sub === 'interface') Interface.render();
       else AdminCockpit._renderOverview();
     },
 
@@ -15650,6 +15665,391 @@ saveAll() {
   })();
 
   /* =============================================================================
+     INTERFACE — SAP integration console (Admin → Interface sub-tab)
+     Renders four sections into #sap-interface-host, all driven by the
+     /sap/interface/* endpoints:
+       (a) transport panel + Test Connection
+       (b) object catalog table (enable/cron/run-now)
+       (c) per-object field-mapping grid (Save)
+       (d) run history (reuses admin-log-* CSS)
+     Dirty-tracking/save logic is local to this module; it does not touch
+     MasterData. Reads use Util.fetchTraced; writes use fetch with x-user-email.
+     ========================================================================== */
+  const Interface = (() => {
+    const API = Config.API_BASE;
+    const USER_EMAIL = 'trevor.holton@newellco.com';
+    // Transform names — must mirror sap_sync.TRANSFORMS in the backend contract.
+    const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
+    const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
+
+    let _objects = [];               // last GET /objects payload
+    let _selectedObject = null;      // object_key whose mapping grid is shown
+    // Per-object mapping editor state: { rows:[...], dirty:bool }
+    const _mapState = {};
+
+    const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function _writeHeaders(json = true) {
+      const h = { 'x-user-email': USER_EMAIL };
+      if (json) h['content-type'] = 'application/json';
+      return h;
+    }
+
+    // -----------------------------------------------------------------------
+    // Public entry point
+    // -----------------------------------------------------------------------
+    async function render() {
+      const host = document.getElementById('sap-interface-host');
+      if (!host) return;
+      host.innerHTML = `
+        <section class="sap-section" id="sap-transport-panel"></section>
+        <section class="sap-section" id="sap-catalog-panel"></section>
+        <section class="sap-section" id="sap-mapping-panel"></section>
+        <section class="sap-section" id="sap-runs-panel"></section>`;
+      _renderTransportPanel();
+      await _renderCatalog();
+      _renderMappingPanel();
+      _renderRuns();
+    }
+
+    // -----------------------------------------------------------------------
+    // (a) Transport panel + Test Connection
+    // -----------------------------------------------------------------------
+    function _renderTransportPanel() {
+      const el = document.getElementById('sap-transport-panel');
+      if (!el) return;
+      const opts = TRANSPORTS.map(tr => `<option value="${tr}">${_esc(tr)}</option>`).join('');
+      el.innerHTML = `
+        <h3 class="sap-h3">${_esc(t('ui.sap_transport'))}</h3>
+        <div class="sap-transport-row">
+          <select id="sap-transport-sel" class="md-input">${opts}</select>
+          <button class="btn btn-sm" id="sap-test-conn-btn">${_esc(t('ui.sap_test_connection'))}</button>
+        </div>
+        <textarea id="sap-source-params" class="md-input sap-params"
+          rows="4" placeholder='{ }' spellcheck="false"></textarea>`;
+      document.getElementById('sap-test-conn-btn')?.addEventListener('click', _testConnection);
+    }
+
+    async function _testConnection() {
+      const transport = document.getElementById('sap-transport-sel')?.value || 'file_drop';
+      let source_params = {};
+      const raw = (document.getElementById('sap-source-params')?.value || '').trim();
+      if (raw) {
+        try { source_params = JSON.parse(raw); }
+        catch { Toast.show(t('toast.sap_conn_fail'), 'error'); return; }
+      }
+      try {
+        const res = await fetch(`${API}/sap/interface/test-connection`, {
+          method: 'POST',
+          headers: _writeHeaders(),
+          body: JSON.stringify({ transport, source_params }),
+        }).then(r => {
+          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          return r.json();
+        });
+        if (res.ok) Toast.show(`${t('toast.sap_conn_ok')}: ${res.detail || ''}`.trim(), 'success');
+        else        Toast.show(`${t('toast.sap_conn_fail')}: ${res.detail || ''}`.trim(), 'warn', 5000);
+      } catch (e) {
+        Toast.show(`${t('toast.sap_conn_fail')}: ${e.message}`, 'error');
+        ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // (b) Object catalog table
+    // -----------------------------------------------------------------------
+    async function _renderCatalog() {
+      const el = document.getElementById('sap-catalog-panel');
+      if (!el) return;
+      el.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
+      try {
+        const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        _objects = data.objects || [];
+        if (_selectedObject === null && _objects.length) _selectedObject = _objects[0].object_key;
+
+        const head = `
+          <tr>
+            <th>${_esc(t('ui.sap_field'))}</th>
+            <th>${_esc(t('ui.sap_enabled'))}</th>
+            <th>${_esc(t('ui.sap_schedule'))}</th>
+            <th>${_esc(t('ui.sap_last_run'))}</th>
+            <th>${_esc(t('ui.sap_next_run'))}</th>
+            <th>${_esc(t('ui.sap_last_result'))}</th>
+            <th></th>
+          </tr>`;
+        const body = _objects.map(o => {
+          const lr = o.last_run || null;
+          const status = lr ? (lr.status || 'unknown') : '—';
+          const pillClass = status === 'ok' ? 'success' : (status === 'error' ? 'error' : 'info');
+          const counts = lr
+            ? `+${lr.rows_inserted ?? 0} / ~${lr.rows_updated ?? 0} / !${lr.rows_failed ?? 0}`
+            : '';
+          return `
+            <tr data-object="${_esc(o.object_key)}">
+              <td><button class="sap-obj-link" data-object="${_esc(o.object_key)}">${_esc(o.label || o.object_key)}</button></td>
+              <td><input type="checkbox" class="sap-obj-enabled" data-object="${_esc(o.object_key)}" ${o.enabled ? 'checked' : ''}></td>
+              <td><input type="text" class="md-input sap-obj-cron" data-object="${_esc(o.object_key)}"
+                    value="${_esc(o.schedule_cron || '')}" placeholder="* * * * *" size="14"></td>
+              <td>${lr ? _esc(_fmtTs(lr.started_at)) : '—'}</td>
+              <td>${o.next_run ? _esc(_fmtTs(o.next_run)) : '—'}</td>
+              <td><span class="admin-log-level admin-log-${pillClass}">${_esc(status)}</span> <span class="sap-counts">${_esc(counts)}</span></td>
+              <td><button class="btn btn-sm sap-run-now" data-object="${_esc(o.object_key)}">${_esc(t('ui.sap_run_now'))}</button></td>
+            </tr>`;
+        }).join('');
+
+        el.innerHTML = `
+          <h3 class="sap-h3">${_esc(t('tab.interface'))}</h3>
+          <div class="sap-table-wrap">
+            <table class="md-table sap-catalog-table"><thead>${head}</thead><tbody>${body}</tbody></table>
+          </div>`;
+
+        el.querySelectorAll('.sap-obj-enabled').forEach(cb =>
+          cb.addEventListener('change', () => _saveConfig(cb.dataset.object, { enabled: cb.checked })));
+        el.querySelectorAll('.sap-obj-cron').forEach(inp =>
+          inp.addEventListener('change', () => _saveConfig(inp.dataset.object, { schedule_cron: inp.value.trim() || null })));
+        el.querySelectorAll('.sap-run-now').forEach(btn =>
+          btn.addEventListener('click', () => _runNow(btn.dataset.object, btn)));
+        el.querySelectorAll('.sap-obj-link').forEach(btn =>
+          btn.addEventListener('click', () => { _selectedObject = btn.dataset.object; _renderMappingPanel(); }));
+      } catch (e) {
+        el.innerHTML = `<div class="md-empty">${_esc(`Failed to load interface objects: ${e.message}`)}</div>`;
+        ErrorLog.error('sap-interface', `Load objects failed: ${e.message}`);
+      }
+    }
+
+    async function _saveConfig(object, patch) {
+      try {
+        await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
+          method: 'POST',
+          headers: _writeHeaders(),
+          body: JSON.stringify(patch),
+        }).then(r => {
+          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          return r.json();
+        });
+        // Refresh catalog so next_run / derived state stays in sync.
+        await _renderCatalog();
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('sap-interface', `Config save failed for ${object}: ${e.message}`);
+      }
+    }
+
+    async function _runNow(object, btn) {
+      if (btn) { btn.disabled = true; }
+      try {
+        const res = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
+          method: 'POST',
+          headers: _writeHeaders(),
+          body: JSON.stringify({ dry_run: false }),
+        }).then(r => {
+          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          return r.json();
+        });
+        if (res.status === 'ok') {
+          Toast.show(`${t('toast.sap_sync_done')} (+${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
+        } else {
+          Toast.show(`${t('toast.sap_sync_failed')}: ${res.error || ''}`.trim(), 'error', 6000);
+        }
+        await _renderCatalog();
+        _renderRuns();
+      } catch (e) {
+        Toast.show(`${t('toast.sap_sync_failed')}: ${e.message}`, 'error');
+        ErrorLog.error('sap-interface', `Sync failed for ${object}: ${e.message}`);
+      } finally {
+        if (btn) { btn.disabled = false; }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // (c) Per-object field-mapping grid
+    // -----------------------------------------------------------------------
+    async function _renderMappingPanel() {
+      const el = document.getElementById('sap-mapping-panel');
+      if (!el) return;
+      const object = _selectedObject;
+      if (!object) { el.innerHTML = ''; return; }
+      el.innerHTML = `<div class="md-loading">${_esc(t('ui.loading'))}</div>`;
+      try {
+        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        _mapState[object] = {
+          rows: (data.mappings || []).map(m => ({
+            sap_field:     m.sap_field || '',
+            nimbus_column: m.nimbus_column || '',
+            transform:     m.transform || 'none',
+            active:        m.active !== false,
+            field_order:   m.field_order ?? 0,
+          })),
+          dirty: false,
+        };
+        _drawMappingGrid(object);
+      } catch (e) {
+        el.innerHTML = `<div class="md-empty">${_esc(`Failed to load mappings: ${e.message}`)}</div>`;
+        ErrorLog.error('sap-interface', `Load mappings failed for ${object}: ${e.message}`);
+      }
+    }
+
+    function _drawMappingGrid(object) {
+      const el = document.getElementById('sap-mapping-panel');
+      if (!el) return;
+      const state = _mapState[object];
+      if (!state) return;
+      const transOpts = (sel) => TRANSFORMS.map(tr =>
+        `<option value="${tr}" ${tr === sel ? 'selected' : ''}>${_esc(tr)}</option>`).join('');
+      const objLabel = (_objects.find(o => o.object_key === object) || {}).label || object;
+      const body = state.rows.map((m, i) => `
+        <tr data-idx="${i}">
+          <td><input type="text" class="md-input sap-map-cell" data-idx="${i}" data-field="sap_field" value="${_esc(m.sap_field)}"></td>
+          <td><input type="text" class="md-input sap-map-cell" data-idx="${i}" data-field="nimbus_column" value="${_esc(m.nimbus_column)}"></td>
+          <td><select class="md-input sap-map-cell" data-idx="${i}" data-field="transform">${transOpts(m.transform)}</select></td>
+          <td><input type="checkbox" class="sap-map-cell" data-idx="${i}" data-field="active" ${m.active ? 'checked' : ''}></td>
+        </tr>`).join('');
+      el.innerHTML = `
+        <h3 class="sap-h3">${_esc(objLabel)} — ${_esc(t('ui.sap_field'))} → ${_esc(t('ui.sap_nimbus_column'))}</h3>
+        <div class="sap-table-wrap">
+          <table class="md-table sap-mapping-table">
+            <thead><tr>
+              <th>${_esc(t('ui.sap_field'))}</th>
+              <th>${_esc(t('ui.sap_nimbus_column'))}</th>
+              <th>${_esc(t('ui.sap_transform'))}</th>
+              <th>${_esc(t('ui.sap_active'))}</th>
+            </tr></thead>
+            <tbody>${body || `<tr><td colspan="4" class="md-empty">${_esc(t('ui.sap_no_runs'))}</td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="sap-map-actions">
+          <button class="btn btn-sm" id="sap-add-map">+</button>
+          <button class="btn btn-sm btn-primary" id="sap-save-map">${_esc(t('ui.sap_save_mappings'))}</button>
+        </div>`;
+
+      el.querySelectorAll('.sap-map-cell').forEach(inp => {
+        const evt = inp.type === 'checkbox' ? 'change' : 'input';
+        inp.addEventListener(evt, () => {
+          const idx = +inp.dataset.idx;
+          const field = inp.dataset.field;
+          const row = state.rows[idx];
+          if (!row) return;
+          row[field] = inp.type === 'checkbox' ? inp.checked : inp.value;
+          state.dirty = true;
+        });
+      });
+      document.getElementById('sap-add-map')?.addEventListener('click', () => {
+        state.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true, field_order: state.rows.length });
+        state.dirty = true;
+        _drawMappingGrid(object);
+      });
+      document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(object));
+    }
+
+    async function _saveMappings(object) {
+      const state = _mapState[object];
+      if (!state) return;
+      const mappings = state.rows
+        .filter(m => m.sap_field.trim() && m.nimbus_column.trim())
+        .map((m, i) => ({
+          sap_field:     m.sap_field.trim(),
+          nimbus_column: m.nimbus_column.trim(),
+          transform:     m.transform || 'none',
+          active:        m.active !== false,
+          field_order:   i,
+        }));
+      try {
+        await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
+          method: 'POST',
+          headers: _writeHeaders(),
+          body: JSON.stringify({ mappings }),
+        }).then(r => {
+          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          return r.json();
+        });
+        state.dirty = false;
+        Toast.show(t('toast.sap_mappings_saved'), 'success');
+        await _renderMappingPanel();
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${e.message}`);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // (d) Run history — reuses admin-log-* CSS classes
+    // -----------------------------------------------------------------------
+    async function _renderRuns() {
+      const el = document.getElementById('sap-runs-panel');
+      if (!el) return;
+      el.innerHTML = `
+        <h3 class="sap-h3">${_esc(t('ui.sap_runs_title'))}</h3>
+        <div class="admin-log-list" id="sap-runs-list"><div class="md-loading">${_esc(t('ui.loading'))}</div></div>`;
+      const list = document.getElementById('sap-runs-list');
+      try {
+        const params = new URLSearchParams({ limit: '50' });
+        if (_selectedObject) params.set('object', _selectedObject);
+        const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        const runs = data.runs || [];
+        if (!runs.length) {
+          if (list) list.innerHTML = `<div class="admin-log-empty">${_esc(t('ui.sap_no_runs'))}</div>`;
+          return;
+        }
+        if (list) list.innerHTML = '';
+        runs.forEach(rn => {
+          const status = rn.status || 'unknown';
+          const lvl = status === 'ok' ? 'success' : (status === 'error' ? 'error' : 'info');
+          const row = document.createElement('div');
+          row.className = `admin-log-row admin-log-${lvl}`;
+
+          const head = document.createElement('div');
+          head.className = 'admin-log-head';
+          const time = document.createElement('span');
+          time.className = 'admin-log-time';
+          time.textContent = _fmtTs(rn.started_at);
+          head.appendChild(time);
+          const lvlEl = document.createElement('span');
+          lvlEl.className = `admin-log-level admin-log-${lvl}`;
+          lvlEl.textContent = status;
+          head.appendChild(lvlEl);
+          const scope = document.createElement('span');
+          scope.className = 'admin-log-scope';
+          scope.textContent = rn.object_key || '';
+          head.appendChild(scope);
+          row.appendChild(head);
+
+          const msg = document.createElement('div');
+          msg.className = 'admin-log-msg';
+          const counts = `read ${rn.rows_read ?? 0} · +${rn.rows_inserted ?? 0} / ~${rn.rows_updated ?? 0} / !${rn.rows_failed ?? 0}`;
+          msg.textContent = rn.error ? `${counts} — ${rn.error}` : counts;
+          row.appendChild(msg);
+
+          if (list) list.appendChild(row);
+        });
+      } catch (e) {
+        if (list) list.innerHTML = `<div class="admin-log-empty">${_esc(`Failed to load run history: ${e.message}`)}</div>`;
+        ErrorLog.error('sap-interface', `Load runs failed: ${e.message}`);
+      }
+    }
+
+    function _fmtTs(ts) {
+      if (!ts) return '—';
+      try {
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return String(ts);
+        return Util.fmtDTReadable ? Util.fmtDTReadable(d) : d.toLocaleString();
+      } catch { return String(ts); }
+    }
+
+    return { render };
+  })();
+
+  /* =============================================================================
      BOOTSTRAP
      ========================================================================== */
 document.addEventListener('DOMContentLoaded', () => {
@@ -15836,6 +16236,6 @@ document.addEventListener('DOMContentLoaded', () => {
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData, WelcomeSplash,
-    LaborPlanning
+    LaborPlanning, Interface
   };
 })();

@@ -224,6 +224,7 @@ window.__NIMBUS_LOCALES.fr = {
   'tab.table':                         'Ordres',
   'tab.masterdata':                    'Gestion des Données Maîtres',
   'tab.admin':                         'Cockpit Admin',
+  'tab.interface':                     'Interface',
 
   /* ── Empty state messages ────────────────────────────────────────────────── */
   'empty.select_order':                'Sélectionnez un ordre à inspecter.',

@@ -228,6 +228,7 @@ window.__NIMBUS_LOCALES.es = {
   'tab.table':                         'Pedidos',
   'tab.masterdata':                    'Gestionar Datos Maestros',
   'tab.admin':                         'Cabina de Control',
+  'tab.interface':                     'Interfaz',
 
   /* ── Empty state messages ────────────────────────────────────────────────── */
   'empty.select_order':                'Seleccione un pedido para inspeccionar.',

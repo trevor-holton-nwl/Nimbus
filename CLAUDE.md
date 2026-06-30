@@ -28,25 +28,19 @@ This is the primary long-term scalability constraint for every feature in NIMBUS
 
 ## Running the App
 
-**Backend:**
+The backend serves **both** the JSON API and the static frontend (a `StaticFiles` mount at `/`), so local dev is a single process.
+
 ```bash
-pip install fastapi uvicorn pandas numpy openpyxl "psycopg[binary]" psycopg_pool pydantic python-dotenv
-python brain.py
-# Runs on http://localhost:8000
+pip install -r requirements.txt
+uvicorn brain:api --port 8000      # add --reload for auto-reload during dev
+# Then open http://localhost:8000/
 ```
 
-For backend iteration with auto-reload (since `python brain.py` does not reload on source changes):
-```bash
-uvicorn brain:api --reload --port 8000
-```
+> `brain.py` has **no `if __name__ == "__main__"` block** — `python brain.py` does nothing. The entrypoint is always `uvicorn brain:api` (this is also the container `CMD`).
 
-**Frontend:** Serve `index.html` over HTTP (cannot open as `file://` due to CORS). Any static file server works:
-```bash
-python -m http.server 9000
-# Then open http://localhost:9000
-```
+No build step — JavaScript and CSS are loaded directly; most libraries come from CDN.
 
-No build step — JavaScript and CSS are loaded directly; all libraries come from CDN.
+**Legacy two-process split** (serving the UI separately on another port) still works but now needs a shim, because `app.js` `API_BASE` defaults to same-origin (relative). Set `window.NIMBUS_API_BASE = 'http://localhost:8000'` before `app.js` loads, then `python -m http.server 9000`. Prefer the single-process command above.
 
 ## Database Setup
 
@@ -67,18 +61,20 @@ PG_PASS=your_password
 
 Pool tuning knobs (all optional): `NIMBUS_PG_POOL_MIN`, `NIMBUS_PG_POOL_MAX`, `NIMBUS_PG_POOL_TIMEOUT`, `NIMBUS_PG_STATEMENT_TIMEOUT_MS`.
 
-> ⚠️ **Machine-specific paths:** `COLOR_FILE` and `COLOR_WHEEL_DIR` in `brain.py` are still hardcoded absolute paths. Update these constants when running on a new machine. Move them to env vars before any hosted deployment — see `MIGRATION.md`.
+> **Color-wheel paths are env-driven:** `COLOR_FILE` and `COLOR_WHEEL_DIR` in `brain.py` read from env vars (`os.getenv`), defaulting to a local Windows path for dev — override them via `.env` on a new machine. The container image sets them to `/data/color_wheel.xlsx` and `/data/color_wheels` (an **ephemeral** dir on the pilot — uploaded wheels are lost on restart; see `MIGRATION.md` for the Azure Files durability fix).
 
 ## Data Sources
 
 **Orders live in Postgres**, not Excel. `db.py` owns all connection management and queries; `brain.py` is **stateless** — it holds no in-memory order cache. Every `GET /tasks` request queries the DB directly via `db.query_orders()`. This allows multiple uvicorn workers or replicas without shared state.
 
-- **Order ingest** — `POST /upload` accepts a `sequence_testing`-shaped `.xlsx` and upserts rows into the `orders` table (`db.ingest_orders_from_excel`). Each order's **plant is materialized on the row** (`orders.plant`) at ingest — from a `WERKS`/`PLANT` upload column when present, else derived from the line→plant mapping — so the `/tasks` read path selects `o.plant` directly instead of `LEFT JOIN`ing `production_lines` on the line code alone (which fanned out / mis-attributed orders when a line code is reused across plants). `orders.plant` is added by a `schema.sql` migration: **re-run `schema.sql`** after pulling this change or `GET /tasks` errors on the missing column. A real authoritative plant source (Excel column or upload picker) and a plant-aware `make_id` are still needed before line codes are reused across plants — see `MIGRATION.md`.
+- **Order ingest** — `POST /upload` accepts a `sequence_testing`-shaped `.xlsx` and upserts rows into the `orders` table (`db.ingest_orders_from_excel`). The actual orders-upsert is now factored into `db.upsert_orders`, the **shared** upsert used by both the `/upload` path and the SAP sync path (`sap_sync.py`). Each order's **plant is materialized on the row** (`orders.plant`) at ingest — from a `WERKS`/`PLANT` upload column when present, else derived from the line→plant mapping — so the `/tasks` read path selects `o.plant` directly instead of `LEFT JOIN`ing `production_lines` on the line code alone (which fanned out / mis-attributed orders when a line code is reused across plants). `orders.plant` is added by a `schema.sql` migration: **re-run `schema.sql`** after pulling this change or `GET /tasks` errors on the missing column. A real authoritative plant source (Excel column or upload picker) and a plant-aware `make_id` are still needed before line codes are reused across plants — see `MIGRATION.md`.
 - **Color wheels** — still file-based: a global `color_wheel.xlsx` (`COLOR_FILE` in `brain.py`) plus per-plant `color_wheel_<PLANT>.xlsx` files under `COLOR_WHEEL_DIR`, uploaded via the Plant tab. These are cached in `GLOBAL_CW` / `PLANT_CWS` at startup, on `POST /reload`, and **inline after every color-wheel upload/delete** (so a new wheel takes effect without an explicit `/reload`).
 - **Master data** — `master_data.py` backs the `/master-data/*` and `/labor-plan*` endpoints against Postgres. `ALLOWED_TABLES` covers five tables — `subnetworks`, `plants`, `production_lines`, `materials`, `material_plants` — keyed by composite keys (plants by `(subnetwork, plant)`, not plant alone). Beyond list/bulk CRUD it owns runtime DDL (add/drop/rename-label column), the cascade-delete preview, an `admin_audit` log, per-plant JSONB constraint config (`set_plant_constraints`), the **Labor Planning** subsystem (`labor_plan` + `labor_plan_line` tables, aggregate + line-level load/upsert), and `known_plant_line_codes()` (used by `/upload` validation). Most dynamic SQL goes through `psycopg.sql.Identifier` / parameterized placeholders; `add_column`'s `NUMERIC(length)` is validated as `precision[,scale]` and rebuilt via `sql.Literal` before composing (previously a raw DDL-injection sink). Maintenance DDL in `db.py` (`VACUUM ANALYZE`/`ANALYZE`) uses an allowlist check against `pg_stat_user_tables` rather than `Identifier`.
+- **SAP sync (skeleton)** — `sap_sync.py` is a **transport-agnostic** SAP→NIMBUS sync engine; its connectors are **stubs today** (no live SAP calls). It is backed by three Postgres tables: `sap_sync_config` (per-object sync settings), `sap_sync_run` (run history/status), and `sap_field_map` (SAP field → NIMBUS column mapping). The synced orders are written through `db.upsert_orders` (the same upsert as `/upload`). Surfaced in the Admin **Interface** sub-tab.
 
 ## Deployment Notes
 
+- **Hosted on Azure (single-container pilot, live since 2026-06-30).** Deployed as one container to **Azure Container Apps** — FastAPI serves the API and the static UI from the same origin, against Azure Database for PostgreSQL. Live URL: `https://ca-nimbus-dev.delightfulwater-7252cdf0.eastus2.azurecontainerapps.io/`. Resources (RG `rg-nimbus-dev`, region `eastus2`): ACR `acrnimbusdev` (image `nimbus:vN`), Container App `ca-nimbus-dev`, env `cae-nimbus-dev`, Postgres `pgdb-nimbus-dev`/`nimbus`. **Redeploy:** `az acr build -r acrnimbusdev -t nimbus:vN <repo>` then `az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:vN`. Full runbook + gotchas in **`DEPLOYMENT.md`**; remaining hardening (Entra SSO, Key Vault, color-wheel durability) in **`MIGRATION.md`**. The pilot runs **single-replica** (in-process color-wheel cache + log buffer), and CORS is effectively vestigial since the UI is same-origin.
 - **`POST /reload`** refreshes the in-process color-wheel file cache only. It does **not** reload orders (they are never cached — every `/tasks` request hits Postgres).
 - **`APP_VERSION`** in `app.js` and **`NIMBUS_BUILD_ID`** in `index.html` must be kept in sync and bumped on every deploy to bust static asset caches.
 - **CORS / optional auth env:** `NIMBUS_ALLOWED_ORIGINS` (comma-separated; default `*`, with `allow_credentials=False`) pins allowed origins for hosting. `NIMBUS_API_KEY` (unset by default ⇒ no-op) gates the destructive/DDL/maintenance routes behind an `X-API-Key` header — a deployment-config stopgap, **not** user-level auth (actor identity is still read from spoofable `X-User`/`x-user-email`; the real fix is Entra SSO — see `MIGRATION.md`).
@@ -120,7 +116,7 @@ A second frontend file, **`nimbus-intelligence.js`** (~2,200 lines, loaded after
 
 > `Interaction` also owns a Ctrl/Cmd+drag marquee multi-select (edge-scroll), a 500 ms hover-preview card, double-click-label line isolation, 60 fps multi-order ghost-drag, and two-way AG Grid ↔ `Selection` sync.
 
-> `AdminCockpit` is far more than upload/data management: it embeds a Postgres ops console (pool utilization, server info, table bloat + VACUUM/ANALYZE triggers, active-connection stacks, blocking-lock chains, index usage/unused detection, slow-query bars via `pg_stat_statements`, sequence exhaustion), a `PerfMonitor` thread profiler, and a diagnostics-bundle exporter. `App` manages top tabs (home/gantt/masterdata/admin/labor) plus three independent sub-tab dimensions (`_ganttSub` timeline|orders, `_laborSub`, `_currentMasterSub`).
+> `AdminCockpit` is far more than upload/data management: it embeds a Postgres ops console (pool utilization, server info, table bloat + VACUUM/ANALYZE triggers, active-connection stacks, blocking-lock chains, index usage/unused detection, slow-query bars via `pg_stat_statements`, sequence exhaustion), a `PerfMonitor` thread profiler, and a diagnostics-bundle exporter. `App` manages top tabs (home/gantt/masterdata/admin/labor) plus three independent sub-tab dimensions (`_ganttSub` timeline|orders, `_laborSub`, `_currentMasterSub`). The admin area carries an **Interface** sub-tab (Overview → Manage Data Tables → Interface), backed by a dedicated `Interface` frontend module that manages the SAP sync config, field mapping, and run history (see Backend → `sap_sync.py`); the SAP connectors are **stub skeletons** today.
 
 **State flow:** User action → `Interaction` → mutate `Store` → `Store.publish()` → subscribed UI modules re-render.
 
@@ -130,7 +126,7 @@ A second frontend file, **`nimbus-intelligence.js`** (~2,200 lines, loaded after
 
 ### Backend (`brain.py` — FastAPI; data layer in `db.py`, `master_data.py`)
 
-`brain.py` exposes ~38 endpoints (tasks, task notes, concurrency refresh, diagnostics + DB deep-dive/maintenance, upload/purge/audit, color wheels, master data + column DDL + constraints, labor planning, backend log buffer, health). The most load-bearing:
+`brain.py` exposes ~38 endpoints (tasks, task notes, concurrency refresh, diagnostics + DB deep-dive/maintenance, upload/purge/audit, color wheels, master data + column DDL + constraints, labor planning, backend log buffer, health). A separate `sap_sync.py` module owns the SAP→NIMBUS sync engine and an **in-process APScheduler started in the lifespan hook — disabled by default**, gated by `NIMBUS_SAP_SYNC_ENABLED` (unset ⇒ scheduler never starts). The pilot runs single-replica, so this in-process scheduler is safe today; multi-replica needs an advisory-lock guard (see `MIGRATION.md`). The most load-bearing endpoints:
 - `GET /tasks` — task list with finish-to-start links and metadata; supports `?plant=`/`?line=` server-side scoping plus optional `?limit=`/`?offset=` pagination (`meta.total` carries the full filtered row count when paging). Calls `db.query_orders()` on every request — no cache.
 - `GET /diagnostics` / `GET /diagnostics/deep` — load statistics and DB stats. `GET /diagnostics/db` exposes a deep DB-observability layer (pool stats, server info, table health, connection activity, blocking-lock chains, index usage, slow queries via `pg_stat_statements`, sequence health); `POST /maintenance/vacuum-analyze` and `/maintenance/analyze` trigger maintenance behind a table allowlist. Driven by the AdminCockpit console.
 - `POST /task/note`, `POST /tasks/refresh` (concurrency reconciliation), `GET/POST /logs/backend`(+`/clear`), `GET /upload/audit`, `GET/POST /audit/log`(+`/clear`), `GET /health`, `/labor-plan` + `/labor-plan/line`, `POST /master-data/plants/{plant}/constraints`, `/master-data/{table}/cascade-preview`, `/master-data/{table}/columns` (ADD/DROP/rename label DDL), `/master-data/_audit`
@@ -201,3 +197,5 @@ With `altInput: true`, existing `.value` reads in save functions keep working �
 ### Files
 
 `styles.css` (~4,900 lines) uses a CSS-variable design-token system (warm off-white light base, deep-slate dark mode, amber accent) with a `body.dark` layer that is **incomplete** — several newer components hardcode light colors (e.g. `.cw-active-card`, `.welcome-splash`, `.lp-hm-grad`, `.tab-btn.active` outline) and a few tokens are referenced but never defined (`--border`, `--border-subtle`, `--font-mono`, `--amber`, `--nimbus-amber`, `--bg-float`). `index.html` also carries ~850 lines of inline `<style>` that have not yet been migrated into `styles.css`. (`nimbus-interaction.js` was previously a separate file, but the `Interaction` module is now inlined into `app.js`.) `nimbus-worker.js` is the standalone Web Worker (see Frontend → Web Worker); it is **not** part of the `window.NIMBUS` IIFE chain and must never `import`/reference `app.js`.
+
+**Container files (repo root):** `Dockerfile` builds the single-container image (`python:3.12-slim`, non-root) — it copies the frontend into `/app/web` and serves it through the `StaticFiles` mount registered as the **last** route in `brain.py`, so the API and UI share one origin and backend source (`*.py`, `schema.sql`) is never web-served. `.dockerignore` trims the build context. Build/run via the commands in `DEPLOYMENT.md`.

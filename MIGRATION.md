@@ -1,7 +1,10 @@
 # NIMBUS — Hosted Azure Pilot: Migration Runbook
 
-> **Status: NOT YET EXECUTED.** This is a transition document. No code changes have been made.
-> When Newell green-lights the hosted pilot, execute the workstreams below in order.
+> **Status: PARTIALLY EXECUTED — single-container pilot LIVE on Azure (2026-06-30).** The pilot code
+> changes (containerization, env-driven paths, same-origin serving, the `firming_indicator` schema
+> fix) are done, committed, and deployed — see the closing addendum and `DEPLOYMENT.md`.
+> The hardening workstreams below (two-container split, Entra SSO, Key Vault, Azure Files durability,
+> VNet) remain the plan of record; execute them in order as the pilot graduates toward production.
 >
 > **Local-first guarantee:** every change here is designed to be *additive and backward-compatible*.
 > With no environment variables set and auth disabled, NIMBUS runs on your machine exactly as it
@@ -181,7 +184,7 @@ Ordered (user-assigned managed identity + Key Vault **before** the apps — a sy
 
 ## Verification (run at execution time)
 
-1. **Local stack still works first:** with no env vars / auth disabled, `python brain.py` + local frontend behaves exactly as today.
+1. **Local stack still works first:** with no env vars / auth disabled, `uvicorn brain:api --port 8000` (open `http://localhost:8000/`) behaves exactly as today.
 2. **Local containerized stack:** `docker compose up` → `http://localhost:8080`. Schema auto-applied, `/tasks` loads, drag/edit persists, color-wheel upload writes to `/data` volume, app boots with `NIMBUS_AUTH.disabled=true`.
 3. **Auth:** with dev bypass off, unauthenticated `POST /task/update` → 401; valid Entra token accepted; `GET /health` stays open; audit rows record the real signed-in email, not `trevor.holton@`.
 4. **Conflict guardrail:** two sessions on the same plant edit the same order; second save gets 409 + Toast, not a silent overwrite.
@@ -255,14 +258,19 @@ The `/tasks` read path previously derived an order's plant by `LEFT JOIN product
 
 ---
 
-## Addendum — Single-container "just get it running" pilot (planned 2026-06-26)
+## Addendum — Single-container "just get it running" pilot (DEPLOYED 2026-06-30)
 
-> A first, deliberately-minimal pilot deploys NIMBUS to **Azure Container Apps as a single
-> container**: FastAPI serves both the JSON API **and** the static frontend (via a `StaticFiles`
-> mount, same-origin), against the existing Azure Postgres, with config as plain Container App
-> env vars and **no SSO**. This is the on-ramp, not the destination — it is simpler than the
-> two-container model in Workstreams 2/6. The deferred-hardening items below remain the plan of
-> record; this addendum records what the pilot changed and where each deferred item lives.
+> **LIVE:** `https://ca-nimbus-dev.delightfulwater-7252cdf0.eastus2.azurecontainerapps.io/`
+>
+> NIMBUS is deployed to **Azure Container Apps as a single container**: FastAPI serves both the JSON
+> API **and** the static frontend (via a `StaticFiles` mount, same-origin), against Azure Postgres
+> (`pgdb-nimbus-dev`/`nimbus`), with config as plain Container App env vars and **no SSO**. Resources
+> in RG `rg-nimbus-dev` (region `eastus2`): ACR `acrnimbusdev`, Container App `ca-nimbus-dev`, env
+> `cae-nimbus-dev`. This is the on-ramp, not the destination — simpler than the two-container model
+> in Workstreams 2/6. Exact commands + ops gotchas live in **`DEPLOYMENT.md`**; the deferred-hardening
+> items below remain the plan of record. **One schema fix was required during deploy:** `schema.sql`
+> was missing the `orders.firming_indicator` column that `db.py` reads/writes (the tasks endpoint
+> 500'd until it was added) — now fixed in `schema.sql`.
 
 ### How the pilot diverges from the runbook above
 - **One container, not two.** FastAPI serves the frontend itself —
@@ -304,3 +312,31 @@ Implications for a hosted plant pilot:
 - **Fix (deferred):** vendor these libraries into the repo and serve them from the same container
   (they would be covered by the existing `StaticFiles` mount), or front them with an approved
   internal mirror; add SRI hashes + a CSP. **Decide before any network-restricted plant rollout.**
+
+---
+
+## Workstream — SAP Interface (deferred hardening)
+
+> The SAP→NIMBUS sync engine (`sap_sync.py`, the Admin "Interface" sub-tab, and the
+> `sap_sync_config` / `sap_sync_run` / `sap_field_map` tables) ships as a **non-live skeleton** —
+> connectors are stubs, the in-process scheduler is **disabled by default**, and no real SAP
+> transport is wired. The items below must be resolved **before** any production SAP pull goes live.
+
+- **SAP credentials → Azure Key Vault.** SAP service-account creds (and any RFC/OData secrets) come
+  from **env only** and must be sourced from Key Vault (per Workstream 7) — **never** in code, the
+  Interface UI, DB seeds, or logs. Treat them like `pg-pass`.
+- **Private network path required before any pull transport.** No SAP pull (OData or RFC) may run
+  over the public internet — a private path (**VPN / ExpressRoute / SAP Cloud Connector**) must be in
+  place first. This is gated by the same VNet/Private-Endpoint hardening tracked in Workstream 7 /
+  Fork 2.
+- **PyRFC + SAP NW RFC SDK bundling.** If the **RFC** transport is chosen (vs. OData), `PyRFC` and the
+  proprietary **SAP NetWeaver RFC SDK** must be bundled into the `Dockerfile` (the SDK is a licensed
+  native dependency, not a pip wheel — it needs explicit copy + `LD_LIBRARY_PATH` wiring). OData
+  needs no native SDK.
+- **Multi-replica scheduler safety.** The in-process APScheduler is only safe today because the pilot
+  runs **single-replica**. Before scaling past one replica, `sap_sync.sync_object` must be guarded by
+  a **`pg_try_advisory_lock`** so only one replica runs a given sync at a time (otherwise every
+  replica fires the same scheduled pull concurrently).
+- **Classification extraction performance.** Deriving `COLOR` / `FORM_SIZE` classification must be
+  resolved **server-side in SAP** (in the extractor / CDS view), not by post-hoc parsing in NIMBUS —
+  per-row classification on the NIMBUS side does not scale to the production order volume.

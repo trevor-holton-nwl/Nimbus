@@ -37,6 +37,7 @@ import psycopg
 from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -46,6 +47,7 @@ from pydantic import BaseModel
 
 import db
 import master_data as md
+import sap_sync
 
 
 # =========================
@@ -135,6 +137,29 @@ STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR", ".")
 # =========================
 # LIFESPAN
 # =========================
+async def _run_sap_job(object_key: str) -> None:
+    """APScheduler job body for one SAP object. Offloads the blocking sync to the
+    threadpool (sap_sync.sync_object is sync + does DB I/O) so the event loop is
+    never stalled, and logs the outcome. Never raises — a failed sync is logged,
+    not allowed to crash the scheduler thread."""
+    try:
+        result = await run_in_threadpool(
+            sap_sync.sync_object, object_key, user_email="sap-scheduler")
+        if result.get("status") == "ok":
+            _log_event("info", "sap_sync", "Scheduled SAP sync completed",
+                       object_key=object_key,
+                       rows_read=result.get("rows_read", 0),
+                       rows_inserted=result.get("rows_inserted", 0),
+                       rows_updated=result.get("rows_updated", 0),
+                       rows_failed=result.get("rows_failed", 0))
+        else:
+            _log_event("error", "sap_sync", "Scheduled SAP sync failed",
+                       object_key=object_key, error=result.get("error"))
+    except Exception as e:
+        _log_event("error", "sap_sync", "Scheduled SAP sync raised",
+                   exc=e, object_key=object_key)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
@@ -158,7 +183,44 @@ async def lifespan(app: FastAPI):
                    connected=health.get("connected", False))
     except Exception as e:
         _log_event("error", "startup", "DB probe failed at startup", error=str(e))
+
+    # SAP background sync scheduler — DISABLED by default (see SAP_SYNC_ENABLED).
+    # When enabled, register one cron job per enabled+scheduled SAP object. APScheduler
+    # is imported lazily so it is only a hard dependency when the feature is on.
+    app.state.sap_scheduler = None
+    if SAP_SYNC_ENABLED:
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from apscheduler.triggers.cron import CronTrigger
+            scheduler = AsyncIOScheduler()
+            jobs = sap_sync.list_enabled_jobs()
+            for job in jobs:
+                object_key = job["object_key"]
+                scheduler.add_job(
+                    _run_sap_job,
+                    CronTrigger.from_crontab(job["schedule_cron"]),
+                    args=[object_key],
+                    id="sap:" + object_key,
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
+            scheduler.start()
+            app.state.sap_scheduler = scheduler
+            _log_event("info", "sap_sync", "SAP sync scheduler started",
+                       jobs=len(jobs))
+        except Exception as e:
+            _log_event("error", "sap_sync", "SAP sync scheduler failed to start", exc=e)
+    else:
+        _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
+
     yield
+
+    scheduler = getattr(app.state, "sap_scheduler", None)
+    if scheduler is not None:
+        with suppress(Exception):
+            scheduler.shutdown(wait=False)
+        _log_event("info", "sap_sync", "SAP sync scheduler stopped")
     _log_event("info", "startup", "Server shutting down")
 
 api = FastAPI(lifespan=lifespan)
@@ -184,6 +246,12 @@ api.add_middleware(
     expose_headers=["x-request-id"],
 )
 
+# Gzip every response over ~1 KB (honours Accept-Encoding). The single biggest
+# wire-size win for the static frontend: app.js (~717 KB) + the active locale +
+# styles.css + JSON payloads all ship compressed (~75% smaller) through the same
+# StaticFiles mount and API. Cheap, transparent, and safe behind Container Apps.
+api.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Optional shared-secret guard for destructive / DDL / maintenance routes. It is a
 # NO-OP until NIMBUS_API_KEY is set in the environment, so the (login-less) frontend
 # keeps working untouched in dev; set the env var AND have admin clients send the
@@ -192,6 +260,13 @@ api.add_middleware(
 # still taken from spoofable X-User / x-user-email headers. Proper per-user auth/SSO
 # with server-verified identity is the real fix (see MIGRATION.md → "User security").
 NIMBUS_API_KEY = os.getenv("NIMBUS_API_KEY")
+
+# Master kill-switch for the SAP background sync scheduler. DISABLED by default —
+# the SAP interface endpoints (config/mappings/test/manual-sync) always work, but
+# NO cron jobs fire unless this is explicitly turned on. This is the non-live
+# skeleton stance: connectors are stubs and nothing reaches out on a timer until
+# an operator opts in. Honored once at startup in the lifespan below.
+SAP_SYNC_ENABLED = os.getenv("NIMBUS_SAP_SYNC_ENABLED", "0") in ("1", "true", "True")
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)):
@@ -620,6 +695,15 @@ def get_health():
             "missed_colors": DIAGNOSTICS.get("missed_colors", []),
         },
     }
+
+
+@api.get("/livez")
+def livez():
+    """Liveness probe: a process-up check ONLY — never touches Postgres or the
+    filesystem. Point the Container Apps *liveness* probe here; readiness and the
+    Admin Cockpit keep using /health (which pings the DB). Keeping liveness DB-free
+    means a slow or briefly-unreachable database can't trigger needless restarts."""
+    return {"status": "ok"}
 
 
 @api.get("/diagnostics/deep")
@@ -1375,6 +1459,205 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# =============================================================================
+# SAP INTERFACE — object catalog, field mappings, per-object config, on-demand
+#                 sync, and run history. Reads are UNGATED; writes are gated by
+#                 the shared-secret guard. Connectors are STUBS in this skeleton
+#                 (no live SAP calls), and the scheduler is disabled by default.
+# =============================================================================
+
+# Source-param keys that may hold credentials/secrets. NEVER returned by the
+# config GET (only has_secret:bool) and NEVER fed to _log_event.
+_SAP_SECRET_KEYS = frozenset({
+    "password", "passwd", "secret", "client_secret", "token", "api_key",
+    "apikey", "sap_password", "rfc_password", "passwd_hash", "auth_token",
+    "private_key", "credential", "credentials",
+})
+
+
+def _sap_strip_secrets(params: dict | None) -> dict:
+    """Return source_params with any secret-bearing keys removed (case-insensitive)."""
+    if not isinstance(params, dict):
+        return {}
+    return {k: v for k, v in params.items() if k.lower() not in _SAP_SECRET_KEYS}
+
+
+def _sap_has_secret(params: dict | None) -> bool:
+    if not isinstance(params, dict):
+        return False
+    return any(k.lower() in _SAP_SECRET_KEYS for k in params)
+
+
+@api.get("/sap/interface/objects")
+def sap_objects():
+    """List the SAP-syncable objects with their config + last/next run summary."""
+    objects = []
+    for object_key, meta in sap_sync.SAP_OBJECTS.items():
+        cfg = sap_sync.get_config(object_key)
+        runs = sap_sync.list_runs(object_key=object_key, limit=1)
+        last_run = runs[0] if runs else None
+        job = None
+        sched = getattr(api.state, "sap_scheduler", None)
+        if sched is not None:
+            job = sched.get_job("sap:" + object_key)
+        next_run = job.next_run_time.isoformat() if (job and job.next_run_time) else None
+        objects.append({
+            "object_key":    object_key,
+            "label":         meta.get("label"),
+            "kind":          meta.get("kind"),
+            "enabled":       cfg.get("enabled", False),
+            "transport":     cfg.get("transport"),
+            "schedule_cron": cfg.get("schedule_cron"),
+            "last_run":      last_run,
+            "next_run":      next_run,
+        })
+    return {"objects": objects}
+
+
+@api.get("/sap/interface/mappings/{object}")
+def sap_get_mappings(object: str):
+    """Return the field-map rows (including inactive) for one SAP object."""
+    if object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    return {"object_key": object, "mappings": sap_sync.load_field_map(object)}
+
+
+@api.post("/sap/interface/mappings/{object}", dependencies=[Depends(require_api_key)])
+def sap_set_mappings(object: str, request: Request, body: dict = Body(default={})):
+    """Replace the field map for one SAP object. Payload: { mappings: [...] }"""
+    if object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    actor = request.headers.get("x-user-email")
+    try:
+        result = sap_sync.replace_field_map(object, body.get("mappings", []),
+                                             user_email=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _log_event("info", "sap_sync", "SAP field map replaced",
+               object_key=object, actor=actor,
+               mappings=len(body.get("mappings", []) or []))
+    return result
+
+
+@api.get("/sap/interface/config/{object}")
+def sap_get_config(object: str):
+    """Return one SAP object's config. Secret source_params keys are stripped —
+    only non-secret keys are returned, plus has_secret:bool."""
+    if object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    cfg = sap_sync.get_config(object)
+    params = cfg.get("source_params") or {}
+    return {
+        "object_key":    object,
+        "enabled":       cfg.get("enabled", False),
+        "transport":     cfg.get("transport"),
+        "schedule_cron": cfg.get("schedule_cron"),
+        "source_params": _sap_strip_secrets(params),
+        "has_secret":    _sap_has_secret(params),
+    }
+
+
+@api.post("/sap/interface/config/{object}", dependencies=[Depends(require_api_key)])
+def sap_set_config(object: str, request: Request, body: dict = Body(default={})):
+    """Update one SAP object's config. Payload: { enabled?, transport?, schedule_cron?,
+    source_params? }. source_params is MERGED into the stored params (omitted keys are
+    never wiped). transport and cron are validated."""
+    if object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    actor = request.headers.get("x-user-email")
+    fields: dict = {}
+    if "enabled" in body:
+        fields["enabled"] = bool(body["enabled"])
+    if "transport" in body:
+        transport = body["transport"]
+        if transport not in ("file_drop", "odata", "rfc"):
+            raise HTTPException(status_code=400, detail=f"Unknown transport: {transport!r}")
+        fields["transport"] = transport
+    if "schedule_cron" in body:
+        cron = body["schedule_cron"]
+        if cron not in (None, ""):
+            # Validate the cron expression without keeping a live trigger around.
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+                CronTrigger.from_crontab(str(cron))
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid cron: {e}") from e
+        fields["schedule_cron"] = cron
+    if "source_params" in body:
+        incoming = body["source_params"]
+        if not isinstance(incoming, dict):
+            raise HTTPException(status_code=400, detail="source_params must be an object")
+        # MERGE: start from stored params so omitted keys (incl. secrets) survive.
+        current = sap_sync.get_config(object).get("source_params") or {}
+        merged = dict(current)
+        merged.update(incoming)
+        fields["source_params"] = merged
+    try:
+        result = sap_sync.set_config(object, **fields)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # Log only NON-SECRET, NON-VALUE config metadata — never source_params values.
+    _log_event("info", "sap_sync", "SAP object config updated",
+               object_key=object, actor=actor,
+               changed=sorted(k for k in fields if k != "source_params"),
+               source_params_changed=("source_params" in fields))
+    # Re-shape through the same secret-stripping the GET uses — the response must
+    # never echo stored source_params secrets (set_config returns the raw config).
+    cfg_params = result.get("source_params") or {}
+    return {
+        "object_key":    object,
+        "enabled":       result.get("enabled", False),
+        "transport":     result.get("transport"),
+        "schedule_cron": result.get("schedule_cron"),
+        "source_params": _sap_strip_secrets(cfg_params),
+        "has_secret":    _sap_has_secret(cfg_params),
+    }
+
+
+@api.post("/sap/interface/test-connection", dependencies=[Depends(require_api_key)])
+def sap_test_connection(request: Request, body: dict = Body(default={})):
+    """Test connectivity for a transport + source_params combo. Payload: { transport,
+    source_params }. Connectors are stubs in this skeleton, so this returns the
+    stub's {ok:false, detail:...} unless a real transport is configured."""
+    transport = body.get("transport")
+    params = body.get("source_params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="source_params must be an object")
+    try:
+        result = sap_sync.test_connection(transport, params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # Never log source_params values (may carry secrets).
+    _log_event("info", "sap_sync", "SAP test-connection invoked",
+               actor=request.headers.get("x-user-email"),
+               transport=transport, ok=result.get("ok"))
+    return result
+
+
+@api.post("/sap/interface/sync/{object}", dependencies=[Depends(require_api_key)])
+async def sap_sync_now(object: str, request: Request, body: dict = Body(default={})):
+    """Run a sync for one SAP object on demand. Payload: { dry_run? }. Offloaded to
+    the threadpool (the sync is blocking + does DB I/O)."""
+    if object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    actor = request.headers.get("x-user-email")
+    dry_run = bool(body.get("dry_run", False))
+    _log_event("info", "sap_sync", "Manual SAP sync requested",
+               object_key=object, actor=actor, dry_run=dry_run)
+    result = await run_in_threadpool(
+        sap_sync.sync_object, object, user_email=actor, dry_run=dry_run)
+    return result
+
+
+@api.get("/sap/interface/runs")
+def sap_runs(object: str | None = Query(default=None),
+             limit: int = Query(default=50, ge=1, le=500)):
+    """Return recent SAP sync runs, newest first, optionally scoped to one object."""
+    if object is not None and object not in sap_sync.SAP_OBJECTS:
+        raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
+    return {"runs": sap_sync.list_runs(object_key=object, limit=limit)}
 
 
 # =============================================================================

@@ -56,11 +56,13 @@ The backend exposes REST endpoints (`brain.py`) for internal use only — no ext
 
 ## CI/CD & Deployment
 
-**Hosting:** Not specified (local development setup documented; cloud deployment not yet configured)
+> Updated 2026-06-30: deployed to Azure (single container). The June-17 snapshot is superseded.
 
-- **Current:** Uvicorn running locally on `http://localhost:8000`
-- **Frontend:** Served via local static file server on `http://localhost:9000`
-- **Production path:** Custom deployment required (no Dockerfile, GitHub Actions, or cloud-native config present yet)
+**Hosting:** Live on **Azure Container Apps** as a single container — FastAPI serves both the API and the static frontend via a `StaticFiles` mount. Image built in **Azure Container Registry** (`acrnimbusdev`) with `az acr build`; full runbook in `DEPLOYMENT.md`.
+
+- **Current:** one container on Azure Container Apps (`ca-nimbus-dev`) against Postgres `pgdb-nimbus-dev` over TLS. Locally, `uvicorn brain:api --port 8000` serves both API and UI at `http://localhost:8000/`.
+- **Container files:** `Dockerfile` + `.dockerignore` now exist at repo root (they did not at the time of the original analysis).
+- **Production path:** redeploy via `az acr build` + `az containerapp update` (`DEPLOYMENT.md`); hardening roadmap in `MIGRATION.md`.
 
 **CI Pipeline:** None
 
@@ -85,9 +87,9 @@ The backend exposes REST endpoints (`brain.py`) for internal use only — no ext
 - `NIMBUS_PG_POOL_TIMEOUT` - Wait time for a free connection in seconds (default: 10)
 - `NIMBUS_PG_STATEMENT_TIMEOUT_MS` - Query timeout in milliseconds (default: 30000)
 
-**File paths:**
-- `COLOR_FILE` - Absolute path to global color wheel Excel file (hardcoded in `brain.py` line 86; **must be updated per machine**)
-- `COLOR_WHEEL_DIR` - Directory for per-plant color wheel uploads (created automatically if missing)
+**File paths (env-driven as of 2026-06-30):**
+- `COLOR_FILE` - global color wheel Excel path; `os.getenv("COLOR_FILE", <local Windows default>)`, set to `/data/color_wheel.xlsx` in the container
+- `COLOR_WHEEL_DIR` - per-plant color wheel dir; `os.getenv("COLOR_WHEEL_DIR", <local Windows default>)`, set to `/data/color_wheels` in the container (auto-created; ephemeral on the pilot)
 
 **Secrets location:**
 - Stored in `.env` file in project root (loaded by `python-dotenv` in `db.py`)

@@ -58,7 +58,7 @@ This codebase has **zero automated test coverage**. There are no test files, no 
 **E2E Tests:**
 - Framework: **Playwright** (already configured; see `.playwright-mcp/`)
 - Scope: Happy paths for critical workflows (schedule an order, run optimization, fix an order)
-- Browser automation against `http://localhost:9000` + `http://localhost:8000` locally
+- Browser automation against `http://localhost:9000` + `http://localhost:8000` locally (legacy two-process setup; updated 2026-06-30 — the deployed app is single-origin, `uvicorn brain:api` serves both API and UI at `:8000`)
 
 ## Test File Organization
 

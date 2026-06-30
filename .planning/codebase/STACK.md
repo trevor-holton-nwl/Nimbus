@@ -78,19 +78,20 @@
 
 ## Platform Requirements
 
+> Updated 2026-06-30: now runs as a single container on Azure Container Apps (FastAPI serves the frontend too). The separate static-file-server step is local-dev-only.
+
 **Development:**
 - PostgreSQL 18 running locally (schema bootstrapped via `schema.sql`)
 - Python 3.x with pip
-- Static file server for frontend (`python -m http.server 9000` or similar)
+- `uvicorn brain:api --port 8000` serves both API and UI at `http://localhost:8000/` (single process). The legacy separate static server (`python -m http.server 9000`) now needs a `window.NIMBUS_API_BASE` shim.
 - Modern browser with ES6 support
-- CORS must allow frontend origin (currently set to `["*"]`)
+- CORS: env-driven (`NIMBUS_ALLOWED_ORIGINS`, default `*`); vestigial once the UI is served same-origin
 
-**Production:**
-- Python 3.x runtime with FastAPI + uvicorn
-- PostgreSQL 18+ (Azure Database for PostgreSQL Flexible Server compatible)
-- Static HTTP server or CDN for frontend assets (`index.html`, `app.js`, `styles.css`, `nimbus-intelligence.js`, `nimbus-worker.js`)
-- TLS/SSL for Postgres connections when hosted remotely (`PG_SSLMODE=require` in production `.env`)
-- Load balancer for multi-worker uvicorn deployments (stateless app)
+**Production (live on Azure):**
+- Single container on **Azure Container Apps** — `Dockerfile` (`python:3.12-slim`) runs `uvicorn brain:api`, serving the API + static frontend from one origin
+- Image in **Azure Container Registry** (`acrnimbusdev`); runbook in `DEPLOYMENT.md`
+- **Azure Database for PostgreSQL Flexible Server** (`pgdb-nimbus-dev`), `PG_SSLMODE=require`
+- Stateless app (orders in Postgres); pilot runs single-replica (in-process color-wheel cache + log buffer)
 
 ---
 
