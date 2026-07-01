@@ -1,6 +1,12 @@
 window.__NIMBUS_LOCALES = window.__NIMBUS_LOCALES || {};
 window.__NIMBUS_LOCALES.pt = {
 
+  /* ── Calendar sync ── */
+  'toast.calendar_saved_locally':      'Salvo localmente — será sincronizado quando o servidor estiver acessível',
+  'toast.calendar_offline_cache':      'Exibindo calendários em cache — servidor inacessível',
+  'toast.calendar_migrated':           'Calendários e bloqueios salvos no servidor',
+  'toast.plant_not_mastered':          'Esta planta não está nos Dados Mestres — adicione-a lá antes de salvar seu calendário',
+
   /* ── Toast messages ─────────────────────────────────────────────────────── */
   'toast.calendar_updated':            'Calendário atualizado',
   'toast.block_removed':               'Bloqueio removido',

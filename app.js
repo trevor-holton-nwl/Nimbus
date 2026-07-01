@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-06-30-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-01-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -1022,6 +1022,9 @@ const NIMBUS = (function () {
     _indexBlocks(plant) {
       const byLine = new Map();
       for (const b of Store.blocks) {
+        // A block applies only within its own plant (line:null = all lines in that
+        // plant). Un-stamped legacy blocks (no b.plant) fall back to global behavior.
+        if (b.plant && plant && b.plant !== plant) continue;
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
         if (!s || !e) continue;
         const key = b.line || '__any__';
@@ -1114,8 +1117,12 @@ const NIMBUS = (function () {
       for (const b of Store.blocks) {
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
         if (!s || !e) continue;
-        if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push({ s, e }); }
-        else globalLine.push({ s, e });
+        // Carry the block's plant so dailyCapacityHours can scope line:null blocks
+        // (globalLine) to their own plant; line-code reuse across plants is likewise
+        // resolved by plant, not just the line string.
+        const rec = { s, e, plant: b.plant || null };
+        if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push(rec); }
+        else globalLine.push(rec);
       }
       for (const b of Store.plantBlocks) {
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
@@ -1134,15 +1141,17 @@ const NIMBUS = (function () {
       const plant = Store.getPlantForLine(line);
       let intervals;
       if (idx) {
-        // Reuse pre-parsed, bucketed intervals (no parseDate per cell).
+        // Reuse pre-parsed, bucketed intervals (no parseDate per cell). line:null
+        // blocks (globalLine) apply only within their own plant.
         intervals = [];
-        const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) intervals.push(x);
-        for (const x of idx.globalLine) intervals.push(x);
+        const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) if (!x.plant || x.plant === plant) intervals.push(x);
+        for (const x of idx.globalLine) if (!x.plant || x.plant === plant) intervals.push(x);
         const pb = idx.plantBlocks.get(plant); if (pb) for (const x of pb) intervals.push(x);
         for (const x of idx.globalPlant) intervals.push(x);
       } else {
         intervals = [];
         for (const b of Store.blocks) {
+          if (b.plant && b.plant !== plant) continue;
           if (b.line && b.line !== line) continue;
           const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
           if (s && e) intervals.push({ s, e });
@@ -1183,14 +1192,15 @@ const NIMBUS = (function () {
       if (!win) return false;
       if (date < win[0] || date >= win[1]) return false;
 
+      const plant = Store.getPlantForLine(line);
       for (const b of Store.blocks) {
+        if (b.plant && b.plant !== plant) continue;
         if (b.line && b.line !== line) continue;
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
         if (!s || !e) continue;
         if (date >= s && date < e) return false;
       }
 
-      const plant = Store.getPlantForLine(line);
       for (const b of Store.plantBlocks) {
         if (b.plant && b.plant !== plant) continue;
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
@@ -1275,13 +1285,14 @@ const NIMBUS = (function () {
         return null;
       }
 
+      const plant = Store.getPlantForLine(line);
       for (const b of Store.blocks) {
+        if (b.plant && b.plant !== plant) continue;
         if (b.line && b.line !== line) continue;
         const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
         if (!bs || !be) continue;
         if (start < be && end > bs) return { start: bs, end: be };
       }
-      const plant = Store.getPlantForLine(line);
       for (const b of Store.plantBlocks) {
         if (b.plant && b.plant !== plant) continue;
         const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
@@ -1419,7 +1430,10 @@ const NIMBUS = (function () {
     },
 
     removeBlock(id) {
+      const blk = Store.blocks.find(b => b.id === id);
+      const plant = blk?.plant || Store.selectedPlant;
       Store.removeBlock(id, 'calendar');
+      if (plant) CalendarSync.saveLineBlackoutDelete(plant, id);
       Toast.show(t('toast.block_removed'), 'success');
     },
 
@@ -1447,7 +1461,13 @@ const NIMBUS = (function () {
       const reason = document.getElementById('blk-reason').value.trim() || t('ui.blackouts_label', {plural: ''});
       if (!start || !end) { Toast.show(t('toast.please_set_start_end'), 'error'); return; }
       if (end <= start)   { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
-      Store.addBlock({ line, start, end, reason }, 'calendar');
+      // Stamp the block's plant so it persists/scopes per-plant (line:null = all
+      // lines in this plant). Requires a plant context.
+      const plant = (line ? Store.getPlantForLine(line) : null) || Store.selectedPlant;
+      if (!plant) { Toast.show(t('toast.select_plant_first'), 'warn'); return; }
+      const before = Store.blocks.length;
+      Store.addBlock({ line, plant, start, end, reason }, 'calendar');
+      if (Store.blocks.length > before) CalendarSync.saveLineBlackoutUpsert(Store.blocks[Store.blocks.length - 1]);
       Modal.close('modal-block');
       Toast.show(t('toast.block_added'), 'success');
     },
@@ -1594,6 +1614,7 @@ const NIMBUS = (function () {
       if (!wh) {
         Store.setPlantWorkHours(pName, d, [8, 17], 'pill');
         for (let i = 0; i < 7; i++) Store.clampLinesToPlant(pName, i);
+        Plant._persistPlantHours(pName);
         Plant._renderHours();
         Toast.show(t('day.sun_enabled', { day: ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => t(k))[d] }), 'success');
         return;
@@ -1618,8 +1639,21 @@ const NIMBUS = (function () {
         Store.setPlantWorkHours(pName, d, [sh, eh], 'pill');
       }
       for (let i = 0; i < 7; i++) Store.clampLinesToPlant(pName, i);
+      Plant._persistPlantHours(pName);
       Plant._renderHours();
       Toast.show(t('toast.plant_hours_updated'), 'success');
+    },
+
+    /** Persist a plant's working hours + the line hours the clamp just rewrote.
+     *  Per-line saves are batched into one /line-hours POST by CalendarSync. */
+    _persistPlantHours(pName) {
+      if (!pName) return;
+      CalendarSync.savePlantHours(pName, Store.plants[pName]?.workHours);
+      for (const line of Object.keys(Store.calendars)) {
+        if (Store.getPlantForLine(line) === pName) {
+          CalendarSync.saveLineHours(pName, line, Store.calendars[line].workHours);
+        }
+      }
     },
 
     _pillRightClick(d, e) {
@@ -1649,6 +1683,7 @@ const NIMBUS = (function () {
           Toast.show(t('day.sun_enabled', { day: dayName }), 'success');
         }
         for (let i = 0; i < 7; i++) Store.clampLinesToPlant(_pName, i);
+        Plant._persistPlantHours(_pName);
         Plant._renderHours();
       };
 
@@ -1820,13 +1855,18 @@ const NIMBUS = (function () {
       if (!start || !end) { Toast.show(t('toast.please_set_start_end'), 'error'); return; }
       if (end <= start)   { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
       if (!Store.selectedPlant) { Toast.show(t('toast.select_plant_first'), 'warn'); return; }
+      const before = Store.plantBlocks.length;
       Store.addPlantBlock({ plant: Store.selectedPlant, start, end, reason }, 'plant');
+      if (Store.plantBlocks.length > before) CalendarSync.savePlantBlackoutUpsert(Store.plantBlocks[Store.plantBlocks.length - 1]);
       Modal.close('modal-plant-block');
       Toast.show(t('toast.plant_blackout_added'), 'success');
     },
 
     removePlantBlock(id) {
+      const blk = Store.plantBlocks.find(b => b.id === id);
+      const plant = blk?.plant || Store.selectedPlant;
       Store.removePlantBlock(id, 'plant');
+      if (plant) CalendarSync.savePlantBlackoutDelete(plant, id);
       Toast.show(t('toast.plant_blackout_removed'), 'success');
     },
 
@@ -2154,11 +2194,11 @@ const NIMBUS = (function () {
     },
 
     _renderLineBlocks(line) {
+      const plant = Store.getPlantForLine(line);
       const lineBlocks = (Store.blocks || [])
-        .filter(b => b.line === line)
+        .filter(b => b.line === line && (!b.plant || b.plant === plant))
         .slice().sort((a, b) => Util.parseDate(a.start) - Util.parseDate(b.start));
 
-      const plant = Store.getPlantForLine(line);
       const plantBlocks = (Store.plantBlocks || [])
         .filter(b => !b.plant || b.plant === plant)
         .slice().sort((a, b) => Util.parseDate(a.start) - Util.parseDate(b.start));
@@ -2270,7 +2310,11 @@ const NIMBUS = (function () {
       if (!line)          { Toast.show(t('toast.select_a_line'), 'error'); return; }
       if (!start || !end) { Toast.show(t('toast.please_set_start_end'), 'error'); return; }
       if (end <= start)   { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
-      Store.addBlock({ line, start, end, reason }, 'prodlines');
+      const plant = Store.getPlantForLine(line) || Store.selectedPlant;
+      if (!plant) { Toast.show(t('toast.select_plant_first'), 'warn'); return; }
+      const before = Store.blocks.length;
+      Store.addBlock({ line, plant, start, end, reason }, 'prodlines');
+      if (Store.blocks.length > before) CalendarSync.saveLineBlackoutUpsert(Store.blocks[Store.blocks.length - 1]);
       Modal.close('modal-lines-block');
       Toast.show(t('toast.blackout_added'), 'success');
       ProdLines._renderDetail(ProdLines._activeNavLine);
@@ -3355,16 +3399,27 @@ const NIMBUS = (function () {
         if (!tog?.checked) { newWh[d] = null; continue; }
         const s = _fp[d * 2]?.element?.value;
         const e = _fp[d * 2 + 1]?.element?.value;
-        newWh[d] = (s && e) ? [Calendar._tToH(s), Calendar._tToH(e)] : null;
+        if (s && e) {
+          const sh = Calendar._tToH(s), eh = Calendar._tToH(e);
+          // Reject degenerate/inverted days client-side so we never diverge from the
+          // backend (_clean_work_hours rejects end <= start with a 400).
+          if (eh <= sh) { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
+          newWh[d] = [sh, eh];
+        } else {
+          newWh[d] = null;
+        }
       }
       if (_plantMode) {
         Store.plants[_plantName].workHours = newWh;
         for (let d = 0; d < 7; d++) Store.clampLinesToPlant(_plantName, d);
+        Plant._persistPlantHours(_plantName);
         Plant.render();
         close();
         Toast.show(t('toast.plant_calendar_clamped'), 'success');
       } else {
         Store.setCalendar(_line, newWh, 'edit-calendar');
+        const plant = Store.getPlantForLine(_line) || Store.selectedPlant;
+        if (plant) CalendarSync.saveLineHours(plant, _line, newWh);
         ProdLines.render();
         close();
         Toast.show(t('toast.line_calendar_updated', { line: _line }), 'success');
@@ -3643,7 +3698,7 @@ const NIMBUS = (function () {
       };
       return {
         tasks:        Store.tasksByPlant(plant),
-        blocks:       Store._state.blocks.filter(b => !b.line || lines.has(b.line)),
+        blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
         plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
         calendars:    pick(Store._state.calendars),
         plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
@@ -3721,7 +3776,7 @@ const NIMBUS = (function () {
       const parsedBlocks = [];
       for (const b of Store.blocks) {
         const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) parsedBlocks.push({ line: b.line, s, e });
+        if (s && e) parsedBlocks.push({ line: b.line, plant: b.plant || null, s, e });
       }
       const parsedPlantBlocks = [];
       for (const b of Store.plantBlocks) {
@@ -3772,8 +3827,9 @@ const NIMBUS = (function () {
       // dailyCapacityHours calls below don't re-iterate Store.blocks for every cell.
       const _capIdx = { lineBlocks: new Map(), globalLine: [], plantBlocks: new Map(), globalPlant: [] };
       for (const b of parsedBlocks) {
-        if (b.line) { let a = _capIdx.lineBlocks.get(b.line); if (!a) _capIdx.lineBlocks.set(b.line, a = []); a.push({ s: b.s, e: b.e }); }
-        else _capIdx.globalLine.push({ s: b.s, e: b.e });
+        const rec = { s: b.s, e: b.e, plant: b.plant || null };
+        if (b.line) { let a = _capIdx.lineBlocks.get(b.line); if (!a) _capIdx.lineBlocks.set(b.line, a = []); a.push(rec); }
+        else _capIdx.globalLine.push(rec);
       }
       for (const b of parsedPlantBlocks) {
         if (b.plant) { let a = _capIdx.plantBlocks.get(b.plant); if (!a) _capIdx.plantBlocks.set(b.plant, a = []); a.push({ s: b.s, e: b.e }); }
@@ -3816,6 +3872,7 @@ const NIMBUS = (function () {
             const intervals = [];
             const labels = [];
             for (const b of Store.blocks) {
+              if (b.plant && b.plant !== plant) continue;
               if (b.line && b.line !== line) continue;
               const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
               if (!s || !e) continue;
@@ -3857,6 +3914,7 @@ const NIMBUS = (function () {
         let conflict = false;
         try {
           for (const b of parsedBlocks) {
+            if (b.plant && b.plant !== plant) continue;
             if (b.line && b.line !== line) continue;
             if (t.start_date < b.e && t.end_date > b.s) { conflict = true; break; }
           }
@@ -4486,8 +4544,10 @@ const NIMBUS = (function () {
         if (workWin) {
           const plant = Store.getPlantForLine(line);
           const blackouts = [];
-          const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) blackouts.push(x);
-          for (const x of blockIdx.globalLine) blackouts.push(x);
+          // line:null blocks (globalLine) apply only within their own plant; concrete
+          // blocks under a reused line code are likewise resolved by plant.
+          const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) if (!x.plant || x.plant === plant) blackouts.push(x);
+          for (const x of blockIdx.globalLine) if (!x.plant || x.plant === plant) blackouts.push(x);
           const _pb = blockIdx.plantBlocks.get(plant); if (_pb) for (const x of _pb) blackouts.push(x);
           for (const x of blockIdx.globalPlant) blackouts.push(x);
           for (const t of taskList) {
@@ -6105,6 +6165,7 @@ const NIMBUS = (function () {
       }
       // Line blackout blocks — one per line for global blocks, one per assigned line otherwise.
       for (const b of Store.blocks) {
+        if (b.plant && b.plant !== Store.selectedPlant) continue;
         if (b.line) {
           if (lineFilterActive && !visibleSet.has(b.line)) continue;
           const item = Timeline._itemForBlock(b);
@@ -9596,10 +9657,12 @@ const NIMBUS = (function () {
 
       // Deep-clone current Store state
       Sandbox._snapshot = {
-        tasks:     Store.tasksArr.map(t => Util.clone(t)),
-        blocks:    Store.blocks.map(b => Util.clone(b)),
-        calendars: Util.clone(Store.calendars),
-        fixedIds:  new Set([...Store.fixedIds])
+        tasks:       Store.tasksArr.map(t => Util.clone(t)),
+        blocks:      Store.blocks.map(b => Util.clone(b)),
+        calendars:   Util.clone(Store.calendars),
+        plants:      Util.clone(Store.plants),
+        plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
+        fixedIds:    new Set([...Store.fixedIds])
       };
       Sandbox.active = true;
 
@@ -9636,9 +9699,11 @@ const NIMBUS = (function () {
         // Discard: restore snapshot
         const snap = Sandbox._snapshot;
         Store.setTasks(snap.tasks, 'sandbox');
-        Store._state.blocks    = snap.blocks;
-        Store._state.calendars = snap.calendars;
-        Store._state.fixedIds  = new Set([...snap.fixedIds]);
+        Store._state.blocks       = snap.blocks;
+        Store._state.calendars    = snap.calendars;
+        Store._state.plants       = snap.plants;
+        Store._state.plantBlocks  = snap.plantBlocks;
+        Store._state.fixedIds     = new Set([...snap.fixedIds]);
         for (const id of Store._state.fixedIds) { const t = Store.tasks[id]; if (t) t.fixed = true; }
         Alerts.scheduleRecompute();
         Toast.show(t('toast.scenario_discarded'), 'info');
@@ -9662,7 +9727,12 @@ const NIMBUS = (function () {
       // now false) so saveAll's own Sandbox.exit(true) call no-ops — no recursion.
       // Without this, "Scenario applied" showed but a reload before a later unrelated
       // save lost the promoted edits (autosave is suppressed during sandbox).
-      if (apply) NIMBUS.Persistence.saveAll();
+      if (apply) {
+        NIMBUS.Persistence.saveAll();
+        // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
+        // guards on Sandbox.active); push the promoted config now that active=false.
+        if (Store.selectedPlant) CalendarSync.flushPlant(Store.selectedPlant);
+      }
     }
   };
 
@@ -10798,7 +10868,14 @@ const NIMBUS = (function () {
             Toast.show(t('toast.backend_zero_orders'), 'warn');
             Store.setTasks([], 'persistence');
             Persistence._currentLoadedPlant = plant;
-            // Still fetch master-data so plants/lines with no orders appear in Master Data tabs.
+            // Restore cached non-task state (blocks/calendars/lineSettings) so a plant
+            // with no orders still shows its saved config; the backend overlay follows.
+            try {
+              const rawCache = localStorage.getItem(Config.LS_KEY);
+              if (rawCache) Persistence._restoreNonTaskState(JSON.parse(rawCache));
+            } catch (_) {}
+            // Fetch master-data so orderless plants/lines appear in Master Data tabs,
+            // THEN hydrate calendars/blackouts from the backend (authoritative).
             Promise.all([
               fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
               fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
@@ -10811,7 +10888,8 @@ const NIMBUS = (function () {
                 Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
                 Store.emit({ type: 'master-data-changed', source: 'persistence' });
               }
-            }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`));
+            }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
+              .finally(() => { CalendarSync.fetchPlantConfig(plant).finally(() => Alerts.scheduleRecompute()); });
             return;
           }
 
@@ -10929,6 +11007,11 @@ const NIMBUS = (function () {
           }).catch(e => {
             ErrorLog.warn('persistence', `Master-data fetch failed: ${e.message}`);
             Toast.show(t('toast.master_data_unavail'), 'warn', 5000);
+          }).finally(() => {
+            // Backend is authoritative for this plant's calendars/blackouts — overlay
+            // them on top of the localStorage restore that already ran. Runs after
+            // master-data so getPlantForLine/subnetwork resolve reliably.
+            CalendarSync.fetchPlantConfig(plant).finally(() => Alerts.scheduleRecompute());
           });
         })
         .catch(err => {
@@ -11075,9 +11158,13 @@ const NIMBUS = (function () {
           // placement (including intentional overlaps and duration changes) and just
           // advance the cursor so SAP-raw neighbors still sequence after it.
           const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
-          const oEnd   = t.original_end_date   instanceof Date ? t.original_end_date   : null;
-          const startMoved = oStart && t.start_date.getTime() !== oStart.getTime();
-          const endMoved   = oEnd   && t.end_date.getTime()   !== oEnd.getTime();
+          // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
+          // legitimately differs from original_end_date (the SAP due date). Detect a real
+          // resize by comparing against the run-time-implied end from the original start,
+          // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
+          const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
+          const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
+          const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
           if (startMoved || endMoved) {
             if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
             continue;
@@ -11563,6 +11650,224 @@ saveAll() {
       if (Persistence._autosaveDisabled) return;
       Persistence._saveCache();
     }, 1200)
+  };
+
+  /* =============================================================================
+     CALENDAR SYNC — backend-authoritative persistence of per-plant/per-line
+     working hours + blackout blocks (dedicated /plant-calendar/* endpoints).
+     - fetchPlantConfig(plant): GET a plant's config and hydrate Store (backend
+       authoritative; localStorage stays the offline fallback).
+     - immediate per-edit saves: working hours (batched per plant), blackouts
+       (delta — upsert on add/edit, explicit delete on remove).
+     - per-slice migration: push slices the backend still lacks (first upgrade / retry).
+     Two guards live in the single _post choke point: _hydrating (don't POST while
+     applying a backend GET) and Sandbox.active (What-If edits stay local until
+     promoted). Block scoping/keying uses the block's stored `plant` + stable id.
+     ========================================================================== */
+  const CalendarSync = {
+    _hydrating: false,
+    _pendingLineHours: {},   // plant → { line → workHours } awaiting a batched flush
+    _whDebounce: {},         // plant → timeout id
+
+    /* ----- load / hydration ----------------------------------------------- */
+    fetchPlantConfig(plant) {
+      if (!plant) return Promise.resolve();
+      return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
+                              { signal: AbortSignal.timeout(8000) })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(cfg => CalendarSync._applyConfig(plant, cfg))
+        .catch(e => {
+          // The localStorage restore already painted the UI — degrade gracefully.
+          ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
+          Toast.show(t('toast.calendar_offline_cache'), 'info');
+        });
+    },
+
+    _applyConfig(plant, cfg) {
+      cfg = cfg || {};
+      // Evaluate emptiness PER SLICE. Backend is authoritative only for the slices it
+      // actually has; slices it still lacks are left intact locally and migrated up
+      // (below) — so a partial migration (or first upgrade) can never let a
+      // clear-and-replace wipe an un-persisted slice.
+      const has = {
+        plantHours:     !!cfg.plant_work_hours,
+        lineHours:      Object.keys(cfg.line_work_hours || {}).length > 0,
+        lineBlackouts:  (cfg.line_blackouts || []).length > 0,
+        plantBlackouts: (cfg.plant_blackouts || []).length > 0,
+      };
+      this._hydrating = true;
+      try {
+        if (has.plantHours) {
+          Store.ensurePlant(plant);
+          Store._state.plants[plant].workHours = cfg.plant_work_hours;
+        }
+        if (has.lineHours) {
+          // Clear this plant's line calendars (backend line set ∪ getPlantForLine===plant), then apply.
+          const backendLines = new Set(Object.keys(cfg.line_work_hours));
+          for (const line of Object.keys(Store._state.calendars)) {
+            if (backendLines.has(line) || Store.getPlantForLine(line) === plant) delete Store._state.calendars[line];
+          }
+          for (const [line, wh] of Object.entries(cfg.line_work_hours)) {
+            Store.ensureCalendar(line);
+            Store._state.calendars[line].workHours = wh;
+          }
+        }
+        if (has.lineBlackouts) {
+          // Clear by the block's OWN stored plant (never a runtime getPlantForLine
+          // derivation, which can be null before master data loads). Preserve backend ids.
+          Store._state.blocks = Store._state.blocks.filter(b => b.plant !== plant);
+          for (const b of cfg.line_blackouts) {
+            Store._state.blocks.push({ id: b.id, line: b.line || null, plant,
+              start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' });
+          }
+        }
+        if (has.plantBlackouts) {
+          Store._state.plantBlocks = Store._state.plantBlocks.filter(b => b.plant !== plant);
+          for (const b of cfg.plant_blackouts) {
+            Store._state.plantBlocks.push({ id: b.id, plant,
+              start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' });
+          }
+        }
+        // Notify subscribers + refresh the offline cache with backend truth. These
+        // emits fire while _hydrating=true, so no POST-back to the backend.
+        Store.emit({ type: 'calendar:change',    source: 'calendar-sync' });
+        Store.emit({ type: 'blocks:change',      source: 'calendar-sync' });
+        Store.emit({ type: 'plantBlocks:change', source: 'calendar-sync' });
+      } finally {
+        this._hydrating = false;
+      }
+      // Migrate the slices the backend still lacks but local has. Covers first upgrade
+      // (backend fully empty) AND partial-migration retry. Each slice is one atomic POST
+      // (all-or-nothing); a failed slice stays un-migrated and retries next load.
+      // Idempotent via client-supplied ids + ON CONFLICT, so re-sending is harmless.
+      this._migrateMissingSlices(plant, has);
+    },
+
+    _migrateMissingSlices(plant, has) {
+      if (!plant) return;
+      const jobs = [];
+      if (!has.plantHours) {
+        const wh = Store._state.plants[plant]?.workHours || null;
+        if (wh) jobs.push(this.savePlantHours(plant, wh));
+      }
+      if (!has.lineHours) {
+        const lines = Object.keys(Store._state.calendars)
+          .filter(l => Store.getPlantForLine(l) === plant)
+          .map(l => ({ production_line: l, work_hours: Store._state.calendars[l].workHours }));
+        if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
+      }
+      if (!has.lineBlackouts) {
+        // Include legacy un-stamped line:null/mapped blocks; stamp them so they scope
+        // per-plant from now on and never re-migrate under a second plant.
+        const blks = Store._state.blocks.filter(b =>
+          b.plant === plant || (!b.plant && (b.line ? Store.getPlantForLine(b.line) === plant : true)));
+        blks.forEach(b => { b.plant = plant; });
+        if (blks.length) jobs.push(this._post('/plant-calendar/line-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, true)) }, 'migrate-line-blackouts'));
+      }
+      if (!has.plantBlackouts) {
+        const blks = Store._state.plantBlocks.filter(b => b.plant === plant || !b.plant);
+        blks.forEach(b => { b.plant = plant; });
+        if (blks.length) jobs.push(this._post('/plant-calendar/plant-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, false)) }, 'migrate-plant-blackouts'));
+      }
+      if (jobs.length) {
+        Promise.all(jobs).then(rs => {
+          if (rs.every(r => r && r.ok)) {
+            ErrorLog.info('calendar-sync', `Migrated local calendar/blackout config for plant ${plant} to backend`);
+            Toast.show(t('toast.calendar_migrated'), 'info', 4000);
+          }
+        });
+      }
+    },
+
+    /* ----- immediate per-edit saves --------------------------------------- */
+    savePlantHours(plant, workHours) {
+      if (!plant) return Promise.resolve({ ok: false });
+      return this._post('/plant-calendar/plant-hours', { plant, work_hours: workHours }, 'plant-hours');
+    },
+
+    // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
+    // fan-out from a single plant-hours edit into ONE /line-hours request.
+    saveLineHours(plant, line, workHours) {
+      if (!plant || !line) return;
+      (this._pendingLineHours[plant] ||= {})[line] = workHours;
+      clearTimeout(this._whDebounce[plant]);
+      this._whDebounce[plant] = setTimeout(() => this._flushLineHours(plant), 600);
+    },
+    _flushLineHours(plant) {
+      const pending = this._pendingLineHours[plant];
+      if (!pending || !Object.keys(pending).length) return;
+      delete this._pendingLineHours[plant];
+      const lines = Object.entries(pending).map(([production_line, work_hours]) => ({ production_line, work_hours }));
+      return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
+    },
+
+    saveLineBlackoutUpsert(block) {
+      if (!block?.plant) return Promise.resolve({ ok: false });
+      return this._post('/plant-calendar/line-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, true)] }, 'line-blackout-upsert');
+    },
+    saveLineBlackoutDelete(plant, id) {
+      if (!plant || !id) return Promise.resolve({ ok: false });
+      return this._post('/plant-calendar/line-blackouts', { plant, deletes: [id] }, 'line-blackout-delete');
+    },
+    savePlantBlackoutUpsert(block) {
+      if (!block?.plant) return Promise.resolve({ ok: false });
+      return this._post('/plant-calendar/plant-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, false)] }, 'plant-blackout-upsert');
+    },
+    savePlantBlackoutDelete(plant, id) {
+      if (!plant || !id) return Promise.resolve({ ok: false });
+      return this._post('/plant-calendar/plant-blackouts', { plant, deletes: [id] }, 'plant-blackout-delete');
+    },
+
+    /** Promote path (What-If → live): push the plant's current calendar/blackout
+     *  state as upserts. Upsert-only — blackout deletions made during What-If are
+     *  not propagated here; they take effect on the next explicit remove. */
+    flushPlant(plant) {
+      if (!plant) return;
+      this.savePlantHours(plant, Store._state.plants[plant]?.workHours);
+      const lines = Object.keys(Store._state.calendars)
+        .filter(l => Store.getPlantForLine(l) === plant)
+        .map(l => ({ production_line: l, work_hours: Store._state.calendars[l].workHours }));
+      if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
+      const lineBk = Store._state.blocks.filter(b => b.plant === plant);
+      if (lineBk.length) this._post('/plant-calendar/line-blackouts', { plant, upserts: lineBk.map(b => this._blockPayload(b, true)) }, 'promote-line-blackouts');
+      const plantBk = Store._state.plantBlocks.filter(b => b.plant === plant);
+      if (plantBk.length) this._post('/plant-calendar/plant-blackouts', { plant, upserts: plantBk.map(b => this._blockPayload(b, false)) }, 'promote-plant-blackouts');
+    },
+
+    /* ----- internals ------------------------------------------------------- */
+    _blockPayload(b, withLine) {
+      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
+      const o = { id: b.id, start: s ? s.toISOString() : null, end: e ? e.toISOString() : null, reason: b.reason || null };
+      if (withLine) o.line = b.line || null;
+      return o;
+    },
+
+    _post(path, body, label) {
+      // Single choke point for every backend write. Two guards: never POST while
+      // applying a backend GET (_hydrating), and never leak What-If edits (Sandbox).
+      if (this._hydrating || (typeof Sandbox !== 'undefined' && Sandbox.active)) {
+        return Promise.resolve({ ok: true, skipped: true });
+      }
+      return Util.fetchTraced(`${Config.API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000),
+      }).then(r => {
+        if (!r.ok) {
+          if (r.status === 400 || r.status === 409) Toast.show(t('toast.plant_not_mastered'), 'error', 6000);
+          else                                       Toast.show(t('toast.calendar_saved_locally'), 'info');
+          ErrorLog.warn('calendar-sync', `${label} failed: HTTP ${r.status}`);
+          return { ok: false, status: r.status };
+        }
+        return { ok: true };
+      }).catch(e => {
+        // The edit is already in Store + localStorage; only backend sync is deferred.
+        ErrorLog.warn('calendar-sync', `${label} error: ${e.message}`);
+        Toast.show(t('toast.calendar_saved_locally'), 'info');
+        return { ok: false, error: e.message };
+      });
+    },
   };
 
   /* =============================================================================
@@ -16421,6 +16726,6 @@ document.addEventListener('DOMContentLoaded', () => {
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData, WelcomeSplash,
-    LaborPlanning, Interface
+    LaborPlanning, Interface, CalendarSync
   };
 })();

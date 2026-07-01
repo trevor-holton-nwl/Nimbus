@@ -8,6 +8,7 @@ parameter placeholder.  The user cannot inject SQL through any of these paths.
 """
 import logging
 import re
+from datetime import datetime, timezone
 
 import psycopg
 from psycopg import sql
@@ -740,6 +741,419 @@ def upsert_labor_plan_line(subnetwork: str, plant: str, cells: list, user_email:
         )
         conn.commit()
     return {"upserted": upserted, "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Plant / line calendars (working hours) + blackout blocks
+#   Working hours: plants.work_hours JSONB (plant-level) + line_calendar table
+#   (line-level). Blackouts: line_blackout / plant_blackout tables.
+#   Writes are DELTA-based (explicit upserts + explicit deletes), never
+#   prune-by-omission. line_blackout.production_line NULL = "all lines in this
+#   plant". Working-hours shape mirrors the frontend Store: {"0".."6": [h1,h2]|null}
+#   (0=Sun..6=Sat; null=closed; fractional hours ok).
+# ---------------------------------------------------------------------------
+
+def ensure_work_hours_columns() -> None:
+    """Idempotent: add plants.work_hours JSONB (plant-level weekly hours). Kept
+    out of column_metadata (like plants.constraints) so it never renders as an
+    editable Master Data grid column. Line-level hours live in the line_calendar
+    table (below), NOT on production_lines, so order-derived lines that lag master
+    data still persist."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS work_hours JSONB")
+        conn.commit()
+
+
+def ensure_line_calendar_table() -> None:
+    """Idempotent: per-line working hours (work_hours JSONB). No FK to
+    production_lines (mirrors labor_plan_line) so a calendar may be authored
+    before its line master row exists; only the plants FK is enforced."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS line_calendar (
+                subnetwork      TEXT NOT NULL,
+                plant           TEXT NOT NULL,
+                production_line TEXT NOT NULL,
+                work_hours      JSONB,
+                created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (subnetwork, plant, production_line),
+                FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_line_calendar_plant ON line_calendar(plant)")
+        conn.commit()
+
+
+def ensure_line_blackout_table() -> None:
+    """Idempotent: per-plant line blackout blocks. production_line NULL = all
+    lines in the plant. block_id is client-supplied (Util.uid 'blk'). No FK to
+    production_lines (a block may precede its line row); plants FK cascades."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS line_blackout (
+                subnetwork      TEXT      NOT NULL,
+                plant           TEXT      NOT NULL,
+                production_line TEXT,                 -- NULL = all lines in this plant
+                block_id        TEXT      NOT NULL,   -- client-supplied (Util.uid 'blk')
+                start_ts        TIMESTAMP NOT NULL,
+                end_ts          TIMESTAMP NOT NULL,
+                reason          TEXT,
+                created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (subnetwork, plant, block_id),
+                FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT chk_line_blackout_range CHECK (end_ts > start_ts)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_line_blackout_plant ON line_blackout(plant)")
+        conn.commit()
+
+
+def ensure_plant_blackout_table() -> None:
+    """Idempotent: per-plant plant-level blackout blocks. block_id client-supplied
+    (Util.uid 'pblk'). Cross-plant-global blocks are not persisted (per-plant model)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS plant_blackout (
+                subnetwork  TEXT      NOT NULL,
+                plant       TEXT      NOT NULL,
+                block_id    TEXT      NOT NULL,   -- client-supplied (Util.uid 'pblk')
+                start_ts    TIMESTAMP NOT NULL,
+                end_ts      TIMESTAMP NOT NULL,
+                reason      TEXT,
+                created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (subnetwork, plant, block_id),
+                FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT chk_plant_blackout_range CHECK (end_ts > start_ts)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plant_blackout_plant ON plant_blackout(plant)")
+        conn.commit()
+
+
+def ensure_unique_plant() -> None:
+    """Idempotent: enforce that a plant code is globally unique across subnetworks
+    — an invariant the app already assumes (getPlantForLine, /tasks?plant=,
+    plant-only constraint updates). If duplicates already exist, skip with a
+    warning (do not fail startup); in that case _resolve_subnetwork's ambiguity
+    ValueError is the correct fail-loud behavior."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant FROM plants GROUP BY plant HAVING COUNT(*) > 1")
+        if cur.fetchone():
+            log.warning("Skipping UNIQUE(plant): duplicate plant codes exist across subnetworks")
+            return
+        cur.execute("SELECT 1 FROM pg_constraint WHERE conname = 'uq_plants_plant'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE plants ADD CONSTRAINT uq_plants_plant UNIQUE (plant)")
+        conn.commit()
+
+
+# ----- helpers -------------------------------------------------------------
+
+def _resolve_subnetwork(cur, plant: str) -> str:
+    """Resolve a plant's subnetwork server-side (the frontend keys by plant only).
+    Unknown plant or ambiguous (>1 subnetwork) -> ValueError. Ambiguity is
+    unreachable once ensure_unique_plant's UNIQUE(plant) holds. This is the SOLE
+    owner of subnetwork resolution for the calendar/blackout endpoints."""
+    if not plant:
+        raise ValueError("plant is required")
+    cur.execute("SELECT DISTINCT subnetwork FROM plants WHERE plant = %s", (plant,))
+    rows = [r[0] for r in cur.fetchall()]
+    if not rows:
+        raise ValueError(f"Plant {plant!r} is not in Master Data")
+    if len(rows) > 1:
+        raise ValueError(f"Plant {plant!r} exists under multiple subnetworks {sorted(rows)}; cannot resolve")
+    return rows[0]
+
+
+def _clean_work_hours(work_hours) -> dict:
+    """Validate/normalize a {0..6: [start,end]|null} weekly working-hours map.
+    Keys become strings '0'..'6'; each value is null (closed) or [start,end]
+    floats with 0 <= start < end <= 24."""
+    if not isinstance(work_hours, dict):
+        raise ValueError("work_hours must be an object keyed 0..6")
+    clean: dict = {}
+    for k, v in work_hours.items():
+        try:
+            day = int(k)
+        except (TypeError, ValueError):
+            raise ValueError(f"work_hours key {k!r} is not a day 0..6")
+        if not (0 <= day <= 6):
+            raise ValueError(f"work_hours day out of range: {k!r}")
+        if v is None:
+            clean[str(day)] = None
+            continue
+        if (not isinstance(v, (list, tuple)) or len(v) != 2
+                or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+            raise ValueError(f"work_hours[{day}] must be [start, end] numbers or null")
+        s, e = float(v[0]), float(v[1])
+        if not (0 <= s < e <= 24):
+            raise ValueError(f"work_hours[{day}] range invalid: {v!r} (need 0 <= start < end <= 24)")
+        clean[str(day)] = [s, e]
+    return clean
+
+
+def _iso_utc(dt):
+    """Serialize a stored UTC-naive datetime back to an ISO string with a 'Z'
+    suffix so the frontend's new Date(...) parses it as UTC. Intentionally
+    DIFFERENT from the orders read path (bare strftime, no Z) — do not unify."""
+    return dt.isoformat() + "Z" if dt is not None else None
+
+
+def _parse_ts(v):
+    """Parse a JS ISO timestamp ('...Z' or offset) into a UTC-naive datetime for
+    the naive TIMESTAMP columns. Returns None if unparseable/empty."""
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        dt = v
+    elif isinstance(v, str):
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+# ----- working hours -------------------------------------------------------
+
+def set_plant_work_hours(plant: str, work_hours, user_email: str | None = None) -> dict:
+    """Persist a plant's weekly working hours to plants.work_hours (JSONB).
+    Empty/None work_hours clears it (SET NULL). The plant row must exist."""
+    clean = _clean_work_hours(work_hours) if work_hours else None
+    with _pool.connection() as conn, conn.cursor() as cur:
+        subnet = _resolve_subnetwork(cur, plant)
+        cur.execute(
+            "UPDATE plants SET work_hours = %s, updated_at = NOW()"
+            " WHERE plant = %s AND subnetwork = %s",
+            (Jsonb(clean) if clean is not None else None, plant, subnet),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_work_hours', %s, %s)",
+            (Jsonb({"plant": plant, "subnetwork": subnet, "work_hours": clean}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "work_hours": clean}
+
+
+def set_line_work_hours(plant: str, lines: list, user_email: str | None = None) -> dict:
+    """Upsert per-line working hours into line_calendar. `lines` is
+    [{production_line, work_hours}]. Null/empty work_hours clears that line's
+    hours (SET NULL). No production_lines dependency — order-derived lines
+    persist. Idempotent per line via ON CONFLICT."""
+    if not isinstance(lines, list):
+        raise ValueError("lines must be a list")
+    prepared = []
+    for item in lines:
+        code = (item or {}).get("production_line")
+        if not code:
+            continue
+        wh = item.get("work_hours")
+        clean = _clean_work_hours(wh) if wh else None
+        prepared.append((code, clean))
+    with _pool.connection() as conn, conn.cursor() as cur:
+        subnet = _resolve_subnetwork(cur, plant)
+        if prepared:
+            cur.executemany(
+                "INSERT INTO line_calendar (subnetwork, plant, production_line, work_hours)"
+                " VALUES (%s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, production_line)"
+                " DO UPDATE SET work_hours = EXCLUDED.work_hours, updated_at = NOW()",
+                [(subnet, plant, code, Jsonb(clean) if clean is not None else None)
+                 for code, clean in prepared],
+            )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('line_calendar', 'upsert', %s, %s)",
+            (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared)}), user_email),
+        )
+        conn.commit()
+    return {"upserted": len(prepared)}
+
+
+# ----- blackouts (delta: explicit upserts + explicit deletes) --------------
+
+def _prepare_blackouts(upserts: list, *, with_line: bool) -> list:
+    """Validate/normalize blackout upserts into executemany tuples. Rejects
+    missing id/start/end and inverted ranges (end <= start)."""
+    out = []
+    for b in (upserts or []):
+        bid = b.get("id")
+        s = _parse_ts(b.get("start"))
+        e = _parse_ts(b.get("end"))
+        if not bid or s is None or e is None:
+            raise ValueError(f"blackout {bid!r} is missing id/start/end")
+        if e <= s:
+            raise ValueError(f"blackout {bid!r} has an inverted range (end <= start)")
+        if with_line:
+            out.append((b.get("line") or None, bid, s, e, b.get("reason")))
+        else:
+            out.append((bid, s, e, b.get("reason")))
+    return out
+
+
+def save_line_blackouts(plant: str, upserts: list, deletes: list | None = None,
+                        user_email: str | None = None) -> dict:
+    """Delta write of line blackouts: upsert the given blocks and delete the given
+    ids. NEVER prunes by omission. production_line NULL = all lines in the plant."""
+    prepared = _prepare_blackouts(upserts, with_line=True)
+    del_ids = [d for d in (deletes or []) if d]
+    with _pool.connection() as conn, conn.cursor() as cur:
+        subnet = _resolve_subnetwork(cur, plant)
+        deleted = 0
+        if del_ids:
+            cur.execute(
+                "DELETE FROM line_blackout WHERE subnetwork = %s AND plant = %s"
+                " AND block_id = ANY(%s)",
+                (subnet, plant, del_ids),
+            )
+            deleted = cur.rowcount
+        if prepared:
+            cur.executemany(
+                "INSERT INTO line_blackout"
+                " (subnetwork, plant, production_line, block_id, start_ts, end_ts, reason)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, block_id) DO UPDATE SET"
+                " production_line = EXCLUDED.production_line, start_ts = EXCLUDED.start_ts,"
+                " end_ts = EXCLUDED.end_ts, reason = EXCLUDED.reason, updated_at = NOW()",
+                [(subnet, plant, line, bid, s, e, reason)
+                 for (line, bid, s, e, reason) in prepared],
+            )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('line_blackout', 'save', %s, %s)",
+            (Jsonb({"plant": plant, "subnetwork": subnet,
+                    "upserted": len(prepared), "deleted": deleted}), user_email),
+        )
+        conn.commit()
+    return {"upserted": len(prepared), "deleted": deleted}
+
+
+def save_plant_blackouts(plant: str, upserts: list, deletes: list | None = None,
+                         user_email: str | None = None) -> dict:
+    """Delta write of plant-level blackouts (upsert + explicit delete)."""
+    prepared = _prepare_blackouts(upserts, with_line=False)
+    del_ids = [d for d in (deletes or []) if d]
+    with _pool.connection() as conn, conn.cursor() as cur:
+        subnet = _resolve_subnetwork(cur, plant)
+        deleted = 0
+        if del_ids:
+            cur.execute(
+                "DELETE FROM plant_blackout WHERE subnetwork = %s AND plant = %s"
+                " AND block_id = ANY(%s)",
+                (subnet, plant, del_ids),
+            )
+            deleted = cur.rowcount
+        if prepared:
+            cur.executemany(
+                "INSERT INTO plant_blackout"
+                " (subnetwork, plant, block_id, start_ts, end_ts, reason)"
+                " VALUES (%s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, block_id) DO UPDATE SET"
+                " start_ts = EXCLUDED.start_ts, end_ts = EXCLUDED.end_ts,"
+                " reason = EXCLUDED.reason, updated_at = NOW()",
+                [(subnet, plant, bid, s, e, reason)
+                 for (bid, s, e, reason) in prepared],
+            )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plant_blackout', 'save', %s, %s)",
+            (Jsonb({"plant": plant, "subnetwork": subnet,
+                    "upserted": len(prepared), "deleted": deleted}), user_email),
+        )
+        conn.commit()
+    return {"upserted": len(prepared), "deleted": deleted}
+
+
+# ----- loaders (hydration) -------------------------------------------------
+
+def load_line_blackouts(plant: str) -> list:
+    """Return a plant's line blackouts. production_line NULL surfaces as line=None
+    ('all lines in this plant'). Own connection (transaction isolation)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT block_id, production_line, start_ts, end_ts, reason"
+            " FROM line_blackout WHERE plant = %s"
+            " ORDER BY production_line NULLS FIRST, start_ts",
+            (plant,),
+        )
+        return [
+            {"id": r[0], "line": r[1], "start": _iso_utc(r[2]),
+             "end": _iso_utc(r[3]), "reason": r[4]}
+            for r in cur.fetchall()
+        ]
+
+
+def load_plant_blackouts(plant: str) -> list:
+    """Return a plant's plant-level blackouts. Own connection."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT block_id, start_ts, end_ts, reason"
+            " FROM plant_blackout WHERE plant = %s ORDER BY start_ts",
+            (plant,),
+        )
+        return [
+            {"id": r[0], "start": _iso_utc(r[1]), "end": _iso_utc(r[2]), "reason": r[3]}
+            for r in cur.fetchall()
+        ]
+
+
+def load_plant_calendar(plant: str) -> dict:
+    """Consolidated per-plant hydration payload: plant work hours, all line work
+    hours, line blackouts, plant blackouts. Transaction-safe: probes for the
+    work_hours columns via information_schema up front, so a pre-migration DB
+    degrades to empty rather than throwing UndefinedColumn (which would poison the
+    read transaction -> InFailedSqlTransaction -> 500). Never 500s on unknown plant."""
+    if not plant:
+        raise ValueError("plant is required")
+    subnet = None
+    plant_wh = None
+    line_wh: dict = {}
+    with _pool.connection() as conn, conn.cursor() as cur:
+        try:
+            subnet = _resolve_subnetwork(cur, plant)
+        except ValueError:
+            subnet = None  # unknown/ambiguous -> plant-only reads; never hard-fail the GET
+        cur.execute(
+            "SELECT table_name FROM information_schema.columns"
+            " WHERE table_schema='public' AND column_name='work_hours'"
+            " AND table_name IN ('plants','line_calendar')"
+        )
+        wh_tables = {r[0] for r in cur.fetchall()}
+        if 'plants' in wh_tables:
+            if subnet:
+                cur.execute("SELECT work_hours FROM plants WHERE plant=%s AND subnetwork=%s", (plant, subnet))
+            else:
+                cur.execute("SELECT work_hours FROM plants WHERE plant=%s LIMIT 1", (plant,))
+            row = cur.fetchone()
+            plant_wh = row[0] if row else None
+        if 'line_calendar' in wh_tables:
+            cur.execute(
+                "SELECT production_line, work_hours FROM line_calendar"
+                " WHERE plant=%s AND work_hours IS NOT NULL",
+                (plant,),
+            )
+            line_wh = {r[0]: r[1] for r in cur.fetchall()}
+    return {
+        "plant": plant,
+        "subnetwork": subnet,
+        "plant_work_hours": plant_wh,
+        "line_work_hours": line_wh,
+        "line_blackouts": load_line_blackouts(plant),
+        "plant_blackouts": load_plant_blackouts(plant),
+    }
 
 
 def known_plant_line_codes() -> dict:

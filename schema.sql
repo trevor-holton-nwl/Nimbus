@@ -273,6 +273,78 @@ CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant ON labor_plan_line(plant);
 CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant_line ON labor_plan_line(plant, production_line);
 
 -- ----------------------------------------------------------------------------
+-- Plant / line calendars (working hours) + blackout blocks
+--   Fresh-DB parity for the idempotent ensure_* startup migrations in
+--   master_data.py (which are authoritative for prod). Additive only — no
+--   data re-mutation on re-run (unlike the plants horizon ×1440 landmine above).
+--   Working-hours shape mirrors the frontend Store: {"0".."6": [h1,h2]|null}.
+-- ----------------------------------------------------------------------------
+-- Plant-level weekly working hours (kept out of column_metadata like constraints).
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS work_hours JSONB;
+
+-- Enforce the global plant-code uniqueness the app already assumes
+-- (getPlantForLine, /tasks?plant=, plant-only constraint updates). Skip if
+-- duplicate plant codes already exist across subnetworks.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_plants_plant')
+     AND NOT EXISTS (SELECT plant FROM plants GROUP BY plant HAVING COUNT(*) > 1) THEN
+    ALTER TABLE plants ADD CONSTRAINT uq_plants_plant UNIQUE (plant);
+  END IF;
+END $$;
+
+-- Line-level working hours. No FK to production_lines (like labor_plan_line) so
+-- order-derived lines that lag master data still persist; only the plants FK.
+CREATE TABLE IF NOT EXISTS line_calendar (
+    subnetwork      TEXT NOT NULL,
+    plant           TEXT NOT NULL,
+    production_line TEXT NOT NULL,
+    work_hours      JSONB,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subnetwork, plant, production_line),
+    FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_line_calendar_plant ON line_calendar(plant);
+
+-- Line blackout blocks. production_line NULL = all lines in this plant.
+-- block_id is client-supplied (Util.uid 'blk'). Delta writes only.
+CREATE TABLE IF NOT EXISTS line_blackout (
+    subnetwork      TEXT      NOT NULL,
+    plant           TEXT      NOT NULL,
+    production_line TEXT,
+    block_id        TEXT      NOT NULL,
+    start_ts        TIMESTAMP NOT NULL,
+    end_ts          TIMESTAMP NOT NULL,
+    reason          TEXT,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subnetwork, plant, block_id),
+    FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_line_blackout_range CHECK (end_ts > start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_line_blackout_plant ON line_blackout(plant);
+
+-- Plant-level blackout blocks. block_id is client-supplied (Util.uid 'pblk').
+CREATE TABLE IF NOT EXISTS plant_blackout (
+    subnetwork  TEXT      NOT NULL,
+    plant       TEXT      NOT NULL,
+    block_id    TEXT      NOT NULL,
+    start_ts    TIMESTAMP NOT NULL,
+    end_ts      TIMESTAMP NOT NULL,
+    reason      TEXT,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subnetwork, plant, block_id),
+    FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_plant_blackout_range CHECK (end_ts > start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_plant_blackout_plant ON plant_blackout(plant);
+
+-- ----------------------------------------------------------------------------
 -- Seed data (idempotent — safe to re-run)
 -- ----------------------------------------------------------------------------
 INSERT INTO subnetworks (code, name) VALUES

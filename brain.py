@@ -168,6 +168,11 @@ async def lifespan(app: FastAPI):
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
     md.ensure_plant_constraints_column()
+    md.ensure_work_hours_columns()
+    md.ensure_line_calendar_table()
+    md.ensure_line_blackout_table()
+    md.ensure_plant_blackout_table()
+    md.ensure_unique_plant()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -925,7 +930,9 @@ class TaskDateUpdate(BaseModel):
 
 class TasksUpdatePayload(BaseModel):
     """Frontend autosave payload: { tasks, blocks?, calendars? }. Only `tasks` is
-    consumed here; blocks/calendars are persisted browser-side (localStorage)."""
+    consumed here. Calendars and blackout blocks now persist through the dedicated
+    /plant-calendar/* endpoints (backend-authoritative); any blocks/calendars sent
+    here are ignored (legacy ride-along, harmless)."""
     tasks: list[TaskDateUpdate] = []
 
 
@@ -1703,6 +1710,86 @@ def labor_plan_line_post(request: Request, body: dict = Body(default={})):
             subnetwork=body.get("subnetwork", ""),
             plant=body.get("plant", ""),
             cells=body.get("cells", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# =============================================================================
+# PLANT CALENDARS — per-plant/per-line working hours + blackout blocks.
+#   Backend-authoritative store for what used to be localStorage-only frontend
+#   state. UNGATED (like /tasks/update and /labor-plan) so calendar edits are not
+#   dead-written when NIMBUS_API_KEY is set — these are user-workflow edits, not
+#   admin/DDL. subnetwork is resolved server-side (frontend keys by plant only).
+#   Blackout writes are DELTA-based: { upserts, deletes } — never prune-by-omission.
+# =============================================================================
+
+@api.get("/plant-calendar")
+def plant_calendar_get(plant: str):
+    """Return a plant's full calendar/blackout config for Store hydration:
+    { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
+      line_blackouts:[...], plant_blackouts:[...] }."""
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant query param is required")
+    try:
+        return md.load_plant_calendar(plant)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/plant-calendar/plant-hours")
+def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default={})):
+    """Set a plant's weekly working hours. Payload: { plant, work_hours:{0..6:[h1,h2]|null} }."""
+    try:
+        return md.set_plant_work_hours(
+            plant=body.get("plant", ""),
+            work_hours=body.get("work_hours") or {},
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/plant-calendar/line-hours")
+def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={})):
+    """Upsert per-line working hours (batched). Payload:
+    { plant, lines:[{production_line, work_hours:{0..6:[h1,h2]|null}}] }."""
+    try:
+        return md.set_line_work_hours(
+            plant=body.get("plant", ""),
+            lines=body.get("lines", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/plant-calendar/line-blackouts")
+def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(default={})):
+    """Delta write of line blackouts. Payload:
+    { plant, upserts:[{id, line?, start, end, reason?}], deletes?:[id] }.
+    line omitted/null = all lines in this plant."""
+    try:
+        return md.save_line_blackouts(
+            plant=body.get("plant", ""),
+            upserts=body.get("upserts", []),
+            deletes=body.get("deletes", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/plant-calendar/plant-blackouts")
+def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(default={})):
+    """Delta write of plant-level blackouts. Payload:
+    { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }."""
+    try:
+        return md.save_plant_blackouts(
+            plant=body.get("plant", ""),
+            upserts=body.get("upserts", []),
+            deletes=body.get("deletes", []),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
