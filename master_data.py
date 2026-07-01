@@ -844,8 +844,28 @@ def ensure_unique_plant() -> None:
     ValueError is the correct fail-loud behavior."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT plant FROM plants GROUP BY plant HAVING COUNT(*) > 1")
-        if cur.fetchone():
-            log.warning("Skipping UNIQUE(plant): duplicate plant codes exist across subnetworks")
+        dupes = [r[0] for r in cur.fetchall()]
+        if dupes:
+            # Surface LOUDLY: with a duplicate plant code, _resolve_subnetwork raises
+            # ambiguity ValueError -> every calendar/blackout POST for that plant 400s,
+            # silently disabling calendar persistence for it. Operators must see this.
+            # (F10 — full fix is sending subnetwork on the write path; see MIGRATION.md.)
+            log.warning(
+                "Skipping UNIQUE(plant): duplicate plant codes across subnetworks %s "
+                "— calendar/blackout persistence is DISABLED for these plants until the "
+                "catalog is deduped or the write path is made subnetwork-aware.",
+                sorted(dupes),
+            )
+            try:
+                cur.execute(
+                    "INSERT INTO admin_audit (table_name, action, details, user_email)"
+                    " VALUES ('plants', 'unique_plant_skipped', %s, %s)",
+                    (Jsonb({"duplicate_plants": sorted(dupes),
+                            "impact": "calendar persistence disabled for these plants"}), None),
+                )
+                conn.commit()
+            except psycopg.Error:
+                pass  # audit is best-effort; never fail startup on it
             return
         cur.execute("SELECT 1 FROM pg_constraint WHERE conname = 'uq_plants_plant'")
         if not cur.fetchone():
@@ -1081,33 +1101,42 @@ def save_plant_blackouts(plant: str, upserts: list, deletes: list | None = None,
 
 def load_line_blackouts(plant: str) -> list:
     """Return a plant's line blackouts. production_line NULL surfaces as line=None
-    ('all lines in this plant'). Own connection (transaction isolation)."""
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT block_id, production_line, start_ts, end_ts, reason"
-            " FROM line_blackout WHERE plant = %s"
-            " ORDER BY production_line NULLS FIRST, start_ts",
-            (plant,),
-        )
-        return [
-            {"id": r[0], "line": r[1], "start": _iso_utc(r[2]),
-             "end": _iso_utc(r[3]), "reason": r[4]}
-            for r in cur.fetchall()
-        ]
+    ('all lines in this plant'). Own connection (transaction isolation). Returns []
+    if the table doesn't exist yet (pre-migration/restored DB) so the consolidated
+    GET honors its 'never 500s' contract for the blackout slices too. (F6)"""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT block_id, production_line, start_ts, end_ts, reason"
+                " FROM line_blackout WHERE plant = %s"
+                " ORDER BY production_line NULLS FIRST, start_ts",
+                (plant,),
+            )
+            return [
+                {"id": r[0], "line": r[1], "start": _iso_utc(r[2]),
+                 "end": _iso_utc(r[3]), "reason": r[4]}
+                for r in cur.fetchall()
+            ]
+    except psycopg.errors.UndefinedTable:
+        return []
 
 
 def load_plant_blackouts(plant: str) -> list:
-    """Return a plant's plant-level blackouts. Own connection."""
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT block_id, start_ts, end_ts, reason"
-            " FROM plant_blackout WHERE plant = %s ORDER BY start_ts",
-            (plant,),
-        )
-        return [
-            {"id": r[0], "start": _iso_utc(r[1]), "end": _iso_utc(r[2]), "reason": r[3]}
-            for r in cur.fetchall()
-        ]
+    """Return a plant's plant-level blackouts. Own connection. Returns [] if the table
+    is absent (pre-migration/restored DB) — see load_line_blackouts. (F6)"""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT block_id, start_ts, end_ts, reason"
+                " FROM plant_blackout WHERE plant = %s ORDER BY start_ts",
+                (plant,),
+            )
+            return [
+                {"id": r[0], "start": _iso_utc(r[1]), "end": _iso_utc(r[2]), "reason": r[3]}
+                for r in cur.fetchall()
+            ]
+    except psycopg.errors.UndefinedTable:
+        return []
 
 
 def load_plant_calendar(plant: str) -> dict:

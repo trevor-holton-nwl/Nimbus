@@ -167,10 +167,29 @@ def translate_db_error(exc) -> dict:
 # =========================
 # QUERIES — read
 # =========================
+# Effective finish for an order, as one shared SQL fragment so every read path agrees.
+# The Gantt bar's WIDTH must always represent run_time (a 12h order = half a day wide),
+# so run_time is the source of truth for duration:
+#   1. run-time-derived end (effective start + run_time hours) takes precedence — even
+#      over a persisted scheduled_end — so bars, utilization, and alerts all reflect the
+#      order's actual run time in elapsed calendar hours. (Most stored scheduled ends
+#      hold a flat ~SAP-window duration that does NOT match run_time.) The order's START
+#      still comes from scheduled_start (see BASIC_START_DATE below), so the user's
+#      placement is preserved — only the width is normalized to run_time;
+#   2. else scheduled_end — used only when run_time is unknown (NULL);
+#   3. else the raw SAP finish, as a last-resort fallback (no zero-width bar).
+# Static SQL, no user input, so it is safe to interpolate.
+_EFF_END_SQL = (
+    "COALESCE("
+    "COALESCE(scheduled_start, basic_start_date) + (run_time * INTERVAL '1 hour'), "
+    "scheduled_end, "
+    "basic_finish_date)"
+)
+
 # Shared projection for the orders read path. Column aliases are the contract the
 # frontend/brain.py rely on; user scheduling overrides take precedence over the
 # SAP-source dates via COALESCE so callers only ever see one start/end per order.
-_ORDERS_SELECT = """
+_ORDERS_SELECT = f"""
     SELECT
         id,
         production_order      AS "PRODUCTION_ORDER",
@@ -179,7 +198,7 @@ _ORDERS_SELECT = """
         o.production_line     AS "PRODUCTION_LINE",
         o.plant               AS "PLANT",
         COALESCE(scheduled_start, basic_start_date) AS "BASIC_START_DATE",
-        COALESCE(scheduled_end,   basic_finish_date) AS "BASIC_FINISH_DATE",
+        {_EFF_END_SQL} AS "BASIC_FINISH_DATE",
         basic_start_date      AS "ORIGINAL_START_DATE",
         basic_finish_date     AS "ORIGINAL_END_DATE",
         (scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
@@ -343,10 +362,10 @@ def get_task_versions(ids: list[str]) -> list[dict]:
     """
     if not ids:
         return []
-    sql = """
+    sql = f"""
         SELECT id,
                COALESCE(scheduled_start, basic_start_date)  AS eff_start,
-               COALESCE(scheduled_end,   basic_finish_date) AS eff_end,
+               {_EFF_END_SQL} AS eff_end,
                xmin::text::bigint                           AS row_version
         FROM orders WHERE id = ANY(%s)
     """
@@ -454,10 +473,10 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT id,
                    COALESCE(scheduled_start, basic_start_date)  AS eff_start,
-                   COALESCE(scheduled_end,   basic_finish_date) AS eff_end,
+                   {_EFF_END_SQL} AS eff_end,
                    xmin::text::bigint                           AS row_version
             FROM orders WHERE id = ANY(%s)
             FOR UPDATE

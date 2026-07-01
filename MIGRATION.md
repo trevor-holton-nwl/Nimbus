@@ -340,3 +340,36 @@ Implications for a hosted plant pilot:
 - **Classification extraction performance.** Deriving `COLOR` / `FORM_SIZE` classification must be
   resolved **server-side in SAP** (in the extractor / CDS view), not by post-hoc parsing in NIMBUS —
   per-row classification on the NIMBUS side does not scale to the production order volume.
+
+---
+
+## Calendar/blackout persistence — deferred hardening (post-review, 2026-07-01)
+
+The calendar-persistence feature (`/plant-calendar/*`) shipped and a persistence-architect review
+remediated the correctness/integration findings inline. Three items are **deliberately deferred**
+here because they are at-scale/multi-user hardening or product decisions, not pilot-blocking bugs.
+
+- **Line-calendar optimistic concurrency (F9 — full fix).** Working-hours writes are last-writer-wins
+  (`ON CONFLICT DO UPDATE`, no `base_version`/`xmin` token), unlike the orders path. The shipped
+  mitigation only re-POSTs the lines a plant-hours clamp actually changed, so a concurrent
+  single-line edit that still fits the new plant window is not clobbered. The **complete** fix is to
+  carry the `line_calendar` row `xmin` on read and enforce it on write (mirror the orders
+  optimistic-concurrency protocol), returning a `stale` list the frontend reconciles. Required before
+  many schedulers edit the same plant's calendars concurrently.
+- **Subnetwork-aware calendar writes (F10).** `_resolve_subnetwork` resolves a plant→subnetwork
+  server-side and assumes plant codes are globally unique (`ensure_unique_plant` adds `UNIQUE(plant)`).
+  The `plants` PK is `(subnetwork, plant)`, so a plant code **can** legally recur across subnetworks at
+  the 50+ plant target. When that happens `ensure_unique_plant` skips the constraint (now logged
+  loudly + `admin_audit`), and every calendar/blackout POST for the ambiguous plant 400s (calendar
+  persistence silently disabled for it). Full fix: send `subnetwork` on the write path (the frontend
+  already knows it from `Store.masterData`) and scope `_resolve_subnetwork` / the UPDATE by it, instead
+  of relying on global plant uniqueness.
+- **Gantt bar-width vs. explicit resize (F12 — product decision).** `db.py._EFF_END_SQL` derives the
+  Gantt bar width as `scheduled_start + run_time` (intentional: bar width must always represent
+  run-time, since stored SAP `scheduled_end` durations rarely match). A user's **edge-resize** (drag
+  the right edge to a duration ≠ run_time) persists `scheduled_end` but silently reverts to a
+  run-time-wide bar on reload. Decide one of: (a) honor an explicit user resize (distinguish a
+  user-set `scheduled_end` from the SAP window and prefer it in the read), or (b) lock the timeline to
+  move-only so the UI never lets the user create a width the reload discards. Left intact pending the
+  ruling — do **not** silently change `_EFF_END_SQL` (it would revert the deliberate run-time
+  normalization for SAP orders).
