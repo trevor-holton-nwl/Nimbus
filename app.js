@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-02-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-02-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -6985,9 +6985,8 @@ const NIMBUS = (function () {
             Table._api.refreshCells({ rowNodes, columns: ['id'], force: true });
           }
         } else {
-          // Unscoped recompute: refresh all visible rows
+          // Unscoped recompute: refresh all visible rows (no redrawRows — would re-enter AG Grid's render cycle)
           Table._api.refreshCells({ columns: ['id'], force: true });
-          Table._api.redrawRows();
         }
         if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
           Table._api.onFilterChanged();
