@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-02-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-02-e'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -4170,16 +4170,17 @@ const NIMBUS = (function () {
       }
 
       // -------- Categorize alerts
+      const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
       const CAT_MAP = {
         overload:             'capacity',
-        closed:               'capacity',
         'near-capacity':      'capacity',
         overlap:              'conflicts',
-        blackout:             'conflicts',
-        'fixed-closed':       'exceptions',
-        'fixed-out-of-hours': 'exceptions',
+        blackout:             'calendar',
+        closed:               'calendar',
+        'fixed-closed':       'calendar',
+        'fixed-out-of-hours': 'calendar',
       };
-      const byCat = { capacity: [], conflicts: [], exceptions: [] };
+      const byCat = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
       for (const a of matches) (byCat[CAT_MAP[a.type] || 'exceptions']).push(a);
 
       const errCt  = matches.filter(a => a.sev === 'err').length;
@@ -4240,7 +4241,7 @@ const NIMBUS = (function () {
           ? `<button class="btn sm" data-act="goto" data-id="${esc(a.id)}">Go to</button>` : '';
 
         return `
-          <div class="ac-card ac-card-${a.sev}">
+          <div class="ac-card ${CALENDAR_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
             <div class="ac-card-headline">
               <span class="ac-card-sev">${sevIcon[a.sev] || '•'}</span>
               <span>${headline}</span>
@@ -4300,9 +4301,10 @@ const NIMBUS = (function () {
           </header>
 
           <div class="ac-body">
-            ${renderCategory('capacity',   'Capacity',   byCat.capacity)}
-            ${renderCategory('conflicts',  'Conflicts',  byCat.conflicts)}
-            ${renderCategory('exceptions', 'Exceptions', byCat.exceptions)}
+            ${renderCategory('capacity',   'Capacity',              byCat.capacity)}
+            ${renderCategory('conflicts',  'Scheduling Conflicts',  byCat.conflicts)}
+            ${renderCategory('calendar',   'Calendar Restrictions', byCat.calendar)}
+            ${renderCategory('exceptions', 'Other',                 byCat.exceptions)}
           </div>
 
           <footer class="ac-foot">
@@ -4348,13 +4350,16 @@ const NIMBUS = (function () {
     },
 
     _renderAlertRow(a) {
+      const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
       const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
       const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
         ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+      const isCalendar = CALENDAR_TYPES.has(a.type);
+      const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
       const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
       const override = (a.type === 'closed' || a.type === 'fixed-closed' || a.type === 'fixed-out-of-hours') && a.taskId != null;
-      return `<div class="alert-row alert-${a.sev}" data-id="${esc(a.id)}">` +
-        `<span class="alert-ico">${sevIcon[a.sev] || '•'}</span>` +
+      return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${esc(a.id)}">` +
+        `<span class="alert-ico">${ico}</span>` +
         `<span class="alert-msg">${esc(a.msg)}</span>` +
         `<div class="alert-actions">` +
           (a.taskId != null ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.focus('${esc(a.id)}')">${t('btn.go_to')}</button>` : '') +
@@ -6345,24 +6350,31 @@ const NIMBUS = (function () {
       // Alert-cell background items — inserted last so they sit on top of the horizon
       // and past-zone shading within .vis-background (DOM order = paint order).
       // Err severity wins over warn on the same cell.
+      const CALENDAR_ALERT_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
       const alertCellMap = {};
       for (const a of Store.alerts) {
         if (!a.line || !a.time) continue;
         if (lineFilterActive && !visibleSet.has(a.line)) continue;
         const dk  = Util.dayKey(a.time);
         const key = `${a.line}|${dk}`;
-        if (!alertCellMap[key]) alertCellMap[key] = { line: a.line, dayKey: dk, sev: a.sev };
-        if (a.sev === 'err') alertCellMap[key].sev = 'err';
+        if (!alertCellMap[key]) alertCellMap[key] = { line: a.line, dayKey: dk, sev: a.sev, hasConflictErr: false };
+        if (a.sev === 'err') {
+          alertCellMap[key].sev = 'err';
+          if (!CALENDAR_ALERT_TYPES.has(a.type)) alertCellMap[key].hasConflictErr = true;
+        }
       }
       for (const key of Object.keys(alertCellMap)) {
         const cell = alertCellMap[key];
+        const cls  = cell.sev !== 'err'  ? 'alertcell-warn'
+                   : cell.hasConflictErr ? 'alertcell-err'
+                   :                       'alertcell-calendar';
         const item = {
           id:    `alertcell-${cell.line}-${cell.dayKey}`,
           group: cell.line,
           start: new Date(cell.dayKey + 'T00:00:00'),
           end:   new Date(cell.dayKey + 'T23:59:59'),
           type:  'background',
-          className: cell.sev === 'err' ? 'alertcell-err' : 'alertcell-warn',
+          className: cls,
           editable: false,
         };
         desired.set(String(item.id), item);

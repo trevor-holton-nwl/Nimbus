@@ -510,6 +510,8 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .alert-row.sev-info .sev { background: var(--info); border-radius: 50%; }
 .alert-row.sev-info .sev::before { content: 'i'; font-style: italic; font-family: 'Times New Roman', serif; font-size: 11px; }
 .alert-row.flash-dim { opacity: 0.25; transition: opacity 0.3s ease-out; }
+.alert-row.alert-calendar { background: rgba(45, 95, 140, 0.06); }
+.alert-row.alert-calendar:hover { background: rgba(45, 95, 140, 0.11); }
 .alert-row .msg { flex: 1; }
 .alert-row .meta { font-size: 11px; color: var(--fg-mute); font-family: 'JetBrains Mono', monospace; }
 .alert-row .dismiss {
@@ -733,13 +735,14 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.blackout {
   background: repeating-linear-gradient(
     45deg,
-    rgba(177, 54, 42, 0.12) 0 8px,
-    rgba(177, 54, 42, 0.04) 8px 16px
+    rgba(110, 25, 10, 0.42) 0 8px,
+    transparent              8px 16px
   ) !important;
-  border-color: rgba(177, 54, 42, 0.3) !important;
+  border-color: rgba(177, 54, 42, 0.45) !important;
   color: var(--err) !important;
   font-style: italic;
-  font-size: 10px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
 }
 
 /* Alert-cell background highlights — render inside .vis-background, beneath
@@ -751,6 +754,12 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.alertcell-warn {
   background: rgba(220, 165, 60, 0.14) !important;
   border-color: transparent !important;
+}
+/* Calendar-restriction alert cells — blue tint signals "zone unavailable",
+   distinct from red scheduling-conflict cells. */
+.vis-item.alertcell-calendar {
+  background: rgba(45, 95, 140, 0.18) !important;
+  border: 1px solid rgba(45, 95, 140, 0.35) !important;
 }
 /* Past-time zone shading — light gray wash behind orders for elapsed time */
 .vis-item.past-zone {
@@ -912,8 +921,10 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
   border-radius: var(--r-md) 0 0 var(--r-md);
 }
-.ac-card-err::before  { background: var(--err); }
-.ac-card-warn::before { background: var(--warn); }
+.ac-card-err::before      { background: var(--err); }
+.ac-card-warn::before     { background: var(--warn); }
+.ac-card-calendar::before { background: var(--info); }
+.ac-card-calendar .ac-card-sev { color: var(--info); }
 
 .ac-card-headline {
   display: flex; align-items: baseline; gap: 8px;
@@ -4220,6 +4231,18 @@ body.dark .vis-labelset .vis-label,
 body.dark .vis-labelset .vis-label .vis-inner,
 body.dark .vis-labelset .vis-label * { color: #f5f2ea !important; }
 body.dark .vis-labelset .vis-label { background: var(--bg-elev) !important; }
+body.dark .vis-item.blackout {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(210, 60, 40, 0.38) 0 8px,
+    transparent              8px 16px
+  ) !important;
+  border-color: rgba(210, 60, 40, 0.50) !important;
+}
+body.dark .vis-item.alertcell-calendar {
+  background: rgba(74, 136, 200, 0.22) !important;
+  border: 1px solid rgba(74, 136, 200, 0.40) !important;
+}
 
 /* Flatpickr calendar dark overrides */
 body.dark .flatpickr-calendar {
