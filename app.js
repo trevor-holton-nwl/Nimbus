@@ -7562,6 +7562,7 @@ const NIMBUS = (function () {
     _open:      new Set(),
     _lineItems: [],
     _vl:        null,
+    _wired:     false,
 
     _renderPending: false,
 
@@ -7667,19 +7668,30 @@ const NIMBUS = (function () {
           mountEl:   el,
           buffer:    4,
         });
+      }
 
+      // Wire once on the persistent #hierarchy element (its innerHTML is
+      // cleared on plant deselect, but the node itself is never replaced).
+      // Expand/collapse is click-driven with _open as the single source of
+      // truth — the native <details> toggle is suppressed because its async
+      // `toggle` event (also queued when innerHTML inserts `details[open]`)
+      // races the VirtualList rebuild. To open a row programmatically,
+      // mutate Hierarchy._open and call render(); do not set det.open.
+      if (!Hierarchy._wired) {
+        Hierarchy._wired = true;
         el.addEventListener('click', e => {
+          const sum = e.target.closest('details.line-group > summary');
+          if (sum) {
+            e.preventDefault();
+            const name = sum.parentElement.dataset.line;
+            if (Hierarchy._open.has(name)) Hierarchy._open.delete(name);
+            else Hierarchy._open.add(name);
+            if (Hierarchy._vl) Hierarchy._vl.update(Hierarchy._lineItems);
+            return;
+          }
           const item = e.target.closest('.hier-item');
           if (item) Timeline.focus(item.dataset.id);
         });
-        el.addEventListener('toggle', e => {
-          const det = e.target.closest('details.line-group');
-          if (!det) return;
-          if (det.open) Hierarchy._open.add(det.dataset.line);
-          else          Hierarchy._open.delete(det.dataset.line);
-          det.querySelector('.line-expand').textContent = det.open ? '−' : '+';
-          Hierarchy._vl.update(Hierarchy._lineItems);
-        }, true);
       }
 
       Hierarchy._vl.update(Hierarchy._lineItems);
@@ -16889,16 +16901,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Freeze watchdog: a setInterval that records actual elapsed time. If the
     // gap is much larger than the schedule, the main thread was blocked.
+    // Caveat: hidden-tab timers are throttled (Chrome/Edge: ~1 tick/min under
+    // intensive throttling, and Windows window occlusion counts as hidden), so
+    // the in-tick hidden guard alone can't keep _lastTick fresh across a
+    // background stint — the visibilitychange reset below handles resume.
     let _lastTick = Date.now();
+    document.addEventListener('visibilitychange', () => { _lastTick = Date.now(); });
     setInterval(() => {
       const now   = Date.now();
-      // Skip while backgrounded — but still advance _lastTick so the first tick after the
-      // tab resumes measures only the post-resume gap and doesn't false-positive a "freeze".
+      // Belt-and-suspenders alongside the visibilitychange reset, in case a
+      // throttled tick races the event on resume.
       if (document.hidden) { _lastTick = now; return; }
       const drift = now - _lastTick;
       _lastTick = now;
       if (drift > 2000) {
-        ErrorLog.warn('freeze', `Main thread blocked ~${drift - 1000}ms`);
+        const blockedMs = drift - 1000;
+        if (drift > 15_000) {
+          // A real synchronous block this long is implausible (and would show up
+          // as a longtask entry) — this is system sleep / lock screen / residual
+          // background-tab throttling.
+          ErrorLog.info('freeze', `~${blockedMs}ms timer gap — likely system sleep or background-tab throttling, not a JS block`);
+        } else {
+          ErrorLog.warn('freeze', `Main thread blocked ~${blockedMs}ms`);
+        }
       }
     }, 1000);
 
