@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-02-f'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-02-g'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
