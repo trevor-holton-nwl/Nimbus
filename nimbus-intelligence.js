@@ -25,8 +25,7 @@
     return;
   }
 
-  const { Store, Toast, Modal, Alerts, Utilization, Engine, UndoStack,
-          Sandbox, Util, Config, Calendar, Timeline } = NIMBUS;
+  const { Store, Toast, Alerts, Util, UndoStack, Utilization } = NIMBUS;
 
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
@@ -431,11 +430,33 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const warnAlerts = alerts.filter(a => a.sev === 'warn');
       const unscheduled = tasks.filter(t => !t.start_date || !t.end_date);
 
-      // Peak utilization
+      // Peak utilization — use sync compute, but trigger worker refresh for next call
       let maxUtil = 0, overloadedLine = null;
       try {
         const now = Util.startOfDay(new Date());
-        const matrix = Utilization.computeMatrix(now, 7);
+        const startMs = now.getTime();
+        const days = 7;
+        const rev = Store._rev || 0;
+        const plant = Store.selectedPlant;
+
+        let matrix = null;
+        // Try cached worker result first, fall back to sync
+        if (Utilization._cache && Utilization._cache.key === `${startMs}|${days}|${rev}|${plant}`) {
+          matrix = Utilization._cache.matrix;
+        } else {
+          // Compute synchronously
+          matrix = Utilization.computeMatrix(now, days);
+          // Post async refresh to worker if available
+          if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
+            NIMBUS.Compute.utilization(startMs, days)
+              .then(({ matrix: m }) => {
+                if ((Store._rev || 0) !== rev) return; // stale
+                Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
+              })
+              .catch(() => {});
+          }
+        }
+
         for (const [line, lineData] of Object.entries(matrix)) {
           for (const row of Object.values(lineData)) {
             if (row.effectiveCapacity > 0) {
@@ -1366,7 +1387,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._badge = badge;
     },
 
-    _recompute() {
+    async _recompute() {
       // Skip when neither alerts nor task data changed since the last score (R21):
       // _recompute is wrapped onto EVERY Alerts.recompute and task mutation, and the
       // matrix build below is expensive. Store.alerts is reassigned on every change
@@ -1401,9 +1422,36 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
       alertPenalty = Math.min(50, Math.round(alertPenalty));
 
-      // Factor 2: utilization overload across horizon, cap 20
+      // Factor 2: utilization overload across horizon, cap 20 — use worker when available
       let utilPenalty = 0;
-      const matrix = Utilization.computeMatrix(horizonStart, Math.ceil(hMinutes / 1440));
+      let matrix = null;
+      const days = Math.ceil(hMinutes / 1440);
+      const plant = Store.selectedPlant;
+      const startMs = horizonStart.getTime();
+
+      if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
+        try {
+          const result = await NIMBUS.Compute.utilization(startMs, days);
+          matrix = result.matrix;
+          // Update the shared cache so subsequent sync calls can reuse it
+          Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix };
+        } catch {
+          // Fallback to synchronous compute
+          matrix = Utilization.computeMatrix(horizonStart, days);
+        }
+      } else {
+        // Worker not available; use sync compute and post for background refresh
+        matrix = Utilization.computeMatrix(horizonStart, days);
+        if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
+          NIMBUS.Compute.utilization(startMs, days)
+            .then(({ matrix: m }) => {
+              if ((Store._rev || 0) !== rev) return; // stale
+              Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
+            })
+            .catch(() => {});
+        }
+      }
+
       Object.values(matrix).forEach(lineData => {
         Object.values(lineData).forEach(row => {
           if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) utilPenalty += 1.5;
@@ -1455,7 +1503,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       ctx.shadowBlur = 0;
     },
 
-    showBreakdown() {
+    async showBreakdown() {
       const alerts = Store.alerts || [];
       const hMinutes = (Store.userSettings?.confidenceHorizonMinutes ?? 20160);
       const hDays    = Math.ceil(hMinutes / 1440);
@@ -1470,7 +1518,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       horizonAlerts.forEach(a => { alertPts += (a.sev === 'err' ? 5 : a.sev === 'warn' ? 2 : 0) * tw(a.time); });
       alertPts = Math.min(50, Math.round(alertPts));
 
-      const matrix = Utilization.computeMatrix(horizonStart, hDays);
+      // Fetch matrix using worker when available, fall back to sync
+      let matrix = null;
+      const startMs = horizonStart.getTime();
+      const rev = Store._rev || 0;
+      const plant = Store.selectedPlant;
+
+      if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
+        try {
+          const result = await NIMBUS.Compute.utilization(startMs, hDays);
+          matrix = result.matrix;
+          Utilization._cache = { key: `${startMs}|${hDays}|${rev}|${plant}`, matrix };
+        } catch {
+          // Fallback to sync
+          matrix = Utilization.computeMatrix(horizonStart, hDays);
+        }
+      } else {
+        matrix = Utilization.computeMatrix(horizonStart, hDays);
+      }
       const overloadedLines = {};
       Object.entries(matrix).forEach(([line, lineData]) => {
         let days = 0;

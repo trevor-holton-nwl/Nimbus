@@ -395,7 +395,7 @@ const NIMBUS = (function () {
             if (p > peak) peak = p;
           }
         }
-      } catch (_) { /* matrix unavailable — leave peak at 0 */ }
+      } catch { /* matrix unavailable — leave peak at 0 */ }
       return {
         changeovers,
         span_h: Math.round(span_h * 10) / 10,
@@ -413,6 +413,13 @@ const NIMBUS = (function () {
       let str = dict[key] ?? en[key] ?? key;
       if (vars) str = str.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
       return str;
+    },
+
+    // Required DOM element getter — throws if element not found.
+    reqEl(id) {
+      const el = document.getElementById(id);
+      if (!el) throw new Error(`required DOM element missing: ${id}`);
+      return el;
     },
   };
 
@@ -983,8 +990,21 @@ const NIMBUS = (function () {
 
     /* ----- alerts ---------------------------------------------------------- */
     setAlerts(alerts, source) {
+      // Compute which task IDs changed alert membership for incremental table updates.
+      const oldAlerts = this._state.alerts || [];
+      const oldTaskIds = new Set(oldAlerts.map(a => a.taskId).filter(id => id != null));
+      const newTaskIds = new Set(alerts.map(a => a.taskId).filter(id => id != null));
+      const changedIds = [];
+      // Tasks that had alerts before but don't now
+      for (const id of oldTaskIds) {
+        if (!newTaskIds.has(id)) changedIds.push(id);
+      }
+      // Tasks that have alerts now but didn't before
+      for (const id of newTaskIds) {
+        if (!oldTaskIds.has(id)) changedIds.push(id);
+      }
       this._state.alerts = alerts;
-      this.emit({ type: 'alerts:change', source });
+      this.emit({ type: 'alerts:change', source, changedIds: changedIds.length ? changedIds : undefined });
     },
     dismissAlert(alertId, source) {
       const next = this._state.alerts.filter(a => a.id !== alertId);
@@ -1261,8 +1281,7 @@ const NIMBUS = (function () {
      *  available on `line`. Returns the starting Date (snapped). */
     nextAvailable(line, from, durationMs) {
       let cur = Util.snap(new Date(from));
-      const STEP = Config.STEP_MS;
-      const MAX_ITERS = 24 * 60 * 30 * 4;  // 30 days of 15-min steps — safety cap
+      const MAX_ITERS = 90 * 24;  // 90-day explicit bound: max day-jumps
       let iter = 0;
 
       while (iter++ < MAX_ITERS) {
@@ -1293,6 +1312,9 @@ const NIMBUS = (function () {
         }
         return cur;
       }
+      // Loop exhausted: no feasible slot found within 90 days. Log for diagnostics.
+      const plant = Store.getPlantForLine(line);
+      ErrorLog.error('calendar', `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`);
       // fallback: return the original from; caller must handle
       return Util.snap(new Date(from));
     },
@@ -1485,6 +1507,10 @@ const NIMBUS = (function () {
 
     openBlockModal() {
       const lineSel = document.getElementById('blk-line');
+      if (!lineSel) { ErrorLog.error('ui', 'required DOM element missing: blk-line'); return; }
+      const reasonEl = document.getElementById('blk-reason');
+      if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: blk-reason'); return; }
+
       lineSel.innerHTML = `<option value="">${t('ui.all_lines_filter')}</option>` +
         Calendar._getLines().map(l => `<option value="${l}">${l}</option>`).join('');
 
@@ -1496,7 +1522,7 @@ const NIMBUS = (function () {
       }
       Calendar._fpBlkStart.setDate(now, false);
       Calendar._fpBlkEnd.setDate(plus1, false);
-      document.getElementById('blk-reason').value = '';
+      reasonEl.value = '';
       Modal.open('modal-block');
     },
 
@@ -1889,6 +1915,9 @@ const NIMBUS = (function () {
     },
 
     openBlockModal() {
+      const reasonEl = document.getElementById('plant-blk-reason');
+      if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: plant-blk-reason'); return; }
+
       const now = new Date(); now.setMinutes(0, 0, 0);
       const plus1 = new Date(now.getTime() + Config.MS_HOUR);
       if (!Plant._fpBlkStart) {
@@ -1897,14 +1926,19 @@ const NIMBUS = (function () {
       }
       Plant._fpBlkStart.setDate(now, false);
       Plant._fpBlkEnd.setDate(plus1, false);
-      document.getElementById('plant-blk-reason').value = '';
+      reasonEl.value = '';
       Modal.open('modal-plant-block');
     },
 
     savePlantBlockFromModal() {
-      const start  = Util.parseDate(document.getElementById('plant-blk-start').value);
-      const end    = Util.parseDate(document.getElementById('plant-blk-end').value);
-      const reason = document.getElementById('plant-blk-reason').value.trim() || t('ui.plant_blackout_default');
+      const startEl = document.getElementById('plant-blk-start');
+      const endEl = document.getElementById('plant-blk-end');
+      const reasonEl = document.getElementById('plant-blk-reason');
+      if (!startEl || !endEl || !reasonEl) { ErrorLog.error('ui', 'required DOM elements missing for plant blackout modal'); return; }
+
+      const start  = Util.parseDate(startEl.value);
+      const end    = Util.parseDate(endEl.value);
+      const reason = reasonEl.value.trim() || t('ui.plant_blackout_default');
       if (!start || !end) { Toast.show(t('toast.please_set_start_end'), 'error'); return; }
       if (end <= start)   { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
       if (!Store.selectedPlant) { Toast.show(t('toast.select_plant_first'), 'warn'); return; }
@@ -2339,6 +2373,10 @@ const NIMBUS = (function () {
 
     openBlockModal(line) {
       const lineSel = document.getElementById('lines-blk-line');
+      if (!lineSel) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-line'); return; }
+      const reasonEl = document.getElementById('lines-blk-reason');
+      if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-reason'); return; }
+
       lineSel.innerHTML = Calendar._getLines()
         .map(l => `<option value="${l}"${l === line ? ' selected' : ''}>${l}</option>`).join('');
       if (line) lineSel.value = line;
@@ -2351,15 +2389,21 @@ const NIMBUS = (function () {
       }
       ProdLines._fpBlkStart.setDate(now, false);
       ProdLines._fpBlkEnd.setDate(plus1, false);
-      document.getElementById('lines-blk-reason').value = '';
+      reasonEl.value = '';
       Modal.open('modal-lines-block');
     },
 
     saveBlockFromModal() {
-      const line   = document.getElementById('lines-blk-line').value;
-      const start  = Util.parseDate(document.getElementById('lines-blk-start').value);
-      const end    = Util.parseDate(document.getElementById('lines-blk-end').value);
-      const reason = document.getElementById('lines-blk-reason').value.trim() || t('ui.blackouts_label', {plural: ''});
+      const lineEl = document.getElementById('lines-blk-line');
+      const startEl = document.getElementById('lines-blk-start');
+      const endEl = document.getElementById('lines-blk-end');
+      const reasonEl = document.getElementById('lines-blk-reason');
+      if (!lineEl || !startEl || !endEl || !reasonEl) { ErrorLog.error('ui', 'required DOM elements missing for production lines blackout modal'); return; }
+
+      const line   = lineEl.value;
+      const start  = Util.parseDate(startEl.value);
+      const end    = Util.parseDate(endEl.value);
+      const reason = reasonEl.value.trim() || t('ui.blackouts_label', {plural: ''});
       if (!line)          { Toast.show(t('toast.select_a_line'), 'error'); return; }
       if (!start || !end) { Toast.show(t('toast.please_set_start_end'), 'error'); return; }
       if (end <= start)   { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
@@ -3657,6 +3701,7 @@ const NIMBUS = (function () {
   const Compute = (() => {
     let _worker = null;
     let _dead   = false;
+    let _crashCount = 0;
     let _seq    = 0;
     const _pending = new Map(); // id → { resolve, reject }
 
@@ -3687,24 +3732,30 @@ const NIMBUS = (function () {
         };
         _worker.onerror = (ev) => {
           // Build {message, filename, lineno, colno} from the ErrorEvent and log
-          // BEFORE flipping _dead (the fallback to main-thread compute is permanent
-          // for the session, so this is the only record of why the worker died).
+          // BEFORE deciding whether to disable the worker (the only record of why
+          // the worker crashed).
           const detail = {
             message:  ev?.message || 'worker error',
             filename: ev?.filename || '',
             lineno:   ev?.lineno ?? null,
             colno:    ev?.colno ?? null,
           };
+          _crashCount++;
+          const logFn = _crashCount === 1 ? 'warn' : 'error';
           try {
-            ErrorLog.error('worker', `worker crashed: ${detail.message}`, detail,
+            ErrorLog[logFn]('worker', `worker crashed (attempt ${_crashCount}): ${detail.message}`, detail,
               { errorCode: 'worker.compute' });
           } catch {}
           for (const p of _pending.values()) p.reject(new Error('worker error'));
           _pending.clear();
           _worker = null;
-          _dead   = true;
+          if (_crashCount >= 2) {
+            // Permanent failure: give up on the worker for the session.
+            _dead = true;
+          }
+          // Otherwise: allow retry on next _init() call (bounded at 1 retry + permanent fail on 2nd crash).
         };
-      } catch (e) {
+      } catch {
         _dead = true;
         return null;
       }
@@ -4369,7 +4420,7 @@ const NIMBUS = (function () {
         const newStart = Calendar.nextAvailable(line, searchFrom, dur);
         const newEnd   = new Date(newStart.getTime() + dur);
         Store.updateTask(task.id, { start_date: newStart, end_date: newEnd }, 'alerts');
-        try { Engine.autoReflow(task.id); } catch (e) {}
+        try { Engine.autoReflow(task.id); } catch {}
         UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
         Alerts.dismiss(alertId);
         Toast.show(t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
@@ -5404,7 +5455,7 @@ const NIMBUS = (function () {
               wheelUsed = true;
             }
           }
-        } catch (_) {
+        } catch {
           // No wheel reachable — continue without
         }
       }
@@ -6493,7 +6544,6 @@ const NIMBUS = (function () {
     init() {
       const el = document.getElementById('ag-grid');
       if (!el || typeof agGrid === 'undefined') return;
-      const lines = Table._getLineOptions();
       const gridOptions = {
         rowData: Store.tasksForSelectedPlant(),
         getRowId: p => String(p.data.id),
@@ -6520,7 +6570,7 @@ const NIMBUS = (function () {
             flex: 0,
             pinned: 'left',
             lockPosition: true,
-            suppressMenu: true,
+            suppressHeaderMenuButton: true,
             sortable: false,
             filter: false,
             resizable: false
@@ -6586,7 +6636,7 @@ const NIMBUS = (function () {
             }
           },
           { headerName: '📝', field: 'notes', width: 54, minWidth: 54, maxWidth: 54, flex: 0,
-            sortable: false, filter: false, editable: false, suppressMenu: true,
+            sortable: false, filter: false, editable: false, suppressHeaderMenuButton: true,
             cellRenderer: p => {
               const has = p.value != null && String(p.value).trim().length > 0;
               return `<button class="nb-note-btn${has ? ' nb-note-has' : ''}"
@@ -6768,7 +6818,6 @@ const NIMBUS = (function () {
       if (!drop) return;
       const today = Util.startOfDay(new Date());
       const tomorrow = new Date(today.getTime() + Config.MS_DAY);
-      const next7 = new Date(today.getTime() + 7 * Config.MS_DAY);
       const cur = Table._chipFilters.dateKey;
       // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
       // longer ranges set status='atrisk-or-window' via dedicated keys.
@@ -6924,8 +6973,22 @@ const NIMBUS = (function () {
         Table._api.applyTransaction({ update: updated });
         if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
       } else if (evt.type === 'alerts:change') {
-        Table._api.refreshCells({ columns: ['id'], force: true });
-        Table._api.redrawRows();
+        // Incremental update: only refresh rows for task IDs that changed alert membership.
+        // Fall back to full refresh if changedIds is absent (unscoped recompute).
+        if (evt.changedIds && evt.changedIds.length) {
+          const rowNodes = [];
+          for (const taskId of evt.changedIds) {
+            const rowNode = Table._api.getRowNode(String(taskId));
+            if (rowNode) rowNodes.push(rowNode);
+          }
+          if (rowNodes.length) {
+            Table._api.refreshCells({ rowNodes, columns: ['id'], force: true });
+          }
+        } else {
+          // Unscoped recompute: refresh all visible rows
+          Table._api.refreshCells({ columns: ['id'], force: true });
+          Table._api.redrawRows();
+        }
         if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
           Table._api.onFilterChanged();
         }
@@ -7044,16 +7107,20 @@ const NIMBUS = (function () {
     _openOverrideModalForId(id) {
       const t = Store.tasks[id];
       if (!t) return;
+      const orderEl = document.getElementById('ovr-order');
+      const lineEl = document.getElementById('ovr-line');
+      const fixEl = document.getElementById('ovr-fix');
+      if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+
       Table._selectedId = id;
-      document.getElementById('ovr-order').textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.PRODUCTION_LINE || '—'}`;
+      orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.PRODUCTION_LINE || '—'}`;
       if (!Table._fpOvrStart) {
         Table._fpOvrStart = Util.fpDatetime('#ovr-start');
       }
       Table._fpOvrStart.setDate(t.start_date, false);
-      const sel = document.getElementById('ovr-line');
       const lines = Table._getLineOptions();
-      sel.innerHTML = lines.map(l => `<option value="${l}" ${l === t.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('');
-      document.getElementById('ovr-fix').checked = !!t.fixed;
+      lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('');
+      fixEl.checked = !!t.fixed;
       Modal.open('modal-override');
     },
 
@@ -7062,9 +7129,14 @@ const NIMBUS = (function () {
       if (!id) return;
       const t = Store.tasks[id];
       if (!t) return;
-      const newStart = Util.parseDate(document.getElementById('ovr-start').value);
-      const newLine  = document.getElementById('ovr-line').value;
-      const alsoFix  = document.getElementById('ovr-fix').checked;
+      const startEl = document.getElementById('ovr-start');
+      const lineEl = document.getElementById('ovr-line');
+      const fixEl = document.getElementById('ovr-fix');
+      if (!startEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+
+      const newStart = Util.parseDate(startEl.value);
+      const newLine  = lineEl.value;
+      const alsoFix  = fixEl.checked;
       if (!newStart) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
 
       const dur = Util.runHours(t) * Config.MS_HOUR;
@@ -7076,7 +7148,7 @@ const NIMBUS = (function () {
         end_date: newEnd,
         PRODUCTION_LINE: newLine
       }, 'table');
-      Table._api.applyTransaction({ update: [Store.tasks[id]] });
+      if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
       if (alsoFix !== Store.isFixed(id)) Store.setFixed([id], alsoFix, 'table');
 
       // Override explicitly does NOT auto-reflow (user's manual choice),
@@ -7101,7 +7173,6 @@ const NIMBUS = (function () {
 
       const rows = rel.map(a => {
         const icon  = a.sev === 'err' ? '🔴' : '🟡';
-        const color = a.sev === 'err' ? 'var(--err)' : 'var(--warn)';
         const date  = a.time ? a.time.toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '';
         return `
           <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
@@ -7177,8 +7248,10 @@ const NIMBUS = (function () {
       });
 
       const ta = document.getElementById('nb-note-ta');
+      const cnt = document.getElementById('nb-note-cnt');
+      if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
       ta.addEventListener('input', () => {
-        document.getElementById('nb-note-cnt').textContent = ta.value.length + '/500';
+        cnt.textContent = ta.value.length + '/500';
       });
       ta.focus();
       ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -7193,7 +7266,8 @@ const NIMBUS = (function () {
 
     _saveNotePopover(id) {
       const ta = document.getElementById('nb-note-ta');
-      if (!ta) return;
+      if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
+      if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
       const val = ta.value.trim().slice(0, 500) || null;
       Store.updateTask(id, { notes: val }, 'table');
       Inspector._persistNote(id, val);
@@ -8852,13 +8926,13 @@ const NIMBUS = (function () {
     },
 
     _refreshColorBtn() {
-      const btn = document.getElementById('gantt-flt-color-btn');
       const lbl = document.getElementById('gantt-flt-color-label');
       if (!lbl) return;
       const n = GanttFilter._selectedColors.size;
       lbl.textContent = n === 0 ? t('ui.all_colors')
         : n === 1 ? [...GanttFilter._selectedColors][0]
         : t('ui.n_colors_filter', { count: n });
+      const btn = document.getElementById('gantt-flt-color-btn');
       if (btn) btn.classList.toggle('active', n > 0);
     },
 
@@ -8920,7 +8994,6 @@ const NIMBUS = (function () {
       const badge = document.getElementById('flt-badge');
       const bar   = document.getElementById('gantt-filterbar');
 
-      let dimCount = 0;
       const updates = [];
       const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
       for (const task of scoped) {
@@ -8929,7 +9002,6 @@ const NIMBUS = (function () {
         const item = Timeline._items.get(id);
         if (!item) continue;
         const shouldDim = active && !GanttFilter.matches(task);
-        if (shouldDim) dimCount++;
         const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
         const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
         if (newClass !== item.className) updates.push({ id, className: newClass });
@@ -9013,7 +9085,6 @@ const NIMBUS = (function () {
       const tl  = Timeline._tl;
       const dom = document.getElementById('vis-timeline');
       if (!dom) return;
-      const rect = dom.getBoundingClientRect();
 
       // Compute critical path lengths for each task (longest chain to it)
       const chainLen = {};
@@ -9436,7 +9507,7 @@ const NIMBUS = (function () {
           // the schedule partially mutated otherwise, with no undo path.
           if (snapshot) {
             try { UndoStack.restoreTasks(snapshot); Alerts.scheduleRecompute(); }
-            catch (e2) { ErrorLog.error('optimize-preview', `revert failed: ${e2?.message || e2}`); }
+            catch { ErrorLog.error('optimize-preview', `revert failed`); }
           }
           OptimizerPreview._snapshot = null;
           if (body) {
@@ -9499,12 +9570,12 @@ const NIMBUS = (function () {
       // cards (span, peak utilization) count decreases as wins but treat
       // increases as neutral — they shouldn't trigger a regression verdict.
       const directional = cards.filter(c => c.lowerIsBetter === true || c.lowerIsBetter === 'soft');
-      let better = 0, worse = 0, neutral = 0;
+      let better = 0, worse = 0;
       for (const c of directional) {
         const d = (post[c.k] ?? 0) - (pre[c.k] ?? 0);
-        if (Math.abs(d) < 0.05) { neutral++; continue; }
+        if (Math.abs(d) < 0.05) { continue; }
         if (c.lowerIsBetter === 'soft') {
-          if (d < 0) better++; else neutral++;
+          if (d < 0) better++;
         } else if (d < 0) better++;
         else worse++;
       }
@@ -10334,7 +10405,7 @@ const NIMBUS = (function () {
 
         e.stopPropagation();
         e.preventDefault();
-        try { container.setPointerCapture(e.pointerId); } catch (_) {}
+        try { container.setPointerCapture(e.pointerId); } catch {}
 
         const overlay = document.createElement('div');
         overlay.className = 'nimbus-marquee';
@@ -10380,7 +10451,7 @@ const NIMBUS = (function () {
       const onPointerUp = (e) => {
         const s = Interaction._marquee;
         if (!s || e.pointerId !== s.pointerId) return;
-        try { container.releasePointerCapture(s.pointerId); } catch (_) {}
+        try { container.releasePointerCapture(s.pointerId); } catch {}
         s.overlay.remove();
         Interaction._marquee = null;
         cancelAnimationFrame(Interaction._marqueeRAF);
@@ -10965,7 +11036,7 @@ const NIMBUS = (function () {
             try {
               const rawCache = localStorage.getItem(Config.LS_KEY);
               if (rawCache) Persistence._restoreNonTaskState(JSON.parse(rawCache));
-            } catch (_) {}
+            } catch {}
             // Fetch master-data so orderless plants/lines appear in Master Data tabs,
             // THEN hydrate calendars/blackouts from the backend (authoritative).
             Promise.all([
@@ -11026,7 +11097,7 @@ const NIMBUS = (function () {
               cacheData = JSON.parse(rawCache);
               Persistence._restoreNonTaskState(cacheData);
             }
-          } catch(_) {}
+          } catch {}
 
           // Sync plant from backend task data BEFORE setTasks so Timeline.rebuild()
           // called synchronously by the tasks:bulk subscriber sees correct plant assignments
@@ -11047,7 +11118,7 @@ const NIMBUS = (function () {
           // SAP ships date-only starts (00:00) — snap each order to the first
           // feasible working slot on its line so ingest doesn't fire false
           // out-of-hours alerts and the variance baseline reflects reality.
-          Persistence._snapToWorkingHours(tasks);
+          Persistence._snapToWorkingHours(tasks, plant);
 
           const setResult = Store.setTasks(tasks, 'persistence');
           stats.dedup_collisions = setResult.collisions;
@@ -11208,89 +11279,105 @@ const NIMBUS = (function () {
     // orders sequence after each other instead of all stacking at 07:00. Reset
     // `original_*_date` to the snapped instant so the variance badge baseline
     // reflects the feasible plan, not the midnight artifact.
-    _snapToWorkingHours(tasks) {
-      const byLine = new Map();
-      for (const t of tasks) {
-        const line = t.PRODUCTION_LINE;
-        if (!line) continue;
-        if (!byLine.has(line)) byLine.set(line, []);
-        byLine.get(line).push(t);
-      }
-
-      let snappedCount = 0;
-      for (const [line, group] of byLine) {
-        group.sort((a, b) => {
-          const ad = a.BASIC_START_DATE instanceof Date ? a.BASIC_START_DATE : a.start_date;
-          const bd = b.BASIC_START_DATE instanceof Date ? b.BASIC_START_DATE : b.start_date;
-          const at = ad?.getTime ? ad.getTime() : 0;
-          const bt = bd?.getTime ? bd.getTime() : 0;
-          return at - bt;
-        });
-
-        let cursor = null;
-        for (const t of group) {
-          if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
-          const durationMs = t.end_date.getTime() - t.start_date.getTime();
-          if (durationMs <= 0) continue;
-
-          if (t.fixed) {
-            if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-            continue;
-          }
-
-          // Backend has a scheduled_start/end persisted for this task — the user
-          // owns its position. Never re-snap on load; alerts will flag any
-          // blackout overlap so the user can resolve it deliberately.
-          if (t.user_scheduled) {
-            if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-            continue;
-          }
-
-          // User has moved or resized this task since ingest — preserve the deliberate
-          // placement (including intentional overlaps and duration changes) and just
-          // advance the cursor so SAP-raw neighbors still sequence after it.
-          const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
-          // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
-          // legitimately differs from original_end_date (the SAP due date). Detect a real
-          // resize by comparing against the run-time-implied end from the original start,
-          // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
-          const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
-          const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
-          const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
-          if (startMoved || endMoved) {
-            if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-            continue;
-          }
-
-          // No original baseline on record AND start is already non-midnight → task was
-          // previously snapped or user-placed (e.g. backend returned a user-saved time
-          // but doesn't persist original_start_date). Preserve it; Alerts will flag overlaps.
-          const isMidnight = t.start_date.getHours() === 0 &&
-                             t.start_date.getMinutes() === 0 &&
-                             t.start_date.getSeconds() === 0;
-          if (!oStart && !isMidnight) {
-            if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-            continue;
-          }
-
-          const from = (cursor && cursor > t.start_date) ? cursor : t.start_date;
-          const snappedStart = Calendar.nextAvailable(line, from, durationMs);
-          if (!(snappedStart instanceof Date)) continue;
-          const snappedEnd = new Date(snappedStart.getTime() + durationMs);
-
-          if (snappedStart.getTime() !== t.start_date.getTime()) snappedCount++;
-          t.start_date = snappedStart;
-          t.end_date   = snappedEnd;
-          t.original_start_date = new Date(snappedStart);
-          t.original_end_date   = new Date(snappedEnd);
-          cursor = new Date(snappedEnd);
+    // Returns array of task IDs that actually moved (start/end changed).
+    _snapToWorkingHours(tasks, plant) {
+      const movedIds = [];
+      Calendar._beginRun(plant);
+      try {
+        const byLine = new Map();
+        for (const t of tasks) {
+          const line = t.PRODUCTION_LINE;
+          if (!line) continue;
+          if (!byLine.has(line)) byLine.set(line, []);
+          byLine.get(line).push(t);
         }
-      }
 
-      if (snappedCount) {
-        ErrorLog.info('persistence',
-          `Snapped ${snappedCount} ingested order(s) to first available working slot per line`);
+        let snappedCount = 0;
+        for (const [line, group] of byLine) {
+          group.sort((a, b) => {
+            const ad = a.BASIC_START_DATE instanceof Date ? a.BASIC_START_DATE : a.start_date;
+            const bd = b.BASIC_START_DATE instanceof Date ? b.BASIC_START_DATE : b.start_date;
+            const at = ad?.getTime ? ad.getTime() : 0;
+            const bt = bd?.getTime ? bd.getTime() : 0;
+            return at - bt;
+          });
+
+          let cursor = null;
+          for (const t of group) {
+            if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
+            const durationMs = t.end_date.getTime() - t.start_date.getTime();
+            if (durationMs <= 0) continue;
+
+            if (t.fixed) {
+              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
+              continue;
+            }
+
+            // Backend has a scheduled_start/end persisted for this task — the user
+            // owns its position. Never re-snap on load; alerts will flag any
+            // blackout overlap so the user can resolve it deliberately.
+            if (t.user_scheduled) {
+              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
+              continue;
+            }
+
+            // User has moved or resized this task since ingest — preserve the deliberate
+            // placement (including intentional overlaps and duration changes) and just
+            // advance the cursor so SAP-raw neighbors still sequence after it.
+            const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
+            // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
+            // legitimately differs from original_end_date (the SAP due date). Detect a real
+            // resize by comparing against the run-time-implied end from the original start,
+            // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
+            const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
+            const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
+            const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
+            if (startMoved || endMoved) {
+              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
+              continue;
+            }
+
+            // No original baseline on record AND start is already non-midnight → task was
+            // previously snapped or user-placed (e.g. backend returned a user-saved time
+            // but doesn't persist original_start_date). Preserve it; Alerts will flag overlaps.
+            const isMidnight = t.start_date.getHours() === 0 &&
+                               t.start_date.getMinutes() === 0 &&
+                               t.start_date.getSeconds() === 0;
+            if (!oStart && !isMidnight) {
+              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
+              continue;
+            }
+
+            const from = (cursor && cursor > t.start_date) ? cursor : t.start_date;
+            const snappedStart = Calendar.nextAvailable(line, from, durationMs);
+            if (!(snappedStart instanceof Date)) continue;
+            const snappedEnd = new Date(snappedStart.getTime() + durationMs);
+
+            const oldStartMs = t.start_date.getTime();
+            const oldEndMs = t.end_date.getTime();
+            const newStartMs = snappedStart.getTime();
+            const newEndMs = snappedEnd.getTime();
+
+            if (newStartMs !== oldStartMs || newEndMs !== oldEndMs) {
+              snappedCount++;
+              movedIds.push(t.id);
+            }
+            t.start_date = snappedStart;
+            t.end_date   = snappedEnd;
+            t.original_start_date = new Date(snappedStart);
+            t.original_end_date   = new Date(snappedEnd);
+            cursor = new Date(snappedEnd);
+          }
+        }
+
+        if (snappedCount) {
+          ErrorLog.info('persistence',
+            `Snapped ${snappedCount} ingested order(s) to first available working slot per line`);
+        }
+      } finally {
+        Calendar._endRun();
       }
+      return movedIds;
     },
 
     _loadCache() {
@@ -11301,7 +11388,7 @@ const NIMBUS = (function () {
 
       let data;
       try { data = JSON.parse(raw); }
-      catch (e) {
+      catch {
         ErrorLog.error('persistence', `Cache JSON parse failed (${raw.length} bytes) — quarantining and clearing`);
         Persistence._quarantineCache(raw);
         try { localStorage.removeItem(Config.LS_KEY); } catch {}
@@ -11613,7 +11700,7 @@ saveAll() {
         const raw = localStorage.getItem(Config.LS_KEY);
         if (!raw) return null;
         return JSON.parse(raw)?.selectedPlant || null;
-      } catch (_) { return null; }
+      } catch { return null; }
     },
 
     /** Wipe the localStorage cache (user-initiated from the Log drawer). */
@@ -11732,7 +11819,7 @@ saveAll() {
         if (!saved) return;
         const known = Store.knownPlants();
         Store.setSelectedPlant(known.includes(saved) ? saved : null, 'restore');
-      } catch (_) {
+      } catch {
         // ignore — selectedPlant restore is best-effort
       }
     },
@@ -11856,9 +11943,13 @@ saveAll() {
           // orders (user moves are startMoved-skipped) and must not drop pending saves.
           const dirtySnapshot  = new Set(Persistence._dirtyIds);
           const forceSnapshot  = new Set(Persistence._forceIds);
-          Persistence._snapToWorkingHours(Store.tasksArr);
+          const movedIds = Persistence._snapToWorkingHours(Store.tasksArr, plant);
           Persistence._saveCache();
-          Store.emit({ type: 'tasks:bulk', source: 'calendar-resnap' });
+          // Only emit and re-render if tasks actually moved; idempotent when hours haven't
+          // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
+          if (movedIds.length) {
+            Store.emit({ type: 'tasks:bulkUpdate', ids: movedIds, source: 'calendar-resnap' });
+          }
           for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
           for (const id of forceSnapshot) Persistence._forceIds.add(id);
         } catch (e) {
@@ -12204,7 +12295,7 @@ saveAll() {
       });
 
       Store.subscribe(evt => {
-        if (evt.type === 'tasks:bulk') {
+        if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
           const panel = document.getElementById('admin-tab');
           if (panel?.classList.contains('active')) {
             // Defer so Persistence._lastLoad stats are fully written before rendering.
@@ -14563,7 +14654,7 @@ saveAll() {
         if (evt.type === 'plant:selected') {
           if (evt.source !== 'header') PlantSelector._reflectSelection();
         }
-        if (evt.type === 'tasks:bulk' || evt.type === 'lineSettings:change') {
+        if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'lineSettings:change') {
           PlantSelector._refreshOptions();
         }
       }, 'PlantSelector');
@@ -16770,7 +16861,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }).observe({ entryTypes: ['longtask'] });
       }
-    } catch (e) { /* longtask API not supported */ }
+    } catch { /* longtask API not supported */ }
 
     setInterval(() => {
       if (document.hidden) return; // skip heap sampling while the tab is backgrounded

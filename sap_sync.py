@@ -24,15 +24,15 @@ CREDENTIALS: connection secrets live only in `source_params` JSONB and are
 NEVER logged. The error path records the exception class/message but the
 connector implementations must not echo credentials into it.
 """
+import contextlib
 import logging
+from typing import Callable
 
-import psycopg
-from psycopg import sql
 from psycopg.types.json import Jsonb
 
 # Shared pool + helpers from the existing data layer. Reusing db._str_id keeps
 # ALPHA / leading-zero handling identical to the Excel ingest path.
-from db import _pool, _str_id, make_id
+from db import _pool, _str_id
 import db
 import master_data as md
 
@@ -184,7 +184,7 @@ def _t_bool_x(value):
     return s in ("X", "TRUE", "T", "1", "Y", "YES")
 
 
-TRANSFORMS: dict[str, callable] = {
+TRANSFORMS: dict[str, Callable] = {
     "none":        _t_none,
     "alpha":       _t_alpha,
     "strip_zeros": _t_strip_zeros,
@@ -363,17 +363,13 @@ class ODataConnector(SapConnector):
 
     def test_connection(self) -> dict:
         # Lazy import — only touched when a live connector is implemented.
-        try:
+        with contextlib.suppress(ImportError):
             import httpx  # noqa: F401  (lazy; not used in the skeleton)
-        except Exception:
-            pass
         return {"ok": False, "detail": "stub: odata not configured"}
 
     def extract(self, object_key: str, since=None) -> list[dict]:
-        try:
+        with contextlib.suppress(ImportError):
             import httpx  # noqa: F401
-        except Exception:
-            pass
         return []
 
 
@@ -384,17 +380,13 @@ class RfcConnector(SapConnector):
     transport = "rfc"
 
     def test_connection(self) -> dict:
-        try:
+        with contextlib.suppress(ImportError):
             import pyrfc  # noqa: F401  (lazy; not used in the skeleton)
-        except Exception:
-            pass
         return {"ok": False, "detail": "stub: rfc not configured"}
 
     def extract(self, object_key: str, since=None) -> list[dict]:
-        try:
+        with contextlib.suppress(ImportError):
             import pyrfc  # noqa: F401
-        except Exception:
-            pass
         return []
 
 

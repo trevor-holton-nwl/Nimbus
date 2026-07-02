@@ -376,7 +376,7 @@ async def _unhandled_handler(request: Request, exc: Exception):
 # ENGINE
 # =========================
 # Global diagnostics bucket populated on every load
-DIAGNOSTICS = {
+DIAGNOSTICS: dict = {
     "loaded_at": None,
     "load_ms": None,
     "source_file": None,

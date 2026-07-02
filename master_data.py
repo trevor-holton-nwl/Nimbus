@@ -902,7 +902,7 @@ def _clean_work_hours(work_hours) -> dict:
         try:
             day = int(k)
         except (TypeError, ValueError):
-            raise ValueError(f"work_hours key {k!r} is not a day 0..6")
+            raise ValueError(f"work_hours key {k!r} is not a day 0..6") from None
         if not (0 <= day <= 6):
             raise ValueError(f"work_hours day out of range: {k!r}")
         if v is None:
