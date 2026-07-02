@@ -761,10 +761,16 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   background: rgba(45, 95, 140, 0.18) !important;
   border: 1px solid rgba(45, 95, 140, 0.35) !important;
 }
-/* Past-time zone shading — light gray wash behind orders for elapsed time */
+/* Past-time zone shading — light gray wash behind orders for elapsed time.
+   top/height forced to fill the row: vis-timeline computes a 0px item height
+   for background items on a group with no visible foreground items, which
+   otherwise renders this invisible on lines with no orders in the current
+   zoom window (mirrored below for .alert-horizon-zone). */
 .vis-item.past-zone {
   background: rgba(150, 150, 160, 0.42) !important;
   border-color: transparent !important;
+  top: 0 !important;
+  height: 100% !important;
 }
 /* Alert-horizon zone — light green wash from now to the plant's alert horizon */
 .vis-item.alert-horizon-zone {
@@ -772,6 +778,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border-color: transparent !important;
   border-right: 3px solid #1a7a2e !important;
   pointer-events: none !important;
+  top: 0 !important;
+  height: 100% !important;
 }
 
 /* Ctrl+drag marquee rubber-band — drawn into .vis-panel.vis-center */

@@ -6007,6 +6007,7 @@ const NIMBUS = (function () {
         const w = Timeline._tl.getWindow();
         Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
         Timeline._visItems.refresh();
+        Timeline._tl.redraw();
       }, 120);
       Timeline._tl.on('rangechanged', _refreshView);
 
@@ -11296,106 +11297,78 @@ const NIMBUS = (function () {
     // SAP gives us date-only `BASIC_START_DATE`s, which parse to 00:00:00. On lines
     // that don't run nights, every freshly ingested order would trip an
     // out-of-hours alert and show a misleading "shifted from SAP" variance once
-    // a user (or autoReflow) moved it to a feasible slot. Walk each line in SAP
-    // order and snap each unfixed task to the first feasible working window via
-    // `Calendar.nextAvailable`, chaining with a per-line cursor so same-day
-    // orders sequence after each other instead of all stacking at 07:00. Reset
-    // `original_*_date` to the snapped instant so the variance badge baseline
-    // reflects the feasible plan, not the midnight artifact.
+    // a user (or autoReflow) moved it to a feasible slot. Snap each unfixed task
+    // to the first feasible working window via `Calendar.nextAvailable`, using the
+    // task's OWN raw start_date — never a cursor advanced past a sibling's end.
+    // Multiple orders that all originate at the same raw SAP midnight therefore
+    // snap to the SAME first-working-hour instant and are left overlapping on
+    // purpose: that's a real scheduling conflict, and the existing Alerts overlap
+    // rule surfaces it for a human to resolve deliberately, rather than this
+    // function silently auto-spreading siblings apart. Reset `original_*_date` to
+    // the snapped instant so the variance badge baseline reflects the feasible
+    // plan, not the midnight artifact.
     // Returns array of task IDs that actually moved (start/end changed).
     _snapToWorkingHours(tasks, plant) {
       const movedIds = [];
       Calendar._beginRun(plant);
       try {
-        const byLine = new Map();
+        let snappedCount = 0;
         for (const t of tasks) {
           const line = t.PRODUCTION_LINE;
           if (!line) continue;
-          if (!byLine.has(line)) byLine.set(line, []);
-          byLine.get(line).push(t);
-        }
+          if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
+          const durationMs = t.end_date.getTime() - t.start_date.getTime();
+          if (durationMs <= 0) continue;
 
-        let snappedCount = 0;
-        for (const [line, group] of byLine) {
-          group.sort((a, b) => {
-            const ad = a.BASIC_START_DATE instanceof Date ? a.BASIC_START_DATE : a.start_date;
-            const bd = b.BASIC_START_DATE instanceof Date ? b.BASIC_START_DATE : b.start_date;
-            const at = ad?.getTime ? ad.getTime() : 0;
-            const bt = bd?.getTime ? bd.getTime() : 0;
-            return at - bt;
-          });
+          if (t.fixed) continue;
 
-          let cursor = null;
-          for (const t of group) {
-            if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
-            const durationMs = t.end_date.getTime() - t.start_date.getTime();
-            if (durationMs <= 0) continue;
+          // Backend has a scheduled_start/end persisted for this task — the user
+          // owns its position. Never re-snap on load; alerts will flag any
+          // blackout overlap so the user can resolve it deliberately.
+          if (t.user_scheduled) continue;
 
-            if (t.fixed) {
-              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-              continue;
-            }
+          // User has moved or resized this task since ingest — preserve the deliberate
+          // placement (including intentional overlaps and duration changes).
+          const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
+          // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
+          // legitimately differs from original_end_date (the SAP due date). Detect a real
+          // resize by comparing against the run-time-implied end from the original start,
+          // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
+          const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
+          const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
+          const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
+          if (startMoved || endMoved) continue;
 
-            // Backend has a scheduled_start/end persisted for this task — the user
-            // owns its position. Never re-snap on load; alerts will flag any
-            // blackout overlap so the user can resolve it deliberately.
-            if (t.user_scheduled) {
-              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-              continue;
-            }
+          // No original baseline on record AND start is already non-midnight → task was
+          // previously snapped or user-placed (e.g. backend returned a user-saved time
+          // but doesn't persist original_start_date). Preserve it; Alerts will flag overlaps.
+          const isMidnight = t.start_date.getHours() === 0 &&
+                             t.start_date.getMinutes() === 0 &&
+                             t.start_date.getSeconds() === 0;
+          if (!oStart && !isMidnight) continue;
 
-            // User has moved or resized this task since ingest — preserve the deliberate
-            // placement (including intentional overlaps and duration changes) and just
-            // advance the cursor so SAP-raw neighbors still sequence after it.
-            const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
-            // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
-            // legitimately differs from original_end_date (the SAP due date). Detect a real
-            // resize by comparing against the run-time-implied end from the original start,
-            // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
-            const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
-            const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
-            const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
-            if (startMoved || endMoved) {
-              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-              continue;
-            }
+          const snappedStart = Calendar.nextAvailable(line, t.start_date, durationMs);
+          if (!(snappedStart instanceof Date)) continue;
+          const snappedEnd = new Date(snappedStart.getTime() + durationMs);
 
-            // No original baseline on record AND start is already non-midnight → task was
-            // previously snapped or user-placed (e.g. backend returned a user-saved time
-            // but doesn't persist original_start_date). Preserve it; Alerts will flag overlaps.
-            const isMidnight = t.start_date.getHours() === 0 &&
-                               t.start_date.getMinutes() === 0 &&
-                               t.start_date.getSeconds() === 0;
-            if (!oStart && !isMidnight) {
-              if (!cursor || t.end_date > cursor) cursor = new Date(t.end_date);
-              continue;
-            }
+          const oldStartMs = t.start_date.getTime();
+          const oldEndMs = t.end_date.getTime();
+          const newStartMs = snappedStart.getTime();
+          const newEndMs = snappedEnd.getTime();
 
-            const from = (cursor && cursor > t.start_date) ? cursor : t.start_date;
-            const snappedStart = Calendar.nextAvailable(line, from, durationMs);
-            if (!(snappedStart instanceof Date)) continue;
-            const snappedEnd = new Date(snappedStart.getTime() + durationMs);
-
-            const oldStartMs = t.start_date.getTime();
-            const oldEndMs = t.end_date.getTime();
-            const newStartMs = snappedStart.getTime();
-            const newEndMs = snappedEnd.getTime();
-
-            if (newStartMs !== oldStartMs || newEndMs !== oldEndMs) {
-              snappedCount++;
-              movedIds.push(t.id);
-            }
-            t.start_date = snappedStart;
-            t.end_date   = snappedEnd;
-            t.original_start_date = new Date(snappedStart);
-            t.original_end_date   = new Date(snappedEnd);
-            cursor = new Date(snappedEnd);
+          if (newStartMs !== oldStartMs || newEndMs !== oldEndMs) {
+            snappedCount++;
+            movedIds.push(t.id);
           }
+          t.start_date = snappedStart;
+          t.end_date   = snappedEnd;
+          t.original_start_date = new Date(snappedStart);
+          t.original_end_date   = new Date(snappedEnd);
         }
 
         if (snappedCount) {
           ErrorLog.info('persistence',
-            `Snapped ${snappedCount} ingested order(s) to first available working slot per line`);
+            `Snapped ${snappedCount} ingested order(s) to first available working slot`);
         }
       } finally {
         Calendar._endRun();
