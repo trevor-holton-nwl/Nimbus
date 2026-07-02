@@ -774,7 +774,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 /* Alert-horizon zone — light green wash from now to the plant's alert horizon */
 .vis-item.alert-horizon-zone {
-  background: rgba(60, 200, 90, 0.12) !important;
+  background: rgba(60, 200, 90, 0.04) !important;
   border-color: transparent !important;
   border-right: 3px solid #1a7a2e !important;
   pointer-events: none !important;
