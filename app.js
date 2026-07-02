@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-01-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-02-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -682,6 +682,14 @@ const NIMBUS = (function () {
       const next = { ...prev, ...changes };
       Store._normalizeDates(next);
       this._state.tasks[id] = next;
+      // Keep the _tasksByPlant index coherent with this reference swap. That index caches
+      // task *references* captured at the last _rebuildPlantIndex(); replacing prev→next
+      // above would otherwise leave it pointing at the stale pre-edit object, so
+      // tasksForSelectedPlant() → Timeline.rebuild() (fired by the post-edit alerts
+      // recompute via alerts:change) would repaint the task at its OLD position — this is
+      // the single-drag "spring-back". updateMany() mutates in place so it stays coherent
+      // on its own; only this reference-replacing path needs the fix-up.
+      Store._reindexTask(prev, next);
       this.emit({ type: 'task:update', id, prev, next, changes, source });
     },
 
@@ -910,6 +918,30 @@ const NIMBUS = (function () {
         (idx[p] ||= []).push(t);
       }
       Store._tasksByPlant = idx;
+    },
+    // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
+    // prev→next, keeping the cached plant buckets coherent without a full O(n) rebuild.
+    // Moves the task between buckets if its resolved plant changed (line/plant edit).
+    _reindexTask(prev, next) {
+      const idx = Store._tasksByPlant;
+      if (!idx) return; // index not built yet (pre-setTasks) — nothing to keep coherent
+      const plantOf = t => t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE) || null;
+      const oldP = plantOf(prev);
+      const newP = plantOf(next);
+      if (oldP === newP) {
+        const bucket = oldP ? idx[oldP] : null;
+        if (bucket) {
+          const i = bucket.indexOf(prev);
+          if (i >= 0) bucket[i] = next;   // in-place swap preserves order
+          else bucket.push(next);
+        }
+        return;
+      }
+      if (oldP && idx[oldP]) {
+        const i = idx[oldP].indexOf(prev);
+        if (i >= 0) idx[oldP].splice(i, 1);
+      }
+      if (newP) (idx[newP] ||= []).push(next);
     },
     allLines() {
       const set = new Set();
@@ -5888,6 +5920,11 @@ const NIMBUS = (function () {
       const options = {
         stack: false,
         editable: { updateTime: true, updateGroup: true, remove: false, add: false },
+        // Let an order be dragged directly, without first selecting it with a plain click.
+        // That pre-select click is what fired CENTER_ON_CLICK → focus() → viewport pan →
+        // DataView refresh, which visually reverted single drags ("spring back"). Blackout /
+        // background items stay put because they are created with editable:false.
+        itemsAlwaysDraggable: { item: true },
         snap: d => Util.snap(d),
         groupOrder: (a, b) => (a.order ?? 0) - (b.order ?? 0),
         orientation: { axis: 'top' },
@@ -5897,7 +5934,7 @@ const NIMBUS = (function () {
         margin: { item: { horizontal: 2, vertical: 4 } },
         height: '100%',
         verticalScroll: true,
-        tooltip: false,
+        tooltip: { delay: 400, followMouse: false },
         showCurrentTime: true
       };
 
@@ -10386,7 +10423,12 @@ const NIMBUS = (function () {
       else           Selection.set([id]);
 
       // --- BEGIN center-on-click (remove this block to revert) ---
-      if (Config.CENTER_ON_CLICK && !shift && !meta && Timeline._tl) {
+      // Skip the auto-center pan during / right after a drag. focus() pans the viewport,
+      // which fires rangechanged → _visItems.refresh() (a DataView re-filter) and visually
+      // reverts a just-dropped order. A genuine standalone click (no recent drag) still centers.
+      if (Config.CENTER_ON_CLICK && !shift && !meta && Timeline._tl
+          && !Interaction._isDragging
+          && (Date.now() - (Interaction._lastDragEndTs || 0)) > 400) {
         // zoom:false → pan only; preserves the current time window width.
         Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false });
       }
@@ -10467,6 +10509,10 @@ const NIMBUS = (function () {
 
         this._log('update:commit', { id, newLine });
 
+        // Stamp drag-recency so a trailing vis 'click' at drag-end can't trigger the
+        // CENTER_ON_CLICK focus() pan that would revert this commit (see _onClick).
+        this._lastDragEndTs = Date.now();
+
         // Multi-order drag: if the dragged item is part of a multi-selection,
         // move all non-fixed selected items by the same time + line delta.
         const deltaMs  = newStart.getTime() - t.start_date.getTime();
@@ -10525,6 +10571,7 @@ const NIMBUS = (function () {
     _ghostDragId: null,
     _edgeScrollRAF: null,
     _isDragging: false,
+    _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
     _dragMouseX: null,
 
     _startEdgeScroll() {

@@ -401,7 +401,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     pruneSnapshots(keepN = 200) {
       if (!IntelDB._db) return;
-      (window.requestIdleCallback || setTimeout)(() => {
+      const fn = () => {
         IntelDB.getAll('snapshots').then(all => {
           if (!all || all.length <= keepN) return;
           const toDelete = all
@@ -411,7 +411,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           const os = tx.objectStore('snapshots');
           toDelete.forEach(s => os.delete(s.id));
         });
-      }, 2000);
+      };
+      if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 });
+      else setTimeout(fn, 2000);
     }
   };
 
