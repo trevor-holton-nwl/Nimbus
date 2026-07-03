@@ -9711,12 +9711,16 @@ const NIMBUS = (function () {
     _postKpis: null,
     _mode:     null,
     _plant:    null,
+    active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
+    _confSnapshot: null,       // Confidence.snapshot() taken just before the trial mutation
+    _abandonGuardInstalled: false,
 
     /** Open the preview modal with a loading skeleton. Safe to call as soon as
      *  the user clicks Run, before any await/fetch — gives instant feedback so
      *  the user doesn't stare at a blurry frozen page during the wheel fetch
      *  + config-close transition + engine run. */
     showLoading(mode, plant) {
+      OptimizerPreview._installAbandonGuard();
       const body = document.getElementById('opt-preview-body');
       if (body) {
         body.innerHTML =
@@ -9739,6 +9743,21 @@ const NIMBUS = (function () {
       Modal.close('modal-opt-preview');
       const root = document.getElementById('modal-opt-preview');
       if (root) root.querySelectorAll('.modal-foot button').forEach(b => { b.disabled = false; });
+    },
+
+    /** One-time safety net: the modal's backdrop is wired (like every other modal's)
+     *  to close on an outside click, bypassing discard()/apply() entirely (app.js's
+     *  boot-time '.modal-backdrop' click handler calls Modal.close() directly). Left
+     *  alone, that would abandon a live trial with no revert AND leave `active` stuck
+     *  true, freezing Confidence forever. Treat any non-apply/discard hide as a discard. */
+    _installAbandonGuard() {
+      if (OptimizerPreview._abandonGuardInstalled) return;
+      OptimizerPreview._abandonGuardInstalled = true;
+      const el = document.getElementById('modal-opt-preview');
+      if (!el) return;
+      new MutationObserver(() => {
+        if (el.hidden && OptimizerPreview.active) OptimizerPreview.discard();
+      }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
     },
 
     /** Entry point — call this instead of Engine.runAndApply when you want
@@ -9773,6 +9792,10 @@ const NIMBUS = (function () {
           // Publish the snapshot BEFORE mutating the Store (R6) so a mid-run throw can
           // be rolled back in the catch — Engine.runAndApply mutates in place.
           OptimizerPreview._snapshot = snapshot;
+          // Freeze Confidence for the whole trial window (through Apply/Discard) and
+          // snapshot it so a Discard can roll back without leaving any trace.
+          OptimizerPreview.active = true;
+          OptimizerPreview._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
           PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
           // KPI inputs are scoped to what the user actually selected on screen 1 —
@@ -9816,10 +9839,14 @@ const NIMBUS = (function () {
           // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
           // the schedule partially mutated otherwise, with no undo path.
           if (snapshot) {
-            try { UndoStack.restoreTasks(snapshot); Alerts.scheduleRecompute(); }
+            try {
+              UndoStack.restoreTasks(snapshot);
+              if (NIMBUS.Confidence && OptimizerPreview._confSnapshot) NIMBUS.Confidence.restore(OptimizerPreview._confSnapshot);
+              Alerts.scheduleRecompute();
+            }
             catch { ErrorLog.error('optimize-preview', `revert failed`); }
           }
-          OptimizerPreview._snapshot = null;
+          OptimizerPreview._clear();
           if (body) {
             body.innerHTML =
               '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
@@ -10044,14 +10071,19 @@ const NIMBUS = (function () {
         () => UndoStack.restoreTasks(snap));
       Toast.show(t('toast.opt_applied'), 'success');
       OptimizerPreview._clear();
+      // The trial is now the committed baseline — recompute right away instead of
+      // waiting on the debounce so the badge reflects it immediately.
+      NIMBUS.Confidence?._recompute();
       Modal.close('modal-opt-preview');
       Alerts.scheduleRecompute();
     },
 
     discard() {
       const snap = OptimizerPreview._snapshot;
+      const confSnap = OptimizerPreview._confSnapshot;
       if (snap) {
         UndoStack.restoreTasks(snap);
+        if (NIMBUS.Confidence && confSnap) NIMBUS.Confidence.restore(confSnap);
         Alerts.scheduleRecompute();
         Toast.show(t('toast.opt_discarded'), 'info');
       }
@@ -10065,6 +10097,8 @@ const NIMBUS = (function () {
       OptimizerPreview._postKpis = null;
       OptimizerPreview._mode     = null;
       OptimizerPreview._plant    = null;
+      OptimizerPreview.active       = false;
+      OptimizerPreview._confSnapshot = null;
     },
   };
 
@@ -10075,6 +10109,7 @@ const NIMBUS = (function () {
   const Sandbox = {
     active: false,
     _snapshot: null,
+    _confSnapshot: null,
 
     init() {
       // Inject sandbox banner into the DOM (hidden by default)
@@ -10104,6 +10139,9 @@ const NIMBUS = (function () {
         plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
         fixedIds:    new Set([...Store.fixedIds])
       };
+      // So a discarded what-if session leaves no trace in the confidence tracker,
+      // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
+      Sandbox._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
       Sandbox.active = true;
 
       // Visual indicator
@@ -10147,12 +10185,14 @@ const NIMBUS = (function () {
         Store._state.plantBlocks  = snap.plantBlocks;
         Store._state.fixedIds     = new Set([...snap.fixedIds]);
         for (const id of Store._state.fixedIds) { const t = Store.tasks[id]; if (t) t.fixed = true; }
+        if (NIMBUS.Confidence && Sandbox._confSnapshot) NIMBUS.Confidence.restore(Sandbox._confSnapshot);
         Alerts.scheduleRecompute();
         Toast.show(t('toast.scenario_discarded'), 'info');
       }
 
-      Sandbox.active    = false;
-      Sandbox._snapshot = null;
+      Sandbox.active        = false;
+      Sandbox._snapshot     = null;
+      Sandbox._confSnapshot = null;
 
       document.body.classList.remove('sandbox-mode');
       const banner = document.getElementById('sandbox-banner');

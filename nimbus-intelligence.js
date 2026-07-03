@@ -515,7 +515,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         selSize,
         selIds,
         selStats,
-        sandboxActive:  !!NIMBUS.Sandbox?._active,
+        sandboxActive:  !!NIMBUS.Sandbox?.active,
         anyFilterActive: !!(
           NIMBUS.GanttFilter?._active?.color ||
           NIMBUS.GanttFilter?._active?.form  ||
@@ -1388,6 +1388,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     async _recompute() {
+      // Frozen during an optimizer preview trial or What-If sandbox session — neither
+      // is committed yet, so the score/tracker must not react until Apply/Promote.
+      if (NIMBUS.OptimizerPreview?.active || NIMBUS.Sandbox?.active) return;
+
       // Skip when neither alerts nor task data changed since the last score (R21):
       // _recompute is wrapped onto EVERY Alerts.recompute and task mutation, and the
       // matrix build below is expensive. Store.alerts is reassigned on every change
@@ -1481,6 +1485,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         flash.style.color = delta > 0 ? 'var(--ok)' : 'var(--err)';
         Confidence._badge.appendChild(flash);
         setTimeout(() => flash.remove(), 1900);
+      }
+      Confidence._sparkline();
+    },
+
+    // Pre-trial state for OptimizerPreview/Sandbox to roll back to on discard, so a
+    // trial run never leaves a trace in the score or its history if it's thrown away.
+    snapshot() {
+      return { score: Confidence._score, history: Confidence._history.slice() };
+    },
+
+    restore(snap) {
+      if (!snap) return;
+      Confidence._score   = snap.score;
+      Confidence._history = snap.history;
+      const scoreEl = document.getElementById('ni-conf-score');
+      if (scoreEl) {
+        scoreEl.textContent = snap.score;
+        scoreEl.style.color = snap.score >= 70 ? 'var(--ok)' : snap.score >= 40 ? 'var(--warn)' : 'var(--err)';
       }
       Confidence._sparkline();
     },
