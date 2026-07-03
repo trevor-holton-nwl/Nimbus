@@ -373,3 +373,41 @@ here because they are at-scale/multi-user hardening or product decisions, not pi
   move-only so the UI never lets the user create a width the reload discards. Left intact pending the
   ruling — do **not** silently change `_EFF_END_SQL` (it would revert the deliberate run-time
   normalization for SAP orders).
+
+## Optimizer — deferred enhancements (post-review, 2026-07-03)
+
+An expert review of the three optimize modes (SPT / Min Changeover / Smart) led to `Engine.runAndApply`
+routing `'changeover'` and `'combined'` through a new day-integrity dispatch (`Engine._dispatchDayIntegrity`
+— see `CLAUDE.md` Key Patterns). Several further improvements were identified and explicitly **declined for
+this round** by the product owner — recorded here so they aren't silently forgotten, not because they're
+blocked on anything technical:
+
+- **Sequence-dependent setup-time modeling.** Changeovers are currently a sort key and a KPI count only —
+  reducing them doesn't free any actual capacity, since no time is charged for a color/form switch between
+  adjacent orders. A per-plant scalar (e.g. N minutes for a color change, M minutes for a form change,
+  editable in the existing `plants.constraints` JSONB pane) would let changeover reduction genuinely
+  shrink schedules. A full color-to-color cost matrix is the more accurate but heavier alternative (needs a
+  new data table + someone to maintain it per plant). Until this exists, "minimize changeovers" is a
+  proxy metric, not a capacity lever.
+- **Release-date floor on pull-forward.** The optimizer will pull an order as early as any line slack
+  allows, with no check against `ORIGINAL_START_DATE` (the SAP-planned release/material-availability date).
+  Explicitly declined this round ("no cap") — revisit if planners report orders being pulled ahead of when
+  components are actually available.
+- **Auto-pin protections.** Today the only order the optimizer won't move is one a planner has manually
+  pinned (`Store.isFixed`). Declined this round, all still on the table: (a) auto-pin an order that's
+  already in progress (start in the past, end in the future — physically on the line); (b) auto-pin
+  SAP-firmed orders (`FIRMING_INDICATOR`/FIXKZ is already ingested into every order and currently read
+  nowhere in the optimizer); (c) a "frozen fence" — an Optimize-dialog setting that protects the next N
+  hours on a line from re-sequencing, for run-to-run stability near the current time.
+- **Cross-line rebalancing.** All three modes are strictly per-line — an overloaded line's overflow can
+  only push to a later day on the *same* line, never move to a sister line with spare capacity. Blocked on
+  data, not design: NIMBUS has no material→line eligibility mapping today (which lines can legally run a
+  given material/form), so the optimizer cannot know which lines are valid alternates for a given order.
+- **Labor-plan capacity integration.** `labor_plan_line.avail_hours` (the Labor Planning subsystem) is
+  never consulted by `Engine.runAndApply` — the optimizer only respects the `Calendar` working-hours/
+  blackout capacity model, not a line's planned headcount-derived capacity. Folding the two together would
+  let a labor shortage day behave like a partial closure to the dispatcher instead of a silent overcommit.
+- **Setup-time-aware carryover across days.** Once setup time (above) is modeled, a day-integrity dispatch
+  could also prefer ending a day on the same color/form it opens the next day with, to avoid a changeover
+  that straddles midnight for no schedule-quality reason. Not meaningful to build before setup time itself
+  exists.

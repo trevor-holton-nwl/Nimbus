@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-02-h'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-03-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -4823,13 +4823,288 @@ const NIMBUS = (function () {
     },
 
     /** Comparator built from _sortTerms — kept for callers that want a plain
-     *  comparator. runAndApply uses the decorate variant for the Schwartzian win. */
+     *  comparator. runAndApply uses the decorate variant for the Schwartzian win.
+     *  For 'combined' and 'changeover' this reflects only the legacy
+     *  color/form-grouping order — runAndApply no longer uses it for either
+     *  mode; see _dispatchDayIntegrity for the actual (day-integrity, tiered
+     *  admit-then-resequence) logic. */
     _comparator(mode, opts = {}) {
       const terms = Engine._sortTerms(mode, opts);
       return (a, b) => {
         for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
         return 0;
       };
+    },
+
+    /** Day-integrity dispatch — mode === 'changeover' | 'combined'. A calendar
+     *  day's own orders (dueDay === that day, per `Util.sapDueDate`) get first
+     *  refusal on every fragment of their day before any overdue carry-over or
+     *  pulled-in future order is considered, so a native order can never be
+     *  pushed to a later day while its own day still has room for it — it can
+     *  only be pulled EARLIER (by an emptier prior day) or bumped by an
+     *  overdue arrival from a prior day that legitimately needs the room.
+     *
+     *  Outer loop walks calendar days forward from `cursorInit`. Per day: rank
+     *  the remaining queue into 4 tiers (native / carry / pull-in / floater —
+     *  see `_rankForDay`), then run the same admit-then-resequence two-phase
+     *  placement as before, but bounded to that day's window so nothing can
+     *  bleed past midnight (or shift close, under respectCalendar) into a day
+     *  it doesn't belong to. Phase 1 admits ranked candidates by concrete
+     *  `fitsAt` simulation (fixed order / blackout / shift close still hard
+     *  obstacles, exactly as before — a day can fragment into multiple
+     *  sub-bucket admission passes). Phase 2 resequences each admitted
+     *  fragment by color/form and places it. Unplaced natives simply remain in
+     *  the queue — on the next day's ranking pass their dueDay is now in the
+     *  past, so they become tier-1 carry automatically; no separate "carry"
+     *  bookkeeping is needed.
+     *
+     *  Returns patches in the same {id, changes:{start_date,end_date}} shape
+     *  the decorated-sort path produces. */
+    _dispatchDayIntegrity(line, freeTasksIn, fixedTasks, cursorInit, opts) {
+      const { respectCalendar, tieBreakTerms, mode } = opts;
+      const dueMs = t => { const d = Util.sapDueDate(t); return d ? d.getTime() : Infinity; };
+      const dueDayKey = t => { const d = Util.sapDueDate(t); return d ? Util.dayKey(d) : null; };
+
+      let queue = freeTasksIn.filter(t => Util.runHours(t) > 0);
+      const patches = [];
+      let cursor = new Date(cursorInit);
+      let fixIdx = 0;
+
+      // Pure — takes/returns a fixIdx rather than closing over mutable state, so
+      // it can advance a scratch copy during phase-1 simulation without touching
+      // the real `fixIdx`, and also drive the real one after phase 2 places.
+      const nextFixIdx = (atCursor, fIdx) => {
+        while (fIdx < fixedTasks.length) {
+          const f = fixedTasks[fIdx];
+          if (!f.start_date || !f.end_date || atCursor >= f.end_date) { fIdx++; continue; }
+          break;
+        }
+        return fIdx;
+      };
+      fixIdx = nextFixIdx(cursor, fixIdx);
+
+      // Concrete-range feasibility: does `t` fit starting exactly at `at`,
+      // without crossing `dayEndMs`? Reuses the same primitives
+      // Calendar.nextAvailable already uses safely (workWindow + _overlapsBlock
+      // against a SPECIFIC [start,end) range). Deliberately never asks Calendar
+      // for an abstract "boundary time" instead — _overlapsBlock returns *some*
+      // overlapping block, not necessarily the chronologically first one when a
+      // line-specific and a plant-wide blackout coexist, so it's only safe to
+      // use as a yes/no check on one concrete candidate range, not to derive a
+      // single "bucket end" timestamp. `dayEndMs` is the actual day-integrity
+      // enforcement: with respectCalendar it's redundant with the work window's
+      // own close, but it's the ONLY day wall when respectCalendar is off.
+      const fitsAt = (at, t, fIdx, dayEndMs) => {
+        const durMs = Util.runHours(t) * Config.MS_HOUR;
+        const endMs = at.getTime() + durMs;
+        if (endMs > dayEndMs) return false;
+        if (fIdx < fixedTasks.length) {
+          const f = fixedTasks[fIdx];
+          if (f.start_date && endMs > f.start_date.getTime()) return false;
+        }
+        if (respectCalendar) {
+          const win = Calendar.workWindow(line, at);
+          if (!win || at < win[0] || at >= win[1]) return false;
+          if (endMs > win[1].getTime()) return false;
+          if (Calendar._overlapsBlock(line, at, new Date(endMs))) return false;
+        }
+        return true;
+      };
+
+      // Phase-2 comparator: color -> form -> runHours -> material (tieBreakTerms,
+      // unchanged), due date then id as final tie-breaks so same-color/form items
+      // still land in a fully deterministic order among themselves.
+      const seqCompare = (a, b) => {
+        for (const tm of tieBreakTerms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
+        const d = dueMs(a) - dueMs(b);
+        if (d) return d;
+        return String(a.id).localeCompare(String(b.id));
+      };
+
+      // Ranks `list` for calendar day `dayKeyD`: tier 0 = native (due today),
+      // tier 1 = carry (overdue from a prior day), tier 2 = pull-in (due later),
+      // tier 3 = floater (no due date). Within-tier order per mode — see the
+      // table in the function doc comment above _dispatchDayIntegrity's caller
+      // (Engine.runAndApply). Final tie-break (current start_date, then id) is
+      // what keeps re-running optimize with no edits deterministic, and keeps a
+      // single drag from reshuffling unrelated same-tier orders.
+      const rankForDay = (list, dayKeyD) => {
+        const wheelFirst = (a, b) => {
+          for (let i = 0; i < tieBreakTerms.length; i++) {
+            const c = tieBreakTerms[i].cmp(a.k[i], b.k[i]);
+            if (c) return c;
+          }
+          return 0;
+        };
+        const decorated = list.map(t => {
+          const dk = dueDayKey(t);
+          const tier = dk === null ? 3 : (dk === dayKeyD ? 0 : (dk < dayKeyD ? 1 : 2));
+          return { t, tier, due: dueMs(t), k: tieBreakTerms.map(tm => tm.get(t)) };
+        });
+        decorated.sort((a, b) => {
+          if (a.tier !== b.tier) return a.tier - b.tier;
+          let c;
+          if (a.tier === 1) {
+            c = (a.due - b.due) || wheelFirst(a, b);
+          } else if (a.tier === 2) {
+            c = mode === 'changeover'
+              ? (wheelFirst(a, b) || (a.due - b.due))
+              : ((a.due - b.due) || wheelFirst(a, b));
+          } else {
+            c = wheelFirst(a, b); // tier 0 (native) and tier 3 (floater)
+          }
+          if (c) return c;
+          const as = a.t.start_date ? a.t.start_date.getTime() : Infinity;
+          const bs = b.t.start_date ? b.t.start_date.getTime() : Infinity;
+          if (as !== bs) return as - bs;
+          return String(a.t.id).localeCompare(String(b.t.id));
+        });
+        return decorated.map(d => d.t);
+      };
+
+      // Escape hatch for an order that can never be admitted (e.g. RUN_TIME
+      // exceeds every day's total capacity on this line — a data problem, not
+      // a scheduling one): the day loop below advances one calendar day per
+      // outer iteration by construction, so a permanently-unfittable order
+      // would otherwise spin forever rather than merely hit the existing
+      // 200-iteration per-day guard. After this many CONSECUTIVE days with
+      // zero admissions, force-place the top-ranked remaining order at the
+      // current cursor (bypassing fitsAt) and warn — one order at a time, so a
+      // handful of bad rows each pay their own 90-day search, not a compounded
+      // one, and the loop is guaranteed to keep shrinking the queue.
+      const FORCE_PLACE_AFTER_DAYS = 90;
+      let emptyDayStreak = 0;
+
+      while (queue.length) {
+        const dayKeyD = Util.dayKey(cursor);
+        let dayStart, dayEnd;
+        if (respectCalendar) {
+          const win = Calendar.workWindow(line, cursor);
+          if (win) {
+            dayStart = win[0]; dayEnd = win[1];
+            if (cursor < dayStart) cursor = new Date(dayStart);
+          } else {
+            // Closed all day (weekend/holiday) — zero-width window, contributes
+            // no placements; still counts toward the force-place streak below.
+            dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
+            dayEnd = dayStart;
+          }
+        } else {
+          dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
+          dayEnd = new Date(dayStart.getTime() + Config.MS_DAY);
+        }
+        fixIdx = nextFixIdx(cursor, fixIdx);
+
+        queue = rankForDay(queue, dayKeyD);
+
+        let placedToday = 0;
+        while (cursor.getTime() < dayEnd.getTime() && queue.length) {
+          // ---- Phase 1 (admission): one linear pass over the remaining queue,
+          // in this day's tiered rank order, against a SCRATCH cursor/fixIdx.
+          // Admit whatever fits (bounded by dayEnd) at the scratch position and
+          // advance it; skip (leave in queue) whatever doesn't, and keep
+          // scanning the rest — remaining space only shrinks as items are
+          // admitted, so a skipped item can never retroactively fit later in
+          // THIS fragment. Native (tier-0) candidates are scanned first, so
+          // they can only ever be denied a fragment by an obstacle every
+          // native has already failed to fit around, never by a lower-tier
+          // item cutting in line.
+          let simCursor = new Date(cursor), simFixIdx = fixIdx;
+          const admitted = [];
+          for (const t of queue) {
+            if (fitsAt(simCursor, t, simFixIdx, dayEnd.getTime())) {
+              admitted.push(t);
+              simCursor = new Date(simCursor.getTime() + Util.runHours(t) * Config.MS_HOUR);
+              simFixIdx = nextFixIdx(simCursor, simFixIdx);
+            }
+          }
+
+          if (!admitted.length) {
+            // Nothing in the queue fits from here today — jump the REAL cursor
+            // forward (mirrors the legacy walk's convergence guard), sized to
+            // the SMALLEST remaining duration so we don't overshoot a smaller
+            // gap further out that a shorter order could still fill.
+            const minDur = Math.min(...queue.map(t => Util.runHours(t) * Config.MS_HOUR));
+            let guard = 0;
+            for (; guard < 200; guard++) {
+              const prevMs = cursor.getTime();
+              while (fixIdx < fixedTasks.length) {
+                const f = fixedTasks[fixIdx];
+                if (!f.start_date || !f.end_date) { fixIdx++; continue; }
+                if (cursor >= f.end_date) { fixIdx++; continue; }
+                if (cursor.getTime() + minDur <= f.start_date.getTime()) break;
+                cursor = new Date(f.end_date);
+                fixIdx++;
+              }
+              if (respectCalendar) cursor = Calendar.nextAvailable(line, cursor, minDur);
+              if (cursor.getTime() === prevMs) break;
+            }
+            if (guard >= 200) {
+              ErrorLog.warn('engine',
+                `Day-integrity dispatch guard hit 200 iterations on "${line}" (day ${dayKeyD}) — schedule may be suboptimal; check fixed orders / blackouts on this line.`,
+                { line, day: dayKeyD });
+            }
+            fixIdx = nextFixIdx(cursor, fixIdx);
+            // Explicit day-wall check (covers respectCalendar === false, where
+            // nothing above stops the cursor at midnight): if the smallest
+            // remaining order still can't fit before dayEnd from wherever the
+            // jump landed, today is exhausted regardless of the reason.
+            if (cursor.getTime() + minDur > dayEnd.getTime() || Util.dayKey(cursor) !== dayKeyD) {
+              cursor = new Date(dayEnd);
+              break;
+            }
+            continue;
+          }
+
+          // ---- Phase 2 (sequencing): resort ONLY this fragment's admitted set
+          // by color/form and place back-to-back for real, starting at the
+          // real cursor. Safe regardless of internal order: phase 1 only
+          // admitted this exact set because it fits, in SOME order, within one
+          // obstacle-free span bounded by dayEnd — total duration is
+          // order-independent, and there is by construction no obstacle
+          // between here and wherever this set's total duration ends.
+          admitted.sort(seqCompare);
+          for (const t of admitted) {
+            const durMs = Util.runHours(t) * Config.MS_HOUR;
+            const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
+            const end   = new Date(start.getTime() + durMs);
+            patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
+            cursor = new Date(end);
+          }
+          placedToday += admitted.length;
+          fixIdx = nextFixIdx(cursor, fixIdx);
+          const admittedIds = new Set(admitted.map(t => t.id));
+          queue = queue.filter(t => !admittedIds.has(t.id));
+        }
+
+        if (placedToday > 0) emptyDayStreak = 0;
+        else emptyDayStreak++;
+
+        if (emptyDayStreak > FORCE_PLACE_AFTER_DAYS && queue.length) {
+          const t = queue[0]; // top-ranked remaining under this day's ordering
+          const durMs = Util.runHours(t) * Config.MS_HOUR;
+          const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
+          const end   = new Date(start.getTime() + durMs);
+          patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
+          ErrorLog.warn('engine',
+            `Order "${t.text || t.id}" on "${line}" would never fit any working day (${FORCE_PLACE_AFTER_DAYS}-day search exhausted) — forced placement at ${Util.fmtDTReadable(start)}. Check RUN_TIME against available daily capacity.`,
+            { line, taskId: t.id });
+          queue = queue.filter(x => x !== t);
+          cursor = new Date(end);
+          fixIdx = nextFixIdx(cursor, fixIdx);
+          emptyDayStreak = 0;
+          continue;
+        }
+
+        // Advance to the next calendar day for the next outer iteration. Guard
+        // against moving backward — a force-placed multi-day-spanning order,
+        // or a >24h work window, can already leave cursor past "tomorrow."
+        const nextDay = new Date(dayStart);
+        nextDay.setDate(nextDay.getDate() + 1);
+        nextDay.setHours(0, 0, 0, 0);
+        if (nextDay.getTime() > cursor.getTime()) cursor = nextDay;
+      }
+      return patches;
     },
 
     /** Main optimiser. Groups by line, optionally respects fixed + calendar.
@@ -4891,21 +5166,6 @@ const NIMBUS = (function () {
           !(respectFixed && Store.isFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
         );
 
-        // Schwartzian transform: decorate each task once with its ordered sort
-        // keys (from Engine._sortTerms — the single source of truth, so this can
-        // no longer drift from _comparator), then sort by comparing keys
-        // positionally. Works for every mode; the color key is present only when
-        // the plant's colorWheel constraint is enabled, which is what makes the
-        // wheel switchable per plant.
-        const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
-        decorated.sort((a, b) => {
-          for (let i = 0; i < sortTerms.length; i++) {
-            const c = sortTerms[i].cmp(a.k[i], b.k[i]);
-            if (c) return c;
-          }
-          return 0;
-        });
-        freeTasks = decorated.map(d => d.t);
         fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
 
         // Cursor floor is max(horizonStart, now): extending "From" backwards
@@ -4924,6 +5184,32 @@ const NIMBUS = (function () {
         } else {
           cursor = new Date(cursorFloor);
         }
+
+        if (mode === 'combined' || mode === 'changeover') {
+          // Day-integrity, tiered admit-then-resequence dispatch — see
+          // Engine._dispatchDayIntegrity. sortTerms here already IS
+          // Engine._sortTerms(mode, { plant, colorMap }), so it doubles as both
+          // the pull-in/floater tie-break and the phase-2 color/form sequencer.
+          patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
+            respectCalendar, tieBreakTerms: sortTerms, mode,
+          }));
+          continue;
+        }
+
+        // Schwartzian transform: decorate each task once with its ordered sort
+        // keys (from Engine._sortTerms — the single source of truth, so this can
+        // no longer drift from _comparator), then sort by comparing keys
+        // positionally. 'changeover' and 'combined' return above via
+        // _dispatchDayIntegrity — only 'spt' reaches this walk now.
+        const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
+        decorated.sort((a, b) => {
+          for (let i = 0; i < sortTerms.length; i++) {
+            const c = sortTerms[i].cmp(a.k[i], b.k[i]);
+            if (c) return c;
+          }
+          return 0;
+        });
+        freeTasks = decorated.map(d => d.t);
 
         // Walk through free tasks, jumping past each fixed task we encounter.
         let fixIdx = 0;
@@ -11363,7 +11649,15 @@ const NIMBUS = (function () {
           t.start_date = snappedStart;
           t.end_date   = snappedEnd;
           t.original_start_date = new Date(snappedStart);
-          t.original_end_date   = new Date(snappedEnd);
+          // Due-date baseline: SAP only shipped a day-level date, not a real time —
+          // treat it as "due by end of this working day," not "due at exactly this
+          // order's own solo-occupancy finish." The latter wrongly assumes every
+          // order gets the line to itself; when several same-day orders share a
+          // line, only one can legitimately go first, and the rest would show
+          // hours "late" for simply being sequenced behind line-mates on the very
+          // day they were always due.
+          const dayEnd = Calendar.workWindow(line, snappedStart)?.[1];
+          t.original_end_date = dayEnd instanceof Date ? new Date(dayEnd) : new Date(snappedEnd);
         }
 
         if (snappedCount) {
