@@ -561,6 +561,86 @@ def list_audit(limit: int = 100) -> list[dict]:
         ]
 
 
+def _sql_literal(value) -> str:
+    """Single-quoted SQL string literal with embedded quotes doubled."""
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _column_ddl_type(data_type: str, char_len: int | None,
+                      num_precision: int | None, num_scale: int | None) -> str:
+    """Map information_schema.columns' reported type back to the DDL keyword
+    add_column() would have accepted (VARCHAR(n) / NUMERIC(p,s) need their
+    size folded back in; the rest are 1:1 with ALLOWED_COLUMN_TYPES)."""
+    dt = data_type.lower()
+    if dt == "character varying":
+        return f"VARCHAR({char_len})" if char_len else "VARCHAR"
+    if dt == "numeric" and num_precision is not None:
+        return f"NUMERIC({num_precision},{num_scale})" if num_scale is not None else f"NUMERIC({num_precision})"
+    if dt == "timestamp without time zone":
+        return "TIMESTAMP"
+    return dt.upper()
+
+
+def export_schema_sql() -> str:
+    """
+    Dump every column currently registered (via column_metadata) on every
+    ALLOWED_TABLES table as idempotent SQL: ALTER TABLE ... ADD COLUMN IF NOT
+    EXISTS + column_metadata INSERT ... ON CONFLICT DO NOTHING. Every
+    statement is safe to re-run regardless of what's already present, so this
+    is a "current truth" snapshot, not a diff — paste the whole thing into
+    schema.sql / a migrations/*.sql file and nothing already-correct changes.
+
+    This is the recovery path for columns added through the Manage Data
+    Tables "Add Column" wizard (add_column, above), which mutates whichever
+    DB is live (local or Azure) directly with no other record in git. Hit
+    GET /master-data/_schema-export against whichever environment you want
+    to check, and fold anything new into schema.sql.
+    """
+    blocks = []
+    with _pool.connection() as conn, conn.cursor() as cur:
+        for table in sorted(ALLOWED_TABLES):
+            cur.execute(
+                """
+                SELECT cm.column_name, cm.display_label, cm.is_locked, cm.column_order,
+                       c.data_type, c.character_maximum_length, c.numeric_precision, c.numeric_scale
+                FROM column_metadata cm
+                JOIN information_schema.columns c
+                  ON c.table_name = cm.table_name
+                 AND c.column_name = cm.column_name
+                 AND c.table_schema = 'public'
+                WHERE cm.table_name = %s
+                ORDER BY cm.column_order, cm.column_name
+                """,
+                (table,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                continue
+
+            lines = [f"-- {table}"]
+            for column_name, _label, _locked, _order, data_type, char_len, num_prec, num_scale in rows:
+                ddl_type = _column_ddl_type(data_type, char_len, num_prec, num_scale)
+                lines.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_name} {ddl_type};")
+
+            values = ",\n    ".join(
+                "({}, {}, {}, {}, {})".format(
+                    _sql_literal(table), _sql_literal(column_name),
+                    _sql_literal(display_label), "TRUE" if is_locked else "FALSE", column_order,
+                )
+                for column_name, display_label, is_locked, column_order, *_ in rows
+            )
+            lines.append(
+                "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES\n"
+                f"    {values}\n"
+                "ON CONFLICT (table_name, column_name) DO NOTHING;"
+            )
+            blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
 # ---------------------------------------------------------------------------
 # Labor Planning — available labor hours by line group × ISO week (aggregate)
 #                  and by production line × calendar day (line-level)

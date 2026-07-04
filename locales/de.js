@@ -97,7 +97,9 @@ window.__NIMBUS_LOCALES.de = {
   'toast.purge_failed':                'Bereinigung fehlgeschlagen: {{msg}}',
   'toast.pick_purge_dates':            'Bitte Start- und Enddatum festlegen.',
   'toast.purge_start_before_end':      'Startdatum muss vor oder gleich dem Enddatum sein.',
-  'toast.col_added':                   'Spalte "{{label}}" hinzugefügt',
+  'toast.col_added':                   'Spalte "{{label}}" hinzugefügt — Schema bei Bedarf exportieren & synchronisieren',
+  'toast.failed_schema_export':        'Schema-Export fehlgeschlagen: {{msg}}',
+  'toast.schema_copied':               'Schema-SQL in die Zwischenablage kopiert',
   'toast.failed_add_col':              'Spalte hinzufügen fehlgeschlagen: {{msg}}',
   'toast.save_failed':                 'Speichern fehlgeschlagen: {{msg}}',
   'toast.paste_result':                'Eingefügt: {{added}} hinzugefügt, {{updated}} aktualisiert',
@@ -132,6 +134,8 @@ window.__NIMBUS_LOCALES.de = {
   'modal.drop_column_title':           'Spalte "{{label}}" löschen?',
   'modal.drop_column_msg':             'Dadurch wird "{{name}}" dauerhaft aus der Tabelle {{table}} entfernt. Alle Daten in dieser Spalte gehen verloren.',
   'modal.drop_column_confirm':         'Ja, Spalte löschen',
+  'modal.export_schema_title':         'Schema exportieren',
+  'modal.export_schema_desc':          'Alle aktuell in dieser Datenbank vorhandenen Spalten als SQL. Kann sicher in schema.sql oder eine Migrationsdatei eingefügt werden — jede Anweisung ändert nur etwas, wenn es noch nicht vorhanden ist.',
   'modal.paste_rows_title':            'Zeilen einfügen',
   'modal.paste_rows_detail':           'Änderungen erscheinen in der Tabelle, werden aber erst nach Klick auf Speichern gesichert.',
   'modal.no_color_wheel_confirm_msg':  'Keine Farbreihe für Werk {{plant}} gefunden.\n\nOhne Farbpriorität optimieren?',
@@ -185,6 +189,7 @@ window.__NIMBUS_LOCALES.de = {
   'btn.add_row':                       '+ Zeile hinzufügen',
   'btn.paste_rows':                    '⎘ Zeilen einfügen',
   'btn.add_column':                    '+ Spalte hinzufügen',
+  'btn.export_schema':                 'Schema exportieren',
   'btn.edit_arrow':                    'Bearbeiten →',
   'btn.unfix_dashboard':               'Freigeben',
   'btn.override':                      '📅 Überschreiben',
@@ -360,7 +365,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.locked_optimizer':               'Für den Optimierer gesperrt',
 
   'toast.isolated_line':               'Linie "{{line}}" isoliert — Label doppelklicken zum Wiederherstellen',
-  'toast.column_dropped':              'Spalte "{{col}}" gelöscht',
+  'toast.column_dropped':              'Spalte "{{col}}" gelöscht — Schema bei Bedarf exportieren & synchronisieren',
   'toast.failed_drop_column':          'Fehler beim Löschen: {{msg}}',
   'toast.column_label_updated':        'Spaltenbezeichnung aktualisiert: "{{label}}"',
   'toast.failed_rename_label':         'Umbenennung fehlgeschlagen: {{msg}}',
@@ -919,7 +924,7 @@ window.__NIMBUS_LOCALES.de = {
   'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
   'kpi.overdue_backlog':               'Overdue backlog',                           // MISSING TRANSLATION
   'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
-  'kpi.all_open_past_finish':          'all open orders past finish',               // MISSING TRANSLATION
+  'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
   'kpi.conflicts_pending':             'Conflicts pending',                         // MISSING TRANSLATION
   'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
   'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION

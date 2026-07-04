@@ -1346,6 +1346,32 @@ def clear_audit_log():
 # MASTER DATA — Subnetwork / Plant / Production Line management
 # =============================================================================
 
+# NOTE: these two literal-path routes MUST be registered before the generic
+# GET /master-data/{table} below — FastAPI/Starlette matches routes in
+# registration order, not by specificity, so a route declared after {table}
+# is permanently shadowed (a request for it just gets captured as table="...",
+# then 404s inside md_list/_assert_table). _audit was previously registered
+# after {table} and was completely unreachable in production as a result.
+@api.get("/master-data/_audit")
+def md_audit(limit: int = 100):
+    """Return the most recent N master-data change audit entries."""
+    return {"entries": md.list_audit(limit)}
+
+
+@api.get("/master-data/_schema-export")
+def md_schema_export():
+    """
+    Read-only: dump every column currently registered (via column_metadata)
+    on the Manage Data Tables tables as idempotent SQL (ALTER TABLE ... ADD
+    COLUMN IF NOT EXISTS + column_metadata INSERT ... ON CONFLICT DO NOTHING).
+    This is the recovery path for columns added through the "Add Column"
+    wizard (md.add_column), which mutates the live DB directly with no other
+    record in git — hit this against whichever DB is live (local or Azure) to
+    get copy-pasteable text to fold back into schema.sql / a migrations file.
+    """
+    return {"sql": md.export_schema_sql()}
+
+
 @api.get("/master-data/{table}")
 def md_list(table: str,
             limit: int | None = Query(default=None, ge=1, le=100000,
@@ -1442,12 +1468,6 @@ def md_rename_label(table: str, column: str, request: Request, body: dict = Body
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@api.get("/master-data/_audit")
-def md_audit(limit: int = 100):
-    """Return the most recent N master-data change audit entries."""
-    return {"entries": md.list_audit(limit)}
 
 
 @api.post("/master-data/plants/{plant}/constraints", dependencies=[Depends(require_api_key)])

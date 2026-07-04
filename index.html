@@ -1673,6 +1673,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
             <button class="md-tab" data-md-tab="production_lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
+            <button class="btn btn-ghost sm" id="md-export-schema-btn" style="margin-left:auto" data-i18n="btn.export_schema">Export Schema</button>
           </nav>
           <div id="md-host"></div>
         </div>
@@ -2392,6 +2393,26 @@ body.dark .ls-co       { color: var(--fg-mute); }
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('md-renamelabel-modal')">Cancel</button>
       <button class="btn btn-primary" id="md-rename-confirm-btn">Save Label</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     SCHEMA EXPORT MODAL
+     ========================================================= -->
+<div class="modal-backdrop" id="md-schema-export-modal" hidden>
+  <div class="modal modal-lg">
+    <header class="modal-head">
+      <h3 data-i18n="modal.export_schema_title">Export Schema</h3>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-schema-export-modal')">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="form-hint" data-i18n="modal.export_schema_desc">Every column currently in this database, as SQL. Safe to paste into schema.sql or a migrations file — each statement only changes something if it isn't already there.</p>
+      <textarea id="md-schema-export-text" class="input" readonly rows="18" style="font-family:var(--font-mono, monospace); font-size:12px; white-space:pre; width:100%;"></textarea>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('md-schema-export-modal')">Close</button>
+      <button class="btn btn-primary" id="md-schema-export-copy-btn" data-i18n="btn.copy_all">⎘ Copy all</button>
     </footer>
   </div>
 </div>

@@ -4078,6 +4078,7 @@ tr:last-child .md-td { border-bottom: none; }
    CONFIRM MODAL + DANGER BUTTON
    ============================================================================= */
 .modal-sm { max-width: 400px; }
+.modal-lg { max-width: 720px; }
 .confirm-message {
   font-size: 14px;
   line-height: 1.55;

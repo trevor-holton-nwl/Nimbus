@@ -97,7 +97,9 @@ window.__NIMBUS_LOCALES.es = {
   'toast.purge_failed':                'Error en la purga: {{msg}}',
   'toast.pick_purge_dates':            'Seleccione tanto fecha de inicio como de fin.',
   'toast.purge_start_before_end':      'La fecha de inicio debe ser anterior o igual a la de fin.',
-  'toast.col_added':                   'Columna "{{label}}" añadida',
+  'toast.col_added':                   'Columna "{{label}}" añadida — exporta y sincroniza el esquema si es necesario',
+  'toast.failed_schema_export':        'Error al exportar el esquema: {{msg}}',
+  'toast.schema_copied':               'SQL del esquema copiado al portapapeles',
   'toast.failed_add_col':              'Error al añadir columna: {{msg}}',
   'toast.save_failed':                 'Error al guardar: {{msg}}',
   'toast.paste_result':                'Pegado: {{added}} añadidos, {{updated}} actualizados',
@@ -133,6 +135,8 @@ window.__NIMBUS_LOCALES.es = {
   'modal.drop_column_title':           '¿Eliminar columna "{{label}}"?',
   'modal.drop_column_msg':             'Esto elimina permanentemente "{{name}}" de la tabla {{table}}. Se perderán todos los datos de esta columna.',
   'modal.drop_column_confirm':         'Sí, eliminar columna',
+  'modal.export_schema_title':         'Exportar Esquema',
+  'modal.export_schema_desc':          'Todas las columnas actuales de esta base de datos, como SQL. Seguro para pegar en schema.sql o un archivo de migración — cada instrucción solo cambia algo si aún no existe.',
   'modal.paste_rows_title':            'Pegar filas',
   'modal.paste_rows_detail':           'Los cambios aparecen en la tabla pero no se guardarán hasta que haga clic en Guardar.',
   'modal.no_color_wheel_confirm_msg':  'No se encontró rueda de colores para la planta {{plant}}.\n\n¿Optimizar sin prioridad de color?',
@@ -187,6 +191,7 @@ window.__NIMBUS_LOCALES.es = {
   'btn.add_row':                       '+ Añadir Fila',
   'btn.paste_rows':                    '⎘ Pegar Filas',
   'btn.add_column':                    '+ Añadir Columna',
+  'btn.export_schema':                 'Exportar Esquema',
   'btn.edit_arrow':                    'Editar →',
   'btn.unfix_dashboard':               'Desfijar',
   'btn.override':                      '📅 Anular',
@@ -364,7 +369,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.locked_optimizer':               'Bloqueado del optimizador',
 
   'toast.isolated_line':               'Línea "{{line}}" aislada — haga doble clic en la etiqueta para restaurar',
-  'toast.column_dropped':              'Columna "{{col}}" eliminada',
+  'toast.column_dropped':              'Columna "{{col}}" eliminada — exporta y sincroniza el esquema si es necesario',
   'toast.failed_drop_column':          'Error al eliminar columna: {{msg}}',
   'toast.column_label_updated':        'Etiqueta de columna actualizada a "{{label}}"',
   'toast.failed_rename_label':         'Error al renombrar etiqueta: {{msg}}',
@@ -922,7 +927,7 @@ window.__NIMBUS_LOCALES.es = {
   'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
   'kpi.overdue_backlog':               'Overdue backlog',                           // MISSING TRANSLATION
   'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
-  'kpi.all_open_past_finish':          'all open orders past finish',               // MISSING TRANSLATION
+  'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
   'kpi.conflicts_pending':             'Conflicts pending',                         // MISSING TRANSLATION
   'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
   'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION

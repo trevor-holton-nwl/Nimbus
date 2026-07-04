@@ -7019,8 +7019,7 @@ const NIMBUS = (function () {
         if (dk !== f.dateKey) return false;
       }
       if (f.status) {
-        const nowDt = new Date();
-        if (f.status === 'late' && !(data.end_date && data.end_date < nowDt)) return false;
+        if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
         if (f.status === 'fixed' && !Store.isFixed(data.id)) return false;
         if (f.status === 'atrisk' || f.status === 'conflict') {
           const rel = Store.alertsByTask().get(String(data.id)) || [];
@@ -7092,7 +7091,7 @@ const NIMBUS = (function () {
       if (!drop) return;
       const cur = Table._chipFilters.status;
       const items = [
-        { v: 'late',     k: 'Late',         d: 'end_date in the past' },
+        { v: 'late',     k: 'Late',         d: 'past SAP due date' },
         { v: 'conflict', k: 'Conflicting',  d: 'has error alert' },
         { v: 'atrisk',   k: 'At risk',      d: 'has warning alert' },
         { v: 'fixed',    k: 'Fixed',        d: 'locked from optimiser' },
@@ -8223,13 +8222,11 @@ const NIMBUS = (function () {
     _renderKPIs(matrix7, tasksArg) {
       const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
       const today = Util.startOfDay(new Date());
-      const nowDt = new Date();
 
       const todayOrders = tasks.filter(t => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
 
-      // Overdue backlog: every order whose end_date is in the past and isn't marked complete.
-      // No status enum exists today, so end_date<now is the strongest proxy for "overdue".
-      const lateCount = tasks.filter(t => t.end_date && t.end_date < nowDt).length;
+      // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
+      const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
       const lateSev = lateCount > 0 ? 'err' : 'ok';
 
       const plantLines = new Set(Store.linesForSelectedPlant());
@@ -8335,7 +8332,7 @@ const NIMBUS = (function () {
     _tileTooltip(action) {
       switch (action) {
         case 'orders-today': return 'Open Orders table filtered to today';
-        case 'late':         return 'Open Orders table filtered to overdue orders';
+        case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
         case 'conflicts':    return 'Jump to Active alerts, error severity highlighted';
         case 'alerts':       return 'Jump to Active alerts list';
         case 'headroom':     return 'Jump to utilization heatmap';
@@ -10269,6 +10266,19 @@ const NIMBUS = (function () {
     _marquee: null,
     _marqueeRAF: null,
 
+    // True iff the user panned/zoomed the Gantt canvas (a byUser rangechange,
+    // OR the mousedown->mouseup endpoint moved >5px) at any point since the
+    // most recent mousedown on #vis-timeline. Consulted by BOTH click paths —
+    // _onClick() below, and the alertcell-popup listener installed in
+    // install() — so a pan-release is never treated as a real click by either.
+    // Reset only on the *next* mousedown (see install()); never reset inside a
+    // click handler, so both consumers see the identical verdict for one
+    // gesture. Distinct from _isDragging/_lastDragEndTs (item-drag state,
+    // further down): those track dragging an order block itself, and their
+    // own edge-scroll setWindow() calls are byUser:false, so they never set
+    // this flag — no coordination needed between the two.
+    _panDuringGesture: false,
+
     trace() { return this._trace.slice(-50); },
     _log(type, data) {
       const entry = { t: Date.now(), type, ...data };
@@ -10300,22 +10310,63 @@ const NIMBUS = (function () {
          never matches. getEventProperties maps any DOM click to {group, time}
          regardless of which DIV was hit; we then look up the alertcell- item
          in the DataSet. */
+      // Pan-vs-click disambiguation, shared by this listener AND _onClick():
+      // canvas panning is 100% native vis-timeline (Hammer.js `moveable`) — no
+      // custom pan code exists — so we can't tell "a pan that ended here" apart
+      // from a real click using the click event alone. Two signals are OR'd
+      // into Interaction._panDuringGesture:
+      //   1. Endpoint distance (mousedown -> mouseup traveled > ~5px) — cheap,
+      //      catches most pans, but misses "pan right, nudge back left before
+      //      releasing" (net displacement can land back under threshold).
+      //      Only armed when the mousedown did NOT start on a real order item
+      //      — dragging an order to reschedule it also travels >5px on this
+      //      same container, and must not be mistaken for a canvas pan (that
+      //      would wrongly suppress the trailing click's Selection.set after
+      //      a drag). Mirrors the existing alertcell-id-prefix check below.
+      //   2. Ground truth: did vis-timeline report the visible window actually
+      //      moving (a `rangechange` with byUser:true) at any point during this
+      //      gesture? Catches what (1) misses. byUser:true is vis-timeline's own
+      //      "this was a user drag/zoom" flag, as opposed to a programmatic
+      //      setWindow()/focus() call (byUser:false) — e.g. CENTER_ON_CLICK
+      //      below, item-drag/marquee edge-scroll, minimap nav (TimelineNav),
+      //      or Alerts.focus()'s scroll-to. Filtering on byUser is what keeps
+      //      those programmatic pans from wrongly suppressing an unrelated
+      //      later click.
       const _tlContainer = document.getElementById('vis-timeline');
       if (_tlContainer && !Interaction._alertcellDelegated) {
         Interaction._alertcellDelegated = true;
         let _downX = null, _downY = null;
+
         _tlContainer.addEventListener('mousedown', e => {
-          _downX = e.clientX; _downY = e.clientY;
+          // New gesture starting: clear the previous gesture's verdict. Must
+          // happen here (not in a click handler) so both click consumers of
+          // this flag see an unconsumed verdict for the CURRENT gesture.
+          Interaction._panDuringGesture = false;
+          const p = Timeline._tl && Timeline._tl.getEventProperties(e);
+          const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
+          if (onRealItem) {
+            // Mousedown started on an order item — this is an item-drag
+            // gesture, not a canvas pan. Don't arm the distance tracker.
+            _downX = _downY = null;
+          } else {
+            _downX = e.clientX; _downY = e.clientY;
+          }
         });
+
+        // mouseup — not click — finalizes the distance check. mouseup always
+        // precedes both vis's internal semantic 'click' (used by _onClick)
+        // and this raw DOM 'click' below, so the verdict is settled before
+        // either consumer runs, regardless of their relative firing order.
+        _tlContainer.addEventListener('mouseup', e => {
+          if (_downX === null) return; // not armed for this gesture — leave flag as-is
+          const dx = e.clientX - _downX, dy = e.clientY - _downY;
+          _downX = _downY = null;
+          if ((dx * dx + dy * dy) > 25) Interaction._panDuringGesture = true;
+        });
+
         _tlContainer.addEventListener('click', e => {
           if (!Timeline._tl) return;
-          // Suppress when the user was panning: a click that traveled more
-          // than ~5px from its mousedown is a drag-pan, not an intent click.
-          if (_downX !== null) {
-            const dx = e.clientX - _downX, dy = e.clientY - _downY;
-            _downX = _downY = null;
-            if ((dx * dx + dy * dy) > 25) return;
-          }
+          if (Interaction._panDuringGesture) return; // panned during this gesture — not a real click
           const p = Timeline._tl.getEventProperties(e);
           if (!p || !p.group || !p.time) return;
           // If the click is on a real foreground item (an order), let normal
@@ -10328,6 +10379,18 @@ const NIMBUS = (function () {
           Alerts.showForCell(p.group, dayKey);
         });
       }
+
+      // Canvas pan/zoom ground truth for _panDuringGesture (see above).
+      // Registered once here in Interaction.install() (which itself only runs
+      // once at startup, guarded by this._installed at the top of install())
+      // rather than reusing one of the KPI/minimap/dependency-overlay
+      // rangechange listeners elsewhere (app.js ~6298, ~8916-8917, ~9366-9367)
+      // — those belong to Timeline/TimelineNav/DependencyOverlay for unrelated
+      // redraw concerns, and piggybacking here would leak an Interaction-only
+      // concern across module boundaries.
+      Timeline._tl.on('rangechange', props => {
+        if (props && props.byUser) Interaction._panDuringGesture = true;
+      });
 
       /* ----- doubleClick: focus + edit ------------------------------------- */
       Timeline._tl.on('doubleClick', props => Interaction._onDoubleClick(props));
@@ -10819,6 +10882,15 @@ const NIMBUS = (function () {
 
       // If a double-click just fired, swallow this follow-up select.
       if (this._justDoubleClicked) return;
+
+      // If the user panned/zoomed the canvas at any point since the mousedown
+      // behind this click, this isn't a real click on whatever it landed on —
+      // it's just the release-point of a pan gesture. Swallow it entirely
+      // (same signal the alertcell-popup listener in install() consults) so
+      // panning never re-selects an order, clears the current selection, or
+      // re-centers via CENTER_ON_CLICK below. See _panDuringGesture's
+      // declaration for how the flag is set/reset.
+      if (this._panDuringGesture) return;
 
       const ev = props.event || {};
       const shift = !!(ev.shiftKey || ev.srcEvent?.shiftKey);
@@ -15801,6 +15873,8 @@ saveAll() {
       document.querySelectorAll('.md-tab').forEach(b => {
         b.onclick = () => _setTab(b.dataset.mdTab);
       });
+      const exportBtn = document.getElementById('md-export-schema-btn');
+      if (exportBtn) exportBtn.onclick = _exportSchema;
       _syncTabUI();
       _loadAndRender(_activeTable);
     }
@@ -16538,6 +16612,32 @@ saveAll() {
         }
       };
       Modal.open('md-renamelabel-modal');
+    }
+
+    // Pulls the current column state (whichever DB this app is pointed at —
+    // local or Azure) back out as idempotent SQL, so drift from the Add/Drop
+    // Column wizard (which mutates the live DB directly, with no git record)
+    // can be folded back into schema.sql after the fact.
+    async function _exportSchema() {
+      const textEl  = document.getElementById('md-schema-export-text');
+      const copyBtn = document.getElementById('md-schema-export-copy-btn');
+      textEl.value = '…';
+      Modal.open('md-schema-export-modal');
+      try {
+        const data = await fetch(`${API}/master-data/_schema-export`).then(r => {
+          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          return r.json();
+        });
+        textEl.value = data.sql || '';
+      } catch (e) {
+        textEl.value = '';
+        Toast.show(t('toast.failed_schema_export', { msg: e.message }), 'error');
+      }
+      copyBtn.onclick = () => {
+        navigator.clipboard.writeText(textEl.value)
+          .then(() => Toast.show(t('toast.schema_copied'), 'success'))
+          .catch(() => Toast.show(t('toast.clipboard_denied'), 'error'));
+      };
     }
 
     async function syncLineSettings(line, patch) {

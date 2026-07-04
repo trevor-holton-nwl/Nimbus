@@ -224,6 +224,30 @@ VALUES ('production_lines', 'pl_group', 'Production Line Group', FALSE, 4)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
+-- Optimizer-flag columns (added via Admin DDL at some point; the physical
+-- columns and/or their column_metadata rows never made it into schema.sql,
+-- so `list_rows`'s INNER JOIN against column_metadata silently hid them from
+-- GET /master-data/production_lines — the ProdLines "Bottleneck"/"Excl.
+-- Optimizer" checkboxes therefore reset to unchecked on every master-data
+-- reload even after being toggled. ADD COLUMN IF NOT EXISTS covers the case
+-- where the physical column is already there; the INSERT closes the metadata
+-- gap either way.
+-- ----------------------------------------------------------------------------
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS bottleneck      TEXT;
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS excl_optimizer  TEXT;
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_type     TEXT;
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_percent  NUMERIC;
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_hours    NUMERIC;
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('production_lines', 'bottleneck',     'Bottleneck',             FALSE, 5),
+    ('production_lines', 'excl_optimizer', 'Exclude from Optimizer', FALSE, 6),
+    ('production_lines', 'buffer_type',    'Buffer Type',            FALSE, 7),
+    ('production_lines', 'buffer_percent', 'Buffer %',               FALSE, 8),
+    ('production_lines', 'buffer_hours',   'Buffer Hours',           FALSE, 9)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
 -- Labor Planning — aggregate available labor hours by line group × ISO week
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS labor_plan (
