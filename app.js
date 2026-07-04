@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-03-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-04-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -10266,17 +10266,17 @@ const NIMBUS = (function () {
     _marquee: null,
     _marqueeRAF: null,
 
-    // True iff the user panned/zoomed the Gantt canvas (a byUser rangechange,
-    // OR the mousedown->mouseup endpoint moved >5px) at any point since the
-    // most recent mousedown on #vis-timeline. Consulted by BOTH click paths —
-    // _onClick() below, and the alertcell-popup listener installed in
-    // install() — so a pan-release is never treated as a real click by either.
-    // Reset only on the *next* mousedown (see install()); never reset inside a
-    // click handler, so both consumers see the identical verdict for one
-    // gesture. Distinct from _isDragging/_lastDragEndTs (item-drag state,
-    // further down): those track dragging an order block itself, and their
-    // own edge-scroll setWindow() calls are byUser:false, so they never set
-    // this flag — no coordination needed between the two.
+    // True iff the pointer strayed >~8px from its mousedown point (PEAK
+    // displacement, not net endpoint displacement — see install() for why)
+    // at any point since the most recent mousedown on #vis-timeline.
+    // Consulted by BOTH click paths — _onClick() below, and the
+    // alertcell-popup listener installed in install() — so a pan-release is
+    // never treated as a real click by either. Reset only on the *next*
+    // mousedown (see install()); never reset inside a click handler, so both
+    // consumers see the identical verdict for one gesture. Distinct from
+    // _isDragging/_lastDragEndTs (item-drag state, further down): those track
+    // dragging an order block itself; mousedown on a real item never arms
+    // this flag's tracker at all (see install()), so there's no overlap.
     _panDuringGesture: false,
 
     trace() { return this._trace.slice(-50); },
@@ -10313,25 +10313,37 @@ const NIMBUS = (function () {
       // Pan-vs-click disambiguation, shared by this listener AND _onClick():
       // canvas panning is 100% native vis-timeline (Hammer.js `moveable`) — no
       // custom pan code exists — so we can't tell "a pan that ended here" apart
-      // from a real click using the click event alone. Two signals are OR'd
-      // into Interaction._panDuringGesture:
-      //   1. Endpoint distance (mousedown -> mouseup traveled > ~5px) — cheap,
-      //      catches most pans, but misses "pan right, nudge back left before
-      //      releasing" (net displacement can land back under threshold).
-      //      Only armed when the mousedown did NOT start on a real order item
-      //      — dragging an order to reschedule it also travels >5px on this
-      //      same container, and must not be mistaken for a canvas pan (that
-      //      would wrongly suppress the trailing click's Selection.set after
-      //      a drag). Mirrors the existing alertcell-id-prefix check below.
-      //   2. Ground truth: did vis-timeline report the visible window actually
-      //      moving (a `rangechange` with byUser:true) at any point during this
-      //      gesture? Catches what (1) misses. byUser:true is vis-timeline's own
-      //      "this was a user drag/zoom" flag, as opposed to a programmatic
-      //      setWindow()/focus() call (byUser:false) — e.g. CENTER_ON_CLICK
-      //      below, item-drag/marquee edge-scroll, minimap nav (TimelineNav),
-      //      or Alerts.focus()'s scroll-to. Filtering on byUser is what keeps
-      //      those programmatic pans from wrongly suppressing an unrelated
-      //      later click.
+      // from a real click using the click event alone.
+      //
+      // Interaction._panDuringGesture is set from PEAK pointer displacement:
+      // the largest distance the pointer strays from its mousedown point at
+      // ANY point during the gesture, not the net mousedown->mouseup endpoint
+      // distance. Net-endpoint tracking (the first cut of this fix, shipped
+      // in nimbus:v22) missed "pan right, then drift back near the start
+      // before releasing" — a normal settle-the-view gesture — because the
+      // net displacement lands back under threshold even though a real pan
+      // happened. Peak displacement catches that directly: a pan-and-return
+      // still peaks at the full pan distance.
+      //
+      // v22 also tried to backstop that gap with a second signal — a
+      // vis-timeline `rangechange` listener gated on `byUser:true` — which
+      // had to be reverted: vis-timeline's Hammer pan recognizer is
+      // configured `{threshold: 5, direction: DIRECTION_ALL}` (any-direction,
+      // 5px) and `Range._onDrag` emits `rangechange{byUser:true}` on every
+      // recognized panmove with no magnitude check of its own, so a click
+      // with a few px of incidental hand jitter — routine on touchpads, not
+      // rare with a mouse — nudged the view a hair and got flagged as a pan,
+      // silently swallowing real clicks almost entirely. Wheel/pinch zoom
+      // also emit `rangechange{byUser:true}` (confirmed in vis-timeline's
+      // Range.js `zoom()`), and touchpad inertial scrolling streams wheel
+      // events for up to ~1s after fingers lift — long enough to land
+      // between an unrelated click's mousedown and its click, wrongly
+      // suppressing it. Peak-displacement alone covers the case rangechange
+      // was added for, so rangechange was removed rather than tuned.
+      //
+      // Threshold is 8px (peak, any direction) — comfortably above sloppy-
+      // click jitter, far below any real pan (which peaks in the tens to
+      // hundreds of px).
       const _tlContainer = document.getElementById('vis-timeline');
       if (_tlContainer && !Interaction._alertcellDelegated) {
         Interaction._alertcellDelegated = true;
@@ -10346,22 +10358,35 @@ const NIMBUS = (function () {
           const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
           if (onRealItem) {
             // Mousedown started on an order item — this is an item-drag
-            // gesture, not a canvas pan. Don't arm the distance tracker.
+            // gesture, not a canvas pan. Don't arm the peak tracker: order
+            // drags routinely exceed 8px and must not be mistaken for a
+            // canvas pan (that would wrongly suppress the trailing click's
+            // Selection.set after a drag). Mirrors the alertcell-id-prefix
+            // check in the click handler below.
             _downX = _downY = null;
           } else {
             _downX = e.clientX; _downY = e.clientY;
           }
         });
 
-        // mouseup — not click — finalizes the distance check. mouseup always
-        // precedes both vis's internal semantic 'click' (used by _onClick)
-        // and this raw DOM 'click' below, so the verdict is settled before
-        // either consumer runs, regardless of their relative firing order.
-        _tlContainer.addEventListener('mouseup', e => {
-          if (_downX === null) return; // not armed for this gesture — leave flag as-is
+        // Peak-displacement check: fires on every mousemove while armed
+        // (_downX !== null), settles the verdict the moment the pointer
+        // strays past threshold, then disarms itself so the rest of the
+        // gesture's mousemoves are a single cheap null-check.
+        _tlContainer.addEventListener('mousemove', e => {
+          if (_downX === null) return; // not armed — no mousedown captured, or started on an item
           const dx = e.clientX - _downX, dy = e.clientY - _downY;
+          if ((dx * dx + dy * dy) > 64) {
+            Interaction._panDuringGesture = true;
+            _downX = _downY = null; // verdict settled — stop tracking for this gesture
+          }
+        });
+
+        // mouseup just disarms — the verdict (if any) was already settled by
+        // mousemove. Keeps the "armed == button currently held" invariant so
+        // a stray mousemove after release can't retroactively set the flag.
+        _tlContainer.addEventListener('mouseup', () => {
           _downX = _downY = null;
-          if ((dx * dx + dy * dy) > 25) Interaction._panDuringGesture = true;
         });
 
         _tlContainer.addEventListener('click', e => {
@@ -10379,18 +10404,6 @@ const NIMBUS = (function () {
           Alerts.showForCell(p.group, dayKey);
         });
       }
-
-      // Canvas pan/zoom ground truth for _panDuringGesture (see above).
-      // Registered once here in Interaction.install() (which itself only runs
-      // once at startup, guarded by this._installed at the top of install())
-      // rather than reusing one of the KPI/minimap/dependency-overlay
-      // rangechange listeners elsewhere (app.js ~6298, ~8916-8917, ~9366-9367)
-      // — those belong to Timeline/TimelineNav/DependencyOverlay for unrelated
-      // redraw concerns, and piggybacking here would leak an Interaction-only
-      // concern across module boundaries.
-      Timeline._tl.on('rangechange', props => {
-        if (props && props.byUser) Interaction._panDuringGesture = true;
-      });
 
       /* ----- doubleClick: focus + edit ------------------------------------- */
       Timeline._tl.on('doubleClick', props => Interaction._onDoubleClick(props));
