@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-05-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-05-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -4164,9 +4164,7 @@ const NIMBUS = (function () {
       let changeovers = 0;
       for (let i = 1; i < cellTasks.length; i++) {
         const a = cellTasks[i-1], b = cellTasks[i];
-        const ka = a.COLOR || a.FORM_SIZE || a.MATERIAL_NUMBER || '';
-        const kb = b.COLOR || b.FORM_SIZE || b.MATERIAL_NUMBER || '';
-        if (ka !== kb) changeovers++;
+        if ((a.COLOR || '') !== (b.COLOR || '') || (a.FORM_SIZE || '') !== (b.FORM_SIZE || '')) changeovers++;
       }
 
       // -------- Categorize alerts
@@ -8495,11 +8493,40 @@ const NIMBUS = (function () {
 
     _nextChangeover(lineTasks, now) {
       const activeIdx = lineTasks.findIndex(t => t.start_date && t.end_date && t.start_date <= now && t.end_date > now);
-      const startIdx  = activeIdx >= 0 ? activeIdx : lineTasks.findIndex(t => t.start_date && t.start_date > now);
-      if (startIdx < 0) return null;
-      const ref = lineTasks[startIdx];
-      for (let i = startIdx + 1; i < lineTasks.length; i++) {
+
+      let refIdx, scanFrom;
+      if (activeIdx >= 0) {
+        refIdx   = activeIdx;
+        scanFrom = activeIdx + 1;
+      } else {
+        const futureIdx = lineTasks.findIndex(t => t.start_date && t.start_date > now);
+        if (futureIdx < 0) return null;
+
+        // Idle: reference is whatever the line most recently finished running
+        // (max end_date <= now), not the next future order itself — using the
+        // future order as its own baseline would hide a changeover into it.
+        let lastDoneIdx = -1, lastDoneEnd = null;
+        for (let i = 0; i < futureIdx; i++) {
+          const t = lineTasks[i];
+          if (t.start_date && t.end_date && t.end_date <= now && (!lastDoneEnd || t.end_date > lastDoneEnd)) {
+            lastDoneEnd = t.end_date;
+            lastDoneIdx = i;
+          }
+        }
+
+        if (lastDoneIdx >= 0) {
+          refIdx   = lastDoneIdx;
+          scanFrom = futureIdx; // compare the next order itself against last-run product
+        } else {
+          refIdx   = futureIdx; // no run history — can't tell if the first order is a changeover
+          scanFrom = futureIdx + 1;
+        }
+      }
+
+      const ref = lineTasks[refIdx];
+      for (let i = scanFrom; i < lineTasks.length; i++) {
         const t = lineTasks[i];
+        if (!t.start_date) continue;
         if ((t.COLOR || '') !== (ref.COLOR || '') || (t.FORM_SIZE || '') !== (ref.FORM_SIZE || '')) {
           return t.start_date;
         }
@@ -8597,14 +8624,14 @@ const NIMBUS = (function () {
         return true;
       });
 
-      // Sort errors first, then warnings, then info — newest within each severity.
+      // Sort errors first, then warnings, then info — soonest within each severity.
       const SEV_RANK = { err: 0, warn: 1, info: 2 };
       alerts.sort((a, b) => {
         const sa = SEV_RANK[a.sev] ?? 9, sb = SEV_RANK[b.sev] ?? 9;
         if (sa !== sb) return sa - sb;
         const ta = a.time ? a.time.getTime() : 0;
         const tb = b.time ? b.time.getTime() : 0;
-        return tb - ta;
+        return ta - tb;
       });
 
       const errN  = alerts.filter(a => a.sev === 'err').length;
