@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-04-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-05-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -8265,14 +8265,14 @@ const NIMBUS = (function () {
         { k: t('kpi.orders_today'),             v: String(todayOrders.length),
           d: t('kpi.orders_total', { n: tasks.length }),
           action: 'orders-today' },
+        { k: t('kpi.conflicts_pending'),         v: String(errAlerts),
+          d: errAlerts === 0 ? t('kpi.none_blocking') : t('kpi.blocking_fix_now'),
+          cls: conflictCls,
+          action: 'alerts-today' },
         { k: t('kpi.overdue_backlog'),           v: String(lateCount),
           d: lateCount === 0 ? t('kpi.no_backlog') : t('kpi.all_open_past_finish'),
           cls: lateSev === 'err' ? 'err' : '',
           action: 'late' },
-        { k: t('kpi.conflicts_pending'),         v: String(errAlerts),
-          d: errAlerts === 0 ? t('kpi.none_blocking') : t('kpi.blocking_fix_now'),
-          cls: conflictCls,
-          action: 'conflicts' },
         { k: t('kpi.open_alerts'),               v: String(openAlerts),
           d: t('kpi.warn_err_summary', { w: warnAlerts, e: errAlerts }),
           cls: alertCls,
@@ -8333,7 +8333,7 @@ const NIMBUS = (function () {
       switch (action) {
         case 'orders-today': return 'Open Orders table filtered to today';
         case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
-        case 'conflicts':    return 'Jump to Active alerts, error severity highlighted';
+        case 'alerts-today': return 'Open Orders table filtered to conflicting orders due today';
         case 'alerts':       return 'Jump to Active alerts list';
         case 'headroom':     return 'Jump to utilization heatmap';
         case 'fixed':        return 'Jump to fixed orders list';
@@ -8363,9 +8363,16 @@ const NIMBUS = (function () {
           }, 120);
           break;
         }
-        case 'conflicts':
-          Dashboard._scrollToAlerts('err');
+        case 'alerts-today': {
+          App.goto('table');
+          const ymd = Util.dayKey(Util.startOfDay(new Date()));
+          setTimeout(() => {
+            if (NIMBUS.Table && NIMBUS.Table._applyChipFilter) {
+              NIMBUS.Table._applyChipFilter({ status: 'conflict', dateKey: ymd });
+            }
+          }, 120);
           break;
+        }
         case 'alerts':
           Dashboard._scrollToAlerts();
           break;

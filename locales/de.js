@@ -922,13 +922,13 @@ window.__NIMBUS_LOCALES.de = {
   // Dashboard KPI tiles
   'kpi.orders_today':                  'Orders today',                              // MISSING TRANSLATION
   'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
-  'kpi.overdue_backlog':               'Overdue backlog',                           // MISSING TRANSLATION
+  'kpi.overdue_backlog':               'Late Orders',                               // MISSING TRANSLATION
   'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
   'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
-  'kpi.conflicts_pending':             'Conflicts pending',                         // MISSING TRANSLATION
+  'kpi.conflicts_pending':             'Alerts Today',                              // MISSING TRANSLATION
   'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
   'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION
-  'kpi.open_alerts':                   'Open alerts',                               // MISSING TRANSLATION
+  'kpi.open_alerts':                   'Total Open Alerts',                         // MISSING TRANSLATION
   'kpi.warn_err_summary':              '{{w}} warn · {{e}} err',                    // MISSING TRANSLATION
   'kpi.capacity_headroom_7d':          'Capacity Headroom Next 7D',                 // MISSING TRANSLATION
   'kpi.avg_used':                      '{{p}}% avg used',                           // MISSING TRANSLATION
