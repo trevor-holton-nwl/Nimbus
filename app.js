@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-05-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-05-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -8241,7 +8241,14 @@ const NIMBUS = (function () {
       const warnAlerts = visibleAlerts.filter(a => a.sev === 'warn').length;
       const alertSev = errAlerts > 0 ? 'err' : openAlerts > 0 ? 'warn' : 'ok';
       const alertCls = alertSev === 'err' ? 'err' : alertSev === 'warn' ? 'warn' : '';
-      const conflictCls = errAlerts > 0 ? 'err' : '';
+      // Alerts Today tile (kpi.conflicts_pending, action:'alerts-today') must count exactly
+      // what its click-through shows -- Table._applyChipFilter({status:'conflict', dateKey:today})
+      // -- i.e. today's orders carrying >=1 err alert. Independent of errAlerts/openAlerts/
+      // warnAlerts/alertSev/alertCls above, which stay rolling-horizon for Total Open Alerts.
+      const alertsByTask = Store.alertsByTask();
+      const conflictsToday = todayOrders.filter(t =>
+        (alertsByTask.get(String(t.id)) || []).some(a => a.sev === 'err')).length;
+      const conflictCls = conflictsToday > 0 ? 'err' : '';
 
       // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
       // Reuse the matrix built once in render() when provided; recompute standalone otherwise.
@@ -8263,8 +8270,8 @@ const NIMBUS = (function () {
         { k: t('kpi.orders_today'),             v: String(todayOrders.length),
           d: t('kpi.orders_total', { n: tasks.length }),
           action: 'orders-today' },
-        { k: t('kpi.conflicts_pending'),         v: String(errAlerts),
-          d: errAlerts === 0 ? t('kpi.none_blocking') : t('kpi.blocking_fix_now'),
+        { k: t('kpi.conflicts_pending'),         v: String(conflictsToday),
+          d: conflictsToday === 0 ? t('kpi.none_blocking') : t('kpi.blocking_fix_now'),
           cls: conflictCls,
           action: 'alerts-today' },
         { k: t('kpi.overdue_backlog'),           v: String(lateCount),
