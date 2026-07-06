@@ -7899,6 +7899,7 @@ const NIMBUS = (function () {
     _lineItems: [],
     _vl:        null,
     _wired:     false,
+    _todayCache: null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
 
     _renderPending: false,
 
@@ -7979,20 +7980,31 @@ const NIMBUS = (function () {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
 
+      // Utilization chip reads the SAME proportional daily-load matrix the Dashboard
+      // heatmap + Line Status use, so all three agree for today (fixes R197). Plant-scoped
+      // srcTasks matches Dashboard._filteredTasks() and is non-cacheable, so it never
+      // thrashes the shared Utilization._cache (TimelineNav's multi-day entry). Memoize locally.
+      const _todayKey = Util.dayKey(Util.startOfDay(todayStart));
+      const _utilMKey = `${todayStart.getTime()}|1|${Store._rev || 0}|${Store.selectedPlant || 'all'}`;
+      let _utilToday;
+      if (Hierarchy._todayCache && Hierarchy._todayCache.key === _utilMKey) {
+        _utilToday = Hierarchy._todayCache.matrix;
+      } else {
+        _utilToday = Utilization.computeMatrix(todayStart, 1, Store.tasksForSelectedPlant());
+        Hierarchy._todayCache = { key: _utilMKey, matrix: _utilToday };
+      }
+
       Hierarchy._lineItems = visibleNames.map(name => {
         const ci    = Timeline._colorIndex(name);
         const color = Config.COLORS[ci % Config.COLORS.length];
         const tasks = lines[name]
           .filter(tk => tk.start_date >= todayStart && tk.start_date <= todayEnd)
           .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-        const endingToday = lines[name].filter(
-          tk => tk.end_date && tk.end_date >= todayStart && tk.end_date <= todayEnd
-        );
-        const runH      = endingToday.reduce((s, tk) => s + Util.runHours(tk), 0);
-        const cap       = Calendar.dailyCapacityHours(name, todayStart);
-        const utilRatio = cap > 0 ? runH / cap : (runH > 0 ? 1 : 0);
-        const pct       = runH > 0 ? Math.round(utilRatio * 100) : null;
-        const sev       = Utilization.sev(utilRatio);
+        const u   = _utilToday[name]?.[_todayKey];
+        const pct = (u && u.scheduled > 0) ? Math.round(u.pct * 100) : null;
+        const sev = u
+          ? Utilization.sev(u.pct, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
+          : 'ok';
         return { name, tasks, color, pct, sev };
       });
 
@@ -8531,9 +8543,9 @@ const NIMBUS = (function () {
           const bg  = heatBg(pct);
           const tc  = heatText(pct);
           const lbl = Math.round(pct * 100) + '%';
-          const cap     = (matrix[line][d]?.capacity || 0).toFixed(1);
-          const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(1);
-          const sched   = (matrix[line][d]?.scheduled || 0).toFixed(1);
+          const cap     = (matrix[line][d]?.capacity || 0).toFixed(2);
+          const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
+          const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
           const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
           html += `<div class="hm-cell" data-line="${line}" data-date="${d}" style="background:${bg};color:${tc};cursor:pointer" title="Click to view ${line} on ${d} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${line}','${d}')">${lbl}</div>`;
         });
@@ -8629,10 +8641,10 @@ const NIMBUS = (function () {
         const ci    = Timeline._colorIndex(line);
         const color = Config.COLORS[ci % Config.COLORS.length];
         const u     = matrix[line]?.[todayKey];
-        const sched   = u ? +u.scheduled.toFixed(1)          : 0;
-        const cap     = u ? +u.capacity.toFixed(1)           : 0;
-        const effCap  = u ? +(u.effectiveCapacity ?? u.capacity).toFixed(1) : cap;
-        const pct     = cap > 0 ? Math.round((sched / cap) * 100) : 0;
+        const sched   = u ? u.scheduled.toFixed(2)                         : '0.00';
+        const cap     = u ? u.capacity.toFixed(2)                          : '0.00';
+        const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
+        const pct     = u ? Math.round(u.pct * 100)                        : 0;
         const overloadAt = u && u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD;
         const sev     = u ? Utilization.sev(u.pct, overloadAt) : 'ok';
         const barW    = Math.min(pct, 100);
