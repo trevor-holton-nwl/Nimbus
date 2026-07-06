@@ -6917,9 +6917,10 @@ const NIMBUS = (function () {
             cellRenderer: p => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
             headerTooltip: 'Fixed orders are locked from the optimiser'
           },
-          { headerName: t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, pinned: 'left',
+          { headerName: t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
             editable: false, cellClass: 'cell-num' },
-          { headerName: t('col.order'), field: 'PRODUCTION_ORDER', minWidth: 160, editable: false,
+          { headerName: t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
+            pinned: 'left', editable: false,
             valueGetter: p => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
           { headerName: t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false },
           { headerName: t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
