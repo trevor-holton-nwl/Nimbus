@@ -7275,7 +7275,7 @@ const NIMBUS = (function () {
     },
 
     _onStore(evt) {
-      if (evt.source === 'table') return;
+      if (evt.source === 'table' && evt.type !== 'fixed:change') return;
       if (!Table._api) return;
       if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected'
           || evt.type === 'lineSettings:change') {
