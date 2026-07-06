@@ -1095,6 +1095,60 @@ def tasks_refresh(payload: TaskRefreshPayload):
     return {"data": db.get_task_versions(payload.ids)}
 
 
+class DueDateCorrection(BaseModel):
+    """One order's due-date-baseline correction, computed client-side by
+    Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
+    `base_version` is the row's xmin as of the client's last load/save of it —
+    used server-side to pin the write against ANY concurrent change to the row
+    (a SAP re-upload, a normal scheduling save, or another tab's correction).
+    Deliberately not a raw date value: a date round-trips through JS
+    Date/JSON.stringify, which would re-label a naive local timestamp as UTC
+    and never match Postgres's naive basic_start_date for a non-UTC client.
+    See db.correct_due_date_baselines."""
+    id: str
+    basic_finish_date: str
+    base_version: int
+
+
+class DueDateCorrectionPayload(BaseModel):
+    corrections: list[DueDateCorrection] = []
+
+
+@api.post("/tasks/baseline-correct")
+def baseline_correct(payload: DueDateCorrectionPayload):
+    """
+    Persist due-date-baseline (basic_finish_date) corrections found by the
+    frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
+    client's perspective — every row is re-validated server-side
+    (db.correct_due_date_baselines) before being written, so a late,
+    duplicate, or concurrent call can never overwrite an already-corrected or
+    genuinely fresh (re-uploaded) value; a failed re-validation is a safe
+    per-row no-op, not an error.
+    Payload: { corrections: [{ id, basic_finish_date, base_version }] }
+    Response: { status, applied, persisted, skipped, not_matched, versions }
+    """
+    items = [
+        {
+            "id": c.id,
+            "basic_finish_date": _to_pydt(c.basic_finish_date),
+            "base_version": c.base_version,
+        }
+        for c in payload.corrections
+        if c.id and c.basic_finish_date and c.base_version is not None
+    ]
+    try:
+        res = db.correct_due_date_baselines(items)
+    except Exception as e:
+        error_code = (db.translate_db_error(e).get("error_code")
+                      if isinstance(e, psycopg.Error) else "db.error")
+        _log_event("error", "db", "Due-date baseline correction failed (transaction rolled back)",
+                   exc=e, error_code=error_code, count=len(items))
+        return {"status": "error", "applied": 0, "persisted": 0, "skipped": len(items),
+                "not_matched": 0, "versions": {}, "error_code": error_code,
+                "cause": "Due-date baseline correction failed (transaction rolled back)"}
+    return {"status": "ok", **res}
+
+
 # =========================
 # ADMIN COCKPIT — upload, purge, audit
 # =========================

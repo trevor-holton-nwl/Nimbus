@@ -214,6 +214,23 @@ const NIMBUS = (function () {
            + `T${p(date.getHours())}:${p(date.getMinutes())}`;
     },
 
+    // Convert a Date to a naive local-time string (no timezone marker), for
+    // sending a date to the backend without going through JSON.stringify's
+    // default Date serialization. Deliberately NOT `date.toISOString()` —
+    // that converts to UTC, and brain.py's `_to_pydt` strips the resulting tz
+    // label WITHOUT converting the clock digits back to local, silently
+    // corrupting the value by the client's UTC offset for any non-UTC user.
+    // Preserves seconds (unlike toLocalInput, which only goes to minute
+    // precision) since callers may encode sub-minute information in the
+    // seconds field.
+    toLocalSeconds(d) {
+      const date = Util.parseDate(d);
+      if (!date) return '';
+      const p = n => String(n).padStart(2, '0');
+      return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+           + `T${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
+    },
+
     // Flatpickr datetime-picker factory — single source for the NIMBUS amber
     // datetime config (30-min step, alt display). `extra` extends/overrides
     // (e.g. an onChange handler). Accepts a selector string or element; returns
@@ -6087,12 +6104,13 @@ const NIMBUS = (function () {
         btn = document.createElement('button');
         btn.id = 'err-log-btn';
         btn.title = 'Open Admin Cockpit log (Ctrl+Alt+L)';
-        btn.onclick = () => { try { App.goto('admin'); } catch {} };
+        btn.onclick = () => { try { App.goto('admin'); AdminCockpit.gotoOvTab('logs'); } catch {} };
         host.appendChild(btn);
       }
-      const errs  = ErrorLog.countBy('error');
-      const warns = ErrorLog.countBy('warn');
-      const total = ErrorLog._entries.length;
+      const sessionEntries = ErrorLog._entries.filter(e => e.sessionId === ErrorLog.SESSION_ID);
+      const errs  = sessionEntries.filter(e => e.level === 'error').length;
+      const warns = sessionEntries.filter(e => e.level === 'warn').length;
+      const total = errs + warns;
       const dot   = errs ? '🔴' : warns ? '🟡' : '🟢';
       btn.textContent = '';   // clear before rebuild
       const dotSpan = document.createElement('span');
@@ -11425,7 +11443,6 @@ const NIMBUS = (function () {
     _dirtyIds: new Set(),       // task ids mutated since last successful backend save
     _forceIds: new Set(),       // dirty ids written by an authoritative bulk op (optimize) —
                                 // these skip the optimistic-concurrency version check on save
-
     // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
     _lastLoad: {
       source: null,          // 'backend' | 'cache' | 'demo'
@@ -11594,6 +11611,11 @@ const NIMBUS = (function () {
           // SAP ships date-only starts (00:00) — snap each order to the first
           // feasible working slot on its line so ingest doesn't fire false
           // out-of-hours alerts and the variance baseline reflects reality.
+          // This pass may run against default/stale hours (CalendarSync's
+          // authoritative fetch hasn't resolved yet) — the due-date-baseline
+          // correction it also computes in-memory is fine to (re-)compute here,
+          // but deliberately not relayed to the backend from this call; only the
+          // post-hydration re-snap in CalendarSync._applyConfig persists it.
           Persistence._snapToWorkingHours(tasks, plant);
 
           const setResult = Store.setTasks(tasks, 'persistence');
@@ -11759,9 +11781,14 @@ const NIMBUS = (function () {
     // function silently auto-spreading siblings apart. Reset `original_*_date` to
     // the snapped instant so the variance badge baseline reflects the feasible
     // plan, not the midnight artifact.
-    // Returns array of task IDs that actually moved (start/end changed).
+    // Returns { movedIds, corrections }: movedIds are task IDs that actually
+    // moved (start/end changed); corrections are due-date-baseline fixes found
+    // by the phase below (see _relayDueDateCorrections — only the caller in
+    // CalendarSync._applyConfig relays them; the pre-hydration call from
+    // Persistence.load deliberately does not).
     _snapToWorkingHours(tasks, plant) {
       const movedIds = [];
+      const corrections = [];
       Calendar._beginRun(plant);
       try {
         let snappedCount = 0;
@@ -11815,25 +11842,180 @@ const NIMBUS = (function () {
           t.start_date = snappedStart;
           t.end_date   = snappedEnd;
           t.original_start_date = new Date(snappedStart);
-          // Due-date baseline: SAP only shipped a day-level date, not a real time —
-          // treat it as "due by end of this working day," not "due at exactly this
-          // order's own solo-occupancy finish." The latter wrongly assumes every
-          // order gets the line to itself; when several same-day orders share a
-          // line, only one can legitimately go first, and the rest would show
-          // hours "late" for simply being sequenced behind line-mates on the very
-          // day they were always due.
-          const dayEnd = Calendar.workWindow(line, snappedStart)?.[1];
-          t.original_end_date = dayEnd instanceof Date ? new Date(dayEnd) : new Date(snappedEnd);
         }
 
         if (snappedCount) {
           ErrorLog.info('persistence',
             `Snapped ${snappedCount} ingested order(s) to first available working slot`);
         }
+
+        // ---- Due-date-baseline correction ---------------------------------
+        // Runs for EVERY task with a line — deliberately no fixed/user_scheduled/
+        // startMoved guard, because "when is this order due" is orthogonal to
+        // "where is it currently placed" (unlike the placement snap above, which
+        // this loop runs after — so a freshly-snapped order's due day already
+        // reflects the day it actually landed on, matching the prior behavior
+        // this replaces). SAP only ships a day-level due date; ingest hygiene
+        // (db.py's upload hygiene) leaves a raw/uncorrected basic_finish_date in
+        // one of two known shapes (== basic_start_date, or == basic_start_date +
+        // RUN_TIME hours — see db.correct_due_date_baselines). Detect either
+        // shape (or a missing value) and replace it with "due by end of the
+        // working day it lands on," computed once and then frozen: once
+        // original_end_date stops matching either raw shape, this loop leaves it
+        // alone forever, until a fresh SAP re-upload re-arms detection by
+        // overwriting basic_finish_date back into a raw shape.
+        for (const t of tasks) {
+          const line = t.PRODUCTION_LINE;
+          if (!line) continue;
+          // Guard against a missing/invalid baseline (e.g. an incomplete future
+          // SAP-sync field map) rather than assume original_start_date is always
+          // a valid Date.
+          const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
+          if (!oStart) continue;
+
+          const oEnd = t.original_end_date instanceof Date ? t.original_end_date : null;
+          const rawShapeStart = oStart.getTime();
+          const rawShapeRun   = oStart.getTime() + Util.runHours(t) * Config.MS_HOUR;
+          const looksRaw = !oEnd
+            || oEnd.getTime() === rawShapeStart
+            || oEnd.getTime() === rawShapeRun;
+
+          // Sticky within this session (this function runs twice per load: once
+          // pre-hydration from Persistence.load against default/stale hours,
+          // once post-hydration from CalendarSync._applyConfig against real
+          // backend hours — see the call sites). Once flagged, a task STAYS
+          // flagged even after the pre-hydration pass's own in-memory guess
+          // stops shape-matching raw below — otherwise the post-hydration pass
+          // would see an already-non-raw value (which IT set, against
+          // default/stale hours) and wrongly conclude "nothing to do," so
+          // neither the real-hours recompute nor the relay that depends on it
+          // would ever run for the common case. A brand-new page load starts
+          // with fresh task objects (no flag) and re-derives `looksRaw` from
+          // the DB's actual (still-raw, since nothing was relayed) shape, so a
+          // stale flag can never mask an already-corrected value across
+          // separate loads.
+          if (looksRaw) t._dueDateBaselinePending = true;
+          if (!t._dueDateBaselinePending) continue;
+
+          // "Due by end of the working day it lands on." Guard workWindow's null
+          // return (closed day — e.g. a bare Saturday SAP date on a freshly
+          // onboarded line, which defaults closed Sat/Sun via Config.WEEKEND_OFF)
+          // by walking forward to the next open day instead of assuming [1] exists.
+          const win = Calendar.workWindow(line, oStart);
+          let dayEnd = win ? win[1] : Persistence._dueEndOfShift(line, oStart);
+          dayEnd = dayEnd instanceof Date
+            ? new Date(dayEnd)
+            // Every day in the search window is closed/misconfigured — fall back
+            // to the run-time-implied end rather than leave it broken.
+            : new Date(rawShapeRun);
+
+          // A continuous/24h-shift line can compute a legitimately-correct dayEnd
+          // that exactly coincides with one of the raw shapes above (RUN_TIME=24
+          // starting exactly at a window's open — the window's close IS
+          // start+24h). Left alone, that value would re-match "needs correction"
+          // on every future load and re-relay a no-op correction forever. Nudge
+          // by a UI-invisible 1 second (never rendered by Util.fmtDT /
+          // fmtDTReadable; negligible for Util.latenessHours) so the next pass's
+          // shape check no longer matches — freezing it like every other
+          // corrected order.
+          if (dayEnd.getTime() === rawShapeStart || dayEnd.getTime() === rawShapeRun) {
+            dayEnd = new Date(dayEnd.getTime() + 1000);
+          }
+
+          t.original_end_date = dayEnd;
+          // Pin the correction to this task's row version (xmin), not a raw date
+          // value: a date round-trips through JS Date/JSON.stringify, which
+          // re-labels a naive local timestamp as UTC — comparing that directly
+          // against Postgres's naive basic_start_date would be off by the
+          // client's UTC offset and would simply never match for any non-UTC
+          // user (i.e. every real user). xmin is an opaque version counter with
+          // no such ambiguity, and — as a bonus — fails safely against ANY
+          // concurrent write to the row (a re-upload, a scheduling save, or
+          // another tab's correction), not just a re-upload specifically.
+          if (t.row_version != null) {
+            corrections.push({ id: t.id, basic_finish_date: dayEnd, base_version: t.row_version });
+          }
+        }
       } finally {
         Calendar._endRun();
       }
-      return movedIds;
+      return { movedIds, corrections };
+    },
+
+    // Walk forward from `date`'s calendar day until an open working day is
+    // found on `line`, returning that day's close. Used by the due-date-
+    // baseline correction above when `date` itself lands on a closed day.
+    // Bounded to 14 days so a fully closed/misconfigured calendar can't spin
+    // forever; returns null if no open day is found in that window (caller
+    // falls back to the run-time-implied end).
+    _dueEndOfShift(line, date) {
+      let cur = new Date(date);
+      const MAX_DAYS = 14;
+      for (let i = 0; i < MAX_DAYS; i++) {
+        const win = Calendar.workWindow(line, cur);
+        if (win) return win[1];
+        cur = new Date(cur);
+        cur.setDate(cur.getDate() + 1);
+        cur.setHours(0, 0, 0, 0);
+      }
+      return null;
+    },
+
+    // Fire-and-forget relay of due-date-baseline corrections found by
+    // _snapToWorkingHours's due-date-baseline phase. Failure just means the
+    // next load retries — the in-memory value set by that phase is already
+    // correct for this session either way. Chunked to bound each POST's row
+    // count: CLAUDE.md's production-scale roadmap anticipates 50+ plants /
+    // 70+ lines, where a plant's one-time backlog could be many thousands of
+    // rows in one shot, risking Postgres's bound-parameter ceiling on the
+    // server's VALUES-join UPDATE. Batches are sent sequentially (not in
+    // parallel) so a struggling backend isn't hit with concurrent bursts.
+    _relayDueDateCorrections(corrections) {
+      if (!corrections || !corrections.length) return;
+      const CHUNK = 500;
+      const chunks = [];
+      for (let i = 0; i < corrections.length; i += CHUNK) {
+        chunks.push(corrections.slice(i, i + CHUNK));
+      }
+
+      const sendNext = (idx) => {
+        if (idx >= chunks.length) return;
+        const chunk = chunks[idx];
+        const body = JSON.stringify({
+          corrections: chunk.map(c => ({
+            id: c.id,
+            // toLocalSeconds, not the raw Date: JSON.stringify would call
+            // Date.toISOString() (UTC), which the backend's naive-datetime
+            // parser mis-handles for any non-UTC client — see toLocalSeconds.
+            basic_finish_date: Util.toLocalSeconds(c.basic_finish_date),
+            base_version: c.base_version,
+          })),
+        });
+        Util.fetchTraced(`${Config.API_BASE}/tasks/baseline-correct`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        })
+          .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+          .then(result => {
+            // Re-stamp row_version for corrected rows, mirroring saveAll() — a
+            // stale cached xmin would false-conflict this order's next
+            // unrelated scheduling save this session.
+            const versions = result.versions || {};
+            for (const id of Object.keys(versions)) {
+              const tk = Store.tasks[id];
+              if (tk) tk.row_version = versions[id];
+            }
+            ErrorLog.info('persistence',
+              `Due-date baseline correction: ${result.persisted ?? 0}/${chunk.length} persisted, `
+              + `${result.not_matched ?? 0} not matched (stale version or already corrected) `
+              + `(batch ${idx + 1}/${chunks.length})`);
+          })
+          .catch(e => ErrorLog.warn('persistence',
+            `Due-date baseline correction relay failed (batch ${idx + 1}/${chunks.length}): ${e.message}`))
+          .finally(() => sendNext(idx + 1));
+      };
+      sendNext(0);
     },
 
     _loadCache() {
@@ -12391,7 +12573,13 @@ saveAll() {
       // real working window. Re-snap against the now-correct hours and re-render/cache.
       // Idempotent when hours match; _snapToWorkingHours re-baselines each pass, so a
       // second pass leaves the correct final baseline (no set-once needed). (F7)
-      if ((has.plantHours || has.lineHours) && Store.tasksArr.length) {
+      // Deliberately NOT gated on (has.plantHours || has.lineHours): "backend has no
+      // override" is still an authoritative answer (use defaults) that the due-date
+      // correction phase needs in order to relay — gating on has.* left the relay
+      // permanently dead for every plant that has never had custom hours saved to the
+      // backend, which is the common case (CalendarSync never migrates auto-seeded
+      // default hours up), not a rare one.
+      if (Store.tasksArr.length) {
         try {
           // A slow (8s) fetchPlantConfig can resolve AFTER the user started editing this
           // session. tasks:bulk clears _dirtyIds/_forceIds (reload semantics, app.js:14840),
@@ -12399,7 +12587,7 @@ saveAll() {
           // orders (user moves are startMoved-skipped) and must not drop pending saves.
           const dirtySnapshot  = new Set(Persistence._dirtyIds);
           const forceSnapshot  = new Set(Persistence._forceIds);
-          const movedIds = Persistence._snapToWorkingHours(Store.tasksArr, plant);
+          const { movedIds, corrections } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
           Persistence._saveCache();
           // Only emit and re-render if tasks actually moved; idempotent when hours haven't
           // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
@@ -12408,6 +12596,14 @@ saveAll() {
           }
           for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
           for (const id of forceSnapshot) Persistence._forceIds.add(id);
+          // Backend-authoritative hours have now landed — this is the only point
+          // in the session safe to PERSIST due-date-baseline corrections. The
+          // earlier pre-hydration call in Persistence.load may have computed
+          // against Config.DEFAULT_SHIFT / stale cached hours, and this
+          // correction is deliberately freeze-once (see _snapToWorkingHours) —
+          // persisting from that first pass could lock in a wrong value before
+          // the accurate hours ever get a chance to run.
+          Persistence._relayDueDateCorrections(corrections);
         } catch (e) {
           ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${e.message}`);
         }
@@ -17391,7 +17587,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Ctrl+Alt+L → open Admin Cockpit log tab
     document.addEventListener('keydown', e => {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') {
-        e.preventDefault(); App.goto('admin');
+        e.preventDefault(); App.goto('admin'); AdminCockpit.gotoOvTab('logs');
       }
     });
 

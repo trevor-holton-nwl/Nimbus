@@ -539,6 +539,112 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             "stale": stale, "versions": versions}
 
 
+def correct_due_date_baselines(corrections: list[dict]) -> dict:
+    """
+    One-time-per-order backfill of the due-date baseline (`basic_finish_date`),
+    computed client-side by Persistence._snapToWorkingHours's due-date-baseline
+    phase in app.js. Not a general task-date write path — every row is
+    re-validated server-side, via a single VALUES-join UPDATE, before it is
+    written:
+
+      1. `xmin` must still equal `base_version` — the row version the client
+         had cached when it computed `basic_finish_date`. Any write to the row
+         since then (a concurrent SAP re-upload, a normal scheduling save, or
+         another tab's correction) bumps xmin regardless of which columns
+         changed, so this fails safely whenever the row moved on since the
+         client read it — including, but not limited to, a re-upload that
+         rewrote basic_start_date/basic_finish_date out from under a stale
+         correction. Deliberately NOT a basic_start_date value comparison: the
+         client-observed value round-trips through JS Date/JSON.stringify,
+         which re-labels a naive local timestamp as UTC — comparing that
+         directly against Postgres's naive (TIMESTAMP WITHOUT TIME ZONE)
+         basic_start_date would be off by the client's UTC offset and would
+         never match for any non-UTC user.
+      2. `basic_finish_date` must still be in a known raw/uncorrected shape
+         (NULL, == basic_start_date, or == basic_start_date + run_time hours)
+         — i.e. nobody already corrected (or re-uploaded a genuine value for)
+         this row since the client read it.
+
+    Either check failing makes the write a safe no-op for that row (not an
+    error) — the id is simply absent from `versions`.
+
+    Each item: {id, basic_finish_date, base_version} (id: str,
+    basic_finish_date: datetime, base_version: int — the row's xmin as of the
+    client's last load/save of it). Callers are expected to chunk large
+    batches themselves (the frontend relay does, at 500 rows/request — see
+    Persistence._relayDueDateCorrections in app.js); this function does not
+    chunk internally, so a single call is still bounded by Postgres's
+    bound-parameter ceiling (3 params/row here).
+
+    Returns {applied, persisted, skipped, not_matched, versions}. `skipped`
+    counts malformed input rows (missing id/basic_finish_date/base_version)
+    rejected before the SQL runs; `not_matched` counts well-formed rows that
+    reached the UPDATE but failed its WHERE clause (stale version, or already
+    corrected) — surfaced as a distinct count so a systemic 0%-match condition
+    (e.g. a version-pinning bug) is visible in logs rather than
+    indistinguishable from a healthy "nothing left to correct" steady state.
+    `versions` carries the post-write xmin per corrected id (same
+    `xmin::text::bigint` shape as update_task_dates_bulk) so the caller can
+    re-stamp the frontend's cached row_version — otherwise every corrected
+    order would false-conflict on its next unrelated scheduling save this
+    session.
+    """
+    versions: dict[str, int] = {}
+    if not corrections:
+        return {"applied": 0, "persisted": 0, "skipped": 0, "not_matched": 0, "versions": {}}
+
+    rows = []
+    skipped = 0
+    for c in corrections:
+        cid = c.get("id")
+        new_finish = c.get("basic_finish_date")
+        base_version = c.get("base_version")
+        if not cid or new_finish is None or base_version is None:
+            skipped += 1
+            continue
+        rows.append((cid, new_finish, base_version))
+
+    if not rows:
+        return {"applied": 0, "persisted": 0, "skipped": skipped, "not_matched": 0, "versions": {}}
+
+    applied = persisted = 0
+    with _pool.connection() as conn, conn.cursor() as cur:
+        try:
+            # Explicit casts on the VALUES columns (same reasoning as
+            # update_task_dates_bulk): an all-NULL column would otherwise be of
+            # unknown type. RETURNING o.xmin gives each row's post-write
+            # version, using the identical xmin::text::bigint expression as
+            # the /tasks read path and update_task_dates_bulk.
+            placeholders = ", ".join(["(%s::text, %s::timestamp, %s::bigint)"] * len(rows))
+            params = [v for row in rows for v in row]
+            sql = f"""
+                UPDATE orders o
+                SET basic_finish_date = v.new_finish,
+                    updated_at        = NOW()
+                FROM (VALUES {placeholders}) AS v(id, new_finish, base_version)
+                WHERE o.id = v.id
+                  AND o.xmin::text::bigint = v.base_version
+                  AND (
+                        o.basic_finish_date IS NULL
+                     OR o.basic_finish_date = o.basic_start_date
+                     OR o.basic_finish_date = o.basic_start_date
+                          + (COALESCE(o.run_time, 0) * INTERVAL '1 hour')
+                  )
+                RETURNING o.id, o.xmin::text::bigint AS new_version
+            """
+            cur.execute(sql, params)
+            for rid, rver in cur.fetchall():
+                versions[rid] = int(rver)
+            conn.commit()
+            persisted = applied = len(versions)
+        except Exception:
+            conn.rollback()
+            raise
+    not_matched = len(rows) - len(versions)
+    return {"applied": applied, "persisted": persisted, "skipped": skipped,
+            "not_matched": not_matched, "versions": versions}
+
+
 def update_task_note(task_id: str, notes) -> dict:
     """Persist a user-written note for an order. Pass None to clear."""
     sql = "UPDATE orders SET notes = %s, updated_at = NOW() WHERE id = %s"
@@ -1292,8 +1398,23 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
     df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
 
+    # RUN_TIME must be parsed BEFORE the "bad" (missing/corrupt finish) branch
+    # below so that branch can resolve to start + RUN_TIME hours instead of a
+    # hardcoded bump. A hardcoded +1h produced a THIRD, undetected raw shape
+    # whenever RUN_TIME != 1 — one that app.js's due-date-baseline correction
+    # heuristic (which only recognizes "== start" or "== start + RUN_TIME
+    # hours") never matched, permanently misclassifying those orders as
+    # already-correct.
+    df["RUN_TIME"] = pd.to_numeric(
+        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(1.0, index=df.index),
+        errors="coerce",
+    ).fillna(1.0)
+
     bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
-    df.loc[bad, "BASIC_FINISH_DATE"] = df.loc[bad, "BASIC_START_DATE"] + pd.Timedelta(hours=1)
+    df.loc[bad, "BASIC_FINISH_DATE"] = (
+        df.loc[bad, "BASIC_START_DATE"]
+        + pd.to_timedelta(df.loc[bad, "RUN_TIME"], unit="h")
+    )
 
     bad_start = df["BASIC_START_DATE"].isna()
     if bad_start.any():
@@ -1303,10 +1424,10 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         })
     df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
 
-    df["RUN_TIME"] = pd.to_numeric(
-        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(1.0, index=df.index),
-        errors="coerce",
-    ).fillna(1.0)
+    # A genuinely date-only (but not "bad") finish — SAP supplied a real
+    # calendar date with no time-of-day — is likewise re-derived from
+    # RUN_TIME rather than trusted as a bare midnight, mirroring app.js's
+    # date-only-start handling (Persistence._snapToWorkingHours).
     mask_notime = df["BASIC_FINISH_DATE"].dt.hour == 0
     df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
         df.loc[mask_notime, "BASIC_START_DATE"]
