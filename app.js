@@ -359,6 +359,25 @@ const NIMBUS = (function () {
       return t?.end_date || Util.sapDueDate(t);
     },
 
+    // Display-only derived "Original Start": due date minus RUN_TIME, so
+    // Orig Start and Orig End always form a runtime-consistent pair (e.g.
+    // RUN_TIME 1h, due 7:00 PM -> Orig Start 6:00 PM) instead of the raw
+    // midnight SAP date. Falls back to the raw original_start_date (coerced
+    // to a Date) when there's no due date to anchor on. Pure/cheap — no
+    // Calendar lookup, no persistence — and never writes back to the task:
+    // original_start_date itself stays untouched because it's load-bearing
+    // for _snapToWorkingHours's startMoved guard and _overlayUserMoves's
+    // move-detection. Edge case (not clamped, deliberately): an order whose
+    // RUN_TIME exceeds the gap between midnight and its due time will show
+    // an implied start before midnight (the previous calendar day).
+    impliedOriginalStart(t) {
+      const due = Util.sapDueDate(t);
+      if (!due) {
+        return t?.original_start_date instanceof Date ? t.original_start_date : Util.parseDate(t?.original_start_date);
+      }
+      return new Date(due.getTime() - Util.runHours(t) * Config.MS_HOUR);
+    },
+
     // Hours that scheduled finish slips past the SAP planning date (clamped at 0).
     latenessHours(t) {
       const end = Util.scheduledEnd(t);
@@ -6923,6 +6942,14 @@ const NIMBUS = (function () {
             valueParser: p => parseFloat(p.newValue) || 0 },
           { headerName: t('col.orig_start'), field: 'original_start_date', minWidth: 160,
             editable: false,
+            // Display-only derived value (due date minus RUN_TIME — see
+            // Util.impliedOriginalStart) instead of the raw midnight SAP
+            // date. `field` is kept alongside `valueGetter` (same precedent
+            // as the PRODUCTION_ORDER column above) purely so AG Grid's
+            // date-type inference off the raw field still drives this
+            // column's sort + agDateColumnFilter; dropping `field` entirely
+            // would degrade the filter to generic/text.
+            valueGetter: p => Util.impliedOriginalStart(p.data),
             valueFormatter: p => Util.fmtDT(p.value),
             cellClass: 'cell-date cell-date-original' },
           { headerName: t('col.orig_end'), field: 'original_end_date', minWidth: 160,
@@ -7681,6 +7708,10 @@ const NIMBUS = (function () {
       const fixed = Store.isFixed(task.id);
       const lineOptions = Table._getLineOptions();
       const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
+      // Display-only derived Orig Start (due date minus RUN_TIME) — see
+      // Util.impliedOriginalStart. Never reads/writes the raw
+      // original_start_date field directly for display.
+      const impliedOrigStart = Util.impliedOriginalStart(task);
 
       body.innerHTML = `
         ${fixed ? `<div class="insp-fix-banner">${t('ui.insp_fixed_banner')}</div>` : ''}
@@ -7722,7 +7753,7 @@ const NIMBUS = (function () {
         <div class="insp-card">
           <h4>${t('ui.insp_schedule_section')}</h4>
           <div class="insp-row"><label>${t('ui.insp_orig_start')}</label>
-            <div class="insp-val">${task.original_start_date ? Util.fmtDT(task.original_start_date) : '—'}</div></div>
+            <div class="insp-val">${impliedOrigStart ? Util.fmtDT(impliedOrigStart) : '—'}</div></div>
           <div class="insp-row"><label>${t('ui.insp_orig_end')}</label>
             <div class="insp-val">${task.original_end_date ? Util.fmtDT(task.original_end_date) : '—'}</div></div>
           <div class="insp-row"><label>${t('ui.insp_updated_start')}</label>
@@ -7775,10 +7806,13 @@ const NIMBUS = (function () {
     },
 
     _varianceBadge(t) {
-      if (!t.original_start_date || !t.start_date) return '';
-      const orig = t.original_start_date instanceof Date ? t.original_start_date : Util.parseDate(t.original_start_date);
+      // Compares against the derived Orig Start (due date minus RUN_TIME —
+      // see Util.impliedOriginalStart), not the raw original_start_date, so
+      // the badge stays consistent with what the Orig Start row now shows.
+      const orig = Util.impliedOriginalStart(t);
+      if (!orig || !t.start_date) return '';
       const curr = t.start_date instanceof Date ? t.start_date : Util.parseDate(t.start_date);
-      if (!orig || !curr) return '';
+      if (!curr) return '';
       const deltaMs = curr.getTime() - orig.getTime();
       if (Math.abs(deltaMs) < 60 * 1000) return '';
       const days = deltaMs / (24 * 3600 * 1000);
@@ -11792,6 +11826,22 @@ const NIMBUS = (function () {
       Calendar._beginRun(plant);
       try {
         let snappedCount = 0;
+
+        // Capture each task's original_start_date BEFORE loop 1 (placement
+        // snap) below can overwrite it. The due-date-baseline correction
+        // phase further down needs the PRISTINE raw value as its
+        // shape-matching anchor — reading the post-snap value would drift
+        // the anchor to the snapped instant (e.g. midnight -> 07:00 on a
+        // line using Config.DEFAULT_SHIFT, the common case, since a fresh
+        // order never has a custom saved calendar) while original_end_date
+        // (never touched by loop 1) is still anchored to the true raw
+        // value — so none of the raw shapes below could ever match, and the
+        // correction would silently never fire for that order.
+        const pristineOriginalStart = new Map();
+        for (const t of tasks) {
+          if (t.original_start_date instanceof Date) pristineOriginalStart.set(t, t.original_start_date);
+        }
+
         for (const t of tasks) {
           const line = t.PRODUCTION_LINE;
           if (!line) continue;
@@ -11857,13 +11907,14 @@ const NIMBUS = (function () {
         // reflects the day it actually landed on, matching the prior behavior
         // this replaces). SAP only ships a day-level due date; ingest hygiene
         // (db.py's upload hygiene) leaves a raw/uncorrected basic_finish_date in
-        // one of two known shapes (== basic_start_date, or == basic_start_date +
-        // RUN_TIME hours — see db.correct_due_date_baselines). Detect either
-        // shape (or a missing value) and replace it with "due by end of the
-        // working day it lands on," computed once and then frozen: once
-        // original_end_date stops matching either raw shape, this loop leaves it
-        // alone forever, until a fresh SAP re-upload re-arms detection by
-        // overwriting basic_finish_date back into a raw shape.
+        // one of three known shapes (== basic_start_date, == basic_start_date +
+        // RUN_TIME hours, or == basic_start_date + 1 hour — see
+        // db.correct_due_date_baselines). Detect any shape (or a missing value)
+        // and replace it with "due by end of the working day it lands on,"
+        // computed once and then frozen: once original_end_date stops matching
+        // any raw shape, this loop leaves it alone forever, until a fresh SAP
+        // re-upload re-arms detection by overwriting basic_finish_date back
+        // into a raw shape.
         for (const t of tasks) {
           const line = t.PRODUCTION_LINE;
           if (!line) continue;
@@ -11873,12 +11924,38 @@ const NIMBUS = (function () {
           const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
           if (!oStart) continue;
 
+          // Shape-matching anchor: the PRISTINE original_start_date captured
+          // before loop 1 above ran, NOT the (possibly already-reassigned)
+          // t.original_start_date read into `oStart` just above. Loop 1
+          // unconditionally overwrites original_start_date with the snapped
+          // instant for every task it snaps (e.g. midnight -> 07:00 on a line
+          // using Config.DEFAULT_SHIFT, the common case), which would drift
+          // rawShapeStart/rawShapeRun/rawShapeHour1 away from what db.py/SAP
+          // actually wrote and make looksRaw never match — silently skipping
+          // the correction for exactly the fresh, never-individually-saved
+          // orders this phase exists to fix. `oStart` itself is still used
+          // below for Calendar.workWindow's "which day is this due" lookup —
+          // that usage is deliberate (see the comment above loop 1's finish).
+          const pristineStart = pristineOriginalStart.get(t) || oStart;
+
           const oEnd = t.original_end_date instanceof Date ? t.original_end_date : null;
-          const rawShapeStart = oStart.getTime();
-          const rawShapeRun   = oStart.getTime() + Util.runHours(t) * Config.MS_HOUR;
+          const rawShapeStart = pristineStart.getTime();
+          const rawShapeRun   = pristineStart.getTime() + Util.runHours(t) * Config.MS_HOUR;
+          // Legacy pre-2026-07-06 ingest-hygiene bug shape: the OLD db.py
+          // upload-hygiene "bad" branch hardcoded basic_finish_date =
+          // basic_start_date + 1 hour for any row with a missing/invalid
+          // BASIC_FINISH_DATE. Kept permanently (not a one-off migration) —
+          // old backups/re-imports could still carry this shape even though
+          // new uploads never will after the ingest-hygiene fix. Unlike
+          // rawShapeRun, this shape is unconditional on RUN_TIME, so it can
+          // theoretically clobber a genuine SAP-set due date that happens to
+          // land exactly 1 hour after start — accepted, same
+          // heuristic-ambiguity class already taken on for rawShapeRun.
+          const rawShapeHour1 = pristineStart.getTime() + Config.MS_HOUR;
           const looksRaw = !oEnd
             || oEnd.getTime() === rawShapeStart
-            || oEnd.getTime() === rawShapeRun;
+            || oEnd.getTime() === rawShapeRun
+            || oEnd.getTime() === rawShapeHour1;
 
           // Sticky within this session (this function runs twice per load: once
           // pre-hydration from Persistence.load against default/stale hours,
@@ -11912,13 +11989,14 @@ const NIMBUS = (function () {
           // A continuous/24h-shift line can compute a legitimately-correct dayEnd
           // that exactly coincides with one of the raw shapes above (RUN_TIME=24
           // starting exactly at a window's open — the window's close IS
-          // start+24h). Left alone, that value would re-match "needs correction"
-          // on every future load and re-relay a no-op correction forever. Nudge
-          // by a UI-invisible 1 second (never rendered by Util.fmtDT /
-          // fmtDTReadable; negligible for Util.latenessHours) so the next pass's
-          // shape check no longer matches — freezing it like every other
-          // corrected order.
-          if (dayEnd.getTime() === rawShapeStart || dayEnd.getTime() === rawShapeRun) {
+          // start+24h; or, narrowly, a day whose real shift-close coincidentally
+          // lands exactly 1 hour after midnight). Left alone, that value would
+          // re-match "needs correction" on every future load and re-relay a
+          // no-op correction forever. Nudge by a UI-invisible 1 second (never
+          // rendered by Util.fmtDT / fmtDTReadable; negligible for
+          // Util.latenessHours) so the next pass's shape check no longer
+          // matches — freezing it like every other corrected order.
+          if (dayEnd.getTime() === rawShapeStart || dayEnd.getTime() === rawShapeRun || dayEnd.getTime() === rawShapeHour1) {
             dayEnd = new Date(dayEnd.getTime() + 1000);
           }
 

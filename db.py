@@ -561,9 +561,11 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
          basic_start_date would be off by the client's UTC offset and would
          never match for any non-UTC user.
       2. `basic_finish_date` must still be in a known raw/uncorrected shape
-         (NULL, == basic_start_date, or == basic_start_date + run_time hours)
-         — i.e. nobody already corrected (or re-uploaded a genuine value for)
-         this row since the client read it.
+         (NULL, == basic_start_date, == basic_start_date + run_time hours, or
+         == basic_start_date + 1 hour — the last being the shape left behind
+         by the pre-2026-07-06 ingest-hygiene bug, see below) — i.e. nobody
+         already corrected (or re-uploaded a genuine value for) this row
+         since the client read it.
 
     Either check failing makes the write a safe no-op for that row (not an
     error) — the id is simply absent from `versions`.
@@ -629,6 +631,19 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
                      OR o.basic_finish_date = o.basic_start_date
                      OR o.basic_finish_date = o.basic_start_date
                           + (COALESCE(o.run_time, 0) * INTERVAL '1 hour')
+                     -- Legacy pre-2026-07-06 ingest-hygiene bug shape: the OLD
+                     -- upload-hygiene "bad" branch hardcoded basic_finish_date
+                     -- = basic_start_date + 1 hour for any row with a
+                     -- missing/invalid BASIC_FINISH_DATE. Kept permanently
+                     -- (not a one-off migration) since old backups/re-imports
+                     -- could still carry this shape even though new uploads
+                     -- never will after the ingest-hygiene fix. Unlike the
+                     -- run_time-based shape above, this one is unconditional
+                     -- on run_time, so it can theoretically also match (and
+                     -- allow overwriting) a genuine SAP-set due date that
+                     -- happens to land exactly 1 hour after start — accepted,
+                     -- same heuristic-ambiguity class already taken on above.
+                     OR o.basic_finish_date = o.basic_start_date + INTERVAL '1 hour'
                   )
                 RETURNING o.id, o.xmin::text::bigint AS new_version
             """
