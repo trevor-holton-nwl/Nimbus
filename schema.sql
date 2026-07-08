@@ -634,6 +634,13 @@ CREATE TABLE IF NOT EXISTS user_security (
     created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
 );
+-- First/last name are optional profile fields, self-service editable via
+-- PATCH /security/me and admin-editable via the Security tab — added after
+-- the initial table, hence ALTER TABLE rather than inline above. See
+-- migrations/2026-07-08-user-name-fields.sql.
+ALTER TABLE user_security ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_name  TEXT;
+
 -- Case-insensitive uniqueness on username. The PK stays case-sensitive (so
 -- display case like 'PJ29587' is preserved), but login + require_admin match on
 -- lower(username), and the auth.py user upserts infer ON CONFLICT (lower(username))

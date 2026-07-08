@@ -39,7 +39,8 @@ def ensure_user_security_table() -> None:
     schema.sql / the shared roles+role_plants+user_security migration). Lets
     the app self-bootstrap even before the migration is applied, matching
     db.ensure_color_wheel_table()'s pattern. Must run AFTER roles exists —
-    user_security.role FKs to roles(role)."""
+    user_security.role FKs to roles(role). Also self-bootstraps the optional
+    first_name/last_name columns (added 2026-07-08) the same way."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_security (
@@ -50,6 +51,8 @@ def ensure_user_security_table() -> None:
                 updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """)
+        cur.execute("ALTER TABLE user_security ADD COLUMN IF NOT EXISTS first_name TEXT")
+        cur.execute("ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_name TEXT")
         conn.commit()
 
     # Case-insensitive uniqueness on username. The PK stays case-sensitive
