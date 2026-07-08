@@ -618,6 +618,8 @@ window.__NIMBUS_LOCALES.en = {
   'sec.signed_in_as':              'Signed in as {{username}}',
   'sec.user_settings_title':       'User Settings',
   'sec.login_invalid':             'Invalid username or password',
+  'sec.access_revoked':            'Your admin access is no longer valid. Please sign in again.',
+  'sec.load_users_failed':         'Failed to load users: {{msg}}',
 
   /* ── Section headers & descriptions ─────────────────────────────────────── */
   'ui.admin_sub':                      'System health, data pipeline diagnostics, upload, purge, and application log.',

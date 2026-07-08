@@ -47,6 +47,19 @@ def ensure_user_security_table() -> None:
                 updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """)
+        # Case-insensitive uniqueness on username. The PK stays case-sensitive
+        # (preserving display case like 'PJ29587'), but every lookup — login and
+        # require_admin — matches on lower(username), and the user upserts below
+        # infer their ON CONFLICT target from THIS index, so it must exist for
+        # them to work. Self-bootstrapped here (mirrors the table create) so the
+        # code and its supporting index always ship together. IF NOT EXISTS is
+        # idempotent; it can only fail if rows already collide case-insensitively
+        # (e.g. both 'PJ29587' AND 'pj29587') — collapse such duplicates first
+        # (see migrations/2026-07-08-username-ci-index.sql).
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_security_lower_username"
+            " ON user_security (lower(username))"
+        )
         conn.commit()
 
 
@@ -149,7 +162,7 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
             try:
                 cur.execute(
                     "INSERT INTO user_security (username, role) VALUES (%s, %s)"
-                    " ON CONFLICT (username) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW()"
+                    " ON CONFLICT (lower(username)) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW()"
                     " RETURNING (xmax = 0)",
                     (username, row.get("role")),
                 )
@@ -164,7 +177,7 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
 
         for d in deletes:
             cur.execute(
-                "DELETE FROM user_security WHERE username = %s",
+                "DELETE FROM user_security WHERE lower(username) = lower(%s)",
                 (d.get("username"),),
             )
             deleted += cur.rowcount
@@ -209,7 +222,7 @@ def set_user_password(username: str, raw_password: str,
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO user_security (username, password_hash) VALUES (%s, %s)"
-            " ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW()",
+            " ON CONFLICT (lower(username)) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW()",
             (username, password_hash),
         )
         cur.execute(
@@ -224,10 +237,12 @@ def set_user_password(username: str, raw_password: str,
 
 def verify_user_password(username: str, raw_password: str) -> bool:
     """Check a plaintext password against the stored hash for `username`.
-    False (never raises) if the user doesn't exist or has no password set."""
+    False (never raises) if the user doesn't exist or has no password set.
+    Username match is case-insensitive/trimmed, mirroring get_user_role."""
+    username = (username or "").strip()
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT password_hash FROM user_security WHERE username = %s",
+            "SELECT password_hash FROM user_security WHERE lower(username) = lower(%s)",
             (username,),
         )
         row = cur.fetchone()
@@ -241,11 +256,14 @@ def verify_user_password(username: str, raw_password: str) -> bool:
 # =========================
 def get_user_role(username: str | None) -> str | None:
     """Look up a user's role by username. None for unknown/blank/no-row —
-    never raises."""
+    never raises. The match is case-insensitive and whitespace-trimmed so a
+    login/header casing difference (e.g. 'pj29587' vs the seeded 'PJ29587')
+    can't silently fail the admin check — a lockout mode we hit before."""
+    username = (username or "").strip()
     if not username:
         return None
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT role FROM user_security WHERE username = %s", (username,))
+        cur.execute("SELECT role FROM user_security WHERE lower(username) = lower(%s)", (username,))
         row = cur.fetchone()
     return row[0] if row else None
 
@@ -260,8 +278,10 @@ def admin_exists() -> bool:
 
 def _actor_email(request: Request) -> str | None:
     """Resolve the acting user's identity from request headers. WS3 SSO
-    note: this is the ONLY line that changes when real SSO lands."""
-    return request.headers.get("x-user-email") or request.headers.get("X-User")
+    note: this is the ONLY line that changes when real SSO lands. Trimmed so
+    stray whitespace never defeats the (case-insensitive) role lookup."""
+    raw = request.headers.get("x-user-email") or request.headers.get("X-User")
+    return raw.strip() if raw else None
 
 
 def require_admin(request: Request) -> str:
@@ -274,6 +294,17 @@ def require_admin(request: Request) -> str:
     if role == "admin" or not admin_exists():
         return email
     raise HTTPException(status_code=403, detail="Admin role required")
+
+
+def whoami(request: Request) -> dict:
+    """Live identity + effective admin status for the caller, computed the same
+    way require_admin decides access (is_admin is True during first-run grace,
+    before any admin exists). Ungated on purpose — any client must be able to
+    call it to discover it is NOT (or no longer) an admin, so the frontend can
+    reconcile a role it cached at login time. Never returns secrets."""
+    email = _actor_email(request)
+    role = get_user_role(email)
+    return {"username": email, "role": role, "is_admin": role == "admin" or not admin_exists()}
 
 
 def authenticate(username: str, password: str) -> dict | None:
@@ -293,7 +324,7 @@ def authenticate(username: str, password: str) -> dict | None:
 # then remove it and rotate the password via Security -> Users. If unset,
 # no bootstrap user is seeded — require_admin's first-run grace (see below)
 # stays open until the first admin is created directly through the UI.
-_BOOTSTRAP_ADMIN_USERNAME = os.getenv("NIMBUS_BOOTSTRAP_ADMIN_USERNAME", "PJ29587")
+_BOOTSTRAP_ADMIN_USERNAME = os.getenv("NIMBUS_BOOTSTRAP_ADMIN_USERNAME", "PJ29587").strip()
 
 
 def ensure_bootstrap_admin() -> None:
@@ -314,7 +345,7 @@ def ensure_bootstrap_admin() -> None:
             password_hash = _hash_password(bootstrap_password)
             cur.execute(
                 "INSERT INTO user_security (username, password_hash, role) VALUES (%s, %s, %s)"
-                " ON CONFLICT (username) DO NOTHING",
+                " ON CONFLICT (lower(username)) DO NOTHING",
                 (_BOOTSTRAP_ADMIN_USERNAME, password_hash, "admin"),
             )
         conn.commit()

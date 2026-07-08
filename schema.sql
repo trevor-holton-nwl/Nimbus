@@ -634,6 +634,13 @@ CREATE TABLE IF NOT EXISTS user_security (
     created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
 );
+-- Case-insensitive uniqueness on username. The PK stays case-sensitive (so
+-- display case like 'PJ29587' is preserved), but login + require_admin match on
+-- lower(username), and the auth.py user upserts infer ON CONFLICT (lower(username))
+-- from this index. Also self-bootstrapped by auth.ensure_user_security_table().
+-- See migrations/2026-07-08-username-ci-index.sql for the case-collision pre-check.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_security_lower_username
+    ON user_security (lower(username));
 
 -- NOTE: the 'admin' row in `roles` and a bootstrap admin user ('PJ29587') in `user_security`
 -- are NOT seeded here. They are seeded idempotently (ON CONFLICT DO NOTHING) at app startup

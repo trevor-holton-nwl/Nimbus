@@ -1597,6 +1597,15 @@ def security_bootstrap_status():
     return {"admin_exists": auth.admin_exists()}
 
 
+@api.get("/security/me")
+def security_me(request: Request):
+    """Live identity + effective admin status for the caller. Ungated on purpose
+    (like /security/bootstrap-status): the frontend calls it to reconcile the
+    role it cached at login against backend truth, so it must be reachable even
+    when the caller is NOT an admin. Returns {username, role, is_admin}; no secrets."""
+    return auth.whoami(request)
+
+
 @api.get("/security/users", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_list_users(
         limit: int | None = Query(default=None, ge=1, le=100000,

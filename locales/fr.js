@@ -431,6 +431,8 @@ window.__NIMBUS_LOCALES.fr = {
   'sec.signed_in_as':              'Connecté en tant que {{username}}',
   'sec.user_settings_title':       'Paramètres utilisateur',
   'sec.login_invalid':             'Nom d\'utilisateur ou mot de passe invalide',
+  'sec.access_revoked':            'Votre accès administrateur n\'est plus valide. Veuillez vous reconnecter.',
+  'sec.load_users_failed':         'Échec du chargement des utilisateurs : {{msg}}',
 
   /* ── En-têtes et descriptions de section ─────────────────────────────────── */
   'ui.admin_sub':                      'Santé du système, diagnostics de pipeline de données, chargement, purge et journal d\'application.',

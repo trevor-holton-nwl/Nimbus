@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-08-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-08-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -6045,7 +6045,10 @@ const NIMBUS = (function () {
 
     function isAdmin() {
       const u = currentUser();
-      return !!u && u.role === 'admin';
+      // Prefer the reconciled is_admin flag (set by refresh() from GET /security/me,
+      // which mirrors the backend's require_admin grace) and fall back to the role
+      // cached at login for sessions that predate a refresh.
+      return !!u && (u.is_admin === true || u.role === 'admin');
     }
 
     async function signIn(username, password) {
@@ -6104,7 +6107,43 @@ const NIMBUS = (function () {
       try { ErrorLog._renderBadge(); } catch {}
     }
 
-    return { currentUser, actor, isAdmin, signIn, signOut, _applyGates };
+    // Reconcile the role cached at login (which the admin UI gates on) against the
+    // backend's LIVE view via GET /security/me. The cached role can go stale — a DB
+    // reseed, a role change, or a since-deleted identity — leaving the UI offering
+    // admin controls that every request then 403s. Fire-and-forget at boot; also
+    // called after a denied admin action. Never clobbers the cache on a transient
+    // network/HTTP error (only a definitive answer updates it).
+    async function refresh() {
+      const u = currentUser();
+      if (!u) return null;                       // signed out — nothing to reconcile
+      try {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me`);
+        if (!r.ok) return null;
+        const me = await r.json();
+        localStorage.setItem(KEY, JSON.stringify({
+          username: me.username || u.username,
+          role: me.role || null,
+          is_admin: !!me.is_admin,
+        }));
+        _applyGates();
+        // If we just lost admin while sitting on the Admin tab, leave it.
+        if (!isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
+          try { App.goto('home'); } catch {}
+        }
+        return me;
+      } catch { return null; }
+    }
+
+    // A backend admin gate returned 403 though the UI believed we were an admin —
+    // the cached role is stale. Reconcile (which hides admin UI / navigates off the
+    // Admin tab if we were demoted) and tell the user plainly, rather than leaving
+    // a dead-end "HTTP 403" in the panel.
+    function onAuthDenied() {
+      refresh();
+      try { Toast.show(t('sec.access_revoked'), 'error'); } catch {}
+    }
+
+    return { currentUser, actor, isAdmin, signIn, signOut, refresh, onAuthDenied, _applyGates };
   })();
 
   /* =============================================================================
@@ -18080,7 +18119,20 @@ saveAll() {
 
     function _postJSON(url, body) {
       return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
-        .then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+        .then(r => {
+          if (!r.ok) {
+            // A 403 here means the backend admin gate rejected us though the UI
+            // believed we were admin (stale cached role). Reconcile + prompt
+            // re-auth instead of only bubbling a raw error to the caller.
+            if (r.status === 403) { try { Session.onAuthDenied(); } catch {} }
+            return r.json().catch(() => ({})).then(e => {
+              const err = new Error(e.detail || `HTTP ${r.status}`);
+              err.status = r.status;
+              throw err;
+            });
+          }
+          return r.json();
+        });
     }
 
     const _debouncedUserSearch = Util.debounce(() => _reloadUsers(), 300);
@@ -18130,7 +18182,11 @@ saveAll() {
         if (_tab !== 'users') return; // bail if the admin switched tabs while awaiting
         _renderUsersTab();
       } catch (e) {
-        if (body) body.innerHTML = `<div class="md-empty">Failed to load users: ${_esc(e.message)}</div>`;
+        const is403 = e.status === 403 || /\b403\b/.test(e.message || '');
+        // Stale-admin 403 (the /master-data/roles half of the Promise.all is
+        // ungated, so a 403 here is from /security/users): reconcile + re-auth.
+        if (is403) { try { Session.onAuthDenied(); } catch {} }
+        if (body) body.innerHTML = `<div class="md-empty">${_esc(is403 ? t('sec.access_revoked') : t('sec.load_users_failed', { msg: e.message }))}</div>`;
         ErrorLog.error('security', `Load users failed: ${e.message}`);
       }
     }
@@ -18599,6 +18655,10 @@ saveAll() {
     // latter's showLoginScreen already called Session._applyGates() once inside
     // signIn(), so this is a harmless, idempotent re-run for that path).
     Session._applyGates();
+    // Reconcile the cached session role against backend truth (a stale cache is
+    // what leaves the admin UI visible while every admin request 403s). Fire-and-
+    // forget — it re-applies the gates when it resolves.
+    try { Session.refresh(); } catch {}
 
     // Global hard-error net (captures stack traces, normalized through ErrorLog).
     ErrorLog.installGlobalHandlers();

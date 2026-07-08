@@ -435,6 +435,8 @@ window.__NIMBUS_LOCALES.es = {
   'sec.sign_out':                  'Cerrar sesión',
   'sec.signed_in_as':              'Sesión iniciada como {{username}}',
   'sec.login_invalid':             'Nombre de usuario o contraseña no válidos',
+  'sec.access_revoked':            'Su acceso de administrador ya no es válido. Vuelva a iniciar sesión.',
+  'sec.load_users_failed':         'Error al cargar los usuarios: {{msg}}',
 
   /* ── Encabezados y descripciones de sección ──────────────────────────────── */
   'ui.admin_sub':                      'Estado del sistema, diagnóstico de la canalización de datos, carga, depuración y registro de aplicaciones.',

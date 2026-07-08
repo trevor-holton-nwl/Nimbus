@@ -1,0 +1,21 @@
+-- 2026-07-08 — case-insensitive uniqueness on user_security.username
+--
+-- Why: every credential lookup now matches on lower(username) — login
+-- (auth.verify_user_password) and authorization (auth.get_user_role) — and the
+-- user upserts in auth.py (bulk_upsert_users / set_user_password) infer their
+-- ON CONFLICT (lower(username)) target from THIS index, so it must exist for
+-- those writes to work. Fixes the recurring admin lockout where a seeded
+-- 'PJ29587' admin row did not match a 'pj29587' (or whitespace-padded) login.
+--
+-- auth.ensure_user_security_table() also creates this index at startup
+-- (self-bootstrap, mirroring the table create), so the running app never lacks
+-- it. This file is the explicit migration + a record for schema drift.
+--
+-- PRE-CHECK — this fails if two rows already collide case-insensitively
+-- (e.g. both 'PJ29587' AND 'pj29587'). Find any such collisions first:
+--     SELECT lower(username) AS key, count(*), array_agg(username)
+--       FROM user_security GROUP BY lower(username) HAVING count(*) > 1;
+-- Collapse each group down to the single intended row (keep the admin, delete
+-- the rest) before applying.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_security_lower_username
+    ON user_security (lower(username));

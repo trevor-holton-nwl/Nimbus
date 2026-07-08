@@ -431,6 +431,8 @@ window.__NIMBUS_LOCALES.de = {
   'sec.signed_in_as':              'Angemeldet als {{username}}',
   'sec.user_settings_title':       'Benutzereinstellungen',
   'sec.login_invalid':             'Ungültiger Benutzername oder Passwort',
+  'sec.access_revoked':            'Ihre Administratorberechtigung ist nicht mehr gültig. Bitte melden Sie sich erneut an.',
+  'sec.load_users_failed':         'Benutzer konnten nicht geladen werden: {{msg}}',
 
   /* ── Abschnittsüberschriften & Beschreibungen ─────────────────────────────── */
   'ui.admin_sub':                      'Systemstatus, Datenpipeline-Diagnose, Upload, Bereinigung und Anwendungsprotokoll.',
