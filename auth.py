@@ -14,6 +14,7 @@ to a caller, or written to admin_audit.
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 
@@ -23,6 +24,8 @@ from psycopg.types.json import Jsonb
 
 # Import the shared pool from the existing db module (same idiom as master_data.py).
 from db import _pool
+
+log = logging.getLogger("nimbus.auth")
 
 # PBKDF2-HMAC-SHA256 iteration count (current OWASP-recommended floor).
 PBKDF2_ITERATIONS = 600_000
@@ -47,20 +50,31 @@ def ensure_user_security_table() -> None:
                 updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """)
-        # Case-insensitive uniqueness on username. The PK stays case-sensitive
-        # (preserving display case like 'PJ29587'), but every lookup — login and
-        # require_admin — matches on lower(username), and the user upserts below
-        # infer their ON CONFLICT target from THIS index, so it must exist for
-        # them to work. Self-bootstrapped here (mirrors the table create) so the
-        # code and its supporting index always ship together. IF NOT EXISTS is
-        # idempotent; it can only fail if rows already collide case-insensitively
-        # (e.g. both 'PJ29587' AND 'pj29587') — collapse such duplicates first
-        # (see migrations/2026-07-08-username-ci-index.sql).
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_security_lower_username"
-            " ON user_security (lower(username))"
-        )
         conn.commit()
+
+    # Case-insensitive uniqueness on username. The PK stays case-sensitive
+    # (preserving display case like 'PJ29587'), but every lookup — login and
+    # require_admin — matches on lower(username), and the user upserts
+    # (bulk_upsert_users / set_user_password) infer their ON CONFLICT target from
+    # THIS index, so it must exist for those WRITES to work. Created in its own
+    # transaction and best-effort: the only way it can fail is pre-existing rows
+    # that already collide case-insensitively (e.g. both 'PJ29587' AND 'pj29587'),
+    # and a live pilot must not fail to boot over that. On failure, reads/auth
+    # still work (they don't need the index) — only user-management writes do — so
+    # an admin can sign in, collapse the duplicates, then apply
+    # migrations/2026-07-08-username-ci-index.sql. IF NOT EXISTS keeps it idempotent.
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_security_lower_username"
+                " ON user_security (lower(username))"
+            )
+            conn.commit()
+    except Exception as e:
+        log.warning(
+            "Could not create ux_user_security_lower_username (likely case-duplicate "
+            "usernames); reads work but user upserts will fail until collapsed: %s", e
+        )
 
 
 # =========================
