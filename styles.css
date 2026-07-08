@@ -1671,28 +1671,6 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   text-align: center;
 }
 
-/* Header user chip — sits in .topbar-actions beside #alert-bell/#err-log-btn */
-.user-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 30px;
-  padding: 0 10px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--line);
-  background: var(--bg-elev);
-  color: var(--fg-mute);
-  font-size: 12px; font-weight: 500;
-  white-space: nowrap;
-}
-.user-chip .user-chip-name { color: var(--fg); font-weight: 600; }
-.user-chip .user-chip-signout {
-  color: var(--fg-mute);
-  cursor: pointer;
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  transition: color var(--t-fast), text-decoration-color var(--t-fast);
-}
-.user-chip .user-chip-signout:hover { color: var(--accent); text-decoration-color: currentColor; }
-
 /* =============================================================================
    TOASTS
    ========================================================================== */

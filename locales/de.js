@@ -227,6 +227,7 @@ window.__NIMBUS_LOCALES.de = {
   'tip.edit_note':                     'Notiz bearbeiten',
   'tip.add_note':                      'Notiz hinzufügen',
   'tip.click_view_alerts':             'Klicken um Warnungen anzuzeigen',
+  'tip.user_settings':                 'Benutzereinstellungen',
   'tip.lang_switcher':                 'Sprache / Language',
 
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
@@ -428,6 +429,7 @@ window.__NIMBUS_LOCALES.de = {
   'sec.sign_in':                   'Anmelden',
   'sec.sign_out':                  'Abmelden',
   'sec.signed_in_as':              'Angemeldet als {{username}}',
+  'sec.user_settings_title':       'Benutzereinstellungen',
   'sec.login_invalid':             'Ungültiger Benutzername oder Passwort',
 
   /* ── Abschnittsüberschriften & Beschreibungen ─────────────────────────────── */

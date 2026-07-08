@@ -231,6 +231,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.edit_note':                     'Edit note',
   'tip.add_note':                      'Add note',
   'tip.click_view_alerts':             'Click to view alerts',
+  'tip.user_settings':                 'User settings',
   'tip.lang_switcher':                 'Language / Idioma',
 
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
@@ -615,6 +616,7 @@ window.__NIMBUS_LOCALES.en = {
   'sec.sign_in':                   'Sign in',
   'sec.sign_out':                  'Sign out',
   'sec.signed_in_as':              'Signed in as {{username}}',
+  'sec.user_settings_title':       'User Settings',
   'sec.login_invalid':             'Invalid username or password',
 
   /* ── Section headers & descriptions ─────────────────────────────────────── */

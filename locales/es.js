@@ -231,6 +231,7 @@ window.__NIMBUS_LOCALES.es = {
   'tip.edit_note':                     'Editar nota',
   'tip.add_note':                      'Añadir nota',
   'tip.click_view_alerts':             'Haga clic para ver alertas',
+  'tip.user_settings':                 'Configuración de usuario',
   'tip.lang_switcher':                 'Idioma / Language',
 
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
@@ -400,6 +401,7 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Pestaña de seguridad ─────────────────────────────────────────────────── */
   'sec.username':                  'Nombre de usuario',
   'sec.role':                      'Rol',
+  'sec.user_settings_title':       'Configuración de usuario',
   'sec.password':                  'Contraseña',
   'sec.password_set':              'Establecida',
   'sec.password_not_set':          'No establecida',

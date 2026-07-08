@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-08-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-08-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -304,6 +304,7 @@ const NIMBUS = (function () {
         : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
       const headers = new Headers(init.headers || {});
       if (!headers.has('x-request-id')) headers.set('x-request-id', reqId);
+      if (!headers.has('x-user-email') && !headers.has('X-User')) headers.set('x-user-email', Session.actor());
       const method = init.method || 'GET';
       const url    = typeof input === 'string' ? input : input.url;
       const t0     = performance.now();
@@ -6026,8 +6027,8 @@ const NIMBUS = (function () {
        Session.isAdmin()      — true iff current user's role === 'admin'
        Session.signIn(u, p)   — POST /security/login; persists session + re-applies gates
        Session.signOut()      — clears session, re-applies gates, reloads the page
-       Session._applyGates()  — re-hides the Admin tab button / header chip / error-log
-                                 badge for non-admins; called after sign-in/out and once
+       Session._applyGates()  — re-hides the Admin tab button / header user-settings button /
+                                 error-log badge for non-admins; called after sign-in/out and once
                                  at boot (from _bootMain) so a resumed session re-gates too.
      ========================================================================== */
   const Session = (() => {
@@ -6069,29 +6070,37 @@ const NIMBUS = (function () {
       location.reload();
     }
 
-    // Populates/hides the header user chip (#user-chip, static markup in index.html).
-    function _renderChip() {
-      const chip = document.getElementById('user-chip');
-      if (!chip) return;
+    // Populates/hides the header user-settings icon button (#user-settings-btn, static
+    // markup in index.html) and wires its click (once) to open the User Settings modal.
+    function _renderUserButton() {
+      const btn = document.getElementById('user-settings-btn');
+      if (!btn) return;
       const u = currentUser();
-      if (!u) { chip.hidden = true; chip.textContent = ''; return; }
-      chip.textContent = '';
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'user-chip-name';
-      nameSpan.textContent = t('sec.signed_in_as', { username: u.username });
-      const signOutSpan = document.createElement('span');
-      signOutSpan.className = 'user-chip-signout';
-      signOutSpan.textContent = t('sec.sign_out');
-      signOutSpan.addEventListener('click', signOut);
-      chip.appendChild(nameSpan);
-      chip.appendChild(signOutSpan);
-      chip.hidden = false;
+      btn.hidden = !u;
+      if (!u) return;
+      if (!btn._wired) {
+        btn._wired = true;
+        btn.addEventListener('click', () => {
+          const current = currentUser();
+          if (!current) return;
+          const signedInEl = document.getElementById('us-signed-in-as');
+          const roleEl = document.getElementById('us-role');
+          if (signedInEl) signedInEl.textContent = t('sec.signed_in_as', { username: current.username });
+          if (roleEl) roleEl.textContent = current.role;
+          Modal.open('modal-user-settings');
+        });
+      }
+      const signOutBtn = document.getElementById('us-signout-btn');
+      if (signOutBtn && !signOutBtn._wired) {
+        signOutBtn._wired = true;
+        signOutBtn.addEventListener('click', signOut);
+      }
     }
 
     function _applyGates() {
       const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
       if (adminBtn) adminBtn.hidden = !isAdmin();
-      _renderChip();
+      _renderUserButton();
       try { ErrorLog._renderBadge(); } catch {}
     }
 
@@ -6119,13 +6128,13 @@ const NIMBUS = (function () {
     card.className = 'login-card';
     card.innerHTML = `
       <div class="login-title">${t('sec.login_title')}</div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
+      <form id="login-form" style="display:flex;flex-direction:column;gap:10px;">
         <input type="text" id="login-username" autocomplete="username"
                placeholder="${t('sec.username')}" aria-label="${t('sec.username')}">
         <input type="password" id="login-password" autocomplete="current-password"
                placeholder="${t('sec.password')}" aria-label="${t('sec.password')}">
-        <button type="button" class="btn btn-primary" id="login-submit-btn">${t('sec.sign_in')}</button>
-      </div>
+        <button type="submit" class="btn btn-primary" id="login-submit-btn">${t('sec.sign_in')}</button>
+      </form>
       <div class="login-error" id="login-error"></div>`;
 
     root.appendChild(card);
@@ -6150,10 +6159,7 @@ const NIMBUS = (function () {
       }
     }
 
-    submitBtn.addEventListener('click', _submit);
-    [userInp, passInp].forEach(inp => {
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); _submit(); } });
-    });
+    card.querySelector('#login-form').addEventListener('submit', e => { e.preventDefault(); _submit(); });
 
     userInp.focus();
   }
