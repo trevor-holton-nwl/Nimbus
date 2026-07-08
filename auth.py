@@ -302,6 +302,24 @@ def get_user_role(username: str | None) -> str | None:
     return row[0] if row else None
 
 
+def get_user_profile(username: str | None) -> dict | None:
+    """Look up a user's role + first/last name by username. None for
+    unknown/blank — never raises. Case-insensitive/trimmed match, same as
+    get_user_role. Used by whoami() and authenticate()."""
+    username = (username or "").strip()
+    if not username:
+        return None
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT role, first_name, last_name FROM user_security WHERE lower(username) = lower(%s)",
+            (username,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {"role": row[0], "first_name": row[1], "last_name": row[2]}
+
+
 def admin_exists() -> bool:
     """True once at least one user_security row has role='admin'. Backs
     require_admin's first-run grace and GET /security/bootstrap-status."""
@@ -337,16 +355,29 @@ def whoami(request: Request) -> dict:
     call it to discover it is NOT (or no longer) an admin, so the frontend can
     reconcile a role it cached at login time. Never returns secrets."""
     email = _actor_email(request)
-    role = get_user_role(email)
-    return {"username": email, "role": role, "is_admin": role == "admin" or not admin_exists()}
+    profile = get_user_profile(email) or {}
+    role = profile.get("role")
+    return {
+        "username": email,
+        "role": role,
+        "is_admin": role == "admin" or not admin_exists(),
+        "first_name": profile.get("first_name"),
+        "last_name": profile.get("last_name"),
+    }
 
 
 def authenticate(username: str, password: str) -> dict | None:
     """Verify a username/password pair against user_security. Returns
-    {"username", "role"} on success, None on failure. Never returns or
-    logs the password hash."""
+    {"username", "role", "first_name", "last_name"} on success, None on
+    failure. Never returns or logs the password hash."""
     if verify_user_password(username, password):
-        return {"username": username, "role": get_user_role(username)}
+        profile = get_user_profile(username) or {}
+        return {
+            "username": username,
+            "role": profile.get("role"),
+            "first_name": profile.get("first_name"),
+            "last_name": profile.get("last_name"),
+        }
     return None
 
 

@@ -35,3 +35,32 @@ def test_validate_name_accepts_max_length():
 def test_validate_name_rejects_too_long():
     with pytest.raises(ValueError, match="100 characters or fewer"):
         auth._validate_name("x" * 101, "First name")
+
+
+ZZ_USER_A = "zztest_name_a"
+ZZ_USER_B = "zztest_name_b"
+
+
+@pytest.mark.pg
+class TestGetUserProfile:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self, pg):
+        db = pg
+        yield
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM user_security WHERE lower(username) = lower(%s)", (ZZ_USER_A,))
+            conn.commit()
+
+    def test_get_user_profile_returns_role_and_names(self, pg):
+        db = pg
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_security (username, role, first_name, last_name) VALUES (%s, NULL, %s, %s)",
+                (ZZ_USER_A, "Jane", "Smith"),
+            )
+            conn.commit()
+        profile = auth.get_user_profile(ZZ_USER_A)
+        assert profile == {"role": None, "first_name": "Jane", "last_name": "Smith"}
+
+    def test_get_user_profile_unknown_user_returns_none(self, pg):
+        assert auth.get_user_profile("zztest_does_not_exist") is None

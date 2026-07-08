@@ -1602,7 +1602,8 @@ def security_me(request: Request):
     """Live identity + effective admin status for the caller. Ungated on purpose
     (like /security/bootstrap-status): the frontend calls it to reconcile the
     role it cached at login against backend truth, so it must be reachable even
-    when the caller is NOT an admin. Returns {username, role, is_admin}; no secrets."""
+    when the caller is NOT an admin. Returns {username, role, is_admin,
+    first_name, last_name}; no secrets."""
     return auth.whoami(request)
 
 
