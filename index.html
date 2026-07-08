@@ -1841,6 +1841,16 @@ body.dark .ls-co       { color: var(--fg-mute); }
     </header>
     <div class="modal-body">
       <p id="us-signed-in-as"></p>
+      <div class="form-row form-row-2">
+        <div>
+          <label data-i18n="sec.first_name">First Name</label>
+          <input type="text" id="us-first-name" maxlength="100">
+        </div>
+        <div>
+          <label data-i18n="sec.last_name">Last Name</label>
+          <input type="text" id="us-last-name" maxlength="100">
+        </div>
+      </div>
       <div class="form-row">
         <label data-i18n="sec.role">Role</label>
         <div class="readonly" id="us-role"></div>
@@ -1848,6 +1858,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" id="us-signout-btn" data-i18n="sec.sign_out">Sign out</button>
+      <button class="btn btn-primary" id="us-save-btn" data-i18n="btn.save">Save</button>
     </footer>
   </div>
 </div>

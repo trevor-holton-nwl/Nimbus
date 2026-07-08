@@ -6062,7 +6062,10 @@ const NIMBUS = (function () {
         throw new Error(e.detail || 'Invalid username or password');
       }
       const data = await res.json();
-      localStorage.setItem(KEY, JSON.stringify({ username: data.username, role: data.role }));
+      localStorage.setItem(KEY, JSON.stringify({
+        username: data.username, role: data.role,
+        first_name: data.first_name || null, last_name: data.last_name || null,
+      }));
       _applyGates();
       return data;
     }
@@ -6088,8 +6091,12 @@ const NIMBUS = (function () {
           if (!current) return;
           const signedInEl = document.getElementById('us-signed-in-as');
           const roleEl = document.getElementById('us-role');
+          const firstEl = document.getElementById('us-first-name');
+          const lastEl = document.getElementById('us-last-name');
           if (signedInEl) signedInEl.textContent = t('sec.signed_in_as', { username: current.username });
           if (roleEl) roleEl.textContent = current.role;
+          if (firstEl) firstEl.value = current.first_name || '';
+          if (lastEl) lastEl.value = current.last_name || '';
           Modal.open('modal-user-settings');
         });
       }
@@ -6097,6 +6104,41 @@ const NIMBUS = (function () {
       if (signOutBtn && !signOutBtn._wired) {
         signOutBtn._wired = true;
         signOutBtn.addEventListener('click', signOut);
+      }
+      const saveBtn = document.getElementById('us-save-btn');
+      if (saveBtn && !saveBtn._wired) {
+        saveBtn._wired = true;
+        saveBtn.addEventListener('click', saveProfile);
+      }
+    }
+
+    // Self-service: PATCH /security/me with just this user's own name fields.
+    // Keeps the modal open with the typed values on failure so the user can
+    // retry; on success, updates the local cache and closes.
+    async function saveProfile() {
+      const firstEl = document.getElementById('us-first-name');
+      const lastEl = document.getElementById('us-last-name');
+      const first_name = firstEl ? firstEl.value.trim() : '';
+      const last_name = lastEl ? lastEl.value.trim() : '';
+      try {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ first_name, last_name }),
+        });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.detail || `HTTP ${r.status}`);
+        }
+        const updated = await r.json();
+        const u = currentUser();
+        localStorage.setItem(KEY, JSON.stringify({
+          ...u, first_name: updated.first_name || null, last_name: updated.last_name || null,
+        }));
+        Modal.close('modal-user-settings');
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Save profile failed: ${e.message}`);
       }
     }
 
@@ -6124,6 +6166,8 @@ const NIMBUS = (function () {
           username: me.username || u.username,
           role: me.role || null,
           is_admin: !!me.is_admin,
+          first_name: me.first_name || null,
+          last_name: me.last_name || null,
         }));
         _applyGates();
         // If we just lost admin while sitting on the Admin tab, leave it.
