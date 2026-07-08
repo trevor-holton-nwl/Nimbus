@@ -239,6 +239,34 @@ gating table above):**
   sign-out sync via a `storage` event listener (signing out in one tab leaves other open tabs
   with a stale session until they next hit a 401/refresh).
 
+### Admin 403-lockout hardening (shipped 2026-07-08, follows the section above)
+
+The `require_admin` rollout above had a recurring failure mode: the frontend gates admin UI on the
+`role` cached in `localStorage['nimbus.session']` **at login**, while the backend re-resolves the
+role **live** on every request via an exact, **case-sensitive** `WHERE username = %s` lookup. A
+seeded uppercase `PJ29587` admin therefore never matched a `pj29587` (or whitespace-padded) login,
+and any post-login drift (DB reseed, role change, since-deleted row) left the admin UI visible while
+every admin request returned a dead-end `403 "Admin role required"`. Fixed:
+
+- **Case-insensitive, trimmed username matching** across `get_user_role`, `verify_user_password`,
+  the `_actor_email` header read, the two user upserts (`ON CONFLICT (lower(username))`), and the
+  bootstrap seed. Backed by a unique index on `lower(username)` — in `schema.sql`,
+  `migrations/2026-07-08-username-ci-index.sql`, and self-bootstrapped **best-effort** in
+  `ensure_user_security_table()` (it must never crash boot). **Run the case-collision pre-check in
+  the migration file before deploying** — if two rows already differ only by case, collapse them
+  first, or the index (and thus user upserts) can't be created.
+- **`GET /security/me`** (`auth.whoami`, ungated like `/security/bootstrap-status`) returns the
+  caller's live `{username, role, is_admin}`, mirroring `require_admin`'s grace. `Session.refresh()`
+  reconciles the cached role against it **on boot** and **after any admin 403**, closing most of the
+  "re-check stale cached role" fast-follow noted just above (only window-focus re-check and
+  multi-tab `storage` sign-out sync remain deferred).
+- **Graceful 403:** `Session.onAuthDenied()` turns a 403 on any admin action into a reconcile + a
+  clear "sign in again" toast, wired into the Security tab's read and write paths.
+
+**Not a security boundary.** `/security/me` and the graceful-403 UX only make the client agree with
+the backend about admin status — identity is still the spoofable `x-user-email`/`X-User` header, so
+the real trust boundary remains the WS3 Entra SSO swap point in `_actor_email` (above).
+
 ## Workstream 4 — Optimistic edit-conflict guardrail (bounded multi-user slice)
 
 The single concession to multi-user, sized for "a few editors, same plant":
