@@ -18145,6 +18145,7 @@ saveAll() {
     let _roleOptions = [];           // role names for the Role <select> (from GET /master-data/roles)
     let _staged = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
     const _pwOpen = new Set();       // usernames with an open inline password-reveal row
+    const _nameSaveTimers = new Map(); // username -> pending debounce timeout id
 
     // ---- Roles tab state ----
     let _roles = [];                 // GET /master-data/roles rows: [{role, description}]
@@ -18268,6 +18269,8 @@ saveAll() {
           </div>
           <div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:center;flex-wrap:wrap">
             <input type="text" class="input" id="sec-new-username" placeholder="${_esc(t('sec.username_ph'))}" style="flex:1;min-width:120px">
+            <input type="text" class="input" id="sec-new-firstname" placeholder="${_esc(t('sec.first_name_ph'))}" maxlength="100" style="flex:1;min-width:100px">
+            <input type="text" class="input" id="sec-new-lastname" placeholder="${_esc(t('sec.last_name_ph'))}" maxlength="100" style="flex:1;min-width:100px">
             ${_roleSelectHtml('', 'id="sec-new-role-select"')}
             <input type="password" class="input" id="sec-new-password" placeholder="${_esc(t('sec.new_password_ph'))}" autocomplete="new-password" style="flex:1;min-width:120px">
             <button class="btn btn-primary sm" id="sec-add-user-btn">${_esc(t('sec.add_user'))}</button>
@@ -18276,6 +18279,8 @@ saveAll() {
             <table class="md-table">
               <thead><tr>
                 <th class="md-th">${_esc(t('sec.username'))}</th>
+                <th class="md-th">${_esc(t('sec.first_name'))}</th>
+                <th class="md-th">${_esc(t('sec.last_name'))}</th>
                 <th class="md-th">${_esc(t('sec.role'))}</th>
                 <th class="md-th">${_esc(t('sec.password'))}</th>
                 <th class="md-th"></th>
@@ -18328,6 +18333,8 @@ saveAll() {
            </div>`;
       return `<tr data-username="${_esc(u.username)}">
         <td class="md-td">${_esc(u.username)}</td>
+        <td class="md-td"><input type="text" class="input" data-first-name-user="${_esc(u.username)}" value="${_esc(u.first_name || '')}" maxlength="100"></td>
+        <td class="md-td"><input type="text" class="input" data-last-name-user="${_esc(u.username)}" value="${_esc(u.last_name || '')}" maxlength="100"></td>
         <td class="md-td">${_roleSelectHtml(u.role, `data-role-select-user="${_esc(u.username)}"`)}</td>
         <td class="md-td">${pwCell}</td>
         <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${_esc(u.username)}" title="${_esc(t('tip.delete_row'))}">🗑</button></td>
@@ -18337,6 +18344,8 @@ saveAll() {
     function _stagedRowHtml(r, i) {
       return `<tr class="md-row-new">
         <td class="md-td">${_esc(r.username)}</td>
+        <td class="md-td"><input type="text" class="input" data-first-name-staged="${i}" value="${_esc(r.first_name || '')}" maxlength="100"></td>
+        <td class="md-td"><input type="text" class="input" data-last-name-staged="${i}" value="${_esc(r.last_name || '')}" maxlength="100"></td>
         <td class="md-td">${_roleSelectHtml(r.role, `data-role-select-staged="${i}"`)}</td>
         <td class="md-td">${_esc(t('sec.password_not_set'))}</td>
         <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${_esc(t('tip.delete_row'))}">🗑</button></td>
@@ -18347,7 +18356,7 @@ saveAll() {
       const tbody = document.getElementById('sec-users-tbody');
       if (!tbody) return;
       if (!_users.length && !_staged.length) {
-        tbody.innerHTML = `<tr><td colspan="4" class="md-empty">${_esc(t('sec.no_users_yet'))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="md-empty">${_esc(t('sec.no_users_yet'))}</td></tr>`;
       } else {
         tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
       }
@@ -18355,6 +18364,14 @@ saveAll() {
         sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser, sel.value)));
       tbody.querySelectorAll('[data-role-select-staged]').forEach(sel =>
         sel.addEventListener('change', () => { _staged[+sel.dataset.roleSelectStaged].role = sel.value; }));
+      tbody.querySelectorAll('[data-first-name-user]').forEach(inp =>
+        inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.firstNameUser)));
+      tbody.querySelectorAll('[data-last-name-user]').forEach(inp =>
+        inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.lastNameUser)));
+      tbody.querySelectorAll('[data-first-name-staged]').forEach(inp =>
+        inp.addEventListener('blur', () => { _staged[+inp.dataset.firstNameStaged].first_name = inp.value; }));
+      tbody.querySelectorAll('[data-last-name-staged]').forEach(inp =>
+        inp.addEventListener('blur', () => { _staged[+inp.dataset.lastNameStaged].last_name = inp.value; }));
       tbody.querySelectorAll('[data-pw-toggle]').forEach(b =>
         b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle); _renderUsersRows(); }));
       tbody.querySelectorAll('[data-pw-cancel]').forEach(b =>
@@ -18373,6 +18390,40 @@ saveAll() {
       } catch (e) {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
         ErrorLog.error('security', `Set role failed for ${username}: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    // Debounced by username so tabbing from First Name straight into Last Name
+    // in the same row coalesces into one save (reading both fields' live
+    // values) instead of firing mid-edit and losing the second field's
+    // keystrokes to the unconditional reload/re-render below.
+    function _scheduleSetUserName(username) {
+      clearTimeout(_nameSaveTimers.get(username));
+      _nameSaveTimers.set(username, setTimeout(() => {
+        _nameSaveTimers.delete(username);
+        _setUserName(username);
+      }, 200));
+    }
+
+    async function _setUserName(username) {
+      const row = document.querySelector(`tr[data-username="${CSS.escape(username)}"]`);
+      if (!row) return;
+      const roleSelect = row.querySelector('[data-role-select-user]');
+      const firstInput = row.querySelector('[data-first-name-user]');
+      const lastInput = row.querySelector('[data-last-name-user]');
+      try {
+        await _postJSON(`${API}/security/users/bulk`, {
+          upserts: [{
+            username,
+            role: roleSelect ? (roleSelect.value || null) : null,
+            first_name: firstInput ? firstInput.value.trim() : '',
+            last_name: lastInput ? lastInput.value.trim() : '',
+          }],
+        });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Set name failed for ${username}: ${e.message}`);
       }
       await _reloadUsers();
     }
@@ -18410,6 +18461,8 @@ saveAll() {
 
     async function _addUser() {
       const uInput = document.getElementById('sec-new-username');
+      const fInput = document.getElementById('sec-new-firstname');
+      const lInput = document.getElementById('sec-new-lastname');
       const rSelect = document.getElementById('sec-new-role-select');
       const pInput = document.getElementById('sec-new-password');
       const username = (uInput?.value || '').trim();
@@ -18417,8 +18470,10 @@ saveAll() {
       const password = pInput?.value || '';
       if (password && password.length < 4) { Toast.show(t('sec.password_too_short'), 'error'); return; }
       const role = rSelect?.value || null;
+      const first_name = (fInput?.value || '').trim();
+      const last_name = (lInput?.value || '').trim();
       try {
-        await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role }] });
+        await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role, first_name, last_name }] });
         if (password) await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password });
       } catch (e) {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
@@ -18435,10 +18490,19 @@ saveAll() {
       const first = lines[0].split('\t').map(h => h.trim().toLowerCase());
       const nameHdrs = ['username', t('sec.username').toLowerCase()];
       const roleHdrs = ['role', t('sec.role').toLowerCase()];
-      const hasHeader = first.some(h => nameHdrs.includes(h) || roleHdrs.includes(h));
+      const firstNameHdrs = ['first name', 'firstname', t('sec.first_name').toLowerCase()];
+      const lastNameHdrs = ['last name', 'lastname', t('sec.last_name').toLowerCase()];
+      const hasHeader = first.some(h =>
+        nameHdrs.includes(h) || roleHdrs.includes(h) || firstNameHdrs.includes(h) || lastNameHdrs.includes(h));
       let headers, dataLines;
       if (hasHeader) {
-        headers = first.map(h => nameHdrs.includes(h) ? 'username' : (roleHdrs.includes(h) ? 'role' : h));
+        headers = first.map(h => {
+          if (nameHdrs.includes(h)) return 'username';
+          if (roleHdrs.includes(h)) return 'role';
+          if (firstNameHdrs.includes(h)) return 'first_name';
+          if (lastNameHdrs.includes(h)) return 'last_name';
+          return h;
+        });
         dataLines = lines.slice(1);
       } else {
         headers = ['username', 'role'];
@@ -18459,14 +18523,20 @@ saveAll() {
       if (!raw.trim()) { Toast.show(t('toast.clipboard_empty'), 'error'); return; }
       const rows = _parseUserPaste(raw);
       if (!rows.length) { Toast.show(t('toast.no_rows_paste'), 'error'); return; }
-      rows.forEach(r => _staged.push({ username: r.username, role: r.role || '' }));
+      rows.forEach(r => _staged.push({
+        username: r.username, role: r.role || '',
+        first_name: r.first_name || '', last_name: r.last_name || '',
+      }));
       _renderUsersRows();
       _renderUsersActions();
     }
 
     async function _saveStaged() {
       if (!_staged.length) return;
-      const upserts = _staged.map(r => ({ username: r.username, role: r.role || null }));
+      const upserts = _staged.map(r => ({
+        username: r.username, role: r.role || null,
+        first_name: r.first_name || '', last_name: r.last_name || '',
+      }));
       try {
         await _postJSON(`${API}/security/users/bulk`, { upserts });
         _staged = [];
