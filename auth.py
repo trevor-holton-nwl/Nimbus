@@ -378,6 +378,32 @@ def whoami(request: Request) -> dict:
     }
 
 
+def update_own_name(actor_email: str | None, first_name: str | None, last_name: str | None) -> dict:
+    """Update the CALLER's own first/last name only — never a name, role, or
+    password for anyone else. `actor_email` must already resolve to an
+    existing user_security row. This is the only self-service write path in
+    the app, so it deliberately touches nothing but these two columns for
+    exactly one row, matched the same case-insensitive way as every other
+    identity lookup in this module."""
+    username = (actor_email or "").strip()
+    if not username:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    first_name = _validate_name(first_name, "First name")
+    last_name = _validate_name(last_name, "Last name")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE user_security SET first_name = %s, last_name = %s, updated_at = NOW()"
+            " WHERE lower(username) = lower(%s) RETURNING username, role",
+            (first_name, last_name, username),
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.commit()
+    return {"username": row[0], "role": row[1], "first_name": first_name, "last_name": last_name}
+
+
 def authenticate(username: str, password: str) -> dict | None:
     """Verify a username/password pair against user_security. Returns
     {"username", "role", "first_name", "last_name"} on success, None on

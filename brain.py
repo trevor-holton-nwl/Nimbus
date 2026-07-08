@@ -1607,6 +1607,21 @@ def security_me(request: Request):
     return auth.whoami(request)
 
 
+@api.patch("/security/me")
+def security_update_me(request: Request, body: dict = Body(default={})):
+    """Self-service: update the CALLER's own first/last name only. Ungated
+    (like GET /security/me) — identity comes from the header, and
+    auth.update_own_name scopes the write to exactly that one row."""
+    try:
+        return auth.update_own_name(
+            request.headers.get("x-user-email") or request.headers.get("X-User"),
+            body.get("first_name"),
+            body.get("last_name"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @api.get("/security/users", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_list_users(
         limit: int | None = Query(default=None, ge=1, le=100000,

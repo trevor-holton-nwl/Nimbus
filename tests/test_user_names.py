@@ -120,3 +120,71 @@ class TestBulkUpsertNames:
                 upserts=[{"username": ZZ_USER_A, "role": None, "first_name": "x" * 101}],
                 deletes=[],
             )
+
+
+@pytest.mark.pg
+class TestUpdateOwnName:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self, pg):
+        db = pg
+        yield
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM user_security WHERE lower(username) IN (lower(%s), lower(%s))",
+                (ZZ_USER_A, ZZ_USER_B),
+            )
+            conn.commit()
+
+    def test_update_own_name_scopes_to_caller_only(self, pg):
+        auth.bulk_upsert_users(
+            upserts=[
+                {"username": ZZ_USER_A, "role": None, "first_name": "", "last_name": ""},
+                {"username": ZZ_USER_B, "role": None, "first_name": "", "last_name": ""},
+            ],
+            deletes=[],
+        )
+        auth.update_own_name(ZZ_USER_A, "Jane", "Smith")
+        result = auth.list_users()
+        by_name = {u["username"].lower(): u for u in result["users"]}
+        assert by_name[ZZ_USER_A.lower()]["first_name"] == "Jane"
+        assert by_name[ZZ_USER_B.lower()]["first_name"] is None
+
+    def test_update_own_name_rejects_too_long(self, pg):
+        auth.bulk_upsert_users(upserts=[{"username": ZZ_USER_A, "role": None}], deletes=[])
+        with pytest.raises(ValueError, match="100 characters or fewer"):
+            auth.update_own_name(ZZ_USER_A, "x" * 101, "Smith")
+
+    def test_update_own_name_unknown_user_404s(self, pg):
+        with pytest.raises(HTTPException) as exc_info:
+            auth.update_own_name("zztest_does_not_exist", "Jane", "Smith")
+        assert exc_info.value.status_code == 404
+
+
+@pytest.mark.pg
+def test_patch_security_me_endpoint(client, pg):
+    db = pg
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM user_security WHERE lower(username) = lower(%s)", (ZZ_USER_A,))
+        cur.execute("INSERT INTO user_security (username) VALUES (%s)", (ZZ_USER_A,))
+        conn.commit()
+    try:
+        resp = client.patch(
+            "/security/me",
+            json={"first_name": "Jane", "last_name": "Smith"},
+            headers={"x-user-email": ZZ_USER_A},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["first_name"] == "Jane"
+        assert body["last_name"] == "Smith"
+
+        resp2 = client.patch(
+            "/security/me",
+            json={"first_name": "x" * 101, "last_name": "Smith"},
+            headers={"x-user-email": ZZ_USER_A},
+        )
+        assert resp2.status_code == 400
+    finally:
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM user_security WHERE lower(username) = lower(%s)", (ZZ_USER_A,))
+            conn.commit()
