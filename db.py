@@ -353,6 +353,57 @@ def reattribute_null_plant_orders() -> int:
     return n
 
 
+def backfill_line_keys() -> int:
+    """
+    Re-derive orders.line_key where it is still NULL, from production_lines.line_key
+    for the matching (plant, production_line) pair. Whole-table sibling of the
+    batch-scoped backfill in upsert_orders() — call this after production_lines
+    change, same trigger as reattribute_null_plant_orders(). Strictly downstream
+    of orders.plant: a row still NULL there is skipped here too (see MIGRATION.md
+    for the pre-existing plant-ambiguity gap this inherits rather than fixes).
+    Idempotent. Returns the number of orders re-attributed.
+    """
+    sql = """
+        UPDATE orders o
+           SET line_key = (
+               SELECT pl.line_key FROM production_lines pl
+                WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+           )
+         WHERE o.line_key IS NULL AND o.plant IS NOT NULL
+           AND (
+               SELECT COUNT(*) FROM production_lines pl
+                WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+           ) = 1
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        n = cur.rowcount
+        # Report (don't guess) rows left NULL because (plant, production_line) matches
+        # zero or more than one production_lines row.
+        cur.execute(
+            """
+            SELECT o.plant, o.production_line, COUNT(*)
+              FROM orders o
+             WHERE o.line_key IS NULL AND o.plant IS NOT NULL
+               AND (
+                   SELECT COUNT(*) FROM production_lines pl
+                    WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+               ) <> 1
+             GROUP BY o.plant, o.production_line
+            """
+        )
+        unresolved = cur.fetchall()
+        conn.commit()
+    if unresolved:
+        total = sum(int(r[2]) for r in unresolved)
+        pairs = ", ".join(f"{r[0]}/{r[1]}" for r in unresolved)
+        log.warning(
+            "backfill_line_keys: %d order(s) left without a line_key — "
+            "(plant, line) pair(s) not uniquely resolved in production_lines: %s", total, pairs,
+        )
+    return n
+
+
 def get_task_versions(ids: list[str]) -> list[dict]:
     """
     Lean refetch for optimistic-concurrency conflict reconciliation: current effective
@@ -1148,6 +1199,16 @@ _UPSERT_SQL = """
             WHEN EXCLUDED.production_line IS DISTINCT FROM orders.production_line THEN NULL
             ELSE orders.plant
         END,
+        -- line_key has no EXCLUDED counterpart (it's derived, never uploaded), so unlike
+        -- plant it never gets a "trust the new explicit value" branch — just reset to
+        -- NULL on either input actually changing, else keep. The post-upsert backfill
+        -- below re-derives it. Plant-changed check is NULL-safe (EXCLUDED.plant IS NOT
+        -- NULL guard) so a plain re-upload with no WERKS/PLANT column doesn't null it.
+        line_key              = CASE
+            WHEN EXCLUDED.production_line IS DISTINCT FROM orders.production_line THEN NULL
+            WHEN EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant THEN NULL
+            ELSE orders.line_key
+        END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
         run_time              = EXCLUDED.run_time,
@@ -1292,6 +1353,24 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                    AND (
                        SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
                         WHERE pl.production_line = o.production_line
+                   ) = 1
+                """,
+                (batch_id,),
+            )
+            conn.commit()
+            # Same idea for line_key, scoped to this batch, strictly downstream of the
+            # plant backfill just above (a row still NULL there stays NULL here too).
+            cur.execute(
+                """
+                UPDATE orders o
+                   SET line_key = (
+                       SELECT pl.line_key FROM production_lines pl
+                        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+                   )
+                 WHERE o.upload_batch_id = %s AND o.line_key IS NULL AND o.plant IS NOT NULL
+                   AND (
+                       SELECT COUNT(*) FROM production_lines pl
+                        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
                    ) = 1
                 """,
                 (batch_id,),
@@ -1512,3 +1591,126 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         "lines": lines,
         "warnings": result["warnings"],
     }
+
+
+# =========================
+# COLOR WHEELS
+# =========================
+# Durable per-plant color wheels (table: color_wheel). Replaces the ephemeral
+# COLOR_WHEEL_DIR/color_wheel_<SAFE>.xlsx + _meta.json files. brain.py owns the
+# xlsx parsing and the in-memory GLOBAL_CW/PLANT_CWS cache; this module owns
+# persistence only. `entries` is a {COLOR: ORDER_Y} map — colors upper/stripped,
+# ranks native floats or None (a blank/NaN rank is stored as JSON null and read
+# back as last-priority 999999 by apply_color_merge / get_color_wheel).
+def ensure_color_wheel_table() -> None:
+    """Idempotent: create the color_wheel table if missing (mirrors schema.sql /
+    migrations/2026-07-07-color-wheel-table.sql). Lets the app self-bootstrap even
+    before the migration is applied, matching the other ensure_* startup hooks."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS color_wheel (
+                plant_key   TEXT PRIMARY KEY,
+                plant_label TEXT NOT NULL,
+                entries     JSONB NOT NULL,
+                filename    TEXT,
+                row_count   INTEGER NOT NULL DEFAULT 0,
+                uploaded_by TEXT,
+                uploaded_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+
+def upsert_color_wheel(plant_key: str, plant_label: str, entries: dict,
+                       filename: str | None = None, row_count: int = 0,
+                       uploaded_by: str | None = None) -> dict:
+    """Insert or replace a plant's color wheel. Returns {"inserted": bool} —
+    True on a first upload, False when an existing wheel was replaced."""
+    sql = """
+        INSERT INTO color_wheel (
+            plant_key, plant_label, entries, filename, row_count, uploaded_by, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (plant_key) DO UPDATE SET
+            plant_label = EXCLUDED.plant_label,
+            entries     = EXCLUDED.entries,
+            filename    = EXCLUDED.filename,
+            row_count   = EXCLUDED.row_count,
+            uploaded_by = EXCLUDED.uploaded_by,
+            updated_at  = NOW()
+        RETURNING (xmax = 0) AS inserted
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, (plant_key, plant_label, Jsonb(entries),
+                          filename, int(row_count), uploaded_by))
+        inserted = bool(cur.fetchone()[0])
+        conn.commit()
+    return {"inserted": inserted}
+
+
+def delete_color_wheel(plant_key: str) -> dict | None:
+    """Delete a plant's color wheel. Returns {"filename": ...} for the deleted
+    row, or None if there was nothing to delete."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM color_wheel WHERE plant_key = %s RETURNING filename",
+                    (plant_key,))
+        row = cur.fetchone()
+        conn.commit()
+    return None if row is None else {"filename": row[0]}
+
+
+def get_color_wheel_row(plant_key: str) -> dict | None:
+    """Return one plant's color-wheel row (entries JSONB auto-decoded to a dict)
+    or None if the plant has no wheel."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT plant_key, plant_label, entries, filename, row_count,"
+            " uploaded_by, uploaded_at"
+            " FROM color_wheel WHERE plant_key = %s",
+            (plant_key,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "plant_key": row[0], "plant_label": row[1], "entries": row[2] or {},
+        "filename": row[3], "row_count": row[4],
+        "uploaded_by": row[5], "uploaded_at": row[6],
+    }
+
+
+def load_all_color_wheels() -> dict:
+    """Return {plant_key: {COLOR: ORDER_Y}} for every stored wheel — used to
+    rebuild the PLANT_CWS cache at startup and on /reload."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant_key, entries FROM color_wheel")
+        return {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+
+def list_color_wheels_meta(limit: int | None = None,
+                           offset: int | None = None) -> tuple[dict, int]:
+    """Return ({plant_label: {uploaded_at, uploaded_by, filename, row_count}}, total)
+    for the /color-wheels listing. Ordered by plant_label for a deterministic
+    paged slice; total is the full count regardless of paging."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM color_wheel")
+        total = cur.fetchone()[0]
+        q = ("SELECT plant_label, uploaded_at, uploaded_by, filename, row_count"
+             " FROM color_wheel ORDER BY plant_label")
+        params: list = []
+        if limit is not None:
+            q += " LIMIT %s"
+            params.append(int(limit))
+        if offset:
+            q += " OFFSET %s"
+            params.append(int(offset))
+        cur.execute(q, params)
+        out: dict = {}
+        for label, uploaded_at, uploaded_by, filename, row_count in cur.fetchall():
+            out[label] = {
+                "uploaded_at": uploaded_at.isoformat() if uploaded_at else None,
+                "uploaded_by": uploaded_by,
+                "filename": filename,
+                "row_count": row_count,
+            }
+    return out, total

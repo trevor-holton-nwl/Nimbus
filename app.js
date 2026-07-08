@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-06-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-07-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -54,6 +54,15 @@
 
 const NIMBUS = (function () {
   'use strict';
+
+  // nimbus-compute-core.js is the single source of truth for the capacity engine,
+  // alert rules, and utilization matrix; the Calendar/Alerts/Utilization modules below
+  // delegate to it (the same module the worker importScripts). index.html injects it
+  // just above app.js. Fail fast with a clear message rather than throwing cryptically
+  // deep inside Alerts/Utilization on first compute.
+  if (typeof NimbusComputeCore === 'undefined') {
+    throw new Error('NIMBUS boot error: nimbus-compute-core.js did not load before app.js — check index.html script order / deploy.');
+  }
 
   /* =============================================================================
      CONFIG — global constants; never mutated at runtime.
@@ -457,6 +466,80 @@ const NIMBUS = (function () {
       if (!el) throw new Error(`required DOM element missing: ${id}`);
       return el;
     },
+
+    // Strips the ".0" suffix Excel appends to General-formatted numeric columns
+    // (e.g. "1000261702.0"), mirroring backend _clean_id() (brain.py) so pasted
+    // SAP-style ids match what's actually stored on tasks.
+    _stripExcelFloatSuffix(s) {
+      return /^-?\d+\.0$/.test(s) ? s.slice(0, -2) : s;
+    },
+
+    // Parse clipboard text pasted from Excel into a flat list of candidate
+    // strings. Same \r-strip/\n-split/\t-split convention as the labor-grid
+    // paste handler and MasterData._parsePaste, flattened to one list since
+    // paste-to-filter only needs "the set of strings the user pasted".
+    parsePasteList(text) {
+      if (!text) return [];
+      return text.replace(/\r/g, '').split('\n')
+        .flatMap(line => line.split('\t'))
+        .map(v => Util._stripExcelFloatSuffix(v.trim()))
+        .filter(Boolean);
+    },
+
+    // Match parsed paste text against a live list of checkbox elements (by
+    // .value, case-insensitive/trimmed), check the matches, and dispatch a
+    // bubbling 'change' on each newly-checked box so the panel's own
+    // onchange="..." handler does the Set-update + apply work — no separate
+    // "select" logic to keep in sync.
+    matchPasteToCheckboxes(text, checkboxEls) {
+      const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
+      const byValue = new Map();
+      checkboxEls.forEach(cb => byValue.set(Util.norm(cb.value), cb));
+      let matched = 0;
+      distinct.forEach(v => {
+        const cb = byValue.get(v);
+        if (!cb) return;
+        matched++;
+        if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      });
+      return { matched, total: distinct.length };
+    },
+
+    // One-time wiring for a small paste-capture <input> sitting atop a
+    // checkbox panel. getCheckboxEls is called lazily at paste-time so it
+    // always sees the panel's current (rebuilt) checkbox list.
+    wirePasteToCheckboxes(inputEl, getCheckboxEls) {
+      if (!inputEl || inputEl._pasteWired) return;
+      inputEl._pasteWired = true;
+      inputEl.addEventListener('paste', e => {
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        inputEl.value = '';
+        if (!text || !text.trim()) return;
+        const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls());
+        if (!total) return;
+        Toast.show(t('toast.paste_checkbox_match', { matched, total }), matched > 0 ? 'success' : 'warn');
+      });
+    },
+
+    // Sub-feature B predicate shared by GanttFilter.matches() and
+    // Table._taskPassesChipFilters(). Frontend task objects carry the
+    // production order as .ORDER (brain.py aliases PRODUCTION_ORDER -> ORDER
+    // in the /tasks response) — .PRODUCTION_ORDER is kept as a fallback only
+    // for parity with the same convention used by Table's own valueGetter.
+    taskMatchesPasteSet(task, idSet) {
+      if (!idSet || idSet.size === 0) return true;
+      const po  = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
+      const mat = Util.norm(task.MATERIAL_NUMBER);
+      return (po && idSet.has(po)) || (mat && idSet.has(mat));
+    },
+
+    // Diagnostic "how many of these pasted values matched a known id" count,
+    // used for the paste toast on the Production Order / Material filter.
+    countPasteMatches(text, knownIdSet) {
+      const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
+      return { matched: distinct.filter(v => knownIdSet.has(v)).length, total: distinct.length };
+    },
   };
 
   window.t = (key, vars) => Util.t(key, vars);
@@ -632,6 +715,8 @@ const NIMBUS = (function () {
   const Store = {
     _tasksByPlant: {},   // plant → [task refs] — derived index rebuilt on setTasks
     _lineToPlant: {},    // line → plant — O(1) cache for getPlantForLine, rebuilt alongside _tasksByPlant
+    _linesByPlant: {},        // plant → [line names] — union of masterData/calendars/lineSettings/tasks, rebuilt in _rebuildPlantIndex
+    _masterLinesByPlant: {},  // plant → [masterData line rows] — masterData.lines grouped by plant, rebuilt in _rebuildPlantIndex
     _state: {
       tasks:        {},           // id → task object
       dependencies: {},           // targetId → [sourceIds]
@@ -847,10 +932,9 @@ const NIMBUS = (function () {
     clampLinesToPlant(plant, dow) {
       const plantHours = this._state.plants[plant]?.workHours[dow];
       const changed = [];  // line codes whose hours this call actually rewrote (F9)
+      const plantLineSet = new Set(Store._linesByPlant[plant] || []);
       for (const line of Object.keys(this._state.calendars)) {
-        const lsettings = this._state.lineSettings[line];
-        const linePlant = (lsettings || {}).plant || null;
-        if (linePlant !== plant) continue;
+        if (!plantLineSet.has(line)) continue;
         const lineHours = this._state.calendars[line].workHours[dow];
         if (!lineHours) continue;
         let next;
@@ -950,10 +1034,13 @@ const NIMBUS = (function () {
       // Rebuild the line → master-data plant cache first so the getPlantForLine calls
       // below (and on every later hot path) resolve in O(1) instead of scanning lines.
       const l2p = {};
+      const masterByPlant = {};
       for (const r of (Store._state.masterData?.lines ?? [])) {
         if (r.production_line && l2p[r.production_line] === undefined) l2p[r.production_line] = r.plant ?? null;
+        if (r.plant) (masterByPlant[r.plant] ||= []).push(r);
       }
       Store._lineToPlant = l2p;
+      Store._masterLinesByPlant = masterByPlant;
       const idx = {};
       for (const t of Store.tasksArr) {
         const p = t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE);
@@ -961,6 +1048,20 @@ const NIMBUS = (function () {
         (idx[p] ||= []).push(t);
       }
       Store._tasksByPlant = idx;
+
+      // Names-only index for dropdown/chip/heatmap consumers — same 4 sources
+      // allLines() unions, bucketed by plant instead of collapsed into one flat set.
+      const namesByPlant = {};
+      const addName = (plant, line) => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
+      for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE), t.PRODUCTION_LINE);
+      for (const line of Object.keys(this._state.calendars))    addName(Store.getPlantForLine(line), line);
+      for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
+      for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.production_line);
+      const linesByPlant = {};
+      for (const [plant, set] of Object.entries(namesByPlant)) {
+        linesByPlant[plant] = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      }
+      Store._linesByPlant = linesByPlant;
     },
     // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
     // prev→next, keeping the cached plant buckets coherent without a full O(n) rebuild.
@@ -1008,8 +1109,10 @@ const NIMBUS = (function () {
     },
     linesForSelectedPlant() {
       const plant = this._state.selectedPlant;
-      if (!plant) return [];
-      return Store.allLines().filter(line => Store.getPlantForLine(line) === plant);
+      return plant ? (Store._linesByPlant[plant] || []) : [];
+    },
+    masterLinesForPlant(plant) {
+      return plant ? (Store._masterLinesByPlant[plant] || []) : [];
     },
     knownPlants() {
       // Prefer master-data plants when available (authoritative source).
@@ -1147,20 +1250,11 @@ const NIMBUS = (function () {
       return { byLine, byPlant };
     },
 
-    /** Returns [startDate, endDate] for a workHours map + date, or null if closed. */
+    /** Returns [startDate, endDate] for a workHours map + date, or null if closed.
+     *  Delegates to the shared compute core (single source of truth; handles the
+     *  fractional-hour split so 08:30 isn't floored to 08:00). */
     _dayWindow(workHours, date) {
-      const d = new Date(date);
-      const wh = workHours[d.getDay()];
-      if (!wh) return null;
-      const [h1, h2] = wh;
-      // h1/h2 are fractional hours (e.g. 8.5 = 08:30). setHours() truncates its hour
-      // argument and takes minutes from the 2nd arg, so split out the minutes first —
-      // otherwise 08:30 silently becomes 08:00 and the capacity engine drifts.
-      const hh1 = Math.floor(h1), mm1 = Math.round((h1 - hh1) * 60);
-      const hh2 = Math.floor(h2), mm2 = Math.round((h2 - hh2) * 60);
-      const start = new Date(d); start.setHours(hh1, mm1, 0, 0);
-      const end   = new Date(d); end.setHours(hh2, mm2, 0, 0);
-      return [start, end];
+      return NimbusComputeCore._dayWindow(workHours, date);
     },
 
     /** Returns [startDate, endDate] for a line+day, intersected with plant hours.
@@ -1275,13 +1369,9 @@ const NIMBUS = (function () {
      *  The single source of truth for the buffer formula — callers that have already
      *  computed dailyCapacityHours (matrix cells, the alert overload loop) call this
      *  instead of effectiveCapacityHours so the full-capacity scan is not repeated.
-     *  MUST stay identical to nimbus-worker.js. */
+     *  Delegates to the shared compute core. */
     effectiveFromCapacity(line, full) {
-      const ls = Store.lineSettings[line];
-      if (!ls) return full;
-      if (ls.bufferUnit === 'pct' && ls.bufferPct > 0) return full * (1 - ls.bufferPct / 100);
-      if (ls.bufferUnit === 'hours' && ls.bufferHours > 0) return Math.max(0, full - ls.bufferHours);
-      return full;
+      return NimbusComputeCore.effectiveFromCapacity(line, full, Store.lineSettings);
     },
 
     effectiveCapacityHours(line, date) {
@@ -1581,6 +1671,9 @@ const NIMBUS = (function () {
     },
 
     _getLines() {
+      if (Store.selectedPlant) return Store.linesForSelectedPlant();
+      // No plant selected yet (e.g. blackout modal opened before plant pick) —
+      // fall back to the unscoped view rather than showing nothing.
       const set = new Set();
       Store.tasksArr.forEach(t => set.add(t.PRODUCTION_LINE || 'Unknown'));
       Object.keys(Store.calendars).forEach(l => set.add(l));
@@ -2095,7 +2188,7 @@ const NIMBUS = (function () {
       fd.append('file', file);
       fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, {
         method: 'POST', body: fd,
-        headers: { 'X-User': 'trevor.holton@newellco.com' },
+        headers: { 'X-User': Session.actor() },
       })
         .then(r => r.json())
         .then(body => {
@@ -2123,7 +2216,7 @@ const NIMBUS = (function () {
       if (!ok) return;
       fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, {
         method: 'DELETE',
-        headers: { 'X-User': 'trevor.holton@newellco.com' },
+        headers: { 'X-User': Session.actor() },
       })
         .then(r => r.json())
         .then(body => {
@@ -2523,7 +2616,7 @@ const NIMBUS = (function () {
       try {
         const r = await fetch(`${Config.API_BASE}/labor-plan`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body: JSON.stringify({ subnetwork, plant, cells }),
         });
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
@@ -2538,7 +2631,7 @@ const NIMBUS = (function () {
       try {
         const r = await fetch(`${Config.API_BASE}/labor-plan/line`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body: JSON.stringify({ subnetwork, plant, cells }),
         });
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
@@ -2937,8 +3030,8 @@ const NIMBUS = (function () {
       // Show all groups unless user has filtered to specific ones
       const visibleGroups = _displayGroups.length ? _displayGroups : _groups;
       const fetchGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
-      const allLinesMeta = (Store._state.masterData?.lines || [])
-        .filter(l => l.plant === plant && visibleGroups.includes(l.pl_group))
+      const allLinesMeta = Store.masterLinesForPlant(plant)
+        .filter(l => visibleGroups.includes(l.pl_group))
         .sort((a, b) => visibleGroups.indexOf(a.pl_group) - visibleGroups.indexOf(b.pl_group) || a.production_line.localeCompare(b.production_line));
       if (!allLinesMeta.length) {
         grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('empty.no_production_lines_plant')}</div>`; return;
@@ -3080,8 +3173,8 @@ const NIMBUS = (function () {
       const container = document.getElementById('labor-capacity-grid'); if (!container) return;
       const scopeGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
       await _fetchLines(plant, scopeGroup);
-      const lines = (Store._state.masterData?.lines || [])
-        .filter(l => l.plant === plant && (!scopeGroup || l.pl_group === scopeGroup))
+      const lines = Store.masterLinesForPlant(plant)
+        .filter(l => !scopeGroup || l.pl_group === scopeGroup)
         .map(l => l.production_line).sort();
       if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${t('empty.no_production_lines_plant')}</div>`; return; }
 
@@ -3901,231 +3994,28 @@ const NIMBUS = (function () {
     },
 
     _recomputeSync(opts = {}) {
+      // Synchronous fallback (worker unavailable / no plant selected). Delegates to
+      // nimbus-compute-core — the SAME implementation the worker runs — so a worker-dead
+      // session and a healthy one produce identical alerts (no "two brains" divergence).
+      // Reads the same GLOBAL Store data the previous inline rule engine did (all tasks/
+      // blocks/plant-blocks/calendars/…). The core writes calendar defaults into
+      // Store.calendars/plants exactly as Store.ensure* did (same in-place side effect).
       const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-      // Incremental scope: when opts.lines is a non-empty Set, recompute alerts only for
-      // those lines and splice them into the existing list (merge at the end). Callers that
-      // use this path must never move a task across lines.
       const onlyLines = (opts.lines instanceof Set && opts.lines.size) ? opts.lines : null;
-      const alerts = [];
-      const tasks = Store.tasksArr;
-      const todayStart = Util.startOfDay(new Date());
-      let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStart);
-      if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.PRODUCTION_LINE || 'Unknown'));
-
-      // Pre-parse block dates once rather than re-parsing on every per-task and
-      // per-(line,day) call below.
-      const parsedBlocks = [];
-      for (const b of Store.blocks) {
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) parsedBlocks.push({ line: b.line, plant: b.plant || null, s, e });
-      }
-      const parsedPlantBlocks = [];
-      for (const b of Store.plantBlocks) {
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) parsedPlantBlocks.push({ plant: b.plant, s, e });
-      }
-
-      // Cache line→plant lookups; the same handful of lines repeat across many tasks.
-      const _plantCache = {};
-      const plantOf = line => {
-        if (!(line in _plantCache)) _plantCache[line] = Store.getPlantForLine(line);
-        return _plantCache[line];
-      };
-
-      /* 1. OVERLAPS on the same line — two or more orders sharing a timespan. */
-      const byLine = {};
-      activeTasks.forEach(t => {
-        if (!t.start_date || !t.end_date) return;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        (byLine[line] ||= []).push(t);
+      const { alerts: kept } = NimbusComputeCore.computeAlerts({
+        tasks:        Store.tasksArr,
+        blocks:       Store.blocks,
+        plantBlocks:  Store.plantBlocks,
+        calendars:    Store.calendars,
+        plants:       Store.plants,
+        lineSettings: Store.lineSettings,
+        masterData:   Store._state.masterData,
+        dismissed:    [...Alerts._dismissed],
+        opts:         { lines: onlyLines ? [...onlyLines] : null },
       });
-      for (const line of Object.keys(byLine)) {
-        const arr = byLine[line].slice().sort((a,b) => a.start_date - b.start_date);
-        for (let i = 1; i < arr.length; i++) {
-          const prev = arr[i-1], cur = arr[i];
-          if (cur.start_date < prev.end_date) {
-            alerts.push({
-              id:  `ovl-${prev.id}-${cur.id}`,
-              sev: 'err', type: 'overlap',
-              msg: `Orders "${prev.text || prev.id}" and "${cur.text || cur.id}" overlap on ${line}.`,
-              taskId: cur.id, line, time: cur.start_date
-            });
-          }
-        }
-      }
-
-      /* 2. OVERLOAD — a line's scheduled hours exceed its daily capacity. */
-      const byLineDay = {};
-      activeTasks.forEach(t => {
-        if (!t.start_date) return;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        const day  = Util.dayKey(t.start_date);
-        (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-        byLineDay[`${line}|${day}`].hours += Util.runHours(t);
-        byLineDay[`${line}|${day}`].tasks.push(t);
-      });
-      // Bucket the already-parsed blocks (zero re-parse) so the per-(line,day)
-      // dailyCapacityHours calls below don't re-iterate Store.blocks for every cell.
-      const _capIdx = { lineBlocks: new Map(), globalLine: [], plantBlocks: new Map(), globalPlant: [] };
-      for (const b of parsedBlocks) {
-        const rec = { s: b.s, e: b.e, plant: b.plant || null };
-        if (b.line) { let a = _capIdx.lineBlocks.get(b.line); if (!a) _capIdx.lineBlocks.set(b.line, a = []); a.push(rec); }
-        else _capIdx.globalLine.push(rec);
-      }
-      for (const b of parsedPlantBlocks) {
-        if (b.plant) { let a = _capIdx.plantBlocks.get(b.plant); if (!a) _capIdx.plantBlocks.set(b.plant, a = []); a.push({ s: b.s, e: b.e }); }
-        else _capIdx.globalPlant.push({ s: b.s, e: b.e });
-      }
-      for (const k of Object.keys(byLineDay)) {
-        const { line, day, hours } = byLineDay[k];
-        const dateObj = new Date(day + 'T12:00:00');
-        const cap = Calendar.dailyCapacityHours(line, dateObj, _capIdx);
-        const effCap = Calendar.effectiveFromCapacity(line, cap);
-        if (effCap > 0 && hours > effCap * Config.OVERLOAD_THRESHOLD) {
-          alerts.push({
-            id:  `ovl-day-${line}-${day}`,
-            sev: 'err', type: 'overload',
-            msg: `${line} is overloaded on ${day}: ${hours.toFixed(1)}h scheduled vs ${effCap.toFixed(1)}h effective capacity (${cap.toFixed(1)}h total).`,
-            line, time: dateObj
-          });
-        } else if (effCap > 0 && hours > effCap * Config.WARN_THRESHOLD) {
-          // Near-capacity alerts suppressed (set SHOW_NEAR_CAPACITY_ALERTS = true to re-enable)
-          if (Config.SHOW_NEAR_CAPACITY_ALERTS) alerts.push({
-            id:  `warn-day-${line}-${day}`,
-            sev: 'warn', type: 'near-capacity',
-            msg: `${line} is near capacity on ${day}: ${hours.toFixed(1)} / ${effCap.toFixed(1)}h effective capacity (${Math.round(100*hours/effCap)}%).`,
-            line, time: dateObj
-          });
-        } else if (cap === 0 && hours > 0) {
-          // Build a diagnostic explaining *why* cap is 0 — either the day-of-week
-          // is configured closed, or one or more blackouts consume the entire
-          // working window. Per-block contributions use interval-union math
-          // (Util.mergedOverlapHours) so overlapping blocks aren't double-counted.
-          const win = Calendar.workWindow(line, dateObj);
-          let reason;
-          if (!win) {
-            reason = `the ${line} or plant calendar is closed that day-of-week`;
-          } else {
-            const winHrs = (win[1] - win[0]) / Config.MS_HOUR;
-            const plant = Store.getPlantForLine(line);
-            const dayStart = new Date(dateObj); dayStart.setHours(0,0,0,0);
-            const dayEnd   = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
-            const intervals = [];
-            const labels = [];
-            for (const b of Store.blocks) {
-              if (b.plant && b.plant !== plant) continue;
-              if (b.line && b.line !== line) continue;
-              const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-              if (!s || !e) continue;
-              if (s >= dayEnd || e <= dayStart) continue;
-              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / Config.MS_HOUR;
-              if (ov > 0) {
-                intervals.push({ s, e });
-                labels.push(`${b.line ? 'line' : 'global line'}${b.reason ? ` "${b.reason}"` : ''} ${ov.toFixed(1)}h`);
-              }
-            }
-            for (const b of Store.plantBlocks) {
-              if (b.plant && b.plant !== plant) continue;
-              const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-              if (!s || !e) continue;
-              if (s >= dayEnd || e <= dayStart) continue;
-              const ov = (Math.min(win[1], e) - Math.max(win[0], s)) / Config.MS_HOUR;
-              if (ov > 0) {
-                intervals.push({ s, e });
-                labels.push(`${b.plant ? 'plant' : 'global plant'}${b.reason ? ` "${b.reason}"` : ''} ${ov.toFixed(1)}h`);
-              }
-            }
-            const consumed = Util.mergedOverlapHours(win, intervals);
-            reason = `working window is ${winHrs.toFixed(1)}h, blackouts union to ${consumed.toFixed(1)}h (${labels.join(', ') || 'no blocks found — bug?'})`;
-          }
-          alerts.push({
-            id:  `closed-${line}-${day}`,
-            sev: 'err', type: 'closed',
-            msg: `${line} is scheduled on ${day} but has 0h capacity — ${reason}.`,
-            line, time: dateObj
-          });
-        }
-      }
-
-      /* 3. BLACKOUT VIOLATION — a task overlaps an active blackout block. */
-      for (const t of activeTasks) {
-        if (!t.start_date || !t.end_date) continue;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        const plant = plantOf(line);
-        let conflict = false;
-        try {
-          for (const b of parsedBlocks) {
-            if (b.plant && b.plant !== plant) continue;
-            if (b.line && b.line !== line) continue;
-            if (t.start_date < b.e && t.end_date > b.s) { conflict = true; break; }
-          }
-          if (!conflict) {
-            for (const b of parsedPlantBlocks) {
-              if (b.plant && b.plant !== plant) continue;
-              if (t.start_date < b.e && t.end_date > b.s) { conflict = true; break; }
-            }
-          }
-        } catch (e) {
-          ErrorLog.error('alerts', `Blackout check failed for id=${t.id}: ${e.message}`);
-        }
-        if (conflict) {
-          alerts.push({
-            id:  `blk-${t.id}`,
-            sev: 'err', type: 'blackout',
-            msg: `Order "${t.text || t.id}" overlaps a blackout block on ${line}.`,
-            taskId: t.id, line, time: t.start_date
-          });
-        }
-      }
-
-      /* 4. FIXED-BUT-ON-CLOSED-DAY — fixed order on a day the line calendar is closed. */
-      for (const t of activeTasks) {
-        if (!t.fixed || !t.start_date) continue;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        const win = Calendar.workWindow(line, t.start_date);
-        if (!win) {
-          alerts.push({
-            id: `fixclosed-${t.id}`,
-            sev: 'warn', type: 'fixed-closed',
-            msg: `Fixed order "${t.text || t.id}" is on a day the ${line} calendar is closed.`,
-            taskId: t.id, line, time: t.start_date
-          });
-        }
-      }
-
-      /* 5. FIXED-OUT-OF-HOURS — fixed order start or end falls outside the
-            permitted working-hour window on an otherwise-open day. Does not
-            fire when check 4 already covers the same day (win null). */
-      for (const t of activeTasks) {
-        if (!t.fixed || !t.start_date || !t.end_date) continue;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        const winS = Calendar.workWindow(line, t.start_date);
-        const winE = Calendar.workWindow(line, t.end_date);
-        const parts = [];
-        if (winS && t.start_date < winS[0]) {
-          parts.push(`starts before ${line} opens (${Util.fmtDTReadable(winS[0])})`);
-        }
-        if (winE && t.end_date > winE[1]) {
-          parts.push(`ends after ${line} closes (${Util.fmtDTReadable(winE[1])})`);
-        }
-        if (parts.length) {
-          alerts.push({
-            id:  `fixhours-${t.id}`,
-            sev: 'warn', type: 'fixed-out-of-hours',
-            msg: `Fixed order "${t.text || t.id}" ${parts.join(' and ')}.`,
-            taskId: t.id, line, time: t.start_date
-          });
-        }
-      }
-
-      /* Preserve dismissals — a previously-dismissed alert whose condition is
-         still active is not re-surfaced this cycle. We track dismissed IDs in
-         `Alerts._dismissed`. */
-      const kept = alerts.filter(a => !Alerts._dismissed.has(a.id));
       if (onlyLines) {
-        // Incremental merge: retain alerts on untouched lines (their inputs didn't change)
-        // and replace only the affected lines. Correct because callers of the scoped path
-        // never move a task to a different line, and every alert carries a `line` field.
+        // Incremental merge: retain alerts on untouched lines, replace only the affected
+        // ones. Callers of the scoped path never move a task across lines.
         const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
         Store.setAlerts(retained.concat(kept), 'alerts');
       } else {
@@ -4153,8 +4043,16 @@ const NIMBUS = (function () {
     focus(alertId) {
       const a = Store.alerts.find(x => x.id === alertId);
       if (!a) return;
-      if (!a.taskId) return;
-      App.goto('gantt');
+
+      if (!a.taskId) {
+        // Line/day-level alerts (overload, closed) carry no taskId — reuse the
+        // dashboard heatmap's line+day navigation instead of silently no-oping.
+        // Timeline.gotoLineDay already forces the Timeline sub-tab visible.
+        if (a.line && a.time) Timeline.gotoLineDay(a.line, Util.dayKey(a.time));
+        return;
+      }
+
+      App.gotoGanttTimeline();
       setTimeout(() => {
         const t = Store.tasks[a.taskId];
         if (!t || !Timeline._tl) return;
@@ -4164,6 +4062,7 @@ const NIMBUS = (function () {
           const center = t.start_date.getTime();
           const start = new Date(center - 1.5 * 24 * Config.MS_HOUR);
           const end   = new Date(center + 1.5 * 24 * Config.MS_HOUR);
+          Timeline._syncViewWindow(start.getTime(), end.getTime());
           Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
         }
         Timeline._tl.setSelection([String(a.taskId)]);
@@ -4271,7 +4170,7 @@ const NIMBUS = (function () {
           num = `<span class="ac-card-num">${(utilPct * 100).toFixed(0)}%</span>`;
         }
 
-        const gotoBtn = a.taskId
+        const gotoBtn = (a.taskId || (a.line && a.time))
           ? `<button class="btn sm" data-act="goto" data-id="${esc(a.id)}">Go to</button>` : '';
 
         return `
@@ -4396,7 +4295,7 @@ const NIMBUS = (function () {
         `<span class="alert-ico">${ico}</span>` +
         `<span class="alert-msg">${esc(a.msg)}</span>` +
         `<div class="alert-actions">` +
-          (a.taskId != null ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.focus('${esc(a.id)}')">${t('btn.go_to')}</button>` : '') +
+          ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.focus('${esc(a.id)}')">${t('btn.go_to')}</button>` : '') +
           (fixable  ? `<button class="btn-fix" title="${t('tip.fix_alert')}" onclick="NIMBUS.Alerts.applyFix('${esc(a.id)}')">${t('btn.fix_it')}</button>` : '') +
           (override ? `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')">${t('btn.override')}</button>` : '') +
           `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismiss('${esc(a.id)}')">${t('btn.dismiss')}</button>` +
@@ -4409,8 +4308,14 @@ const NIMBUS = (function () {
       const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
       const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
-      const alerts = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
-      const hiddenCount = Store.alerts.length - alerts.length;
+      // Scope to the selected plant's lines, matching Dashboard._renderAlertSummary —
+      // otherwise an alert for another plant (reachable once the compute worker has
+      // permanently fallen back to an unscoped sync recompute, see CLAUDE.md) can be
+      // shown and clicked here even though Timeline/scrollToLine can't navigate to it.
+      const plantLines = new Set(Store.linesForSelectedPlant());
+      const timeFiltered = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
+      const alerts = timeFiltered.filter(a => !a.line || plantLines.has(a.line));
+      const hiddenCount = Store.alerts.length - timeFiltered.length;
 
       if (!alerts.length) {
         if (Alerts._drawerVL) { Alerts._drawerVL.destroy(); Alerts._drawerVL = null; }
@@ -4568,88 +4473,40 @@ const NIMBUS = (function () {
       }
       const _pmT0u = performance.now();
       const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
-      const matrix = {};
-      const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
+
+      // Reproduce the exact line set the inline builder used: task lines, plus (when this
+      // is NOT a filtered subset) either the selected plant's lines or every visited
+      // calendar line. Passed explicitly so the core pins the same set.
+      const lineSet = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
       if (srcTasks === null) {
-        // When a plant is selected, scope the line set to that plant's lines so this sync
-        // path and the plant-scoped worker prewarm compute the same matrix under the same
-        // key. With no plant selected, include every visited calendar line (global view).
-        if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lines.add(l));
-        else Object.keys(Store.calendars).forEach(l => lines.add(l));
+        if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
+        else Object.keys(Store.calendars).forEach(l => lineSet.add(l));
       }
 
-      // Pre-parse blackout blocks once for the whole matrix instead of re-parsing every
-      // block on every (line, day) cell. Capacity is computed once per cell and the
-      // buffer applied inline so effectiveCapacityHours does not re-scan.
-      const blockIdx = Calendar._indexCapacityBlocks();
-      for (const line of lines) {
-        matrix[line] = {};
-        for (let i = 0; i < days; i++) {
-          const d = new Date(start); d.setDate(start.getDate() + i);
-          const key = Util.dayKey(d);
-          const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
-          matrix[line][key] = {
-            date: d,
-            scheduled:         0,
-            capacity:          cap,
-            effectiveCapacity: Calendar.effectiveFromCapacity(line, cap),
-            tasks:             []
-          };
-        }
-      }
-
-      for (const t of taskList) {
-        if (!t.start_date) continue;
-        const line = t.PRODUCTION_LINE || 'Unknown';
-        if (!matrix[line]) continue;
-
-        // Defensive: ingest edge cases may leave end_date null. Fall back to
-        // legacy single-day attribution so the row still appears.
-        if (!t.end_date) {
-          const key = Util.dayKey(t.start_date);
-          if (matrix[line][key]) {
-            matrix[line][key].scheduled += Util.runHours(t);
-            matrix[line][key].tasks.push(t);
-          }
-          continue;
-        }
-
-        const tStartMs = t.start_date.getTime();
-        const tEndMs   = t.end_date.getTime();
-        if (tEndMs <= tStartMs) continue;
-        const taskRunHrs = Util.runHours(t);
-        if (taskRunHrs <= 0) continue;
-        // Distribute RUN_TIME proportionally by calendar-day overlap so that
-        // orders scheduled outside or across working hours still count toward
-        // the day's load. The denominator (dailyCapacityHours) already deducts
-        // blackouts, giving the correct scheduled/available ratio.
-        const totalTaskMs = tEndMs - tStartMs;
-
-        // Iterate the matrix's pre-built day rows (bounded to `days` ≤ 14)
-        // rather than walking [start_date, end_date]. SAP-bloated end_dates
-        // can sit months past start_date; the old open-ended walk was burning
-        // 30-42 s on the main thread re-walking days that have no matrix row.
-        const lineRows = matrix[line];
-        for (const key of Object.keys(lineRows)) {
-          const row = lineRows[key];
-          const dayStartMs = row.date.getTime();
-          const dayEndMs   = dayStartMs + Config.MS_DAY;
-          if (tEndMs <= dayStartMs || tStartMs >= dayEndMs) continue;
-          if (!Calendar.workWindow(line, row.date)) continue;
-          const overlapMs = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
-          const contribution = taskRunHrs * (overlapMs / totalTaskMs);
-          if (contribution > 0) {
-            row.scheduled += contribution;
-            row.tasks.push(t);
-          }
-        }
-      }
+      // Delegate the matrix build to nimbus-compute-core — the single source of truth,
+      // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
+      // (its worker contract); resolve them back to task OBJECTS here, which is what
+      // computeMatrix's callers expect (they read task fields off the rows).
+      const { matrix } = NimbusComputeCore.computeUtilization({
+        tasks:        taskList,
+        lineSettings: Store.lineSettings,
+        calendars:    Store.calendars,
+        plants:       Store.plants,
+        blocks:       Store.blocks,
+        plantBlocks:  Store.plantBlocks,
+        masterData:   Store._state.masterData,
+        startMs:      start.getTime(),
+        days,
+        lines:        [...lineSet],
+      });
+      const byId = new Map(taskList.map(t => [t.id, t]));
       for (const line of Object.keys(matrix)) {
-        for (const k of Object.keys(matrix[line])) {
-          const row = matrix[line][k];
-          row.pct = row.capacity > 0 ? row.scheduled / row.capacity : (row.scheduled > 0 ? 1 : 0);
+        const rows = matrix[line];
+        for (const k of Object.keys(rows)) {
+          rows[k].tasks = rows[k].tasks.map(id => byId.get(id)).filter(Boolean);
         }
       }
+
       if (cacheable) Utilization._cache = { key: cacheKey, matrix };
       PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
       return matrix;
@@ -5819,7 +5676,7 @@ const NIMBUS = (function () {
       // Persist audit log entry
       fetch(`${Config.API_BASE}/audit/log`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': 'trevor.holton@newellco.com' },
+        headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
         body: JSON.stringify({
           action: 'optimization_run', plant,
           details: {
@@ -6115,6 +5972,11 @@ const NIMBUS = (function () {
 
    // Debounced so rapid bursts of log pushes don't thrash the DOM.
     _renderBadge: Util.debounce(function () {
+      if (!Session.isAdmin()) {
+        const existing = document.getElementById('err-log-btn');
+        if (existing) existing.hidden = true;
+        return;
+      }
       let btn = document.getElementById('err-log-btn');
       if (!btn) {
         const host = document.getElementById('alert-bell')?.parentElement
@@ -6152,6 +6014,149 @@ const NIMBUS = (function () {
       );
     }
   };
+
+  /* =============================================================================
+     SESSION — mandatory-login client session. Backed by localStorage (mirrors the
+     LangSwitcher get/set idiom in nimbus-intelligence.js), never the backend —
+     the backend is the source of truth for the password check (POST /security/login);
+     once authenticated, the session is just { username, role } cached locally so a
+     page reload doesn't force a re-login.
+       Session.currentUser()  — { username, role } | null
+       Session.actor()        — username for X-User/x-user-email headers, else 'system'
+       Session.isAdmin()      — true iff current user's role === 'admin'
+       Session.signIn(u, p)   — POST /security/login; persists session + re-applies gates
+       Session.signOut()      — clears session, re-applies gates, reloads the page
+       Session._applyGates()  — re-hides the Admin tab button / header chip / error-log
+                                 badge for non-admins; called after sign-in/out and once
+                                 at boot (from _bootMain) so a resumed session re-gates too.
+     ========================================================================== */
+  const Session = (() => {
+    const KEY = 'nimbus.session';
+
+    function currentUser() {
+      try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; }
+    }
+
+    function actor() {
+      const u = currentUser();
+      return u ? u.username : 'system';
+    }
+
+    function isAdmin() {
+      const u = currentUser();
+      return !!u && u.role === 'admin';
+    }
+
+    async function signIn(username, password) {
+      const res = await fetch(`${Config.API_BASE}/security/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || 'Invalid username or password');
+      }
+      const data = await res.json();
+      localStorage.setItem(KEY, JSON.stringify({ username: data.username, role: data.role }));
+      _applyGates();
+      return data;
+    }
+
+    function signOut() {
+      localStorage.removeItem(KEY);
+      _applyGates();
+      location.reload();
+    }
+
+    // Populates/hides the header user chip (#user-chip, static markup in index.html).
+    function _renderChip() {
+      const chip = document.getElementById('user-chip');
+      if (!chip) return;
+      const u = currentUser();
+      if (!u) { chip.hidden = true; chip.textContent = ''; return; }
+      chip.textContent = '';
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'user-chip-name';
+      nameSpan.textContent = t('sec.signed_in_as', { username: u.username });
+      const signOutSpan = document.createElement('span');
+      signOutSpan.className = 'user-chip-signout';
+      signOutSpan.textContent = t('sec.sign_out');
+      signOutSpan.addEventListener('click', signOut);
+      chip.appendChild(nameSpan);
+      chip.appendChild(signOutSpan);
+      chip.hidden = false;
+    }
+
+    function _applyGates() {
+      const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+      if (adminBtn) adminBtn.hidden = !isAdmin();
+      _renderChip();
+      try { ErrorLog._renderBadge(); } catch {}
+    }
+
+    return { currentUser, actor, isAdmin, signIn, signOut, _applyGates };
+  })();
+
+  /* =============================================================================
+     AUTH (LOGIN SCREEN) — mandatory full-screen gate, JS-built only (no static
+     index.html markup for the overlay itself — mirrors WelcomeSplash's technique:
+     build a full-viewport overlay, append to document.body, call t(...) inline for
+     every label rather than relying on the [data-i18n] sweep, which only runs
+     inside App.init() — i.e. AFTER this gate has already decided whether to run it).
+     showLoginScreen() is called from the DOMContentLoaded gate (see _bootMain below)
+     when no session is cached; on successful sign-in it tears itself down and calls
+     App._bootMain() — the same boot path a resumed session takes.
+     ========================================================================== */
+  function showLoginScreen() {
+    const root = document.createElement('div');
+    root.className = 'login-screen';
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-label', t('sec.login_title'));
+
+    const card = document.createElement('div');
+    card.className = 'login-card';
+    card.innerHTML = `
+      <div class="login-title">${t('sec.login_title')}</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <input type="text" id="login-username" autocomplete="username"
+               placeholder="${t('sec.username')}" aria-label="${t('sec.username')}">
+        <input type="password" id="login-password" autocomplete="current-password"
+               placeholder="${t('sec.password')}" aria-label="${t('sec.password')}">
+        <button type="button" class="btn btn-primary" id="login-submit-btn">${t('sec.sign_in')}</button>
+      </div>
+      <div class="login-error" id="login-error"></div>`;
+
+    root.appendChild(card);
+    document.body.appendChild(root);
+
+    const userInp   = card.querySelector('#login-username');
+    const passInp   = card.querySelector('#login-password');
+    const errEl     = card.querySelector('#login-error');
+    const submitBtn = card.querySelector('#login-submit-btn');
+
+    async function _submit() {
+      errEl.textContent = '';
+      submitBtn.disabled = true;
+      try {
+        await Session.signIn(userInp.value.trim(), passInp.value);
+        root.remove();
+        App._bootMain();
+      } catch (e) {
+        // Deliberately generic — never reveal whether the username itself was wrong.
+        errEl.textContent = t('sec.login_invalid');
+        submitBtn.disabled = false;
+      }
+    }
+
+    submitBtn.addEventListener('click', _submit);
+    [userInp, passInp].forEach(inp => {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); _submit(); } });
+    });
+
+    userInp.focus();
+  }
 
   /* =============================================================================
      TOAST — transient notification banners (top-right stack).
@@ -6232,16 +6237,19 @@ const NIMBUS = (function () {
         const okBtn = document.getElementById('confirm-ok-btn');
         okBtn.textContent  = opts.confirmLabel || 'Confirm';
         okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
+        const closeBtn = document.getElementById('confirm-close-btn');
         const done = ok => { cleanup(); resolve(ok); };
         const cleanup = () => {
           okBtn.removeEventListener('click', onOk);
           document.getElementById('confirm-cancel-btn').removeEventListener('click', onCancel);
+          closeBtn.removeEventListener('click', onCancel);
           Modal.close('confirm-modal');
         };
         const onOk     = () => done(true);
         const onCancel = () => done(false);
         okBtn.addEventListener('click', onOk);
         document.getElementById('confirm-cancel-btn').addEventListener('click', onCancel);
+        closeBtn.addEventListener('click', onCancel);
         Modal.open('confirm-modal');
       });
     }
@@ -6422,19 +6430,33 @@ const NIMBUS = (function () {
           Timeline._scheduleRebuild();
         }
       } else if (evt.type === 'tasks:bulkUpdate') {
-        // Patch individual items — avoids groups.clear() which resets vertical scroll.
+        // Patch items — avoids groups.clear() which resets vertical scroll.
         // Skip tasks on lines hidden by the Gantt line filter, otherwise their items
         // get added to the DataSet and the filter visually "leaks" on optimize runs.
+        // All patches are collected up front and flushed via a SINGLE _items.update()
+        // call (vis-timeline DataSet.update() upserts by id) instead of one DataSet
+        // write per task — a per-task loop here previously dominated optimize-run cost.
         if (Timeline._ganttActive()) {
           const sel = (typeof GanttFilter !== 'undefined') ? GanttFilter._selectedLines : null;
           const filtered = sel && sel.size > 0;
           const _pmT0patch = performance.now();
+          const patches = [];
           for (const id of (evt.ids || [])) {
+            const sid = String(id);
             if (filtered) {
-              const t = Store.tasks[id];
+              const t = Store.tasks[sid];
               if (!t || !sel.has(t.PRODUCTION_LINE || 'Unknown')) continue;
             }
-            Timeline._applyTaskPatch(String(id));
+            const patch = Timeline._itemPatchFor(sid);
+            if (patch) patches.push(patch);
+          }
+          if (patches.length) {
+            Timeline._suppressEvents = true;
+            try {
+              Timeline._items.update(patches);
+            } finally {
+              Timeline._suppressEvents = false;
+            }
           }
           PerfMonitor.record('Timeline.patchLoop', performance.now() - _pmT0patch);
         }
@@ -6455,14 +6477,23 @@ const NIMBUS = (function () {
       }
     },
 
-    _applyTaskPatch(id) {
+    // Builds a vis-timeline item patch for a single task id, or returns null/undefined
+    // if the task is missing or undated. Pure — does not touch the DataSet. Shared by
+    // _applyTaskPatch (single-id callers) and the tasks:bulkUpdate batch path above.
+    _itemPatchFor(id) {
       const t = Store.tasks[id];
-      if (!t || !t.start_date || !t.end_date) return;
-      const patch = Timeline._itemForTask(t);
+      if (!t || !t.start_date || !t.end_date) return null;
+      return Timeline._itemForTask(t);
+    },
+
+    _applyTaskPatch(id) {
+      const patch = Timeline._itemPatchFor(id);
+      if (!patch) return;
       Timeline._suppressEvents = true;
       try {
-        if (Timeline._items.get(id)) Timeline._items.update(patch);
-        else                         Timeline._items.add(patch);
+        // DataSet.update() upserts by id (adds if not present) — see the batched
+        // tasks:bulkUpdate path above for the multi-id equivalent.
+        Timeline._items.update(patch);
       } finally { Timeline._suppressEvents = false; }
     },
 
@@ -6551,21 +6582,17 @@ const NIMBUS = (function () {
       }
 
       const plant = Store.selectedPlant;
-      const plantLines = new Set(Store.linesForSelectedPlant());
-      const lineSet = new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'));
-      if (plant) {
-        for (const l of plantLines) lineSet.add(l);
-      }
-      const sortedLines = [...lineSet].sort((a, b) =>
-        a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
       // Scope to GanttFilter line multi-select — without this, vis-timeline reserves
       // row height for every plant line and leaves ghost rows above the visible ones.
       const lineFilterActive = (typeof GanttFilter !== 'undefined')
         && GanttFilter._selectedLines
         && GanttFilter._selectedLines.size > 0;
-      const visibleLines = lineFilterActive
-        ? sortedLines.filter(l => GanttFilter._selectedLines.has(l))
-        : sortedLines;
+      // Single source of truth for "what lines are rendered, and in what
+      // order" — see Timeline._visibleLines(). Also reused by
+      // Dashboard._gotoLine and Alerts.focus's line+day fallback via
+      // Timeline.gotoLineDay()/scrollToLine(), so any code computing a row
+      // index for a line always matches this actual rendered order.
+      const visibleLines = Timeline._visibleLines();
       const visibleSet = new Set(visibleLines);
       const scopedTasks = lineFilterActive
         ? tasks.filter(t => visibleSet.has(t.PRODUCTION_LINE || 'Unknown'))
@@ -6786,10 +6813,43 @@ const NIMBUS = (function () {
     focus(id) {
       const t = Store.tasks[id];
       if (!t || !t.start_date || !t.end_date || !Timeline._tl) return;
+      // Force the target into the sliding DataView window first — see
+      // _syncViewWindow's doc comment for why vis-timeline's own focus()/
+      // setSelection() otherwise silently no-op for out-of-window items.
+      Timeline._syncViewWindow(t.start_date.getTime(), t.end_date.getTime());
       // vis-timeline's focus() scrolls both horizontally (time) and vertically (line row).
       Timeline._tl.focus(String(id), { animation: { duration: 300 } });
       Timeline._tl.setSelection([String(id)]);
       Inspector.show(t);
+    },
+
+    // Force Timeline._visItems (the ±90-day sliding DataView, see init()) to
+    // include a specific ms range synchronously, bypassing the 120ms-debounced
+    // rangechanged handler that normally keeps it in sync. vis-timeline's own
+    // Timeline.focus()/setSelection() look up items via itemsData.get(ids)
+    // against whatever DataSet/DataView is currently attached — if the target
+    // id isn't passing the filter at call time, focus() silently no-ops (no
+    // pan/zoom) and setSelection() updates internal state but the item is
+    // never visually highlighted even once it later loads (ItemSet only
+    // re-applies "selected" to items that already existed with a changed
+    // constructor, not to items newly added by a DataView refresh).
+    //
+    // Unions the requested range into the current window rather than
+    // replacing it — a hard cutover to the destination would evict
+    // everything visible under the OLD viewport from the DataView before the
+    // pan animation even starts, causing a blank flash for the duration of
+    // the pan. The debounced rangechanged handler naturally narrows the
+    // buffer back down once the animation settles, so this only needs to be
+    // a temporary superset. Call immediately before focus()/setSelection()/
+    // setWindow() whenever the target might be outside the window the
+    // timeline was last showing.
+    _syncViewWindow(startMs, endMs) {
+      const cur = Timeline._viewWindow;
+      Timeline._viewWindow = {
+        start: cur ? Math.min(cur.start, startMs) : startMs,
+        end:   cur ? Math.max(cur.end,   endMs)   : endMs,
+      };
+      if (Timeline._visItems) Timeline._visItems.refresh();
     },
 
     setView(mode) {
@@ -6860,6 +6920,71 @@ const NIMBUS = (function () {
         Timeline._lineColorIdx[line] = Timeline._nextColorIdx++ % Config.COLORS.length;
       }
       return Timeline._lineColorIdx[line];
+    },
+
+    // Single source of truth for "what lines are rendered, and in what
+    // order." Mirrors rebuild()'s plant-scoping + numeric-aware sort +
+    // GanttFilter line-filter exactly, so any code computing a row index for
+    // a line always matches the actual rendered .vis-group DOM order.
+    _visibleLines() {
+      const plant = Store.selectedPlant;
+      const tasks = Store.tasksForSelectedPlant().filter(t => t.start_date && t.end_date);
+      const plantLines = new Set(Store.linesForSelectedPlant());
+      const lineSet = new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'));
+      if (plant) {
+        for (const l of plantLines) lineSet.add(l);
+      }
+      const sortedLines = [...lineSet].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      const lineFilterActive = (typeof GanttFilter !== 'undefined')
+        && GanttFilter._selectedLines
+        && GanttFilter._selectedLines.size > 0;
+      return lineFilterActive
+        ? sortedLines.filter(l => GanttFilter._selectedLines.has(l))
+        : sortedLines;
+    },
+
+    // Scroll the vis-timeline vertical scroller so the group row for `line`
+    // is at the top of the visible viewport. Returns false (no-op, no crash)
+    // if the line isn't currently rendered — e.g. hidden by an active
+    // GanttFilter line filter, or the Gantt hasn't rendered any groups yet.
+    scrollToLine(line) {
+      const visibleLines = Timeline._visibleLines();
+      const lineIdx = visibleLines.indexOf(line);
+      if (lineIdx < 0) return false;
+      const groups = document.querySelectorAll('.vis-foreground .vis-group');
+      if (!groups.length) return false;
+      let targetY = 0;
+      for (let i = 0; i < lineIdx && i < groups.length; i++) {
+        targetY += groups[i].getBoundingClientRect().height;
+      }
+      const scrollEl = document.querySelector('.vis-vertical-scroll') ||
+                       document.querySelector('.vis-panel.vis-center .vis-content');
+      if (scrollEl) scrollEl.scrollTop = targetY;
+      return true;
+    },
+
+    // Shared "pan to a day + scroll to a line row" navigation, used by
+    // Dashboard._gotoLine (heatmap cell clicks) and Alerts.focus's fallback
+    // for line/day-level alerts (overload, closed) that have no taskId to
+    // focus() on. Forces the Gantt to the Timeline sub-tab first — plain
+    // App.goto('gantt') alone preserves whatever Gantt sub-tab was last
+    // active, so without this the pan/scroll below can happen invisibly
+    // behind a hidden #gantt-sub-timeline pane.
+    gotoLineDay(line, dateStr) {
+      App.gotoGanttTimeline();
+      setTimeout(() => {
+        if (Timeline._tl) {
+          const dayStart    = new Date(dateStr + 'T00:00:00');
+          const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
+          Timeline._syncViewWindow(dayStart.getTime(), dayLevelEnd.getTime());
+          Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
+          document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+            b.classList.toggle('active', b.dataset.view === 'day');
+          });
+        }
+        setTimeout(() => { Timeline.scrollToLine(line); }, 100);
+      }, 250);
     }
   };
 
@@ -6873,7 +6998,12 @@ const NIMBUS = (function () {
     _selectedId: null,  // for the override modal
     _noteOutsideHandler: null,
     _noteKeyHandler: null,
-    _chipFilters: { lines: new Set(), colors: new Set(), status: null, dateKey: null },
+    _chipFilters: { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() },
+    _rangeMode:        false,
+    _rangeAnchor:      null,
+    _rangeActive:      null,
+    _rangeDragOn:      false,
+    _rangeHighlighted: new Set(),
 
     init() {
       const el = document.getElementById('ag-grid');
@@ -6978,13 +7108,16 @@ const NIMBUS = (function () {
                 ⚐ ${rel.length}</button>`;
             }
           },
-          { headerName: '📝', field: 'notes', width: 54, minWidth: 54, maxWidth: 54, flex: 0,
-            sortable: false, filter: false, editable: false, suppressHeaderMenuButton: true,
+          { headerName: '📝', field: 'notes', width: 180, minWidth: 80,
+            sortable: false, filter: false, editable: true, suppressHeaderMenuButton: true,
+            cellEditor: 'agLargeTextCellEditor', cellEditorPopup: true,
+            cellEditorParams: { maxLength: 500, rows: 5, cols: 50 },
             cellRenderer: p => {
-              const has = p.value != null && String(p.value).trim().length > 0;
-              return `<button class="nb-note-btn${has ? ' nb-note-has' : ''}"
-                title="${has ? 'Edit note' : 'Add note'}"
-                onclick="NIMBUS.Table._showNotePopover(event,'${p.data.id}')">✎</button>`;
+              const note = p.value != null ? String(p.value).trim() : '';
+              if (!note) return `<span class="nb-note-empty">✎ <em>${t('ui.add_note')}</em></span>`;
+              const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
+              const esc = note.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+              return `<span class="nb-note-preview" title="${esc}">✎ ${preview}</span>`;
             }
           }
         ],
@@ -6992,21 +7125,50 @@ const NIMBUS = (function () {
         onSelectionChanged: Table._onSelectionChanged,
         isExternalFilterPresent: () => Table._hasChipFilters(),
         doesExternalFilterPass: node => Table._taskPassesChipFilters(node.data),
+        onCellMouseDown: p => {
+          if (!Table._rangeMode) return;
+          p.event.preventDefault();
+          Table._rangeAnchor  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+          Table._rangeActive  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+          Table._rangeDragOn  = true;
+          Table._applyRangeHighlight();
+          document.addEventListener('mouseup', () => { Table._rangeDragOn = false; }, { once: true });
+        },
+        onCellMouseOver: p => {
+          if (!Table._rangeMode || !Table._rangeDragOn) return;
+          Table._rangeActive = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+          Table._applyRangeHighlight();
+        },
         onCellKeyDown: p => {
-          if ((p.event.ctrlKey || p.event.metaKey) && p.event.key === 'c') {
-            const raw = p.api.getValue(p.column.getColId(), p.node);
-            const colDef = p.column.getColDef();
-            let text = raw;
-            if (colDef.valueFormatter) {
-              const fmt = colDef.valueFormatter({ value: raw, data: p.data, node: p.node, column: p.column, api: p.api, colDef });
-              if (fmt != null) text = fmt;
+          const ctrl = p.event.ctrlKey || p.event.metaKey;
+          const key  = p.event.key;
+          if (ctrl && key === 'y') {
+            p.event.preventDefault();
+            Table._toggleRangeMode();
+            return;
+          }
+          if (ctrl && key === 'c') {
+            if (Table._rangeMode && Table._rangeHighlighted.size > 0) {
+              Table._copyRange();
+            } else {
+              const raw = p.api.getValue(p.column.getColId(), p.node);
+              const colDef = p.column.getColDef();
+              let text = raw;
+              if (colDef.valueFormatter) {
+                const fmt = colDef.valueFormatter({ value: raw, data: p.data, node: p.node, column: p.column, api: p.api, colDef });
+                if (fmt != null) text = fmt;
+              }
+              navigator.clipboard?.writeText(text == null ? '' : String(text)).catch(() => {});
+              const cell = p.event.target?.closest?.('.ag-cell');
+              if (cell) {
+                cell.classList.add('ag-cell-copy-flash');
+                setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380);
+              }
             }
-            navigator.clipboard?.writeText(text == null ? '' : String(text)).catch(() => {});
-            const cell = p.event.target?.closest?.('.ag-cell');
-            if (cell) {
-              cell.classList.add('ag-cell-copy-flash');
-              setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380);
-            }
+            return;
+          }
+          if (key === 'Escape' && Table._rangeMode) {
+            Table._clearRange();
           }
         },
         onGridReady: params => {
@@ -7026,7 +7188,7 @@ const NIMBUS = (function () {
       // Outside-click closes any open chip dropdown. Capture phase so AG Grid
       // (which can stopPropagation on some interactions) doesn't swallow the event.
       const closeAllChipDropdowns = () => {
-        ['line', 'color', 'status', 'date'].forEach(k => {
+        ['line', 'color', 'status', 'date', 'pomat'].forEach(k => {
           const d = document.getElementById(`tbl-flt-${k}-dropdown`);
           if (d) d.hidden = true;
         });
@@ -7046,11 +7208,23 @@ const NIMBUS = (function () {
     _initChipFilters() {
       Table._refreshChipDropdowns();
       Table._refreshChipButtons();
+
+      Util.wirePasteToCheckboxes(document.getElementById('tbl-flt-line-paste-input'),
+        () => document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      Util.wirePasteToCheckboxes(document.getElementById('tbl-flt-color-paste-input'),
+        () => document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+
+      const poTa = document.getElementById('tbl-flt-pomat-textarea');
+      if (poTa) {
+        poTa.addEventListener('paste', Table._onPoMatPaste);
+        poTa.addEventListener('input', Util.debounce(Table._onPoMatApply, 150));
+      }
+      document.getElementById('tbl-flt-pomat-clear')?.addEventListener('click', Table._clearPoMat);
     },
 
     _hasChipFilters() {
       const f = Table._chipFilters;
-      return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null;
+      return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null || f.poMat.size > 0;
     },
 
     _taskPassesChipFilters(data) {
@@ -7058,6 +7232,7 @@ const NIMBUS = (function () {
       const f = Table._chipFilters;
       if (f.lines.size > 0 && !f.lines.has(data.PRODUCTION_LINE)) return false;
       if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
+      if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
       if (f.dateKey) {
         const dk = data.start_date ? Util.dayKey(data.start_date) : '';
         if (dk !== f.dateKey) return false;
@@ -7078,7 +7253,7 @@ const NIMBUS = (function () {
       const d = document.getElementById(`tbl-flt-${kind}-dropdown`);
       if (!d) return;
       // Close peers
-      ['line','color','status','date'].forEach(k => {
+      ['line','color','status','date','pomat'].forEach(k => {
         if (k !== kind) {
           const other = document.getElementById(`tbl-flt-${k}-dropdown`);
           if (other) other.hidden = true;
@@ -7095,7 +7270,7 @@ const NIMBUS = (function () {
     },
 
     _buildLineChipDropdown() {
-      const drop = document.getElementById('tbl-flt-line-dropdown');
+      const drop = document.getElementById('tbl-flt-line-checklist');
       if (!drop) return;
       const lineSet = new Set();
       for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
@@ -7114,7 +7289,7 @@ const NIMBUS = (function () {
     },
 
     _buildColorChipDropdown() {
-      const drop = document.getElementById('tbl-flt-color-dropdown');
+      const drop = document.getElementById('tbl-flt-color-checklist');
       if (!drop) return;
       const colorSet = new Set();
       for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
@@ -7209,7 +7384,47 @@ const NIMBUS = (function () {
       Table._chipFilters.colors.clear();
       Table._chipFilters.status = null;
       Table._chipFilters.dateKey = null;
+      Table._chipFilters.poMat.clear();
+      const ta = document.getElementById('tbl-flt-pomat-textarea');
+      if (ta) ta.value = '';
+      const cnt = document.getElementById('tbl-flt-pomat-count');
+      if (cnt) cnt.textContent = '';
       Table._refreshChipDropdowns();
+      Table._refreshChipButtons();
+      if (Table._api) Table._api.onFilterChanged();
+    },
+
+    _onPoMatApply() {
+      const ta = document.getElementById('tbl-flt-pomat-textarea');
+      if (!ta) return;
+      Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+      const cnt = document.getElementById('tbl-flt-pomat-count');
+      if (cnt) {
+        const n = Table._chipFilters.poMat.size;
+        cnt.textContent = n ? t('ui.pomat_count', { count: n }) : '';
+      }
+      Table._refreshChipButtons();
+      if (Table._api) Table._api.onFilterChanged();
+    },
+
+    _onPoMatPaste(e) {
+      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      if (!text || !text.trim()) return;
+      const known = new Set();
+      (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
+        const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
+        const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+      });
+      const { matched, total } = Util.countPasteMatches(text, known);
+      if (total) Toast.show(t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
+    },
+
+    _clearPoMat() {
+      Table._chipFilters.poMat.clear();
+      const ta = document.getElementById('tbl-flt-pomat-textarea');
+      if (ta) ta.value = '';
+      const cnt = document.getElementById('tbl-flt-pomat-count');
+      if (cnt) cnt.textContent = '';
       Table._refreshChipButtons();
       if (Table._api) Table._api.onFilterChanged();
     },
@@ -7264,6 +7479,10 @@ const NIMBUS = (function () {
       }
       set('tbl-flt-date-btn', 'tbl-flt-date-label', dateLabel, !!f.dateKey);
 
+      set('tbl-flt-pomat-btn', 'tbl-flt-pomat-label',
+        f.poMat.size === 0 ? t('ui.all_pomat') : t('ui.n_pomat_filter', { count: f.poMat.size }),
+        f.poMat.size > 0);
+
       const hasAny = Table._hasChipFilters();
       const clear = document.getElementById('tbl-flt-clear');
       if (clear) clear.hidden = !hasAny;
@@ -7289,6 +7508,11 @@ const NIMBUS = (function () {
           Table._chipFilters.colors.clear();
           Table._chipFilters.status = null;
           Table._chipFilters.dateKey = null;
+          Table._chipFilters.poMat.clear();
+          const ta = document.getElementById('tbl-flt-pomat-textarea');
+          if (ta) ta.value = '';
+          const cnt = document.getElementById('tbl-flt-pomat-count');
+          if (cnt) cnt.textContent = '';
         }
         Table._refreshChipDropdowns();
         Table._refreshChipButtons();
@@ -7379,6 +7603,13 @@ const NIMBUS = (function () {
         }
       } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
         changes[field] = parseFloat(p.newValue) || 0;
+      } else if (field === 'notes') {
+        const trimmed = (p.newValue || '').trim();
+        Store.updateTask(id, { notes: trimmed }, 'table');
+        Table._api.applyTransaction({ update: [Store.tasks[id]] });
+        Inspector._persistNote(id, trimmed);
+        Toast.show(t('toast.row_updated'), 'success', 1200);
+        return;
       } else {
         changes[field] = p.newValue;
       }
@@ -7416,6 +7647,8 @@ const NIMBUS = (function () {
     },
 
     _getLineOptions() {
+      if (Store.selectedPlant) return Store.linesForSelectedPlant();
+      // No plant selected — fall back to the unscoped view rather than showing nothing.
       const set = new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'));
       Object.keys(Store.calendars).forEach(l => set.add(l));
       return [...set].sort();
@@ -7502,6 +7735,115 @@ const NIMBUS = (function () {
     exportCsv() {
       if (!Table._api) return;
       Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv' });
+    },
+
+    _toggleRangeMode() {
+      const badge  = document.getElementById('orders-copy-badge');
+      const gridEl = document.getElementById('ag-grid');
+      if (Table._rangeMode) {
+        Table._clearRange();
+      } else {
+        Table._rangeMode = true;
+        badge?.classList.add('active');
+        gridEl?.classList.add('nimbus-range-mode');
+      }
+    },
+
+    _applyRangeHighlight() {
+      if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
+      const gridEl = document.getElementById('ag-grid');
+      if (!gridEl) return;
+      const cols   = Table._api.getAllDisplayedColumns();
+      const colIds = cols.map(c => c.getColId());
+      const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
+      const bIdx   = colIds.indexOf(Table._rangeActive.colId);
+      if (aIdx === -1 || bIdx === -1) return;
+      const minCol = Math.min(aIdx, bIdx);
+      const maxCol = Math.max(aIdx, bIdx);
+      const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+      const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+      const newSet = new Set();
+      for (let ri = minRow; ri <= maxRow; ri++) {
+        for (let ci = minCol; ci <= maxCol; ci++) {
+          newSet.add(`${ri}|${colIds[ci]}`);
+        }
+      }
+      Table._rangeHighlighted.forEach(key => {
+        if (!newSet.has(key)) {
+          const sep = key.indexOf('|');
+          gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+            ?.classList.remove('nimbus-range-sel');
+        }
+      });
+      newSet.forEach(key => {
+        if (!Table._rangeHighlighted.has(key)) {
+          const sep = key.indexOf('|');
+          gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+            ?.classList.add('nimbus-range-sel');
+        }
+      });
+      Table._rangeHighlighted = newSet;
+    },
+
+    _clearRange() {
+      const gridEl = document.getElementById('ag-grid');
+      Table._rangeHighlighted.forEach(key => {
+        const sep = key.indexOf('|');
+        gridEl?.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+          ?.classList.remove('nimbus-range-sel');
+      });
+      Table._rangeHighlighted.clear();
+      Table._rangeAnchor  = null;
+      Table._rangeActive  = null;
+      Table._rangeDragOn  = false;
+      Table._rangeMode    = false;
+      document.getElementById('orders-copy-badge')?.classList.remove('active');
+      gridEl?.classList.remove('nimbus-range-mode');
+    },
+
+    _copyRange() {
+      if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
+      const cols   = Table._api.getAllDisplayedColumns();
+      const colIds = cols.map(c => c.getColId());
+      const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
+      const bIdx   = colIds.indexOf(Table._rangeActive.colId);
+      if (aIdx === -1 || bIdx === -1) return;
+      const minCol = Math.min(aIdx, bIdx);
+      const maxCol = Math.max(aIdx, bIdx);
+      const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+      const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+      const rowStrs = [];
+      for (let ri = minRow; ri <= maxRow; ri++) {
+        const node = Table._api.getDisplayedRowAtIndex(ri);
+        if (!node) continue;
+        const cells = [];
+        for (let ci = minCol; ci <= maxCol; ci++) {
+          const colId  = colIds[ci];
+          const col    = cols[ci];
+          const raw    = Table._api.getValue(colId, node);
+          const colDef = col.getColDef();
+          let text = raw;
+          if (colDef.valueFormatter) {
+            const fmt = colDef.valueFormatter({ value: raw, data: node.data, node, column: col, api: Table._api, colDef });
+            if (fmt != null) text = fmt;
+          }
+          cells.push(text == null ? '' : String(text));
+        }
+        rowStrs.push(cells.join('\t'));
+      }
+      navigator.clipboard?.writeText(rowStrs.join('\n')).catch(() => {});
+      const gridEl = document.getElementById('ag-grid');
+      if (gridEl) {
+        Table._rangeHighlighted.forEach(key => {
+          const sep  = key.indexOf('|');
+          const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
+          if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
+        });
+      }
+      const nRows = maxRow - minRow + 1;
+      const nCols = maxCol - minCol + 1;
+      Toast.show(t('toast.copied_range').replace('{r}', nRows).replace('{c}', nCols), 'success');
+      Table._clearRange();
     },
 
     _showAlertPopup(taskId) {
@@ -8054,7 +8396,6 @@ const NIMBUS = (function () {
     _prevKpi:    {},
 
     _filterLines:  new Set(),
-    _plantLines:   {},   // plant → Set<line>, built from task data
 
     _latenessHorizon: 14,                  // days; toggled by 7/14/28 segment buttons
     _latenessDrillKey: null,               // 'LINE|YYYY-MM-DD' for the currently-drilled cell
@@ -8118,15 +8459,8 @@ const NIMBUS = (function () {
     },
 
     _buildFilterOptions() {
-      const plantLines = {};
-      for (const t of Store.tasksArr) {
-        const p = Store.getPlantForLine(t.PRODUCTION_LINE);
-        const l = t.PRODUCTION_LINE;
-        if (!l) continue;
-        if (!plantLines[p]) plantLines[p] = new Set();
-        plantLines[p].add(l);
-      }
-      Dashboard._plantLines = plantLines;
+      // Store.linesForSelectedPlant() is now an O(1) indexed read (Store._linesByPlant,
+      // rebuilt in _rebuildPlantIndex) — no need to hand-build a plant→lines map here.
       Dashboard._refreshLineDropdown();
       Dashboard._refreshFilterBtns();
     },
@@ -8143,7 +8477,7 @@ const NIMBUS = (function () {
       }
       btn.disabled = false;
 
-      const lines = new Set(Dashboard._plantLines[Store.selectedPlant] || []);
+      const lines = new Set(Store.linesForSelectedPlant());
       // Drop stale line selections
       for (const l of [...Dashboard._filterLines]) {
         if (!lines.has(l)) Dashboard._filterLines.delete(l);
@@ -8625,6 +8959,7 @@ const NIMBUS = (function () {
       const esc   = s => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
       const byLine = {};
+      for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
       for (const tk of tasks) { const l = tk.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
       const lines = Object.keys(byLine).sort();
 
@@ -8747,31 +9082,7 @@ const NIMBUS = (function () {
       Alerts.scheduleRecompute();
     },
     _gotoLine(line, dateStr) {
-      App.goto('gantt');
-      setTimeout(() => {
-        if (Timeline._tl) {
-          const dayStart    = new Date(dateStr + 'T00:00:00');
-          const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
-          Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
-          document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
-            b.classList.toggle('active', b.dataset.view === 'day');
-          });
-        }
-        setTimeout(() => {
-          const allLines = [...new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
-          const lineIdx  = allLines.indexOf(line);
-          if (lineIdx < 0) return;
-          const groups = document.querySelectorAll('.vis-foreground .vis-group');
-          if (!groups.length) return;
-          let targetY = 0;
-          for (let i = 0; i < lineIdx && i < groups.length; i++) {
-            targetY += groups[i].getBoundingClientRect().height;
-          }
-          const scrollEl = document.querySelector('.vis-vertical-scroll') ||
-                           document.querySelector('.vis-panel.vis-center .vis-content');
-          if (scrollEl) scrollEl.scrollTop = targetY;
-        }, 100);
-      }, 250);
+      Timeline.gotoLineDay(line, dateStr);
     },
 
     /* ---------------------------------------------------------------------
@@ -8791,7 +9102,7 @@ const NIMBUS = (function () {
       const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
       // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
-      const allLines = [...new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
+      const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.PRODUCTION_LINE || 'Unknown')])].sort();
       const days  = [];
       {
         const d = Util.startOfDay(new Date());
@@ -8956,7 +9267,7 @@ const NIMBUS = (function () {
     },
 
     _jumpToOrder(id) {
-      App.goto('gantt');
+      App.gotoGanttTimeline();
       setTimeout(() => { if (Timeline && Timeline.focus) Timeline.focus(id); }, 250);
     }
   };
@@ -9171,6 +9482,7 @@ const NIMBUS = (function () {
     _selectedLines:  new Set(),
     _selectedColors: new Set(),
     _selectedForms:  new Set(),
+    _pastedIds:      new Set(),
     _bar:            null,
 
     init() {
@@ -9197,6 +9509,7 @@ const NIMBUS = (function () {
           GanttFilter._selectedLines.clear();
           GanttFilter._selectedColors.clear();
           GanttFilter._selectedForms.clear();
+          GanttFilter._clearPoMat();
           GanttFilter.populate();
           GanttFilter._buildLineDropdown();
           GanttFilter._refreshLineBtn();
@@ -9208,6 +9521,7 @@ const NIMBUS = (function () {
         [document.getElementById('gantt-flt-line-btn'),  document.getElementById('gantt-line-dropdown')],
         [document.getElementById('gantt-flt-color-btn'), document.getElementById('gantt-color-dropdown')],
         [document.getElementById('gantt-flt-form-btn'),  document.getElementById('gantt-form-dropdown')],
+        [document.getElementById('gantt-flt-pomat-btn'), document.getElementById('gantt-pomat-dropdown')],
       ];
       document.addEventListener('click', e => {
         if (_fltPairs.every(([, d]) => !d || d.hidden)) return;
@@ -9217,6 +9531,20 @@ const NIMBUS = (function () {
           }
         }
       });
+
+      Util.wirePasteToCheckboxes(document.getElementById('gantt-line-paste-input'),
+        () => document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      Util.wirePasteToCheckboxes(document.getElementById('gantt-color-paste-input'),
+        () => document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      Util.wirePasteToCheckboxes(document.getElementById('gantt-form-paste-input'),
+        () => document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+
+      const poTa = document.getElementById('gantt-pomat-textarea');
+      if (poTa) {
+        poTa.addEventListener('paste', GanttFilter._onPoMatPaste);
+        poTa.addEventListener('input', Util.debounce(GanttFilter._onPoMatApply, 150));
+      }
+      document.getElementById('gantt-pomat-clear')?.addEventListener('click', GanttFilter._clearPoMat);
 
       GanttFilter._buildLineDropdown();
     },
@@ -9230,6 +9558,7 @@ const NIMBUS = (function () {
       const { text } = GanttFilter._active;
       if (GanttFilter._selectedColors.size > 0 && !GanttFilter._selectedColors.has((task.COLOR || '').toUpperCase())) return false;
       if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
+      if (!Util.taskMatchesPasteSet(task, GanttFilter._pastedIds)) return false;
       if (text) {
         const haystack = [(task.text || ''), (task.ORDER || ''), (task.MATERIAL_DESCRIPTION || '')].join(' ').toLowerCase();
         if (!haystack.includes(text)) return false;
@@ -9238,7 +9567,8 @@ const NIMBUS = (function () {
     },
 
     isActive() {
-      return !!(GanttFilter._selectedColors.size || GanttFilter._selectedForms.size || GanttFilter._active.text);
+      return !!(GanttFilter._selectedColors.size || GanttFilter._selectedForms.size
+        || GanttFilter._pastedIds.size || GanttFilter._active.text);
     },
 
     clear() {
@@ -9248,6 +9578,7 @@ const NIMBUS = (function () {
       GanttFilter._selectedLines.clear();
       GanttFilter._selectedColors.clear();
       GanttFilter._selectedForms.clear();
+      GanttFilter._clearPoMat();
       GanttFilter._buildLineDropdown();
       GanttFilter._refreshLineBtn();
       GanttFilter._buildColorDropdown();
@@ -9265,7 +9596,7 @@ const NIMBUS = (function () {
     },
 
     _buildLineDropdown() {
-      const drop = document.getElementById('gantt-line-dropdown');
+      const drop = document.getElementById('gantt-line-checklist');
       if (!drop) return;
       const lineSet = new Set(Store.linesForSelectedPlant());
       for (const t of Store.tasksForSelectedPlant()) {
@@ -9319,7 +9650,7 @@ const NIMBUS = (function () {
     },
 
     _buildColorDropdown() {
-      const drop = document.getElementById('gantt-color-dropdown');
+      const drop = document.getElementById('gantt-color-checklist');
       if (!drop) return;
       const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
       const colorSet = new Set(scoped.map(t => (t.COLOR || '').toUpperCase()).filter(Boolean));
@@ -9362,7 +9693,7 @@ const NIMBUS = (function () {
     },
 
     _buildFormDropdown() {
-      const drop = document.getElementById('gantt-form-dropdown');
+      const drop = document.getElementById('gantt-form-checklist');
       if (!drop) return;
       const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
       const formSet = new Set(scoped.map(t => (t.FORM_SIZE || '').toUpperCase()).filter(Boolean));
@@ -9399,6 +9730,55 @@ const NIMBUS = (function () {
       GanttFilter._apply();
     },
 
+    _togglePoMatDropdown() {
+      const drop = document.getElementById('gantt-pomat-dropdown');
+      if (drop) drop.hidden = !drop.hidden;
+    },
+
+    _refreshPoMatBtn() {
+      const btn = document.getElementById('gantt-flt-pomat-btn');
+      const lbl = document.getElementById('gantt-flt-pomat-label');
+      if (!lbl) return;
+      const n = GanttFilter._pastedIds.size;
+      lbl.textContent = n === 0 ? t('ui.all_pomat') : t('ui.n_pomat_filter', { count: n });
+      if (btn) btn.classList.toggle('active', n > 0);
+    },
+
+    _onPoMatApply() {
+      const ta = document.getElementById('gantt-pomat-textarea');
+      if (!ta) return;
+      GanttFilter._pastedIds = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+      const cnt = document.getElementById('gantt-pomat-count');
+      if (cnt) {
+        const n = GanttFilter._pastedIds.size;
+        cnt.textContent = n ? t('ui.pomat_count', { count: n }) : '';
+      }
+      GanttFilter._refreshPoMatBtn();
+      GanttFilter._apply();
+    },
+
+    _onPoMatPaste(e) {
+      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      if (!text || !text.trim()) return;
+      const known = new Set();
+      (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
+        const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
+        const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+      });
+      const { matched, total } = Util.countPasteMatches(text, known);
+      if (total) Toast.show(t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
+    },
+
+    _clearPoMat() {
+      GanttFilter._pastedIds.clear();
+      const ta = document.getElementById('gantt-pomat-textarea');
+      if (ta) ta.value = '';
+      const cnt = document.getElementById('gantt-pomat-count');
+      if (cnt) cnt.textContent = '';
+      GanttFilter._refreshPoMatBtn();
+      GanttFilter._apply();
+    },
+
     _apply: null,  // assigned below after Util is in scope
 
     _doApply() {
@@ -9427,6 +9807,7 @@ const NIMBUS = (function () {
 
       const n = (GanttFilter._selectedColors.size > 0 ? 1 : 0)
               + (GanttFilter._selectedForms.size  > 0 ? 1 : 0)
+              + (GanttFilter._pastedIds.size > 0 ? 1 : 0)
               + (GanttFilter._active.text ? 1 : 0);
       if (badge) badge.textContent = n + ' filter' + (n !== 1 ? 's' : '');
       const wrap = document.getElementById('flt-badge-wrap');
@@ -9501,7 +9882,7 @@ const NIMBUS = (function () {
 
       // Compute critical path lengths for each task (longest chain to it)
       const chainLen = {};
-      const allIds = Object.keys(Store.tasks);
+      const allIds = Store.tasksForSelectedPlant().map(t => String(t.id));
       const getLen = (id) => {
         if (chainLen[id] !== undefined) return chainLen[id];
         const sources = deps[id] || [];
@@ -9545,7 +9926,10 @@ const NIMBUS = (function () {
       // Group row heights from DOM
       const groupEls = dom.querySelectorAll('.vis-foreground .vis-group');
       const lineToY = {};
-      const lines = [...new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
+      // Scope to the selected plant (mirrors the TimelineNav R17 fix) so this ordering
+      // matches the visible plant-scoped group rows built by Timeline.rebuild.
+      const lines = [...new Set((Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr)
+        .map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
       if (groupEls.length) {
         lines.forEach((line, i) => {
           const groupEl = groupEls[i];
@@ -12285,8 +12669,13 @@ saveAll() {
       // authoritative reschedule never false-conflicts with a concurrent editor.
       const taskPayload = dirtyTasks.map(t => ({
         id:           t.id,
-        start_date:   t.start_date,
-        end_date:     t.end_date,
+        // toLocalSeconds, not the raw Date: JSON.stringify would call
+        // Date.toISOString() (UTC), but the orders read path emits bare naive
+        // strftime (no Z) which new Date() parses as LOCAL — so a raw Date here
+        // round-trips shifted by the client's UTC offset for any non-UTC user.
+        // Mirrors _relayDueDateCorrections; see Util.toLocalSeconds.
+        start_date:   Util.toLocalSeconds(t.start_date),
+        end_date:     Util.toLocalSeconds(t.end_date),
         base_version: t.row_version ?? null,
         force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
       }));
@@ -12938,11 +13327,14 @@ saveAll() {
       const ov = document.getElementById('admin-overview-pane');
       const mg = document.getElementById('admin-manage-pane');
       const ifc = document.getElementById('admin-interface-pane');
+      const sec = document.getElementById('admin-security-pane');
       if (ov) ov.hidden = (sub !== 'overview');
       if (mg) mg.hidden = (sub !== 'manage');
       if (ifc) ifc.hidden = (sub !== 'interface');
+      if (sec) sec.hidden = (sub !== 'security');
       if (sub === 'manage') MasterData.render();
       else if (sub === 'interface') Interface.render();
+      else if (sub === 'security') Security.render();
       else AdminCockpit._renderOverview();
     },
 
@@ -15812,6 +16204,10 @@ saveAll() {
     },
 
     goto(tab) {
+      // Admin Cockpit is admin-only — blocks the tab button, the Log button's click
+      // handler, and the Ctrl+Alt+L shortcut simultaneously (all three route through here).
+      if (tab === 'admin' && !Session.isAdmin()) return;
+
       // Redirect legacy 'table' references to the Orders sub-tab inside Scheduling Board
       if (tab === 'table') { App.goto('gantt'); App.gotoGanttSub('orders'); return; }
 
@@ -15870,6 +16266,20 @@ saveAll() {
           if (DependencyOverlay._enabled) DependencyOverlay.render();
         }, 30);
       }
+    },
+
+    // Convenience combinator for every "go to a specific order/line" entry
+    // point (Alerts.focus, Dashboard._gotoLine/_jumpToOrder, Timeline.gotoLineDay,
+    // Command Palette handlers in nimbus-intelligence.js) that must manipulate
+    // Timeline right after navigating. Plain App.goto('gantt') alone preserves
+    // whatever Gantt sub-tab (timeline vs orders) was last active — if the
+    // user was last on the Orders AG-Grid sub-tab, the Timeline pan/selection
+    // happens invisibly behind it. Force 'timeline' explicitly instead. Do NOT
+    // change App.goto('gantt') itself — that preservation behavior is correct
+    // for plain top-nav tab switches.
+    gotoGanttTimeline() {
+      App.goto('gantt');
+      App.gotoGanttSub('timeline');
     },
 
     gotoLaborSub(sub) {
@@ -15978,16 +16388,19 @@ saveAll() {
       confDaysInp.value  = Math.max(1, Math.round(confHz  / 1440));
 
       async function _savePlantHorizon(patch) {
-        if (!plantRow) { Toast.show(t('toast.no_plant_selected'), 'warn'); return; }
-        Object.assign(plantRow, patch);
+        if (!plantRow) { Toast.show(t('toast.no_plant_selected'), 'warn'); return false; }
         try {
-          await fetch(`${Config.API_BASE}/master-data/plants/bulk`, {
+          const r = await fetch(`${Config.API_BASE}/master-data/plants/bulk`, {
             method:  'POST',
-            headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+            headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body:    JSON.stringify({ upserts: [{ subnetwork: plantRow.subnetwork, plant: plantRow.plant, ...patch }], deletes: [] }),
           });
+          if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+          Object.assign(plantRow, patch); // commit to Store only once the write is confirmed
+          return true;
         } catch (e) {
           Toast.show(t('toast.horizon_save_failed', { msg: e.message }), 'error');
+          return false;
         }
       }
 
@@ -16002,17 +16415,27 @@ saveAll() {
       }
 
       async function saveAlert() {
+        const prevMin = plantRow?.alt_flag_horizon ?? Store.userSettings.alertHorizonMinutes ?? 43200;
         const totalMin = readAlertMinutes();
         Store.setUserSettings({ alertHorizonMinutes: totalMin }, 'system-settings');
-        await _savePlantHorizon({ alt_flag_horizon: totalMin });
+        const ok = await _savePlantHorizon({ alt_flag_horizon: totalMin });
+        if (!ok) {
+          Store.setUserSettings({ alertHorizonMinutes: prevMin }, 'system-settings');
+          alertDaysInp.value = Math.max(1, Math.round(prevMin / 1440));
+        }
         Alerts._renderBell();
         if (document.getElementById('alert-drawer')?.classList.contains('open')) Alerts._renderDrawer();
       }
 
       async function saveConf() {
+        const prevMin = plantRow?.conf_score_horizon ?? Store.userSettings.confidenceHorizonMinutes ?? 20160;
         const totalMin = readConfMinutes();
         Store.setUserSettings({ confidenceHorizonMinutes: totalMin }, 'system-settings');
-        await _savePlantHorizon({ conf_score_horizon: totalMin });
+        const ok = await _savePlantHorizon({ conf_score_horizon: totalMin });
+        if (!ok) {
+          Store.setUserSettings({ confidenceHorizonMinutes: prevMin }, 'system-settings');
+          confDaysInp.value = Math.max(1, Math.round(prevMin / 1440));
+        }
         if (typeof NIMBUS !== 'undefined' && NIMBUS.Confidence?._recomputeDebounced)
           NIMBUS.Confidence._recomputeDebounced();
       }
@@ -16072,23 +16495,11 @@ saveAll() {
         saveConstraints();
       }
 
-      async function saveConstraints() {
-        if (!plantRow) { Toast.show(t('toast.no_plant_selected'), 'warn'); return; }
-        consState.forEach((c, idx) => { c.order = idx + 1; });
-        const payload = consState.map(c => ({ key: c.key, enabled: c.enabled, order: c.order }));
-        plantRow.constraints = payload;  // update Store so the optimizer sees it immediately
-        try {
-          await fetch(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
-            method:  'POST',
-            headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
-            body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
-          });
-        } catch (e) {
-          Toast.show(t('toast.constraints_save_failed', { msg: e.message }), 'error');
-        }
-      }
-
-      (function initConstraints() {
+      // Rebuild consState from the last-known-persisted plantRow.constraints
+      // (the catalog default fills in any key absent from that persisted list).
+      // Shared by init and by saveConstraints' failure path, since plantRow.constraints
+      // is only mutated once a write is confirmed — it is always the source of truth to revert to.
+      function rebuildConsStateFromPersisted() {
         const stored = Array.isArray(plantRow?.constraints) ? plantRow.constraints : null;
         consState = Engine.CONSTRAINT_CATALOG.map((cat, i) => {
           const s = stored?.find(x => x.key === cat.key);
@@ -16098,6 +16509,29 @@ saveAll() {
             order:   (s && Number.isFinite(s.order)) ? s.order : i + 1,
           };
         }).sort((a, b) => a.order - b.order);
+      }
+
+      async function saveConstraints() {
+        if (!plantRow) { Toast.show(t('toast.no_plant_selected'), 'warn'); return; }
+        consState.forEach((c, idx) => { c.order = idx + 1; });
+        const payload = consState.map(c => ({ key: c.key, enabled: c.enabled, order: c.order }));
+        try {
+          const r = await fetch(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
+            method:  'POST',
+            headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
+          });
+          if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+          plantRow.constraints = payload;  // commit to Store only once the write is confirmed
+        } catch (e) {
+          Toast.show(t('toast.constraints_save_failed', { msg: e.message }), 'error');
+          rebuildConsStateFromPersisted();
+          renderConstraints();
+        }
+      }
+
+      (function initConstraints() {
+        rebuildConsStateFromPersisted();
         renderConstraints();
         // Probe whether a wheel is actually uploaded (hint only — the toggle works
         // regardless, since enabling color with no wheel is a harmless no-op).
@@ -16763,7 +17197,7 @@ saveAll() {
       try {
         const res = await fetch(`${API}/master-data/${table}/bulk`, {
           method:  'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ upserts, deletes }),
         }).then(r => {
           if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -16883,7 +17317,7 @@ saveAll() {
         try {
           await fetch(`${API}/master-data/${table}/columns`, {
             method:  'POST',
-            headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+            headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
           }).then(r => {
             if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -16913,7 +17347,7 @@ saveAll() {
       try {
         await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
           method:  'DELETE',
-          headers: { 'x-user-email': 'trevor.holton@newellco.com' },
+          headers: { 'x-user-email': Session.actor() },
         }).then(r => {
           if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
           return r.json();
@@ -16939,7 +17373,7 @@ saveAll() {
         try {
           await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
             method:  'PATCH',
-            headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+            headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body:    JSON.stringify({ display_label: newLabel }),
           }).then(r => {
             if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -17014,7 +17448,7 @@ saveAll() {
       try {
         await fetch(`${API}/master-data/production_lines/bulk`, {
           method:  'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': 'trevor.holton@newellco.com' },
+          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
         }).then(r => {
           if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -17044,7 +17478,6 @@ saveAll() {
      ========================================================================== */
   const Interface = (() => {
     const API = Config.API_BASE;
-    const USER_EMAIL = 'trevor.holton@newellco.com';
     // Transform names — must mirror sap_sync.TRANSFORMS in the backend contract.
     const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
     const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
@@ -17085,7 +17518,7 @@ saveAll() {
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
     function _writeHeaders(json = true) {
-      const h = { 'x-user-email': USER_EMAIL };
+      const h = { 'x-user-email': Session.actor() };
       if (json) h['content-type'] = 'application/json';
       return h;
     }
@@ -17600,9 +18033,567 @@ saveAll() {
   })();
 
   /* =============================================================================
-     BOOTSTRAP
+     SECURITY — admin sub-tab: user accounts (username / role / password) and
+     role-based plant assignment (roles + role_plants). Same self-contained,
+     paint-into-one-host-div idiom as Interface: private state, a public
+     render() entry point, an internal 'users' | 'roles' tab, full re-render on
+     every tab switch and on every write (mirrors Interface's _saveConfig: try
+     the write, Toast+log on failure, then unconditionally reload+repaint from
+     the server either way). Backend: /security/users(+/bulk, +/{username}/
+     reset-password) for accounts (auth.py); the generic /master-data/roles
+     and /master-data/role_plants (+/bulk) for roles and their plant scoping
+     (master_data.py) — this module only renders and posts, never touches
+     password hashes beyond the single write they're submitted in.
      ========================================================================== */
-document.addEventListener('DOMContentLoaded', () => {
+  const Security = (() => {
+    const API = Config.API_BASE;
+
+    let _tab = 'users';              // active top-level tab: 'users' | 'roles'
+
+    // ---- Users tab state ----
+    let _users = [];                 // last GET /security/users .users: [{username,role,has_password}]
+    let _usersSearch = '';           // current server-side search query
+    let _roleOptions = [];           // role names for the Role <select> (from GET /master-data/roles)
+    let _staged = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
+    const _pwOpen = new Set();       // usernames with an open inline password-reveal row
+
+    // ---- Roles tab state ----
+    let _roles = [];                 // GET /master-data/roles rows: [{role, description}]
+    let _rolePlants = [];            // GET /master-data/role_plants rows: [{role, plant}]
+    let _rolesInUse = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
+    let _selectedRole = null;
+
+    const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function _writeHeaders(json = true) {
+      const h = { 'x-user-email': Session.actor() };
+      if (json) h['content-type'] = 'application/json';
+      return h;
+    }
+
+    function _postJSON(url, body) {
+      return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+    }
+
+    const _debouncedUserSearch = Util.debounce(() => _reloadUsers(), 300);
+
+    // -----------------------------------------------------------------------
+    // Public entry point
+    // -----------------------------------------------------------------------
+    async function render() {
+      const host = document.getElementById('security-host');
+      if (!host) return;
+      _paintShell();
+      await _loadActiveTab();
+    }
+
+    function _paintShell() {
+      const host = document.getElementById('security-host');
+      if (!host) return;
+      const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+      host.innerHTML = `
+        <div class="sap-pagehead">
+          <div><div class="sap-pagehead-title"><h2>${_esc(t('tab.security'))}</h2></div></div>
+        </div>
+        <div class="sap-tabs">${tabBtn('users', t('tab.security_users'))}${tabBtn('roles', t('tab.security_roles'))}</div>
+        <div id="security-tabbody"><div class="md-loading">${_esc(t('ui.loading'))}</div></div>`;
+      host.querySelectorAll('[data-tab]').forEach(b =>
+        b.addEventListener('click', () => { _tab = b.dataset.tab; _paintShell(); _loadActiveTab(); }));
+    }
+
+    function _loadActiveTab() {
+      return _tab === 'users' ? _reloadUsers() : _reloadRoles();
+    }
+
+    // -----------------------------------------------------------------------
+    // USERS tab
+    // -----------------------------------------------------------------------
+    async function _reloadUsers() {
+      const body = document.getElementById('security-tabbody');
+      try {
+        const q = _usersSearch.trim();
+        const usersUrl = `${API}/security/users` + (q ? `?search=${encodeURIComponent(q)}` : '');
+        const [usersData, rolesData] = await Promise.all([
+          Util.fetchTraced(usersUrl).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+          Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        ]);
+        _users = usersData.users || [];
+        _roleOptions = [...new Set((rolesData.rows || []).map(r => r.role).filter(Boolean))].sort();
+        if (_tab !== 'users') return; // bail if the admin switched tabs while awaiting
+        _renderUsersTab();
+      } catch (e) {
+        if (body) body.innerHTML = `<div class="md-empty">Failed to load users: ${_esc(e.message)}</div>`;
+        ErrorLog.error('security', `Load users failed: ${e.message}`);
+      }
+    }
+
+    function _renderUsersTab() {
+      const body = document.getElementById('security-tabbody');
+      if (!body) return;
+      // Preserve the search box's focus/caret across the re-render a debounced
+      // keystroke-driven reload causes (captured synchronously, not via
+      // focus/blur listeners, since replacing innerHTML can race those).
+      const hadFocus = document.activeElement && document.activeElement.id === 'sec-user-search';
+      const caret = hadFocus ? document.activeElement.selectionStart : null;
+      body.innerHTML = _usersShellHtml();
+      _wireUsersShell();
+      _renderUsersRows();
+      _renderUsersActions();
+      if (hadFocus) {
+        const search = document.getElementById('sec-user-search');
+        if (search) {
+          search.focus();
+          const pos = caret ?? search.value.length;
+          search.setSelectionRange(pos, pos);
+        }
+      }
+    }
+
+    function _usersShellHtml() {
+      return `
+        <div class="panel">
+          <div class="md-toolbar">
+            <input type="search" class="input md-search" id="sec-user-search" placeholder="${_esc(t('sec.search_users_ph'))}" value="${_esc(_usersSearch)}">
+            <span class="spacer"></span>
+            <button class="btn btn-ghost sm" id="sec-paste-users" title="${_esc(t('tip.paste_rows'))}">${_esc(t('btn.paste_rows'))}</button>
+            <span id="sec-users-actions" style="display:inline-flex;gap:8px;align-items:center"></span>
+          </div>
+          <div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:center;flex-wrap:wrap">
+            <input type="text" class="input" id="sec-new-username" placeholder="${_esc(t('sec.username_ph'))}" style="flex:1;min-width:120px">
+            ${_roleSelectHtml('', 'id="sec-new-role-select"')}
+            <input type="password" class="input" id="sec-new-password" placeholder="${_esc(t('sec.new_password_ph'))}" autocomplete="new-password" style="flex:1;min-width:120px">
+            <button class="btn btn-primary sm" id="sec-add-user-btn">${_esc(t('sec.add_user'))}</button>
+          </div>
+          <div class="md-table-wrap">
+            <table class="md-table">
+              <thead><tr>
+                <th class="md-th">${_esc(t('sec.username'))}</th>
+                <th class="md-th">${_esc(t('sec.role'))}</th>
+                <th class="md-th">${_esc(t('sec.password'))}</th>
+                <th class="md-th"></th>
+              </tr></thead>
+              <tbody id="sec-users-tbody"></tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    function _wireUsersShell() {
+      const search = document.getElementById('sec-user-search');
+      if (search) {
+        search.addEventListener('input', () => { _usersSearch = search.value; _debouncedUserSearch(); });
+      }
+      document.getElementById('sec-paste-users')?.addEventListener('click', _pasteUsers);
+      document.getElementById('sec-add-user-btn')?.addEventListener('click', _addUser);
+    }
+
+    function _renderUsersActions() {
+      const el = document.getElementById('sec-users-actions');
+      if (!el) return;
+      el.innerHTML = _staged.length
+        ? `<span class="md-dirty-badge">${_esc(t('ui.unsaved_badge', { count: _staged.length }))}</span>
+           <button class="btn btn-primary sm" id="sec-save-staged">${_esc(t('sec.save_changes'))}</button>`
+        : '';
+      document.getElementById('sec-save-staged')?.addEventListener('click', _saveStaged);
+    }
+
+    // extraAttrs is a caller-built, already-escaped attribute string (id="..." or data-x="...").
+    function _roleSelectHtml(value, extraAttrs) {
+      const opts = [`<option value=""${!value ? ' selected' : ''}>${_esc(t('ui.select_placeholder'))}</option>`]
+        .concat(_roleOptions.map(r => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
+        .join('');
+      return `<select class="input" ${extraAttrs}>${opts}</select>`;
+    }
+
+    function _userRowHtml(u) {
+      const pwOpen = _pwOpen.has(u.username);
+      const pwCell = pwOpen
+        ? `<div style="display:flex;gap:6px;align-items:center">
+             <input type="password" class="input" data-pw-input="${_esc(u.username)}" placeholder="${_esc(t('sec.new_password_ph'))}" autocomplete="new-password" style="width:140px">
+             <button class="btn btn-primary sm" data-pw-save="${_esc(u.username)}">${_esc(t('sec.save_password'))}</button>
+             <button class="btn btn-ghost sm" data-pw-cancel="${_esc(u.username)}">${_esc(t('btn.cancel'))}</button>
+           </div>`
+        : `<div style="display:flex;gap:8px;align-items:center">
+             <span class="admin-health-dot ${u.has_password ? 'ok' : 'warn'}"></span>
+             <span>${_esc(u.has_password ? t('sec.password_set') : t('sec.password_not_set'))}</span>
+             <button class="btn btn-ghost sm" data-pw-toggle="${_esc(u.username)}">${_esc(u.has_password ? t('sec.reset_password') : t('sec.set_password'))}</button>
+           </div>`;
+      return `<tr data-username="${_esc(u.username)}">
+        <td class="md-td">${_esc(u.username)}</td>
+        <td class="md-td">${_roleSelectHtml(u.role, `data-role-select-user="${_esc(u.username)}"`)}</td>
+        <td class="md-td">${pwCell}</td>
+        <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${_esc(u.username)}" title="${_esc(t('tip.delete_row'))}">🗑</button></td>
+      </tr>`;
+    }
+
+    function _stagedRowHtml(r, i) {
+      return `<tr class="md-row-new">
+        <td class="md-td">${_esc(r.username)}</td>
+        <td class="md-td">${_roleSelectHtml(r.role, `data-role-select-staged="${i}"`)}</td>
+        <td class="md-td">${_esc(t('sec.password_not_set'))}</td>
+        <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${_esc(t('tip.delete_row'))}">🗑</button></td>
+      </tr>`;
+    }
+
+    function _renderUsersRows() {
+      const tbody = document.getElementById('sec-users-tbody');
+      if (!tbody) return;
+      if (!_users.length && !_staged.length) {
+        tbody.innerHTML = `<tr><td colspan="4" class="md-empty">${_esc(t('sec.no_users_yet'))}</td></tr>`;
+      } else {
+        tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
+      }
+      tbody.querySelectorAll('[data-role-select-user]').forEach(sel =>
+        sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser, sel.value)));
+      tbody.querySelectorAll('[data-role-select-staged]').forEach(sel =>
+        sel.addEventListener('change', () => { _staged[+sel.dataset.roleSelectStaged].role = sel.value; }));
+      tbody.querySelectorAll('[data-pw-toggle]').forEach(b =>
+        b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle); _renderUsersRows(); }));
+      tbody.querySelectorAll('[data-pw-cancel]').forEach(b =>
+        b.addEventListener('click', () => { _pwOpen.delete(b.dataset.pwCancel); _renderUsersRows(); }));
+      tbody.querySelectorAll('[data-pw-save]').forEach(b =>
+        b.addEventListener('click', () => _savePassword(b.dataset.pwSave)));
+      tbody.querySelectorAll('[data-del-user]').forEach(b =>
+        b.addEventListener('click', () => _deleteUser(b.dataset.delUser)));
+      tbody.querySelectorAll('[data-del-staged]').forEach(b =>
+        b.addEventListener('click', () => { _staged.splice(+b.dataset.delStaged, 1); _renderUsersRows(); _renderUsersActions(); }));
+    }
+
+    async function _setUserRole(username, role) {
+      try {
+        await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role: role || null }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Set role failed for ${username}: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    async function _savePassword(username) {
+      const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`);
+      const pw = input ? input.value : '';
+      if (!pw || pw.length < 8) { Toast.show(t('sec.password_too_short'), 'error'); return; }
+      try {
+        await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
+        _pwOpen.delete(username);
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Set password failed for ${username}: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    async function _deleteUser(username) {
+      const ok = await Modal.confirm({
+        title: t('sec.confirm_delete_user_title'),
+        message: t('sec.confirm_delete_user_msg', { username }),
+        confirmLabel: t('btn.yes_delete'),
+        tone: 'danger',
+      });
+      if (!ok) return;
+      try {
+        await _postJSON(`${API}/security/users/bulk`, { deletes: [{ username }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Delete user failed for ${username}: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    async function _addUser() {
+      const uInput = document.getElementById('sec-new-username');
+      const rSelect = document.getElementById('sec-new-role-select');
+      const pInput = document.getElementById('sec-new-password');
+      const username = (uInput?.value || '').trim();
+      if (!username) { Toast.show(t('sec.username_required'), 'error'); return; }
+      const password = pInput?.value || '';
+      if (password && password.length < 8) { Toast.show(t('sec.password_too_short'), 'error'); return; }
+      const role = rSelect?.value || null;
+      try {
+        await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role }] });
+        if (password) await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Add user failed: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
+    // username/role 2-column shape (no password column — passwords are never pasted).
+    function _parseUserPaste(rawText) {
+      const lines = rawText.replace(/\r/g, '').split('\n').filter(l => l.trim());
+      if (!lines.length) return [];
+      const first = lines[0].split('\t').map(h => h.trim().toLowerCase());
+      const nameHdrs = ['username', t('sec.username').toLowerCase()];
+      const roleHdrs = ['role', t('sec.role').toLowerCase()];
+      const hasHeader = first.some(h => nameHdrs.includes(h) || roleHdrs.includes(h));
+      let headers, dataLines;
+      if (hasHeader) {
+        headers = first.map(h => nameHdrs.includes(h) ? 'username' : (roleHdrs.includes(h) ? 'role' : h));
+        dataLines = lines.slice(1);
+      } else {
+        headers = ['username', 'role'];
+        dataLines = lines;
+      }
+      return dataLines.map(line => {
+        const vals = line.split('\t');
+        const row = {};
+        headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+        return row;
+      }).filter(r => r.username);
+    }
+
+    async function _pasteUsers() {
+      let raw;
+      try { raw = await navigator.clipboard.readText(); }
+      catch { Toast.show(t('toast.clipboard_denied'), 'error'); return; }
+      if (!raw.trim()) { Toast.show(t('toast.clipboard_empty'), 'error'); return; }
+      const rows = _parseUserPaste(raw);
+      if (!rows.length) { Toast.show(t('toast.no_rows_paste'), 'error'); return; }
+      rows.forEach(r => _staged.push({ username: r.username, role: r.role || '' }));
+      _renderUsersRows();
+      _renderUsersActions();
+    }
+
+    async function _saveStaged() {
+      if (!_staged.length) return;
+      const upserts = _staged.map(r => ({ username: r.username, role: r.role || null }));
+      try {
+        await _postJSON(`${API}/security/users/bulk`, { upserts });
+        _staged = [];
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Save staged users failed: ${e.message}`);
+      }
+      await _reloadUsers();
+    }
+
+    // -----------------------------------------------------------------------
+    // ROLES tab — master-detail: role list (left) + its plant assignments (right)
+    // -----------------------------------------------------------------------
+    async function _reloadRoles() {
+      const body = document.getElementById('security-tabbody');
+      try {
+        const [rolesData, rpData] = await Promise.all([
+          Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+          Util.fetchTraced(`${API}/master-data/role_plants`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        ]);
+        _roles = rolesData.rows || [];
+        _rolePlants = rpData.rows || [];
+        if (_selectedRole && !_roles.some(r => r.role === _selectedRole)) _selectedRole = null;
+        // Best-effort: knowing which roles have >=1 user lets the delete button be
+        // disabled pre-emptively. Non-fatal if this fetch fails — bulk_apply's FK
+        // hardening (ForeignKeyViolation -> clean 400) remains the authoritative guard.
+        try {
+          const usersData = await Util.fetchTraced(`${API}/security/users`).then(r => { if (!r.ok) throw new Error(); return r.json(); });
+          _rolesInUse = new Set((usersData.users || []).map(u => u.role).filter(Boolean));
+        } catch { _rolesInUse = new Set(); }
+        if (_tab !== 'roles') return; // bail if the admin switched tabs while awaiting
+        _renderRolesTab();
+      } catch (e) {
+        if (body) body.innerHTML = `<div class="md-empty">Failed to load roles: ${_esc(e.message)}</div>`;
+        ErrorLog.error('security', `Load roles failed: ${e.message}`);
+      }
+    }
+
+    function _renderRolesTab() {
+      const body = document.getElementById('security-tabbody');
+      if (!body) return;
+      body.innerHTML = `<div class="sap-console"><div id="sec-roles-rail"></div><div id="sec-roles-detail"></div></div>`;
+      _renderRolesRail();
+      _renderRolesDetail();
+    }
+
+    function _roleRowHtml(r) {
+      const sel = r.role === _selectedRole ? ' sap-rail-row-sel' : '';
+      const inUse = _rolesInUse.has(r.role);
+      const delAttrs = inUse
+        ? `disabled title="${_esc(t('sec.role_in_use'))}"`
+        : `title="${_esc(t('tip.delete_row'))}"`;
+      return `<div class="sap-rail-row${sel}" style="display:flex;align-items:center;gap:8px" data-role="${_esc(r.role)}">
+        <div style="flex:1;min-width:0">
+          <div class="sap-rail-name" style="cursor:pointer" data-role-select="${_esc(r.role)}">${_esc(r.role)}</div>
+          <input type="text" class="input" data-role-desc="${_esc(r.role)}" value="${_esc(r.description || '')}"
+            title="${_esc(t('sec.description'))}" placeholder="${_esc(t('sec.description_ph'))}"
+            style="margin-top:4px;width:100%;font-size:11.5px;padding:3px 6px">
+        </div>
+        <button class="btn btn-ghost sm" data-role-desc-save="${_esc(r.role)}">${_esc(t('btn.save'))}</button>
+        <button class="sap-icon-btn danger" data-role-del="${_esc(r.role)}" ${delAttrs}>🗑</button>
+      </div>`;
+    }
+
+    function _renderRolesRail() {
+      const el = document.getElementById('sec-roles-rail');
+      if (!el) return;
+      const rows = !_roles.length
+        ? `<div class="md-empty">${_esc(t('sec.no_roles_yet'))}</div>`
+        : _roles.map(_roleRowHtml).join('');
+      el.innerHTML = `<div class="panel">
+        <div class="panel-head"><span class="sap-section-label">${_esc(t('tab.security_roles'))}</span></div>
+        <div style="display:flex;gap:8px;padding:12px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+          <input type="text" class="input" id="sec-new-role" placeholder="${_esc(t('sec.role'))}" style="flex:1;min-width:90px">
+          <input type="text" class="input" id="sec-new-role-desc" placeholder="${_esc(t('sec.description_ph'))}" style="flex:1.6;min-width:110px">
+          <button class="btn btn-primary sm" id="sec-add-role-btn">${_esc(t('sec.add_role'))}</button>
+        </div>
+        <div class="sap-rail" id="sec-roles-list">${rows}</div>
+      </div>`;
+      document.getElementById('sec-add-role-btn')?.addEventListener('click', _addRole);
+      el.querySelectorAll('[data-role-select]').forEach(nameEl =>
+        nameEl.addEventListener('click', () => _selectRole(nameEl.dataset.roleSelect)));
+      el.querySelectorAll('[data-role-desc-save]').forEach(b =>
+        b.addEventListener('click', () => _saveRoleDescription(b.dataset.roleDescSave)));
+      el.querySelectorAll('[data-role-del]').forEach(b =>
+        b.addEventListener('click', () => _deleteRole(b.dataset.roleDel)));
+    }
+
+    function _selectRole(role) {
+      _selectedRole = role;
+      // Local-only: toggle the selected highlight instead of rebuilding the rail,
+      // so an in-progress "add role" draft elsewhere in the rail isn't wiped.
+      document.querySelectorAll('#sec-roles-list .sap-rail-row').forEach(el =>
+        el.classList.toggle('sap-rail-row-sel', el.dataset.role === role));
+      _renderRolesDetail();
+    }
+
+    function _renderRolesDetail() {
+      const el = document.getElementById('sec-roles-detail');
+      if (!el) return;
+      const role = _selectedRole;
+      const header = role ? t('sec.plants_for_role', { role }) : t('sec.no_role_selected');
+      const plants = role ? _rolePlants.filter(rp => rp.role === role).map(rp => rp.plant).sort() : [];
+      const addHtml = !role ? '' : `
+        <div class="sap-section-label">${_esc(t('sec.add_plant'))}</div>
+        <div class="hps-combobox" id="sec-plant-combobox" style="max-width:280px">
+          <input type="text" class="input" id="sec-plant-search" placeholder="${_esc(t('sec.search_plants_ph'))}" autocomplete="off">
+          <div class="hps-dropdown" id="sec-plant-dropdown" hidden></div>
+        </div>`;
+      const listHtml = !role ? '' : !plants.length
+        ? `<div class="sap-help" style="margin-top:12px">${_esc(t('sec.no_plants_yet'))}</div>`
+        : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map(p =>
+            `<span class="sap-keychip">${_esc(p)}<button data-remove-plant="${_esc(p)}" title="${_esc(t('tip.delete_row'))}"
+               style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
+          ).join('')}</div>`;
+      el.innerHTML = `<div class="panel">
+        <div class="sap-detail-head"><span class="sap-detail-name">${_esc(header)}</span></div>
+        <div class="panel-body">${addHtml}${listHtml}</div>
+      </div>`;
+      if (role) {
+        const srch = document.getElementById('sec-plant-search');
+        srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
+        srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
+        srch?.addEventListener('blur', () => { setTimeout(() => { const dd = document.getElementById('sec-plant-dropdown'); if (dd) dd.hidden = true; }, 150); });
+      }
+      el.querySelectorAll('[data-remove-plant]').forEach(b =>
+        b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant)));
+    }
+
+    // Type-to-filter Store.knownPlants() down to matches, click one to add it —
+    // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
+    // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
+    function _renderPlantDropdown(query) {
+      const dd = document.getElementById('sec-plant-dropdown');
+      if (!dd || !_selectedRole) return;
+      const assigned = new Set(_rolePlants.filter(rp => rp.role === _selectedRole).map(rp => rp.plant));
+      const all = Store.knownPlants().filter(p => !assigned.has(p));
+      const q = (query || '').trim().toLowerCase();
+      const filtered = q ? all.filter(p => p.toLowerCase().includes(q)) : all;
+      if (!filtered.length) {
+        dd.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plants available'}</div>`;
+        return;
+      }
+      dd.innerHTML = filtered.map(p => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
+      dd.querySelectorAll('[data-plant]').forEach(optEl =>
+        optEl.addEventListener('mousedown', e => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant); }));
+    }
+
+    async function _addPlantToRole(plant) {
+      if (!_selectedRole) return;
+      try {
+        await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role: _selectedRole, plant }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Add plant to role failed: ${e.message}`);
+      }
+      await _reloadRoles();
+    }
+
+    async function _removePlantFromRole(plant) {
+      if (!_selectedRole) return;
+      try {
+        await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role: _selectedRole, plant }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Remove plant from role failed: ${e.message}`);
+      }
+      await _reloadRoles();
+    }
+
+    async function _addRole() {
+      const nameInput = document.getElementById('sec-new-role');
+      const descInput = document.getElementById('sec-new-role-desc');
+      const role = (nameInput?.value || '').trim();
+      if (!role) return;
+      try {
+        await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: (descInput?.value || '').trim() }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Add role failed: ${e.message}`);
+      }
+      await _reloadRoles();
+    }
+
+    async function _saveRoleDescription(role) {
+      const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`);
+      if (!input) return;
+      try {
+        await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: input.value }] });
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Save role description failed: ${e.message}`);
+      }
+      await _reloadRoles();
+    }
+
+    async function _deleteRole(role) {
+      const ok = await Modal.confirm({
+        title: t('sec.confirm_delete_role_title'),
+        message: t('sec.confirm_delete_role_msg', { role }),
+        confirmLabel: t('btn.yes_delete'),
+        tone: 'danger',
+      });
+      if (!ok) return;
+      try {
+        await _postJSON(`${API}/master-data/roles/bulk`, { deletes: [{ role }] });
+        if (_selectedRole === role) _selectedRole = null;
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Delete role failed: ${e.message}`);
+      }
+      await _reloadRoles();
+    }
+
+    return { render };
+  })();
+
+  /* =============================================================================
+     BOOTSTRAP
+     _bootMain() is the real boot sequence — everything that used to run directly
+     inside the DOMContentLoaded handler. It is gated behind Session: the listener
+     below only calls it immediately when a session is already cached (page
+     reload while signed in); otherwise it shows the mandatory login screen first,
+     and showLoginScreen's own sign-in success handler calls App._bootMain() once
+     authenticated, so the exact same boot path runs either way.
+     ========================================================================== */
+  function _bootMain() {
+    // Re-apply session-driven UI gates now that boot is proceeding (covers both
+    // the "already signed in" resume path and the "just signed in" path — the
+    // latter's showLoginScreen already called Session._applyGates() once inside
+    // signIn(), so this is a harmless, idempotent re-run for that path).
+    Session._applyGates();
+
     // Global hard-error net (captures stack traces, normalized through ErrorLog).
     ErrorLog.installGlobalHandlers();
     // Restore the persisted error-log ring from the previous page load (best-effort).
@@ -17675,10 +18666,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }, 1000);
 
-    // Ctrl+Alt+L → open Admin Cockpit log tab
+    // Ctrl+Alt+L → open Admin Cockpit log tab (admin-only; App.goto('admin') already
+    // guards this, but the early-return here is a redundant defense-in-depth check).
     document.addEventListener('keydown', e => {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') {
-        e.preventDefault(); App.goto('admin'); AdminCockpit.gotoOvTab('logs');
+        e.preventDefault();
+        if (!Session.isAdmin()) return;
+        App.goto('admin'); AdminCockpit.gotoOvTab('logs');
       }
     });
 
@@ -17787,6 +18781,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // if they pick a different one, it re-scopes. No remembered plant → unscoped.
     const _bootPlant = Persistence._rememberedPlant();
     Persistence.load(_bootPlant ? { plant: _bootPlant } : {});
+  }
+  App._bootMain = _bootMain;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // Mandatory login gate — blocks the whole app until authenticated against
+    // user_security. A cached session (page reload while signed in) skips
+    // straight to _bootMain(); otherwise showLoginScreen() takes over and calls
+    // App._bootMain() itself once Session.signIn() resolves.
+    if (!Session.currentUser()) { showLoginScreen(); return; }
+    _bootMain();
   });
 
   /* Public namespace for inline onclick handlers in index.html */
@@ -17799,6 +18803,7 @@ document.addEventListener('DOMContentLoaded', () => {
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData, WelcomeSplash,
-    LaborPlanning, Interface, CalendarSync
+    LaborPlanning, Interface, Security, CalendarSync,
+    Session, showLoginScreen
   };
 })();

@@ -27,6 +27,7 @@ log = logging.getLogger("nimbus.md")
 ALLOWED_TABLES = frozenset({
     'subnetworks', 'plants', 'production_lines',
     'materials', 'material_plants',
+    'roles', 'role_plants',
 })
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
@@ -36,6 +37,13 @@ COLUMN_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # System columns the UI must never see or touch.
 SYSTEM_COLUMNS = frozenset({'created_at', 'updated_at'})
 
+# Generated/computed columns per table — must never be written by bulk_apply's
+# upsert (Postgres rejects an explicit value for a GENERATED ALWAYS AS column).
+# Only relevant if such a column is ever also registered in column_metadata;
+# line_key deliberately never is, but this is cheap insurance against that
+# happening by mistake later.
+GENERATED_COLUMNS = {'production_lines': frozenset({'line_key'})}
+
 # Key columns per table — is_locked in column_metadata, but also enforced here.
 _KEY_COLUMNS = {
     'subnetworks':      frozenset({'code'}),
@@ -43,6 +51,8 @@ _KEY_COLUMNS = {
     'production_lines': frozenset({'subnetwork', 'plant', 'production_line'}),
     'materials':        frozenset({'material_id'}),
     'material_plants':  frozenset({'material_id', 'plant'}),
+    'roles':            frozenset({'role'}),
+    'role_plants':      frozenset({'role', 'plant'}),
 }
 
 
@@ -259,16 +269,21 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                 for k in keys
             )
             vals = [d[k] for k in keys]
-            cur.execute(
-                sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), where),
-                vals,
-            )
+            try:
+                cur.execute(
+                    sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), where),
+                    vals,
+                )
+            except psycopg.errors.ForeignKeyViolation:
+                conn.rollback()
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
             deleted += cur.rowcount
 
         # --- Upserts ---
         for row in upserts:
             # Only pass columns that actually exist in the table (guard against stale client)
-            col_names = [c for c in row if c not in SYSTEM_COLUMNS]
+            col_names = [c for c in row if c not in SYSTEM_COLUMNS
+                         and c not in GENERATED_COLUMNS.get(table, frozenset())]
             if not col_names:
                 continue
             col_sql     = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)
@@ -303,7 +318,11 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     vals=placeholders,
                     conflict=conflict_cols,
                 )
-            cur.execute(q, [row[c] for c in col_names])
+            try:
+                cur.execute(q, [row[c] for c in col_names])
+            except psycopg.errors.ForeignKeyViolation:
+                conn.rollback()
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1
@@ -892,6 +911,24 @@ def ensure_line_blackout_table() -> None:
         conn.commit()
 
 
+def ensure_line_key_columns() -> None:
+    """Idempotent: add the generated line_key identity column ({subnetwork}_
+    {plant}_{production_line}) to the three line-scoped tables that are
+    startup-hook-authoritative for prod (labor_plan_line/line_calendar/
+    line_blackout are NOT re-provisioned by schema.sql on redeploy — see
+    DEPLOYMENT.md). production_lines/orders are NOT handled here: they have
+    no ensure_* hook and rely on schema.sql / a dated migrations/*.sql apply
+    instead."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        for table in ("labor_plan_line", "line_calendar", "line_blackout"):
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS line_key TEXT "
+                f"GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED"
+            )
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_line_key ON {table}(line_key)")
+        conn.commit()
+
+
 def ensure_plant_blackout_table() -> None:
     """Idempotent: per-plant plant-level blackout blocks. block_id client-supplied
     (Util.uid 'pblk'). Cross-plant-global blocks are not persisted (per-plant model)."""
@@ -1273,3 +1310,60 @@ def known_plant_line_codes() -> dict:
         cur.execute("SELECT production_line FROM production_lines")
         lines = {r[0] for r in cur.fetchall()}
     return {"plants": plants, "lines": lines}
+
+
+# ---------------------------------------------------------------------------
+# Roles / Role-Plant mappings — self-bootstrapped generic-CRUD tables.
+#   Both are registered in ALLOWED_TABLES, so the generic Master Data grid
+#   (list_rows/bulk_apply) reads and writes them directly; that read path
+#   INNER JOINs column_metadata, so each table's rows must be seeded here too
+#   or the grid comes back empty. role_plants FKs roles(role), so
+#   ensure_roles_table() must run before ensure_role_plants_table() at
+#   startup (see brain.py lifespan()).
+# ---------------------------------------------------------------------------
+def ensure_roles_table() -> None:
+    """Idempotent: create the roles table + seed its column_metadata rows."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                role        TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.executemany(
+            "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (table_name, column_name) DO NOTHING",
+            [
+                ("roles", "role", "Role", True, 1),
+                ("roles", "description", "Description", False, 2),
+            ],
+        )
+        conn.commit()
+
+
+def ensure_role_plants_table() -> None:
+    """Idempotent: create the role_plants table (role -> plant assignments)
+    + seed its column_metadata rows. FKs roles(role) ON DELETE CASCADE, so
+    roles must already exist — call ensure_roles_table() first."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS role_plants (
+                role        TEXT NOT NULL REFERENCES roles(role) ON DELETE CASCADE ON UPDATE CASCADE,
+                plant       TEXT NOT NULL,
+                created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (role, plant)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_role_plants_plant ON role_plants(plant)")
+        cur.executemany(
+            "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (table_name, column_name) DO NOTHING",
+            [
+                ("role_plants", "role", "Role", True, 1),
+                ("role_plants", "plant", "Plant", True, 2),
+            ],
+        )
+        conn.commit()

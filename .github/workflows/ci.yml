@@ -1,0 +1,76 @@
+name: CI
+
+# First automated gate for NIMBUS: JS lint + JS unit tests, and the Python
+# suite against a real Postgres so the @pytest.mark.pg data-integrity /
+# schema-idempotency tests actually run (they auto-skip locally when no DB).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test-js:
+    name: ESLint + JS unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: ESLint gate (JS source — errors block)
+        # Blocking gate over the hand-written JS (app.js, intelligence, worker,
+        # compute-core). Kept green.
+        run: npm run lint:ci
+      - name: ESLint full report (locales — non-blocking)
+        # Surfaces the pre-existing duplicate-key errors in locales/*.js
+        # (CODE_REVIEW_FINDINGS.md Appendix A.1). Non-blocking until that
+        # separate i18n cleanup lands; flip to blocking once locales are clean.
+        run: npm run lint:errors
+        continue-on-error: true
+      - name: JS unit tests
+        run: npm test
+
+  test-python:
+    name: pytest (with Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nimbus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PG_HOST: localhost
+      PG_PORT: '5432'
+      PG_DB: nimbus
+      PG_USER: postgres
+      PG_PASS: postgres
+      # brain.py reads these (os.getenv), defaulting to a local Windows path;
+      # point them at temp paths so `import brain` succeeds on the runner.
+      COLOR_FILE: /tmp/color_wheel.xlsx
+      COLOR_WHEEL_DIR: /tmp/color_wheels
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Bootstrap schema
+        run: psql "postgresql://postgres:postgres@localhost:5432/nimbus" -f schema.sql
+      - name: Run tests
+        run: pytest -ra

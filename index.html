@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <script>
 // Lock page zoom — Gantt timeline zoom via scroll is unaffected
 (function () {
@@ -43,7 +43,7 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-07-06-c';</script>
+<script>window.NIMBUS_BUILD_ID = '2026-07-07-a';</script>
 <link rel="stylesheet" href="styles.css?v=2026-07-06-c">
 
 <style>
@@ -151,6 +151,49 @@
   color: #b5b0a8;
   font-family: 'Public Sans', sans-serif;
   margin-left: 4px;
+}
+.dash-filter-paste-row {
+  padding: 6px 10px 4px;
+  border-bottom: 1px solid #ece8e0;
+}
+.dash-filter-paste-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: 'Public Sans', sans-serif;
+  border: 1px solid #d5d1c8;
+  border-radius: 5px;
+}
+.dash-filter-checklist {
+  max-height: 200px;
+  overflow-y: auto;
+}
+.dash-filter-pomat-panel {
+  min-width: 280px;
+  padding: 8px 10px;
+}
+.dash-filter-pomat-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 90px;
+  resize: vertical;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid #d5d1c8;
+  border-radius: 5px;
+}
+.dash-filter-pomat-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+.dash-filter-pomat-count {
+  font-size: 11px;
+  color: #b5b0a8;
+  font-family: 'Public Sans', sans-serif;
 }
 
 /* ── Utilization Heatmap ─────────────────────────────────────── */
@@ -946,6 +989,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <span class="badge" id="alert-badge" hidden>0</span>
       </button>
       <button class="btn btn-primary" data-i18n="btn.save" onclick="NIMBUS.Persistence.saveAll()">Save</button>
+      <span id="user-chip" class="user-chip" hidden></span>
     </div>
   </header>
 
@@ -1099,7 +1143,14 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span id="gantt-flt-line-label">All Lines</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
-        <div class="dash-filter-dropdown" id="gantt-line-dropdown" hidden></div>
+        <div class="dash-filter-dropdown" id="gantt-line-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="gantt-line-paste-input"
+                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
+                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="gantt-line-checklist"></div>
+        </div>
       </div>
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-color-btn"
@@ -1107,7 +1158,14 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span id="gantt-flt-color-label">All Colors</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
-        <div class="dash-filter-dropdown" id="gantt-color-dropdown" hidden></div>
+        <div class="dash-filter-dropdown" id="gantt-color-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="gantt-color-paste-input"
+                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
+                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="gantt-color-checklist"></div>
+        </div>
       </div>
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-form-btn"
@@ -1115,7 +1173,30 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span id="gantt-flt-form-label">All Forms</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
-        <div class="dash-filter-dropdown" id="gantt-form-dropdown" hidden></div>
+        <div class="dash-filter-dropdown" id="gantt-form-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="gantt-form-paste-input"
+                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
+                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="gantt-form-checklist"></div>
+        </div>
+      </div>
+      <div class="gantt-line-filter-group">
+        <button class="flt-sel gantt-line-btn" id="gantt-flt-pomat-btn"
+                onclick="NIMBUS.GanttFilter._togglePoMatDropdown()">
+          <span id="gantt-flt-pomat-label" data-i18n="ui.all_pomat">PO / Material</span>
+          <span style="margin-left:4px;opacity:.6;">▾</span>
+        </button>
+        <div class="dash-filter-dropdown dash-filter-pomat-panel" id="gantt-pomat-dropdown" hidden>
+          <textarea id="gantt-pomat-textarea" class="dash-filter-pomat-textarea" rows="6"
+                    data-i18n-placeholder="ph.paste_po_material"
+                    placeholder="Paste Production Order or Material Number values — one per line or Excel column…"></textarea>
+          <div class="dash-filter-pomat-actions">
+            <span class="dash-filter-pomat-count" id="gantt-pomat-count"></span>
+            <button type="button" class="btn btn-ghost sm" id="gantt-pomat-clear" data-i18n="btn.clear_pasted">Clear pasted</button>
+          </div>
+        </div>
       </div>
       <input  id="flt-text"  class="flt-input" type="search" placeholder="Search orders…" data-i18n-placeholder="ph.search_orders">
       <span class="flt-badge-wrap" id="flt-badge-wrap" hidden><span class="flt-badge" id="flt-badge"></span></span>
@@ -1160,6 +1241,9 @@ body.dark .ls-co       { color: var(--fg-mute); }
     <div class="table-toolbar">
       <input id="quick-filter" class="input" type="search" placeholder="Quick filter orders, material, line…" data-i18n-placeholder="ph.quick_filter">
       <div class="spacer"></div>
+      <span class="orders-copy-badge" id="orders-copy-badge" title="Ctrl+Y · drag to extend · Ctrl+C to copy · Esc to exit">
+        <span>⊞</span><span data-i18n="btn.copy_mode">Copy Mode</span>
+      </span>
       <button class="btn btn-ghost" data-i18n="btn.export_csv" onclick="NIMBUS.Table.exportCsv()">Export CSV</button>
       <button class="btn btn-ghost" data-i18n="btn.fix_selected" onclick="NIMBUS.Table.fixSelected(true)">Fix selected</button>
       <button class="btn btn-ghost" data-i18n="btn.unfix_selected" onclick="NIMBUS.Table.fixSelected(false)">Unfix selected</button>
@@ -1176,7 +1260,14 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span id="tbl-flt-line-label">All Lines</span>
           <span class="dash-filter-arrow">▾</span>
         </button>
-        <div class="dash-filter-dropdown" id="tbl-flt-line-dropdown" hidden></div>
+        <div class="dash-filter-dropdown" id="tbl-flt-line-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="tbl-flt-line-paste-input"
+                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
+                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="tbl-flt-line-checklist"></div>
+        </div>
       </div>
 
       <div class="dash-filter-group">
@@ -1185,7 +1276,14 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span id="tbl-flt-color-label">All Colors</span>
           <span class="dash-filter-arrow">▾</span>
         </button>
-        <div class="dash-filter-dropdown" id="tbl-flt-color-dropdown" hidden></div>
+        <div class="dash-filter-dropdown" id="tbl-flt-color-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="tbl-flt-color-paste-input"
+                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
+                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="tbl-flt-color-checklist"></div>
+        </div>
       </div>
 
       <div class="dash-filter-group">
@@ -1204,6 +1302,23 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <span class="dash-filter-arrow">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="tbl-flt-date-dropdown" hidden></div>
+      </div>
+
+      <div class="dash-filter-group">
+        <button class="dash-filter-btn" id="tbl-flt-pomat-btn" disabled
+                onclick="NIMBUS.Table._toggleChipDropdown('pomat')">
+          <span id="tbl-flt-pomat-label" data-i18n="ui.all_pomat">PO / Material</span>
+          <span class="dash-filter-arrow">▾</span>
+        </button>
+        <div class="dash-filter-dropdown dash-filter-pomat-panel" id="tbl-flt-pomat-dropdown" hidden>
+          <textarea id="tbl-flt-pomat-textarea" class="dash-filter-pomat-textarea" rows="6"
+                    data-i18n-placeholder="ph.paste_po_material"
+                    placeholder="Paste Production Order or Material Number values — one per line or Excel column…"></textarea>
+          <div class="dash-filter-pomat-actions">
+            <span class="dash-filter-pomat-count" id="tbl-flt-pomat-count"></span>
+            <button type="button" class="btn btn-ghost sm" id="tbl-flt-pomat-clear" data-i18n="btn.clear_pasted">Clear pasted</button>
+          </div>
+        </div>
       </div>
 
       <button class="dash-filter-clear" id="tbl-flt-clear" hidden
@@ -1389,6 +1504,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <button class="admin-subtab active" data-sub="overview" role="tab" data-i18n="tab.overview">Overview</button>
           <button class="admin-subtab" data-sub="manage" role="tab" data-i18n="tab.manage_data_tables">Manage Data Tables</button>
           <button class="admin-subtab" data-sub="interface" role="tab" data-i18n="tab.interface">Interface</button>
+          <button class="admin-subtab" data-sub="security" role="tab" data-i18n="tab.security">Security</button>
         </nav>
 
         <!-- OVERVIEW PANE -->
@@ -1678,6 +1794,9 @@ body.dark .ls-co       { color: var(--fg-mute); }
           <div id="md-host"></div>
         </div>
         <div id="admin-interface-pane" hidden><div id="sap-interface-host"></div></div>
+        <div id="admin-security-pane" hidden>
+          <div id="security-host"></div>
+        </div>
 
       </div>
     </div>
@@ -2306,7 +2425,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
   <div class="modal modal-sm">
     <header class="modal-head">
       <h3 id="confirm-title">Confirm</h3>
-      <button class="icon-btn" onclick="NIMBUS.Modal.close('confirm-modal')">✕</button>
+      <button class="icon-btn" id="confirm-close-btn">✕</button>
     </header>
     <div class="modal-body">
       <p class="confirm-message" id="confirm-message"></p>
@@ -2440,6 +2559,9 @@ body.dark .ls-co       { color: var(--fg-mute); }
   // that silently drifted behind APP_VERSION — the browser/corp-proxy then served stale JS
   // for several deploys ("my fix did nothing"). Now bumping NIMBUS_BUILD_ID (top of file)
   // cache-busts every script at once. Emitted after the locales so load order is preserved.
+  // nimbus-compute-core.js MUST load before app.js — app.js's Calendar/Alerts/Utilization
+  // delegate to window.NimbusComputeCore (the same module the worker importScripts).
+  document.write('<script src="nimbus-compute-core.js?v=' + encodeURIComponent(v) + '"><\/script>');
   document.write('<script src="app.js?v=' + encodeURIComponent(v) + '"><\/script>');
   document.write('<script src="nimbus-intelligence.js?v=' + encodeURIComponent(v) + '"><\/script>');
 })();

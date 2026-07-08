@@ -45,9 +45,11 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pydantic import BaseModel
 
+import auth
 import db
 import master_data as md
 import sap_sync
+from auth import require_admin
 
 
 # =========================
@@ -128,6 +130,14 @@ CW_LOADED_AT: str | None = None
 # =============================================================================
 COLOR_WHEEL_DIR = os.getenv("COLOR_WHEEL_DIR", r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheels")
 
+# Opt-in one-time migration of legacy on-disk color_wheel_<SAFE>.xlsx files into
+# the color_wheel table at startup (only when the table is empty). OFF by default
+# so running the app locally against a REMOTE DB never silently pushes local dev
+# wheels into it — enable deliberately (NIMBUS_CW_BACKFILL=1) on the box that
+# holds the authoritative files. A no-op in the container regardless (its /data
+# is ephemeral and empty on boot).
+CW_BACKFILL_FROM_DISK = os.getenv("NIMBUS_CW_BACKFILL", "").strip().lower() in ("1", "true", "yes")
+
 # Directory holding the frontend served by the StaticFiles mount at the bottom of
 # this file. Default "." = current working dir = repo root, so `uvicorn brain:api`
 # serves the UI locally with zero config. The container image sets NIMBUS_STATIC_DIR
@@ -164,6 +174,9 @@ async def _run_sap_job(object_key: str) -> None:
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
     _migrate_audit_log()
+    db.ensure_color_wheel_table()
+    if CW_BACKFILL_FROM_DISK:
+        _backfill_color_wheels_from_disk()
     load_color_wheels(COLOR_FILE)
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
@@ -171,8 +184,13 @@ async def lifespan(app: FastAPI):
     md.ensure_work_hours_columns()
     md.ensure_line_calendar_table()
     md.ensure_line_blackout_table()
+    md.ensure_line_key_columns()
     md.ensure_plant_blackout_table()
     md.ensure_unique_plant()
+    md.ensure_roles_table()
+    md.ensure_role_plants_table()
+    auth.ensure_user_security_table()
+    auth.ensure_bootstrap_admin()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -461,25 +479,13 @@ def _cw_safe_name(plant: str) -> str:
     """Sanitize a plant code to a safe filename component (uppercase alphanumeric + underscore)."""
     return re.sub(r'[^\w]', '_', plant.strip().upper())
 
-def _cw_path(plant: str) -> str:
-    return os.path.join(COLOR_WHEEL_DIR, f"color_wheel_{_cw_safe_name(plant)}.xlsx")
-
-def _cw_meta_path() -> str:
-    return os.path.join(COLOR_WHEEL_DIR, "_meta.json")
-
+# The audit log stays file-based for now: COLOR_WHEEL_DIR/_audit_log.json is a
+# shared append-only log of color-wheel AND optimization events (see the
+# /audit/log endpoints). Wheel DATA + metadata now live in the color_wheel
+# Postgres table; only this audit trail remains on disk. Its durability is a
+# separately-tracked follow-up (see MIGRATION.md).
 def _cw_audit_path() -> str:
     return os.path.join(COLOR_WHEEL_DIR, "_audit_log.json")
-
-def _cw_read_meta() -> dict:
-    try:
-        with open(_cw_meta_path(), encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def _cw_write_meta(meta: dict) -> None:
-    with open(_cw_meta_path(), 'w', encoding='utf-8') as f:
-        json.dump(meta, f, indent=2)
 
 def _migrate_audit_log() -> None:
     """Convert a legacy JSON-array audit file to JSON-Lines (idempotent, runs at startup)."""
@@ -501,23 +507,72 @@ def _cw_append_audit(entry: dict) -> None:
         f.write(json.dumps(entry) + '\n')
 
 
+def _cw_df_to_entries(cw_df) -> dict:
+    """Turn a cleaned color-wheel DataFrame into a JSONB-safe {COLOR: ORDER_Y}
+    map: colors upper/stripped, ranks coerced to native float (blank/NaN -> None
+    so the JSON is valid and reads back as last-priority 999999). Shared by the
+    upload path and the disk->DB backfill so the parse rules can't drift."""
+    if "ORDER" in cw_df.columns and "ORDER_Y" not in cw_df.columns:
+        cw_df = cw_df.rename(columns={"ORDER": "ORDER_Y"})
+    colors = cw_df["COLOR"].astype(str).str.upper().str.strip()
+    ranks = pd.to_numeric(cw_df["ORDER_Y"], errors="coerce")
+    return {
+        str(c): (None if pd.isna(v) else float(v))
+        for c, v in zip(colors, ranks, strict=True)
+    }
+
+
 def _parse_color_wheel(path: str) -> dict:
-    """
-    Read one per-plant color-wheel .xlsx into a {COLOR: ORDER_Y} dict (colors
-    upper/stripped, order coerced numeric). Shared by load_color_wheels and the
-    single-plant refresh so the per-plant parse rules can't drift between them.
-    """
-    pdf = db.clean(pd.read_excel(path))
-    if "ORDER" in pdf.columns and "ORDER_Y" not in pdf.columns:
-        pdf = pdf.rename(columns={"ORDER": "ORDER_Y"})
-    pdf["COLOR"] = pdf["COLOR"].astype(str).str.upper().str.strip()
-    return dict(zip(pdf["COLOR"], pd.to_numeric(pdf["ORDER_Y"], errors="coerce"), strict=True))
+    """Read one per-plant color-wheel .xlsx from disk into a {COLOR: ORDER_Y}
+    map. Used only by the one-time disk->DB backfill now that wheels persist in
+    the color_wheel Postgres table."""
+    return _cw_df_to_entries(db.clean(pd.read_excel(path)))
+
+
+def _backfill_color_wheels_from_disk() -> None:
+    """One-time cutover helper (opt-in via NIMBUS_CW_BACKFILL — gated at the
+    call site in lifespan): if the color_wheel table is empty but legacy
+    color_wheel_<SAFE>.xlsx files still exist in COLOR_WHEEL_DIR, import them into
+    the table. A no-op whenever the table already has rows — it never clobbers DB
+    data. Preserves an operator's existing on-disk wheels through the file->DB
+    cutover when run on the box that holds the authoritative files."""
+    try:
+        existing, _ = db.list_color_wheels_meta()
+        if existing:
+            return  # table already populated — leave it alone
+    except Exception as e:
+        _log_event("warn", "color_wheel", "Color-wheel backfill skipped (table check failed)",
+                   exc=e, error_code="db.read")
+        return
+    if not os.path.isdir(COLOR_WHEEL_DIR):
+        return
+    imported = 0
+    for fname in os.listdir(COLOR_WHEEL_DIR):
+        m = re.match(r'^color_wheel_(.+)\.xlsx$', fname, re.IGNORECASE)
+        if not m:
+            continue
+        plant_key = m.group(1).upper()
+        try:
+            entries = _parse_color_wheel(os.path.join(COLOR_WHEEL_DIR, fname))
+            db.upsert_color_wheel(plant_key, plant_key, entries,
+                                  filename=fname, row_count=len(entries),
+                                  uploaded_by="backfill")
+            imported += 1
+        except Exception as e:
+            _log_event("warn", "color_wheel", "Could not backfill plant color wheel",
+                       exc=e, error_code="file.read", filename=fname)
+    if imported:
+        _log_event("info", "color_wheel",
+                   f"Backfilled {imported} color wheel(s) from disk into the color_wheel table",
+                   count=imported)
 
 
 def load_color_wheels(color_file: str = COLOR_FILE) -> None:
     """
-    Populate the GLOBAL_CW / PLANT_CWS module-level cache from disk.
-    Called at startup, on /reload, and after a color-wheel upload/delete.
+    Populate the GLOBAL_CW / PLANT_CWS module-level cache. The global wheel is
+    still read from COLOR_FILE on disk (a deploy-time file); per-plant wheels are
+    loaded from the durable color_wheel Postgres table. Called at startup, on
+    /reload, and after a color-wheel upload/delete.
     """
     global GLOBAL_CW, PLANT_CWS, CW_LOADED_AT
 
@@ -534,17 +589,14 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
         _log_event("warn", "color_wheel", "Could not read global color wheel",
                    exc=e, error_code="file.read", filename=color_file)
 
-    p_cws: dict = {}
-    if os.path.isdir(COLOR_WHEEL_DIR):
-        for fname in os.listdir(COLOR_WHEEL_DIR):
-            m = re.match(r'^color_wheel_(.+)\.xlsx$', fname, re.IGNORECASE)
-            if not m:
-                continue
-            try:
-                p_cws[m.group(1).upper()] = _parse_color_wheel(os.path.join(COLOR_WHEEL_DIR, fname))
-            except Exception as e:
-                _log_event("warn", "color_wheel", "Could not read plant color wheel",
-                           exc=e, error_code="file.read", filename=fname)
+    try:
+        p_cws = db.load_all_color_wheels()   # { safe_plant_key: {COLOR: ORDER_Y} }
+    except Exception as e:
+        # Degrade (no per-plant priority) but record why — orders still schedule,
+        # just without color-wheel ordering, matching the missing-wheel behavior.
+        p_cws = {}
+        _log_event("error", "color_wheel", "Could not load plant color wheels from DB",
+                   exc=e, error_code="db.read")
 
     GLOBAL_CW = g_cw
     PLANT_CWS = p_cws
@@ -553,24 +605,22 @@ def load_color_wheels(color_file: str = COLOR_FILE) -> None:
 
 def _reload_one_plant_wheel(plant: str) -> None:
     """
-    Refresh the PLANT_CWS cache entry for a single plant from its own file —
-    used after an upload/delete so we don't os.listdir + re-parse every wheel.
-    Pops the key when the file is absent (delete path). The key derivation
-    matches load_color_wheels() exactly: _cw_safe_name(plant) (which equals the
-    regex capture .upper() of the on-disk color_wheel_<safe>.xlsx filename).
+    Refresh the PLANT_CWS cache entry for a single plant from the color_wheel
+    table — used after an upload/delete so we don't reload every plant's wheel.
+    Pops the key when the plant has no stored wheel (delete path). The key
+    derivation matches load_all_color_wheels() exactly: _cw_safe_name(plant).
     """
     global PLANT_CWS, CW_LOADED_AT
     key = _cw_safe_name(plant)
-    path = _cw_path(plant)
-    if not os.path.isfile(path):
-        PLANT_CWS.pop(key, None)
-        CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
-        return
     try:
-        PLANT_CWS[key] = _parse_color_wheel(path)
+        row = db.get_color_wheel_row(key)
+        if row is None:
+            PLANT_CWS.pop(key, None)
+        else:
+            PLANT_CWS[key] = row["entries"]
     except Exception as e:
         _log_event("warn", "color_wheel", "Could not refresh plant color wheel",
-                   exc=e, error_code="file.read", plant=plant, filename=path)
+                   exc=e, error_code="db.read", plant=plant)
     CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
 
 
@@ -658,16 +708,21 @@ def _to_pydt(val):
     ts = pd.to_datetime(val, errors="coerce")
     if pd.isna(ts):
         return None
-    # strip tzinfo — Postgres columns are TIMESTAMP WITHOUT TIME ZONE;
-    # JS Date.toISOString() always emits UTC Z strings which make pd.to_datetime
-    # return a tz-aware Timestamp, which psycopg3 rejects for tz-naive columns.
+    # Input contract: the frontend save path now sends NAIVE-LOCAL strings (no Z,
+    # via Util.toLocalSeconds), which pd.to_datetime parses tz-naive — so the
+    # .replace(tzinfo=None) below is a no-op and the local clock digits are stored
+    # verbatim, matching the tz-less strftime read path (round-trips correctly for
+    # non-UTC clients). The .replace stays as a defensive guard: a stray tz-aware
+    # input (e.g. an external /tasks/bulk_update caller still sending a UTC Z
+    # string) is coerced to tz-naive, since Postgres columns are TIMESTAMP WITHOUT
+    # TIME ZONE and psycopg3 rejects tz-aware values for them.
     return ts.to_pydatetime().replace(tzinfo=None)
 
 
 # =========================
 # ROUTES
 # =========================
-@api.get("/diagnostics")
+@api.get("/diagnostics", dependencies=[Depends(require_admin)])
 def get_diagnostics():
     """Return diagnostics: base metadata merged with live DB counts (stateless)."""
     return _diag_snapshot()
@@ -711,7 +766,7 @@ def livez():
     return {"status": "ok"}
 
 
-@api.get("/diagnostics/deep")
+@api.get("/diagnostics/deep", dependencies=[Depends(require_admin)])
 def get_diagnostics_deep():
     """Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS."""
     db_deep = db.get_db_deep_stats()
@@ -757,7 +812,7 @@ def get_diagnostics_deep():
     }
 
 
-@api.post("/reload")
+@api.post("/reload", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def reload_data():
     """
     Refresh the in-process color-wheel cache from disk. In stateless mode orders
@@ -1152,7 +1207,7 @@ def baseline_correct(payload: DueDateCorrectionPayload):
 # =========================
 # ADMIN COCKPIT — upload, purge, audit
 # =========================
-@api.post("/upload", dependencies=[Depends(require_api_key)])
+@api.post("/upload", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_orders(file: UploadFile = File(...)):
     """
     Receive an xlsx file (sequence_testing-shaped) and upsert into the orders
@@ -1187,7 +1242,7 @@ async def upload_orders(file: UploadFile = File(...)):
     return result
 
 
-@api.post("/purge", dependencies=[Depends(require_api_key)])
+@api.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def purge_orders(payload: dict):
     """
     payload: { start_date: ISO, end_date: ISO } — both inclusive.
@@ -1207,13 +1262,13 @@ def purge_orders(payload: dict):
     return result
 
 
-@api.get("/upload/audit")
+@api.get("/upload/audit", dependencies=[Depends(require_admin)])
 def get_upload_audit(limit: int = 50):
     """Recent uploads, newest first, for the Admin Cockpit history card."""
     return {"audit": db.upload_audit_log(limit)}
 
 
-@api.post("/upload/audit/clear")
+@api.post("/upload/audit/clear", dependencies=[Depends(require_admin)])
 def clear_upload_audit():
     """Delete all upload history records."""
     return db.clear_upload_audit()
@@ -1223,9 +1278,9 @@ def clear_upload_audit():
 # COLOR WHEEL ENDPOINTS
 # =========================
 
-@api.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key)])
+@api.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...)):
-    """Upload or replace a plant-specific color wheel xlsx."""
+    """Upload or replace a plant-specific color wheel (persisted to the color_wheel table)."""
     raw = await file.read()
     # Excel parse is blocking/CPU-bound — keep it off the event loop.
     try:
@@ -1246,80 +1301,71 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
             detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with COLOR and ORDER columns",
         ) from e
 
-    path = _cw_path(plant)
-    is_replace = os.path.isfile(path)
+    entries = _cw_df_to_entries(cw_df)
     row_count = len(cw_df)
     ts = datetime.utcnow().isoformat() + "Z"
     user = request.headers.get("X-User", "system")
-    action = "color_wheel_replace" if is_replace else "color_wheel_upload"
     fname = file.filename or "upload.xlsx"
+    safe = _cw_safe_name(plant)
 
-    def _do_file_ops():
-        with open(path, 'wb') as fh:
-            fh.write(raw)
-        meta = _cw_read_meta()
-        meta[plant] = {
-            "uploaded_at": ts, "uploaded_by": user,
-            "filename": fname, "row_count": row_count,
-        }
-        _cw_write_meta(meta)
+    def _persist():
+        # upsert (insert-or-replace) is a single statement; RETURNING (xmax = 0)
+        # tells us whether this was a first upload or a replace.
+        res = db.upsert_color_wheel(safe, plant, entries,
+                                    filename=fname, row_count=row_count, uploaded_by=user)
+        is_replace = not res["inserted"]
         _cw_append_audit({
-            "ts": ts, "user": user, "action": action, "plant": plant,
+            "ts": ts, "user": user,
+            "action": "color_wheel_replace" if is_replace else "color_wheel_upload",
+            "plant": plant,
             "details": {"filename": fname, "row_count": row_count, "replaced": is_replace},
         })
+        # Color-merge runs per-request from the cache; refresh ONLY this plant's
+        # wheel so the new wheel takes effect on the next /tasks call without
+        # reloading every plant's wheel (or requiring a full /reload).
+        _reload_one_plant_wheel(plant)
+        return is_replace
 
-    await run_in_threadpool(_do_file_ops)
-    # Color-merge runs per-request from the cache; refresh ONLY this plant's wheel
-    # so the new wheel takes effect on the next /tasks call without re-reading
-    # every plant's file (or requiring a full /reload).
-    await run_in_threadpool(_reload_one_plant_wheel, plant)
+    is_replace = await run_in_threadpool(_persist)
+    action = "color_wheel_replace" if is_replace else "color_wheel_upload"
     return {"status": "ok", "row_count": row_count, "action": action, "replaced": is_replace}
 
 
 @api.get("/color-wheel/{plant}")
 def get_color_wheel(plant: str):
-    """Return the parsed color wheel for a plant as JSON entries."""
-    path = _cw_path(plant)
-    if not os.path.isfile(path):
+    """Return the stored color wheel for a plant as sorted JSON entries."""
+    row = db.get_color_wheel_row(_cw_safe_name(plant))
+    if row is None:
         raise HTTPException(status_code=404, detail=f"No color wheel uploaded for plant {plant!r}")
-    try:
-        cw_df = db.clean(pd.read_excel(path))
-        if "ORDER" in cw_df.columns and "ORDER_Y" not in cw_df.columns:
-            cw_df = cw_df.rename(columns={"ORDER": "ORDER_Y"})
-        cw_df["COLOR"] = cw_df["COLOR"].astype(str).str.upper().str.strip()
-        cw_df["ORDER_Y"] = pd.to_numeric(cw_df["ORDER_Y"], errors="coerce").fillna(999999)
-        entries = (
-            cw_df.sort_values("ORDER_Y")[["COLOR", "ORDER_Y"]]
-            .rename(columns={"COLOR": "color", "ORDER_Y": "order_y"})
-            .to_dict(orient="records")
-        )
-        meta = _cw_read_meta().get(plant, {})
-        return {"plant": plant, "entries": entries, "meta": meta}
-    except Exception as e:
-        _log_event("error", "color_wheel", "Could not read color wheel",
-                   exc=e, error_code="file.read", plant=plant)
-        raise HTTPException(status_code=500,
-                            detail=f"Could not read color wheel — ref: {_current_rid()}") from e
+    # entries: {COLOR: ORDER_Y|None} -> [{color, order_y}] ascending by rank, with
+    # a null/blank rank sorting last (999999), matching apply_color_merge().
+    entries = [
+        {"color": c, "order_y": (999999 if o is None else o)}
+        for c, o in row["entries"].items()
+    ]
+    entries.sort(key=lambda e: e["order_y"])
+    meta = {
+        "uploaded_at": row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
+        "uploaded_by": row["uploaded_by"],
+        "filename": row["filename"],
+        "row_count": row["row_count"],
+    }
+    return {"plant": plant, "entries": entries, "meta": meta}
 
 
-@api.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key)])
+@api.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def delete_color_wheel(plant: str, request: Request):
-    """Delete a plant's uploaded color wheel file."""
-    path = _cw_path(plant)
-    if not os.path.isfile(path):
+    """Delete a plant's stored color wheel."""
+    res = db.delete_color_wheel(_cw_safe_name(plant))
+    if res is None:
         return {"status": "not_found"}
-    os.remove(path)
     ts = datetime.utcnow().isoformat() + "Z"
     user = request.headers.get("X-User", "system")
-    meta = _cw_read_meta()
-    filename = meta.pop(plant, {}).get("filename", "unknown")
-    _cw_write_meta(meta)
     _cw_append_audit({
         "ts": ts, "user": user, "action": "color_wheel_delete", "plant": plant,
-        "details": {"filename": filename},
+        "details": {"filename": res.get("filename") or "unknown"},
     })
-    # File already removed above — drop just this plant's cache entry rather than
-    # re-reading the whole directory.
+    # Row already removed above — drop just this plant's cache entry.
     _reload_one_plant_wheel(plant)
     return {"status": "ok"}
 
@@ -1330,36 +1376,21 @@ def list_color_wheels(
             description="Max color wheels to return. Omit for the full listing."),
         offset: int | None = Query(default=None, ge=0,
             description="Wheels to skip before returning (for paging).")):
-    """List plants with uploaded color wheels and their metadata.
+    """List plants with stored color wheels and their metadata.
 
     Optional ?limit=/?offset= page the listing (default = full catalog). When
     supplied, meta.total carries the full count so callers can paginate."""
-    meta = _cw_read_meta()
-    # Cross-reference with actual files in case meta is stale after manual deletion
-    if os.path.isdir(COLOR_WHEEL_DIR):
-        for fname in os.listdir(COLOR_WHEEL_DIR):
-            if not (fname.startswith("color_wheel_") and fname.endswith(".xlsx")):
-                continue
-            safe_key = fname[len("color_wheel_"):-len(".xlsx")]
-            if not any(_cw_safe_name(p) == safe_key for p in meta):
-                meta[safe_key] = {"uploaded_at": None, "row_count": None, "filename": fname}
-
+    plants, total = db.list_color_wheels_meta(limit, offset)
     if limit is None and offset is None:
-        return {"plants": meta}
-
-    # Page a deterministic (key-sorted) slice; meta.total is the full count.
-    total = len(meta)
-    start = offset or 0
-    items = sorted(meta.items())
-    items = items[start:] if limit is None else items[start:start + int(limit)]
-    return {"plants": dict(items), "meta": {"total": total}}
+        return {"plants": plants}
+    return {"plants": plants, "meta": {"total": total}}
 
 
 # =========================
 # AUDIT LOG ENDPOINTS
 # =========================
 
-@api.get("/audit/log")
+@api.get("/audit/log", dependencies=[Depends(require_admin)])
 def get_audit_log(limit: int = 200):
     """Return the most recent N audit log entries, newest first."""
     log = []
@@ -1384,7 +1415,7 @@ def append_audit_log(entry: dict, request: Request):
     return {"status": "ok"}
 
 
-@api.post("/audit/log/clear")
+@api.post("/audit/log/clear", dependencies=[Depends(require_admin)])
 def clear_audit_log():
     """Wipe the full audit log."""
     try:
@@ -1406,13 +1437,13 @@ def clear_audit_log():
 # is permanently shadowed (a request for it just gets captured as table="...",
 # then 404s inside md_list/_assert_table). _audit was previously registered
 # after {table} and was completely unreachable in production as a result.
-@api.get("/master-data/_audit")
+@api.get("/master-data/_audit", dependencies=[Depends(require_admin)])
 def md_audit(limit: int = 100):
     """Return the most recent N master-data change audit entries."""
     return {"entries": md.list_audit(limit)}
 
 
-@api.get("/master-data/_schema-export")
+@api.get("/master-data/_schema-export", dependencies=[Depends(require_admin)])
 def md_schema_export():
     """
     Read-only: dump every column currently registered (via column_metadata)
@@ -1444,7 +1475,7 @@ def md_list(table: str,
     return md.list_rows(table, limit=limit, offset=offset, plant=plant)
 
 
-@api.post("/master-data/{table}/cascade-preview")
+@api.post("/master-data/{table}/cascade-preview", dependencies=[Depends(require_admin)])
 def md_cascade_preview(table: str, body: dict = Body(default={})):
     """Preview cascading deletes before committing. Payload: { deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
@@ -1452,7 +1483,7 @@ def md_cascade_preview(table: str, body: dict = Body(default={})):
     return md.cascade_preview(table, body.get("deletes", []))
 
 
-@api.post("/master-data/{table}/bulk", dependencies=[Depends(require_api_key)])
+@api.post("/master-data/{table}/bulk", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_bulk(table: str, request: Request, body: dict = Body(default={})):
     """Apply upserts and deletes in one transaction. Payload: { upserts: row[], deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
@@ -1473,12 +1504,18 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
                     _log_event("info", "db", "Re-attributed orders to plant after line change", count=n)
             except Exception as e:
                 _log_event("warn", "db", "Plant re-attribution after line change failed", error=str(e))
+            try:
+                n = db.backfill_line_keys()
+                if n:
+                    _log_event("info", "db", "Backfilled order line_key after line change", count=n)
+            except Exception as e:
+                _log_event("warn", "db", "line_key backfill after line change failed", error=str(e))
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/master-data/{table}/columns", dependencies=[Depends(require_api_key)])
+@api.post("/master-data/{table}/columns", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_add_column(table: str, request: Request, body: dict = Body(default={})):
     """Add a new user-defined column to a master-data table. Payload: { column_name, sql_type, length?, nullable?, default?, display_label? }"""
     if table not in md.ALLOWED_TABLES:
@@ -1498,7 +1535,7 @@ def md_add_column(table: str, request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.delete("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key)])
+@api.delete("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_drop_column(table: str, column: str, request: Request):
     """Drop a user-defined column from a master-data table (system columns are protected)."""
     if table not in md.ALLOWED_TABLES:
@@ -1509,7 +1546,7 @@ def md_drop_column(table: str, column: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.patch("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key)])
+@api.patch("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_rename_label(table: str, column: str, request: Request, body: dict = Body(default={})):
     """Update the display_label of an existing column. Payload: { display_label: str }"""
     if table not in md.ALLOWED_TABLES:
@@ -1524,7 +1561,7 @@ def md_rename_label(table: str, column: str, request: Request, body: dict = Body
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/master-data/plants/{plant}/constraints", dependencies=[Depends(require_api_key)])
+@api.post("/master-data/plants/{plant}/constraints", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(default={})):
     """Persist a plant's switchable-constraint config (ordered list).
 
@@ -1537,6 +1574,62 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
             plant=plant,
             constraints=body.get("constraints", []),
             user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# =========================
+# SECURITY — users, roles admin
+# =========================
+
+@api.post("/security/login")
+def security_login(body: dict = Body(default={})):
+    """Authenticate against user_security. Never exposes the hash."""
+    result = auth.authenticate(body.get("username", ""), body.get("password", ""))
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return result
+
+
+@api.get("/security/bootstrap-status")
+def security_bootstrap_status():
+    return {"admin_exists": auth.admin_exists()}
+
+
+@api.get("/security/users", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def security_list_users(
+        limit: int | None = Query(default=None, ge=1, le=100000,
+            description="Max users to return. Omit for the full list."),
+        offset: int | None = Query(default=None, ge=0,
+            description="Rows to skip before returning (for paging)."),
+        search: str | None = Query(default=None,
+            description="Filter to usernames containing this substring.")):
+    """List users (never includes password hashes)."""
+    return auth.list_users(limit=limit, offset=offset, search=search)
+
+
+@api.post("/security/users/bulk", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def security_bulk_users(request: Request, body: dict = Body(default={})):
+    """Apply user upserts/deletes (username + role only — never touches passwords).
+    Payload: { upserts: [{username, role}], deletes: [{username}] }"""
+    try:
+        return auth.bulk_upsert_users(
+            upserts=body.get("upserts", []),
+            deletes=body.get("deletes", []),
+            user_email=request.headers.get("x-user-email") or request.headers.get("X-User"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/security/users/{username}/reset-password", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def security_reset_password(username: str, request: Request, body: dict = Body(default={})):
+    """Set/replace a user's password. Hashed before storage; never retrievable afterward."""
+    try:
+        return auth.set_user_password(
+            username, body.get("password", ""),
+            user_email=request.headers.get("x-user-email") or request.headers.get("X-User"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1571,7 +1664,7 @@ def _sap_has_secret(params: dict | None) -> bool:
     return any(k.lower() in _SAP_SECRET_KEYS for k in params)
 
 
-@api.get("/sap/interface/objects")
+@api.get("/sap/interface/objects", dependencies=[Depends(require_admin)])
 def sap_objects():
     """List the SAP-syncable objects with their config + last/next run summary."""
     objects = []
@@ -1597,7 +1690,7 @@ def sap_objects():
     return {"objects": objects}
 
 
-@api.get("/sap/interface/mappings/{object}")
+@api.get("/sap/interface/mappings/{object}", dependencies=[Depends(require_admin)])
 def sap_get_mappings(object: str):
     """Return the field-map rows (including inactive) for one SAP object."""
     if object not in sap_sync.SAP_OBJECTS:
@@ -1605,7 +1698,7 @@ def sap_get_mappings(object: str):
     return {"object_key": object, "mappings": sap_sync.load_field_map(object)}
 
 
-@api.post("/sap/interface/mappings/{object}", dependencies=[Depends(require_api_key)])
+@api.post("/sap/interface/mappings/{object}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def sap_set_mappings(object: str, request: Request, body: dict = Body(default={})):
     """Replace the field map for one SAP object. Payload: { mappings: [...] }"""
     if object not in sap_sync.SAP_OBJECTS:
@@ -1622,7 +1715,7 @@ def sap_set_mappings(object: str, request: Request, body: dict = Body(default={}
     return result
 
 
-@api.get("/sap/interface/config/{object}")
+@api.get("/sap/interface/config/{object}", dependencies=[Depends(require_admin)])
 def sap_get_config(object: str):
     """Return one SAP object's config. Secret source_params keys are stripped —
     only non-secret keys are returned, plus has_secret:bool."""
@@ -1640,7 +1733,7 @@ def sap_get_config(object: str):
     }
 
 
-@api.post("/sap/interface/config/{object}", dependencies=[Depends(require_api_key)])
+@api.post("/sap/interface/config/{object}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def sap_set_config(object: str, request: Request, body: dict = Body(default={})):
     """Update one SAP object's config. Payload: { enabled?, transport?, schedule_cron?,
     source_params? }. source_params is MERGED into the stored params (omitted keys are
@@ -1697,7 +1790,7 @@ def sap_set_config(object: str, request: Request, body: dict = Body(default={}))
     }
 
 
-@api.post("/sap/interface/test-connection", dependencies=[Depends(require_api_key)])
+@api.post("/sap/interface/test-connection", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def sap_test_connection(request: Request, body: dict = Body(default={})):
     """Test connectivity for a transport + source_params combo. Payload: { transport,
     source_params }. Connectors are stubs in this skeleton, so this returns the
@@ -1717,7 +1810,7 @@ def sap_test_connection(request: Request, body: dict = Body(default={})):
     return result
 
 
-@api.post("/sap/interface/sync/{object}", dependencies=[Depends(require_api_key)])
+@api.post("/sap/interface/sync/{object}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def sap_sync_now(object: str, request: Request, body: dict = Body(default={})):
     """Run a sync for one SAP object on demand. Payload: { dry_run? }. Offloaded to
     the threadpool (the sync is blocking + does DB I/O)."""
@@ -1732,7 +1825,7 @@ async def sap_sync_now(object: str, request: Request, body: dict = Body(default=
     return result
 
 
-@api.get("/sap/interface/runs")
+@api.get("/sap/interface/runs", dependencies=[Depends(require_admin)])
 def sap_runs(object: str | None = Query(default=None),
              limit: int = Query(default=50, ge=1, le=500)):
     """Return recent SAP sync runs, newest first, optionally scoped to one object."""
@@ -1793,10 +1886,11 @@ def labor_plan_line_post(request: Request, body: dict = Body(default={})):
 # =============================================================================
 # PLANT CALENDARS — per-plant/per-line working hours + blackout blocks.
 #   Backend-authoritative store for what used to be localStorage-only frontend
-#   state. UNGATED (like /tasks/update and /labor-plan) so calendar edits are not
-#   dead-written when NIMBUS_API_KEY is set — these are user-workflow edits, not
-#   admin/DDL. subnetwork is resolved server-side (frontend keys by plant only).
-#   Blackout writes are DELTA-based: { upserts, deletes } — never prune-by-omission.
+#   state. GET /plant-calendar (the read path) stays open, matching /tasks/update
+#   and /labor-plan. The four write endpoints below require require_admin, per
+#   the endpoint-gating table shipped with mandatory login — subnetwork is
+#   resolved server-side (frontend keys by plant only). Blackout writes are
+#   DELTA-based: { upserts, deletes } — never prune-by-omission.
 # =============================================================================
 
 @api.get("/plant-calendar")
@@ -1812,7 +1906,7 @@ def plant_calendar_get(plant: str):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/plant-calendar/plant-hours")
+@api.post("/plant-calendar/plant-hours", dependencies=[Depends(require_admin)])
 def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default={})):
     """Set a plant's weekly working hours. Payload: { plant, work_hours:{0..6:[h1,h2]|null} }."""
     try:
@@ -1825,7 +1919,7 @@ def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default=
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/plant-calendar/line-hours")
+@api.post("/plant-calendar/line-hours", dependencies=[Depends(require_admin)])
 def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={})):
     """Upsert per-line working hours (batched). Payload:
     { plant, lines:[{production_line, work_hours:{0..6:[h1,h2]|null}}] }."""
@@ -1839,7 +1933,7 @@ def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/plant-calendar/line-blackouts")
+@api.post("/plant-calendar/line-blackouts", dependencies=[Depends(require_admin)])
 def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(default={})):
     """Delta write of line blackouts. Payload:
     { plant, upserts:[{id, line?, start, end, reason?}], deletes?:[id] }.
@@ -1855,7 +1949,7 @@ def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(defau
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@api.post("/plant-calendar/plant-blackouts")
+@api.post("/plant-calendar/plant-blackouts", dependencies=[Depends(require_admin)])
 def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(default={})):
     """Delta write of plant-level blackouts. Payload:
     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }."""
@@ -1874,7 +1968,7 @@ def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(defa
 # DB DIAGNOSTICS — comprehensive backend health for Admin Cockpit
 # =============================================================================
 
-@api.get("/diagnostics/db")
+@api.get("/diagnostics/db", dependencies=[Depends(require_admin)])
 def get_diagnostics_db():
     """
     Full DB deep-dive: pool stats, server info, table health, connection activity,
@@ -1901,7 +1995,7 @@ def get_diagnostics_db():
 # terminate-idle (kills app's own pool connections), reset-stats (destroys forensics).
 # =============================================================================
 
-@api.post("/maintenance/vacuum-analyze", dependencies=[Depends(require_api_key)])
+@api.post("/maintenance/vacuum-analyze", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def maintenance_vacuum_analyze(body: dict = Body(default={})):
     table = body.get("table") or None
     _log_event("info", "maintenance", f"VACUUM ANALYZE {table if table else 'all tables'}")
@@ -1917,7 +2011,7 @@ def maintenance_vacuum_analyze(body: dict = Body(default={})):
                 "error": str(e)}
 
 
-@api.post("/maintenance/analyze", dependencies=[Depends(require_api_key)])
+@api.post("/maintenance/analyze", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def maintenance_analyze(body: dict = Body(default={})):
     table = body.get("table")
     if not table:
@@ -1938,7 +2032,7 @@ def maintenance_analyze(body: dict = Body(default={})):
 # BACKEND EVENT LOG — in-memory ring buffer, surfaced in Admin Cockpit
 # =============================================================================
 
-@api.get("/logs/backend")
+@api.get("/logs/backend", dependencies=[Depends(require_admin)])
 def get_backend_logs(level: str | None = None, limit: int = 200,
                      category: str | None = None, since: str | None = None,
                      q: str | None = None, offset: int = 0):
@@ -1974,7 +2068,7 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
     return {"entries": entries[:limit], "total": total}
 
 
-@api.post("/logs/backend/clear", dependencies=[Depends(require_api_key)])
+@api.post("/logs/backend/clear", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def clear_backend_logs(request: Request):
     """Wipe the in-memory backend event log ring buffer. Gated behind the
     optional shared-secret guard; records the actor that triggered it."""

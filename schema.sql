@@ -9,6 +9,20 @@
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
+-- schema_migrations: ledger of one-time, DATA-MUTATING migrations so that
+-- re-applying schema.sql never re-runs them. schema.sql must otherwise stay
+-- pure idempotent DDL (CREATE ... IF NOT EXISTS / ADD COLUMN IF NOT EXISTS /
+-- INSERT ... ON CONFLICT DO NOTHING). Any statement that MUTATES existing row
+-- data must be recorded here and guarded, mirroring the promote-azure
+-- migration-ledger model. See the plants horizon note below for why an
+-- unguarded data mutation in this file is dangerous.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id          TEXT PRIMARY KEY,
+    applied_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------------------------
 -- orders: SAP-source columns + user-scheduling overrides
 --
 -- The columns prefixed `basic_*` are owned by the SAP export and overwritten
@@ -106,9 +120,27 @@ CREATE INDEX IF NOT EXISTS idx_plants_subnetwork ON plants(subnetwork);
 -- Migrations for existing databases
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS alt_flag_horizon   INTEGER NOT NULL DEFAULT 43200;
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS conf_score_horizon INTEGER NOT NULL DEFAULT 20160;
--- Convert existing day-valued rows to minutes (safe: day values are always <= 365)
-UPDATE plants SET alt_flag_horizon   = alt_flag_horizon   * 1440 WHERE alt_flag_horizon   <= 365;
-UPDATE plants SET conf_score_horizon = conf_score_horizon * 1440 WHERE conf_score_horizon <= 365;
+-- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
+-- and NO LONGER re-run on apply.
+--
+-- History: these horizon columns store MINUTES (defaults 43200 / 20160). An early
+-- schema stored days, and a migration multiplied any value <= 365 (a day count) by
+-- 1440. That UPDATE was left UNGUARDED, so it re-ran on EVERY schema.sql apply and
+-- silently re-multiplied any legitimate sub-365-MINUTE horizon edit (e.g. a 300-min
+-- horizon → 432000) — a live data-corruption landmine. The conversion cannot be made
+-- safely idempotent by value alone: a sub-365 number is ambiguous (a day-count to
+-- convert vs. an already-correct small minute value).
+--
+-- Resolution: every live database was converted long ago (the old UPDATE ran on
+-- every apply), so their horizons are already minutes. We therefore record the
+-- migration as applied WITHOUT re-running it — protecting any current sub-365-minute
+-- value from a final erroneous ×1440. The ONLY scenario that could still need the
+-- conversion is restoring from a pre-minutes (day-valued) dump; handle that as an
+-- explicit, backup-first one-off, running exactly these two statements once:
+--     UPDATE plants SET alt_flag_horizon   = alt_flag_horizon   * 1440 WHERE alt_flag_horizon   <= 365;
+--     UPDATE plants SET conf_score_horizon = conf_score_horizon * 1440 WHERE conf_score_horizon <= 365;
+-- then INSERT the ledger row below so it is never repeated. See MIGRATION.md.
+INSERT INTO schema_migrations (id) VALUES ('plants_horizon_minutes') ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS production_lines (
     subnetwork       TEXT NOT NULL,
@@ -128,6 +160,23 @@ CREATE INDEX IF NOT EXISTS idx_lines_plant_only ON production_lines(plant);
 -- looks up production_lines by production_line alone, which the subnetwork-leading
 -- composite PK cannot serve efficiently.
 CREATE INDEX IF NOT EXISTS idx_lines_production_line ON production_lines(production_line);
+
+-- ----------------------------------------------------------------------------
+-- line_key: stable, human-readable composite identity string for a production
+-- line, e.g. "HMF_5512_LINE01". GENERATED so it can never drift from the
+-- natural PK (subnetwork, plant, production_line) — never write to it
+-- directly, and never register it in column_metadata (it would make the
+-- Add-Column wizard / export_schema_sql / bulk_apply try to write a value
+-- into a generated column, which Postgres rejects outright).
+-- Soft reference only: indexed for identity/joins, NOT a hard FK from
+-- orders/labor_plan_line/line_calendar/line_blackout — those tables can
+-- reference a plant+line combo before it's registered here, same as today.
+-- Must precede the orders.plant/line_key blocks below in file order: the
+-- orders.line_key backfill selects this column, so it has to exist first.
+-- ----------------------------------------------------------------------------
+ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS line_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lines_line_key ON production_lines(line_key);
 
 -- ----------------------------------------------------------------------------
 -- orders.plant — per-order plant attribution. Placed AFTER production_lines so the
@@ -158,6 +207,34 @@ UPDATE orders o
    AND (
        SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
         WHERE pl.production_line = o.production_line
+   ) = 1;
+
+-- ----------------------------------------------------------------------------
+-- orders.line_key — soft-reference identity string mirroring production_lines
+-- line_key. Plain TEXT (not generated — orders has no subnetwork column, and
+-- adding one would be redundant; plant is already enforced ~globally unique
+-- via ensure_unique_plant(), so a (plant, production_line) lookup against
+-- production_lines is sufficient). Populated by copying production_lines.
+-- line_key for the matching (plant, production_line) pair. Kept in sync by
+-- db.py (ingest upsert CASE + reattribution), not by the DB.
+-- Strictly downstream of orders.plant: a line code ambiguous across >1 plant
+-- (left plant NULL above) stays line_key NULL too — this does not resolve
+-- that pre-existing ambiguity, it inherits it (see MIGRATION.md).
+-- ----------------------------------------------------------------------------
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS line_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_orders_line_key ON orders(line_key);
+CREATE INDEX IF NOT EXISTS idx_orders_line_key_null ON orders(production_line, plant) WHERE line_key IS NULL;
+
+UPDATE orders o
+   SET line_key = (
+       SELECT pl.line_key FROM production_lines pl
+        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+   )
+ WHERE o.line_key IS NULL
+   AND o.plant IS NOT NULL
+   AND (
+       SELECT COUNT(*) FROM production_lines pl
+        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
    ) = 1;
 
 -- ============================================================================
@@ -295,12 +372,22 @@ CREATE TABLE IF NOT EXISTS labor_plan_line (
 );
 CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant ON labor_plan_line(plant);
 CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant_line ON labor_plan_line(plant, production_line);
+-- line_key: same generated identity string as production_lines.line_key (see
+-- above). This table already carries its own subnetwork/plant/production_line,
+-- so it self-populates on ALTER — no lookup/backfill needed. NOT a startup-hook
+-- table for this column: schema.sql only reaches a pre-existing prod DB once at
+-- provisioning (see master_data.py's ensure_line_key_columns() for the
+-- redeploy-safe path that also covers this table).
+ALTER TABLE labor_plan_line ADD COLUMN IF NOT EXISTS line_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
+CREATE INDEX IF NOT EXISTS idx_lpl_line_key ON labor_plan_line(line_key);
 
 -- ----------------------------------------------------------------------------
 -- Plant / line calendars (working hours) + blackout blocks
 --   Fresh-DB parity for the idempotent ensure_* startup migrations in
 --   master_data.py (which are authoritative for prod). Additive only — no
---   data re-mutation on re-run (unlike the plants horizon ×1440 landmine above).
+--   data re-mutation on re-run (like the now-ledger-guarded plants horizon
+--   conversion above, which no longer re-mutates).
 --   Working-hours shape mirrors the frontend Store: {"0".."6": [h1,h2]|null}.
 -- ----------------------------------------------------------------------------
 -- Plant-level weekly working hours (kept out of column_metadata like constraints).
@@ -331,6 +418,12 @@ CREATE TABLE IF NOT EXISTS line_calendar (
         ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_line_calendar_plant ON line_calendar(plant);
+-- line_key: same generated identity string as production_lines.line_key.
+-- See master_data.py's ensure_line_key_columns() for the redeploy-safe path
+-- (this table is startup-hook-authoritative for prod, not schema.sql).
+ALTER TABLE line_calendar ADD COLUMN IF NOT EXISTS line_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
+CREATE INDEX IF NOT EXISTS idx_line_calendar_line_key ON line_calendar(line_key);
 
 -- Line blackout blocks. production_line NULL = all lines in this plant.
 -- block_id is client-supplied (Util.uid 'blk'). Delta writes only.
@@ -350,6 +443,14 @@ CREATE TABLE IF NOT EXISTS line_blackout (
     CONSTRAINT chk_line_blackout_range CHECK (end_ts > start_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_line_blackout_plant ON line_blackout(plant);
+-- line_key: same generated identity string as production_lines.line_key.
+-- production_line is nullable here (NULL = all lines in plant) — '||'
+-- propagates NULL automatically, so line_key correctly comes out NULL for
+-- plant-wide blocks with no special-casing. See master_data.py's
+-- ensure_line_key_columns() for the redeploy-safe path (startup-hook table).
+ALTER TABLE line_blackout ADD COLUMN IF NOT EXISTS line_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
+CREATE INDEX IF NOT EXISTS idx_line_blackout_line_key ON line_blackout(line_key);
 
 -- Plant-level blackout blocks. block_id is client-supplied (Util.uid 'pblk').
 CREATE TABLE IF NOT EXISTS plant_blackout (
@@ -468,3 +569,82 @@ INSERT INTO sap_field_map (object_key, sap_field, nimbus_column, transform, fiel
     ('orders', 'GLTRP', 'basic_finish_date',    'dats',        4),
     ('orders', 'GAMNG', 'order_quantity',       'decimal',     5)
 ON CONFLICT (object_key, sap_field) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- color_wheel: durable per-plant uploaded color wheels
+--
+-- Replaces the ephemeral COLOR_WHEEL_DIR/color_wheel_<SAFE>.xlsx + _meta.json
+-- files (Container Apps /data is wiped on every restart/redeploy). One row per
+-- plant. `entries` is the parsed {COLOR: ORDER_Y} priority map (COLOR upper/
+-- stripped; ORDER_Y numeric, NULL for a blank/unparseable rank — treated as
+-- last priority 999999 on read, matching apply_color_merge()).
+--
+-- plant_key = _cw_safe_name(plant) (uppercase, non-word chars -> '_'): the same
+-- key used for the on-disk filename stem and the PLANT_CWS cache, so the
+-- collision profile is byte-for-byte unchanged. No FK to plants — like
+-- line_calendar, a wheel may exist for an order-derived plant that lags master
+-- data, and wheels are plant-keyed, not subnetwork-scoped. plant_label keeps the
+-- raw plant code as typed (for the /color-wheels listing).
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS color_wheel (
+    plant_key   TEXT PRIMARY KEY,
+    plant_label TEXT NOT NULL,
+    entries     JSONB NOT NULL,
+    filename    TEXT,
+    row_count   INTEGER NOT NULL DEFAULT 0,
+    uploaded_by TEXT,
+    uploaded_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------------------------
+-- SECURITY / RBAC scaffolding — roles, role_plants, user_security
+--
+-- roles + role_plants are generic-CRUD backed via master_data.py (registered
+-- in ALLOWED_TABLES), same as subnetworks/plants/production_lines above.
+-- user_security is credentials storage — deliberately NEVER registered in
+-- master_data's ALLOWED_TABLES; it is only ever read/written through the
+-- dedicated auth.py functions and the /security/* endpoints in brain.py, not
+-- the generic /master-data/{table} CRUD path. password_hash is never
+-- selected back to the frontend (see auth.list_users).
+--
+-- Table order matters: roles must exist before role_plants and
+-- user_security, which both FK to roles(role).
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roles (
+    role        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS role_plants (
+    role        TEXT NOT NULL REFERENCES roles(role) ON DELETE CASCADE ON UPDATE CASCADE,
+    plant       TEXT NOT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (role, plant)
+);
+CREATE INDEX IF NOT EXISTS idx_role_plants_plant ON role_plants(plant);
+
+CREATE TABLE IF NOT EXISTS user_security (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT,
+    role          TEXT REFERENCES roles(role) ON DELETE RESTRICT ON UPDATE CASCADE,
+    created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- NOTE: the 'admin' row in `roles` and a bootstrap admin user ('PJ29587') in `user_security`
+-- are NOT seeded here. They are seeded idempotently (ON CONFLICT DO NOTHING) at app startup
+-- by auth.ensure_bootstrap_admin(), called from brain.py's lifespan hook right after
+-- auth.ensure_user_security_table() — see MIGRATION.md (Workstream 3 section, "Mandatory
+-- login + require_admin"). If you're looking for an INSERT that creates the first admin,
+-- it lives in Python, not in this file.
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('roles', 'role', 'Role', TRUE, 1),
+    ('roles', 'description', 'Description', FALSE, 2),
+    ('role_plants', 'role', 'Role', TRUE, 1),
+    ('role_plants', 'plant', 'Plant', TRUE, 2)
+ON CONFLICT (table_name, column_name) DO NOTHING;

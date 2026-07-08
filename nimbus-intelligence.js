@@ -544,7 +544,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
             if (!err) { Toast.show(t('toast.no_active_conflicts'), 'info', 1800); return; }
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
           }
         },
@@ -557,7 +557,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.maxUtil >= 1.0 && s.hasPlant,
           run(s) {
             CommandPalette.close();
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             const sample = Store.tasksArr.find(t => t.PRODUCTION_LINE === s.overloadedLine);
             if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
           }
@@ -609,7 +609,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.blackoutRisk > 0 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             Toast.show(t('toast.check_gantt_blackout'), 'warn', 3000);
           }
         },
@@ -719,7 +719,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
             if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
           }
         },
@@ -888,7 +888,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           type: 'order', label, sub, icon: '📦', id: t.id,
           run() {
             CommandPalette.close();
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             setTimeout(() => {
               const task = NIMBUS.Store.tasks[t.id];
               if (task) { NIMBUS.Inspector.show(task); NIMBUS.Timeline.focus(String(t.id)); }
@@ -902,7 +902,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           type: 'line', label: `Go to: ${line}`, sub: 'Scroll Gantt to this line', icon: '🏭',
           run() {
             CommandPalette.close();
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             const sample = NIMBUS.Store.tasksArr.find(t => t.PRODUCTION_LINE === line);
             if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
           }
@@ -911,7 +911,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           type: 'line', label: `Isolate: ${line}`, sub: 'Show only this line in Gantt', icon: '⊕',
           run() {
             CommandPalette.close();
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             NIMBUS.GanttFilter._selectedLines.clear();
             NIMBUS.GanttFilter._selectedLines.add(line);
             NIMBUS.GanttFilter._refreshLineBtn?.();
@@ -927,7 +927,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a,b) => a.time - b.time)[0];
             if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttTimeline();
             setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
           } },
         { type:'action', label:'Take Snapshot',           sub:'Save a manual Time Machine checkpoint', icon:'📷',
@@ -939,7 +939,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           } },
         { type:'action', label:'Print / Export',          sub:'Open the print & export dialog',       icon:'🖨️',
           run(){ CommandPalette.close(); NIMBUS.Printer?.open?.(); } },
-        { type:'action', label:'Go to Now',              sub:'Center Gantt on current time',           icon:'⊙',  run(){ CommandPalette.close(); NIMBUS.App.goto('gantt'); NIMBUS.Timeline.gotoNow?.(); } },
+        { type:'action', label:'Go to Now',              sub:'Center Gantt on current time',           icon:'⊙',  run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); NIMBUS.Timeline.gotoNow?.(); } },
         { type:'action', label:'Time Machine',           sub:'Browse schedule history',                icon:'⏱', run(){ CommandPalette.close(); TimeMachine.openUI(); } },
         { type:'action', label:'Compare Schedules',      sub:'Diff current vs. a snapshot',           icon:'⇄',  run(){ CommandPalette.close(); Diff.showUI(); } },
         { type:'action', label:'Reload Data',            sub:'Re-read Excel (discards in-memory edits)', icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }

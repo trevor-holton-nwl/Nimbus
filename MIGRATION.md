@@ -30,7 +30,7 @@ This runbook gets ONE plant safely live on Azure with real Newell logins, kills 
 2. Containerize (backend + frontend) with a local `docker compose` full stack.
 3. Entra ID SSO: MSAL.js on the frontend, JWT validation on the backend, dev bypass that fails-closed in prod.
 4. Optimistic edit-conflict detection on task-update endpoints (409 + frontend warn).
-5. Color-wheel filesystem durability via Azure Files mount.
+5. Color-wheel filesystem durability — **shipped 2026-07-07 via a Postgres `color_wheel` table** (per-plant wheels), superseding the originally-planned Azure Files mount. See WS5.
 6. Same-origin reverse-proxy networking (frontend nginx → internal backend).
 7. Azure provisioning runbook + schema bootstrap + `DEPLOYMENT.md`.
 8. **Rotate the committed Postgres password** (`Mavdob8808!` is in source history).
@@ -38,7 +38,7 @@ This runbook gets ONE plant safely live on Azure with real Newell logins, kills 
 ### Out of scope (fast-follow, documented but not built)
 - Full plant-scoped RBAC (a clean seam is left, not built).
 - Migrating per-browser `localStorage` state (blackouts/calendars/line-settings) to server-side per-user storage.
-- Migrating color wheels from Azure Files into a Postgres table.
+- ~~Migrating color wheels from Azure Files into a Postgres table.~~ **Done 2026-07-07** — pulled forward: per-plant wheels persist in the `color_wheel` table (they never went via Azure Files). See WS5.
 - VNet + Private Endpoint Postgres hardening.
 - Pagination/filtering toward the 50-plant / 3,500-line roadmap.
 
@@ -120,6 +120,125 @@ CONN_STR = (f"host={PG_HOST} port={PG_PORT} dbname={PG_DB} "
 - Gate boot: make the `DOMContentLoaded` handler (~line 12878) `async`, `await NIMBUS.Auth.init()` before module init.
 - Remove hardcoded `trevor.holton@newellco.com` `X-User` headers (lines ~1604, 1632, 3798, 11979, 12637, 12756, 12786, 12812, 12860) — identity now comes from the JWT.
 
+### `roles` / `role_plants` / `user_security` — RBAC seam partially shipped (relates to Workstream 3, 2026-07-07)
+
+A user-admin feature shipped three new, additive Postgres tables ahead of full Workstream 3.
+Recorded here because **`role_plants` is exactly the per-plant RBAC seam this workstream already
+anticipated** (the `require_plant_access` stub above), and because it creates a filename
+collision this workstream's eventual implementer needs to know about.
+
+- **`roles`** (`role` PK + `description`) and **`role_plants`** (`role`+`plant` composite PK, FK
+  `role` → `roles(role)` `ON DELETE CASCADE`) are plain admin-managed tables wired through the
+  **existing generic CRUD path** — added to `master_data.py`'s `ALLOWED_TABLES` / `_KEY_COLUMNS`,
+  bootstrapped by new `ensure_roles_table()` / `ensure_role_plants_table()` (same
+  `CREATE TABLE IF NOT EXISTS` + `column_metadata` seed idiom as every other `ensure_*` in that
+  file), and served by `GET`/`POST /master-data/roles` + `/role_plants` like any other
+  master-data table. **`role_plants` *is* the RBAC seam:** once WS3 lands, `require_plant_access`
+  can resolve `user["email"]`/`oid` → `user_security.role` → `role_plants.plant` rows instead of
+  returning `user` unchecked — no new table needed then, just wiring the dependency.
+- **`user_security`** (`username` PK, `password_hash`, `role` FK → `roles(role)` `ON DELETE
+  RESTRICT`) is **not** on the generic CRUD path — it's backed by a new, dedicated **`auth.py`**
+  module (`list_users`, `bulk_upsert_users`, `set_user_password`, `verify_user_password`).
+  Passwords are salted PBKDF2-SHA256 (600k iterations), set only via admin reset, and **never
+  retrievable** — the read path never selects `password_hash`, only a `has_password` boolean.
+- **⚠ Filename collision with this workstream's plan.** WS3 above already earmarks a future
+  `auth.py` for Entra JWT validation (`require_user`, `require_plant_access`,
+  `NIMBUS_AUTH_DISABLED` bypass) — that module didn't exist yet, so **this feature's `auth.py`
+  claimed the filename first**, for an unrelated purpose (local username/password admin accounts,
+  no JWT/Entra code). Whoever executes WS3 must reconcile the two — most likely fold Entra's
+  `require_user`/`require_plant_access` into this same file alongside the password/user-admin
+  functions (one `auth.py`, two concerns: Entra handles *authentication*, `roles`/`role_plants`
+  handle *authorization*) — rather than assume `auth.py` is greenfield when WS3 starts.
+- All DDL is additive-only (`CREATE TABLE IF NOT EXISTS`) and Azure/Entra-independent, consistent
+  with this doc's local-first guarantee — runs against local Postgres like every other `ensure_*`
+  table, no new infra required.
+
+**Deferred follow-ups (tracked here, not built):**
+- **Login-path hardening**, needed once an actual login screen consumes `verify_user_password`
+  (today there's no session/token issuance — `user_security` is purely admin-managed username +
+  role + password). Before wiring a real login: make a lookup on a nonexistent username
+  constant-time (today it short-circuits before the PBKDF2 hash runs, a timing side-channel that
+  lets an attacker enumerate valid usernames), add account lockout / rate-limiting on repeated
+  failures, and decide session-vs-token issuance — this may fold into WS3's JWT flow rather than
+  become a second, parallel auth mechanism (see the filename-collision note above).
+- **Server-side `?role=` filter on `GET /master-data/role_plants`.** The endpoint returns the
+  whole table today; the admin Security → Roles master-detail view (role list → its plants)
+  filters client-side. Fine at prototype scale, but per this project's scale rule (`CLAUDE.md`:
+  plant/line-list endpoints must be server-filterable at 50+ plants), add `?role=` server-side
+  before the role/plant count grows.
+- **Role-deletion cascade preview.** `plants`/`subnetworks` already get a friendly pre-delete
+  usage preview (`/master-data/{table}/cascade-preview`) before a destructive delete. Deleting an
+  in-use `role` does not — it now returns a clean `400` (the new generic `ForeignKeyViolation`
+  catch added to `bulk_apply()` alongside these tables, firing on the `user_security.role`
+  `RESTRICT` FK; `role_plants` rows just cascade-delete silently) instead of a `500`, which is
+  correct but still just an error message, not a preview of which users would be affected. Extend
+  cascade-preview to cover `roles` before real admins are managing many users per role.
+
+### Mandatory login + `require_admin` (shipped 2026-07-08, relates to Workstream 3)
+
+Ahead of full Entra SSO, the app now **requires sign-in against `user_security` before any UI
+renders**, and admin-only backend routes are gated behind a new `require_admin` dependency. This
+is a stopgap that reuses the `roles`/`user_security` seam above, not a replacement for WS3.
+
+- **Full-screen login gate.** `app.js` boots into a JS-built `.login-screen` overlay (mirroring
+  `WelcomeSplash`'s append-to-`document.body` technique — no static markup added to
+  `index.html` beyond the header `#user-chip`) whenever no `Session.currentUser()` is cached in
+  `localStorage`. The rest of the existing `DOMContentLoaded` boot sequence was extracted into
+  `App._bootMain()` so the exact same boot path runs whether the gate passes immediately or only
+  after a successful `Session.signIn()`.
+- **`auth.py` additions:** `authenticate()` (verifies against `verify_user_password`, never
+  returns/logs the hash), `get_user_role()`, `admin_exists()`, `_actor_email(request)` (reads
+  `x-user-email`/`X-User` — see SSO swap-point note below), `require_admin` (a FastAPI
+  dependency; grace-opens if no admin row exists yet, otherwise requires `role == 'admin'`), and
+  `ensure_bootstrap_admin()` (seeds the `admin` role + a `PJ29587` bootstrap user, both
+  `ON CONFLICT DO NOTHING` — see the `schema.sql` note next to `user_security`).
+- **New ungated endpoints** (they establish identity, by construction): `POST /security/login`,
+  `GET /security/bootstrap-status`.
+- **Endpoint gating, applied in three tiers** (audited call-by-call against actual frontend
+  callers, not a blanket sweep):
+  - **Admin-exclusive reads/ops, gated fresh with `require_admin`** — diagnostics, backend logs,
+    audit log read/clear, upload-audit read/clear, master-data cascade-preview and
+    `_schema-export`, plant-calendar writes (`plant-hours`/`line-hours`/`*-blackouts`), and the
+    SAP interface read endpoints (`/sap/interface/objects`, `/mappings/{object}`,
+    `/config/{object}`, `/runs`). `POST /reload` also picked up `require_api_key` alongside
+    `require_admin` — it previously had **zero** auth, unlike its `/maintenance/*` siblings.
+  - **Admin-exclusive writes, stacked onto the existing `require_api_key` guard** — `/upload`,
+    `/purge`, color-wheel POST/DELETE, master-data bulk/DDL/constraints writes, `/security/users`
+    (list + bulk + reset-password), the SAP interface write/sync/test-connection endpoints, and
+    `/maintenance/vacuum-analyze`, `/maintenance/analyze`, `/logs/backend/clear`.
+  - **Left untouched, explicitly** — app-wide/ops-critical/pre-auth-by-construction endpoints:
+    `GET /tasks`, all three task-update endpoints, `/tasks/refresh`, `/tasks/baseline-correct`,
+    `GET /health`, `/livez`, labor-plan read/write, `GET /master-data/{table}`,
+    `GET /plant-calendar`, `GET /color-wheel(s)`, `POST /audit/log`, `POST /logs/frontend`, and
+    the two new login endpoints. Gating any of these would break the app for non-admin users or
+    the platform's own liveness probe. The in-process SAP `APScheduler` job is unaffected either
+    way — it calls `master_data.bulk_apply()`/`db.upsert_orders()` directly in-process, never
+    through brain.py's HTTP layer, so it never passes through `Depends()`.
+- **Frontend actor identity:** the 12 raw-`fetch()` call sites and 2 module-level `USER_EMAIL`
+  constants that hardcoded `'trevor.holton@newellco.com'` now read `Session.actor()` instead,
+  so audit trails and `X-User`/`x-user-email` headers reflect whoever is actually signed in.
+
+**Deferred, by design (not missed — flagged by the same verification pass that produced the
+gating table above):**
+- **Login-path hardening.** `/security/login` has no rate-limiting/lockout on repeated failed
+  attempts, and an unknown-username lookup is not constant-time (same timing side-channel noted
+  under the `user_security` RBAC-seam entry above, now directly reachable from an unauthenticated
+  endpoint instead of only from admin-managed password verification).
+- **The SSO swap point is `auth._actor_email(request)` — and only that one function.** When WS3
+  lands, this is the single line that changes (from reading trusted `X-User`/`x-user-email`
+  headers to reading a validated Entra JWT claim); `require_admin`, `authenticate()`, and the
+  frontend `Session` module are all written to not care where the email came from.
+- **Retire the first-run grace in `require_admin`** once WS3 (or any real SSO) lands — today it
+  intentionally leaves every admin route open until the *first* admin row exists, which is safe
+  only because that row is seeded at the very next boot by `ensure_bootstrap_admin()`.
+- **Rotate/remove the `PJ29587` / `1234` bootstrap seed** once real named accounts exist in
+  `user_security` — it is a throwaway credential checked into the hardcoded hash literal in
+  `auth.py`, not a secret, and should not survive past initial onboarding.
+- **Two optional low-priority UX fast-follows**, not built: re-checking a stale cached role on
+  window focus (a demoted admin stays "admin" client-side until next login), and multi-tab
+  sign-out sync via a `storage` event listener (signing out in one tab leaves other open tabs
+  with a stale session until they next hit a 401/refresh).
+
 ## Workstream 4 — Optimistic edit-conflict guardrail (bounded multi-user slice)
 
 The single concession to multi-user, sized for "a few editors, same plant":
@@ -129,9 +248,13 @@ The single concession to multi-user, sized for "a few editors, same plant":
 - **Frontend:** on 409, show a Toast ("Order X was changed by someone else — reload to see the latest") rather than silently clobbering; refresh the affected row.
 - **Known limitation (documented, not fixed):** `Persistence.saveAll()` pushes the whole task array coarsely; the granular `/task/update` path is where real concurrent edits flow and where the guardrail bites. Full per-user state sync is the fast-follow.
 
-## Workstream 5 — Color-wheel durability (Azure Files)
+## Workstream 5 — Color-wheel durability (SHIPPED via Postgres, 2026-07-07)
 
-Container Apps filesystem is ephemeral, but `COLOR_WHEEL_DIR` is written at runtime (per-plant `.xlsx`, `_meta.json`, `_audit_log.json`). **Pilot fix = Azure Files SMB mount at `/data`** — zero code change beyond the env var (WS1). Register the share as environment storage, mount as a volume on the backend, keep backend `min=max=1 replica` during pilot to avoid SMB write races on the audit JSON. Global `COLOR_FILE` stays baked read-only into the image. (Post-pilot: migrate to a `color_wheels` Postgres table — out of scope.)
+Container Apps filesystem is ephemeral, but `COLOR_WHEEL_DIR` was written at runtime. **Resolved by pulling the post-pilot option forward: per-plant color wheels now persist in a Postgres `color_wheel` table** (one row per plant: a JSONB `{COLOR: ORDER_Y}` map + upload metadata; migration `migrations/2026-07-07-color-wheel-table.sql`, mirrored into `schema.sql`, self-bootstrapped by `db.ensure_color_wheel_table()`). This needed **no new Azure infra, dependency, or auth** — Postgres was already the only durable store wired — and removes the durability/SMB-race reason the app was pinned to single-replica (the in-process `PLANT_CWS` cache + log ring buffer are the remaining single-replica reasons; cross-replica cache refresh after an upload still needs `/reload`). The originally-planned **Azure Files SMB mount at `/data` was NOT built** (net-new storage account + share, and it kept single-replica); this **supersedes Fork 1's "Azure Files now" default**. The `brain.py` seams (`load_color_wheels`, `_reload_one_plant_wheel`, the four `/color-wheel*` endpoints) now read/write the DB. An **opt-in** one-time `_backfill_color_wheels_from_disk()` (env `NIMBUS_CW_BACKFILL=1`, **off by default**) imports legacy on-disk wheels into the empty table — off by default so running the app locally against a remote DB never silently pushes local dev wheels into it; a no-op in the container regardless (its `/data` is empty on boot).
+
+**Still on `/data` (ephemeral) — separate follow-ups:**
+- **Global wheel** (`COLOR_FILE`): not uploadable through the app (a deploy-time file), so it stays out of the table and still loads from disk. It currently lives at `/data/color_wheel.xlsx` — **NOT** "baked read-only into the image" as an earlier draft of this note claimed: `.dockerignore` excludes all `*.xlsx`, so nothing ships in the image and `GLOBAL_CW` is simply empty after a restart. Durability fix = **bake `color_wheel.xlsx` into the image** (add it to the build context) or seed it into the table later.
+- **Audit log** (`COLOR_WHEEL_DIR/_audit_log.json`): a shared append-only log of color-wheel **and** `optimization_run` events (see the `/audit/log` endpoints). Left file-based for now; its durability is a distinct item spanning optimization events, not just color wheels.
 
 ## Workstream 6 — Networking: same-origin reverse proxy
 
@@ -175,7 +298,7 @@ Ordered (user-assigned managed identity + Key Vault **before** the apps — a sy
 ---
 
 ## Forks (defaults chosen; confirm at execution time)
-1. **Color wheels:** Azure Files mount now ✅ (recommended) vs. Postgres table now → *default: Azure Files*.
+1. **Color wheels:** ~~Azure Files mount now vs. Postgres table now → default: Azure Files~~ → **REVERSED — shipped as a Postgres `color_wheel` table (2026-07-07)** for per-plant wheels; Azure Files was never provisioned. See WS5.
 2. **Postgres exposure:** public + allow-Azure firewall (pilot) ✅ vs. VNet + Private Endpoint → *default: public for pilot, harden as fast-follow*.
 3. **Schema bootstrap:** manual `psql` one-shot ✅ vs. Container Apps Job → *default: manual*.
 4. **Security action (not optional):** rotate the Postgres password — `Mavdob8808!` is in git/source history.
@@ -293,7 +416,7 @@ The `/tasks` read path previously derived an order's plant by `LEFT JOIN product
 ### Deferred — where each item lives
 | Deferred item | Status / home |
 |---|---|
-| **Color-wheel durability** — Container Apps `/data` is ephemeral, so uploaded per-plant wheels + `_meta.json` + `_audit_log.json` are **wiped on every restart/redeploy** (orders are safe — they're in Postgres). Keep `--min/max-replicas 1` meanwhile. | **Workstream 5** (Azure Files SMB mount; zero code change beyond the env var). |
+| **Color-wheel durability** — per-plant wheels + metadata are now **durable in the Postgres `color_wheel` table** (shipped 2026-07-07). Still ephemeral on `/data`: the **global** `COLOR_FILE` wheel (fix = bake into image) and the shared `_audit_log.json` (color-wheel + `optimization_run` events). Single-replica is still required for the in-process cache/log buffer (DEPLOYMENT.md), not for wheel durability. | **Workstream 5 DONE via Postgres** (not Azure Files). Global-wheel + audit-log durability remain follow-ups. |
 | **Real authentication / login** — the pilot URL is **open to anyone who has it**. | **Workstream 3** (Entra SSO). Interim stopgap: `NIMBUS_API_KEY` (see audit-remediation addendum) — but it guards only destructive *admin* routes, **not** `/tasks` reads or task edits. |
 | **Registry auth without a stored password** (ACR admin user → managed identity). | **Workstream 7** (UAMI + `AcrPull`). |
 | **Postgres network hardening** (allow-Azure firewall → VNet / Private Endpoint). | **Workstream 7** item 4 + **Fork 2**. |
@@ -411,3 +534,69 @@ blocked on anything technical:
   could also prefer ending a day on the same color/form it opens the next day with, to avoid a changeover
   that straddles midnight for no schedule-quality reason. Not meaningful to build before setup time itself
   exists.
+
+## Timezone save corruption (fixed 2026-07-07)
+
+**The code path is fixed; historical rows saved before the fix may be shifted.**
+
+*The bug:* `saveAll`'s task payload serialized `start_date`/`end_date` as raw `Date` objects, so
+`JSON.stringify` emitted `toISOString()` UTC (`…Z`) strings. The backend stored the UTC clock digits
+naively, and the orders read path emits **bare** `strftime` (no `Z`), which the frontend `new Date()`
+parses as **local** — so a save→reload round-trip shifted every task's start/end by the saving client's
+UTC offset (e.g. +4/+5 h for US Eastern). Silent, and on the primary save path.
+
+*The fix:* `saveAll` now routes `start_date`/`end_date` through `Util.toLocalSeconds` (naive-local, no `Z`),
+mirroring the already-correct `_relayDueDateCorrections` path. `brain.py:_to_pydt` then parses tz-naive and
+stores the local clock digits verbatim, round-tripping correctly. The blackout/plant-calendar path is a
+**separate, self-consistent UTC scheme** (`_blockPayload` sends `toISOString()`, `master_data.py:_parse_ts`
+parses Z-aware, the read path re-appends `Z`) and was deliberately left unchanged — do not unify the two.
+
+*Historical exposure (deferred, needs a decision):* rows persisted before this fix by a non-UTC client are
+already shifted by that client's offset. There is **no reliable per-row offset to invert** (the offset
+wasn't recorded), so an automatic backfill is unsafe. A bulk correction would have to assume a single site
+offset (e.g. all edits made in US Eastern) and be run as a **separate, explicitly-approved one-off
+migration** against a backup — not folded into `schema.sql`. Until then, treat pre-2026-07-07 scheduled
+times as potentially offset for any non-UTC editor.
+
+## Schema migration ledger — ×1440 horizon landmine (fixed 2026-07-07)
+
+**`schema.sql` is now safe to re-apply.** Previously it re-ran an unguarded
+`UPDATE plants SET *_horizon = *_horizon * 1440 WHERE *_horizon <= 365` on **every** apply,
+silently re-multiplying any legitimate sub-365-**minute** horizon edit into garbage (e.g. a 300-min
+horizon → 432000). This is the "×1440 landmine" and was the gating fix before revisiting prod promotion.
+
+*The fix:* a new `schema_migrations (id, applied_at)` ledger table records one-time, data-mutating
+migrations so they never re-run. The horizon conversion is recorded as `plants_horizon_minutes` and is
+**no longer executed on apply** — because every live DB was converted long ago (the old UPDATE ran on
+every apply), so their values are already minutes, and re-running risks corrupting a current sub-365
+value (the conversion is ambiguous by value alone: a small number could be a day-count to convert or an
+already-correct minute value). Going forward, **any data-mutating statement belongs in a ledger-guarded
+block, never as a bare UPDATE in `schema.sql`** — this mirrors the `promote-azure` skill's migration-ledger
+model (never hand-mutate prod outside that flow).
+
+*One-off restore case:* the only scenario that could still need the conversion is restoring from a
+**pre-minutes (day-valued) dump**. Handle it as an explicit, backup-first one-off — run the two
+`UPDATE ... * 1440 WHERE ... <= 365` statements once (preserved in the `schema.sql` comment), then
+`INSERT INTO schema_migrations (id) VALUES ('plants_horizon_minutes')` so it never repeats.
+
+## Multi-user real-time sync (planned)
+
+A design for near-real-time (seconds) freshness across concurrent schedulers on the same plant was
+brainstormed and approved 2026-07-07, alongside a Phase 0 render-perf fix (batching `Timeline.patchLoop`).
+Full spec: **`docs/superpowers/specs/2026-07-07-multi-user-sync-design.md`**. This is a pointer/index
+entry only — see the spec for the full architecture.
+
+- **Phase 1 — write-through autosave.** The **TZ corruption hard blocker** is now **fixed** (see
+  "Timezone save corruption" below) — `saveAll` sends naive-local strings, so write-through no longer
+  corrupts on every drag. Still fixes the partial-save dirty-id-clearing bug (dirty ids are cleared before
+  the persisted-count check, so under-persisted rows are never retried) before adding a dirty-tasks-only
+  backend leg to the existing 1.2 s autosave debounce.
+- **Phase 2 — change feed.** A `schedule_events` table (append-only, cursor `id`, plant-scoped) written
+  in the same transaction as task/order/calendar writes; `GET /changes?plant=&since=&client=` cursor-polled
+  every ~3 s by a new frontend `Sync` module, applied via `Store.applyRemote` without dirty-marking
+  (skips locally-dirty ids to avoid yanking a mid-drag edit).
+- **Phase 3 — presence & attribution.** Heartbeat-based who's-here presence (piggybacked on the poll),
+  "moved by X" flash on remote-applied changes, and an attribution banner on remote optimizer runs.
+- **Future (not yet planned):** swap cursor polling for an SSE transport if proxy constraints ease
+  (today all users sit behind a corp proxy that mangles streaming responses — memory:
+  nimbus-deploy-verify-http-cache); soft per-line claims if collision friction remains after Phase 3.

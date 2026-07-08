@@ -28,6 +28,7 @@ const CDN_GLOBALS = {
 const APP_GLOBALS = {
   NIMBUS: 'writable',
   t: 'writable',
+  NimbusComputeCore: 'readonly',  // shared compute core (nimbus-compute-core.js), loaded before app.js
 };
 
 const SHARED_RULES = {
@@ -79,6 +80,17 @@ module.exports = [
       ecmaVersion: 2023,
       sourceType: 'script',
       globals: { ...globals.worker },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // Shared compute core (UMD): loaded in the worker (self/importScripts), the browser
+    // (window), and Node tests (module.exports) — so it needs worker + `module` globals.
+    files: ['nimbus-compute-core.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      globals: { ...globals.worker, module: 'readonly' },
     },
     rules: SHARED_RULES,
   },

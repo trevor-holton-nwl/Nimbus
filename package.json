@@ -4,8 +4,10 @@
   "private": true,
   "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. No build step; static frontend. This package.json exists only for the ESLint static-analysis gate.",
   "scripts": {
-    "lint": "eslint app.js nimbus-intelligence.js nimbus-worker.js locales",
-    "lint:errors": "eslint app.js nimbus-intelligence.js nimbus-worker.js locales --quiet"
+    "lint": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js locales",
+    "lint:errors": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js locales --quiet",
+    "lint:ci": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js --quiet",
+    "test": "node --test \"tests/js/*.test.js\""
   },
   "devDependencies": {
     "eslint": "^9.0.0",
