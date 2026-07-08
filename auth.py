@@ -144,7 +144,7 @@ def list_users(limit: int | None = None, offset: int | None = None,
         where_params = [f"%{search}%"]
 
     query = (
-        "SELECT username, role, (password_hash IS NOT NULL) AS has_password "
+        "SELECT username, role, (password_hash IS NOT NULL) AS has_password, first_name, last_name "
         "FROM user_security" + where_sql + " ORDER BY username"
     )
     params = list(where_params)
@@ -158,7 +158,8 @@ def list_users(limit: int | None = None, offset: int | None = None,
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
         users = [
-            {"username": r[0], "role": r[1], "has_password": bool(r[2])}
+            {"username": r[0], "role": r[1], "has_password": bool(r[2]),
+             "first_name": r[3], "last_name": r[4]}
             for r in cur.fetchall()
         ]
 
@@ -178,8 +179,11 @@ def list_users(limit: int | None = None, offset: int | None = None,
 
 def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
                       user_email: str | None = None) -> dict:
-    """Apply user upserts (username + role only) and deletes in one
-    transaction. NEVER writes password_hash — set_user_password owns that.
+    """Apply user upserts (username + role, optionally first_name/last_name)
+    and deletes in one transaction. NEVER writes password_hash —
+    set_user_password owns that. A row that omits first_name/last_name
+    leaves those columns untouched (role keeps its existing unconditional-
+    overwrite behavior — every existing caller always sends it explicitly).
     Mirrors master_data.bulk_apply's inserted/updated counting (via
     `RETURNING (xmax = 0)`) and its admin_audit insert, written here with
     table_name='user_security'."""
@@ -193,12 +197,20 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
             username = (row.get("username") or "").strip()
             if not username:
                 raise ValueError("Username is required")
+            has_first = "first_name" in row
+            has_last = "last_name" in row
+            first_name = _validate_name(row.get("first_name"), "First name") if has_first else None
+            last_name = _validate_name(row.get("last_name"), "Last name") if has_last else None
             try:
                 cur.execute(
-                    "INSERT INTO user_security (username, role) VALUES (%s, %s)"
-                    " ON CONFLICT (lower(username)) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW()"
+                    "INSERT INTO user_security (username, role, first_name, last_name) VALUES (%s, %s, %s, %s)"
+                    " ON CONFLICT (lower(username)) DO UPDATE SET"
+                    "   role = EXCLUDED.role,"
+                    "   first_name = CASE WHEN %s THEN EXCLUDED.first_name ELSE user_security.first_name END,"
+                    "   last_name = CASE WHEN %s THEN EXCLUDED.last_name ELSE user_security.last_name END,"
+                    "   updated_at = NOW()"
                     " RETURNING (xmax = 0)",
-                    (username, row.get("role")),
+                    (username, row.get("role"), first_name, last_name, has_first, has_last),
                 )
             except psycopg.errors.ForeignKeyViolation:
                 conn.rollback()
