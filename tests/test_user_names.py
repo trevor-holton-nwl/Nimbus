@@ -188,3 +188,15 @@ def test_patch_security_me_endpoint(client, pg):
         with db._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM user_security WHERE lower(username) = lower(%s)", (ZZ_USER_A,))
             conn.commit()
+
+
+def test_new_name_keys_present_in_all_locales():
+    import os
+    locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "locales")
+    required = ["sec.first_name", "sec.last_name", "sec.first_name_ph", "sec.last_name_ph"]
+    for fname in ["en.js", "de.js", "es.js", "fr.js", "pt.js"]:
+        path = os.path.join(locales_dir, fname)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        for key in required:
+            assert f"'{key}'" in text, f"{fname} is missing i18n key {key}"
