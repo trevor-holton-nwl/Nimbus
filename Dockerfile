@@ -25,7 +25,7 @@ COPY . .
 # brain.py / db.py / master_data.py / schema.sql as downloadable static files.
 # NOTE: if you add a new frontend file, add it to this list.
 RUN mkdir -p /app/web \
- && cp index.html styles.css app.js nimbus-intelligence.js nimbus-worker.js /app/web/ \
+ && cp index.html styles.css app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js /app/web/ \
  && cp -r locales /app/web/
 
 # Run as a non-root user; it owns the app dir and the writable color-wheel dir.
