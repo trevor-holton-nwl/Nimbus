@@ -111,6 +111,23 @@ def _verify_password(raw: str, stored: str | None) -> bool:
         return False
 
 
+_MAX_NAME_LENGTH = 100
+
+
+def _validate_name(value: str | None, label: str) -> str | None:
+    """Validate an optional first/last name: the only rule is a max length —
+    names are optional everywhere, so None/blank always passes and normalizes
+    to None (never an empty string) for storage."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > _MAX_NAME_LENGTH:
+        raise ValueError(f"{label} must be {_MAX_NAME_LENGTH} characters or fewer")
+    return value
+
+
 # =========================
 # USERS — list / bulk upsert+delete / password set + verify
 # =========================
