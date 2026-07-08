@@ -417,7 +417,7 @@ window.__NIMBUS_LOCALES.fr = {
   'sec.confirm_delete_user_msg':   'Supprimer l\'utilisateur "{{username}}" ? Cette action est irréversible.',
   'sec.confirm_delete_role_title': 'Supprimer le rôle ?',
   'sec.confirm_delete_role_msg':   'Supprimer le rôle "{{role}}" ? Cela supprime également ses associations de sites.',
-  'sec.password_too_short':        'Le mot de passe doit contenir au moins 8 caractères',
+  'sec.password_too_short':        'Le mot de passe doit contenir au moins 4 caractères',
   'sec.username_required':         'Le nom d\'utilisateur est requis',
   'sec.search_users_ph':           'Rechercher des utilisateurs…',
   'sec.search_plants_ph':          'Rechercher des sites…',

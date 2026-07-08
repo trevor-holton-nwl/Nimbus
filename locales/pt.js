@@ -417,7 +417,7 @@ window.__NIMBUS_LOCALES.pt = {
   'sec.confirm_delete_user_msg':   'Excluir o usuário "{{username}}"? Esta ação não pode ser desfeita.',
   'sec.confirm_delete_role_title': 'Excluir função?',
   'sec.confirm_delete_role_msg':   'Excluir a função "{{role}}"? Isso também remove seus vínculos de plantas.',
-  'sec.password_too_short':        'A senha deve ter pelo menos 8 caracteres',
+  'sec.password_too_short':        'A senha deve ter pelo menos 4 caracteres',
   'sec.username_required':         'O nome de usuário é obrigatório',
   'sec.search_users_ph':           'Buscar usuários…',
   'sec.search_plants_ph':          'Buscar plantas…',

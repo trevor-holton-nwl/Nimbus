@@ -422,7 +422,7 @@ window.__NIMBUS_LOCALES.es = {
   'sec.confirm_delete_user_msg':   '¿Eliminar el usuario "{{username}}"? Esta acción no se puede deshacer.',
   'sec.confirm_delete_role_title': '¿Eliminar rol?',
   'sec.confirm_delete_role_msg':   '¿Eliminar el rol "{{role}}"? Esto también elimina sus asignaciones de plantas.',
-  'sec.password_too_short':        'La contraseña debe tener al menos 8 caracteres',
+  'sec.password_too_short':        'La contraseña debe tener al menos 4 caracteres',
   'sec.username_required':         'El nombre de usuario es obligatorio',
   'sec.search_users_ph':           'Buscar usuarios…',
   'sec.search_plants_ph':          'Buscar plantas…',

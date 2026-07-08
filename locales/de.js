@@ -417,7 +417,7 @@ window.__NIMBUS_LOCALES.de = {
   'sec.confirm_delete_user_msg':   'Benutzer "{{username}}" löschen? Dies kann nicht rückgängig gemacht werden.',
   'sec.confirm_delete_role_title': 'Rolle löschen?',
   'sec.confirm_delete_role_msg':   'Rolle "{{role}}" löschen? Dadurch werden auch die zugehörigen Werkszuordnungen entfernt.',
-  'sec.password_too_short':        'Das Passwort muss mindestens 8 Zeichen lang sein',
+  'sec.password_too_short':        'Das Passwort muss mindestens 4 Zeichen lang sein',
   'sec.username_required':         'Benutzername ist erforderlich',
   'sec.search_users_ph':           'Benutzer suchen…',
   'sec.search_plants_ph':          'Werke suchen…',

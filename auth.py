@@ -139,6 +139,9 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
     inserted = updated = deleted = 0
 
     with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM user_security WHERE role = 'admin'")
+        admins_before = cur.fetchone()[0]
+
         for row in upserts:
             username = (row.get("username") or "").strip()
             if not username:
@@ -166,6 +169,16 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
             )
             deleted += cur.rowcount
 
+        # Guard against locking everyone out: block this batch (role changes AND
+        # deletes both count) if it would leave zero admin users where at least
+        # one existed before. Checked after mutating so a role-change-away and a
+        # delete both trip it, but before commit so it's fully reversible.
+        if admins_before > 0:
+            cur.execute("SELECT COUNT(*) FROM user_security WHERE role = 'admin'")
+            if cur.fetchone()[0] == 0:
+                conn.rollback()
+                raise ValueError("This would remove the last remaining admin user — refused")
+
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES (%s, %s, %s, %s)",
@@ -188,8 +201,8 @@ def set_user_password(username: str, raw_password: str,
     username = (username or "").strip()
     if not username:
         raise ValueError("Username is required")
-    if not raw_password or len(raw_password) < 8:
-        raise ValueError("Password must be at least 8 characters")
+    if not raw_password or len(raw_password) < 4:
+        raise ValueError("Password must be at least 4 characters")
 
     password_hash = _hash_password(raw_password)
 

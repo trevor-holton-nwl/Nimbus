@@ -604,7 +604,7 @@ window.__NIMBUS_LOCALES.en = {
   'sec.confirm_delete_user_msg':   'Delete user "{{username}}"? This cannot be undone.',
   'sec.confirm_delete_role_title': 'Delete role?',
   'sec.confirm_delete_role_msg':   'Delete role "{{role}}"? This also removes its plant mappings.',
-  'sec.password_too_short':        'Password must be at least 8 characters',
+  'sec.password_too_short':        'Password must be at least 4 characters',
   'sec.username_required':         'Username is required',
   'sec.search_users_ph':           'Search users…',
   'sec.search_plants_ph':          'Search plants…',

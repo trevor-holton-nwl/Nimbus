@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-08-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-08-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -18280,7 +18280,7 @@ saveAll() {
     async function _savePassword(username) {
       const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`);
       const pw = input ? input.value : '';
-      if (!pw || pw.length < 8) { Toast.show(t('sec.password_too_short'), 'error'); return; }
+      if (!pw || pw.length < 4) { Toast.show(t('sec.password_too_short'), 'error'); return; }
       try {
         await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
         _pwOpen.delete(username);
@@ -18315,7 +18315,7 @@ saveAll() {
       const username = (uInput?.value || '').trim();
       if (!username) { Toast.show(t('sec.username_required'), 'error'); return; }
       const password = pInput?.value || '';
-      if (password && password.length < 8) { Toast.show(t('sec.password_too_short'), 'error'); return; }
+      if (password && password.length < 4) { Toast.show(t('sec.password_too_short'), 'error'); return; }
       const role = rSelect?.value || null;
       try {
         await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role }] });
