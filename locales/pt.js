@@ -436,6 +436,7 @@ window.__NIMBUS_LOCALES.pt = {
   'sec.user_settings_title':       'Configurações do usuário',
   'sec.login_invalid':             'Nome de usuário ou senha inválidos',
   'sec.access_revoked':            'Seu acesso de administrador não é mais válido. Faça login novamente.',
+  'sec.plant_access_changed':      'Seu acesso a plantas foi alterado. Sua seleção de planta foi limpa.',
   'sec.load_users_failed':         'Falha ao carregar os usuários: {{msg}}',
 
   /* ── Cabeçalhos e descrições de seção ────────────────────────────────────── */

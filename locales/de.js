@@ -436,6 +436,7 @@ window.__NIMBUS_LOCALES.de = {
   'sec.user_settings_title':       'Benutzereinstellungen',
   'sec.login_invalid':             'Ungültiger Benutzername oder Passwort',
   'sec.access_revoked':            'Ihre Administratorberechtigung ist nicht mehr gültig. Bitte melden Sie sich erneut an.',
+  'sec.plant_access_changed':      'Ihr Werkzugriff hat sich geändert. Ihre Werksauswahl wurde zurückgesetzt.',
   'sec.load_users_failed':         'Benutzer konnten nicht geladen werden: {{msg}}',
 
   /* ── Abschnittsüberschriften & Beschreibungen ─────────────────────────────── */

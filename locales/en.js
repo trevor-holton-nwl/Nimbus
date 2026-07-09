@@ -623,6 +623,7 @@ window.__NIMBUS_LOCALES.en = {
   'sec.user_settings_title':       'User Settings',
   'sec.login_invalid':             'Invalid username or password',
   'sec.access_revoked':            'Your admin access is no longer valid. Please sign in again.',
+  'sec.plant_access_changed':      'Your plant access has changed. Your plant selection has been cleared.',
   'sec.load_users_failed':         'Failed to load users: {{msg}}',
 
   /* ── Section headers & descriptions ─────────────────────────────────────── */

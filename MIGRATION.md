@@ -174,6 +174,56 @@ collision this workstream's eventual implementer needs to know about.
   correct but still just an error message, not a preview of which users would be affected. Extend
   cascade-preview to cover `roles` before real admins are managing many users per role.
 
+### Per-plant RBAC enforcement (shipped 2026-07-09, closes the role_plants seam above)
+
+`role_plants` stopped being CRUD-only scaffolding ahead of full WS3/Entra SSO. `auth.py` gained
+`get_allowed_plants(username) -> list[str] | None` (`None` = unrestricted) and a FastAPI-dependency
+wrapper `get_allowed_plants_for_request`. Semantics, mirroring `require_admin`'s fail-open posture:
+unknown/no-role users, `role == 'admin'`, and a role with **zero** `role_plants` rows are all
+unrestricted — a role is only restricted once it has ≥1 `role_plants` row (an unscoped role hasn't
+"opted in" yet, so existing users are unaffected until an admin deliberately scopes their role).
+
+**Enforced at (all narrowing, never widening an explicit filter):**
+- `GET /tasks` — an explicit `?plant=` outside the caller's allowed set 403s; a `?line=`-only
+  request 403s only if none of that line's plants (a line code can repeat across plants) are
+  allowed; the unscoped `?limit=`-only tooling path is silently bounded to the allowed set rather
+  than rejected (`db.query_orders`/`count_orders` gained an `allowed_plants` AND-filter).
+- `GET /master-data/{table}` for `table in master_data.PLANT_SCOPED_TABLES` — `{'plants',
+  'production_lines', 'material_plants'}`, a **static** allowlist (deliberately not derived from
+  the dynamic "does this table have a `plant` column" check `list_rows` already uses for the
+  `?plant=` param — the admin Add-Column DDL wizard can add a column named `plant` to any table on
+  a whim, and this security boundary must not be able to widen itself via an unrelated admin
+  action). Same 403-on-explicit-mismatch / silent-bound-otherwise behavior as `/tasks`.
+- Frontend: `Session` caches `allowed_plants` from `POST /security/login` and `GET /security/me`
+  (added a new `Session.allowedPlants()` accessor, mirroring `isAdmin()`); `Store.knownPlants()`
+  intersects with it, so the header plant selector only ever offers allowed plants; if a role's
+  scope changes and the currently-selected plant falls outside it, `Session.refresh()` clears the
+  selection (same posture as its existing admin-tab-demotion redirect).
+
+**Deliberately NOT scoped (documented, not missed):**
+- `GET /master-data/roles` / `/role_plants` themselves — that `plant` column means "which plant
+  this role can see," a different concept from "which plant this business record belongs to";
+  scoping them would conflate the two. (Both remain otherwise ungated for GET, per the existing
+  note above — unrelated to this change.)
+- `subnetworks`/`materials` — no `plant` column, unaffected by construction.
+- Orders with `orders.plant IS NULL` (ambiguous shared-line-code orders — see `db.py`'s
+  `reattribute_null_plant_orders`) are invisible to **restricted** callers via the `ANY()` filter,
+  by design (never guess) — an unrestricted caller still sees them today when no plant/line filter
+  is given. If a "missing order" ticket ever traces back to a restricted role, check this first.
+- Frontend filtering is UX, not the security boundary — `Session.refresh()` is fire-and-forget at
+  boot, so a resumed session can briefly show a stale (possibly wider) plant list before it
+  resolves. The backend enforcement above is unconditional and per-request regardless.
+
+**⚠ Before re-deploying or re-seeding role_plants data:** any role that already has ≥1
+`role_plants` row instantly restricts every user holding that role — there is no rollout toggle.
+Audit first: `SELECT rp.role, array_agg(rp.plant), COUNT(us.username) FROM role_plants rp LEFT
+JOIN user_security us ON us.role = rp.role GROUP BY rp.role;` — confirm every returned role is an
+intentional, reviewed part of whatever change prompted the check.
+
+`require_plant_access` from the original WS3 stub (line 109 above) is superseded by this —
+`get_allowed_plants_for_request` is the real dependency now. When WS3/Entra SSO lands, only
+`auth._actor_email` needs to change, same swap-point `require_admin` already relies on.
+
 ### Mandatory login + `require_admin` (shipped 2026-07-08, relates to Workstream 3)
 
 Ahead of full Entra SSO, the app now **requires sign-in against `user_security` before any UI

@@ -440,6 +440,7 @@ window.__NIMBUS_LOCALES.es = {
   'sec.signed_in_as':              'Sesión iniciada como {{username}}',
   'sec.login_invalid':             'Nombre de usuario o contraseña no válidos',
   'sec.access_revoked':            'Su acceso de administrador ya no es válido. Vuelva a iniciar sesión.',
+  'sec.plant_access_changed':      'Su acceso a plantas ha cambiado. Se ha borrado su planta seleccionada.',
   'sec.load_users_failed':         'Error al cargar los usuarios: {{msg}}',
 
   /* ── Encabezados y descripciones de sección ──────────────────────────────── */

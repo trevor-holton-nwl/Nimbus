@@ -30,6 +30,16 @@ ALLOWED_TABLES = frozenset({
     'roles', 'role_plants',
 })
 
+# Tables whose `plant` column is business/scheduling data, subject to
+# per-user role_plants scoping (auth.get_allowed_plants). A static allowlist
+# rather than a dynamic "plant" in col_names check: the Add-Column DDL
+# wizard can add a column literally named `plant` to any table on a whim,
+# and a security boundary must not be able to widen itself via an unrelated
+# admin action. Deliberately excludes `role_plants` itself — its `plant`
+# column means "which plant this role can see", a different concept from
+# "which plant this record belongs to".
+PLANT_SCOPED_TABLES = frozenset({'plants', 'production_lines', 'material_plants'})
+
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
 COLUMN_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
@@ -79,13 +89,16 @@ def _row_key(table: str, row: dict) -> tuple:
 # Read
 # ---------------------------------------------------------------------------
 def list_rows(table: str, limit: int | None = None, offset: int | None = None,
-              plant: str | None = None) -> dict:
+              plant: str | None = None, allowed_plants: list[str] | None = None) -> dict:
     """
     Return column metadata + data rows for the given table.
 
     Optional server-side scoping (all default to current full-catalog behavior):
       - `plant`: filter to rows whose `plant` column matches (only honored when
         the table actually has a `plant` column; ignored otherwise).
+      - `allowed_plants`: per-user role_plants scope (auth.get_allowed_plants);
+        ANDed in alongside `plant`, but only for tables in PLANT_SCOPED_TABLES —
+        it narrows, never widens, the result.
       - `limit`/`offset`: parameterized LIMIT/OFFSET page window.
     When any of these are supplied, `meta.total` carries the full row count for
     the same filter (ignoring limit/offset) so callers can paginate.
@@ -127,12 +140,19 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         if not col_names:
             return {"columns": [], "rows": [], "meta": {"total": 0}}
 
-        # Optional plant filter — only when the table actually has a plant column.
-        where_sql = sql.SQL("")
+        # Optional plant filters — only when the table actually has a plant column.
+        # `plant` (explicit caller filter) and `allowed_plants` (per-user
+        # role_plants scope, PLANT_SCOPED_TABLES only) AND together; neither
+        # widens the other.
+        where_parts = []
         where_params: list = []
         if plant and "plant" in col_names:
-            where_sql = sql.SQL(" WHERE {col} = %s").format(col=sql.Identifier("plant"))
-            where_params = [plant]
+            where_parts.append(sql.SQL("{col} = %s").format(col=sql.Identifier("plant")))
+            where_params.append(plant)
+        if allowed_plants is not None and table in PLANT_SCOPED_TABLES and "plant" in col_names:
+            where_parts.append(sql.SQL("{col} = ANY(%s)").format(col=sql.Identifier("plant")))
+            where_params.append(allowed_plants)
+        where_sql = (sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)) if where_parts else sql.SQL("")
 
         # Fetch rows with only the visible columns (plant filter + page window).
         select_idents = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)
@@ -1310,6 +1330,17 @@ def known_plant_line_codes() -> dict:
         cur.execute("SELECT production_line FROM production_lines")
         lines = {r[0] for r in cur.fetchall()}
     return {"plants": plants, "lines": lines}
+
+
+def plants_for_line(line: str) -> list[str]:
+    """Distinct plants a production_line code currently appears under. May
+    return more than one — a line code is not guaranteed unique across
+    plants (composite PK on production_lines). Used by /tasks' per-user
+    plant-scope check for ?line=-only requests: a shared line code should
+    count as allowed if ANY of its plants is in the caller's allowed set."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT plant FROM production_lines WHERE production_line = %s", (line,))
+        return [r[0] for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

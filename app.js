@@ -1118,14 +1118,22 @@ const NIMBUS = (function () {
     knownPlants() {
       // Prefer master-data plants when available (authoritative source).
       const masterPlants = Store._state.masterData?.plants?.map(p => p.plant) ?? [];
-      if (masterPlants.length) return [...new Set(masterPlants)].sort();
-      // Fall back to dynamically discovered plants from order data.
-      const dynamic = [];
-      for (const line of Store.allLines()) {
-        const p = Store.getPlantForLine(line);
-        if (p) dynamic.push(p);
+      let all;
+      if (masterPlants.length) {
+        all = [...new Set(masterPlants)].sort();
+      } else {
+        // Fall back to dynamically discovered plants from order data.
+        const dynamic = [];
+        for (const line of Store.allLines()) {
+          const p = Store.getPlantForLine(line);
+          if (p) dynamic.push(p);
+        }
+        all = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
       }
-      return [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
+      // Per-user role_plants scope (backend is the real boundary — this is UX,
+      // not security; a stale/wide cache here still 403s server-side).
+      const allowed = (typeof Session !== 'undefined') ? Session.allowedPlants() : null;
+      return allowed ? all.filter(p => allowed.includes(p)) : all;
     },
 
     /* ----- alerts ---------------------------------------------------------- */
@@ -6051,6 +6059,14 @@ const NIMBUS = (function () {
       return !!u && (u.is_admin === true || u.role === 'admin');
     }
 
+    // null = unrestricted (every plant); array = the caller's role_plants scope.
+    // Mirrors isAdmin()'s fallback posture: trusts whatever was last cached
+    // (login or refresh()) rather than blocking on a fresh network call.
+    function allowedPlants() {
+      const u = currentUser();
+      return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
+    }
+
     async function signIn(username, password) {
       const res = await fetch(`${Config.API_BASE}/security/login`, {
         method: 'POST',
@@ -6064,6 +6080,7 @@ const NIMBUS = (function () {
       const data = await res.json();
       localStorage.setItem(KEY, JSON.stringify({
         username: data.username, role: data.role,
+        allowed_plants: data.allowed_plants ?? null,
         first_name: data.first_name || null, last_name: data.last_name || null,
       }));
       _applyGates();
@@ -6166,6 +6183,7 @@ const NIMBUS = (function () {
           username: me.username || u.username,
           role: me.role || null,
           is_admin: !!me.is_admin,
+          allowed_plants: me.allowed_plants ?? null,
           first_name: me.first_name || null,
           last_name: me.last_name || null,
         }));
@@ -6174,6 +6192,18 @@ const NIMBUS = (function () {
         if (!isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
           try { App.goto('home'); } catch {}
         }
+        // If plant scope changed and the currently selected plant fell outside
+        // it, clear the selection rather than leave the user looking at data
+        // they're no longer allowed to see — mirrors the admin-tab redirect above.
+        try {
+          if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions();
+          const allowed = allowedPlants();
+          if (allowed && Store.selectedPlant && !allowed.includes(Store.selectedPlant)) {
+            Store.setSelectedPlant(null, 'session-refresh');
+            Toast.show(t('sec.plant_access_changed'), 'warn');
+          }
+          if (typeof PlantSelector !== 'undefined') PlantSelector._reflectSelection();
+        } catch {}
         return me;
       } catch { return null; }
     }
@@ -6187,7 +6217,7 @@ const NIMBUS = (function () {
       try { Toast.show(t('sec.access_revoked'), 'error'); } catch {}
     }
 
-    return { currentUser, actor, isAdmin, signIn, signOut, refresh, onAuthDenied, _applyGates };
+    return { currentUser, actor, isAdmin, allowedPlants, signIn, signOut, refresh, onAuthDenied, _applyGates };
   })();
 
   /* =============================================================================

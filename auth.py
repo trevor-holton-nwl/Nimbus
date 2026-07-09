@@ -340,6 +340,30 @@ def admin_exists() -> bool:
         return bool(cur.fetchone()[0])
 
 
+def get_allowed_plants(username: str | None) -> list[str] | None:
+    """Resolve the plants `username`'s role is scoped to, via role_plants.
+    None = unrestricted (every plant) — the safe default whenever this
+    feature hasn't been deliberately engaged for a role: unknown/no-role
+    users, role == 'admin', and a role with zero role_plants rows (an
+    unscoped role hasn't "opted in" to restriction) all resolve to None.
+    A role only becomes restricted once it has >=1 role_plants row — this
+    is a stopgap ahead of WS3/Entra SSO, not a hard security boundary,
+    same posture as require_admin (identity is still a spoofable header)."""
+    role = get_user_role(username)
+    if role is None or role == "admin":
+        return None
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant FROM role_plants WHERE role = %s ORDER BY plant", (role,))
+        rows = [r[0] for r in cur.fetchall()]
+    return rows or None
+
+
+def get_allowed_plants_for_request(request: Request) -> list[str] | None:
+    """FastAPI-dependency-shaped resolver for get_allowed_plants. Scopes
+    rather than gates — never raises, unlike require_admin."""
+    return get_allowed_plants(_actor_email(request))
+
+
 def _actor_email(request: Request) -> str | None:
     """Resolve the acting user's identity from request headers. WS3 SSO
     note: this is the ONLY line that changes when real SSO lands. Trimmed so
@@ -375,6 +399,7 @@ def whoami(request: Request) -> dict:
         "is_admin": role == "admin" or not admin_exists(),
         "first_name": profile.get("first_name"),
         "last_name": profile.get("last_name"),
+        "allowed_plants": get_allowed_plants(email),
     }
 
 
@@ -415,6 +440,7 @@ def authenticate(username: str, password: str) -> dict | None:
             "role": profile.get("role"),
             "first_name": profile.get("first_name"),
             "last_name": profile.get("last_name"),
+            "allowed_plants": get_allowed_plants(username),
         }
     return None
 

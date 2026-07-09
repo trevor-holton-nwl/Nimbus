@@ -858,7 +858,8 @@ def get_tasks(plant: str | None = None, line: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
                   description="Max rows to return. Omit for the full plant-scoped list."),
               offset: int | None = Query(default=None, ge=0,
-                  description="Rows to skip before returning (for paging).")):
+                  description="Rows to skip before returning (for paging)."),
+              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
@@ -870,6 +871,11 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     Response: { data: Task[], links: Link[], meta: DiagnosticsDict }
     When ?limit/?offset= are supplied, meta.total carries the full filtered
     row count (ignoring limit/offset) so callers can paginate.
+
+    Per-user plant scope (role_plants, via auth.get_allowed_plants) is
+    enforced here: an explicit ?plant= (or the plant a ?line= resolves to)
+    outside the caller's allowed set 403s; an unscoped (?limit=-only) pull
+    is silently bounded to the allowed set rather than rejected.
     """
     paging = limit is not None or offset is not None
     # A request with no plant, no line, and no explicit limit would materialize the
@@ -881,14 +887,21 @@ def get_tasks(plant: str | None = None, line: str | None = None,
             detail=("Specify ?plant= (or ?line=) to scope the request, or ?limit= "
                     "for a bounded unscoped tooling pull — refusing to load the full order book."),
         )
-    df = db.query_orders(plant=plant, line=line, limit=limit, offset=offset)
+    if allowed_plants is not None:
+        if plant is not None and plant not in allowed_plants:
+            raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
+        if plant is None and line is not None:
+            line_plants = md.plants_for_line(line)
+            if line_plants and not (set(line_plants) & set(allowed_plants)):
+                raise HTTPException(status_code=403, detail=f"Line {line!r} is not on any of your assigned plants")
+    df = db.query_orders(plant=plant, line=line, limit=limit, offset=offset, allowed_plants=allowed_plants)
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "line_filter_active": line, "pre_color_merge_count": 0,
                       "raw_row_count": 0, "unique_id_count": 0,
                       "color_merge_misses": 0, "missed_colors": [],
                       "emitted_task_count": 0, "color_merge_ms": 0,
-                      "total": (db.count_orders(plant=plant, line=line) if paging else 0),
+                      "total": (db.count_orders(plant=plant, line=line, allowed_plants=allowed_plants) if paging else 0),
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
                       "source_file": "postgres://nimbus/orders"}
         return {"data": [], "links": [], "meta": empty_meta}
@@ -961,7 +974,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     meta["pre_color_merge_count"] = pre_merge_count
     meta["raw_row_count"] = pre_merge_count
     meta["unique_id_count"] = len(data)
-    meta["total"] = db.count_orders(plant=plant, line=line) if paging else len(data)
+    meta["total"] = db.count_orders(plant=plant, line=line, allowed_plants=allowed_plants) if paging else len(data)
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -1464,15 +1477,23 @@ def md_list(table: str,
             offset: int | None = Query(default=None, ge=0,
                 description="Rows to skip before returning (for paging)."),
             plant: str | None = Query(default=None,
-                description="Filter to one plant (only honored for tables with a plant column).")):
+                description="Filter to one plant (only honored for tables with a plant column)."),
+            allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """List rows for a master-data table (subnetworks | plants | production_lines | ...).
 
     Optional ?limit=/?offset=/?plant= scope the result server-side; all default
     to the full-catalog behavior. When supplied, meta.total carries the full
-    filtered row count for paging."""
+    filtered row count for paging.
+
+    Per-user plant scope (role_plants) is enforced for tables in
+    md.PLANT_SCOPED_TABLES: an explicit ?plant= outside the caller's allowed
+    set 403s; otherwise the row set is silently bounded to the allowed set."""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
-    return md.list_rows(table, limit=limit, offset=offset, plant=plant)
+    if (allowed_plants is not None and table in md.PLANT_SCOPED_TABLES
+            and plant is not None and plant not in allowed_plants):
+        raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
+    return md.list_rows(table, limit=limit, offset=offset, plant=plant, allowed_plants=allowed_plants)
 
 
 @api.post("/master-data/{table}/cascade-preview", dependencies=[Depends(require_admin)])

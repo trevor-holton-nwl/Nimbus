@@ -230,7 +230,8 @@ def load_orders_df() -> pd.DataFrame:
 
 
 def query_orders(plant: str | None = None, line: str | None = None,
-                 limit: int | None = None, offset: int | None = None) -> pd.DataFrame:
+                 limit: int | None = None, offset: int | None = None,
+                 allowed_plants: list[str] | None = None) -> pd.DataFrame:
     """
     Server-side-scoped orders read for the stateless /tasks path.
 
@@ -238,7 +239,10 @@ def query_orders(plant: str | None = None, line: str | None = None,
     plant (~70 lines) so we never materialize the whole order book. `line=`
     narrows further. `limit`/`offset` are a coarse guard rail for unscoped
     tooling queries only — finish-to-start links are coherent only within a
-    plant/line scope, never across a blind offset window.
+    plant/line scope, never across a blind offset window. `allowed_plants`
+    (per-user role_plants scope, resolved by auth.get_allowed_plants) is
+    ANDed in alongside any explicit plant/line filter — it only narrows,
+    never widens, the result.
 
     All filter values are bound as parameters (no string interpolation).
     Rows are ordered by (production_line, effective start) so brain.py's
@@ -252,6 +256,9 @@ def query_orders(plant: str | None = None, line: str | None = None,
     if line:
         where.append('o.production_line = %s')
         params.append(line)
+    if allowed_plants is not None:
+        where.append('o.plant = ANY(%s)')
+        params.append(allowed_plants)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += '\n    ORDER BY o.production_line, COALESCE(scheduled_start, basic_start_date)'
@@ -268,7 +275,8 @@ def query_orders(plant: str | None = None, line: str | None = None,
     return pd.DataFrame(rows, columns=cols)
 
 
-def count_orders(plant: str | None = None, line: str | None = None) -> int:
+def count_orders(plant: str | None = None, line: str | None = None,
+                 allowed_plants: list[str] | None = None) -> int:
     """Row count for a plant/line scope — for pagination totals / tooling."""
     sql = "SELECT COUNT(*) FROM orders o"
     where, params = [], []
@@ -278,6 +286,9 @@ def count_orders(plant: str | None = None, line: str | None = None) -> int:
     if line:
         where.append('o.production_line = %s')
         params.append(line)
+    if allowed_plants is not None:
+        where.append('o.plant = ANY(%s)')
+        params.append(allowed_plants)
     if where:
         sql += " WHERE " + " AND ".join(where)
     with _pool.connection() as conn, conn.cursor() as cur:

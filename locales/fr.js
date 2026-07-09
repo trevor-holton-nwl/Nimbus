@@ -436,6 +436,7 @@ window.__NIMBUS_LOCALES.fr = {
   'sec.user_settings_title':       'Paramètres utilisateur',
   'sec.login_invalid':             'Nom d\'utilisateur ou mot de passe invalide',
   'sec.access_revoked':            'Votre accès administrateur n\'est plus valide. Veuillez vous reconnecter.',
+  'sec.plant_access_changed':      'Votre accès aux usines a changé. Votre sélection d\'usine a été effacée.',
   'sec.load_users_failed':         'Échec du chargement des utilisateurs : {{msg}}',
 
   /* ── En-têtes et descriptions de section ─────────────────────────────────── */
