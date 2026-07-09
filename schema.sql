@@ -617,6 +617,12 @@ CREATE TABLE IF NOT EXISTS roles (
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
 );
+-- Per-role DEFAULT settings blob — shallow-merged UNDER each user's own
+-- user_settings by the frontend (resolution precedence:
+-- userSettings[key] ?? roleSettings[key] ?? SYSTEM_DEFAULT[key]). Added after
+-- the roles table, hence ALTER rather than inline. Never applied to admins.
+-- See migrations/2026-07-09-user-settings.sql.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS role_plants (
     role        TEXT NOT NULL REFERENCES roles(role) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -662,3 +668,18 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('role_plants', 'role', 'Role', TRUE, 1),
     ('role_plants', 'plant', 'Plant', TRUE, 2)
 ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- Per-user settings — one JSONB blob per user (theme, language, defaultPlant,
+-- date/time display prefs, saved grid layout, optimizer defaults, pinned
+-- plants/lines, landing view). Read/written ONLY through auth.py
+-- (get_user_settings / upsert_user_settings) and the /security/me* endpoints,
+-- never the generic master_data CRUD path. FK to user_security so a deleted
+-- user's settings are cleaned up automatically. Self-bootstrapped at startup by
+-- auth.ensure_user_settings_table(). See migrations/2026-07-09-user-settings.sql.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_settings (
+    username   TEXT PRIMARY KEY REFERENCES user_security(username) ON DELETE CASCADE ON UPDATE CASCADE,
+    settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);

@@ -43,7 +43,7 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-07-09-a';</script>
+<script>window.NIMBUS_BUILD_ID = '2026-07-09-b';</script>
 <link rel="stylesheet" href="styles.css?v=2026-07-09-a">
 
 <style>
@@ -940,6 +940,139 @@ body.dark .ls-pct      { color: var(--fg); }
 body.dark .ls-pct.warn { color: #e0a93a; }
 body.dark .ls-pct.err  { color: #f06a5a; }
 body.dark .ls-co       { color: var(--fg-mute); }
+
+/* User Settings — Personalization / Workflow controls */
+.us-field-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1.4;
+}
+.us-combo { position: relative; display: block; }
+.us-combo-input { width: 100%; padding-right: 28px; }
+.us-combo.has-value .us-combo-input {
+  background: var(--accent-wash);
+  border-color: var(--accent-soft);
+  font-weight: 600;
+}
+.us-combo-clear {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.us-combo-clear:hover { background: var(--bg-subtle); color: var(--fg); }
+.us-combo-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 90;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+  padding: 4px 0;
+}
+.us-combo-option {
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.us-combo-option:hover,
+.us-combo-option.active { background: var(--bg-subtle); }
+.us-combo-option.selected { color: var(--accent); font-weight: 600; }
+.us-combo-option-prefix {
+  font-size: 10px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.us-combo-empty {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+/* User Settings — Phase-2 controls (toggles, pinned lists, landing view) */
+.us-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.us-toggle-row input[type=checkbox] { accent-color: var(--accent); cursor: pointer; margin: 0; width: auto; }
+.us-landing-row { display: flex; gap: 8px; }
+.us-landing-row select { flex: 1; }
+.us-pinned-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.us-pinned-empty { font-size: 12px; color: var(--fg-faint); }
+.us-pinned-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-soft);
+  border-radius: 14px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.us-pin-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.us-pin-remove:hover { background: var(--bg-subtle); color: var(--fg); }
+/* Pinned section header in the header plant combobox dropdown */
+.hps-section {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  font-weight: 600;
+}
+.hps-pin-ico, .line-pin-ico { font-size: 11px; margin-left: auto; }
+.line-pin-ico { margin-left: 0; margin-right: 2px; }
 </style>
 </head>
 <body>
@@ -1840,20 +1973,35 @@ body.dark .ls-co       { color: var(--fg-mute); }
       <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-user-settings')">✕</button>
     </header>
     <div class="modal-body">
-      <p id="us-signed-in-as"></p>
-      <div class="form-row form-row-2">
-        <div>
-          <label data-i18n="sec.first_name">First Name</label>
-          <input type="text" id="us-first-name" maxlength="100">
+      <nav class="us-tabs" role="tablist" style="display:flex;gap:6px;margin-bottom:14px;">
+        <button class="seg-btn active" data-us-tab="personalization" role="tab" data-i18n="us.tab_personalization">Personalization</button>
+        <button class="seg-btn" data-us-tab="workflow" role="tab" data-i18n="us.tab_workflow">Workflow</button>
+        <button class="seg-btn" data-us-tab="profile" role="tab" data-i18n="us.tab_profile">Profile</button>
+      </nav>
+
+      <!-- PANE: PERSONALIZATION (populated at runtime by Session._renderSettingsPanes) -->
+      <div id="us-tab-personalization" class="us-tab-body"></div>
+
+      <!-- PANE: WORKFLOW (populated at runtime by Session._renderSettingsPanes) -->
+      <div id="us-tab-workflow" class="us-tab-body" hidden></div>
+
+      <!-- PANE: PROFILE (name fields + identity; saved via us-save-btn) -->
+      <div id="us-tab-profile" class="us-tab-body" hidden>
+        <p id="us-signed-in-as"></p>
+        <div class="form-row form-row-2">
+          <div>
+            <label data-i18n="sec.first_name">First Name</label>
+            <input type="text" id="us-first-name" maxlength="100">
+          </div>
+          <div>
+            <label data-i18n="sec.last_name">Last Name</label>
+            <input type="text" id="us-last-name" maxlength="100">
+          </div>
         </div>
-        <div>
-          <label data-i18n="sec.last_name">Last Name</label>
-          <input type="text" id="us-last-name" maxlength="100">
+        <div class="form-row">
+          <label data-i18n="sec.role">Role</label>
+          <div class="readonly" id="us-role"></div>
         </div>
-      </div>
-      <div class="form-row">
-        <label data-i18n="sec.role">Role</label>
-        <div class="readonly" id="us-role"></div>
       </div>
     </div>
     <footer class="modal-foot">

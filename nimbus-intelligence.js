@@ -2200,9 +2200,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   const DarkMode = {
     _key: 'nimbus.theme',
 
+    // Resolve the effective theme: an explicit per-user (or role) 'theme' pref wins;
+    // otherwise fall back to the offline nimbus.theme cache (Store not yet hydrated
+    // at first boot / pre-network). Mirrors Store.pref precedence without inventing a
+    // default so a missing pref keeps deferring to the offline cache.
+    _resolve() {
+      try {
+        const us = Store && Store._state && Store._state.userSettings;
+        const rd = Store && Store._state && Store._state.roleDefaults;
+        if (us && us.theme != null) return us.theme;
+        if (rd && rd.theme != null) return rd.theme;
+      } catch { /* Store not ready — fall through to offline cache */ }
+      return localStorage.getItem(DarkMode._key);
+    },
+
     init() {
-      if (localStorage.getItem(DarkMode._key) === 'dark')
-        document.body.classList.add('dark');
+      document.body.classList.toggle('dark', DarkMode._resolve() === 'dark');
+      DarkMode._syncPill();
     },
 
     _syncPill() {
@@ -2211,11 +2225,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       pill.classList.toggle('ni-dm-dark', DarkMode.isDark());
     },
 
-    toggle() {
-      const isDark = document.body.classList.toggle('dark');
-      localStorage.setItem(DarkMode._key, isDark ? 'dark' : 'light');
+    // Apply a specific theme with write-through: body.dark + the offline nimbus.theme
+    // cache (so the pre-network boot picks the right theme) + the durable per-user
+    // pref via Session.setPref. Used by both the header pill and the settings control.
+    set(isDark, opts = {}) {
+      document.body.classList.toggle('dark', !!isDark);
+      try { localStorage.setItem(DarkMode._key, isDark ? 'dark' : 'light'); } catch {}
+      try { NIMBUS.Session && NIMBUS.Session.setPref && NIMBUS.Session.setPref('theme', isDark ? 'dark' : 'light'); } catch {}
       DarkMode._syncPill();
-      Toast.show(isDark ? t('toast.dark_mode_on') : t('toast.light_mode_on'), 'info', 1200);
+      if (opts.toast !== false)
+        Toast.show(isDark ? t('toast.dark_mode_on') : t('toast.light_mode_on'), 'info', 1200);
       // Repaint canvas-painted views whose colors are baked in at draw time.
       try { NIMBUS.TimelineNav?.render?.(); } catch (e) {
         (window.NIMBUS && window.NIMBUS.ErrorLog
@@ -2228,6 +2247,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           : console.warn('[DarkMode] heatmap repaint failed', e));
       }
     },
+
+    toggle() { DarkMode.set(!DarkMode.isDark()); },
 
     isDark() { return document.body.classList.contains('dark'); }
   };
@@ -2242,8 +2263,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       { code: 'pt', label: 'PT', name: 'Português' },
     ],
     current() { return localStorage.getItem(LangSwitcher._key) || 'en'; },
-    set(code) {
-      localStorage.setItem(LangSwitcher._key, code);
+    async set(code) {
+      // Offline render cache — the pre-network boot reads this before Store is
+      // hydrated, so it must reflect the new locale immediately.
+      try { localStorage.setItem(LangSwitcher._key, code); } catch {}
+      // Durable per-user pref. Await an explicit flush BEFORE reload: setPref is
+      // debounced and the reload would otherwise cancel the pending PATCH, leaving
+      // the DB (and session cache) stale and reverting the language on next boot.
+      try {
+        if (NIMBUS.Session && NIMBUS.Session.setPref) {
+          NIMBUS.Session.setPref('language', code);
+          if (NIMBUS.Session.flushPrefs) await NIMBUS.Session.flushPrefs();
+        }
+      } catch { /* best-effort — the offline cache above still applies the locale */ }
       location.reload();
     },
   };

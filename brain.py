@@ -191,6 +191,8 @@ async def lifespan(app: FastAPI):
     md.ensure_role_plants_table()
     auth.ensure_user_security_table()
     auth.ensure_bootstrap_admin()
+    auth.ensure_role_settings_column()
+    auth.ensure_user_settings_table()
     _log_event("info", "startup", "Color wheels loaded",
                global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -1624,7 +1626,7 @@ def security_me(request: Request):
     (like /security/bootstrap-status): the frontend calls it to reconcile the
     role it cached at login against backend truth, so it must be reachable even
     when the caller is NOT an admin. Returns {username, role, is_admin,
-    first_name, last_name}; no secrets."""
+    first_name, last_name, allowed_plants, settings, role_settings}; no secrets."""
     return auth.whoami(request)
 
 
@@ -1638,6 +1640,23 @@ def security_update_me(request: Request, body: dict = Body(default={})):
             request.headers.get("x-user-email") or request.headers.get("X-User"),
             body.get("first_name"),
             body.get("last_name"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.patch("/security/me/settings")
+def security_update_my_settings(request: Request, body: dict = Body(default={})):
+    """Self-service: shallow-merge a PARTIAL settings patch into the CALLER's own
+    user_settings blob. Ungated (like PATCH /security/me) — identity comes from
+    the header, and auth.upsert_user_settings scopes the write to exactly that
+    one row (resolving canonical username casing so header casing can't create a
+    duplicate). Body: {settings: {...}}. Returns {username, settings} with the
+    full merged blob. A blank/unknown actor -> 401; a non-dict settings -> 400."""
+    try:
+        return auth.upsert_user_settings(
+            auth._actor_email(request),
+            body.get("settings"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

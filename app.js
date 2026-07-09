@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-09-a'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-09-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -136,16 +136,46 @@ const NIMBUS = (function () {
            + `${p(date.getHours())}:${p(date.getMinutes())}`;
     },
 
-    // Human-readable datetime (e.g. "05/15/2026 · 6 PM").
+    // ── DISPLAY-ONLY format prefs (Store.pref) ──────────────────────────────
+    // Resolve the user's timeFormat/dateFormat preference with safe fallbacks for
+    // when Store isn't hydrated yet. These never touch stored data — they only
+    // change how a Date is rendered (see the timezone caution: timeFormat/dateFormat
+    // are display-only, save/parse/compute paths stay untouched).
+    _timeFormatPref() {
+      try { return Store.pref('timeFormat') || '12h'; } catch { return '12h'; }
+    },
+    _dateFormatPref() {
+      try { return Store.pref('dateFormat') || 'M j, Y'; } catch { return 'M j, Y'; }
+    },
+    // Format a Date's time part per timeFormat: 12h ("6 PM" / "6:30 PM") or 24h ("18:30").
+    _fmtTimePref(date) {
+      const min = date.getMinutes();
+      if (Util._timeFormatPref() === '24h') {
+        const p = n => String(n).padStart(2, '0');
+        return `${p(date.getHours())}:${p(min)}`;
+      }
+      const h24 = date.getHours();
+      const ampm = h24 < 12 ? 'AM' : 'PM';
+      const h12 = h24 % 12 || 12;
+      const minStr = min === 0 ? '' : `:${String(min).padStart(2, '0')}`;
+      return `${h12}${minStr} ${ampm}`;
+    },
+    // Format a Date's date part per the Flatpickr-token dateFormat pref, via the
+    // Flatpickr static formatter; falls back to compact MM/DD/YY if unavailable.
+    _fmtDatePref(date) {
+      const tok = Util._dateFormatPref();
+      try {
+        if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(date, tok);
+      } catch { /* fall through to legacy compact format */ }
+      const p = n => String(n).padStart(2, '0');
+      return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)}`;
+    },
+    // Human-readable datetime (e.g. "May 15, 2026 · 6 PM"), routed through the
+    // per-user dateFormat + timeFormat display prefs.
     fmtDTReadable(d) {
       const date = Util.parseDate(d);
       if (!date) return '';
-      const p = n => String(n).padStart(2, '0');
-      const h24 = date.getHours(), min = date.getMinutes();
-      const ampm = h24 < 12 ? 'AM' : 'PM';
-      const h12 = h24 % 12 || 12;
-      const minStr = min === 0 ? '' : `:${String(min).padStart(2,'0')}`;
-      return `${p(date.getMonth()+1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)} · ${h12}${minStr} ${ampm}`;
+      return `${Util._fmtDatePref(date)} · ${Util._fmtTimePref(date)}`;
     },
 
     // Compact range for blackout rows. Same day: "05/15/26 · 6–7 PM". Multi-day: "05/15/26 → 05/17/26".
@@ -245,10 +275,17 @@ const NIMBUS = (function () {
     // (e.g. an onChange handler). Accepts a selector string or element; returns
     // the flatpickr instance. The date-only (Printer/AdminCockpit) and
     // OptimizeDialog (1-min, inline) pickers intentionally do NOT use this.
+    // Display-only altFormat, routed through the dateFormat + timeFormat prefs
+    // (machine `dateFormat` below is unchanged — parse/save paths untouched).
+    _fpAltFormat() {
+      const df = Util._dateFormatPref();
+      const tf = Util._timeFormatPref();
+      return `${df} · ${tf === '24h' ? 'H:i' : 'h:i K'}`;
+    },
     fpDatetime(sel, extra = {}) {
       return flatpickr(sel, {
         enableTime: true, dateFormat: 'Y-m-d\\TH:i',
-        altInput: true, altFormat: 'M j, Y · h:i K', minuteIncrement: 30,
+        altInput: true, altFormat: Util._fpAltFormat(), minuteIncrement: 30,
         ...extra,
       });
     },
@@ -546,6 +583,62 @@ const NIMBUS = (function () {
   window.t = (key, vars) => Util.t(key, vars);
 
   /* =============================================================================
+     SETTINGS — per-user settings catalog + system defaults (single source of
+     truth on the frontend; mirrors the backend contract). Placed AFTER Util and
+     BEFORE Store so Store.pref() can resolve defaults at runtime.
+
+     CATALOG entry shape: { key, category, type, default, tier, region }
+       category : 'personalization' | 'workflow' | 'profile'
+       type     : coarse editor/value hint for the (later) settings UI
+       default  : the SYSTEM default — last link in the resolution chain
+       tier     : the LOWEST tier that may SET the key ('user' | 'role' | 'system').
+                  Every key here is user-settable, so all are 'user'; roles supply
+                  defaults for all EXCEPT the three "user tier only" workflow keys
+                  (gridLayout / pinnedPlants / pinnedLines), which are inherently
+                  per-person and never role-overridable.
+       region   : true only for keys eligible for the (NO-OP today) {plant} region
+                  fallback — timezone & firstDayOfWeek.
+     timeFormat / dateFormat / timezone are DISPLAY-ONLY (they change how values
+     render, never the stored data).
+     ========================================================================== */
+  const Settings = (() => {
+    const CATALOG = [
+      // ── Personalization ────────────────────────────────────────────────
+      // (category MUST match the modal pane the control renders in — see
+      //  _renderPersonalizationPane / _renderWorkflowPane below.)
+      { key: 'theme',        category: 'personalization', type: 'enum',   default: 'light', tier: 'user', region: false },
+      { key: 'language',     category: 'personalization', type: 'enum',   default: 'en',    tier: 'user', region: false },
+      { key: 'defaultPlant', category: 'personalization', type: 'plant',  default: null,    tier: 'user', region: false },
+      { key: 'landingView',  category: 'personalization', type: 'object', default: null,    tier: 'user', region: false },
+      // gridLayout / pinnedPlants / pinnedLines are USER-TIER ONLY — inherently
+      // per-person, so roles never supply defaults for them.
+      { key: 'gridLayout',   category: 'personalization', type: 'object', default: null, tier: 'user', region: false },
+      { key: 'pinnedPlants', category: 'personalization', type: 'array',  default: [],   tier: 'user', region: false },
+      { key: 'pinnedLines',  category: 'personalization', type: 'array',  default: [],   tier: 'user', region: false },
+      // ── Workflow ───────────────────────────────────────────────────────
+      { key: 'timeFormat',        category: 'workflow', type: 'enum',     default: '12h',              tier: 'user', region: false },
+      { key: 'dateFormat',        category: 'workflow', type: 'enum',     default: 'M j, Y',           tier: 'user', region: false },
+      { key: 'timezone',          category: 'workflow', type: 'timezone', default: 'America/New_York', tier: 'user', region: true  },
+      { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
+      { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
+    ];
+
+    // { key: default } map derived from CATALOG (last link in Store.pref precedence).
+    const DEFAULTS = {};
+    for (const e of CATALOG) DEFAULTS[e.key] = e.default;
+
+    const _byKey = {};
+    for (const e of CATALOG) _byKey[e.key] = e;
+
+    return {
+      CATALOG,
+      DEFAULTS,
+      isRegion(key)   { return !!(_byKey[key] && _byKey[key].region); },
+      byCategory(cat) { return CATALOG.filter(e => e.category === cat); },
+    };
+  })();
+
+  /* =============================================================================
      VIRTUAL LIST — minimal padding-based windowing helper.
      Renders only the items visible in the scroll viewport plus a buffer,
      using paddingTop/paddingBottom spacers so the scrollbar reflects true height.
@@ -731,7 +824,8 @@ const NIMBUS = (function () {
       lineSettings: {},           // line → { plant, bufferUnit, bufferPct, bufferHours, bottleneck, excludeFromOpt }
       selectedPlant: null,        // single plant selected from Dashboard filter; drives Plant tab + optimization
       masterData: null,           // { plants: [...], lines: [...] } from /master-data/* endpoints
-      userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 } // null = no cap; values in minutes
+      userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 }, // per-user prefs blob (DB truth merged in by Session) + legacy horizon caps; null = no cap, values in minutes
+      roleDefaults: {}            // roles.settings for the signed-in user's role — Store.pref() fallback below userSettings
     },
     _listeners: new Set(),
 
@@ -748,6 +842,7 @@ const NIMBUS = (function () {
     get lineSettings()  { return this._state.lineSettings; },
     get selectedPlant() { return this._state.selectedPlant; },
     get userSettings()  { return this._state.userSettings; },
+    get roleDefaults()  { return this._state.roleDefaults; },
 
     isFixed(id)     { return this._state.fixedIds.has(String(id)); },
 
@@ -1189,6 +1284,31 @@ const NIMBUS = (function () {
     setUserSettings(patch, source) {
       Object.assign(this._state.userSettings, patch);
       this.emit({ type: 'settings:change', source });
+    },
+    // Replace the role-defaults snapshot wholesale (roles.settings for the signed-in
+    // user's role). Session.signIn/refresh push this from GET /security/me.role_settings.
+    setRoleDefaults(obj, source) {
+      this._state.roleDefaults = (obj && typeof obj === 'object') ? { ...obj } : {};
+      this.emit({ type: 'settings:change', source });
+    },
+    /* Resolve an effective per-user preference using the contract precedence:
+         userSettings[key] ?? roleDefaults[key] ?? Settings.DEFAULTS[key]
+       Never throws — returns undefined for an unknown key with no default. `opts.plant`
+       scaffolds a region/{plant} fallback (see note) and may be passed now for
+       forward-compat; it is ignored today. */
+    pref(key, opts = {}) {
+      try {
+        const us   = this._state.userSettings || {};
+        const rd   = this._state.roleDefaults || {};
+        const defs = (typeof Settings !== 'undefined' && Settings.DEFAULTS) || {};
+        // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
+        // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
+        // a per-plant regional default keyed on opts.plant would slot in between the
+        // user blob and the role defaults right here. There is NO plants timezone /
+        // week-start column yet, so we deliberately do not read one — do not invent a
+        // plants column to satisfy this hook.
+        return us[key] ?? rd[key] ?? defs[key];
+      } catch { return undefined; }
     },
 
     /* ----- internals ------------------------------------------------------- */
@@ -5549,6 +5669,12 @@ const NIMBUS = (function () {
       const el = document.getElementById('modal-optimize');
       if (!el) return;
       el.hidden = false;
+      // Seed from the user's saved optimizer defaults (pref('optimizerDefaults'))
+      // when present, so the dialog opens pre-filled with their preferred strategy,
+      // time window, and option toggles. Falls back to the historical defaults
+      // (horizon preset / changeover / toolbar checkbox state) otherwise.
+      let _od = null;
+      try { _od = Store.pref('optimizerDefaults'); } catch {}
       // Sync option checkboxes from the Gantt toolbar's existing chk- elements
       const rfEl = document.getElementById('chk-respect-fixed');
       const rcEl = document.getElementById('chk-respect-calendar');
@@ -5556,10 +5682,18 @@ const NIMBUS = (function () {
       const ocEl = document.getElementById('opt-chk-calendar');
       if (rfEl && ofEl) ofEl.checked = rfEl.checked;
       if (rcEl && ocEl) ocEl.checked = rcEl.checked;
+      // Saved defaults override the toolbar mirror when present.
+      if (_od && typeof _od === 'object') {
+        if (ofEl && typeof _od.respectFixed === 'boolean')    ofEl.checked = _od.respectFixed;
+        if (ocEl && typeof _od.respectCalendar === 'boolean') ocEl.checked = _od.respectCalendar;
+      }
       _initPickers();
       _buildPlantSelect();
-      applyPreset('horizon');
-      selectMode('changeover');
+      // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
+      const _seedPreset = (_od && ['horizon', '2w'].includes(_od.preset)) ? _od.preset : 'horizon';
+      applyPreset(_seedPreset);
+      const _seedMode = (_od && ['spt', 'changeover', 'combined'].includes(_od.mode)) ? _od.mode : 'changeover';
+      selectMode(_seedMode);
       // Reset the Run button HTML in case a previous session left it in the
       // "Optimizing…" state (e.g., Cancel mid-fetch).
       const runBtn = document.getElementById('opt-run-btn');
@@ -5601,6 +5735,17 @@ const NIMBUS = (function () {
       }
       const sfEl = document.getElementById('opt-chk-fixed');
       const scEl = document.getElementById('opt-chk-calendar');
+
+      // Remember the chosen strategy/window/options as this user's optimizer
+      // defaults so the dialog pre-fills the same way next time (feature: optimizer
+      // defaults). Self-service pref — persisted via the debounced PATCH.
+      try {
+        Session.setPref('optimizerDefaults', {
+          mode: _mode, preset: _preset,
+          respectFixed:    sfEl?.checked ?? true,
+          respectCalendar: scEl?.checked ?? true,
+        });
+      } catch {}
 
       // Immediate visual feedback so the click feels responsive.
       const runBtn = document.getElementById('opt-run-btn');
@@ -6078,11 +6223,19 @@ const NIMBUS = (function () {
         throw new Error(e.detail || 'Invalid username or password');
       }
       const data = await res.json();
+      // Per-user settings + role defaults are the authoritative DB blobs; the
+      // login response may not carry them (only GET /security/me is guaranteed to),
+      // so default to {} and let refresh() fill them from /security/me at boot.
+      const settings = data.settings || {};
+      const roleSettings = data.role_settings || {};
       localStorage.setItem(KEY, JSON.stringify({
         username: data.username, role: data.role,
         allowed_plants: data.allowed_plants ?? null,
         first_name: data.first_name || null, last_name: data.last_name || null,
+        settings, role_settings: roleSettings,
       }));
+      Store.setUserSettings(settings, 'session-signin');
+      Store.setRoleDefaults(roleSettings, 'session-signin');
       _applyGates();
       return data;
     }
@@ -6114,6 +6267,9 @@ const NIMBUS = (function () {
           if (roleEl) roleEl.textContent = current.role;
           if (firstEl) firstEl.value = current.first_name || '';
           if (lastEl) lastEl.value = current.last_name || '';
+          // Build the Personalization / Workflow controls fresh so they reflect
+          // the current resolved prefs each time the modal opens.
+          try { _renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${e.message}`); }
           Modal.open('modal-user-settings');
         });
       }
@@ -6127,6 +6283,504 @@ const NIMBUS = (function () {
         saveBtn._wired = true;
         saveBtn.addEventListener('click', saveProfile);
       }
+      // Wire the User Settings tab bar (Personalization / Workflow / Profile).
+      // _renderSettingsPanes() populates the Personalization/Workflow panes on
+      // modal open; this only toggles which pane + button is active. Wired once.
+      document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(tabBtn => {
+        if (tabBtn._wired) return;
+        tabBtn._wired = true;
+        tabBtn.addEventListener('click', () => _showUserTab(tabBtn.getAttribute('data-us-tab')));
+      });
+    }
+
+    // Toggle the active User Settings tab: highlight the button and reveal only
+    // the matching pane (#us-tab-<name>). Names mirror Settings category ids.
+    function _showUserTab(name) {
+      document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-us-tab') === name);
+      });
+      ['personalization', 'workflow', 'profile'].forEach(n => {
+        const body = document.getElementById('us-tab-' + n);
+        if (body) body.hidden = (n !== name);
+      });
+    }
+
+    /* ── Personalization + Workflow panes (Phase-1 self-service settings) ─────
+       Rebuilt each time the modal opens so every control reflects the current
+       resolved pref (Store.pref = user ?? role ?? system default). Labels use
+       t() inline — App.init()'s one-shot [data-i18n] sweep never runs over these
+       dynamically-inserted nodes. Each control persists via setPref() and, where
+       it changes the running app, applies the effect immediately. */
+    function _optTag(value, label, selected) {
+      const v = String(value);
+      return `<option value="${v}"${v === String(selected) ? ' selected' : ''}>${label}</option>`;
+    }
+
+    // Repaint the display surfaces whose datetime labels are baked at render time,
+    // so a timeFormat/dateFormat change is reflected without waiting for the next
+    // natural re-render. Best-effort — never throws into the change handler.
+    function _repaintDisplayFormat() {
+      if (typeof NIMBUS === 'undefined') return;
+      // Timeline bar tooltips + blackout titles are baked at build time.
+      try { if (NIMBUS.Timeline?.rebuild) NIMBUS.Timeline.rebuild(); } catch {}
+      try { if (NIMBUS.TimelineNav?.render) NIMBUS.TimelineNav.render(); } catch {}
+      // AG Grid date columns render through pref-aware valueFormatters — force a
+      // cell repaint so the new format shows without an edit/scroll.
+      try { if (NIMBUS.Table?._api) NIMBUS.Table._api.refreshCells({ force: true }); } catch {}
+      // Inspector schedule rows are baked into innerHTML — re-render the current
+      // selection so its dates repaint too.
+      try {
+        const id = NIMBUS.Inspector?._currentId;
+        if (id && NIMBUS.Inspector?._render) {
+          const task = NIMBUS.Store?.tasks?.[id];
+          if (task) NIMBUS.Inspector._render(task);
+        }
+      } catch {}
+    }
+
+    function _htmlEsc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Landing-view tab choices (admin tab only for admins) and their sub-views.
+    function _landingTabDefs() {
+      const defs = [
+        ['home',       t('tab.home')],
+        ['gantt',      t('tab.gantt')],
+        ['labor',      t('us.tab_labor')],
+        ['masterdata', t('tab.masterdata')],
+      ];
+      if (isAdmin()) defs.push(['admin', t('tab.admin')]);
+      return defs;
+    }
+    function _landingSubDefs(tab) {
+      if (tab === 'gantt')      return [['timeline', t('us.landing_timeline')], ['orders', t('tab.table')]];
+      if (tab === 'masterdata') return [['lines', t('tab.production_lines')], ['plant', t('tab.plant')]];
+      return null;   // home / labor / admin land on the tab with no sub-view here
+    }
+
+    // Render the small removable list of pinned values below a pinned combobox.
+    function _renderPinnedList(listEl, key) {
+      if (!listEl) return;
+      const items = (pref(key) || []).slice();
+      if (!items.length) {
+        listEl.innerHTML = `<div class="us-pinned-empty">${t('us.pinned_none')}</div>`;
+        return;
+      }
+      listEl.innerHTML = items.map(v => {
+        const safe = _htmlEsc(v);
+        return `<span class="us-pinned-item"><span class="us-pinned-name">${safe}</span>` +
+          `<button type="button" class="us-pin-remove" data-val="${safe}" title="${t('us.pin_remove')}" aria-label="${t('us.pin_remove')}">×</button></span>`;
+      }).join('');
+    }
+
+    /* Searchable pin picker (scale-safe — never a chip selector). optionsFn()
+       supplies the full candidate list; already-pinned values are filtered out.
+       Choosing appends to pref(key) via setPref; the removable list handles unpin.
+       afterChange() lets the caller refresh the affected surface immediately. */
+    function _initPinnedCombo({ inputId, dropdownId, listId, key, optionsFn, noneMsg, afterChange }) {
+      const input    = document.getElementById(inputId);
+      const dropdown = document.getElementById(dropdownId);
+      const listEl   = document.getElementById(listId);
+      if (!input || !dropdown || !listEl) return;
+      let filtered = [];
+      let activeIdx = -1;
+
+      const open  = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+      const close = () => { dropdown.hidden = true; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); };
+      const highlight = () => {
+        const els = dropdown.querySelectorAll('.us-combo-option');
+        els.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        const a = els[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
+      };
+      const add = (val) => {
+        if (val == null) return;
+        const cur = pref(key) || [];
+        if (!cur.includes(val)) setPref(key, [...cur, val]);
+        input.value = '';
+        _renderPinnedList(listEl, key);
+        close();
+        try { afterChange && afterChange(); } catch {}
+      };
+      const renderList = (query) => {
+        const already = new Set(pref(key) || []);
+        const all = (optionsFn() || []).filter(o => !already.has(o));
+        const q = (query || '').trim().toLowerCase();
+        filtered = q ? all.filter(o => o.toLowerCase().includes(q)) : all.slice();
+        if (!filtered.length) {
+          dropdown.innerHTML = `<div class="us-combo-empty">${all.length ? t('us.no_matches') : noneMsg}</div>`;
+          activeIdx = -1;
+          return;
+        }
+        dropdown.innerHTML = filtered.map((o, i) => {
+          const safe = _htmlEsc(o);
+          return `<div class="us-combo-option" role="option" data-val="${safe}" data-idx="${i}"><span>${safe}</span></div>`;
+        }).join('');
+        activeIdx = 0;
+        highlight();
+        dropdown.querySelectorAll('.us-combo-option').forEach(el => {
+          el.addEventListener('mousedown', e => { e.preventDefault(); add(el.dataset.val); });
+        });
+      };
+
+      input.addEventListener('focus', () => { renderList(input.value); open(); });
+      input.addEventListener('input', () => { renderList(input.value); open(); });
+      input.addEventListener('keydown', e => {
+        if (dropdown.hidden) {
+          if (e.key === 'ArrowDown' || e.key === 'Enter') { renderList(input.value); open(); e.preventDefault(); }
+          return;
+        }
+        if (e.key === 'ArrowDown')    { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
+        else if (e.key === 'Enter')   { e.preventDefault(); const v = filtered[activeIdx]; if (v != null) add(v); }
+        else if (e.key === 'Escape')  { close(); input.blur(); }
+      });
+      input.addEventListener('blur', () => setTimeout(close, 120));
+
+      _renderPinnedList(listEl, key);
+      listEl.addEventListener('click', e => {
+        const btn = e.target.closest('.us-pin-remove');
+        if (!btn) return;
+        const val = btn.dataset.val;
+        setPref(key, (pref(key) || []).filter(x => x !== val));
+        _renderPinnedList(listEl, key);
+        try { afterChange && afterChange(); } catch {}
+      });
+    }
+
+    function _renderSettingsPanes() {
+      _renderPersonalizationPane();
+      _renderWorkflowPane();
+    }
+
+    function _renderPersonalizationPane() {
+      const pane = document.getElementById('us-tab-personalization');
+      if (!pane) return;
+      // Seed from the ACTUALLY-applied theme (body.dark) so the control matches what
+      // the user sees: DarkMode may have applied 'dark' from the legacy nimbus.theme
+      // cache even when no user_settings.theme pref exists yet (pref() → 'light').
+      const theme = document.body.classList.contains('dark') ? 'dark' : (pref('theme') || 'light');
+      const lang  = pref('language');
+      const langOpts = [
+        ['en', 'English'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'],
+      ].map(([c, n]) => _optTag(c, n, lang)).join('');
+      // Landing view — tab select + (dependent) sub-view select.
+      const lv       = pref('landingView') || {};
+      const lvTab    = _landingTabDefs().some(([v]) => v === lv.tab) ? lv.tab : 'home';
+      const landingTabOpts = _landingTabDefs().map(([v, n]) => _optTag(v, n, lvTab)).join('');
+      const lvSubDefs = _landingSubDefs(lvTab);
+      const landingSubOpts = lvSubDefs
+        ? lvSubDefs.map(([v, n]) => _optTag(v, n, lv.sub)).join('')
+        : '';
+      // Saved grid layout — the on/off toggle mirrors pref('gridLayout') null-ness.
+      const gridLayoutOn = pref('gridLayout') != null;
+      pane.innerHTML = `
+        <div class="form-row">
+          <label data-i18n="us.theme">${t('us.theme')}</label>
+          <select id="us-pref-theme">
+            ${_optTag('light', t('us.theme_light'), theme)}
+            ${_optTag('dark',  t('us.theme_dark'),  theme)}
+          </select>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.language">${t('us.language')}</label>
+          <select id="us-pref-language">${langOpts}</select>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.default_plant">${t('us.default_plant')}</label>
+          <div class="us-combo" id="us-plant-combo">
+            <input type="text" id="us-plant-input" class="us-combo-input" autocomplete="off" spellcheck="false"
+                   placeholder="${t('us.default_plant_ph')}" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+            <button type="button" class="us-combo-clear" id="us-plant-clear" title="${t('us.default_plant_clear')}" hidden>×</button>
+            <div class="us-combo-dropdown" id="us-plant-dropdown" role="listbox" hidden></div>
+          </div>
+          <p class="us-field-hint">${t('us.default_plant_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.landing_view">${t('us.landing_view')}</label>
+          <div class="us-landing-row">
+            <select id="us-landing-tab">${landingTabOpts}</select>
+            <select id="us-landing-sub"${landingSubOpts ? '' : ' hidden'}>${landingSubOpts || ''}</select>
+          </div>
+          <p class="us-field-hint">${t('us.landing_view_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.grid_layout">${t('us.grid_layout')}</label>
+          <label class="us-toggle-row">
+            <input type="checkbox" id="us-grid-layout-toggle"${gridLayoutOn ? ' checked' : ''}>
+            <span>${t('us.grid_layout_toggle')}</span>
+          </label>
+          <button type="button" class="btn btn-ghost sm" id="us-grid-layout-reset" style="margin-top:8px">${t('us.grid_layout_reset')}</button>
+          <p class="us-field-hint">${t('us.grid_layout_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.pinned_plants">${t('us.pinned_plants')}</label>
+          <div class="us-combo" id="us-pinplant-combo">
+            <input type="text" id="us-pinplant-input" class="us-combo-input" autocomplete="off" spellcheck="false"
+                   placeholder="${t('us.pinned_plants_ph')}" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+            <div class="us-combo-dropdown" id="us-pinplant-dropdown" role="listbox" hidden></div>
+          </div>
+          <div class="us-pinned-list" id="us-pinplant-list"></div>
+          <p class="us-field-hint">${t('us.pinned_plants_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.pinned_lines">${t('us.pinned_lines')}</label>
+          <div class="us-combo" id="us-pinline-combo">
+            <input type="text" id="us-pinline-input" class="us-combo-input" autocomplete="off" spellcheck="false"
+                   placeholder="${t('us.pinned_lines_ph')}" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+            <div class="us-combo-dropdown" id="us-pinline-dropdown" role="listbox" hidden></div>
+          </div>
+          <div class="us-pinned-list" id="us-pinline-list"></div>
+          <p class="us-field-hint">${t('us.pinned_lines_hint')}</p>
+        </div>`;
+
+      const themeSel = pane.querySelector('#us-pref-theme');
+      themeSel.addEventListener('change', () => {
+        const isDark = themeSel.value === 'dark';
+        // DarkMode.set() does the write-through (Session.setPref + nimbus.theme cache
+        // + repaint); fall back to a bare persist if the intelligence layer is absent.
+        try {
+          if (typeof NIMBUS !== 'undefined' && NIMBUS.DarkMode?.set) NIMBUS.DarkMode.set(isDark);
+          else setPref('theme', isDark ? 'dark' : 'light');
+        } catch { setPref('theme', isDark ? 'dark' : 'light'); }
+      });
+
+      const langSel = pane.querySelector('#us-pref-language');
+      langSel.addEventListener('change', () => {
+        // LangSwitcher.set() persists via Session.setPref, keeps nimbus.locale in
+        // sync, and reloads so the whole UI re-renders in the chosen locale.
+        try {
+          if (typeof NIMBUS !== 'undefined' && NIMBUS.LangSwitcher?.set) NIMBUS.LangSwitcher.set(langSel.value);
+          else { setPref('language', langSel.value); location.reload(); }
+        } catch { setPref('language', langSel.value); location.reload(); }
+      });
+
+      _initDefaultPlantCombo(pane);
+
+      // ── Default landing view (tab + dependent sub-view) ──────────────────
+      const landingTabSel = pane.querySelector('#us-landing-tab');
+      const landingSubSel = pane.querySelector('#us-landing-sub');
+      const _persistLanding = () => {
+        const tab = landingTabSel.value;
+        const subs = _landingSubDefs(tab);
+        const sub  = (subs && landingSubSel && !landingSubSel.hidden) ? landingSubSel.value : null;
+        setPref('landingView', { tab, sub });
+      };
+      if (landingTabSel) {
+        landingTabSel.addEventListener('change', () => {
+          const subs = _landingSubDefs(landingTabSel.value);
+          if (landingSubSel) {
+            if (subs) {
+              landingSubSel.innerHTML = subs.map(([v, n]) => _optTag(v, n, subs[0][0])).join('');
+              landingSubSel.hidden = false;
+            } else {
+              landingSubSel.innerHTML = '';
+              landingSubSel.hidden = true;
+            }
+          }
+          _persistLanding();
+        });
+      }
+      if (landingSubSel) landingSubSel.addEventListener('change', _persistLanding);
+
+      // ── Saved grid layout (toggle + reset) ───────────────────────────────
+      const gridToggle = pane.querySelector('#us-grid-layout-toggle');
+      if (gridToggle) {
+        gridToggle.addEventListener('change', () => {
+          try { Table._setLayoutEnabled(gridToggle.checked); } catch {}
+        });
+      }
+      const gridReset = pane.querySelector('#us-grid-layout-reset');
+      if (gridReset) {
+        gridReset.addEventListener('click', () => {
+          let ok = false;
+          try { ok = Table._resetGridLayout(); } catch {}
+          Toast.show(ok ? t('us.grid_layout_reset_done') : t('us.grid_layout_no_grid'), ok ? 'success' : 'warn');
+        });
+      }
+
+      // ── Pinned plants / lines ─────────────────────────────────────────────
+      _initPinnedCombo({
+        inputId: 'us-pinplant-input', dropdownId: 'us-pinplant-dropdown', listId: 'us-pinplant-list',
+        key: 'pinnedPlants', optionsFn: () => Store.knownPlants(), noneMsg: t('us.no_plants'),
+        afterChange: () => { try { PlantSelector._reflectSelection(); } catch {} },
+      });
+      _initPinnedCombo({
+        inputId: 'us-pinline-input', dropdownId: 'us-pinline-dropdown', listId: 'us-pinline-list',
+        key: 'pinnedLines', optionsFn: () => Store.allLines().slice().sort((a, b) => a.localeCompare(b)),
+        noneMsg: t('us.no_lines'),
+        afterChange: () => { try { Hierarchy.render(); } catch {} },
+      });
+    }
+
+    // Searchable plant combobox (scale-safe — never a chip list). Bound to
+    // pref('defaultPlant'); writes via setPref('defaultPlant', code|null). Modeled
+    // on the header PlantSelector, scoped to this modal instance.
+    function _initDefaultPlantCombo(pane) {
+      const input    = pane.querySelector('#us-plant-input');
+      const dropdown = pane.querySelector('#us-plant-dropdown');
+      const clearBtn = pane.querySelector('#us-plant-clear');
+      const combo    = pane.querySelector('#us-plant-combo');
+      if (!input || !dropdown || !combo) return;
+      let filtered = [];
+      let activeIdx = -1;
+
+      const options = () => Store.knownPlants();          // already allowedPlants()-scoped
+      const current = () => pref('defaultPlant') || null;
+
+      const reflect = () => {
+        const dp = current();
+        input.value = dp ? `${dp}` : '';
+        combo.classList.toggle('has-value', !!dp);
+        clearBtn.hidden = !dp;
+      };
+      const open  = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+      const close = () => { dropdown.hidden = true; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); };
+      const highlight = () => {
+        const items = dropdown.querySelectorAll('.us-combo-option');
+        items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        const a = items[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
+      };
+      const choose = (plant) => { setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
+
+      const renderList = (query) => {
+        const all = options();
+        const q = (query || '').trim().toLowerCase();
+        const looksLikeLabel = current() && q === `${current()}`.toLowerCase();
+        const fq = looksLikeLabel ? '' : q;
+        filtered = fq ? all.filter(p => p.toLowerCase().includes(fq)) : all.slice();
+        if (!filtered.length) {
+          dropdown.innerHTML = `<div class="us-combo-empty">${all.length ? t('us.no_matches') : t('us.no_plants')}</div>`;
+          activeIdx = -1;
+          return;
+        }
+        const sel = current();
+        dropdown.innerHTML = filtered.map((p, i) =>
+          `<div class="us-combo-option${p === sel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
+             <span class="us-combo-option-prefix">${t('ui.plant_label')}</span><span>${p}</span>
+           </div>`).join('');
+        activeIdx = Math.max(0, filtered.indexOf(sel));
+        highlight();
+        dropdown.querySelectorAll('.us-combo-option').forEach(el => {
+          el.addEventListener('mousedown', e => { e.preventDefault(); choose(el.dataset.plant); });
+        });
+      };
+
+      input.addEventListener('focus', () => { renderList(input.value); open(); });
+      input.addEventListener('input', () => { renderList(input.value); open(); });
+      input.addEventListener('keydown', e => {
+        if (dropdown.hidden) {
+          if (e.key === 'ArrowDown' || e.key === 'Enter') { renderList(input.value); open(); e.preventDefault(); }
+          return;
+        }
+        if (e.key === 'ArrowDown')      { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
+        else if (e.key === 'ArrowUp')   { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
+        else if (e.key === 'Enter')     { e.preventDefault(); const p = filtered[activeIdx]; if (p) choose(p); }
+        else if (e.key === 'Escape')    { close(); reflect(); input.blur(); }
+      });
+      input.addEventListener('blur', () => setTimeout(() => { close(); reflect(); }, 120));
+      clearBtn.addEventListener('mousedown', e => e.preventDefault());
+      clearBtn.addEventListener('click', () => { choose(null); input.focus(); });
+      reflect();
+    }
+
+    function _renderWorkflowPane() {
+      const pane = document.getElementById('us-tab-workflow');
+      if (!pane) return;
+      const tf = pref('timeFormat');
+      const df = pref('dateFormat');
+      const now = new Date();
+      const sample = (tok) => {
+        try { if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(now, tok); } catch {}
+        return tok;
+      };
+      const dfTokens = ['M j, Y', 'm/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y'];
+      if (df && !dfTokens.includes(df)) dfTokens.unshift(df);   // keep a role/legacy value selectable
+      const dfOpts = dfTokens.map(tok => _optTag(tok, sample(tok), df)).join('');
+      const fdow = Number(pref('firstDayOfWeek'));
+      const fdowSel = (fdow === 1) ? 1 : 0;
+      // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
+      const od      = pref('optimizerDefaults');
+      const odMode  = (od && ['spt', 'changeover', 'combined'].includes(od.mode)) ? od.mode : 'changeover';
+      const odFixed = od ? od.respectFixed !== false : true;
+      const odCal   = od ? od.respectCalendar !== false : true;
+      pane.innerHTML = `
+        <div class="form-row">
+          <label data-i18n="us.time_format">${t('us.time_format')}</label>
+          <select id="us-pref-timeformat">
+            ${_optTag('12h', t('us.time_12h'), tf)}
+            ${_optTag('24h', t('us.time_24h'), tf)}
+          </select>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.date_format">${t('us.date_format')}</label>
+          <select id="us-pref-dateformat">${dfOpts}</select>
+          <p class="us-field-hint">${t('us.date_format_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.first_day">${t('us.first_day')}</label>
+          <select id="us-pref-firstday">
+            ${_optTag(0, t('us.first_day_sun'), fdowSel)}
+            ${_optTag(1, t('us.first_day_mon'), fdowSel)}
+          </select>
+          <p class="us-field-hint">${t('us.first_day_hint')}</p>
+        </div>
+        <div class="form-row">
+          <label data-i18n="us.opt_defaults">${t('us.opt_defaults')}</label>
+          <select id="us-opt-mode">
+            ${_optTag('spt',        t('us.opt_mode_spt'),        odMode)}
+            ${_optTag('changeover', t('us.opt_mode_changeover'), odMode)}
+            ${_optTag('combined',   t('us.opt_mode_smart'),      odMode)}
+          </select>
+          <label class="us-toggle-row" style="margin-top:8px">
+            <input type="checkbox" id="us-opt-fixed"${odFixed ? ' checked' : ''}>
+            <span>${t('us.opt_respect_fixed')}</span>
+          </label>
+          <label class="us-toggle-row">
+            <input type="checkbox" id="us-opt-calendar"${odCal ? ' checked' : ''}>
+            <span>${t('us.opt_respect_calendar')}</span>
+          </label>
+          <button type="button" class="btn btn-ghost sm" id="us-opt-clear" style="margin-top:8px"${od ? '' : ' hidden'}>${t('us.opt_defaults_clear')}</button>
+          <p class="us-field-hint">${t('us.opt_defaults_hint')}</p>
+        </div>`;
+
+      const tfSel = pane.querySelector('#us-pref-timeformat');
+      tfSel.addEventListener('change', () => { setPref('timeFormat', tfSel.value); _repaintDisplayFormat(); });
+      const dfSel = pane.querySelector('#us-pref-dateformat');
+      dfSel.addEventListener('change', () => { setPref('dateFormat', dfSel.value); _repaintDisplayFormat(); });
+
+      const fdSel = pane.querySelector('#us-pref-firstday');
+      if (fdSel) fdSel.addEventListener('change', () => {
+        const v = fdSel.value === '1' ? 1 : 0;
+        setPref('firstDayOfWeek', v);
+        try { App._applyFirstDayOfWeek(); } catch {}
+      });
+
+      // Optimizer defaults — preserve any stored preset; the dialog's run() keeps
+      // it fresh from the user's last actual run.
+      const modeSel  = pane.querySelector('#us-opt-mode');
+      const fixedChk = pane.querySelector('#us-opt-fixed');
+      const calChk   = pane.querySelector('#us-opt-calendar');
+      const writeOpt = () => {
+        const existing = pref('optimizerDefaults') || {};
+        setPref('optimizerDefaults', {
+          mode: modeSel.value,
+          preset: ['horizon', '2w'].includes(existing.preset) ? existing.preset : 'horizon',
+          respectFixed: fixedChk.checked,
+          respectCalendar: calChk.checked,
+        });
+        const clr = pane.querySelector('#us-opt-clear');
+        if (clr) clr.hidden = false;
+      };
+      if (modeSel)  modeSel.addEventListener('change', writeOpt);
+      if (fixedChk) fixedChk.addEventListener('change', writeOpt);
+      if (calChk)   calChk.addEventListener('change', writeOpt);
+      const optClear = pane.querySelector('#us-opt-clear');
+      if (optClear) optClear.addEventListener('click', () => {
+        setPref('optimizerDefaults', null);
+        _renderWorkflowPane();
+      });
     }
 
     // Self-service: PATCH /security/me with just this user's own name fields.
@@ -6159,6 +6813,75 @@ const NIMBUS = (function () {
       }
     }
 
+    /* ── Self-service preference writes (Personalization / Workflow) ─────────
+       setPref(key, value) is OPTIMISTIC (mirrors _savePlantHorizon's write-then-
+       revert shape): Store.userSettings updates immediately so the UI reflects the
+       change, then a debounced PATCH /security/me/settings persists it. On success
+       we adopt the server's full merged blob and mirror it to the nimbus.session
+       cache; on failure we revert only this batch's keys in Store AND the cache and
+       Toast an i18n error. Multiple rapid setPref calls coalesce into one PATCH. */
+    let _prefTimer = null;
+    let _prefPending = {};   // key → queued new value for the next PATCH
+    let _prefPrev    = {};   // key → pre-edit value, for revert on failure
+
+    async function _flushPrefs() {
+      _prefTimer = null;
+      const patch = _prefPending; _prefPending = {};
+      const prev  = _prefPrev;    _prefPrev = {};
+      if (!Object.keys(patch).length) return;
+      try {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/settings`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ settings: patch }),
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        const updated = await r.json();
+        // Server returns the full merged blob — adopt it as truth + mirror to cache.
+        const settings = updated.settings || {};
+        Store.setUserSettings(settings, 'settings-pref');
+        const u = currentUser();
+        if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings }));
+      } catch (e) {
+        // Revert only the keys this failed batch touched — in Store and the cache —
+        // leaving keys a still-pending batch owns untouched.
+        Store.setUserSettings(prev, 'settings-pref-revert');
+        const u = currentUser();
+        if (u) {
+          const cached = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
+          for (const k of Object.keys(prev)) {
+            if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
+          }
+          localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
+        }
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('settings', `Save preference failed: ${e.message}`);
+      }
+    }
+
+    function setPref(key, value) {
+      // Capture the pre-edit value once per batch (first writer wins) so a revert
+      // restores the value from before this batch, not an intermediate optimistic one.
+      if (!(key in _prefPrev)) _prefPrev[key] = Store.userSettings[key];
+      _prefPending[key] = value;
+      Store.setUserSettings({ [key]: value }, 'settings-pref');   // optimistic
+      if (_prefTimer) clearTimeout(_prefTimer);
+      _prefTimer = setTimeout(_flushPrefs, 600);
+    }
+
+    // Flush any pending pref writes immediately and return the PATCH promise. The
+    // language switch must await this BEFORE location.reload() — a reload cancels
+    // the debounced timer and in-flight fetch, so without an explicit flush the DB
+    // (and the session cache _flushPrefs refreshes on success) would never catch up
+    // and the next boot would revert the language from stale truth.
+    function flushPrefs() {
+      if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
+      return _flushPrefs();
+    }
+
+    // Convenience read — resolves via Store.pref (user ?? role ?? system default).
+    function pref(key) { return Store.pref(key); }
+
     function _applyGates() {
       const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
       if (adminBtn) adminBtn.hidden = !isAdmin();
@@ -6179,6 +6902,11 @@ const NIMBUS = (function () {
         const r = await Util.fetchTraced(`${Config.API_BASE}/security/me`);
         if (!r.ok) return null;
         const me = await r.json();
+        // GET /security/me now carries the caller's own settings blob + their role's
+        // defaults; cache both (localStorage = cache of DB truth so the app boots
+        // offline from the cached blob) and push them into Store for Store.pref().
+        const settings = me.settings || {};
+        const roleSettings = me.role_settings || {};
         localStorage.setItem(KEY, JSON.stringify({
           username: me.username || u.username,
           role: me.role || null,
@@ -6186,7 +6914,10 @@ const NIMBUS = (function () {
           allowed_plants: me.allowed_plants ?? null,
           first_name: me.first_name || null,
           last_name: me.last_name || null,
+          settings, role_settings: roleSettings,
         }));
+        Store.setUserSettings(settings, 'session-refresh');
+        Store.setRoleDefaults(roleSettings, 'session-refresh');
         _applyGates();
         // If we just lost admin while sitting on the Admin tab, leave it.
         if (!isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
@@ -6217,7 +6948,7 @@ const NIMBUS = (function () {
       try { Toast.show(t('sec.access_revoked'), 'error'); } catch {}
     }
 
-    return { currentUser, actor, isAdmin, allowedPlants, signIn, signOut, refresh, onAuthDenied, _applyGates };
+    return { currentUser, actor, isAdmin, allowedPlants, signIn, signOut, refresh, onAuthDenied, setPref, flushPrefs, pref, _applyGates };
   })();
 
   /* =============================================================================
@@ -6660,7 +7391,7 @@ const NIMBUS = (function () {
         id,
         group:   line,
         content: `<span style="font-style:italic;">✕ ${b.reason || t('ui.blackouts_label', {plural: ''})}</span>`,
-        title:   `${t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDT(b.start)} → ${Util.fmtDT(b.end)}`,
+        title:   `${t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
         start:   b.start, end: b.end,
         editable: false,
         className: 'blackout',
@@ -7123,6 +7854,100 @@ const NIMBUS = (function () {
     _rangeActive:      null,
     _rangeDragOn:      false,
     _rangeHighlighted: new Set(),
+    _applyingLayout:   false,   // true while restoring saved layout — suppresses capture echo
+    _captureTimer:     null,
+
+    /* ── Saved grid layout (pref('gridLayout'), user tier) ────────────────────
+       gridLayout === null  → feature OFF: never applied on load, never captured.
+       gridLayout === {...}  → feature ON: applied on grid-ready, re-captured (debounced)
+                               on every column/sort/filter change. The on/off toggle in
+                               User Settings derives its state from this null-ness, so
+                               enabling captures the current live layout (→ non-null) and
+                               disabling nulls it. Shape: { columnState, sortModel, filterModel }
+                               per the settings contract; AG Grid v31 folds sort into
+                               columnState, so applyColumnState() alone restores sorting —
+                               sortModel is derived and stored only to honor the contract shape. */
+    _layoutEnabled() { try { return Store.pref('gridLayout') != null; } catch { return false; } },
+
+    _currentLayout() {
+      if (!Table._api) return { columnState: null, sortModel: null, filterModel: null };
+      let columnState = null, filterModel = null, sortModel = null;
+      try { columnState = Table._api.getColumnState(); } catch {}
+      try { filterModel = Table._api.getFilterModel(); } catch {}
+      if (columnState) {
+        sortModel = columnState
+          .filter(c => c.sort)
+          .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+          .map(c => ({ colId: c.colId, sort: c.sort }));
+      }
+      return { columnState, sortModel, filterModel };
+    },
+
+    // Debounced capture — guarded so programmatic restores don't echo back, and
+    // a no-op while the feature is disabled.
+    _captureLayout() {
+      if (Table._applyingLayout || !Table._layoutEnabled()) return;
+      clearTimeout(Table._captureTimer);
+      Table._captureTimer = setTimeout(() => {
+        if (!Table._layoutEnabled()) return;
+        try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+      }, 400);
+    },
+
+    _applySavedLayout() {
+      const layout = (() => { try { return Store.pref('gridLayout'); } catch { return null; } })();
+      if (!layout || !Table._api) return;
+      Table._applyingLayout = true;
+      try {
+        if (Array.isArray(layout.columnState)) {
+          Table._api.applyColumnState({ state: layout.columnState, applyOrder: true });
+        }
+        if (layout.filterModel && typeof layout.filterModel === 'object') {
+          Table._api.setFilterModel(layout.filterModel);
+        }
+      } catch (e) {
+        ErrorLog.warn('table', `Apply saved grid layout failed: ${e.message}`);
+      }
+      // Release the guard on the next macrotask so any events the restore fired
+      // (sync or queued) are all ignored, but genuine later user edits are not.
+      setTimeout(() => { Table._applyingLayout = false; }, 0);
+    },
+
+    // Turn the feature on (capture current live layout) or off (null it + reset
+    // the grid to defaults). Called by the User Settings toggle.
+    _setLayoutEnabled(on) {
+      if (on) {
+        try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+      } else {
+        try { Session.setPref('gridLayout', null); } catch {}
+        Table._resetGridState();
+      }
+    },
+
+    // Reset the live grid to its default column arrangement + clear column filters.
+    _resetGridState() {
+      if (!Table._api) return;
+      Table._applyingLayout = true;
+      try {
+        Table._api.resetColumnState();
+        Table._api.setFilterModel(null);
+      } catch (e) {
+        ErrorLog.warn('table', `Reset grid layout failed: ${e.message}`);
+      }
+      setTimeout(() => { Table._applyingLayout = false; }, 0);
+    },
+
+    // "Reset grid layout" action: reset the live grid, then — if the feature is
+    // on — re-capture the now-default state so it persists (staying non-null keeps
+    // the toggle on). Returns true if the grid was available to reset.
+    _resetGridLayout() {
+      if (!Table._api) return false;
+      Table._resetGridState();
+      if (Table._layoutEnabled()) {
+        try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+      }
+      return true;
+    },
 
     init() {
       const el = document.getElementById('ag-grid');
@@ -7200,20 +8025,20 @@ const NIMBUS = (function () {
             // column's sort + agDateColumnFilter; dropping `field` entirely
             // would degrade the filter to generic/text.
             valueGetter: p => Util.impliedOriginalStart(p.data),
-            valueFormatter: p => Util.fmtDT(p.value),
+            valueFormatter: p => Util.fmtDTReadable(p.value),
             cellClass: 'cell-date cell-date-original' },
           { headerName: t('col.orig_end'), field: 'original_end_date', minWidth: 160,
             editable: false,
-            valueFormatter: p => Util.fmtDT(p.value),
+            valueFormatter: p => Util.fmtDTReadable(p.value),
             cellClass: 'cell-date cell-date-original' },
           { headerName: t('col.updated_start'), field: 'start_date', minWidth: 160,
             editable: true,
-            valueFormatter: p => Util.fmtDT(p.value),
+            valueFormatter: p => Util.fmtDTReadable(p.value),
             cellEditor: Table._DateTimeEditor,
             cellClass: 'cell-date' },
           { headerName: t('col.updated_end'), field: 'end_date', minWidth: 160,
             editable: false,
-            valueFormatter: p => Util.fmtDT(p.value),
+            valueFormatter: p => Util.fmtDTReadable(p.value),
             cellClass: 'cell-date' },
           { headerName: t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
             cellRenderer: p => {
@@ -7290,11 +8115,23 @@ const NIMBUS = (function () {
             Table._clearRange();
           }
         },
+        // Saved grid layout — capture column order/width/visibility/pinning, sort,
+        // and built-in column filters whenever the user changes them (debounced, and
+        // only while the feature is enabled). See Table._captureLayout.
+        onSortChanged:    () => Table._captureLayout(),
+        onColumnMoved:    () => Table._captureLayout(),
+        onColumnResized:  () => Table._captureLayout(),
+        onColumnVisible:  () => Table._captureLayout(),
+        onColumnPinned:   () => Table._captureLayout(),
+        onFilterChanged:  () => Table._captureLayout(),
         onGridReady: params => {
           Table._api = params.api;
           Table._colApi = params.columnApi;
           Table._wireQuickFilter();
           Table._initChipFilters();
+          // Restore the user's saved grid layout (if the feature is on) before
+          // first paint so the table opens in their remembered arrangement.
+          Table._applySavedLayout();
           ErrorLog.info('table', `AG Grid ready with ${Store.tasksArr.length} rows`);
         },
       };
@@ -8215,16 +9052,16 @@ const NIMBUS = (function () {
         <div class="insp-card">
           <h4>${t('ui.insp_schedule_section')}</h4>
           <div class="insp-row"><label>${t('ui.insp_orig_start')}</label>
-            <div class="insp-val">${impliedOrigStart ? Util.fmtDT(impliedOrigStart) : '—'}</div></div>
+            <div class="insp-val">${impliedOrigStart ? Util.fmtDTReadable(impliedOrigStart) : '—'}</div></div>
           <div class="insp-row"><label>${t('ui.insp_orig_end')}</label>
-            <div class="insp-val">${task.original_end_date ? Util.fmtDT(task.original_end_date) : '—'}</div></div>
+            <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>
           <div class="insp-row"><label>${t('ui.insp_updated_start')}</label>
             <div class="insp-val">
               <input type="text" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
               ${Inspector._varianceBadge(task)}
             </div></div>
           <div class="insp-row"><label>${t('ui.insp_updated_end')}</label>
-            <div class="insp-val">${Util.fmtDT(task.end_date)}</div></div>
+            <div class="insp-val">${Util.fmtDTReadable(task.end_date)}</div></div>
           <div class="insp-row"><label>${t('ui.insp_run_time')}</label>
             <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}"></div></div>
         </div>
@@ -8402,6 +9239,7 @@ const NIMBUS = (function () {
         `<summary>` +
         `<span class="line-expand">${open ? '−' : '+'}</span>` +
         `<span class="line-dot" style="background:${item.color}"></span>` +
+        (item.pinned ? '<span class="line-pin-ico" aria-hidden="true">📌</span>' : '') +
         `<span>${item.name}</span>` +
         `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
         `${chip}</summary>` +
@@ -8435,9 +9273,19 @@ const NIMBUS = (function () {
         if (!lines[l]) lines[l] = [];
       }
       const lineNames = Object.keys(lines).sort();
-      const visibleNames = (GanttFilter?._selectedLines?.size > 0)
+      let visibleNames = (GanttFilter?._selectedLines?.size > 0)
         ? lineNames.filter(l => GanttFilter._selectedLines.has(l))
         : lineNames;
+      // Surface the user's pinned lines at the top (scale-safe quick access at
+      // 70+ lines/plant), preserving alpha order within each group.
+      let _pinnedLines;
+      try { _pinnedLines = new Set(Store.pref('pinnedLines') || []); } catch { _pinnedLines = new Set(); }
+      if (_pinnedLines.size) {
+        visibleNames = [
+          ...visibleNames.filter(l => _pinnedLines.has(l)),
+          ...visibleNames.filter(l => !_pinnedLines.has(l)),
+        ];
+      }
 
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
@@ -8467,7 +9315,7 @@ const NIMBUS = (function () {
         const sev = u
           ? Utilization.sev(u.pct, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
           : 'ok';
-        return { name, tasks, color, pct, sev };
+        return { name, tasks, color, pct, sev, pinned: _pinnedLines.has(name) };
       });
 
       if (!Hierarchy._vl) {
@@ -11204,8 +12052,8 @@ const NIMBUS = (function () {
         const line = t.PRODUCTION_LINE || '—';
         const color = t.COLOR || '—';
         const form  = t.FORM_SIZE || '—';
-        const startStr = t.start_date ? Util.fmtDT(t.start_date) : '—';
-        const endStr   = t.end_date   ? Util.fmtDT(t.end_date)   : '—';
+        const startStr = t.start_date ? Util.fmtDTReadable(t.start_date) : '—';
+        const endStr   = t.end_date   ? Util.fmtDTReadable(t.end_date)   : '—';
         const orderNo  = t.ORDER || t.PRODUCTION_ORDER || t.text || t.id;
         const matDesc  = t.MATERIAL_DESCRIPTION || t.text || '';
         const rel = Store.alertsByTask().get(String(id)) || [];
@@ -15953,9 +16801,18 @@ saveAll() {
       const looksLikeLabel = Store.selectedPlant
         && query.trim().toLowerCase() === `${Store.selectedPlant}`.toLowerCase();
       const filterQ = looksLikeLabel ? '' : q;
-      PlantSelector._filtered = filterQ
+      const base = filterQ
         ? PlantSelector._options.filter(p => p.toLowerCase().includes(filterQ))
         : PlantSelector._options.slice();
+
+      // Surface the user's pinned plants at the top (scale-safe quick access at
+      // 50+ plants). _filtered order MUST match the rendered option order so
+      // keyboard nav (data-idx) stays correct.
+      let pinnedSet;
+      try { pinnedSet = new Set(Store.pref('pinnedPlants') || []); } catch { pinnedSet = new Set(); }
+      const pinned = base.filter(p => pinnedSet.has(p));
+      const rest   = base.filter(p => !pinnedSet.has(p));
+      PlantSelector._filtered = [...pinned, ...rest];
 
       if (!PlantSelector._filtered.length) {
         PlantSelector._dropdown.innerHTML =
@@ -15964,12 +16821,21 @@ saveAll() {
         return;
       }
       const sel = Store.selectedPlant;
-      PlantSelector._dropdown.innerHTML = PlantSelector._filtered.map((p, i) => {
+      const optHtml = (p, i) => {
         const isSel = p === sel;
+        const isPin = pinnedSet.has(p);
         return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
-          <span class="hps-option-prefix">Plant</span><span>${p}</span>
+          <span class="hps-option-prefix">${t('ui.plant_label')}</span><span>${p}</span>
+          ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
         </div>`;
-      }).join('');
+      };
+      let ddHtml = '';
+      PlantSelector._filtered.forEach((p, i) => {
+        if (pinned.length && i === 0) ddHtml += `<div class="hps-section">${t('us.pinned_section')}</div>`;
+        if (pinned.length && rest.length && i === pinned.length) ddHtml += `<div class="hps-section">${t('us.all_plants_section')}</div>`;
+        ddHtml += optHtml(p, i);
+      });
+      PlantSelector._dropdown.innerHTML = ddHtml;
       PlantSelector._activeIdx = Math.max(0, PlantSelector._filtered.indexOf(sel));
       PlantSelector._highlightActive();
       PlantSelector._dropdown.querySelectorAll('.hps-option').forEach(el => {
@@ -16399,6 +17265,42 @@ saveAll() {
     gotoGanttTimeline() {
       App.goto('gantt');
       App.gotoGanttSub('timeline');
+    },
+
+    // Push pref('firstDayOfWeek') into Flatpickr's default l10n so calendar pickers
+    // start the week on the user's chosen day. Flatpickr reads firstDayOfWeek at
+    // construction time, so this affects pickers created AFTER the call (all NIMBUS
+    // pickers are lazily built on first open). Safe no-op if Flatpickr isn't loaded.
+    _applyFirstDayOfWeek() {
+      try {
+        let fdow = Store.pref('firstDayOfWeek');
+        fdow = Number(fdow);
+        if (fdow !== 0 && fdow !== 1) fdow = 0;
+        if (typeof flatpickr !== 'undefined' && flatpickr.l10ns && flatpickr.l10ns.default) {
+          flatpickr.l10ns.default.firstDayOfWeek = fdow;
+        }
+      } catch {}
+    },
+
+    // Navigate to the user's saved default landing view (pref('landingView') =
+    // { tab, sub }), falling back to the Dashboard. Called once on boot after the
+    // first task payload arrives. Guards the admin tab against non-admins and only
+    // applies a sub-view for tabs that have one.
+    _gotoLanding() {
+      let lv = null;
+      try { lv = Store.pref('landingView'); } catch {}
+      const validTabs = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
+      let tab = (lv && validTabs.includes(lv.tab)) ? lv.tab : 'home';
+      if (tab === 'admin' && !Session.isAdmin()) tab = 'home';
+      App.goto(tab);
+      const sub = lv && lv.sub;
+      if (sub) {
+        try {
+          if (tab === 'gantt')           App.gotoGanttSub(sub);
+          else if (tab === 'masterdata') App.gotoMasterSub(sub);
+          else if (tab === 'labor')      App.gotoLaborSub(sub);
+        } catch {}
+      }
     },
 
     gotoLaborSub(sub) {
@@ -18799,6 +19701,36 @@ saveAll() {
     // latter's showLoginScreen already called Session._applyGates() once inside
     // signIn(), so this is a harmless, idempotent re-run for that path).
     Session._applyGates();
+    // Hydrate per-user settings + role defaults from the cached session blob so the
+    // app reflects the user's prefs immediately AND works offline. Session.refresh()
+    // below overwrites these with DB truth from /security/me when the network is up.
+    try {
+      const _u = Session.currentUser();
+      if (_u) {
+        Store.setUserSettings(_u.settings || {}, 'session-cache');
+        Store.setRoleDefaults(_u.role_settings || {}, 'session-cache');
+      }
+    } catch {}
+    // Now that Store carries the resolved per-user prefs, apply the display-scoped
+    // ones that must be settled BEFORE the first render (App.init's data-i18n sweep
+    // and DarkMode). Both fall back to their offline localStorage caches when no
+    // explicit user/role value exists, so a legacy nimbus.locale/nimbus.theme is
+    // preserved rather than clobbered by a system default.
+    try {
+      const us = Store._state.userSettings || {}, rd = Store._state.roleDefaults || {};
+      const lang = (us.language != null) ? us.language : (rd.language != null ? rd.language : null);
+      if (lang && lang !== Util._locale) {
+        Util._locale = lang;
+        try { localStorage.setItem('nimbus.locale', lang); } catch {}
+      }
+    } catch {}
+    // Re-apply the theme from the resolved pref. Covers the just-signed-in path
+    // (DarkMode.init already ran off the offline cache before settings loaded) and
+    // is idempotent for the resume path (DarkMode.init runs again right after).
+    try { if (typeof NIMBUS !== 'undefined' && NIMBUS.DarkMode?.init) NIMBUS.DarkMode.init(); } catch {}
+    // Feed the resolved firstDayOfWeek pref into Flatpickr's default locale so every
+    // calendar-style picker created afterwards renders weeks starting on the chosen day.
+    App._applyFirstDayOfWeek();
     // Reconcile the cached session role against backend truth (a stale cache is
     // what leaves the admin UI visible while every admin request 403s). Fire-and-
     // forget — it re-applies the gates when it resolves.
@@ -18978,17 +19910,54 @@ saveAll() {
     const _firstLoad = Store.subscribe(evt => {
       if (evt.type === 'tasks:bulk') {
         _firstLoad();
-        App.goto('home');
+        // Land on the user's saved default landing view (pref('landingView')),
+        // falling back to the Dashboard. Auth + plant resolution have completed
+        // by now (session hydrated above; first task payload has arrived).
+        App._gotoLanding();
         // Anchor Gantt to today as the leftmost column on first visit (3-day Day view).
         setTimeout(() => Timeline.setView('day'), 200);
       }
     }, 'App.firstLoad');
+    // One-shot: apply the user's defaultPlant preference once plant metadata is
+    // authoritative (the first master-data load — knownPlants() prefers master-data
+    // plants). This is what makes the defaultPlant SETTING actually impact the app:
+    //   • an explicit defaultPlant (known + allowed) → auto-select it. An explicit,
+    //     cross-device preference beats the per-browser "last-used" plant, so a
+    //     returning user lands on their default instead of re-picking at WelcomeSplash;
+    //   • else a valid remembered plant from a prior session → leave the existing
+    //     flow (selection stays null → WelcomeSplash prompts, as before);
+    //   • else, when the user can see exactly ONE plant → auto-select that one.
+    // Setting the plant (source 'default-plant') triggers Persistence.loadForPlant
+    // and dismisses WelcomeSplash via the usual 'plant:selected' subscribers.
+    let _defaultPlantApplied = false;
+    const _offDefaultPlant = Store.subscribe(evt => {
+      if (evt.type !== 'master-data-changed') return;
+      _offDefaultPlant();
+      if (_defaultPlantApplied) return;
+      _defaultPlantApplied = true;
+      try {
+        if (Store.selectedPlant) return;                 // already selected — never override
+        const known = Store.knownPlants();               // already allowedPlants()-scoped
+        // An explicit default plant wins over the per-browser "last-used" plant so a
+        // returning user lands on their configured default rather than the splash.
+        const dp = Store.pref('defaultPlant');
+        if (dp && known.includes(dp)) { Store.setSelectedPlant(dp, 'default-plant'); return; }
+        // No explicit default → preserve the existing flow: a valid remembered plant
+        // leaves selection null so WelcomeSplash prompts (unchanged behavior).
+        const cached = Persistence._rememberedPlant();
+        if (cached && known.includes(cached)) return;
+        // Neither a default nor a remembered plant, but the user can see exactly one.
+        if (dp == null && known.length === 1) Store.setSelectedPlant(known[0], 'default-plant');
+      } catch (e) { ErrorLog.warn('boot', `default-plant apply failed: ${e.message}`); }
+    }, 'App.defaultPlant');
+
     // Stateless backend: scope the first load to the remembered plant so boot
     // doesn't pull every plant's order book. We intentionally do NOT set
     // Store.selectedPlant here — that keeps selectedPlant null so WelcomeSplash
     // still shows and the user still makes the explicit selection. When they pick
     // the same plant as last time, loadForPlant() no-ops (data already loaded);
     // if they pick a different one, it re-scopes. No remembered plant → unscoped.
+    // (The defaultPlant one-shot above may set a selection after master data loads.)
     const _bootPlant = Persistence._rememberedPlant();
     Persistence.load(_bootPlant ? { plant: _bootPlant } : {});
   }
@@ -19006,7 +19975,7 @@ saveAll() {
   /* Public namespace for inline onclick handlers in index.html */
   return {
     App, Engine, Alerts, Timeline, Table, Inspector,
-    Dashboard, Calendar, Plant, ProdLines, Persistence, Modal, Toast, Store, Util, Config,
+    Dashboard, Calendar, Plant, ProdLines, Persistence, Modal, Toast, Store, Util, Config, Settings,
     Utilization, ContextMenu, Hierarchy,
     Selection, UndoStack, Interaction,
     ErrorLog, AdminCockpit,

@@ -80,6 +80,35 @@ def ensure_user_security_table() -> None:
         )
 
 
+def ensure_user_settings_table() -> None:
+    """Idempotent: create the user_settings table if missing (mirrors schema.sql /
+    migrations/2026-07-09-user-settings.sql). Lets the app self-bootstrap even
+    before the migration is applied, matching ensure_user_security_table() and
+    db.ensure_color_wheel_table(). Must run AFTER user_security exists —
+    user_settings.username FKs to user_security(username)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                username   TEXT PRIMARY KEY REFERENCES user_security(username) ON DELETE CASCADE ON UPDATE CASCADE,
+                settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+
+def ensure_role_settings_column() -> None:
+    """Idempotent: add the roles.settings JSONB column if missing (mirrors
+    schema.sql / migrations/2026-07-09-user-settings.sql). Holds per-role DEFAULT
+    settings, shallow-merged UNDER each user's own blob by the frontend. Must run
+    AFTER roles exists (md.ensure_roles_table())."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE roles ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb"
+        )
+        conn.commit()
+
+
 # =========================
 # PASSWORD HASHING
 # =========================
@@ -298,6 +327,73 @@ def verify_user_password(username: str, raw_password: str) -> bool:
 
 
 # =========================
+# USER SETTINGS — per-user JSONB blob + per-role defaults (partial/shallow merge)
+# =========================
+def get_user_settings(username: str | None) -> dict:
+    """Return a user's own settings blob (JSONB auto-decoded to a dict), or {}
+    if the user has no row. Never raises. Case-insensitive/trimmed match, same
+    as get_user_role — so header casing can't miss the stored canonical row."""
+    username = (username or "").strip()
+    if not username:
+        return {}
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT settings FROM user_settings WHERE lower(username) = lower(%s)",
+            (username,),
+        )
+        row = cur.fetchone()
+    return (row[0] or {}) if row else {}
+
+
+def get_role_settings(role: str | None) -> dict:
+    """Return a role's DEFAULT settings blob, or {} for a None/unknown role or
+    for 'admin' (admins never receive role defaults — they always resolve to the
+    system defaults under their own settings). Never raises."""
+    if not role or role == "admin":
+        return {}
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT settings FROM roles WHERE role = %s", (role,))
+        row = cur.fetchone()
+    return (row[0] or {}) if row else {}
+
+
+def upsert_user_settings(actor_username: str | None, patch: dict) -> dict:
+    """Shallow-merge a PARTIAL `patch` into the CALLER's own user_settings blob
+    and return the full merged result. This is a self-service write (like
+    update_own_name): `actor_username` comes from the request header and must
+    already resolve to a user_security row. Keys absent from `patch` are
+    preserved. The canonical username casing is resolved from user_security (the
+    same case-insensitive match every identity lookup uses) and used as the row
+    key, so header casing can never create a duplicate row."""
+    username = (actor_username or "").strip()
+    if not username:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    if not isinstance(patch, dict):
+        raise ValueError("settings must be a JSON object")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT username FROM user_security WHERE lower(username) = lower(%s)",
+            (username,),
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=401, detail="Not signed in")
+        canonical = row[0]
+        cur.execute(
+            "INSERT INTO user_settings (username, settings) VALUES (%s, %s)"
+            " ON CONFLICT (username) DO UPDATE SET"
+            "   settings = user_settings.settings || EXCLUDED.settings,"
+            "   updated_at = NOW()"
+            " RETURNING settings",
+            (canonical, Jsonb(patch)),
+        )
+        merged = cur.fetchone()[0]
+        conn.commit()
+    return {"username": canonical, "settings": merged or {}}
+
+
+# =========================
 # AUTHORIZATION — role lookup, require_admin dependency, login, bootstrap seed
 # =========================
 def get_user_role(username: str | None) -> str | None:
@@ -400,6 +496,8 @@ def whoami(request: Request) -> dict:
         "first_name": profile.get("first_name"),
         "last_name": profile.get("last_name"),
         "allowed_plants": get_allowed_plants(email),
+        "settings": get_user_settings(email) or {},
+        "role_settings": get_role_settings(role) or {},
     }
 
 
