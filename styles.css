@@ -206,6 +206,7 @@ h1, h2, h3, h4 {
 .icon-btn:hover { color: var(--fg); background: var(--bg-subtle); border-color: var(--line); }
 .icon-btn.sm { width: 24px; height: 24px; }
 .icon-btn .bell { font-size: 15px; }
+.user-icon-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
 .icon-btn .badge {
   position: absolute; top: 2px; right: 2px;
   background: var(--err); color: #fff;

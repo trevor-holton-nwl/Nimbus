@@ -26,7 +26,8 @@ COPY . .
 # NOTE: if you add a new frontend file, add it to this list.
 RUN mkdir -p /app/web \
  && cp index.html styles.css app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js /app/web/ \
- && cp -r locales /app/web/
+ && cp -r locales /app/web/ \
+ && cp -r Images /app/web/
 
 # Run as a non-root user; it owns the app dir and the writable color-wheel dir.
 RUN useradd --create-home --uid 10001 nimbus \
