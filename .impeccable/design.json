@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-13T00:00:00Z",
+  "title": "Design System: NIMBUS",
+  "extensions": {
+    "colorMeta": {
+      "foundry-amber": {
+        "role": "primary",
+        "displayName": "Foundry Amber",
+        "canonical": "oklch(60% 0.13 70)",
+        "tonalRamp": [
+          "oklch(20% 0.05 70)",
+          "oklch(30% 0.07 70)",
+          "oklch(40% 0.09 70)",
+          "oklch(50% 0.11 70)",
+          "oklch(60% 0.13 70)",
+          "oklch(70% 0.12 70)",
+          "oklch(85% 0.08 70)",
+          "oklch(95% 0.03 70)"
+        ]
+      },
+      "deep-slate": {
+        "role": "secondary",
+        "displayName": "Deep Slate",
+        "canonical": "oklch(28% 0.02 255)",
+        "tonalRamp": [
+          "oklch(12% 0.01 255)",
+          "oklch(20% 0.015 255)",
+          "oklch(28% 0.02 255)",
+          "oklch(36% 0.02 255)",
+          "oklch(45% 0.02 255)",
+          "oklch(60% 0.015 255)",
+          "oklch(78% 0.01 255)",
+          "oklch(92% 0.005 255)"
+        ]
+      },
+      "warm-mill-white": { "role": "neutral", "displayName": "Warm Mill White", "canonical": "oklch(96% 0.005 90)" },
+      "near-black-ink": { "role": "neutral", "displayName": "Near-Black Ink", "canonical": "oklch(18% 0.005 260)" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Page/section titles, brand mark, modal headings. Archivo, 700 weight." },
+      "body": { "displayName": "Body", "purpose": "Default text everywhere — dense information UI, smaller and tighter than an editorial site." },
+      "label": { "displayName": "Mono / Label", "purpose": "IDs, timestamps, stat numbers, version strings — anything generated or measured rather than written." },
+      "control": { "displayName": "Control", "purpose": "Interactive chrome (buttons, tabs, inputs, filter dropdowns) — the app's most common text size by volume, not a one-off." }
+    },
+    "shadows": [
+      { "name": "sm", "value": "0 1px 2px rgba(26,27,31,0.06)", "purpose": "Barest lift — icon-button hover, small popovers. Dark mode: rgba(0,0,0,0.35)." },
+      { "name": "md", "value": "0 2px 6px rgba(26,27,31,0.08), 0 1px 2px rgba(26,27,31,0.04)", "purpose": "Dropdowns, tooltips, small floating panels. Dark mode: rgba(0,0,0,0.4)." },
+      { "name": "lg", "value": "0 8px 24px rgba(26,27,31,0.12), 0 2px 6px rgba(26,27,31,0.06)", "purpose": "Modals and the welcome-splash card — the only surfaces that read as floating above everything else. Dark mode: rgba(0,0,0,0.5)." }
+    ],
+    "motion": [
+      { "name": "t-fast", "value": "0.12s ease", "purpose": "Default for color/background/border transitions on buttons, tabs, icon-buttons." },
+      { "name": "t-med", "value": "0.18s ease", "purpose": "Slightly slower transitions where the fast token feels too abrupt (larger surfaces)." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Deep Slate CTA button — the action color, distinct from Foundry Amber.",
+      "html": "<button class=\"ds-btn-primary\">Optimize Schedule</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid var(--primary); background: var(--primary); color: var(--primary-fg); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast), border-color var(--t-fast); } .ds-btn-primary:hover { background: var(--primary-hot); border-color: var(--primary-hot); } .ds-btn-primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Default hairline-bordered button used for everything that isn't the primary action.",
+      "html": "<button class=\"ds-btn-secondary\">Cancel</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--bg-elev); color: var(--fg); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast), border-color var(--t-fast); } .ds-btn-secondary:hover { background: var(--bg-subtle); border-color: var(--line-strong); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Icon Button",
+      "kind": "button",
+      "refersTo": "icon-btn",
+      "description": "Square transparent icon button with an optional notification badge.",
+      "html": "<button class=\"ds-icon-btn\" aria-label=\"Notifications\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9\"/><path d=\"M13.73 21a2 2 0 0 1-3.46 0\"/></svg><span class=\"ds-icon-btn-badge\">3</span></button>",
+      "css": ".ds-icon-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border-radius: var(--r-md); border: 1px solid transparent; background: transparent; color: var(--fg-mute); transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast); } .ds-icon-btn:hover { color: var(--fg); background: var(--bg-subtle); border-color: var(--line); } .ds-icon-btn-badge { position: absolute; top: 2px; right: 2px; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 10px; background: var(--err); color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Default text input with the Foundry Amber focus ring.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Search orders…\" />",
+      "css": ".ds-input { height: 30px; padding: 5px 10px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--bg-elev); color: var(--fg); font-size: 12.5px; transition: border-color var(--t-fast), box-shadow var(--t-fast); } .ds-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }"
+    },
+    {
+      "name": "Tabs",
+      "kind": "nav",
+      "refersTo": "tab-btn-active",
+      "description": "Top-bar tab pair — idle vs. active state, active marked by a Foundry Amber outline.",
+      "html": "<div class=\"ds-tabs\"><button class=\"ds-tab-btn\">Orders</button><button class=\"ds-tab-btn ds-tab-btn--active\">Gantt</button></div>",
+      "css": ".ds-tabs { display: flex; gap: 2px; } .ds-tab-btn { display: flex; align-items: center; gap: 7px; height: 30px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid transparent; background: transparent; color: var(--fg-mute); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast); } .ds-tab-btn:hover { color: var(--fg); background: var(--bg-subtle); } .ds-tab-btn--active { color: var(--fg); background: var(--bg-subtle); border-color: var(--line); font-size: 13px; font-weight: 700; outline: 2px solid var(--accent); outline-offset: 0; }"
+    },
+    {
+      "name": "Modal",
+      "kind": "card",
+      "refersTo": "modal",
+      "description": "Head/body/foot modal shell — the primary use of shadow-lg in the whole system.",
+      "html": "<div class=\"ds-modal\"><div class=\"ds-modal-head\">Edit Order</div><div class=\"ds-modal-body\">Modal content goes here.</div><div class=\"ds-modal-foot\"><button>Cancel</button><button>Save</button></div></div>",
+      "css": ".ds-modal { display: flex; flex-direction: column; width: 100%; max-width: 440px; max-height: 90vh; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-lg); font-family: 'Public Sans', sans-serif; } .ds-modal-head { padding: 14px 18px; border-bottom: 1px solid var(--line); font-family: 'Archivo', sans-serif; font-size: 14px; font-weight: 700; color: var(--fg); } .ds-modal-body { padding: 18px; overflow: auto; color: var(--fg); font-size: 13px; } .ds-modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); background: var(--bg-subtle); } .ds-modal-foot button { height: 30px; padding: 6px 12px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast), border-color var(--t-fast); } .ds-modal-foot button:first-child { border: 1px solid var(--line); background: var(--bg-elev); color: var(--fg); } .ds-modal-foot button:first-child:hover { background: var(--bg-subtle); border-color: var(--line-strong); } .ds-modal-foot button:last-child { border: 1px solid var(--primary); background: var(--primary); color: var(--primary-fg); } .ds-modal-foot button:last-child:hover { background: var(--primary-hot); border-color: var(--primary-hot); }"
+    },
+    {
+      "name": "Toast",
+      "kind": "custom",
+      "refersTo": "toast",
+      "description": "Solid-fill status toast — success/error/warn/info.",
+      "html": "<div class=\"ds-toast ds-toast--success\">Schedule saved</div>",
+      "css": ".ds-toast { display: inline-flex; align-items: center; padding: 10px 16px; border-radius: var(--r-md); color: #fff; font-size: 12.5px; font-weight: 500; box-shadow: var(--shadow-md); } .ds-toast--success { background: var(--ok); } .ds-toast--error { background: var(--err); } .ds-toast--warn { background: var(--warn); } .ds-toast--info { background: var(--info); }"
+    },
+    {
+      "name": "Badge",
+      "kind": "chip",
+      "refersTo": "badge-warn",
+      "description": "Soft-tint status label — distinct from the solid-fill toast.",
+      "html": "<span class=\"ds-badge ds-badge--warn\">3 overloaded</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--r-sm); font-size: 11px; font-weight: 600; } .ds-badge--warn { background: var(--warn-soft); color: var(--warn); } .ds-badge--err { background: var(--err-soft); color: var(--err); } .ds-badge--info { background: #ede9fe; color: #6366f1; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Foundry Console",
+    "overview": "NIMBUS is a control-room instrument, not a consumer app that happens to render a Gantt chart. The palette is deep slate shot through with a single molten-amber accent — the visual grammar of a foundry control panel, not a SaaS dashboard. Every surface is dense with real information (order counts, due dates, line utilization) because the people using it are experts scheduling production every day, not casual visitors who need to be onboarded gently. The system is deliberately restrained: one accent color, hairline borders as the default separator, shadows reserved for the handful of surfaces that genuinely float above the page (modals, the welcome splash). It rejects two failure modes explicitly — the bubbly, gradient-hero gloss of generic consumer SaaS, and the dated grid-of-forms clunkiness of legacy ERP screens. NIMBUS sits between them: modern craft applied to an industrial, information-dense tool.",
+    "keyCharacteristics": [
+      "Deep slate + warm amber, nothing else competing for identity",
+      "Hairline borders and flat surfaces by default; shadows are the exception, not the rule",
+      "JetBrains Mono for anything numeric or machine-generated (IDs, timestamps, stat figures)",
+      "Brisk, exact motion — nothing lingers, nothing bounces"
+    ],
+    "rules": [
+      { "name": "The One-Accent Rule", "body": "Foundry Amber never becomes a background fill or a large surface. It is a line, an outline, an icon, a focus ring — never a wash of color.", "section": "colors" },
+      { "name": "The Hairline-Over-Shadow Rule", "body": "Regions are separated by a 1px border by default. A shadow is a deliberate signal that something is floating above the page (a modal, a popover), not a decorative default on every card.", "section": "colors" },
+      { "name": "The Dark-Mode Remap, Not Reversal", "body": "In dark mode, Foundry Amber shifts brighter (#d4920f) and quietly takes over the Secondary/primary-button role too — dark mode is not a naive color inversion, it's a re-tuned palette on the same structure. Coverage is incomplete today: some newer components hardcode light-mode colors, and a few token names are referenced in dark-mode CSS without a matching :root definition.", "section": "colors" },
+      { "name": "The Mono-Means-Machine Rule", "body": "If a string was generated, measured, or timestamped rather than written by a person, it renders in JetBrains Mono. This is the fastest visual cue in the system for \"this is data, not copy.\"", "section": "typography" },
+      { "name": "The Floating-Means-Floating Rule", "body": "A shadow above the sm step is reserved for something the user should read as temporarily suspended over the interface (a modal, an overlay). Don't reach for shadow-lg on a static panel just to make it feel premium.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep Foundry Amber to lines, outlines, icons, and focus rings — never a background wash (The One-Accent Rule).",
+      "Do separate regions with a 1px Hairline border by default; reach for a shadow only when something is genuinely floating above the page (modal, popover, splash card).",
+      "Do render anything generated/measured/timestamped in JetBrains Mono (IDs, durations, stat numbers, version strings).",
+      "Do use Flatpickr for every date/time input — never native <input type=\"date\">, datetime-local, or time (the one exception is the AG Grid inline date-cell editor).",
+      "Do use searchable/filterable comboboxes for plant and line selection, scoped to the plant→line hierarchy — this system is built to hold 50+ plants and 3,500+ lines, not the pilot's handful.",
+      "Do re-skin third-party components (vis-timeline, Flatpickr, AG Grid) to the token system rather than shipping their default look.",
+      "Do keep transitions fast (0.12–0.18s) and exponential-ease — a hover state should register like a mechanical switch, not a soft fade."
+    ],
+    "donts": [
+      "Don't use bubble or chip selectors for plants or lines — they break down past ~10 entries and this system must scale to thousands.",
+      "Don't add gradient-hero sections, gradient text, or glassmorphism as a decorative default — that's the generic-consumer-SaaS gloss this system explicitly rejects.",
+      "Don't use dated grid-of-forms ERP layouts, oversized bordered table cells, or beige/gray corporate-form styling — that's the legacy-ERP clunk this system explicitly rejects.",
+      "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead.",
+      "Don't reference a CSS variable name that isn't defined in :root or body.dark — a few token names (--border, --border-subtle, --font-mono, --nimbus-amber, --bg-float) are referenced somewhere without a definition. Check before reusing one.",
+      "Don't reach for --shadow-lg on a static, non-floating panel just to make it feel more \"premium\" — see The Floating-Means-Floating Rule."
+    ]
+  }
+}

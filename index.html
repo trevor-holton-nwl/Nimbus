@@ -54,14 +54,14 @@
   gap: 8px;
   padding: 14px 0 18px;
   flex-wrap: wrap;
-  border-bottom: 1px solid #e8e4dc;
+  border-bottom: 1px solid var(--line);
   margin-bottom: 24px;
 }
 .dash-filter-label {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.07em;
-  color: #9a9285;
+  color: var(--fg-mute);
   font-family: 'Public Sans', sans-serif;
   text-transform: uppercase;
   margin-right: 2px;
@@ -75,10 +75,10 @@
   font-size: 12px;
   font-family: 'Public Sans', sans-serif;
   font-weight: 500;
-  border: 1.5px solid #d5d1c8;
+  border: 1.5px solid var(--line);
   border-radius: 6px;
-  background: #faf9f5;
-  color: #3d3628;
+  background: var(--bg-subtle);
+  color: var(--fg);
   cursor: pointer;
   white-space: nowrap;
   transition: border-color 0.15s, background 0.15s;
@@ -89,13 +89,13 @@
   cursor: not-allowed;
 }
 .dash-filter-btn:not(:disabled):hover {
-  border-color: #b8791a;
-  background: #fff;
+  border-color: var(--accent);
+  background: var(--bg-elev);
 }
 .dash-filter-btn.active {
-  border-color: #b8791a;
-  background: #fdf4e7;
-  color: #7a4f0e;
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-hot);
   font-weight: 600;
 }
 .dash-filter-arrow { font-size: 10px; opacity: 0.55; }
@@ -104,10 +104,10 @@
   top: calc(100% + 4px);
   left: 0;
   min-width: 190px;
-  background: #fff;
-  border: 1.5px solid #d5d1c8;
+  background: var(--bg-elev);
+  border: 1.5px solid var(--line);
   border-radius: 8px;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.11);
+  box-shadow: var(--shadow-lg);
   z-index: 300;
   padding: 5px 0;
   max-height: 260px;
@@ -120,14 +120,14 @@
   padding: 6px 14px;
   font-size: 12px;
   font-family: 'Public Sans', sans-serif;
-  color: #3d3628;
+  color: var(--fg);
   cursor: pointer;
   transition: background 0.1s;
   user-select: none;
 }
-.dash-filter-dropdown label:hover { background: #f5f0e8; }
+.dash-filter-dropdown label:hover { background: var(--bg-subtle); }
 .dash-filter-dropdown input[type="checkbox"] {
-  accent-color: #b8791a;
+  accent-color: var(--accent);
   width: 13px;
   height: 13px;
   flex-shrink: 0;
@@ -138,23 +138,23 @@
   font-size: 11px;
   font-family: 'Public Sans', sans-serif;
   font-weight: 600;
-  border: 1.5px solid #c0392b;
+  border: 1.5px solid var(--err);
   border-radius: 6px;
   background: transparent;
-  color: #c0392b;
+  color: var(--err);
   cursor: pointer;
   transition: background 0.1s;
 }
-.dash-filter-clear:hover { background: #fff0ee; }
+.dash-filter-clear:hover { background: var(--err-soft); }
 .dash-filter-hint {
   font-size: 11px;
-  color: #b5b0a8;
+  color: var(--fg-mute);
   font-family: 'Public Sans', sans-serif;
   margin-left: 4px;
 }
 .dash-filter-paste-row {
   padding: 6px 10px 4px;
-  border-bottom: 1px solid #ece8e0;
+  border-bottom: 1px solid var(--line);
 }
 .dash-filter-paste-input {
   width: 100%;
@@ -162,8 +162,15 @@
   padding: 4px 8px;
   font-size: 12px;
   font-family: 'Public Sans', sans-serif;
-  border: 1px solid #d5d1c8;
+  border: 1px solid var(--line);
   border-radius: 5px;
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.dash-filter-paste-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
 }
 .dash-filter-checklist {
   max-height: 200px;
@@ -181,8 +188,10 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   padding: 6px 8px;
-  border: 1px solid #d5d1c8;
+  border: 1px solid var(--line);
   border-radius: 5px;
+  background: var(--bg-elev);
+  color: var(--fg);
 }
 .dash-filter-pomat-actions {
   display: flex;
@@ -192,7 +201,7 @@
 }
 .dash-filter-pomat-count {
   font-size: 11px;
-  color: #b5b0a8;
+  color: var(--fg-mute);
   font-family: 'Public Sans', sans-serif;
 }
 
@@ -215,7 +224,7 @@
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #ffffff;
+  background: var(--bg-elev);
 }
 .hm-day-head {
   display: flex;
@@ -228,12 +237,12 @@
   font-weight: 700;
   font-family: 'Public Sans', sans-serif;
   letter-spacing: 0.06em;
-  color: #6b6558;
+  color: var(--fg-mute);
 }
 .hm-date {
   font-size: 9px;
   font-family: 'JetBrains Mono', monospace;
-  color: #9a9285;
+  color: var(--fg-faint);
 }
 .hm-line-label {
   display: flex;
@@ -242,7 +251,7 @@
   font-size: 11px;
   font-weight: 600;
   font-family: 'JetBrains Mono', monospace;
-  color: #3d3628;
+  color: var(--fg);
   padding-right: 4px;
   white-space: nowrap;
 }
@@ -253,6 +262,10 @@
   flex-shrink: 0;
 }
 .hm-cell {
+  /* Rendered as a real <button> for keyboard access — reset UA button chrome
+     so it fills its grid cell exactly like the plain div it replaced. */
+  appearance: none;
+  border: 0; margin: 0; width: 100%; height: 100%; box-sizing: border-box;
   border-radius: 5px;
   display: flex;
   align-items: center;
@@ -263,7 +276,7 @@
   padding: 7px 2px;
   min-height: 34px;
   text-shadow: 0 1px 2px rgba(0,0,0,0.15);
-  cursor: default;
+  cursor: pointer;
   transition: filter 0.12s, outline-color 0.12s;
 }
 .hm-cell:hover {
@@ -280,24 +293,22 @@
   margin-top: 10px;
   font-size: 10px;
   font-family: 'Public Sans', sans-serif;
-  color: #9a9285;
+  color: var(--fg-mute);
   letter-spacing: 0.03em;
 }
 .hm-grad {
   flex: 1;
   height: 6px;
   border-radius: 3px;
-  background: linear-gradient(to right, #ede8de, #c8a95a, #c96a1a, #991b1b);
+  /* Mirrors the actual heatBg() ramp in Dashboard._renderHeatmap (app.js) —
+     var() here means one rule covers both themes, no separate dark override. */
+  background: linear-gradient(to right, var(--bg-subtle), var(--warn), var(--warn-vivid), var(--err));
 }
 /* Heatmap dark-mode overrides */
-body.dark .hm-sticky { background: var(--bg-elev); }
 body.dark .hm-dow { color: var(--fg); }
 body.dark .hm-date { color: var(--fg-mute); }
 body.dark .hm-line-label { color: var(--fg); }
 body.dark .hm-legend { color: var(--fg-mute); }
-body.dark .hm-grad {
-  background: linear-gradient(to right, #252730, #7a5a18, #a8520f, #b32a1f);
-}
 body.dark .hm-cell:hover {
   outline-color: rgba(255,255,255,0.35);
 }
@@ -336,33 +347,39 @@ body.dark .hm-cell:hover {
 .lh-scroll-wrap::-webkit-scrollbar-track { background: transparent; }
 .lh-scroll-wrap::-webkit-scrollbar-thumb { background: var(--line-strong, #c7c6bd); border-radius: 3px; }
 .lh-grid { display: grid; gap: 3px; width: 100%; }
-.lh-sticky { position: sticky; top: 0; z-index: 2; background: #ffffff; }
-.lh-corner { background: #ffffff; }
+.lh-sticky { position: sticky; top: 0; z-index: 2; background: var(--bg-elev); }
+.lh-corner { background: var(--bg-elev); }
 .lh-day-head { display: flex; flex-direction: column; align-items: center; padding-bottom: 5px; }
 .lh-dow {
   font-size: 10px; font-weight: 700;
   font-family: 'Public Sans', sans-serif;
-  letter-spacing: 0.06em; color: #6b6558;
+  letter-spacing: 0.06em; color: var(--fg-mute);
 }
-.lh-date { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: #9a9285; }
+.lh-date { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: var(--fg-faint); }
 .lh-line-label {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; font-weight: 600;
   font-family: 'JetBrains Mono', monospace;
-  color: #3d3628; padding-right: 6px;
+  color: var(--fg); padding-right: 6px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lh-line-name { overflow: hidden; text-overflow: ellipsis; }
 .lh-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
 .lh-cell {
+  /* Late cells render as a real <button> for keyboard access; on-plan cells stay
+     a plain div. Reset UA button chrome so either fills its grid cell identically. */
+  appearance: none;
+  border: 0; margin: 0; width: 100%; height: 100%; box-sizing: border-box;
   border-radius: 5px;
   display: flex; align-items: center; justify-content: center;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px; font-weight: 600;
   padding: 7px 2px; min-height: 32px;
   text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  cursor: default;
   transition: filter 0.12s, outline-color 0.12s;
 }
+button.lh-cell { cursor: pointer; }
 .lh-cell:hover {
   filter: brightness(1.12);
   outline: 2px solid rgba(255,255,255,0.55);
@@ -373,7 +390,7 @@ body.dark .hm-cell:hover {
   display: flex; align-items: center; gap: 10px;
   margin-top: 10px;
   font-size: 10px; font-family: 'Public Sans', sans-serif;
-  color: #9a9285; letter-spacing: 0.03em;
+  color: var(--fg-mute); letter-spacing: 0.03em;
 }
 .lh-leg-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
 .lh-legend-more {
@@ -385,7 +402,6 @@ body.dark .hm-cell:hover {
 }
 body.dark .lh-sticky,
 body.dark .lh-corner {
-  background: var(--bg-elev);
   box-shadow: 0 1px 0 var(--line);
 }
 body.dark .lh-dow { color: var(--fg); }
@@ -444,7 +460,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   text-align: right;
   font-family: 'JetBrains Mono', monospace;
   font-weight: 700;
-  color: #dc2626;
+  color: var(--err);
 }
 .lh-drill-more { padding: 6px 12px; font-size: 11px; color: var(--fg-mute); text-align: center; }
 body.dark .lh-drill-head { background: rgba(184,121,26,0.15); }
@@ -843,17 +859,17 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: #9a8f84;
+  color: var(--fg-mute);
   padding-top: 4px;
   padding-bottom: 4px;
-  border-bottom: 1px solid #e8e4dc;
+  border-bottom: 1px solid var(--line);
   margin-bottom: 2px;
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #ffffff;
+  background: var(--bg-elev);
 }
-.ls-row.ls-header:hover { background: #ffffff; }
+.ls-row.ls-header:hover { background: var(--bg-elev); }
 .ls-header .ls-bar-wrap { overflow: visible; }
 .ls-header .ls-code,
 .ls-header .ls-hours,
@@ -864,7 +880,7 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.07em;
-  color: #9a8f84;
+  color: var(--fg-mute);
 }
 .ls-header .ls-bar-wrap {
   height: auto;
@@ -884,14 +900,14 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   font-weight: 600;
-  color: #6b6459;
+  color: var(--fg-mute);
   min-width: 58px;
   white-space: nowrap;
 }
 .ls-hours {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: #5a5047;
+  color: var(--fg-mute);
   min-width: 74px;
   white-space: nowrap;
 }
@@ -902,7 +918,11 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
   border-radius: 4px;
   overflow: hidden;
 }
-.ls-bar { height: 100%; border-radius: 4px; transition: width 0.35s ease; min-width: 4px; }
+.ls-bar {
+  width: 100%; height: 100%; border-radius: 4px;
+  transform-origin: left center;
+  transition: transform 0.35s ease;
+}
 .ls-bar.over { opacity: 0.88; }
 .ls-pct {
   font-family: 'JetBrains Mono', monospace;
@@ -910,36 +930,22 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
   font-weight: 700;
   min-width: 38px;
   text-align: right;
-  color: #3d3530;
+  color: var(--fg);
 }
-.ls-pct.warn { color: #b45309; }
-.ls-pct.err  { color: #b91c1c; }
+.ls-pct.warn { color: var(--warn); }
+.ls-pct.err  { color: var(--err); }
 .ls-co {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: #9a8f84;
+  color: var(--fg-mute);
   min-width: 38px;
   text-align: right;
 }
-/* Line Status dark-mode overrides */
-body.dark .ls-header,
-body.dark .ls-row.ls-header:hover {
-  background: var(--bg-elev);
-  border-bottom-color: var(--line);
-  color: var(--fg-mute);
-}
-body.dark .ls-header .ls-code,
-body.dark .ls-header .ls-hours,
-body.dark .ls-header .ls-pct,
-body.dark .ls-header .ls-co { color: var(--fg-mute); }
+/* Line Status dark-mode overrides — only the values that genuinely differ from
+   the (now token-based) light rules above; --fg-mute/--fg/--bg-elev/--line/--warn/
+   --err already resolve correctly per-theme on their own. */
 body.dark .ls-row:hover { background: rgba(255,255,255,0.04); }
-body.dark .ls-code  { color: var(--fg); }
-body.dark .ls-hours { color: var(--fg-mute); }
 body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
-body.dark .ls-pct      { color: var(--fg); }
-body.dark .ls-pct.warn { color: #e0a93a; }
-body.dark .ls-pct.err  { color: #f06a5a; }
-body.dark .ls-co       { color: var(--fg-mute); }
 
 /* User Settings — Personalization / Workflow controls */
 .us-field-hint {
@@ -1139,11 +1145,18 @@ body.dark .ls-co       { color: var(--fg-mute); }
 
           <div class="dash-filter-group" id="line-filter-group">
             <button class="dash-filter-btn" id="line-filter-btn" disabled
-                    onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown')">
+                    aria-haspopup="listbox" aria-expanded="false"
+                    onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn')">
               <span id="line-filter-label">All Lines</span>
               <span class="dash-filter-arrow">▾</span>
             </button>
-            <div class="dash-filter-dropdown" id="line-filter-dropdown" hidden></div>
+            <div class="dash-filter-dropdown" id="line-filter-dropdown" role="listbox" hidden>
+              <div class="dash-filter-paste-row">
+                <input type="text" class="dash-filter-paste-input" id="line-filter-search"
+                       placeholder="Search lines…" oninput="NIMBUS.Dashboard._filterLineSearch(this.value)">
+              </div>
+              <div class="dash-filter-checklist" id="line-filter-checklist"></div>
+            </div>
           </div>
 
           <button class="dash-filter-clear" id="dash-filter-clear" hidden
@@ -1153,15 +1166,13 @@ body.dark .ls-co       { color: var(--fg-mute); }
         </div>
 
         <div class="hero-row">
-          <div class="hero-text">
-            <div class="eyebrow" data-i18n="ui.hop_on">Hop On</div>
-            <h1 data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</h1>
-            <p class="sub" data-i18n="ui.hero_subheading">
-              Newell Integrated Batch &amp; Unified Scheduling
-            </p>
-            <div class="hero-actions">
-              <button class="btn btn-primary btn-lg" data-i18n="btn.open_scheduling" onclick="NIMBUS.App.goto('gantt')">Open Scheduling Board →</button>
-              <button class="btn btn-ghost btn-lg" data-i18n="btn.open_orders" onclick="NIMBUS.App.goto('table')">Open Orders →</button>
+          <div class="dash-context-strip">
+            <span class="dcs-title" data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</span>
+            <span class="dcs-sep">·</span>
+            <span class="dcs-sub" data-i18n="ui.hero_subheading">Newell Integrated Batch &amp; Unified Scheduling</span>
+            <div class="dcs-actions">
+              <button class="btn btn-ghost sm" data-i18n="btn.open_scheduling" onclick="NIMBUS.App.goto('gantt')">Scheduling Board →</button>
+              <button class="btn btn-ghost sm" data-i18n="btn.open_orders" onclick="NIMBUS.App.goto('table')">Orders →</button>
             </div>
           </div>
           <div class="hero-aside">
@@ -1183,7 +1194,7 @@ body.dark .ls-co       { color: var(--fg-mute); }
 
           <div class="panel" id="line-status-card">
             <header class="panel-head">
-              <h3><span data-i18n="ui.line_status_title">Line Status</span> <span style="color:#9a8f84;font-weight:400;font-size:12px;letter-spacing:0.04em;">· <span data-i18n="ui.today">Today</span></span></h3>
+              <h3><span data-i18n="ui.line_status_title">Line Status</span> <span style="color:var(--fg-faint);font-weight:400;font-size:11px;letter-spacing:0.04em;">· <span data-i18n="ui.today">Today</span></span></h3>
               <span class="panel-hint" data-i18n="ui.line_status_hint">util / capacity / next CO</span>
             </header>
             <div class="panel-body panel-body-flush">
@@ -1279,8 +1290,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="dash-filter-dropdown" id="gantt-line-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="gantt-line-paste-input"
-                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
-                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+                   data-i18n-placeholder="ph.search_or_paste" data-i18n-title="tip.search_or_paste"
+                   placeholder="Search or paste values…" title="Type to filter, or paste a column from Excel to auto-select matches" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="gantt-line-checklist"></div>
         </div>
@@ -1294,8 +1305,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="dash-filter-dropdown" id="gantt-color-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="gantt-color-paste-input"
-                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
-                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+                   data-i18n-placeholder="ph.search_or_paste" data-i18n-title="tip.search_or_paste"
+                   placeholder="Search or paste values…" title="Type to filter, or paste a column from Excel to auto-select matches" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="gantt-color-checklist"></div>
         </div>
@@ -1309,8 +1320,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="dash-filter-dropdown" id="gantt-form-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="gantt-form-paste-input"
-                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
-                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+                   data-i18n-placeholder="ph.search_or_paste" data-i18n-title="tip.search_or_paste"
+                   placeholder="Search or paste values…" title="Type to filter, or paste a column from Excel to auto-select matches" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="gantt-form-checklist"></div>
         </div>
@@ -1396,8 +1407,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="dash-filter-dropdown" id="tbl-flt-line-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="tbl-flt-line-paste-input"
-                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
-                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+                   data-i18n-placeholder="ph.search_or_paste" data-i18n-title="tip.search_or_paste"
+                   placeholder="Search or paste values…" title="Type to filter, or paste a column from Excel to auto-select matches" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="tbl-flt-line-checklist"></div>
         </div>
@@ -1412,8 +1423,8 @@ body.dark .ls-co       { color: var(--fg-mute); }
         <div class="dash-filter-dropdown" id="tbl-flt-color-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="tbl-flt-color-paste-input"
-                   data-i18n-placeholder="ph.paste_values" data-i18n-title="tip.paste_to_select"
-                   placeholder="Paste values…" title="Paste a column from Excel to auto-select matches" autocomplete="off">
+                   data-i18n-placeholder="ph.search_or_paste" data-i18n-title="tip.search_or_paste"
+                   placeholder="Search or paste values…" title="Type to filter, or paste a column from Excel to auto-select matches" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="tbl-flt-color-checklist"></div>
         </div>

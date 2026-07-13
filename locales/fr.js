@@ -160,6 +160,8 @@ window.__NIMBUS_LOCALES.fr = {
   'col.updated_end':                   'Fin Mise à Jour',
   'col.alerts':                        'Alertes',
   'col.notes':                         '📝',
+  'col.fixed':                         '🔒',
+  'tip.fixed_column':                  'Les ordres fixés sont verrouillés pour l\'optimiseur',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Ajouter une interruption',
@@ -256,6 +258,10 @@ window.__NIMBUS_LOCALES.fr = {
   'empty.select_plant_timeline':       'Sélectionnez une usine pour voir les ordres',
   'empty.no_plant_selected':           'Aucune usine sélectionnée',
   'empty.no_plant_table':              'Choisissez une usine dans la barre supérieure pour lister ses ordres ici.',
+  'empty.no_orders_plant_title':       'Aucun ordre pour l\'instant',
+  'empty.no_orders_plant_msg':         'Cette usine n\'a aucun ordre chargé. Importez un fichier d\'ordres ou revenez après la prochaine synchronisation.',
+  'empty.no_orders_filtered_title':    'Aucun résultat',
+  'empty.no_orders_filtered_msg':      'Vos filtres ont exclu tous les ordres de cette usine.',
   'empty.no_plant_hierarchy':          'Choisissez une usine dans la barre supérieure pour lister ses lignes et ordres ici.',
   'empty.pick_plant_dashboard':        'Choisissez une usine pour voir son tableau de bord',
   'empty.no_uploads':                  'Aucun chargement encore.',
@@ -285,6 +291,10 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.all_statuses':                   'Tous les Statuts',
   'ui.any_date':                       'Toute date',
   'ui.any_status':                     'Tout statut',
+  'ui.status_desc_late':               'passé l\'échéance SAP',
+  'ui.status_desc_conflict':           'a une alerte d\'erreur',
+  'ui.status_desc_atrisk':             'a une alerte d\'avertissement',
+  'ui.status_desc_fixed':              'verrouillé pour l\'optimiseur',
   'ui.today':                          'Aujourd\'hui',
   'ui.tomorrow':                       'Demain',
   'ui.late':                           'En retard',
@@ -570,6 +580,8 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Coller pour filtrer (coller une colonne Excel dans les filtres) ──────── */
   'ph.paste_values':                   'Coller des valeurs…',
   'tip.paste_to_select':               'Collez une colonne depuis Excel pour sélectionner automatiquement les correspondances',
+  'ph.search_or_paste':                'Rechercher ou coller des valeurs…',
+  'tip.search_or_paste':               'Tapez pour filtrer, ou collez une colonne depuis Excel pour sélectionner automatiquement les correspondances',
   'toast.paste_checkbox_match':        '{{matched}} sur {{total}} correspondent',
   'ui.all_pomat':                      'Ordre / Matière',
   'ui.n_pomat_filter':                 '{{count}} collés',
@@ -608,6 +620,7 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Navigation / count labels ───────────────────────────────────────────── */
   'ui.orders_visible':                 '{{count}} commande{{plural}} visible{{plural}}',
   'ui.orders_visible_plural':          's',
+  'ui.column_filters_active':          '· filtres de colonne également actifs',
   'ui.lines_nav_title':                'Lignes · {{count}}',
   'ui.no_lines_match':                 'Aucune ligne correspondante',
   'ui.no_matches':                     'Aucune correspondance',
@@ -1036,13 +1049,13 @@ window.__NIMBUS_LOCALES.fr = {
   // Dashboard KPI tiles
   'kpi.orders_today':                  'Orders today',                              // MISSING TRANSLATION
   'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
-  'kpi.overdue_backlog':               'Late Orders',                               // MISSING TRANSLATION
+  'kpi.overdue_backlog':               'All-Time Late Orders',                      // MISSING TRANSLATION
   'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
   'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
   'kpi.conflicts_pending':             'Alerts Today',                              // MISSING TRANSLATION
   'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
   'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION
-  'kpi.open_alerts':                   'Total Open Alerts',                         // MISSING TRANSLATION
+  'kpi.open_alerts':                   'Open Alerts (Horizon)',                     // MISSING TRANSLATION
   'kpi.warn_err_summary':              '{{w}} warn · {{e}} err',                    // MISSING TRANSLATION
   'kpi.capacity_headroom_7d':          'Capacity Headroom Next 7D',                 // MISSING TRANSLATION
   'kpi.avg_used':                      '{{p}}% avg used',                           // MISSING TRANSLATION

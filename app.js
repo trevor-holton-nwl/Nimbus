@@ -6899,7 +6899,14 @@ const NIMBUS = (function () {
       const u = currentUser();
       if (!u) return null;                       // signed out — nothing to reconcile
       try {
-        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me`);
+        // Cache-busted like /tasks (see DEPLOYMENT.md) — this URL never varies,
+        // and the corp proxy caches GET responses keyed on URL regardless of
+        // normal cache semantics, so an uncached fetch here would keep re-adopting
+        // whatever settings blob was first ever fetched instead of DB truth.
+        const r = await Util.fetchTraced(
+          `${Config.API_BASE}/security/me?_cb=${Date.now()}`,
+          { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
+        );
         if (!r.ok) return null;
         const me = await r.json();
         // GET /security/me now carries the caller's own settings blob + their role's
@@ -7849,6 +7856,8 @@ const NIMBUS = (function () {
     _noteOutsideHandler: null,
     _noteKeyHandler: null,
     _chipFilters: { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() },
+    _lineSearch:       '',
+    _colorSearch:      '',
     _rangeMode:        false,
     _rangeAnchor:      null,
     _rangeActive:      null,
@@ -7984,24 +7993,26 @@ const NIMBUS = (function () {
             resizable: false
           },
           {
-            headerName: '', field: 'fixed',
+            headerName: t('col.fixed'), field: 'fixed',
             width: 42, minWidth: 42, maxWidth: 42, flex: 0,
             pinned: 'left',
             editable: false,
             cellRenderer: p => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
-            headerTooltip: 'Fixed orders are locked from the optimiser'
+            headerTooltip: t('tip.fixed_column')
           },
           { headerName: t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
             editable: false, cellClass: 'cell-num' },
           { headerName: t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
             pinned: 'left', editable: false,
             valueGetter: p => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
-          { headerName: t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false },
+          { headerName: t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
+            tooltipField: 'MATERIAL_DESCRIPTION' },
           { headerName: t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
             editable: false, cellClass: 'cell-num',
             valueParser: p => parseFloat(p.newValue) || 0 },
           { headerName: t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
-            cellEditor: 'agSelectCellEditor',
+            cellEditor: Table._SearchableLineEditor,
+            cellEditorPopup: true,
             cellEditorParams: () => ({ values: Table._getLineOptions() }),
             cellRenderer: p => {
               if (!p.value) return '';
@@ -8069,6 +8080,7 @@ const NIMBUS = (function () {
         onSelectionChanged: Table._onSelectionChanged,
         isExternalFilterPresent: () => Table._hasChipFilters(),
         doesExternalFilterPass: node => Table._taskPassesChipFilters(node.data),
+        noRowsOverlayComponent: Table._NoRowsOverlay,
         onCellMouseDown: p => {
           if (!Table._rangeMode) return;
           p.event.preventDefault();
@@ -8165,10 +8177,18 @@ const NIMBUS = (function () {
       Table._refreshChipDropdowns();
       Table._refreshChipButtons();
 
-      Util.wirePasteToCheckboxes(document.getElementById('tbl-flt-line-paste-input'),
+      const lineIn  = document.getElementById('tbl-flt-line-paste-input');
+      const colorIn = document.getElementById('tbl-flt-color-paste-input');
+      Util.wirePasteToCheckboxes(lineIn,
         () => document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      Util.wirePasteToCheckboxes(document.getElementById('tbl-flt-color-paste-input'),
+      Util.wirePasteToCheckboxes(colorIn,
         () => document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color pickers must
+      // stay filterable, not a bare scrollable checkbox list — matches the Gantt tab's
+      // identical filter bar. Paste-to-select (above) and type-to-filter (below) share
+      // the same input without conflict — wirePasteToCheckboxes only listens for 'paste'.
+      if (lineIn)  lineIn.oninput  = () => Table._filterLineSearch(lineIn.value);
+      if (colorIn) colorIn.oninput = () => Table._filterColorSearch(colorIn.value);
 
       const poTa = document.getElementById('tbl-flt-pomat-textarea');
       if (poTa) {
@@ -8225,6 +8245,28 @@ const NIMBUS = (function () {
       Table._buildDateChipDropdown();
     },
 
+    // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
+    // must stay filterable — this is the Orders tab's share of that, matching the
+    // Gantt tab's identical filter bar.
+    _filterLineSearch(q) {
+      Table._lineSearch = q || '';
+      Table._buildLineChipDropdown();
+    },
+    _filterColorSearch(q) {
+      Table._colorSearch = q || '';
+      Table._buildColorChipDropdown();
+    },
+
+    // Clears the line/color live-search text and its <input> values without
+    // touching selections — shared by the plant-change handler and clear filters.
+    _resetChipSearch() {
+      Table._lineSearch = Table._colorSearch = '';
+      const lineIn  = document.getElementById('tbl-flt-line-paste-input');
+      const colorIn = document.getElementById('tbl-flt-color-paste-input');
+      if (lineIn)  lineIn.value  = '';
+      if (colorIn) colorIn.value = '';
+    },
+
     _buildLineChipDropdown() {
       const drop = document.getElementById('tbl-flt-line-checklist');
       if (!drop) return;
@@ -8238,10 +8280,12 @@ const NIMBUS = (function () {
       for (const l of [...Table._chipFilters.lines]) {
         if (!lineSet.has(l)) Table._chipFilters.lines.delete(l);
       }
+      const q = Table._lineSearch.toLowerCase().trim();
+      const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
       const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-      drop.innerHTML = sorted.length
-        ? sorted.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No lines</div>`;
+      drop.innerHTML = visible.length
+        ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
+        : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? t('ui.no_matches') : 'No lines'}</div>`;
     },
 
     _buildColorChipDropdown() {
@@ -8255,10 +8299,12 @@ const NIMBUS = (function () {
       for (const c of [...Table._chipFilters.colors]) {
         if (!colorSet.has(c)) Table._chipFilters.colors.delete(c);
       }
+      const q = Table._colorSearch.toLowerCase().trim();
+      const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
       const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-      drop.innerHTML = sorted.length
-        ? sorted.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No colors</div>`;
+      drop.innerHTML = visible.length
+        ? visible.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
+        : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? t('ui.no_matches') : 'No colors'}</div>`;
     },
 
     _buildStatusChipDropdown() {
@@ -8266,23 +8312,23 @@ const NIMBUS = (function () {
       if (!drop) return;
       const cur = Table._chipFilters.status;
       const items = [
-        { v: 'late',     k: 'Late',         d: 'past SAP due date' },
-        { v: 'conflict', k: 'Conflicting',  d: 'has error alert' },
-        { v: 'atrisk',   k: 'At risk',      d: 'has warning alert' },
-        { v: 'fixed',    k: 'Fixed',        d: 'locked from optimiser' },
+        { v: 'late',     k: t('ui.late'),        d: t('ui.status_desc_late') },
+        { v: 'conflict', k: t('ui.conflicting'),  d: t('ui.status_desc_conflict') },
+        { v: 'atrisk',   k: t('ui.at_risk'),      d: t('ui.status_desc_atrisk') },
+        { v: 'fixed',    k: t('ui.fixed'),        d: t('ui.status_desc_fixed') },
       ];
       drop.innerHTML = items.map(i =>
         `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
            <span style="display:flex;align-items:center;gap:8px;">
-             <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:#b8791a;width:13px;height:13px;cursor:pointer;">
+             <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
              <strong>${i.k}</strong>
            </span>
-           <span style="font-size:10.5px;color:#9a9285;margin-left:21px;">${i.d}</span>
+           <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>
          </label>`).join('')
-        + `<div style="border-top:1px solid #ece8e0;margin:4px 0;"></div>
+        + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
            <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
-             <input type="radio" name="tbl-flt-status" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:#b8791a;width:13px;height:13px;cursor:pointer;">
-             <span>Any status</span>
+             <input type="radio" name="tbl-flt-status" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+             <span>${t('ui.any_status')}</span>
            </label>`;
     },
 
@@ -8301,14 +8347,14 @@ const NIMBUS = (function () {
       drop.innerHTML = presets.map(p =>
         `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
            <span style="display:flex;align-items:center;gap:8px;">
-             <input type="radio" name="tbl-flt-date" value="${p.v}"${cur === p.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:#b8791a;width:13px;height:13px;cursor:pointer;">
+             <input type="radio" name="tbl-flt-date" value="${p.v}"${cur === p.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
              <strong>${p.k}</strong>
            </span>
-           <span style="font-size:10.5px;color:#9a9285;margin-left:21px;">${p.d}</span>
+           <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${p.d}</span>
          </label>`).join('')
-        + `<div style="border-top:1px solid #ece8e0;margin:4px 0;"></div>
+        + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
            <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
-             <input type="radio" name="tbl-flt-date" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:#b8791a;width:13px;height:13px;cursor:pointer;">
+             <input type="radio" name="tbl-flt-date" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
              <span>${t('ui.any_date')}</span>
            </label>`;
     },
@@ -8345,6 +8391,10 @@ const NIMBUS = (function () {
       if (ta) ta.value = '';
       const cnt = document.getElementById('tbl-flt-pomat-count');
       if (cnt) cnt.textContent = '';
+      Table._resetChipSearch();
+      // Fold native AG column filters into the same Clear action — otherwise a
+      // restored saved layout's column filter survives this click invisibly.
+      if (Table._api && Table._api.isAnyFilterPresent()) Table._api.setFilterModel(null);
       Table._refreshChipDropdowns();
       Table._refreshChipButtons();
       if (Table._api) Table._api.onFilterChanged();
@@ -8439,14 +8489,20 @@ const NIMBUS = (function () {
         f.poMat.size === 0 ? t('ui.all_pomat') : t('ui.n_pomat_filter', { count: f.poMat.size }),
         f.poMat.size > 0);
 
-      const hasAny = Table._hasChipFilters();
+      // Native AG Grid per-column filters (from a saved layout, or set directly
+      // via a column header menu) can suppress rows with zero acknowledgment in
+      // this bar otherwise — surface + fold them into the same Clear action.
+      const hasNative = !!(Table._api && Table._api.isAnyFilterPresent());
+      const hasAny = Table._hasChipFilters() || hasNative;
       const clear = document.getElementById('tbl-flt-clear');
       if (clear) clear.hidden = !hasAny;
 
       const hint = document.getElementById('tbl-flt-hint');
       if (hint && Table._api) {
         const n = Table._api.getDisplayedRowCount();
-        hint.textContent = plant ? t('ui.orders_visible', { count: n, plural: n !== 1 ? t('ui.orders_visible_plural') : '' }) : '';
+        let txt = plant ? t('ui.orders_visible', { count: n, plural: n !== 1 ? t('ui.orders_visible_plural') : '' }) : '';
+        if (plant && hasNative) txt += ' ' + t('ui.column_filters_active');
+        hint.textContent = txt;
       }
     },
 
@@ -8469,6 +8525,7 @@ const NIMBUS = (function () {
           if (ta) ta.value = '';
           const cnt = document.getElementById('tbl-flt-pomat-count');
           if (cnt) cnt.textContent = '';
+          Table._resetChipSearch();
         }
         Table._refreshChipDropdowns();
         Table._refreshChipButtons();
@@ -8536,6 +8593,37 @@ const NIMBUS = (function () {
         if (overlay) overlay.remove();
         if (grid) grid.style.visibility = '';
       }
+    },
+
+    // AG Grid's built-in no-rows overlay (shown automatically once a plant is
+    // selected but the grid displays zero rows — either the plant genuinely has
+    // no orders, or the chip/quick/native filters excluded everything). Reuses
+    // the app's own EmptyState component instead of AG Grid's raw default text,
+    // and offers a one-click way out when filters are the cause.
+    _NoRowsOverlay: class {
+      init() {
+        const filtered = Table._hasChipFilters()
+          || (Table._api && Table._api.isAnyFilterPresent())
+          || !!document.getElementById('quick-filter')?.value;
+        this._eGui = document.createElement('div');
+        EmptyState.render(this._eGui, filtered
+          ? { title: t('empty.no_orders_filtered_title'), msg: t('empty.no_orders_filtered_msg'), icon: '⌕' }
+          : { title: t('empty.no_orders_plant_title'),    msg: t('empty.no_orders_plant_msg') });
+        if (filtered) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'btn btn-ghost sm';
+          btn.style.marginTop = '6px';
+          btn.textContent = t('btn.clear_filters');
+          btn.onclick = () => {
+            Table._clearChipFilters();
+            const qf = document.getElementById('quick-filter');
+            if (qf) { qf.value = ''; Table._api.setGridOption('quickFilterText', ''); }
+          };
+          this._eGui.querySelector('.nimbus-empty-state')?.appendChild(btn);
+        }
+      }
+      getGui() { return this._eGui; }
     },
 
     /** Called when a grid cell is edited. Push the change through the store. */
@@ -8942,6 +9030,70 @@ const NIMBUS = (function () {
       getGui() { return this._input; }
       afterGuiAttached() { this._input.focus(); this._input.select(); }
       getValue() { return Util.parseDate(this._input.value); }
+      destroy() {}
+    },
+
+    // Scale mandate (CLAUDE.md Production Scale Roadmap): the line-reassignment
+    // editor is the actual scheduling control (not just a filter), so it needs
+    // type-to-filter even more than the chip picker does — AG Grid Community has
+    // no searchable select (that's Enterprise's agRichSelectCellEditor), so this
+    // is a small hand-rolled popup editor: text input + filtered option list.
+    _SearchableLineEditor: class {
+      init(params) {
+        this._params = params;
+        this._values = (typeof params.values === 'function' ? params.values() : params.values) || [];
+        this._chosen = null;
+        this._activeIdx = 0;
+
+        this._eGui = document.createElement('div');
+        this._eGui.className = 'nse-editor';
+        this._eGui.innerHTML = `<input type="text" class="nse-input" autocomplete="off"><div class="nse-list"></div>`;
+        this._input = this._eGui.querySelector('.nse-input');
+        this._list  = this._eGui.querySelector('.nse-list');
+        this._input.value = params.value || '';
+        this._input.addEventListener('input', () => this._renderList(this._input.value));
+        this._input.addEventListener('keydown', e => this._onKeyDown(e));
+        this._renderList('');
+      }
+      _renderList(q) {
+        const query = q.toLowerCase().trim();
+        this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
+        this._activeIdx = 0;
+        const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        this._list.innerHTML = this._filtered.length
+          ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
+          : `<div class="nse-empty">${t('ui.no_matches')}</div>`;
+        this._list.querySelectorAll('.nse-opt').forEach(el => {
+          el.addEventListener('mousedown', e => { e.preventDefault(); this._choose(Number(el.dataset.i)); });
+        });
+      }
+      _choose(i) {
+        const v = this._filtered[i];
+        if (v == null) return;
+        this._chosen = v;
+        this._input.value = v;
+        this._params.api.stopEditing();
+      }
+      _onKeyDown(e) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
+        else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
+        else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
+      }
+      _move(delta) {
+        if (!this._filtered.length) return;
+        this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
+        this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
+      }
+      getGui() { return this._eGui; }
+      afterGuiAttached() { this._input.focus(); this._input.select(); }
+      getValue() {
+        if (this._chosen != null) return this._chosen;
+        const typed = this._input.value.trim();
+        const exact = this._values.find(v => v.toLowerCase() === typed.toLowerCase());
+        return exact != null ? exact : this._params.value;
+      }
+      isPopup() { return true; }
       destroy() {}
     }
   };
@@ -9391,12 +9543,18 @@ const NIMBUS = (function () {
           Dashboard._renderDebounced = setTimeout(() => Dashboard.render(), 300);
         }
       }, 'Dashboard');
-      // Close line-filter dropdown on outside click
+      // Close line-filter dropdown on outside click or Escape
+      const closeLineFilterDropdown = () => {
+        const d = document.getElementById('line-filter-dropdown');
+        const btn = document.getElementById('line-filter-btn');
+        if (d) d.hidden = true;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      };
       document.addEventListener('click', e => {
-        if (!e.target.closest('#line-filter-group')) {
-          const d = document.getElementById('line-filter-dropdown');
-          if (d) d.hidden = true;
-        }
+        if (!e.target.closest('#line-filter-group')) closeLineFilterDropdown();
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeLineFilterDropdown();
       });
       // Wire lateness-horizon segment buttons.
       const horizonGroup = document.getElementById('lateness-horizon-group');
@@ -9414,6 +9572,13 @@ const NIMBUS = (function () {
           Dashboard._renderLatenessHeatmap();
         });
       }
+      // Line Status card height is copied from the heatmap panel's rendered size
+      // (_syncLineStatusHeight) — without a resize listener the two panels drift
+      // out of sync until the next data-driven re-render.
+      window.addEventListener('resize', () => {
+        clearTimeout(Dashboard._resizeDebounced);
+        Dashboard._resizeDebounced = setTimeout(() => Dashboard._syncLineStatusHeight(), 150);
+      });
       setTimeout(() => Dashboard._buildFilterOptions(), 0);
     },
 
@@ -9432,14 +9597,26 @@ const NIMBUS = (function () {
       Dashboard._refreshFilterBtns();
     },
 
+    _lineSearch: '',
+
+    _filterLineSearch(q) {
+      Dashboard._lineSearch = q || '';
+      Dashboard._renderLineChecklist();
+    },
+
     _refreshLineDropdown() {
       const btn  = document.getElementById('line-filter-btn');
       const drop = document.getElementById('line-filter-dropdown');
       if (!btn || !drop) return;
 
+      Dashboard._lineSearch = '';
+      const srch = document.getElementById('line-filter-search');
+      if (srch) srch.value = '';
+
       if (!Store.selectedPlant) {
         btn.disabled = true;
-        drop.innerHTML = '';
+        Dashboard._allLines = [];
+        Dashboard._renderLineChecklist();
         return;
       }
       btn.disabled = false;
@@ -9450,11 +9627,23 @@ const NIMBUS = (function () {
         if (!lines.has(l)) Dashboard._filterLines.delete(l);
       }
 
+      Dashboard._allLines = [...lines].sort();
+      Dashboard._renderLineChecklist();
+    },
+
+    // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
+    // must stay filterable, not a bare scrollable checkbox list — this is the
+    // dashboard's line filter's share of that, matching the Gantt/Orders dropdowns.
+    _renderLineChecklist() {
+      const list = document.getElementById('line-filter-checklist');
+      if (!list) return;
+      const all = Dashboard._allLines || [];
+      const q = Dashboard._lineSearch.toLowerCase().trim();
+      const visible = q ? all.filter(l => l.toLowerCase().includes(q)) : all;
       const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-      const sorted = [...lines].sort();
-      drop.innerHTML = sorted.length
-        ? sorted.map(l => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No lines</div>`;
+      list.innerHTML = visible.length
+        ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
+        : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${all.length ? t('ui.no_matches') : 'No lines'}</div>`;
     },
 
     _refreshFilterBtns() {
@@ -9482,10 +9671,12 @@ const NIMBUS = (function () {
       }
     },
 
-    _toggleDropdown(id) {
+    _toggleDropdown(id, btnId) {
       const drop = document.getElementById(id);
       if (!drop) return;
       drop.hidden = !drop.hidden;
+      const btn = btnId && document.getElementById(btnId);
+      if (btn) btn.setAttribute('aria-expanded', String(!drop.hidden));
     },
 
     _onLineChange(cb) {
@@ -9664,18 +9855,18 @@ const NIMBUS = (function () {
       tiles.forEach((tile, idx) => {
         let el = stack.children[idx];
         if (!el) {
-          el = document.createElement('div');
+          // Real <button> so keyboard/screen-reader users get focus + Enter/Space
+          // activation natively — a div with a hand-rolled role/tabindex promised
+          // the same and never wired a keydown handler to deliver on it.
+          el = document.createElement('button');
+          el.type = 'button';
           stack.appendChild(el);
         }
         el.className = 'kpi-tile ' + (tile.cls || '') + (tile.action ? ' is-actionable' : '');
+        el.disabled = !tile.action;
         el.onclick = tile.action ? () => Dashboard._tileClick(tile.action) : null;
-        if (tile.action) {
-          el.setAttribute('role', 'button');
-          el.setAttribute('tabindex', '0');
-          el.setAttribute('title', Dashboard._tileTooltip(tile.action));
-        } else {
-          el.removeAttribute('role'); el.removeAttribute('tabindex'); el.removeAttribute('title');
-        }
+        if (tile.action) el.setAttribute('title', Dashboard._tileTooltip(tile.action));
+        else el.removeAttribute('title');
         const kEl = el.querySelector('.k') || document.createElement('div');
         const vEl = el.querySelector('.v') || document.createElement('div');
         const dEl = el.querySelector('.d') || document.createElement('div');
@@ -9788,6 +9979,28 @@ const NIMBUS = (function () {
       requestAnimationFrame(step);
     },
 
+    // Read a real CSS custom property so heatmap colors stay theme-correct and
+    // in sync with DESIGN.md's tokens instead of hand-duplicated light/dark hex pairs.
+    _cssVar(name, fallback) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    },
+    _lerpHex(a, b, frac) {
+      const p = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+      const ca = p(a), cb = p(b);
+      const rgb = [0, 1, 2].map(i => Math.round(ca[i] + (cb[i] - ca[i]) * frac));
+      return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+    },
+    // WCAG relative luminance — picks readable text color from the actual resolved
+    // background instead of a hand-tuned per-theme pct threshold.
+    _relLuminance(hex) {
+      const c = [1, 3, 5].map(i => {
+        const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    },
+
     _renderHeatmap(matrix) {
       const container = document.getElementById('util-heatmap-panel');
       if (!container) return;
@@ -9803,25 +10016,22 @@ const NIMBUS = (function () {
 
       const days = Object.keys(matrix[lines[0]]);
 
-      const isDark = document.body.classList.contains('dark');
-      function lerpRGB(a, b, t) {
-        const p = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
-        const ca = p(a), cb = p(b);
-        return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
-      }
-      const idleBg = isDark ? '#252730' : '#ede8de';
-      const lowMid = isDark ? '#7a5a18' : '#c8a95a';
-      const midHi  = isDark ? '#a8520f' : '#c96a1a';
-      const hot    = isDark ? '#b32a1f' : '#991b1b';
+      const idleBg  = Dashboard._cssVar('--bg-subtle', '#ecebe4');
+      const warnBg  = Dashboard._cssVar('--warn', '#b57a0a');
+      const vividBg = Dashboard._cssVar('--warn-vivid', '#f39c12');
+      const errBg   = Dashboard._cssVar('--err', '#b1362a');
+      const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
+      const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
+      const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
       function heatBg(pct) {
         if (pct <= 0)    return idleBg;
-        if (pct <= 0.5)  return lerpRGB(idleBg, lowMid, pct / 0.5);
-        if (pct <= 1.0)  return lerpRGB(lowMid, midHi, (pct - 0.5) / 0.5);
-        return lerpRGB(midHi, hot, Math.min((pct - 1.0) / 0.25, 1));
+        if (pct <= 0.5)  return Dashboard._lerpHex(idleBg, warnBg, pct / 0.5);
+        if (pct <= 1.0)  return Dashboard._lerpHex(warnBg, vividBg, (pct - 0.5) / 0.5);
+        return Dashboard._lerpHex(vividBg, errBg, Math.min((pct - 1.0) / 0.25, 1));
       }
-      function heatText(pct) {
-        if (isDark) return pct <= 0 ? '#8f909d' : '#ffffff';
-        return pct < 0.45 ? '#3d3628' : '#ffffff';
+      function heatText(pct, bg) {
+        if (pct <= 0) return muteTxt;
+        return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
       }
 
       const cols = `74px repeat(${days.length}, 1fr)`;
@@ -9843,13 +10053,13 @@ const NIMBUS = (function () {
         days.forEach(d => {
           const pct = matrix[line][d]?.pct || 0;
           const bg  = heatBg(pct);
-          const tc  = heatText(pct);
+          const tc  = heatText(pct, bg);
           const lbl = Math.round(pct * 100) + '%';
           const cap     = (matrix[line][d]?.capacity || 0).toFixed(2);
           const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
           const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
           const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
-          html += `<div class="hm-cell" data-line="${line}" data-date="${d}" style="background:${bg};color:${tc};cursor:pointer" title="Click to view ${line} on ${d} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${line}','${d}')">${lbl}</div>`;
+          html += `<button type="button" class="hm-cell" data-line="${line}" data-date="${d}" style="background:${bg};color:${tc}" title="Click to view ${line} on ${d} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${line}','${d}')">${lbl}</button>`;
         });
       });
 
@@ -10113,20 +10323,22 @@ const NIMBUS = (function () {
       lineTotals.sort((a, b) => b.total - a.total || a.ln.localeCompare(b.ln));
       const lines = lineTotals.map(x => x.ln);
 
-      const isDark = document.body.classList.contains('dark');
-      const idleBg = isDark ? '#21232c' : '#ede8de';
-      const amber  = isDark ? '#c2861d' : '#f59e0b';
-      const orange = isDark ? '#d8651b' : '#d97706';
-      const red    = isDark ? '#dc2626' : '#dc2626';
+      const idleBg  = Dashboard._cssVar('--bg-subtle', '#ecebe4');
+      const amber   = Dashboard._cssVar('--warn', '#b57a0a');
+      const orange  = Dashboard._cssVar('--warn-vivid', '#f39c12');
+      const red     = Dashboard._cssVar('--err', '#b1362a');
+      const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
+      const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
+      const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
       function cellBg(h) {
         if (h <= 0)  return idleBg;
         if (h <= 8)  return amber;
         if (h <= 24) return orange;
         return red;
       }
-      function cellText(h) {
-        if (h <= 0) return isDark ? '#9fa0ad' : '#7a6e55';
-        return '#ffffff';
+      function cellText(h, bg) {
+        if (h <= 0) return muteTxt;
+        return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
       }
 
       const cols = `120px repeat(${days.length}, 1fr)`;
@@ -10150,16 +10362,17 @@ const NIMBUS = (function () {
           const cell = cells[line][dk];
           const h = cell.lateHours;
           const bg = cellBg(h);
-          const tc = cellText(h);
+          const tc = cellText(h, bg);
           const lbl = h <= 0 ? '·' : (h < 10 ? h.toFixed(1) + 'h' : Math.round(h) + 'h');
           const title = h <= 0
             ? `${line} · ${dk} · on plan`
             : `${line} · ${dk} · ${cell.lateCount} late order${cell.lateCount === 1 ? '' : 's'} · ${h.toFixed(1)}h cumulative late`;
-          const click = h > 0
-            ? `onclick="NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"`
-            : '';
-          const cursor = h > 0 ? 'cursor:pointer;' : '';
-          html += `<div class="lh-cell" style="background:${bg};color:${tc};${cursor}" title="${esc(title)}" ${click}>${lbl}</div>`;
+          // Only late cells are interactive — render those as real buttons for free
+          // keyboard access; on-plan cells stay inert divs (nothing to activate).
+          const tag = h > 0 ? 'button' : 'div';
+          const typeAttr = h > 0 ? ' type="button"' : '';
+          const click = h > 0 ? ` onclick="NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"` : '';
+          html += `<${tag}${typeAttr} class="lh-cell" style="background:${bg};color:${tc}" title="${esc(title)}"${click}>${lbl}</${tag}>`;
         }
       });
 
@@ -10451,6 +10664,9 @@ const NIMBUS = (function () {
     _selectedForms:  new Set(),
     _pastedIds:      new Set(),
     _bar:            null,
+    _lineSearch:     '',
+    _colorSearch:    '',
+    _formSearch:     '',
 
     init() {
       const bar = document.getElementById('gantt-filterbar');
@@ -10477,6 +10693,7 @@ const NIMBUS = (function () {
           GanttFilter._selectedColors.clear();
           GanttFilter._selectedForms.clear();
           GanttFilter._clearPoMat();
+          GanttFilter._resetSearch();
           GanttFilter.populate();
           GanttFilter._buildLineDropdown();
           GanttFilter._refreshLineBtn();
@@ -10499,12 +10716,22 @@ const NIMBUS = (function () {
         }
       });
 
-      Util.wirePasteToCheckboxes(document.getElementById('gantt-line-paste-input'),
+      const lineIn  = document.getElementById('gantt-line-paste-input');
+      const colorIn = document.getElementById('gantt-color-paste-input');
+      const formIn  = document.getElementById('gantt-form-paste-input');
+      Util.wirePasteToCheckboxes(lineIn,
         () => document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      Util.wirePasteToCheckboxes(document.getElementById('gantt-color-paste-input'),
+      Util.wirePasteToCheckboxes(colorIn,
         () => document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      Util.wirePasteToCheckboxes(document.getElementById('gantt-form-paste-input'),
+      Util.wirePasteToCheckboxes(formIn,
         () => document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color/form pickers
+      // must stay filterable, not a bare scrollable checkbox list. Paste-to-select
+      // (above) and type-to-filter (below) share the same input without conflict —
+      // wirePasteToCheckboxes only listens for 'paste', this only listens for 'input'.
+      if (lineIn)  lineIn.oninput  = () => GanttFilter._filterLineSearch(lineIn.value);
+      if (colorIn) colorIn.oninput = () => GanttFilter._filterColorSearch(colorIn.value);
+      if (formIn)  formIn.oninput  = () => GanttFilter._filterFormSearch(formIn.value);
 
       const poTa = document.getElementById('gantt-pomat-textarea');
       if (poTa) {
@@ -10546,6 +10773,7 @@ const NIMBUS = (function () {
       GanttFilter._selectedColors.clear();
       GanttFilter._selectedForms.clear();
       GanttFilter._clearPoMat();
+      GanttFilter._resetSearch();
       GanttFilter._buildLineDropdown();
       GanttFilter._refreshLineBtn();
       GanttFilter._buildColorDropdown();
@@ -10557,9 +10785,29 @@ const NIMBUS = (function () {
       GanttFilter._apply();
     },
 
+    // Clears the line/color/form live-search text and its <input> values without
+    // touching selections — shared by the plant-change handler and clear().
+    _resetSearch() {
+      GanttFilter._lineSearch = GanttFilter._colorSearch = GanttFilter._formSearch = '';
+      const lineIn  = document.getElementById('gantt-line-paste-input');
+      const colorIn = document.getElementById('gantt-color-paste-input');
+      const formIn  = document.getElementById('gantt-form-paste-input');
+      if (lineIn)  lineIn.value  = '';
+      if (colorIn) colorIn.value = '';
+      if (formIn)  formIn.value  = '';
+    },
+
     _toggleLineDropdown() {
       const drop = document.getElementById('gantt-line-dropdown');
       if (drop) drop.hidden = !drop.hidden;
+    },
+
+    // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
+    // must stay filterable, not a bare scrollable checkbox list — this is the
+    // Gantt line filter's share of that, matching the Dashboard's line filter.
+    _filterLineSearch(q) {
+      GanttFilter._lineSearch = q || '';
+      GanttFilter._buildLineDropdown();
     },
 
     _buildLineDropdown() {
@@ -10574,14 +10822,16 @@ const NIMBUS = (function () {
       for (const l of [...GanttFilter._selectedLines]) {
         if (!lineSet.has(l)) GanttFilter._selectedLines.delete(l);
       }
+      const q = GanttFilter._lineSearch.toLowerCase().trim();
+      const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
       const esc = s => String(s).replace(/[&<>"]/g,
         c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = sorted.length
-        ? sorted.map(l =>
+      drop.innerHTML = visible.length
+        ? visible.map(l =>
             `<label><input type="checkbox" value="${esc(l)}"${GanttFilter._selectedLines.has(l) ? ' checked' : ''}
              onchange="NIMBUS.GanttFilter._onLineChange(this)"> ${esc(l)}</label>`
           ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No lines</div>`;
+        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No lines'}</div>`;
     },
 
     _refreshLineBtn() {
@@ -10616,6 +10866,11 @@ const NIMBUS = (function () {
       if (drop) drop.hidden = !drop.hidden;
     },
 
+    _filterColorSearch(q) {
+      GanttFilter._colorSearch = q || '';
+      GanttFilter._buildColorDropdown();
+    },
+
     _buildColorDropdown() {
       const drop = document.getElementById('gantt-color-checklist');
       if (!drop) return;
@@ -10625,14 +10880,16 @@ const NIMBUS = (function () {
       for (const c of [...GanttFilter._selectedColors]) {
         if (!colorSet.has(c)) GanttFilter._selectedColors.delete(c);
       }
+      const q = GanttFilter._colorSearch.toLowerCase().trim();
+      const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
       const esc = s => String(s).replace(/[&<>"]/g,
         c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = sorted.length
-        ? sorted.map(c =>
+      drop.innerHTML = visible.length
+        ? visible.map(c =>
             `<label><input type="checkbox" value="${esc(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
              onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${esc(c)}</label>`
           ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No colors</div>`;
+        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No colors'}</div>`;
       GanttFilter._refreshColorBtn();
     },
 
@@ -10659,6 +10916,11 @@ const NIMBUS = (function () {
       if (drop) drop.hidden = !drop.hidden;
     },
 
+    _filterFormSearch(q) {
+      GanttFilter._formSearch = q || '';
+      GanttFilter._buildFormDropdown();
+    },
+
     _buildFormDropdown() {
       const drop = document.getElementById('gantt-form-checklist');
       if (!drop) return;
@@ -10668,14 +10930,16 @@ const NIMBUS = (function () {
       for (const f of [...GanttFilter._selectedForms]) {
         if (!formSet.has(f)) GanttFilter._selectedForms.delete(f);
       }
+      const q = GanttFilter._formSearch.toLowerCase().trim();
+      const visible = q ? sorted.filter(f => f.toLowerCase().includes(q)) : sorted;
       const esc = s => String(s).replace(/[&<>"]/g,
         c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = sorted.length
-        ? sorted.map(f =>
+      drop.innerHTML = visible.length
+        ? visible.map(f =>
             `<label><input type="checkbox" value="${esc(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
              onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${esc(f)}</label>`
           ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">No forms</div>`;
+        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No forms'}</div>`;
       GanttFilter._refreshFormBtn();
     },
 
