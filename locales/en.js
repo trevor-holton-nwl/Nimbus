@@ -225,6 +225,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.close_esc':                     'Close (Esc)',
   'tip.remove_block':                  'Remove',
   'tip.schedule_confidence':           'Schedule Confidence — click for breakdown',
+  'ui.confidence_label':               'Confidence',
   'tip.open_admin_log':                'Open Admin Cockpit log (Ctrl+Alt+L)',
   'tip.col_options':                   'Column options',
   'tip.delete_row':                    'Delete row',
@@ -239,6 +240,7 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
   'tab.home':                          'Dashboard',
   'tab.gantt':                         'Scheduling Board',
+  'tab.labor':                         'Labor Plan',
   'tab.table':                         'Orders',
   'tab.masterdata':                    'Master Data',
   'tab.admin':                         'Admin Cockpit',
@@ -547,15 +549,13 @@ window.__NIMBUS_LOCALES.en = {
   'btn.hour':                          'Hour',
   'btn.day':                           'Day',
   'btn.week':                          'Week',
-  'btn.open_scheduling':               'Open Scheduling Board →',
-  'btn.open_orders':                   'Open Orders →',
 
   /* ── Static UI labels ────────────────────────────────────────────────────── */
   'ui.plant_label':                    'Plant',
   'ui.hop_on':                         'Hop On',
   'ui.hero_heading':                   'Welcome to NIMBUS 🧹',
   'ui.hero_subheading':                'Newell Integrated Batch & Unified Scheduling',
-  'ui.todays_overview':                "Today's Overview",
+  'ui.todays_overview':                'Overview',
   'ui.util_heatmap':                   'Utilization Heatmap — next 7 days',
   'ui.active_alerts':                  'Active alerts',
   'ui.fixed_orders':                   'Fixed orders',

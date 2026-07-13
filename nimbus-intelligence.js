@@ -229,6 +229,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   background:var(--bg-subtle); border:1.5px solid var(--line); border-radius:20px;
   cursor:pointer; transition:border-color 0.15s; position:relative; }
 .ni-conf-badge:hover { border-color:var(--accent); }
+.ni-conf-label { font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--fg-mute); }
 .ni-conf-score { font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace; min-width:24px; text-align:right; }
 .ni-conf-spark { display:block; }
 .ni-conf-delta { position:absolute; top:-8px; right:4px; font-size:10px; font-weight:700;
@@ -1381,7 +1382,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       badge.className = 'ni-conf-badge';
       badge.title = t('tip.schedule_confidence');
       badge.addEventListener('click', () => Confidence.showBreakdown());
-      badge.innerHTML = `<span class="ni-conf-score" id="ni-conf-score">—</span>
+      badge.innerHTML = `<span class="ni-conf-label">${t('ui.confidence_label')}</span>
+        <span class="ni-conf-score" id="ni-conf-score">—</span>
         <canvas class="ni-conf-spark" id="ni-conf-spark" width="48" height="20"></canvas>`;
       actions.insertBefore(badge, actions.firstChild);
       Confidence._badge = badge;
@@ -1475,7 +1477,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = score;
-        scoreEl.style.color = score >= 70 ? 'var(--ok)' : score >= 40 ? 'var(--warn)' : 'var(--err)';
+        scoreEl.style.color = score >= 70 ? 'var(--ok)' : score >= 40 ? 'var(--warn-text)' : 'var(--err)';
       }
       const delta = score - prev;
       if (Confidence._badge && Math.abs(delta) >= 5) {

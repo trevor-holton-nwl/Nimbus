@@ -54,6 +54,7 @@ h1, h2, h3, h4 {
   --ok:       #2f7a4d;
   --ok-soft:  #d8ecdf;
   --warn:     #b57a0a;
+  --warn-text:#8a5c08;             /* AA-safe (5.8:1 on white) text/icon color — --warn itself is ~3.2:1, background-only */
   --warn-soft:#f6e5bd;
   --warn-vivid:#f39c12;            /* vivid amber — distinct from the muted --warn */
   --tab-admin-bg:       #f3f4f6;   /* Admin tab tint (light) */
@@ -216,6 +217,36 @@ h1, h2, h3, h4 {
   width: 1px;
   height: 20px;
   background: var(--line);
+}
+/* Divider between the status/info widgets (Confidence badge, alert bell) and
+   the action/account cluster (Save, user icon, admin log toggle) — same
+   pattern as #user-settings-btn::before above. */
+.topbar-actions .btn-primary {
+  position: relative;
+}
+.topbar-actions .btn-primary::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+}
+
+/* Narrow-viewport fallback: brand + plant selector + utility widgets hold
+   their size, tab labels truncate instead of clipping/overflowing the bar. */
+@media (max-width: 1200px) {
+  .brand, .topbar-actions { flex-shrink: 0; }
+  .tabs { overflow: hidden; }
+  .tab-btn { min-width: 0; }
+  .tab-btn span:not(.tab-ico) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 90px;
+  }
 }
 .icon-btn .badge {
   position: absolute; top: 2px; right: 2px;
@@ -4358,6 +4389,7 @@ body.dark {
   /* Semantic */
   --ok:       #3d9962;  --ok-soft:   #0e2e1d;
   --warn:     #d09010;  --warn-soft: #2e2008;
+  --warn-text: #d09010;           /* already AA-safe (5.7:1) as text on dark bg — no darkening needed here */
   --warn-vivid: #e0a018;
   --tab-md-bg: #1c3d28;  --tab-md-bg-hover: #224830;  /* Master Data tab — dark green in dark mode */
   --err:      #d94a3a;  --err-soft:  #2e1210;

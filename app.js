@@ -4532,7 +4532,7 @@ const NIMBUS = (function () {
       if (n > 0) {
         badge.textContent = n > 99 ? '99+' : String(n);
         badge.style.display = '';
-        bell.style.color = visible.some(a => a.sev === 'err') ? 'var(--err)' : 'var(--warn)';
+        bell.style.color = visible.some(a => a.sev === 'err') ? 'var(--err)' : 'var(--warn-text)';
       } else {
         badge.style.display = 'none';
         bell.style.color = '';
@@ -9833,11 +9833,15 @@ const NIMBUS = (function () {
           action: 'alerts-today' },
         { k: t('kpi.overdue_backlog'),           v: String(lateCount),
           d: lateCount === 0 ? t('kpi.no_backlog') : t('kpi.all_open_past_finish'),
-          cls: lateSev === 'err' ? 'err' : '',
+          // Historical/running-total metric, not a today-action item — kept neutral
+          // so red is reserved for the one tile that's actually blocking right now.
+          cls: '',
           action: 'late' },
         { k: t('kpi.open_alerts'),               v: String(openAlerts),
           d: t('kpi.warn_err_summary', { w: warnAlerts, e: errAlerts }),
-          cls: alertCls,
+          // Rolling monitoring aggregate, not an immediate blocker — capped at warn
+          // even when it includes err-severity alerts (see conflictCls below for that).
+          cls: openAlerts > 0 ? 'warn' : '',
           action: 'alerts' },
         { k: t('kpi.capacity_headroom_7d'),      v: `${headroom}%`,
           d: pctN > 0 ? t('kpi.avg_used', { p: Math.round(avgUtil * 100) }) : t('kpi.no_data'),
