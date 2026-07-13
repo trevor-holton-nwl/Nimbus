@@ -1833,27 +1833,10 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   background: #404350;
 }
 
-/* Log-entry toggle button in the topbar */
-#err-log-btn {
-  position: relative;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  color: var(--fg);
-  font-size: 12px;
-  font-weight: 500;
-  height: 30px;
-  padding: 0 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  transition: background var(--t-fast), border-color var(--t-fast);
-  cursor: pointer;
-}
-#err-log-btn:hover {
-  background: var(--bg-subtle);
-  border-color: var(--line-strong);
-}
+/* Log-entry toggle button in the topbar — an .icon-btn peer of the alert
+   bell/user icon; severity is carried by the badge color, not an emoji dot. */
+#err-log-btn .log-ico { font-size: 14px; line-height: 1; }
+#err-log-btn .badge.warn { background: var(--warn-text); }
 
 /* Data integrity badge (appended alongside tabs) */
 #data-integrity-badge {

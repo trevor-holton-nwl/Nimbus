@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-13-b'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-13-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -6138,25 +6138,23 @@ const NIMBUS = (function () {
                   || document.body;
         btn = document.createElement('button');
         btn.id = 'err-log-btn';
-        btn.title = 'Open Admin Cockpit log (Ctrl+Alt+L)';
+        btn.className = 'icon-btn';
+        btn.innerHTML = '<span class="log-ico" aria-hidden="true">🖥️</span>'
+                       + '<span class="badge" id="err-log-badge" hidden>0</span>';
         btn.onclick = () => { try { App.goto('admin'); AdminCockpit.gotoOvTab('logs'); } catch {} };
         host.appendChild(btn);
       }
+      const tip = t('tip.open_admin_log');
+      btn.title = tip;
+      btn.setAttribute('aria-label', tip);
       const sessionEntries = ErrorLog._entries.filter(e => e.sessionId === ErrorLog.SESSION_ID);
       const errs  = sessionEntries.filter(e => e.level === 'error').length;
       const warns = sessionEntries.filter(e => e.level === 'warn').length;
       const total = errs + warns;
-      const dot   = errs ? '🔴' : warns ? '🟡' : '🟢';
-      btn.textContent = '';   // clear before rebuild
-      const dotSpan = document.createElement('span');
-      dotSpan.textContent = dot;
-      const label = document.createTextNode(` Log `);
-      const count = document.createElement('span');
-      count.style.cssText = 'opacity:.65;font-family:ui-monospace,monospace;font-size:11px;';
-      count.textContent = total;
-      btn.appendChild(dotSpan);
-      btn.appendChild(label);
-      btn.appendChild(count);
+      const badge = btn.querySelector('#err-log-badge');
+      badge.hidden = total === 0;
+      badge.textContent = total;
+      badge.classList.toggle('warn', !errs && !!warns);
     }, 80),
 
     copy() {      const txt = ErrorLog._entries.map(e =>
