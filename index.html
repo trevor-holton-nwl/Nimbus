@@ -43,8 +43,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-07-13-c';</script>
-<link rel="stylesheet" href="styles.css?v=2026-07-13-c">
+<script>window.NIMBUS_BUILD_ID = '2026-07-13-d';</script>
+<link rel="stylesheet" href="styles.css?v=2026-07-13-d">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1117,9 +1117,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="tab-btn" data-tab="masterdata" role="tab">
         <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
       </button>
-      <button class="tab-btn" data-tab="admin" role="tab">
-        <span class="tab-ico">🖥️</span><span data-i18n="tab.admin">Admin Cockpit</span>
-      </button>
     </nav>
 
     <div class="topbar-actions">
@@ -1139,43 +1136,47 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <div class="home-scroll">
       <div class="home-container">
 
-        <!-- Dashboard line-filter bar (plant selector moved to the top header). -->
-        <div class="dash-filter-bar" id="dash-filter-bar">
-          <span class="dash-filter-label" data-i18n="ui.filter_label">Filter</span>
-
-          <div class="dash-filter-group" id="line-filter-group">
-            <button class="dash-filter-btn" id="line-filter-btn" disabled
-                    aria-haspopup="listbox" aria-expanded="false"
-                    onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn')">
-              <span id="line-filter-label">All Lines</span>
-              <span class="dash-filter-arrow">▾</span>
-            </button>
-            <div class="dash-filter-dropdown" id="line-filter-dropdown" role="listbox" hidden>
-              <div class="dash-filter-paste-row">
-                <input type="text" class="dash-filter-paste-input" id="line-filter-search"
-                       placeholder="Search lines…" oninput="NIMBUS.Dashboard._filterLineSearch(this.value)">
-              </div>
-              <div class="dash-filter-checklist" id="line-filter-checklist"></div>
+        <!-- Work header: slim greeting + live situation summary + primary CTA into the
+             scheduling board, with the line filter folded in below (was a separate bar). -->
+        <div class="work-header" id="work-header">
+          <div class="wh-row">
+            <div class="wh-context">
+              <span class="wh-greeting" data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</span>
+              <span class="wh-sep">·</span>
+              <span class="wh-situation" id="wh-situation"></span>
             </div>
+            <button type="button" class="btn btn-primary wh-cta" onclick="NIMBUS.App.gotoGanttTimeline()">
+              <span data-i18n="ui.open_schedule">Open schedule</span><span aria-hidden="true">→</span>
+            </button>
           </div>
 
-          <button class="dash-filter-clear" id="dash-filter-clear" hidden
-                  onclick="NIMBUS.Dashboard._clearFilters()" data-i18n="btn.clear_filter_line">✕ Clear line filter</button>
+          <div class="dash-filter-bar" id="dash-filter-bar">
+            <span class="dash-filter-label" data-i18n="ui.filter_label">Filter</span>
 
-          <span class="dash-filter-hint" id="dash-filter-hint"></span>
+            <div class="dash-filter-group" id="line-filter-group">
+              <button class="dash-filter-btn" id="line-filter-btn" disabled
+                      aria-haspopup="listbox" aria-expanded="false"
+                      onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn')">
+                <span id="line-filter-label">All Lines</span>
+                <span class="dash-filter-arrow">▾</span>
+              </button>
+              <div class="dash-filter-dropdown" id="line-filter-dropdown" role="listbox" hidden>
+                <div class="dash-filter-paste-row">
+                  <input type="text" class="dash-filter-paste-input" id="line-filter-search"
+                         placeholder="Search lines…" oninput="NIMBUS.Dashboard._filterLineSearch(this.value)">
+                </div>
+                <div class="dash-filter-checklist" id="line-filter-checklist"></div>
+              </div>
+            </div>
+
+            <button class="dash-filter-clear" id="dash-filter-clear" hidden
+                    onclick="NIMBUS.Dashboard._clearFilters()" data-i18n="btn.clear_filter_line">✕ Clear line filter</button>
+
+            <span class="dash-filter-hint" id="dash-filter-hint"></span>
+          </div>
         </div>
 
-        <div class="hero-row">
-          <div class="dash-context-strip">
-            <span class="dcs-title" data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</span>
-            <span class="dcs-sep">·</span>
-            <span class="dcs-sub" data-i18n="ui.hero_subheading">Newell Integrated Batch &amp; Unified Scheduling</span>
-          </div>
-          <div class="hero-aside">
-            <h3 class="kpi-section-header" data-i18n="ui.todays_overview">Today's Overview</h3>
-            <div class="kpi-stack" id="kpi-stack"><!-- filled by Dashboard module --></div>
-          </div>
-        </div>
+        <div class="kpi-stack" id="kpi-stack"><!-- filled by Dashboard module --></div>
 
         <div class="grid-2">
           <div class="panel">
@@ -1200,7 +1201,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         </div>
 
         <div class="grid-2">
-          <div class="panel">
+          <div class="panel panel-quiet">
             <header class="panel-head">
               <h3 data-i18n="ui.active_alerts">Active alerts</h3>
               <span class="panel-hint" id="alert-summary-count">0 open</span>
@@ -1210,7 +1211,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel panel-quiet">
             <header class="panel-head">
               <h3 data-i18n="ui.fixed_orders">Fixed orders</h3>
               <span class="panel-hint" data-i18n="ui.locked_optimizer">Locked from the optimizer</span>
@@ -1221,7 +1222,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel panel-quiet">
           <header class="panel-head">
             <h3 data-i18n="ui.projected_lateness">Projected lateness — vs SAP plan</h3>
             <div class="panel-head-controls">
@@ -1929,6 +1930,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <button class="md-tab" data-md-tab="production_lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
+            <button class="md-tab" data-md-tab="bom_items" role="tab" data-i18n="tab.bom_items">Bill of Materials</button>
             <button class="btn btn-ghost sm" id="md-export-schema-btn" style="margin-left:auto" data-i18n="btn.export_schema">Export Schema</button>
           </nav>
           <div id="md-host"></div>
@@ -2008,6 +2010,26 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="form-row">
           <label data-i18n="sec.role">Role</label>
           <div class="readonly" id="us-role"></div>
+        </div>
+        <div class="form-row" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">
+          <label data-i18n="sec.change_password_title" style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:var(--fg-mute);">Change Password</label>
+        </div>
+        <div class="form-row">
+          <label data-i18n="sec.current_password">Current Password</label>
+          <input type="password" id="us-current-password" autocomplete="current-password">
+        </div>
+        <div class="form-row form-row-2">
+          <div>
+            <label data-i18n="sec.new_password">New Password</label>
+            <input type="password" id="us-new-password" autocomplete="new-password">
+          </div>
+          <div>
+            <label data-i18n="sec.confirm_password">Confirm New Password</label>
+            <input type="password" id="us-confirm-password" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="form-row">
+          <button class="btn btn-primary sm" id="us-change-password-btn" data-i18n="sec.update_password">Update Password</button>
         </div>
       </div>
     </div>

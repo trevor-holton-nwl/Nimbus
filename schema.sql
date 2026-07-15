@@ -266,6 +266,45 @@ CREATE TABLE IF NOT EXISTS material_plants (
 );
 CREATE INDEX IF NOT EXISTS idx_material_plants_material ON material_plants(material_id);
 
+-- ----------------------------------------------------------------------------
+-- Bill of Materials — one row per component per level per material/plant/alt
+-- BOM. True row-unique key is (material_id, plant, alternative_bom, level,
+-- item_number, component_id); (material_id, plant, alternative_bom) is the
+-- natural "BOM header" grouping but not a separate DB key. Both the parent
+-- material and the component must already exist at this plant in
+-- material_plants — component is always sourced from the SAME plant as the
+-- parent material, so both FKs share the `plant` column rather than
+-- carrying a separate component_plant. ON DELETE RESTRICT: removing a
+-- material_plants row is blocked while bom_items still references it either
+-- way, so BOM data must be cleaned up first (see master_data.cascade_preview).
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bom_items (
+    material_id           TEXT      NOT NULL,
+    plant                 TEXT      NOT NULL,
+    alternative_bom       TEXT      NOT NULL,
+    level                 INTEGER   NOT NULL,
+    item_number           TEXT      NOT NULL,
+    component_id          TEXT      NOT NULL,
+    base_quantity         NUMERIC,
+    item_category         TEXT      NOT NULL DEFAULT '',
+    assembly              TEXT      NOT NULL DEFAULT '',
+    component_quantity    NUMERIC,
+    base_unit_of_measure  TEXT      NOT NULL DEFAULT '',
+    valid_from            DATE,
+    valid_to              DATE,
+    changed_on            DATE,
+    change_number         TEXT      NOT NULL DEFAULT '',
+    created_at            TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (material_id, plant, alternative_bom, level, item_number, component_id),
+    FOREIGN KEY (material_id, plant) REFERENCES material_plants(material_id, plant)
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+    FOREIGN KEY (component_id, plant) REFERENCES material_plants(material_id, plant)
+        ON DELETE RESTRICT ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bom_items_material_plant ON bom_items(material_id, plant);
+CREATE INDEX IF NOT EXISTS idx_bom_items_component_plant ON bom_items(component_id, plant);
+
 -- column_metadata: display labels + whether a column is a locked key column.
 -- System columns (created_at, updated_at) are never inserted here — the
 -- backend filters them out before returning column lists to the UI.
@@ -507,7 +546,22 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('material_plants',  'status_pl',                  'Status PL',                    FALSE, 4),
     ('material_plants',  'default_production_version', 'Default Production Version',   FALSE, 5),
     ('material_plants',  'min_lot_size',               'Minimum Lot Size',             FALSE, 6),
-    ('material_plants',  'incremental_lot_size',       'Incremental Lot Size',         FALSE, 7)
+    ('material_plants',  'incremental_lot_size',       'Incremental Lot Size',         FALSE, 7),
+    ('bom_items',        'material_id',                'Material',                     TRUE,  1),
+    ('bom_items',        'plant',                      'Plant',                        TRUE,  2),
+    ('bom_items',        'alternative_bom',            'Alternative BOM',              TRUE,  3),
+    ('bom_items',        'level',                      'Level',                        TRUE,  4),
+    ('bom_items',        'item_number',                'Item Number',                  TRUE,  5),
+    ('bom_items',        'component_id',               'Component',                    TRUE,  6),
+    ('bom_items',        'base_quantity',               'Base Quantity',               FALSE, 7),
+    ('bom_items',        'item_category',               'Item Category',               FALSE, 8),
+    ('bom_items',        'assembly',                    'Assembly',                    FALSE, 9),
+    ('bom_items',        'component_quantity',          'Component Quantity',          FALSE, 10),
+    ('bom_items',        'base_unit_of_measure',        'Base Unit of Measure',        FALSE, 11),
+    ('bom_items',        'valid_from',                  'Valid From',                  FALSE, 12),
+    ('bom_items',        'valid_to',                    'Valid To',                    FALSE, 13),
+    ('bom_items',        'changed_on',                  'Changed On',                  FALSE, 14),
+    ('bom_items',        'change_number',               'Change Number',               FALSE, 15)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------

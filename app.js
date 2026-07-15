@@ -40,7 +40,7 @@
    Change APP_VERSION any time you deploy a new build.
    ========================================================================== */
 (function () {
-  const APP_VERSION = '2026-07-13-c'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
+  const APP_VERSION = '2026-07-13-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
   const KEY = 'nimbus.app.ver';
   const stored = sessionStorage.getItem(KEY);
   if (stored !== APP_VERSION) {
@@ -6281,6 +6281,11 @@ const NIMBUS = (function () {
         saveBtn._wired = true;
         saveBtn.addEventListener('click', saveProfile);
       }
+      const changePwBtn = document.getElementById('us-change-password-btn');
+      if (changePwBtn && !changePwBtn._wired) {
+        changePwBtn._wired = true;
+        changePwBtn.addEventListener('click', changePassword);
+      }
       // Wire the User Settings tab bar (Personalization / Workflow / Profile).
       // _renderSettingsPanes() populates the Personalization/Workflow panes on
       // modal open; this only toggles which pane + button is active. Wired once.
@@ -6811,6 +6816,46 @@ const NIMBUS = (function () {
       }
     }
 
+    // Self-service: PATCH /security/me/password. Unlike saveProfile(), the
+    // caller's identity header alone isn't enough here — the backend re-verifies
+    // current_password (auth.change_own_password) since there's no session token
+    // binding the header to a prior login. Fields are cleared on success but the
+    // modal stays open (mirrors the admin panel's non-closing _savePassword).
+    async function changePassword() {
+      const curEl = document.getElementById('us-current-password');
+      const newEl = document.getElementById('us-new-password');
+      const confEl = document.getElementById('us-confirm-password');
+      const current_password = curEl ? curEl.value : '';
+      const new_password = newEl ? newEl.value : '';
+      const confirm_password = confEl ? confEl.value : '';
+      if (!new_password || new_password.length < 4) {
+        Toast.show(t('sec.password_too_short'), 'error');
+        return;
+      }
+      if (new_password !== confirm_password) {
+        Toast.show(t('sec.password_mismatch'), 'error');
+        return;
+      }
+      try {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/password`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ current_password, new_password }),
+        });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.detail || `HTTP ${r.status}`);
+        }
+        if (curEl) curEl.value = '';
+        if (newEl) newEl.value = '';
+        if (confEl) confEl.value = '';
+        Toast.show(t('sec.password_updated'), 'success');
+      } catch (e) {
+        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
+        ErrorLog.error('security', `Change password failed: ${e.message}`);
+      }
+    }
+
     /* ── Self-service preference writes (Personalization / Workflow) ─────────
        setPref(key, value) is OPTIMISTIC (mirrors _savePlantHorizon's write-then-
        revert shape): Store.userSettings updates immediately so the UI reflects the
@@ -6978,7 +7023,7 @@ const NIMBUS = (function () {
     card.innerHTML = `
       <div class="login-title">${t('sec.login_title')}</div>
       <form id="login-form" style="display:flex;flex-direction:column;gap:10px;">
-        <input type="text" id="login-username" autocomplete="username"
+        <input type="text" id="login-username" autocomplete="username" autocapitalize="off"
                placeholder="${t('sec.username')}" aria-label="${t('sec.username')}">
         <input type="password" id="login-password" autocomplete="current-password"
                placeholder="${t('sec.password')}" aria-label="${t('sec.password')}">
@@ -6994,11 +7039,17 @@ const NIMBUS = (function () {
     const errEl     = card.querySelector('#login-error');
     const submitBtn = card.querySelector('#login-submit-btn');
 
+    userInp.addEventListener('input', () => {
+      const pos = userInp.selectionStart;
+      userInp.value = userInp.value.toLowerCase();
+      userInp.setSelectionRange(pos, pos);
+    });
+
     async function _submit() {
       errEl.textContent = '';
       submitBtn.disabled = true;
       try {
-        await Session.signIn(userInp.value.trim(), passInp.value);
+        await Session.signIn(userInp.value.trim().toLowerCase(), passInp.value);
         root.remove();
         App._bootMain();
       } catch (e) {
@@ -9745,16 +9796,16 @@ const NIMBUS = (function () {
     _renderEmptyState() {
       const homeContainer = document.querySelector('#home-tab .home-container');
       let overlay = document.getElementById('dashboard-empty-overlay');
-      const heroAside = document.querySelector('#home-tab .hero-aside');
-      const dataPanels = document.querySelectorAll('#home-tab .home-container > .grid-2, #home-tab .home-container > .panel');
+      const situationEl = document.getElementById('wh-situation');
+      const dataPanels = document.querySelectorAll('#home-tab .home-container > .kpi-stack, #home-tab .home-container > .grid-2, #home-tab .home-container > .panel');
       if (!Store.selectedPlant) {
         if (!overlay && homeContainer) {
           overlay = document.createElement('div');
           overlay.id = 'dashboard-empty-overlay';
           overlay.className = 'dashboard-empty-overlay';
-          // Insert after the hero row so the welcome banner still leads.
-          const hero = homeContainer.querySelector('.hero-row');
-          if (hero && hero.nextSibling) homeContainer.insertBefore(overlay, hero.nextSibling);
+          // Insert after the work header so the greeting still leads.
+          const header = homeContainer.querySelector('.work-header');
+          if (header && header.nextSibling) homeContainer.insertBefore(overlay, header.nextSibling);
           else homeContainer.appendChild(overlay);
         }
         if (overlay) {
@@ -9763,11 +9814,10 @@ const NIMBUS = (function () {
             msg:   t('ui.select_plant_dashboard_msg')
           });
         }
-        if (heroAside) heroAside.style.visibility = 'hidden';
+        if (situationEl) { situationEl.textContent = ''; situationEl.classList.remove('warn'); }
         dataPanels.forEach(el => el.style.display = 'none');
       } else {
         if (overlay) overlay.remove();
-        if (heroAside) heroAside.style.visibility = '';
         dataPanels.forEach(el => el.style.display = '');
       }
     },
@@ -9780,26 +9830,10 @@ const NIMBUS = (function () {
 
       // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
       const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
-      const lateSev = lateCount > 0 ? 'err' : 'ok';
 
-      const plantLines = new Set(Store.linesForSelectedPlant());
-      const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
-      const alertHz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-      const alertCutoff = typeof alertHz === 'number' ? new Date(Date.now() + alertHz * Config.MS_MIN) : null;
-      const visibleAlerts = Store.alerts.filter(a => {
-        if (a.line && !plantLines.has(a.line)) return false;
-        if (alertCutoff && a.time && a.time > alertCutoff) return false;
-        return true;
-      });
-      const openAlerts = visibleAlerts.length;
-      const errAlerts  = visibleAlerts.filter(a => a.sev === 'err').length;
-      const warnAlerts = visibleAlerts.filter(a => a.sev === 'warn').length;
-      const alertSev = errAlerts > 0 ? 'err' : openAlerts > 0 ? 'warn' : 'ok';
-      const alertCls = alertSev === 'err' ? 'err' : alertSev === 'warn' ? 'warn' : '';
       // Alerts Today tile (kpi.conflicts_pending, action:'alerts-today') must count exactly
       // what its click-through shows -- Table._applyChipFilter({status:'conflict', dateKey:today})
-      // -- i.e. today's orders carrying >=1 err alert. Independent of errAlerts/openAlerts/
-      // warnAlerts/alertSev/alertCls above, which stay rolling-horizon for Total Open Alerts.
+      // -- i.e. today's orders carrying >=1 err alert.
       const alertsByTask = Store.alertsByTask();
       const conflictsToday = todayOrders.filter(t =>
         (alertsByTask.get(String(t.id)) || []).some(a => a.sev === 'err')).length;
@@ -9819,8 +9853,9 @@ const NIMBUS = (function () {
       const headroom = Math.max(0, Math.round((1 - avgUtil) * 100));
       const headroomSev = avgUtil >= 0.95 ? 'err' : avgUtil >= 0.80 ? 'warn' : 'ok';
 
-      const fixedCount = tasks.filter(t => Store.isFixed(t.id)).length;
-
+      // Four action-oriented tiles, one calm row. Open Alerts and Fixed Orders were
+      // trimmed off this row — both counts still surface in their own panels below
+      // (alert-summary-count, the fixed-orders list) so nothing is lost, just decluttered.
       const tiles = [
         { k: t('kpi.orders_today'),             v: String(todayOrders.length),
           d: t('kpi.orders_total', { n: tasks.length }),
@@ -9835,20 +9870,13 @@ const NIMBUS = (function () {
           // so red is reserved for the one tile that's actually blocking right now.
           cls: '',
           action: 'late' },
-        { k: t('kpi.open_alerts'),               v: String(openAlerts),
-          d: t('kpi.warn_err_summary', { w: warnAlerts, e: errAlerts }),
-          // Rolling monitoring aggregate, not an immediate blocker — capped at warn
-          // even when it includes err-severity alerts (see conflictCls below for that).
-          cls: openAlerts > 0 ? 'warn' : '',
-          action: 'alerts' },
         { k: t('kpi.capacity_headroom_7d'),      v: `${headroom}%`,
           d: pctN > 0 ? t('kpi.avg_used', { p: Math.round(avgUtil * 100) }) : t('kpi.no_data'),
           cls: headroomSev === 'err' ? 'err' : headroomSev === 'warn' ? 'warn' : '',
           action: 'headroom' },
-        { k: t('kpi.fixed_orders'),              v: String(fixedCount),
-          d: t('kpi.locked_from_optimiser'),
-          action: 'fixed' },
       ];
+
+      Dashboard._renderSituation({ todayCount: todayOrders.length, attention: conflictsToday + lateCount });
 
       const stack = document.getElementById('kpi-stack');
       if (!stack) return;
@@ -9898,9 +9926,7 @@ const NIMBUS = (function () {
         case 'orders-today': return 'Open Orders table filtered to today';
         case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
         case 'alerts-today': return 'Open Orders table filtered to conflicting orders due today';
-        case 'alerts':       return 'Jump to Active alerts list';
         case 'headroom':     return 'Jump to utilization heatmap';
-        case 'fixed':        return 'Jump to fixed orders list';
         default: return '';
       }
     },
@@ -9937,34 +9963,30 @@ const NIMBUS = (function () {
           }, 120);
           break;
         }
-        case 'alerts':
-          Dashboard._scrollToAlerts();
-          break;
         case 'headroom': {
           const hm = document.getElementById('util-heatmap-panel');
           if (hm) hm.closest('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
           break;
         }
-        case 'fixed': {
-          const fl = document.getElementById('fixed-list');
-          if (fl) fl.closest('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          break;
-        }
       }
     },
 
-    _scrollToAlerts(highlight) {
-      const panel = document.getElementById('alert-summary-list')?.closest('.panel');
-      if (!panel) return;
-      panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      if (highlight === 'err') {
-        const list = panel.querySelector('#alert-summary-list');
-        if (!list) return;
-        list.querySelectorAll('.alert-row').forEach(r => {
-          if (!r.classList.contains('sev-err')) r.classList.add('flash-dim');
+    // Work-header situation line: "3 need attention · 42 orders scheduled today" (or the
+    // all-clear phrasing). Fed directly from _renderKPIs' own todayOrders/conflictsToday/
+    // lateCount so the header always agrees with the tiles below it — no separate recompute.
+    _renderSituation({ todayCount, attention }) {
+      const el = document.getElementById('wh-situation');
+      if (!el) return;
+      const totalPlural = todayCount === 1 ? '' : 's';
+      if (attention > 0) {
+        el.textContent = t('ui.work_status_attention', {
+          count: attention, plural: attention === 1 ? '' : 's',
+          total: todayCount, totalPlural,
         });
-        setTimeout(() => list.querySelectorAll('.flash-dim').forEach(r => r.classList.remove('flash-dim')), 2400);
+      } else {
+        el.textContent = t('ui.work_status_clear', { total: todayCount, totalPlural });
       }
+      el.classList.toggle('warn', attention > 0);
     },
 
     _animateTicker(el, from, to, toStr, dur) {
@@ -17876,6 +17898,7 @@ saveAll() {
       production_lines: 'Production Lines',
       materials:        'Material',
       material_plants:  'Material Plant',
+      bom_items:        'Bill of Materials',
     };
 
     // KEY_COLS drives primary-key identification per table.
@@ -17885,6 +17908,7 @@ saveAll() {
       production_lines: ['subnetwork', 'plant', 'production_line'],
       materials:        ['material_id'],
       material_plants:  ['material_id', 'plant'],
+      bom_items:        ['material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'],
     };
 
     // Tables that need a parent-dropdown for FK columns.
@@ -17892,7 +17916,16 @@ saveAll() {
       plants:           { subnetwork: 'subnetworks' },
       production_lines: { subnetwork: 'subnetworks', plant: 'plants' },
       material_plants:  { material_id: 'materials' },
+      // bom_items.component_id is deliberately NOT registered here: it needs a
+      // plant-scoped option list (material_plants filtered to the row's plant),
+      // which the generic _fkSelect (whole-source-table, single-key convention)
+      // can't express. See the bom_items special case in _appendRow instead.
     };
+
+    // bom_items requires a plant + material pick before the grid loads (its
+    // table is expected to be huge — one row per component per level per
+    // material — unlike every other MasterData table, which loads in full).
+    let _bomFilter = { plant: null, material_id: null };
 
     function _rowKey(table, row) {
       return KEY_COLS[table].map(k => String(row[k] ?? '')).join('|');
@@ -17938,18 +17971,165 @@ saveAll() {
       const exportBtn = document.getElementById('md-export-schema-btn');
       if (exportBtn) exportBtn.onclick = _exportSchema;
       _syncTabUI();
-      _loadAndRender(_activeTable);
+      _renderActiveTable();
     }
 
     function _setTab(table) {
       _activeTable = table;
       _syncTabUI();
-      _loadAndRender(table);
+      _renderActiveTable();
     }
 
     function _syncTabUI() {
       document.querySelectorAll('.md-tab').forEach(b =>
         b.classList.toggle('active', b.dataset.mdTab === _activeTable));
+    }
+
+    // bom_items never loads unscoped (its table is expected to be huge) — show
+    // the plant+material picker gate until both are chosen, same as every
+    // other tab shows its grid immediately.
+    function _renderActiveTable() {
+      if (_activeTable === 'bom_items' && !(_bomFilter.plant && _bomFilter.material_id)) {
+        _renderBomGate();
+      } else {
+        _loadAndRender(_activeTable);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // BOM plant + material scope gate
+    // -----------------------------------------------------------------------
+    function _renderBomGate() {
+      const host = document.getElementById('md-host');
+      if (!host) return;
+      host.innerHTML = `
+        <div class="md-bom-gate">
+          <p class="md-bom-gate-hint">${t('hint.bom_pick_scope')}</p>
+          <div class="md-bom-gate-row">
+            <label>${t('ui.plant_label')}</label>
+            <div id="md-bom-plant-picker"></div>
+          </div>
+          <div class="md-bom-gate-row">
+            <label>${t('col.material')}</label>
+            <div id="md-bom-material-picker"></div>
+          </div>
+        </div>`;
+      const plants = Store.knownPlants ? Store.knownPlants() : [];
+      _mkCombobox(document.getElementById('md-bom-plant-picker'), plants, {
+        value: _bomFilter.plant || '',
+        placeholder: t('ph.select_plant'),
+        onSelect: (p) => {
+          _bomFilter = { plant: p || null, material_id: null };
+          _renderBomGate();
+        },
+      });
+      if (_bomFilter.plant) _loadBomMaterialsForPlant(_bomFilter.plant);
+    }
+
+    async function _loadBomMaterialsForPlant(plant) {
+      const matHost = document.getElementById('md-bom-material-picker');
+      if (matHost) matHost.innerHTML = `<div class="md-loading-inline">${t('ui.loading')}</div>`;
+      try {
+        const data = await Util.fetchTraced(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
+          .then(r => r.json());
+        const materials = (data.rows || []).map(r => r.material_id).sort();
+        const host2 = document.getElementById('md-bom-material-picker');
+        if (!host2) return; // tab/plant changed again while this was in flight
+        _mkCombobox(host2, materials, {
+          value: _bomFilter.material_id || '',
+          placeholder: t('ph.select_material'),
+          onSelect: (m) => {
+            _bomFilter.material_id = m || null;
+            if (m) _loadAndRender('bom_items');
+          },
+        });
+      } catch (e) {
+        if (matHost) matHost.innerHTML = `<div class="md-empty">${t('err.load_materials_failed')}</div>`;
+        ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${e.message}`);
+      }
+    }
+
+    // Minimal self-contained searchable combobox — reuses the topbar
+    // PlantSelector's markup/CSS classes (hps-*) for visual consistency and
+    // the same type-to-filter/keyboard-nav interaction, but works off a plain
+    // options array with no Store dependency, so it fits BOM's plant AND
+    // material pickers (PlantSelector itself is wired one-to-one to
+    // Store.selectedPlant and the global topbar DOM).
+    function _mkCombobox(containerEl, options, { value = '', placeholder = '', onSelect } = {}) {
+      if (!containerEl) return;
+      containerEl.innerHTML = `
+        <div class="hps-combobox md-bom-combobox">
+          <input type="text" class="hps-input" placeholder="${placeholder}" autocomplete="off" spellcheck="false"
+                 aria-haspopup="listbox" aria-expanded="false">
+          <button type="button" class="hps-clear" hidden>&times;</button>
+          <div class="hps-dropdown" role="listbox" hidden></div>
+        </div>`;
+      const root      = containerEl.querySelector('.hps-combobox');
+      const input     = root.querySelector('.hps-input');
+      const clearBtn  = root.querySelector('.hps-clear');
+      const dropdown  = root.querySelector('.hps-dropdown');
+      let filtered  = [];
+      let activeIdx = -1;
+      let open      = false;
+      let selected  = value;
+
+      function reflect() {
+        input.value = selected || '';
+        root.classList.toggle('has-value', !!selected);
+        clearBtn.hidden = !selected;
+      }
+      function renderDropdown(query) {
+        const q = (query || '').trim().toLowerCase();
+        const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
+        const filterQ = looksLikeLabel ? '' : q;
+        filtered = filterQ ? options.filter(o => String(o).toLowerCase().includes(filterQ)) : options.slice();
+        if (!filtered.length) {
+          dropdown.innerHTML = `<div class="hps-empty">${options.length ? t('ui.no_matches') : t('ui.no_options')}</div>`;
+          activeIdx = -1;
+          return;
+        }
+        dropdown.innerHTML = filtered.map((o, i) =>
+          `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
+        ).join('');
+        activeIdx = Math.max(0, filtered.indexOf(selected));
+        highlight();
+        dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
+          el.addEventListener('mousedown', e => { e.preventDefault(); pick(filtered[i]); });
+        });
+      }
+      function highlight() {
+        const items = dropdown.querySelectorAll('.hps-option');
+        items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
+      }
+      function openDd()  { dropdown.hidden = false; open = true;  input.setAttribute('aria-expanded', 'true'); }
+      function closeDd() { dropdown.hidden = true;  open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
+      function pick(o) {
+        selected = o;
+        reflect();
+        closeDd();
+        input.blur();
+        if (onSelect) onSelect(o);
+      }
+
+      input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
+      input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
+      input.addEventListener('keydown', e => {
+        if (!open) {
+          if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
+          return;
+        }
+        if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
+        else if (e.key === 'Enter') { e.preventDefault(); if (filtered[activeIdx]) pick(filtered[activeIdx]); }
+        else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
+      });
+      input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
+      clearBtn.addEventListener('mousedown', e => e.preventDefault());
+      clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
+      document.addEventListener('click', e => { if (!root.contains(e.target)) closeDd(); });
+
+      reflect();
     }
 
     // -----------------------------------------------------------------------
@@ -17962,8 +18142,13 @@ saveAll() {
       const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+      // bom_items is the one table that must never load in full — always scope
+      // the request to the plant + material the user picked via the gate.
+      const qs = table === 'bom_items'
+        ? `?${new URLSearchParams({ plant: _bomFilter.plant, material_id: _bomFilter.material_id }).toString()}`
+        : '';
       try {
-        const data = await Util.fetchTraced(`${API}/master-data/${table}`, { headers: { 'x-request-id': reqId } }).then(async r => {
+        const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async r => {
           if (!r.ok) {
             // Surface the backend body instead of discarding it.
             const parsed = await Util.parseBackendError(r);
@@ -18002,6 +18187,22 @@ saveAll() {
 
       host.innerHTML = '';
 
+      if (table === 'bom_items') {
+        const scopeBar = document.createElement('div');
+        scopeBar.className = 'md-bom-scope-bar';
+        scopeBar.innerHTML = `<span>${t('ui.plant_label')}: <strong>${_bomFilter.plant}</strong> &middot; ${t('col.material')}: <strong>${_bomFilter.material_id}</strong></span>`;
+        const changeBtn = document.createElement('button');
+        changeBtn.className = 'btn btn-ghost sm';
+        changeBtn.textContent = t('btn.change_scope');
+        changeBtn.onclick = () => {
+          _bomFilter = { plant: null, material_id: null };
+          delete _cache.bom_items;
+          _renderActiveTable();
+        };
+        scopeBar.appendChild(changeBtn);
+        host.appendChild(scopeBar);
+      }
+
       // -- Toolbar --
       const toolbar = document.createElement('div');
       toolbar.className = 'md-toolbar';
@@ -18037,6 +18238,15 @@ saveAll() {
       pasteBtn.title = t('tip.paste_rows');
       pasteBtn.onclick = () => _pasteRows(table);
       toolbar.appendChild(pasteBtn);
+
+      if (table === 'bom_items') {
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'btn btn-ghost sm';
+        uploadBtn.textContent = t('btn.upload_bom');
+        uploadBtn.title = t('tip.upload_bom');
+        uploadBtn.onclick = () => _uploadBom();
+        toolbar.appendChild(uploadBtn);
+      }
 
       const addColBtn = document.createElement('button');
       addColBtn.className = 'btn btn-ghost sm';
@@ -18137,6 +18347,16 @@ saveAll() {
         const td = document.createElement('td');
         td.className = 'md-td';
 
+        // bom_items.component_id: plant-scoped dropdown (material_plants rows
+        // for this row's plant), not the generic FK_SOURCE/_fkSelect path —
+        // that assumes the source table's LAST key column is the value column
+        // (true for material_plants -> 'plant', wrong for what we need: 'material_id').
+        if (table === 'bom_items' && col.column_name === 'component_id' && isNew) {
+          td.appendChild(_bomComponentSelect(rowView.plant || _bomFilter.plant, rowView.component_id, key));
+          tr.appendChild(td);
+          return;
+        }
+
         // FK columns get a <select> populated from parent table.
         const fkSources = FK_SOURCE[table] || {};
         if (fkSources[col.column_name] && !isNew) {
@@ -18228,6 +18448,47 @@ saveAll() {
       return sel;
     }
 
+    // Per-plant memoized list of material_ids valid at that plant, used only
+    // by the bom_items component_id dropdown. Deliberately separate from
+    // _cache['material_plants'] (which may be absent, or scoped to a
+    // different plant if that tab was visited) rather than risking either
+    // table's cached view corrupting the other's.
+    const _bomComponentOptionsCache = {};
+
+    function _bomComponentSelect(plant, value, rowKey) {
+      const sel = document.createElement('select');
+      sel.className = 'input md-fk-select';
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = t('ui.select_placeholder');
+      sel.appendChild(blank);
+
+      const fill = (materials) => {
+        while (sel.options.length > 1) sel.remove(1);
+        materials.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          if (m === value) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      };
+      sel.onchange = () => _markDirty('bom_items', rowKey, 'component_id', sel.value);
+
+      if (_bomComponentOptionsCache[plant]) {
+        fill(_bomComponentOptionsCache[plant]);
+      } else if (plant) {
+        fetch(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
+          .then(r => r.json())
+          .then(data => {
+            const materials = (data.rows || []).map(r => r.material_id).sort();
+            _bomComponentOptionsCache[plant] = materials;
+            fill(materials);
+          }).catch(() => {});
+      }
+      return sel;
+    }
+
     function _markDirty(table, rowKey, colName, value) {
       const state = _cache[table];
       if (!state) return;
@@ -18279,6 +18540,12 @@ saveAll() {
       if (!state) return;
       const newRow = {};
       state.columns.forEach(c => { newRow[c.column_name] = ''; });
+      if (table === 'bom_items') {
+        // A new row is always within the currently scoped material+plant —
+        // pre-fill so the user isn't retyping the scope on every row.
+        newRow.material_id = _bomFilter.material_id || '';
+        newRow.plant = _bomFilter.plant || '';
+      }
       state.added.push(newRow);
       // Re-render to show the new row (simpler than appending).
       _renderTable(table);
@@ -18289,6 +18556,40 @@ saveAll() {
         const firstCell = lastRow?.querySelector('.md-cell');
         if (firstCell) firstCell.focus();
       }, 50);
+    }
+
+    async function _uploadBom() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.xlsx';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+          const resp = await Util.fetchTraced(`${API}/bom/upload`, { method: 'POST', body: fd });
+          const result = await resp.json();
+          if (!resp.ok) throw new Error(result.detail || result.message || t('toast.bom_upload_failed'));
+          Toast.show(
+            t('toast.bom_upload_done', {
+              inserted: result.inserted || 0, updated: result.updated || 0, rejected: result.rejected || 0,
+            }),
+            result.rejected ? 'warn' : 'success',
+          );
+          if (result.warnings && result.warnings.length) {
+            result.warnings.slice(0, 10).forEach(w => ErrorLog.warn('master-data', w.msg));
+          }
+          // Refresh the currently-scoped view so newly uploaded rows for this
+          // material+plant show up immediately.
+          delete _cache.bom_items;
+          if (_activeTable === 'bom_items') _renderActiveTable();
+        } catch (e) {
+          Toast.show(`${t('toast.bom_upload_failed')}: ${e.message}`, 'error');
+          ErrorLog.error('master-data', `BOM upload failed: ${e.message}`);
+        }
+      };
+      input.click();
     }
 
     async function _pasteRows(table) {
@@ -18384,7 +18685,7 @@ saveAll() {
       const isNew = state.added.some(r => _rowKey(table, r) === rowKey);
       let cascadeDetail = '';
 
-      if (!isNew && (table === 'subnetworks' || table === 'plants')) {
+      if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
         try {
           const preview = await fetch(`${API}/master-data/${table}/cascade-preview`, {
             method: 'POST',
@@ -18395,8 +18696,11 @@ saveAll() {
           const parts = [];
           if (preview.plants > 0)           parts.push(`<strong>${preview.plants}</strong> plant${preview.plants !== 1 ? 's' : ''}`);
           if (preview.production_lines > 0)  parts.push(`<strong>${preview.production_lines}</strong> production line${preview.production_lines !== 1 ? 's' : ''}`);
+          if (preview.bom_items > 0)          parts.push(`<strong>${preview.bom_items}</strong> BOM item${preview.bom_items !== 1 ? 's' : ''}`);
           if (parts.length) {
-            cascadeDetail = `<div class="md-cascade-warn">This will also permanently delete ${parts.join(' and ')}.</div>`;
+            cascadeDetail = table === 'material_plants'
+              ? `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — delete those first.</div>`
+              : `<div class="md-cascade-warn">This will also permanently delete ${parts.join(' and ')}.</div>`;
           }
         } catch {}
       }
@@ -18457,25 +18761,33 @@ saveAll() {
       if (!upserts.length && !deletes.length) return;
 
       // Cascade confirmation for deletes that weren't already confirmed.
-      if (deletes.length && (table === 'subnetworks' || table === 'plants')) {
+      if (deletes.length && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
         try {
           const preview = await fetch(`${API}/master-data/${table}/cascade-preview`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ deletes }),
           }).then(r => r.json());
-          const total = (preview.plants || 0) + (preview.production_lines || 0);
+          const total = (preview.plants || 0) + (preview.production_lines || 0) + (preview.bom_items || 0);
           if (total > 0) {
             const parts = [];
             if (preview.plants > 0)          parts.push(`${preview.plants} plant${preview.plants !== 1 ? 's' : ''}`);
             if (preview.production_lines > 0) parts.push(`${preview.production_lines} production line${preview.production_lines !== 1 ? 's' : ''}`);
-            const ok = await Modal.confirm({
-              title:         `Delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}?`,
-              message:       `This will also permanently delete ${parts.join(' and ')}.`,
-              detail:        '<strong>This cannot be undone.</strong>',
-              confirmLabel:  `Yes, delete all`,
-              tone:          'danger',
-            });
+            if (preview.bom_items > 0)         parts.push(`${preview.bom_items} BOM item${preview.bom_items !== 1 ? 's' : ''}`);
+            const ok = table === 'material_plants'
+              ? await Modal.confirm({
+                  title:         `Cannot delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}`,
+                  message:       `This is referenced by ${parts.join(' and ')} — delete those first.`,
+                  confirmLabel:  `OK`,
+                  tone:          'danger',
+                }).then(() => false)
+              : await Modal.confirm({
+                  title:         `Delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}?`,
+                  message:       `This will also permanently delete ${parts.join(' and ')}.`,
+                  detail:        '<strong>This cannot be undone.</strong>',
+                  confirmLabel:  `Yes, delete all`,
+                  tone:          'danger',
+                });
             if (!ok) return;
           }
         } catch {}

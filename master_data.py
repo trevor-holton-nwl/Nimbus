@@ -6,16 +6,18 @@ psycopg.sql.Identifier; every type literal is validated against a whitelist
 before being composed with psycopg.sql.SQL; every value goes through a
 parameter placeholder.  The user cannot inject SQL through any of these paths.
 """
+import io
 import logging
 import re
 from datetime import datetime, timezone
 
+import pandas as pd
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-# Import the shared pool from the existing db module.
-from db import _pool
+# Import the shared pool + SAP-numeric-ID normalizer from the existing db module.
+from db import _pool, _str_id
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up), so a
 # narrowed-but-unexpected error class here still reaches the operator log.
@@ -26,7 +28,7 @@ log = logging.getLogger("nimbus.md")
 # ---------------------------------------------------------------------------
 ALLOWED_TABLES = frozenset({
     'subnetworks', 'plants', 'production_lines',
-    'materials', 'material_plants',
+    'materials', 'material_plants', 'bom_items',
     'roles', 'role_plants',
 })
 
@@ -38,7 +40,7 @@ ALLOWED_TABLES = frozenset({
 # admin action. Deliberately excludes `role_plants` itself — its `plant`
 # column means "which plant this role can see", a different concept from
 # "which plant this record belongs to".
-PLANT_SCOPED_TABLES = frozenset({'plants', 'production_lines', 'material_plants'})
+PLANT_SCOPED_TABLES = frozenset({'plants', 'production_lines', 'material_plants', 'bom_items'})
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
@@ -61,6 +63,7 @@ _KEY_COLUMNS = {
     'production_lines': frozenset({'subnetwork', 'plant', 'production_line'}),
     'materials':        frozenset({'material_id'}),
     'material_plants':  frozenset({'material_id', 'plant'}),
+    'bom_items':        frozenset({'material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'}),
     'roles':            frozenset({'role'}),
     'role_plants':      frozenset({'role', 'plant'}),
 }
@@ -89,7 +92,8 @@ def _row_key(table: str, row: dict) -> tuple:
 # Read
 # ---------------------------------------------------------------------------
 def list_rows(table: str, limit: int | None = None, offset: int | None = None,
-              plant: str | None = None, allowed_plants: list[str] | None = None) -> dict:
+              plant: str | None = None, allowed_plants: list[str] | None = None,
+              material_id: str | None = None) -> dict:
     """
     Return column metadata + data rows for the given table.
 
@@ -99,6 +103,10 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
       - `allowed_plants`: per-user role_plants scope (auth.get_allowed_plants);
         ANDed in alongside `plant`, but only for tables in PLANT_SCOPED_TABLES —
         it narrows, never widens, the result.
+      - `material_id`: filter to rows whose `material_id` column matches (only
+        honored when the table actually has one; ignored otherwise). Used by
+        the BOM tab, which requires a plant + material pick before browsing
+        rather than ever loading the full (potentially huge) bom_items table.
       - `limit`/`offset`: parameterized LIMIT/OFFSET page window.
     When any of these are supplied, `meta.total` carries the full row count for
     the same filter (ignoring limit/offset) so callers can paginate.
@@ -149,6 +157,9 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         if plant and "plant" in col_names:
             where_parts.append(sql.SQL("{col} = %s").format(col=sql.Identifier("plant")))
             where_params.append(plant)
+        if material_id and "material_id" in col_names:
+            where_parts.append(sql.SQL("{col} = %s").format(col=sql.Identifier("material_id")))
+            where_params.append(material_id)
         if allowed_plants is not None and table in PLANT_SCOPED_TABLES and "plant" in col_names:
             where_parts.append(sql.SQL("{col} = ANY(%s)").format(col=sql.Identifier("plant")))
             where_params.append(allowed_plants)
@@ -221,7 +232,7 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
     """
     _assert_table(table)
     # Seed all child-table keys so a missing branch reads as 0, not "absent".
-    result = {"plants": 0, "production_lines": 0, "material_plants": 0}
+    result = {"plants": 0, "production_lines": 0, "material_plants": 0, "bom_items": 0}
     if not deletes:
         return result
 
@@ -259,6 +270,21 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
                     (material_ids,),
                 )
                 result["material_plants"] = int(cur.fetchone()[0])
+
+        elif table == "material_plants":
+            # bom_items FKs (material_id, plant) and (component_id, plant) are both
+            # ON DELETE RESTRICT, not CASCADE — a dependent row here blocks the
+            # delete rather than disappearing with it, so surface the count either way.
+            bom_count = 0
+            for d in deletes:
+                if d.get("material_id") and d.get("plant"):
+                    cur.execute(
+                        "SELECT COUNT(*) FROM bom_items"
+                        " WHERE (material_id = %s AND plant = %s) OR (component_id = %s AND plant = %s)",
+                        (d["material_id"], d["plant"], d["material_id"], d["plant"]),
+                    )
+                    bom_count += int(cur.fetchone()[0])
+            result["bom_items"] = bom_count
 
     return result
 
@@ -1330,6 +1356,125 @@ def known_plant_line_codes() -> dict:
         cur.execute("SELECT production_line FROM production_lines")
         lines = {r[0] for r in cur.fetchall()}
     return {"plants": plants, "lines": lines}
+
+
+def known_material_plant_pairs() -> set[tuple[str, str]]:
+    """Return every (material_id, plant) pair currently in material_plants, for
+    validating a BOM upload — both the parent material and the component of
+    every bom_items row must already exist at that plant (bom_items' two FKs
+    both reference material_plants(material_id, plant))."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT material_id, plant FROM material_plants")
+        return {(r[0], r[1]) for r in cur.fetchall()}
+
+
+# Required SAP/export headers, after clean()-style STRIP→UPPER→spaces-to-
+# underscores normalization ("Item Number" -> "ITEM_NUMBER"). Add aliases in
+# the row loop below if a real SAP export uses different headers, mirroring
+# how db.ingest_orders_from_excel handles ORDER/WERKS variants.
+_BOM_REQUIRED = {"MATERIAL", "PLANT", "ALTERNATIVE_BOM", "LEVEL", "ITEM_NUMBER", "COMPONENT"}
+
+
+def ingest_bom_from_excel(file_bytes: bytes, filename: str, user_email: str | None = None) -> dict:
+    """
+    Parse an uploaded BOM export (.xlsx) and upsert into bom_items.
+
+    Both (material_id, plant) and (component_id, plant) must already exist in
+    material_plants — bom_items' two FKs both reference material_plants
+    (material_id, plant), and a component is always sourced from the same
+    plant as its parent material. Rows that reference an unknown pair (or are
+    missing a key field) are rejected individually rather than failing the
+    whole upload, mirroring db.ingest_orders_from_excel's warnings-not-hard-
+    fail style — reused here via bulk_apply so the ON CONFLICT upsert,
+    admin_audit logging, and FK-violation handling stay in one place.
+
+    Returns: {status, raw_row_count, inserted, updated, rejected, warnings}.
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception as e:
+        return {"status": "error", "message": f"Could not parse xlsx: {e}",
+                "raw_row_count": 0, "inserted": 0, "updated": 0, "rejected": 0, "warnings": []}
+
+    df.columns = df.columns.astype(str).str.strip().str.upper().str.replace(" ", "_")
+    raw_row_count = len(df)
+
+    missing = _BOM_REQUIRED - set(df.columns)
+    if missing:
+        return {"status": "error",
+                "message": f"Uploaded file is missing required columns: {sorted(missing)}",
+                "raw_row_count": raw_row_count, "inserted": 0, "updated": 0, "rejected": 0, "warnings": []}
+
+    for date_col in ("VALID_FROM", "VALID_TO", "CHANGED_ON"):
+        if date_col in df.columns:
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    for num_col in ("BASE_QUANTITY", "COMPONENT_QUANTITY", "LEVEL"):
+        if num_col in df.columns:
+            df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
+
+    known_pairs = known_material_plant_pairs()
+    warnings: list[dict] = []
+    valid_rows: list[dict] = []
+    rejected = 0
+
+    def _num(v):
+        return None if pd.isna(v) else float(v)
+
+    def _date(v):
+        return v.date().isoformat() if pd.notna(v) else None
+
+    for _, r in df.iterrows():
+        material_id = _str_id(r.get("MATERIAL"))
+        plant = _str_id(r.get("PLANT"))
+        component_id = _str_id(r.get("COMPONENT"))
+        alternative_bom = _str_id(r.get("ALTERNATIVE_BOM"))
+        item_number = _str_id(r.get("ITEM_NUMBER"))
+        level = r.get("LEVEL")
+
+        if not material_id or not plant or not component_id or not alternative_bom \
+                or not item_number or pd.isna(level):
+            rejected += 1
+            continue
+        if (material_id, plant) not in known_pairs:
+            rejected += 1
+            warnings.append({"level": "error",
+                              "msg": f"Row rejected: material {material_id!r} not found at plant {plant!r} in material_plants"})
+            continue
+        if (component_id, plant) not in known_pairs:
+            rejected += 1
+            warnings.append({"level": "error",
+                              "msg": f"Row rejected: component {component_id!r} not found at plant {plant!r} in material_plants"})
+            continue
+
+        valid_rows.append({
+            "material_id": material_id,
+            "plant": plant,
+            "alternative_bom": alternative_bom,
+            "level": int(level),
+            "item_number": item_number,
+            "component_id": component_id,
+            "base_quantity": _num(r.get("BASE_QUANTITY")),
+            "item_category": _str_id(r.get("ITEM_CATEGORY")),
+            "assembly": _str_id(r.get("ASSEMBLY")),
+            "component_quantity": _num(r.get("COMPONENT_QUANTITY")),
+            "base_unit_of_measure": _str_id(r.get("BASE_UNIT_OF_MEASURE")),
+            "valid_from": _date(r.get("VALID_FROM")),
+            "valid_to": _date(r.get("VALID_TO")),
+            "changed_on": _date(r.get("CHANGED_ON")),
+            "change_number": _str_id(r.get("CHANGE_NUMBER")),
+        })
+
+    result = bulk_apply("bom_items", {"upserts": valid_rows, "deletes": []}, user_email=user_email)
+    return {
+        "status": "ok",
+        "raw_row_count": raw_row_count,
+        "inserted": result["inserted"],
+        "updated": result["updated"],
+        "rejected": rejected,
+        # Cap: a bad file could otherwise produce thousands of near-identical
+        # rejection entries and bloat the response.
+        "warnings": warnings[:200],
+    }
 
 
 def plants_for_line(line: str) -> list[str]:

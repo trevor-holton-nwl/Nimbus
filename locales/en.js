@@ -110,6 +110,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.missing_key_rows':            'All {{count}} row(s) missing required key: {{keys}}',
   'toast.no_valid_rows':               'No valid rows to paste',
   'toast.no_plant_selected':           'No plant selected',
+  'toast.bom_upload_done':             '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected',
+  'toast.bom_upload_failed':           'BOM upload failed',
   'toast.horizon_save_failed':         'Horizon save failed: {{msg}}',
   'toast.constraints_save_failed':     'Constraint save failed: {{msg}}',
   'toast.voice_heard':                 '🎤 "{{text}}"',
@@ -210,12 +212,15 @@ window.__NIMBUS_LOCALES.en = {
   'btn.yes_delete':                    'Yes, delete',
   'btn.rename_label':                  'Rename label',
   'btn.delete_column':                 'Delete column',
+  'btn.upload_bom':                    '⬆ Upload BOM Export',
+  'btn.change_scope':                  'Change',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Search lines…',
   'ph.add_note':                       'Add a note…',
   'ph.search_commands':                'Search commands, orders, lines…',
   'ph.select_plant':                   'Select',
+  'ph.select_material':                'Select',
   'ph.name_scenario':                  'Name this scenario…',
   'ph.search_table':                   'Search {{table}}…',
 
@@ -231,6 +236,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.delete_row':                    'Delete row',
   'tip.key_cols_no_delete':            'Key columns cannot be deleted',
   'tip.paste_rows':                    'Paste rows from clipboard (TSV / Excel copy)',
+  'tip.upload_bom':                    'Upload a BOM export (.xlsx) to bulk-load Bill of Materials data',
   'tip.edit_note':                     'Edit note',
   'tip.add_note':                      'Add note',
   'tip.click_view_alerts':             'Click to view alerts',
@@ -554,8 +560,9 @@ window.__NIMBUS_LOCALES.en = {
   'ui.plant_label':                    'Plant',
   'ui.hop_on':                         'Hop On',
   'ui.hero_heading':                   'Welcome to NIMBUS 🧹',
-  'ui.hero_subheading':                'Newell Integrated Batch & Unified Scheduling',
-  'ui.todays_overview':                'Overview',
+  'ui.open_schedule':                  'Open schedule',
+  'ui.work_status_attention':          '{{count}} item{{plural}} needing attention · {{total}} order{{totalPlural}} today',
+  'ui.work_status_clear':              'All clear · {{total}} order{{totalPlural}} today',
   'ui.util_heatmap':                   'Utilization Heatmap — next 7 days',
   'ui.active_alerts':                  'Active alerts',
   'ui.fixed_orders':                   'Fixed orders',
@@ -591,6 +598,7 @@ window.__NIMBUS_LOCALES.en = {
   'tab.plants':                        'Plants',
   'tab.materials':                     'Material',
   'tab.material_plant':                'Material Plant',
+  'tab.bom_items':                     'Bill of Materials',
 
   /* ── Security tab ────────────────────────────────────────────────────────── */
   'sec.username':                  'Username',
@@ -616,6 +624,13 @@ window.__NIMBUS_LOCALES.en = {
   'sec.confirm_delete_role_title': 'Delete role?',
   'sec.confirm_delete_role_msg':   'Delete role "{{role}}"? This also removes its plant mappings.',
   'sec.password_too_short':        'Password must be at least 4 characters',
+  'sec.change_password_title':     'Change Password',
+  'sec.current_password':          'Current Password',
+  'sec.new_password':              'New Password',
+  'sec.confirm_password':          'Confirm New Password',
+  'sec.update_password':           'Update Password',
+  'sec.password_mismatch':         'New password and confirmation do not match',
+  'sec.password_updated':          'Password updated',
   'sec.username_required':         'Username is required',
   'sec.search_users_ph':           'Search users…',
   'sec.search_plants_ph':          'Search plants…',
@@ -936,6 +951,10 @@ window.__NIMBUS_LOCALES.en = {
 
   /* ── Master data ─────────────────────────────────────────────────────────── */
   'ui.select_placeholder':             '— select —',
+  'ui.no_matches':                     'No matches',
+  'ui.no_options':                     'No data available',
+  'hint.bom_pick_scope':               'Pick a plant and material to browse its Bill of Materials.',
+  'err.load_materials_failed':         'Failed to load materials for this plant',
 
   /* ── Admin cockpit — DB summary tiles ───────────────────────────────────── */
   'ui.diag_tile_pool':                 'Pool',

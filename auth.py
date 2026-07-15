@@ -326,6 +326,21 @@ def verify_user_password(username: str, raw_password: str) -> bool:
     return _verify_password(raw_password, row[0])
 
 
+def change_own_password(actor_email: str | None, current_password: str, new_password: str) -> dict:
+    """Self-service: change the CALLER's own password. Requires the correct
+    CURRENT password — unlike update_own_name/upsert_user_settings, this can't
+    just trust the actor header, since identity here comes from a client-supplied
+    header rather than a verified session token (see auth._actor_email). Verifying
+    the current password is the only thing standing between "I can set the
+    X-User header" and "I can take over any account whose username I know"."""
+    username = (actor_email or "").strip()
+    if not username:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    if not verify_user_password(username, current_password or ""):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    return set_user_password(username, new_password, user_email=username)
+
+
 # =========================
 # USER SETTINGS — per-user JSONB blob + per-role defaults (partial/shallow merge)
 # =========================

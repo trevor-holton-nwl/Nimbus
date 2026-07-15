@@ -57,8 +57,6 @@ h1, h2, h3, h4 {
   --warn-text:#8a5c08;             /* AA-safe (5.8:1 on white) text/icon color — --warn itself is ~3.2:1, background-only */
   --warn-soft:#f6e5bd;
   --warn-vivid:#f39c12;            /* vivid amber — distinct from the muted --warn */
-  --tab-admin-bg:       #f3f4f6;   /* Admin tab tint (light) */
-  --tab-admin-bg-hover: #e5e7eb;
   --tab-md-bg:          #f0fdf4;   /* Master Data tab tint (light) */
   --tab-md-bg-hover:    #dcfce7;
   --err:      #b1362a;
@@ -140,20 +138,6 @@ h1, h2, h3, h4 {
 }
 .tab-btn.active .tab-ico { color: var(--accent); font-size: 12px; }
 .tab-ico { font-size: 10px; color: var(--fg-faint); }
-
-/* Admin Cockpit tab — desaturated idle chip */
-.tab-btn[data-tab="admin"]:not(.active) {
-  background: var(--tab-admin-bg);
-  border-color: transparent;
-}
-.tab-btn[data-tab="admin"]:not(.active):hover {
-  background: var(--tab-admin-bg-hover);
-  border-color: transparent;
-}
-/* Admin Cockpit tab — saturated gray when active */
-.tab-btn[data-tab="admin"].active {
-  background: var(--tab-admin-bg-hover);
-}
 
 /* Manage Master Data tab — desaturated idle chip */
 .tab-btn[data-tab="masterdata"]:not(.active) {
@@ -328,34 +312,51 @@ textarea { min-height: 60px; padding: 7px 10px; }
   padding: 12px 32px 60px;
 }
 
-/* Hero */
-.hero-row {
-  display: flex; flex-direction: column; gap: 16px;
-  margin-bottom: 28px;
+/* Work header — slim greeting + live situation summary + primary CTA into the
+   scheduling board. Replaces the old hero-row (greeting banner) + separate
+   "Today's Overview" KPI aside: one compact context row instead of two. */
+.work-header {
+  margin-bottom: 20px;
 }
-.dash-context-strip {
-  display: flex; align-items: center; gap: 8px;
-  flex-wrap: wrap;
-  padding: 4px 2px;
+.wh-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0 2px;
 }
-.dcs-title {
+.wh-context {
+  display: flex; align-items: baseline; gap: 8px;
+  flex-wrap: wrap; min-width: 0;
+}
+.wh-greeting {
   font-family: 'Archivo', 'Public Sans', sans-serif;
-  font-weight: 700; font-size: 14px;
+  font-weight: 700; font-size: 15px;
   color: var(--fg);
+  white-space: nowrap;
 }
-.dcs-sep { color: var(--fg-faint); }
-.dcs-sub { color: var(--fg-mute); font-size: 13px; }
-.dcs-actions { margin-left: auto; display: flex; gap: 8px; }
+.wh-sep { color: var(--fg-faint); }
+.wh-situation {
+  font-size: 13px; color: var(--fg-mute);
+}
+.wh-situation.warn {
+  color: var(--warn-text, var(--warn));
+  font-weight: 600;
+}
+.wh-cta {
+  flex-shrink: 0;
+  font-weight: 600;
+  gap: 8px;
+}
+.wh-cta span[aria-hidden] { display: inline-block; transition: transform var(--t-fast); }
+.wh-cta:hover span[aria-hidden] { transform: translateX(2px); }
+@media (max-width: 720px) {
+  .wh-row { flex-direction: column; align-items: stretch; }
+  .wh-cta { width: 100%; justify-content: center; }
+}
 
-.hero-aside { display: flex; flex-direction: column; }
-.kpi-section-header {
-  font-size: 13px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.07em; color: var(--fg-mute);
-  margin: 0 0 10px 2px;
-}
+/* KPI tile row — 4 action tiles, one row, promoted directly under the work header. */
 .kpi-stack {
-  flex: 1;
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+  margin-bottom: 22px;
 }
 @media (max-width: 900px) {
   .kpi-stack { grid-template-columns: repeat(2, 1fr); }
@@ -436,6 +437,18 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .panel-body { padding: 16px 18px; }
 .panel-body-chart { height: 252px; }   /* Chart.js responsive mode needs explicit parent height */
 .panel-body-flush { padding: 0; }
+/* Quiet panel — a visually recessive treatment for secondary/reference dashboard
+   panels (alerts, fixed orders, projected lateness) so they read as supporting
+   detail behind the promoted utilization/line-status pair, not equal-weight charts. */
+.panel-quiet .panel-head {
+  background: var(--bg-subtle);
+  padding: 10px 18px 9px;
+}
+.panel-quiet .panel-head h3 {
+  font-size: 12.5px; font-weight: 600;
+  color: var(--fg-mute);
+}
+.panel-quiet .panel-hint { font-size: 10.5px; }
 /* Plant tab — two-column layout ------------------------------------------- */
 .plant-two-col {
   display: grid;
@@ -4206,6 +4219,63 @@ tr:last-child .md-td { border-bottom: none; }
   color: var(--err, #c0392b);
 }
 
+/* Bill of Materials — plant+material scope gate (shown before the grid loads,
+   since bom_items is expected to be far larger than any other MasterData table) */
+.md-bom-gate {
+  max-width: 420px;
+  padding: 24px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-sm);
+}
+.md-bom-gate-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+.md-bom-gate-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.md-bom-gate-row label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.md-bom-combobox { width: 100%; }
+.md-bom-combobox .hps-input {
+  width: 100% !important;
+  max-width: none !important;
+  font-size: 13px;
+}
+.md-bom-combobox .hps-dropdown { width: 100%; }
+.md-loading-inline {
+  padding: 5px 0;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+
+/* Bill of Materials — scope breadcrumb shown above the grid once loaded */
+.md-bom-scope-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.md-bom-scope-bar strong { color: var(--fg); }
+
 /* =============================================================================
    COLUMN CONTEXT MENU (floating)
    ============================================================================= */
@@ -4754,17 +4824,11 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 .admin-db-ok-msg { padding: 10px 0; color: var(--ok);      font-size: 12px; }
 .admin-db-na-msg { padding: 10px 0; color: var(--fg-mute); font-size: 12px; font-style: italic; }
 
-/* Admin Cockpit tab — dark grey in dark mode */
-body.dark .tab-btn[data-tab="admin"]:not(.active) { background: #2a2c36; border-color: transparent; }
-body.dark .tab-btn[data-tab="admin"]:not(.active):hover { background: #32343f; }
-body.dark .tab-btn[data-tab="admin"].active { background: #32343f; }
-
 /* Manage Master Data tab dark-green is now driven by the --tab-md-bg / --tab-md-bg-hover
    token overrides in the body.dark block above — the tab-btn rules use those vars. */
 
 /* Active tab + sub-sub tab text → white in dark mode */
-body.dark .tab-btn[data-tab="masterdata"].active,
-body.dark .tab-btn[data-tab="admin"].active { color: #ffffff; }
+body.dark .tab-btn[data-tab="masterdata"].active { color: #ffffff; }
 body.dark .admin-subtab.active,
 body.dark .sub-subtab.active { color: #ffffff; }
 

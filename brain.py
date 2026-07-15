@@ -1257,6 +1257,30 @@ async def upload_orders(file: UploadFile = File(...)):
     return result
 
 
+@api.post("/bom/upload", dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def upload_bom(request: Request, file: UploadFile = File(...)):
+    """
+    Receive a BOM export (.xlsx) and upsert into bom_items — the bulk-load path
+    for Bill of Materials data (expected at real scale, tens of thousands of
+    rows+), mirroring /upload for orders. Every row's (material, plant) and
+    (component, plant) must already exist in material_plants; rows that don't
+    are rejected individually (reported in `warnings`/`rejected`) rather than
+    failing the whole file. The blocking parse/upsert is offloaded to a worker
+    thread so it doesn't block the event loop.
+    """
+    raw = await file.read()
+    result = await run_in_threadpool(md.ingest_bom_from_excel, raw,
+                                     file.filename or "bom_upload.xlsx",
+                                     request.headers.get("x-user-email"))
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("message", "Upload failed"))
+    _log_event("info", "upload", "BOM uploaded and ingested",
+               filename=file.filename, inserted=result.get("inserted", 0),
+               updated=result.get("updated", 0), rejected=result.get("rejected", 0),
+               raw=result.get("raw_row_count", 0))
+    return result
+
+
 @api.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def purge_orders(payload: dict):
     """
@@ -1480,12 +1504,15 @@ def md_list(table: str,
                 description="Rows to skip before returning (for paging)."),
             plant: str | None = Query(default=None,
                 description="Filter to one plant (only honored for tables with a plant column)."),
+            material_id: str | None = Query(default=None,
+                description="Filter to one material (only honored for tables with a material_id column)."),
             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """List rows for a master-data table (subnetworks | plants | production_lines | ...).
 
-    Optional ?limit=/?offset=/?plant= scope the result server-side; all default
-    to the full-catalog behavior. When supplied, meta.total carries the full
-    filtered row count for paging.
+    Optional ?limit=/?offset=/?plant=/?material_id= scope the result server-side;
+    all default to the full-catalog behavior. When supplied, meta.total carries
+    the full filtered row count for paging. bom_items in particular relies on
+    ?plant=+?material_id= to never load its full (potentially huge) table.
 
     Per-user plant scope (role_plants) is enforced for tables in
     md.PLANT_SCOPED_TABLES: an explicit ?plant= outside the caller's allowed
@@ -1495,7 +1522,8 @@ def md_list(table: str,
     if (allowed_plants is not None and table in md.PLANT_SCOPED_TABLES
             and plant is not None and plant not in allowed_plants):
         raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
-    return md.list_rows(table, limit=limit, offset=offset, plant=plant, allowed_plants=allowed_plants)
+    return md.list_rows(table, limit=limit, offset=offset, plant=plant,
+                         allowed_plants=allowed_plants, material_id=material_id)
 
 
 @api.post("/master-data/{table}/cascade-preview", dependencies=[Depends(require_admin)])
@@ -1657,6 +1685,21 @@ def security_update_my_settings(request: Request, body: dict = Body(default={}))
         return auth.upsert_user_settings(
             auth._actor_email(request),
             body.get("settings"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.patch("/security/me/password")
+def security_change_my_password(request: Request, body: dict = Body(default={})):
+    """Self-service: change the CALLER's own password. Requires the correct
+    current password (see auth.change_own_password) since identity here comes
+    from a client header, not a verified session token."""
+    try:
+        return auth.change_own_password(
+            auth._actor_email(request),
+            body.get("current_password", ""),
+            body.get("new_password", ""),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
