@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS bom_items (
 CREATE INDEX IF NOT EXISTS idx_bom_items_material_plant ON bom_items(material_id, plant);
 CREATE INDEX IF NOT EXISTS idx_bom_items_component_plant ON bom_items(component_id, plant);
 
-INSERT INTO column_metadata (table_name, column_name, display_label, is_key_column, sort_order) VALUES
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
     ('bom_items',        'material_id',                'Material',                     TRUE,  1),
     ('bom_items',        'plant',                      'Plant',                        TRUE,  2),
     ('bom_items',        'alternative_bom',            'Alternative BOM',              TRUE,  3),
