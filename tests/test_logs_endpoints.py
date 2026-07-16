@@ -20,7 +20,19 @@ except Exception as e:  # pragma: no cover - environment dependent
 
 @pytest.fixture
 def tc():
-    return TestClient(brain.api)
+    route = next(
+        route for route in brain.api.routes
+        if getattr(route, "path", None) == "/logs/backend" and "GET" in route.methods
+    )
+    assert any(
+        dependency.dependency is brain.require_admin
+        for dependency in route.dependencies
+    )
+    brain.api.dependency_overrides[brain.require_admin] = lambda: 'test-admin'
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
 
 
 @pytest.fixture(autouse=True)
