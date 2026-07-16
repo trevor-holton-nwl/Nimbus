@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
 import * as foundation from '../../../web/application-foundation.mjs';
+import * as state from '../../../web/schedule-state.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -207,9 +208,10 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // location lives both on sandbox and window
   sandbox.location = location_;
 
-  // app.js now throws unless the foundation bridge is populated before it runs
-  // (see web/app-entry.mjs) — pre-populate it here just like a real page load.
+  // app.js now throws unless the foundation/state bridges are populated before it
+  // runs (see web/app-entry.mjs) — pre-populate them here just like a real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
+  sandbox.window.__NIMBUS_STATE = state;
 
   // application-foundation.mjs is a real ES module loaded above via a normal
   // dynamic import, so it executes in THIS host Node realm — NOT inside the

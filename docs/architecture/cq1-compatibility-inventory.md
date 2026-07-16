@@ -201,3 +201,51 @@ BOM browsing, filtering, and upload belong to `plant-and-administration.mjs`
 `GET /bom-items` endpoints stay in `brain.py` / `db.py`; the admin UI that
 calls them is scoped to the plant-administration module. BOM is not part of
 the primary scheduling workflow.
+
+---
+
+## 6. Open Store Encapsulation Exceptions (tracked, not fixed in Phase 1)
+
+`Store._state` and `Store._rev` remain real, physically-present properties on
+the exported `Store` object — required for backward compatibility with
+consumers not yet migrated. Remove each row below only when its owning
+module migrates in a later phase and stops touching these fields directly.
+
+| Consumer | Touches | Migrates in |
+|---|---|---|
+| `Alerts` | `Store._rev`, `Store._state` | Phase 2 (schedule-services.mjs) |
+| `Utilization` | `Store._rev` | Phase 2 (schedule-services.mjs) |
+| `Engine` | `Store._state` | Phase 2 (schedule-services.mjs) |
+| `Persistence` | `Store._state` | Phase 2 (schedule-data.mjs) |
+| `CalendarSync` | `Store._state` | Phase 2 (schedule-data.mjs) |
+| `Timeline` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
+| `Hierarchy` | `Store._rev` | Phase 3 (schedule-workbench.mjs) |
+| `Dashboard` | `Store._rev`, `Store._state` | Phase 3 (schedule-workbench.mjs) |
+| `GanttFilter` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
+| `DependencyOverlay` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
+| `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
+| `App` | `Store._state` | Phase 4 (application-shell.mjs) |
+| `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
+
+`Store.rev()` and the new `Store.replace*` setters are available now as the
+migration target for each row above — use them instead of `_rev`/`_state`
+when a consumer's turn comes.
+
+`Store.mode()` returns `'live'` unconditionally today: NIMBUS's own `Sandbox`
+module doesn't live in `schedule-state.mjs` yet (a later CQ-1 task adds it as
+a sibling export in this same file), so a bare `Sandbox.active` reference
+would be an undeclared identifier and fail this file's `no-undef` lint gate.
+Whichever task adds `Sandbox` to this module should also update `mode()` to
+read `Sandbox.active` directly (a same-module reference, no seam needed).
+
+`Store.removeTask()` calls an injected `_selectionRemoveHook` (wired via
+`Store.setSelectionRemoveHook(fn)`) instead of a bare `Selection.remove(...)`
+reference, for the same reason `Util`/`ErrorLog` use resolver seams for
+not-yet-extracted modules — except here the risk is sharper than a lint
+error: browsers define a real, unrelated global `Selection` (the DOM
+Selection API, `window.Selection`), so an unguarded reference would silently
+resolve to the wrong thing and throw `Selection.remove is not a function` at
+runtime instead of failing fast. `app.js` wires
+`Store.setSelectionRemoveHook(id => Selection.remove(id))` once, alongside
+the other DI seams. Remove this seam once `Selection` itself moves into
+`schedule-state.mjs` and `removeTask()` can reference it directly.

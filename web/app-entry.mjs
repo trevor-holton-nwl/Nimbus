@@ -6,10 +6,12 @@
 // shrinks over Phase 2-4 as more of app.js's content moves into real modules,
 // and disappears once app.js does.
 import * as foundation from './application-foundation.mjs';
+import * as state from './schedule-state.mjs';
 
 export function bootEntry({ window: win = (typeof window !== 'undefined' ? window : undefined), loadScript } = {}) {
   if (!win) return Promise.reject(new Error('NIMBUS boot error: no window available for bootEntry'));
   win.__NIMBUS_FOUNDATION = foundation;
+  win.__NIMBUS_STATE = state;
 
   const inject = loadScript || defaultLoadScript;
   const v = win.NIMBUS_BUILD_ID || 'dev';

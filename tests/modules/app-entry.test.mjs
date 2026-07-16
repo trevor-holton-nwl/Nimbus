@@ -38,3 +38,10 @@ test('bootEntry does not request nimbus-intelligence.js if app.js fails', async 
   await assert.rejects(() => bootEntry({ window: fakeWindow, loadScript }));
   assert.deepEqual(calls.map(s => s.split('?')[0]), ['app.js']);
 });
+
+test('bootEntry populates the state bridge too', async () => {
+  const fakeWindow = {};
+  await bootEntry({ window: fakeWindow, loadScript: () => Promise.resolve() });
+  assert.ok(fakeWindow.__NIMBUS_STATE);
+  assert.equal(typeof fakeWindow.__NIMBUS_STATE.Store, 'object');
+});

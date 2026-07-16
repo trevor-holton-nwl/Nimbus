@@ -64,10 +64,11 @@ const NIMBUS = (function () {
     throw new Error('NIMBUS boot error: nimbus-compute-core.js did not load before app.js — check index.html script order / deploy.');
   }
 
-  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION) {
-    throw new Error('NIMBUS boot error: application-foundation.mjs did not load before app.js — check app-entry.mjs.');
+  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE) {
+    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs did not load before app.js — check app-entry.mjs.');
   }
   const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
+  const { Store } = window.__NIMBUS_STATE;
   window.t = (key, vars) => Util.t(key, vars);
   Util.setPreferenceResolver(key => Store.pref(key));
   Util.setActorResolver(() => Session.actor());
@@ -76,6 +77,9 @@ const NIMBUS = (function () {
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
   ErrorLog.setAdminGate(() => Session.isAdmin());
   ErrorLog.setBadgeClickHandler(() => { App.goto('admin'); AdminCockpit.gotoOvTab('logs'); });
+  Store.setAllowedPlantsResolver(() => Session.allowedPlants());
+  Store.setSettingsDefaultsResolver(() => Settings.DEFAULTS);
+  Store.setSelectionRemoveHook(id => Selection.remove(id));
 
   /* =============================================================================
      SETTINGS — per-user settings catalog + system defaults (single source of
@@ -137,532 +141,6 @@ const NIMBUS = (function () {
   const VL_HIER_TASK_H = 28;
   const VL_LS_ROW_H    = 36;
   const VL_ALERT_ROW_H = 72;
-
-  /* =============================================================================
-     STORE — single reactive source of truth.
-     Every mutation goes through here and fans out to subscribers.
-     Subscribers tag their own mutations with `source` so they can skip echoes.
-     ========================================================================== */
-  const Store = {
-    _tasksByPlant: {},   // plant → [task refs] — derived index rebuilt on setTasks
-    _lineToPlant: {},    // line → plant — O(1) cache for getPlantForLine, rebuilt alongside _tasksByPlant
-    _linesByPlant: {},        // plant → [line names] — union of masterData/calendars/lineSettings/tasks, rebuilt in _rebuildPlantIndex
-    _masterLinesByPlant: {},  // plant → [masterData line rows] — masterData.lines grouped by plant, rebuilt in _rebuildPlantIndex
-    _state: {
-      tasks:        {},           // id → task object
-      dependencies: {},           // targetId → [sourceIds]
-      calendars:    {},           // line → { workHours: {0..6: [h1,h2]|null} }
-      blocks:       [],           // [{id, line, start, end, reason}]
-      alerts:       [],           // [{id, sev, type, msg, taskId?, line?, time?}]
-      fixedIds:     new Set(),    // ids of tasks locked from optimiser
-      meta:         { lastOptimize: null },
-      plants:       {},           // plantName → { workHours: {0..6: [h1,h2]|null} }
-      plantBlocks:  [],           // [{id, plant, start, end, reason}]
-      lineSettings: {},           // line → { plant, bufferUnit, bufferPct, bufferHours, bottleneck, excludeFromOpt }
-      selectedPlant: null,        // single plant selected from Dashboard filter; drives Plant tab + optimization
-      masterData: null,           // { plants: [...], lines: [...] } from /master-data/* endpoints
-      userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 }, // per-user prefs blob (DB truth merged in by Session) + legacy horizon caps; null = no cap, values in minutes
-      roleDefaults: {}            // roles.settings for the signed-in user's role — Store.pref() fallback below userSettings
-    },
-    _listeners: new Set(),
-
-    /* ----- basic access ---------------------------------------------------- */
-    get state()     { return this._state; },
-    get tasks()     { return this._state.tasks; },
-    get blocks()    { return this._state.blocks; },
-    get alerts()    { return this._state.alerts; },
-    get calendars() { return this._state.calendars; },
-    get fixedIds()  { return this._state.fixedIds; },
-    get tasksArr()      { return Object.values(this._state.tasks); },
-    get plants()        { return this._state.plants; },
-    get plantBlocks()   { return this._state.plantBlocks; },
-    get lineSettings()  { return this._state.lineSettings; },
-    get selectedPlant() { return this._state.selectedPlant; },
-    get userSettings()  { return this._state.userSettings; },
-    get roleDefaults()  { return this._state.roleDefaults; },
-
-    isFixed(id)     { return this._state.fixedIds.has(String(id)); },
-
-    /* ----- subscription ---------------------------------------------------- */
-    subscribe(fn, label) {
-      if (label) fn._pmLabel = label;
-      this._listeners.add(fn);
-      return () => this._listeners.delete(fn);
-    },
-    emit(event) {
-      // event: { type, source?, id?, changes?, ... }
-      // Monotonic revision — any state change bumps it. Used as a cheap, always-correct
-      // cache key by memoized read-models (e.g. Utilization.computeMatrix).
-      this._rev = (this._rev || 0) + 1;
-      for (const l of this._listeners) {
-        const _t = performance.now();
-        try { l(event); } catch (e) { console.error('[Store] listener error:', e); }
-        finally { PerfMonitor.record('store:' + (l._pmLabel || l.name || '?'), performance.now() - _t); }
-      }
-    },
-
-    /* ----- mutations ------------------------------------------------------- */
-    // Replace all tasks (e.g. after backend load or optimiser run).
-    setTasks(tasks, source) {
-      this._state.tasks = {};
-      let collisions = 0;
-      const collisionSamples = [];
-      for (const t of tasks) {
-        Store._normalizeDates(t);
-        if (t.id == null || String(t.id).trim() === '') {
-          if (typeof ErrorLog !== 'undefined') {
-            ErrorLog.error('store', 'setTasks: task with null/empty id — skipped', t);
-          }
-          continue;
-        }
-        const key = String(t.id);
-        if (Object.prototype.hasOwnProperty.call(this._state.tasks, key)) {
-          collisions++;
-          if (collisionSamples.length < 5) collisionSamples.push({ id: key, text: t.text, line: t.PRODUCTION_LINE });
-        }
-        this._state.tasks[key] = t;
-      }
-      if (collisions && typeof ErrorLog !== 'undefined') {
-        ErrorLog.error('store',
-          `setTasks silently overwrote ${collisions} duplicate id(s) — rows were LOST`,
-          collisionSamples);
-      }
-      this._rebuildPlantIndex();
-      this.emit({ type: 'tasks:bulk', source });
-      return { inserted: Object.keys(this._state.tasks).length, collisions };
-    },
-
-    // Update one task with a partial change-set.
-    // NOTE: we replace the task *reference* (prev → next) rather than mutating
-    // in place, so subscribers (e.g. AG Grid, diff-rebuild) can diff by identity.
-    // Backwards-compatible: the emitted event still carries {id, changes, source};
-    // {prev, next} are additive fields for consumers that want them.
-    updateTask(id, changes, source) {
-      const prev = this._state.tasks[id];
-      if (!prev) return;
-      const next = { ...prev, ...changes };
-      Store._normalizeDates(next);
-      this._state.tasks[id] = next;
-      // Keep the _tasksByPlant index coherent with this reference swap. That index caches
-      // task *references* captured at the last _rebuildPlantIndex(); replacing prev→next
-      // above would otherwise leave it pointing at the stale pre-edit object, so
-      // tasksForSelectedPlant() → Timeline.rebuild() (fired by the post-edit alerts
-      // recompute via alerts:change) would repaint the task at its OLD position — this is
-      // the single-drag "spring-back". updateMany() mutates in place so it stays coherent
-      // on its own; only this reference-replacing path needs the fix-up.
-      Store._reindexTask(prev, next);
-      this.emit({ type: 'task:update', id, prev, next, changes, source });
-    },
-
-    // Remove a task, cleaning up dependencies, fixedIds, and (if present)
-    // the Selection set. Emits 'task:remove'.
-    removeTask(id, source) {
-      const key = String(id);
-      const prev = this._state.tasks[key];
-      if (!prev) return null;
-      delete this._state.tasks[key];
-
-      // Clean up dependency graph both ways.
-      const deps = this._state.dependencies;
-      if (deps[key]) delete deps[key];
-      for (const target of Object.keys(deps)) {
-        const arr = deps[target];
-        const i = arr.indexOf(key);
-        if (i >= 0) arr.splice(i, 1);
-        if (!arr.length) delete deps[target];
-      }
-
-      this._state.fixedIds.delete(key);
-      // Selection is defined later in this IIFE; guard for load order.
-      if (typeof Selection !== 'undefined') Selection.remove(key);
-      this.emit({ type: 'task:remove', id: key, prev, source });
-      return prev;
-    },
-
-    // Update several tasks at once (used by the optimiser).
-    updateMany(patches, source) {
-      // patches: [{id, changes}]
-      for (const p of patches) {
-        const task = this._state.tasks[p.id];
-        if (!task) continue;
-        Object.assign(task, p.changes);
-        Store._normalizeDates(task);
-      }
-      this.emit({ type: 'tasks:bulkUpdate', ids: patches.map(p => p.id), source });
-    },
-
-    // Toggle fixed flag on a task (or group of tasks).
-    setFixed(ids, fixed, source) {
-      const arr = Array.isArray(ids) ? ids : [ids];
-      for (const id of arr) {
-        const key = String(id);
-        if (fixed) this._state.fixedIds.add(key);
-        else       this._state.fixedIds.delete(key);
-        const t = this._state.tasks[id];
-        if (t) t.fixed = !!fixed;
-      }
-      this.emit({ type: 'fixed:change', ids: arr, fixed, source });
-    },
-
-    /* ----- calendar & blocks ---------------------------------------------- */
-    setCalendar(line, workHours, source) {
-      if (!this._state.calendars[line]) this._state.calendars[line] = { workHours: {} };
-      this._state.calendars[line].workHours = workHours;
-      this.emit({ type: 'calendar:change', line, source });
-    },
-    ensureCalendar(line) {
-      if (this._state.calendars[line]) return;
-      const defaults = {};
-      for (let d = 0; d < 7; d++) {
-        if (Config.WEEKEND_OFF && (d === 0 || d === 6)) defaults[d] = null;
-        else defaults[d] = [...Config.DEFAULT_SHIFT];
-      }
-      this._state.calendars[line] = { workHours: defaults };
-    },
-    addBlock(block, source) {
-      if (Config.DEBUG_BLOCKS) console.trace('[addBlock]', { source, block });
-      const newS = Util.parseDate(block.start)?.getTime();
-      const newE = Util.parseDate(block.end)?.getTime();
-      const dup = this._state.blocks.find(b =>
-        (b.line || '') === (block.line || '') &&
-        (b.plant || '') === (block.plant || '') &&   // scope dedup per-plant so same-time
-        Util.parseDate(b.start)?.getTime() === newS &&  // blackouts on different plants coexist (F5)
-        Util.parseDate(b.end)?.getTime()   === newE &&
-        (b.reason || '') === (block.reason || '')
-      );
-      if (dup) {
-        ErrorLog.warn?.('store', `Refused duplicate line blackout (line=${block.line||'*'}, ${block.start}→${block.end}, reason="${block.reason||''}") from source="${source}"`);
-        return;
-      }
-      if (!block.id) block.id = Util.uid('blk');
-      this._state.blocks.push(block);
-      this.emit({ type: 'blocks:change', source });
-    },
-    removeBlock(blockId, source) {
-      const i = this._state.blocks.findIndex(b => b.id === blockId);
-      if (i >= 0) {
-        this._state.blocks.splice(i, 1);
-        this.emit({ type: 'blocks:change', source });
-      }
-    },
-
-    /* ----- plants & plant-blocks ------------------------------------------ */
-    ensurePlant(name) {
-      if (!name) return;
-      if (this._state.plants[name]) return;
-      const defaults = {};
-      for (let d = 0; d < 7; d++) {
-        if (Config.WEEKEND_OFF && (d === 0 || d === 6)) defaults[d] = null;
-        else defaults[d] = [...Config.DEFAULT_SHIFT];
-      }
-      this._state.plants[name] = { workHours: defaults };
-    },
-    setPlantWorkHours(plant, dow, range, source) {
-      this.ensurePlant(plant);
-      this._state.plants[plant].workHours[dow] = range;
-      this.emit({ type: 'calendar:change', source });
-    },
-    clampLinesToPlant(plant, dow) {
-      const plantHours = this._state.plants[plant]?.workHours[dow];
-      const changed = [];  // line codes whose hours this call actually rewrote (F9)
-      const plantLineSet = new Set(Store._linesByPlant[plant] || []);
-      for (const line of Object.keys(this._state.calendars)) {
-        if (!plantLineSet.has(line)) continue;
-        const lineHours = this._state.calendars[line].workHours[dow];
-        if (!lineHours) continue;
-        let next;
-        if (!plantHours) {
-          next = null;
-        } else {
-          const ns = Math.max(lineHours[0], plantHours[0]);
-          const ne = Math.min(lineHours[1], plantHours[1]);
-          next = ns >= ne ? null : [ns, ne];
-        }
-        // Only write + report when the value actually changes, so a concurrent
-        // single-line edit that already fits the new plant window is not re-persisted
-        // (and therefore not clobbered) by the plant-hours batch. (F9)
-        const same = Array.isArray(next)
-          ? (Array.isArray(lineHours) && lineHours[0] === next[0] && lineHours[1] === next[1])
-          : (next === null && lineHours === null);
-        if (!same) {
-          this._state.calendars[line].workHours[dow] = next;
-          changed.push(line);
-        }
-      }
-      this.emit({ type: 'calendar:change', source: 'plant-clamp' });
-      return changed;
-    },
-    addPlantBlock(block, source) {
-      if (Config.DEBUG_BLOCKS) console.trace('[addPlantBlock]', { source, block });
-      const newS = Util.parseDate(block.start)?.getTime();
-      const newE = Util.parseDate(block.end)?.getTime();
-      const dup = this._state.plantBlocks.find(b =>
-        (b.plant || '') === (block.plant || '') &&
-        Util.parseDate(b.start)?.getTime() === newS &&
-        Util.parseDate(b.end)?.getTime()   === newE &&
-        (b.reason || '') === (block.reason || '')
-      );
-      if (dup) {
-        ErrorLog.warn?.('store', `Refused duplicate plant blackout (plant=${block.plant||'*'}, ${block.start}→${block.end}, reason="${block.reason||''}") from source="${source}"`);
-        return;
-      }
-      if (!block.id) block.id = Util.uid('pblk');
-      this._state.plantBlocks.push(block);
-      this.emit({ type: 'plantBlocks:change', source });
-    },
-    removePlantBlock(id, source) {
-      const i = this._state.plantBlocks.findIndex(b => b.id === id);
-      if (i >= 0) {
-        this._state.plantBlocks.splice(i, 1);
-        this.emit({ type: 'plantBlocks:change', source });
-      }
-    },
-
-    /* ----- line settings -------------------------------------------------- */
-    ensureLineSettings(line) {
-      if (this._state.lineSettings[line]) return;
-      this._state.lineSettings[line] = {
-        plant: null,
-        bufferUnit: 'pct',
-        bufferPct: 0,
-        bufferHours: 0,
-        bottleneck: false,
-        excludeFromOpt: false,
-        plGroup: '',
-      };
-    },
-    setLineSetting(line, patch, source) {
-      this.ensureLineSettings(line);
-      Object.assign(this._state.lineSettings[line], patch);
-      // Only a `plant` change can move a line between plant buckets — skip the
-      // index/cache rebuild for the common buffer/group/flag edits that can't.
-      if ('plant' in patch) this._rebuildPlantIndex();
-      this.emit({ type: 'lineSettings:change', line, source });
-    },
-    getPlantForLine(line) {
-      const fromSettings = (this._state.lineSettings[line] || {}).plant;
-      if (fromSettings) return fromSettings;
-      // O(1) cache (line → master-data plant), rebuilt alongside _tasksByPlant. Consulted
-      // before the linear .find fallback so this stays O(1) on hot paths (tasksForSelectedPlant,
-      // worker snapshots, util matrix builds). A miss falls through to the authoritative scan.
-      const cached = this._lineToPlant[line];
-      if (cached !== undefined) return cached;
-      const mdLine = (this._state.masterData?.lines ?? []).find(r => r.production_line === line);
-      return mdLine?.plant ?? null;
-    },
-    setSelectedPlant(plant, source) {
-      const next = plant || null;
-      if (next === this._state.selectedPlant) return; // no-op: don't re-emit
-      this._state.selectedPlant = next;
-      this.emit({ type: 'plant:selected', plant: this._state.selectedPlant, source });
-    },
-
-    /* ----- plant-scoped accessors ----------------------------------------- */
-    // The selected plant is a true global filter. When null, callers see an
-    // empty world and render an EmptyState prompt instead of their usual view.
-    tasksByPlant(plant) {
-      return plant ? (Store._tasksByPlant[plant] || []) : Store.tasksArr;
-    },
-    _rebuildPlantIndex() {
-      // Rebuild the line → master-data plant cache first so the getPlantForLine calls
-      // below (and on every later hot path) resolve in O(1) instead of scanning lines.
-      const l2p = {};
-      const masterByPlant = {};
-      for (const r of (Store._state.masterData?.lines ?? [])) {
-        if (r.production_line && l2p[r.production_line] === undefined) l2p[r.production_line] = r.plant ?? null;
-        if (r.plant) (masterByPlant[r.plant] ||= []).push(r);
-      }
-      Store._lineToPlant = l2p;
-      Store._masterLinesByPlant = masterByPlant;
-      const idx = {};
-      for (const t of Store.tasksArr) {
-        const p = t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE);
-        if (!p) continue;
-        (idx[p] ||= []).push(t);
-      }
-      Store._tasksByPlant = idx;
-
-      // Names-only index for dropdown/chip/heatmap consumers — same 4 sources
-      // allLines() unions, bucketed by plant instead of collapsed into one flat set.
-      const namesByPlant = {};
-      const addName = (plant, line) => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
-      for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE), t.PRODUCTION_LINE);
-      for (const line of Object.keys(this._state.calendars))    addName(Store.getPlantForLine(line), line);
-      for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
-      for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.production_line);
-      const linesByPlant = {};
-      for (const [plant, set] of Object.entries(namesByPlant)) {
-        linesByPlant[plant] = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-      }
-      Store._linesByPlant = linesByPlant;
-    },
-    // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
-    // prev→next, keeping the cached plant buckets coherent without a full O(n) rebuild.
-    // Moves the task between buckets if its resolved plant changed (line/plant edit).
-    _reindexTask(prev, next) {
-      const idx = Store._tasksByPlant;
-      if (!idx) return; // index not built yet (pre-setTasks) — nothing to keep coherent
-      const plantOf = t => t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE) || null;
-      const oldP = plantOf(prev);
-      const newP = plantOf(next);
-      if (oldP === newP) {
-        const bucket = oldP ? idx[oldP] : null;
-        if (bucket) {
-          const i = bucket.indexOf(prev);
-          if (i >= 0) bucket[i] = next;   // in-place swap preserves order
-          else bucket.push(next);
-        }
-        return;
-      }
-      if (oldP && idx[oldP]) {
-        const i = idx[oldP].indexOf(prev);
-        if (i >= 0) idx[oldP].splice(i, 1);
-      }
-      if (newP) (idx[newP] ||= []).push(next);
-    },
-    allLines() {
-      const set = new Set();
-      for (const t of Store.tasksArr) {
-        if (t.PRODUCTION_LINE) set.add(t.PRODUCTION_LINE);
-      }
-      Object.keys(this._state.calendars).forEach(l => set.add(l));
-      Object.keys(this._state.lineSettings).forEach(l => set.add(l));
-      // Master table is authoritative — include lines regardless of order attachment.
-      (this._state.masterData?.lines ?? []).forEach(r => {
-        if (r.production_line) set.add(r.production_line);
-      });
-      return [...set];
-    },
-    tasksForSelectedPlant() {
-      const plant = this._state.selectedPlant;
-      if (!plant) return [];
-      // Read straight from the _tasksByPlant index (rebuilt on setTasks / lineSettings /
-      // master-data changes) instead of re-filtering every task via getPlantForLine.
-      return Store.tasksByPlant(plant);
-    },
-    linesForSelectedPlant() {
-      const plant = this._state.selectedPlant;
-      return plant ? (Store._linesByPlant[plant] || []) : [];
-    },
-    masterLinesForPlant(plant) {
-      return plant ? (Store._masterLinesByPlant[plant] || []) : [];
-    },
-    knownPlants() {
-      // Prefer master-data plants when available (authoritative source).
-      const masterPlants = Store._state.masterData?.plants?.map(p => p.plant) ?? [];
-      let all;
-      if (masterPlants.length) {
-        all = [...new Set(masterPlants)].sort();
-      } else {
-        // Fall back to dynamically discovered plants from order data.
-        const dynamic = [];
-        for (const line of Store.allLines()) {
-          const p = Store.getPlantForLine(line);
-          if (p) dynamic.push(p);
-        }
-        all = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
-      }
-      // Per-user role_plants scope (backend is the real boundary — this is UX,
-      // not security; a stale/wide cache here still 403s server-side).
-      const allowed = (typeof Session !== 'undefined') ? Session.allowedPlants() : null;
-      return allowed ? all.filter(p => allowed.includes(p)) : all;
-    },
-
-    /* ----- alerts ---------------------------------------------------------- */
-    setAlerts(alerts, source) {
-      // Compute which task IDs changed alert membership for incremental table updates.
-      const oldAlerts = this._state.alerts || [];
-      const oldTaskIds = new Set(oldAlerts.map(a => a.taskId).filter(id => id != null));
-      const newTaskIds = new Set(alerts.map(a => a.taskId).filter(id => id != null));
-      const changedIds = [];
-      // Tasks that had alerts before but don't now
-      for (const id of oldTaskIds) {
-        if (!newTaskIds.has(id)) changedIds.push(id);
-      }
-      // Tasks that have alerts now but didn't before
-      for (const id of newTaskIds) {
-        if (!oldTaskIds.has(id)) changedIds.push(id);
-      }
-      this._state.alerts = alerts;
-      this.emit({ type: 'alerts:change', source, changedIds: changedIds.length ? changedIds : undefined });
-    },
-    dismissAlert(alertId, source) {
-      const next = this._state.alerts.filter(a => a.id !== alertId);
-      if (next.length !== this._state.alerts.length) {
-        // Reassign (not splice-in-place) so the array identity changes and the
-        // alertsByTask()/Timeline._conflictIds() memos invalidate correctly.
-        this._state.alerts = next;
-        this.emit({ type: 'alerts:change', source });
-      }
-    },
-    dismissAllAlerts(source) {
-      this._state.alerts = [];
-      this.emit({ type: 'alerts:change', source });
-    },
-    /** Map<String taskId, alert[]> for O(1) per-row alert lookups, memoized on the
-     *  Store.alerts array identity (every mutator reassigns the array, so the memo
-     *  invalidates on any change). Replaces O(rows × alerts) Store.alerts.filter()
-     *  scans in grid cell renderers / row-class / popovers (R16). Treat as read-only. */
-    alertsByTask() {
-      if (this._alertsByTaskSrc !== this._state.alerts) {
-        const m = new Map();
-        for (const a of this._state.alerts) {
-          if (a.taskId == null) continue;
-          const k = String(a.taskId);
-          let arr = m.get(k);
-          if (!arr) m.set(k, arr = []);
-          arr.push(a);
-        }
-        this._alertsByTaskSrc = this._state.alerts;
-        this._alertsByTask = m;
-      }
-      return this._alertsByTask;
-    },
-    setUserSettings(patch, source) {
-      Object.assign(this._state.userSettings, patch);
-      this.emit({ type: 'settings:change', source });
-    },
-    // Replace the role-defaults snapshot wholesale (roles.settings for the signed-in
-    // user's role). Session.signIn/refresh push this from GET /security/me.role_settings.
-    setRoleDefaults(obj, source) {
-      this._state.roleDefaults = (obj && typeof obj === 'object') ? { ...obj } : {};
-      this.emit({ type: 'settings:change', source });
-    },
-    /* Resolve an effective per-user preference using the contract precedence:
-         userSettings[key] ?? roleDefaults[key] ?? Settings.DEFAULTS[key]
-       Never throws — returns undefined for an unknown key with no default. `opts.plant`
-       scaffolds a region/{plant} fallback (see note) and may be passed now for
-       forward-compat; it is ignored today. */
-    pref(key, opts = {}) {
-      try {
-        const us   = this._state.userSettings || {};
-        const rd   = this._state.roleDefaults || {};
-        const defs = (typeof Settings !== 'undefined' && Settings.DEFAULTS) || {};
-        // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
-        // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
-        // a per-plant regional default keyed on opts.plant would slot in between the
-        // user blob and the role defaults right here. There is NO plants timezone /
-        // week-start column yet, so we deliberately do not read one — do not invent a
-        // plants column to satisfy this hook.
-        return us[key] ?? rd[key] ?? defs[key];
-      } catch { return undefined; }
-    },
-
-    /* ----- internals ------------------------------------------------------- */
-    _normalizeDates(task) {
-      for (const k of ['start_date','end_date','BASIC_START_DATE','BASIC_FINISH_DATE','original_start_date','original_end_date']) {
-        const v = task[k];
-        if (v && !(v instanceof Date)) task[k] = Util.parseDate(v);
-      }
-      if (task.start_date) task.start_date = Util.snap(task.start_date);
-      if (task.end_date)   task.end_date   = Util.snap(task.end_date);
-      // To re-enable SAP firmed→fixed mapping: change the line below back to:
-      //   task.fixed = !!task.fixed || !!task.firmed;
-      task.fixed = !!task.fixed;
-      if (task.fixed) Store._state.fixedIds.add(String(task.id));
-      if (task.id != null) task.id = String(task.id);
-    }
-  };
 
   /* =============================================================================
      CALENDAR — working hours, blackout blocks, availability calculations.
@@ -8598,7 +8076,7 @@ const NIMBUS = (function () {
 
     _buildFilterOptions() {
       // Store.linesForSelectedPlant() is now an O(1) indexed read (Store._linesByPlant,
-      // rebuilt in _rebuildPlantIndex) — no need to hand-build a plant→lines map here.
+      // rebuilt in rebuildPlantIndex) — no need to hand-build a plant→lines map here.
       Dashboard._refreshLineDropdown();
       Dashboard._refreshFilterBtns();
     },
@@ -12135,7 +11613,7 @@ const NIMBUS = (function () {
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
             };
-            Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
+            Store.rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
             Store.emit({ type: 'master-data-changed', source: 'persistence' });
           }
         }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (no-plant path): ${e.message}`));
@@ -12184,7 +11662,7 @@ const NIMBUS = (function () {
                   plants: pData?.rows ?? [],
                   lines:  lData?.rows ?? [],
                 };
-                Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
+                Store.rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
                 Store.emit({ type: 'master-data-changed', source: 'persistence' });
               }
             }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
@@ -12305,7 +11783,7 @@ const NIMBUS = (function () {
                 plants: pData?.rows ?? [],
                 lines:  lData?.rows ?? [],
               };
-              Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
+              Store.rebuildPlantIndex(); // backfill line→plant cache / plant index after hydration
               Store.emit({ type: 'master-data-changed', source: 'persistence' });
             }
           }).catch(e => {
@@ -13185,7 +12663,7 @@ saveAll() {
       // Ensure the line→plant index is current before _applyConfig so getPlantForLine
       // resolves reliably even when the master-data fetch REJECTED (the .finally still
       // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
-      Store._rebuildPlantIndex();
+      Store.rebuildPlantIndex();
       return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
                               { signal: AbortSignal.timeout(8000) })
         .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -17777,7 +17255,7 @@ saveAll() {
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
             };
-            Store._rebuildPlantIndex(); // backfill line→plant cache / plant index after edit
+            Store.rebuildPlantIndex(); // backfill line→plant cache / plant index after edit
           }
           Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
         }).catch(() => {
@@ -19411,7 +18889,7 @@ saveAll() {
           // lineSettings[].plant was just rewritten in bulk above via direct writes
           // (not setLineSetting), so the plant index is stale — rebuild it before the
           // emit so tasksForSelectedPlant / _tasksByPlant reflect the new assignments.
-          Store._rebuildPlantIndex();
+          Store.rebuildPlantIndex();
           Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
         }
         try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
