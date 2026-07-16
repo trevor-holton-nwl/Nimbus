@@ -2772,8 +2772,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   // nimbus-compute-core.js MUST load before app.js — app.js's Calendar/Alerts/Utilization
   // delegate to window.NimbusComputeCore (the same module the worker importScripts).
   document.write('<script src="nimbus-compute-core.js?v=' + encodeURIComponent(v) + '"><\/script>');
-  document.write('<script src="app.js?v=' + encodeURIComponent(v) + '"><\/script>');
-  document.write('<script src="nimbus-intelligence.js?v=' + encodeURIComponent(v) + '"><\/script>');
+  document.write('<script type="module" src="app-entry.mjs?v=' + encodeURIComponent(v) + '"><\/script>');
 })();
 </script>
 </body>

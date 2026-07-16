@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
+import * as foundation from '../../../web/application-foundation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -63,7 +64,7 @@ function makeNodeList(items) {
  * @returns {{ nimbus: object, context: object, domReady: Function|null,
  *             fetchCalls: Array, workerMessages: Array }}
  */
-export function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {} } = {}) {
+export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {} } = {}) {
   const appSrc  = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
   const corePath = resolve(ROOT, 'web/nimbus-compute-core.js');
   const NimbusComputeCore = _require(corePath);
@@ -205,6 +206,23 @@ export function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {} } = {
   sandbox.globalThis = sandbox;
   // location lives both on sandbox and window
   sandbox.location = location_;
+
+  // app.js now throws unless the foundation bridge is populated before it runs
+  // (see web/app-entry.mjs) — pre-populate it here just like a real page load.
+  sandbox.window.__NIMBUS_FOUNDATION = foundation;
+
+  // application-foundation.mjs is a real ES module loaded above via a normal
+  // dynamic import, so it executes in THIS host Node realm — NOT inside the
+  // vm context created below. Its Toast/Modal functions reference bare
+  // `document` (e.g. Toast.show does document.getElementById('toast-stack')),
+  // which app.js code running inside the vm (via runInContext) can trigger
+  // indirectly (e.g. Persistence.saveAll -> Toast.show on save success). For
+  // that cross-realm call to resolve instead of throwing "document is not
+  // defined", mirror the same harness DOM stub onto the host realm's
+  // globalThis. This split-realm quirk is a test-harness-only concession: in
+  // a real browser, application-foundation.mjs and app.js share the one page
+  // window/document, so it doesn't arise there.
+  if (typeof globalThis.document === 'undefined') globalThis.document = document_;
 
   const ctx = createContext(sandbox);
 

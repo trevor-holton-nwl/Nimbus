@@ -11,14 +11,14 @@ import assert from 'node:assert/strict';
 import { loadLegacyApp } from './helpers/load-legacy-app.mjs';
 
 // Load once — app.js evaluation is expensive (~300 ms).
-const { nimbus, workerMessages, fetchCalls } = loadLegacyApp();
+const { nimbus, workerMessages, fetchCalls } = await loadLegacyApp();
 const { Store, Persistence } = nimbus;
 
 // ---------------------------------------------------------------------------
 // 1. Selected-plant task and line scoping
 // ---------------------------------------------------------------------------
 
-test('Store.tasksForSelectedPlant returns only the selected plant\'s tasks', () => {
+test('Store.tasksForSelectedPlant returns only the selected plant\'s tasks', async () => {
   const task5512 = {
     id: 'aa01', PRODUCTION_ORDER: 'PO1', MATERIAL_NUMBER: 'M1',
     PRODUCTION_LINE: 'L1', plant: '5512',
@@ -52,7 +52,7 @@ test('Store.tasksForSelectedPlant returns only the selected plant\'s tasks', () 
   assert.ok(!selected.some(t => t.plant === '1006'), 'should exclude plant 1006 tasks');
 });
 
-test('Store.linesForSelectedPlant excludes lines belonging to other plants', () => {
+test('Store.linesForSelectedPlant excludes lines belonging to other plants', async () => {
   // State carried from the previous test; plant 5512 is still selected.
   const lines = Store.linesForSelectedPlant();
   assert.ok(lines.includes('L1'), 'should include L1 (belongs to 5512)');
@@ -63,7 +63,7 @@ test('Store.linesForSelectedPlant excludes lines belonging to other plants', () 
 // 2. Alert and utilization dispatch APIs (Compute is internal to app.js)
 // ---------------------------------------------------------------------------
 
-test('Alerts.recompute is callable and Utilization.computeMatrix returns structured data', () => {
+test('Alerts.recompute is callable and Utilization.computeMatrix returns structured data', async () => {
   // Compute is an internal module (not exported). Alerts and Utilization are the
   // public entry points that route through it. Pin their callable surface.
   const { Alerts, Utilization } = nimbus;
@@ -84,7 +84,7 @@ test('Alerts.recompute is callable and Utilization.computeMatrix returns structu
 // 3. Explicit Save request shape
 // ---------------------------------------------------------------------------
 
-test('Persistence.saveAll posts to /tasks/update with expected payload shape', () => {
+test('Persistence.saveAll posts to /tasks/update with expected payload shape', async () => {
   const task = {
     id: 'cc03', PRODUCTION_ORDER: 'PO3', MATERIAL_NUMBER: 'M3',
     PRODUCTION_LINE: 'L1', plant: '5512',
@@ -122,7 +122,7 @@ test('Persistence.saveAll posts to /tasks/update with expected payload shape', (
   assert.ok('force' in t, 'task must carry force flag');
 });
 
-test('Persistence.saveAll alone does not POST (only explicit calls do)', () => {
+test('Persistence.saveAll alone does not POST (only explicit calls do)', async () => {
   // Confirm autosave does NOT trigger a backend POST — only saveAll() does.
   // Reset dirty set; with nothing dirty, saveAll still posts (blocks/calendars
   // always go) but NO task rows should appear.
@@ -144,7 +144,7 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', () => {
 // 4. Legacy namespace — planner commands exist
 // ---------------------------------------------------------------------------
 
-test('NIMBUS namespace exposes the legacy planner commands used by index.html', () => {
+test('NIMBUS namespace exposes the legacy planner commands used by index.html', async () => {
   // Source the command list from the generated contract rather than hardcoding.
   // This test fails if a module is accidentally removed from the return value.
   const expectedModules = [
