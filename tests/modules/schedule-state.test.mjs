@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store, Selection, UndoStack } from '../../web/schedule-state.mjs';
+import { Store, Selection, UndoStack, Sandbox } from '../../web/schedule-state.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
   const before = Store.rev();
@@ -88,4 +88,54 @@ test('UndoStack.snapshotTasks/restoreTasks round-trip through Store', () => {
   Store.updateTask('u1', { RUN_TIME: '9' }, 'unit-test');
   UndoStack.restoreTasks(snap);
   assert.equal(Store.tasks['u1'].RUN_TIME, '2');
+});
+
+test('Sandbox.enter snapshots current state and flips active/mode', () => {
+  Store.setTasks([{ id: 'sb1', RUN_TIME: '1' }], 'unit-test');
+  assert.equal(Store.mode(), 'live');
+  const entered = Sandbox.enter('unit-test');
+  assert.equal(entered, true);
+  assert.equal(Sandbox.active, true);
+  assert.equal(Store.mode(), 'draft');
+  Sandbox.exit(false, 'unit-test');
+});
+
+test('Sandbox.enter is a no-op (returns false) when already active', () => {
+  Sandbox.enter('unit-test');
+  assert.equal(Sandbox.enter('unit-test'), false);
+  Sandbox.exit(false, 'unit-test');
+});
+
+test('Sandbox.exit(false) restores the pre-enter snapshot and emits sandbox:exited', () => {
+  Store.setTasks([{ id: 'sb2', RUN_TIME: '1' }], 'unit-test');
+  Store.setFixed('sb2', true, 'unit-test');
+  Sandbox.enter('unit-test');
+  Store.setFixed('sb2', false, 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt));
+  const snap = Sandbox.exit(false, 'unit-test');
+  off();
+  assert.ok(Store.isFixed('sb2'), 'discard must restore the pre-sandbox fixed flag');
+  assert.equal(Sandbox.active, false);
+  assert.equal(Store.mode(), 'live');
+  const exitEvt = events.find(e => e.type === 'sandbox:exited');
+  assert.equal(exitEvt.applied, false);
+  assert.equal(exitEvt.snapshot, snap);
+});
+
+test('Sandbox.exit(true) pushes exactly one UndoStack entry and emits applied:true', () => {
+  // Reset the shared UndoStack singleton first — an earlier test in this file
+  // intentionally saturates it to MAX(10) entries, at which point every further
+  // push evicts the oldest and length stops growing, masking a push undercount.
+  UndoStack._entries.length = 0;
+  Store.setTasks([{ id: 'sb3', RUN_TIME: '1' }], 'unit-test');
+  Sandbox.enter('unit-test');
+  const before = UndoStack._entries.length;
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt));
+  Sandbox.exit(true, 'unit-test');
+  off();
+  assert.equal(UndoStack._entries.length, before + 1);
+  const exitEvt = events.find(e => e.type === 'sandbox:exited');
+  assert.equal(exitEvt.applied, true);
 });

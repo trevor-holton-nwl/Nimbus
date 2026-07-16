@@ -68,7 +68,7 @@ const NIMBUS = (function () {
     throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs did not load before app.js — check app-entry.mjs.');
   }
   const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
-  const { Store, Selection, UndoStack } = window.__NIMBUS_STATE;
+  const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
   window.t = (key, vars) => Util.t(key, vars);
   Util.setPreferenceResolver(key => Store.pref(key));
   Util.setActorResolver(() => Session.actor());
@@ -10136,16 +10136,22 @@ const NIMBUS = (function () {
   };
 
   /* =============================================================================
-     SANDBOX — "What-If" mode. Deep-clones Store state so planners can try
-     changes freely without affecting the live schedule.
+     SANDBOX ADAPTER — thin app.js UI/side-effect layer over the state-only
+     `Sandbox` module (state + snapshots now live in schedule-state.mjs). Owns
+     the DOM banner/buttons and performs the cross-module side effects that
+     used to be inline in Sandbox.exit() (Alerts recompute, Persistence save,
+     CalendarSync flush/re-hydrate, Confidence snapshot/restore, Toast
+     messages) by subscribing to the `sandbox:entered`/`sandbox:exited`
+     (and `sandbox:reverted`, fired by the undo-a-promoted-scenario path)
+     events the state module emits. This is new code, not a move — it is the
+     thin UI/cross-module layer the design's ownership map calls out as
+     belonging to `schedule-workbench.mjs` eventually; for Phase 1 it stays
+     here as a boot-wired adapter.
      ========================================================================== */
-  const Sandbox = {
-    active: false,
-    _snapshot: null,
+  const SandboxAdapter = {
     _confSnapshot: null,
 
     init() {
-      // Inject sandbox banner into the DOM (hidden by default)
       const banner = document.getElementById('sandbox-banner');
       if (!banner) return;
       banner.innerHTML = `
@@ -10156,28 +10162,28 @@ const NIMBUS = (function () {
           <button class="btn btn-ghost sm" id="sb-discard-btn">${t('ui.discard_btn')}</button>
           <button class="btn btn-primary sm" id="sb-apply-btn">${t('ui.promote_btn')}</button>
         </div>`;
-      document.getElementById('sb-discard-btn')?.addEventListener('click', () => Sandbox.exit(false));
-      document.getElementById('sb-apply-btn')?.addEventListener('click',  () => Sandbox.exit(true));
+      document.getElementById('sb-discard-btn')?.addEventListener('click', () => Sandbox.exit(false, 'sandbox-ui'));
+      document.getElementById('sb-apply-btn')?.addEventListener('click',  () => Sandbox.exit(true, 'sandbox-ui'));
+
+      Store.subscribe(evt => {
+        if (evt.type === 'sandbox:entered') SandboxAdapter._onEntered();
+        else if (evt.type === 'sandbox:exited') SandboxAdapter._onExited(evt);
+        else if (evt.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+      }, 'SandboxAdapter');
     },
 
     enter() {
       if (Sandbox.active) { Toast.show(t('toast.already_in_sandbox'), 'warn'); return; }
+      Sandbox.enter('sandbox-ui');
+    },
 
-      // Deep-clone current Store state
-      Sandbox._snapshot = {
-        tasks:       Store.tasksArr.map(t => Util.clone(t)),
-        blocks:      Store.blocks.map(b => Util.clone(b)),
-        calendars:   Util.clone(Store.calendars),
-        plants:      Util.clone(Store.plants),
-        plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
-        fixedIds:    new Set([...Store.fixedIds])
-      };
+    _onEntered() {
       // So a discarded what-if session leaves no trace in the confidence tracker,
       // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
-      Sandbox._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
-      Sandbox.active = true;
+      // Captured here (not in Sandbox.enter()) at the same logical moment as before —
+      // the state module doesn't know about the cross-file Confidence module.
+      SandboxAdapter._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
 
-      // Visual indicator
       document.body.classList.add('sandbox-mode');
       const banner = document.getElementById('sandbox-banner');
       if (banner) banner.hidden = false;
@@ -10191,41 +10197,18 @@ const NIMBUS = (function () {
       Toast.show(t('toast.what_if_mode'), 'info', 1500);
     },
 
-    exit(apply) {
-      if (!Sandbox.active) return;
+    _onExited(evt) {
+      const { applied, snapshot: snap } = evt;
 
-      // Hoisted so the promote flush below can diff deleted blackouts against the
-      // pre-sandbox snapshot — it is nulled during teardown, before the flush. (F3)
-      const snap = Sandbox._snapshot;
-
-      if (apply) {
-        // Promote sandbox state to real state with a single undoable entry
-        UndoStack.push('Discard What-If scenario', () => {
-          Store.setTasks(snap.tasks, 'undo');
-          Store._state.fixedIds = new Set([...snap.fixedIds]);
-          for (const id of Store._state.fixedIds) { const t = Store.tasks[id]; if (t) t.fixed = true; }
-          Alerts.scheduleRecompute();
-          Toast.show(t('toast.scenario_discarded'), 'info');
-        });
+      if (applied) {
         const scenarioName = document.getElementById('sb-scenario-name')?.value || 'What-If';
         Toast.show(t('toast.scenario_applied', { name: scenarioName }), 'success');
       } else {
-        // Discard: restore snapshot
-        Store.setTasks(snap.tasks, 'sandbox');
-        Store._state.blocks       = snap.blocks;
-        Store._state.calendars    = snap.calendars;
-        Store._state.plants       = snap.plants;
-        Store._state.plantBlocks  = snap.plantBlocks;
-        Store._state.fixedIds     = new Set([...snap.fixedIds]);
-        for (const id of Store._state.fixedIds) { const t = Store.tasks[id]; if (t) t.fixed = true; }
-        if (NIMBUS.Confidence && Sandbox._confSnapshot) NIMBUS.Confidence.restore(Sandbox._confSnapshot);
+        if (NIMBUS.Confidence && SandboxAdapter._confSnapshot) NIMBUS.Confidence.restore(SandboxAdapter._confSnapshot);
         Alerts.scheduleRecompute();
         Toast.show(t('toast.scenario_discarded'), 'info');
       }
-
-      Sandbox.active        = false;
-      Sandbox._snapshot     = null;
-      Sandbox._confSnapshot = null;
+      SandboxAdapter._confSnapshot = null;
 
       document.body.classList.remove('sandbox-mode');
       const banner = document.getElementById('sandbox-banner');
@@ -10234,7 +10217,7 @@ const NIMBUS = (function () {
       document.querySelectorAll('.sandbox-btn').forEach(btn => {
         btn.textContent = t('ui.sandbox_off');
         btn.style.color = '';
-        btn.onclick = () => NIMBUS.Sandbox.enter();
+        btn.onclick = () => SandboxAdapter.enter();
       });
 
       // Promote is an explicit user action, so persist it (cache + backend) the same
@@ -10242,7 +10225,7 @@ const NIMBUS = (function () {
       // now false) so saveAll's own Sandbox.exit(true) call no-ops — no recursion.
       // Without this, "Scenario applied" showed but a reload before a later unrelated
       // save lost the promoted edits (autosave is suppressed during sandbox).
-      if (apply) {
+      if (applied) {
         NIMBUS.Persistence.saveAll();
         // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
         // guards on Sandbox.active); push the promoted config now that active=false.
@@ -10266,10 +10249,19 @@ const NIMBUS = (function () {
       // were just flushed, so skip to avoid re-clobbering them.
       const deferred = CalendarSync._deferredHydrationPlant;
       CalendarSync._deferredHydrationPlant = null;
-      if (deferred && !apply && deferred === Store.selectedPlant) {
+      if (deferred && !applied && deferred === Store.selectedPlant) {
         CalendarSync.fetchPlantConfig(deferred);
       }
-    }
+    },
+
+    // Fired when the user undoes a PROMOTED (applied=true) scenario via UndoStack —
+    // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/fixedIds
+    // then emits this instead of calling Alerts/Toast directly (those are cross-module
+    // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
+    _onReverted() {
+      Alerts.scheduleRecompute();
+      Toast.show(t('toast.scenario_discarded'), 'info');
+    },
   };
 
   /* =============================================================================
@@ -18764,7 +18756,7 @@ saveAll() {
     // DependencyOverlay init deferred similarly
     setTimeout(() => { try { DependencyOverlay.init(); } catch (e) { ErrorLog.error('boot', `DependencyOverlay.init: ${e.message}`); } }, 160);
     // Sandbox init
-    try { Sandbox.init(); } catch (e) { ErrorLog.error('boot', `Sandbox.init: ${e.message}`); }
+    try { SandboxAdapter.init(); } catch (e) { ErrorLog.error('boot', `SandboxAdapter.init: ${e.message}`); }
 
     // Install the unified input pipeline AFTER Timeline + Table are up so
     // their internal DataSet / grid API exist when we wire the listeners.
@@ -18861,7 +18853,7 @@ saveAll() {
     Utilization, ContextMenu, Hierarchy,
     Selection, UndoStack, Interaction,
     ErrorLog, AdminCockpit,
-    TimelineNav, GanttFilter, DependencyOverlay, Sandbox, Printer,
+    TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData, WelcomeSplash,
     LaborPlanning, Interface, Security, CalendarSync,

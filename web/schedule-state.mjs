@@ -50,12 +50,11 @@ export const Store = {
   setSettingsDefaultsResolver(fn) { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
   setSelectionRemoveHook(fn) { _selectionRemoveHook = typeof fn === 'function' ? fn : () => {}; },
   rev() { return this._rev || 0; },
-  // 'draft' once What-If mode is active; the Sandbox module doesn't live in this
-  // file yet (it joins in a later CQ-1 task as a sibling export), so this always
-  // returns 'live' for now — a future task wires the real Sandbox.active check
-  // once that same-module reference exists (referencing it today would be an
-  // undeclared identifier and fail this file's `no-undef` lint gate).
-  mode() { return 'live'; },
+  // 'draft' once What-If mode is active. `Sandbox` is declared further down in
+  // this same module (a sibling top-level const) — referencing it here is safe
+  // even though it appears "before" its declaration in file order, because
+  // mode() is never *called* until well after module evaluation completes.
+  mode() { return (typeof Sandbox !== 'undefined' && Sandbox.active) ? 'draft' : 'live'; },
 
   /* ----- basic access ---------------------------------------------------- */
   get state()     { return this._state; },
@@ -722,5 +721,60 @@ export const UndoStack = {
   restoreTasks(snapshot) {
     const patches = snapshot.map(s => ({ id: s.id, changes: s }));
     Store.updateMany(patches, 'undo');
+  },
+};
+
+/* =============================================================================
+   SANDBOX — "What-If" mode state + snapshots only. Deep-clones Store state so
+   planners can try changes freely without affecting the live schedule. The DOM
+   banner/buttons, Toast messages, and cross-module side effects (Confidence
+   snapshot/restore, Persistence.saveAll, CalendarSync flush/hydration) are NOT
+   this module's concern — they live in app.js's `SandboxAdapter`, which
+   subscribes to the `sandbox:entered`/`sandbox:exited` events emitted below.
+   ========================================================================== */
+export const Sandbox = {
+  active: false,
+  _snapshot: null,
+
+  enter(source) {
+    if (this.active) return false;
+    this._snapshot = {
+      tasks:       Store.tasksArr.map(t => Util.clone(t)),
+      blocks:      Store.blocks.map(b => Util.clone(b)),
+      calendars:   Util.clone(Store.calendars),
+      plants:      Util.clone(Store.plants),
+      plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
+      fixedIds:    new Set([...Store.fixedIds]),
+    };
+    this.active = true;
+    Store.emit({ type: 'sandbox:entered', source });
+    return true;
+  },
+
+  exit(apply, source) {
+    if (!this.active) return null;
+    const snap = this._snapshot;
+
+    if (apply) {
+      // Promote sandbox state to real state with a single undoable entry.
+      UndoStack.push('Discard What-If scenario', () => {
+        Store.setTasks(snap.tasks, 'undo');
+        Store.replaceFixedIds(snap.fixedIds, 'undo');
+        Store.emit({ type: 'sandbox:reverted', source: 'undo' });
+      });
+    } else {
+      // Discard: restore the pre-enter snapshot wholesale.
+      Store.setTasks(snap.tasks, 'sandbox');
+      Store.replaceBlocks(snap.blocks, 'sandbox');
+      Store.replaceCalendars(snap.calendars, 'sandbox');
+      Store.replacePlants(snap.plants, 'sandbox');
+      Store.replacePlantBlocks(snap.plantBlocks, 'sandbox');
+      Store.replaceFixedIds(snap.fixedIds, 'sandbox');
+    }
+
+    this.active = false;
+    this._snapshot = null;
+    Store.emit({ type: 'sandbox:exited', applied: !!apply, source, snapshot: snap });
+    return snap;
   },
 };

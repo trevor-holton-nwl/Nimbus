@@ -674,7 +674,7 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Sandbox.enter()"
+      "expression": "NIMBUS.SandboxAdapter.enter()"
     },
     {
       "file": "index.html",
@@ -844,7 +844,7 @@
     "Printer.preview",
     "Printer.print",
     "ProdLines.saveBlockFromModal",
-    "Sandbox.enter",
+    "SandboxAdapter.enter",
     "Table._clearChipFilters",
     "Table._toggleChipDropdown",
     "Table.applyOverride",

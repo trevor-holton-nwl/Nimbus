@@ -27,7 +27,7 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Store` | `schedule-state.mjs` | All private fields become internal; expose via selectors/commands |
 | `Selection` | `schedule-state.mjs` | |
 | `UndoStack` | `schedule-state.mjs` | |
-| `Sandbox` | `schedule-state.mjs` | State + snapshots only; What-If UI → workbench |
+| `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited` events, pending their real move to `schedule-workbench.mjs` in Phase 3. |
 | `Calendar` | `schedule-services.mjs` | Capacity math only; blackout/line-calendar UI → workbench or plant-admin |
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |
 | `Alerts` | `schedule-services.mjs` | |
@@ -231,12 +231,10 @@ module migrates in a later phase and stops touching these fields directly.
 migration target for each row above — use them instead of `_rev`/`_state`
 when a consumer's turn comes.
 
-`Store.mode()` returns `'live'` unconditionally today: NIMBUS's own `Sandbox`
-module doesn't live in `schedule-state.mjs` yet (a later CQ-1 task adds it as
-a sibling export in this same file), so a bare `Sandbox.active` reference
-would be an undeclared identifier and fail this file's `no-undef` lint gate.
-Whichever task adds `Sandbox` to this module should also update `mode()` to
-read `Sandbox.active` directly (a same-module reference, no seam needed).
+`Store.mode()` now resolves the real `Sandbox.active` flag (Phase 1, Task 5):
+`Sandbox` is a sibling top-level export in `schedule-state.mjs`, so `mode()`
+reads it directly with no seam — `'draft'` while a What-If session is active,
+`'live'` otherwise.
 
 `Store.removeTask()` calls an injected `_selectionRemoveHook` (wired via
 `Store.setSelectionRemoveHook(fn)`) instead of a bare `Selection.remove(...)`
