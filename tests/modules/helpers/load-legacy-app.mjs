@@ -64,8 +64,8 @@ function makeNodeList(items) {
  *             fetchCalls: Array, workerMessages: Array }}
  */
 export function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {} } = {}) {
-  const appSrc  = readFileSync(resolve(ROOT, 'app.js'), 'utf8');
-  const corePath = resolve(ROOT, 'nimbus-compute-core.js');
+  const appSrc  = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
+  const corePath = resolve(ROOT, 'web/nimbus-compute-core.js');
   const NimbusComputeCore = _require(corePath);
 
   let domReadyFn  = null;

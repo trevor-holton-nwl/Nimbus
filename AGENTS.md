@@ -44,7 +44,7 @@ uvicorn brain:api --port 8000      # add --reload for auto-reload during dev
 
 No build step — JavaScript and CSS are loaded directly; most libraries come from CDN.
 
-**Legacy two-process split** (serving the UI separately on another port) still works but now needs a shim, because `app.js` `API_BASE` defaults to same-origin (relative). Set `window.NIMBUS_API_BASE = 'http://localhost:8000'` before `app.js` loads, then `python -m http.server 9000`. Prefer the single-process command above.
+**Legacy two-process split** (serving the UI separately on another port) still works but now needs a shim, because `app.js` `API_BASE` defaults to same-origin (relative). Set `window.NIMBUS_API_BASE = 'http://localhost:8000'` before `app.js` loads, then serve the `web/` directory: `cd web && python -m http.server 9000`. Prefer the single-process command above.
 
 ## Database Setup
 
@@ -205,6 +205,8 @@ With `altInput: true`, existing `.value` reads in save functions keep working �
 - Inspector `start_date` — initialized fresh on each `Inspector._render()` call (no stored instance; old one is discarded with innerHTML reset)
 
 ### Files
+
+**Frontend source lives under `web/`** (moved there in CQ-1 Phase 0 Task 4 — `index.html`, `styles.css`, `app.js`, `nimbus-intelligence.js`, `nimbus-worker.js`, `nimbus-compute-core.js`, `locales/`, `Images/`). `brain.py`'s `STATIC_DIR` defaults to `<repo>/web` (resolved from `Path(__file__)`, not the process cwd), so `uvicorn brain:api` always serves that dedicated tree and never brain.py/db.py/schema.sql alongside it, regardless of the working directory it's launched from. `scripts/check-static-assets.mjs` (`npm run check:static-assets`) enforces this: every local import reachable from a `.mjs` under `web/` must resolve inside `web/`, and no backend filename may appear there.
 
 `styles.css` (~4,900 lines) uses a CSS-variable design-token system (warm off-white light base, deep-slate dark mode, amber accent) with a `body.dark` layer that is **incomplete** — several newer components hardcode light colors (e.g. `.cw-active-card`, `.welcome-splash`, `.lp-hm-grad`, `.tab-btn.active` outline) and a few tokens are referenced but never defined (`--border`, `--border-subtle`, `--font-mono`, `--nimbus-amber`, `--bg-float`) — `--amber` was fixed 2026-07-13 (its one caller, `.gantt-line-btn.active`, now uses the real `--accent`/`--accent-wash`/`--accent-hot` tokens, matching `.dash-filter-btn.active`). `index.html` also carries ~850 lines of inline `<style>` that have not yet been migrated into `styles.css`. (`nimbus-interaction.js` was previously a separate file, but the `Interaction` module is now inlined into `app.js`.) `nimbus-worker.js` is the standalone Web Worker (see Frontend → Web Worker); it is **not** part of the `window.NIMBUS` IIFE chain and must never `import`/reference `app.js`. Its compute logic lives in `nimbus-compute-core.js` (a UMD module loaded via `importScripts` in the worker and `require`d by `tests/js/*.test.js`), which likewise must never reference `app.js`.
 

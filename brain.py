@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
+from pathlib import Path
 from pydantic import BaseModel
 
 import auth
@@ -139,10 +140,11 @@ COLOR_WHEEL_DIR = os.getenv("COLOR_WHEEL_DIR", r"C:\Users\pj29587\OneDrive - New
 CW_BACKFILL_FROM_DISK = os.getenv("NIMBUS_CW_BACKFILL", "").strip().lower() in ("1", "true", "yes")
 
 # Directory holding the frontend served by the StaticFiles mount at the bottom of
-# this file. Default "." = current working dir = repo root, so `uvicorn brain:api`
-# serves the UI locally with zero config. The container image sets NIMBUS_STATIC_DIR
-# to its bundled frontend directory.
-STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR", ".")
+# this file. Defaults to the "web" directory next to this file — not the process's
+# current working directory — so `uvicorn brain:api` always serves the dedicated
+# frontend tree (never brain.py/db.py/schema.sql alongside it) regardless of where
+# it's launched from. NIMBUS_STATIC_DIR can still override this for the container.
+STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR") or str(Path(__file__).resolve().parent / "web")
 
 # =========================
 # LIFESPAN
@@ -331,6 +333,18 @@ async def request_id_mw(request: Request, call_next):
     finally:
         # Clear the rid so it never leaks into the next request on this worker.
         _RID_CTX.reset(rid_token)
+
+
+# ES modules must never be served from a stale browser cache while a module
+# graph is being migrated in (CQ-1 Phase 1+) — unlike app.js, .mjs files carry
+# no APP_VERSION-driven cache-bust query string. Scoped to .mjs only; every
+# other static response and API route keeps its existing caching behavior.
+@api.middleware("http")
+async def static_mjs_no_cache_mw(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.endswith(".mjs"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 # Error semantics: surface real HTTP status codes behind ONE consistent JSON

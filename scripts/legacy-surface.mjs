@@ -135,9 +135,9 @@ function diff(label, current, saved) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const htmlSource = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
-  const intelligenceSource = readFileSync(resolve(ROOT, 'nimbus-intelligence.js'), 'utf8');
-  const appSource = readFileSync(resolve(ROOT, 'app.js'), 'utf8');
+  const htmlSource = readFileSync(resolve(ROOT, 'web/index.html'), 'utf8');
+  const intelligenceSource = readFileSync(resolve(ROOT, 'web/nimbus-intelligence.js'), 'utf8');
+  const appSource = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
 
   const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource });
 

@@ -9,7 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const Core = require('../../nimbus-compute-core.js');
+const Core = require('../../web/nimbus-compute-core.js');
 
 test('toLocalSeconds emits naive local components with no Z suffix', () => {
   const d = new Date(2026, 6, 7, 10, 30, 45); // local 2026-07-07 10:30:45

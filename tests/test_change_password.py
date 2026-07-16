@@ -100,7 +100,7 @@ def test_patch_security_me_password_endpoint(client, pg):
 
 def test_new_password_keys_present_in_all_locales():
     import os
-    locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "locales")
+    locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "locales")
     required = [
         "sec.change_password_title", "sec.current_password", "sec.new_password",
         "sec.confirm_password", "sec.update_password", "sec.password_mismatch",

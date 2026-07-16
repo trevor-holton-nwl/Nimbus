@@ -63,8 +63,9 @@ module.exports = [
     ],
   },
   {
-    // Frontend scripts + locale string maps.
-    files: ['app.js', 'nimbus-intelligence.js', 'locales/*.js'],
+    // Frontend scripts + locale string maps (live under web/ — the dedicated static
+    // asset directory served by brain.py's StaticFiles mount, see CQ-1 Phase 0 Task 4).
+    files: ['web/app.js', 'web/nimbus-intelligence.js', 'web/locales/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -75,7 +76,7 @@ module.exports = [
   },
   {
     // Standalone Web Worker: worker globals only (self/postMessage/onmessage), no DOM, no NIMBUS.
-    files: ['nimbus-worker.js'],
+    files: ['web/nimbus-worker.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -86,7 +87,7 @@ module.exports = [
   {
     // Shared compute core (UMD): loaded in the worker (self/importScripts), the browser
     // (window), and Node tests (module.exports) — so it needs worker + `module` globals.
-    files: ['nimbus-compute-core.js'],
+    files: ['web/nimbus-compute-core.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -115,7 +116,8 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Future browser ESM modules under web/ — browser environment.
+    // Browser ESM modules under web/ — browser environment. Also covers the Phase 0
+    // fixture web/_static-delivery-check.mjs; Phase 1+ will add real module entries here.
     files: ['web/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2023,

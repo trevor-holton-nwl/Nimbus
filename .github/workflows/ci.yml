@@ -33,6 +33,8 @@ jobs:
         run: npm test
       - name: Legacy surface contract
         run: npm run check:legacy-surface
+      - name: Static asset boundary
+        run: npm run check:static-assets
 
   test-python:
     name: pytest (with Postgres)
