@@ -94,4 +94,34 @@ module.exports = [
     },
     rules: SHARED_RULES,
   },
+  {
+    // ESM scripts (scanner, checkers) — Node environment.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // ESM test modules — Node environment.
+    files: ['tests/modules/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // Future browser ESM modules under web/ — browser environment.
+    files: ['web/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.browser, ...CDN_GLOBALS },
+    },
+    rules: SHARED_RULES,
+  },
 ];

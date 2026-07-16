@@ -31,6 +31,8 @@ jobs:
         continue-on-error: true
       - name: JS unit tests
         run: npm test
+      - name: Legacy surface contract
+        run: npm run check:legacy-surface
 
   test-python:
     name: pytest (with Postgres)
