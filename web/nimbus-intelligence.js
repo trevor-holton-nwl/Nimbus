@@ -683,7 +683,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           label: 'Rush order: Enter Sandbox what-if mode',
           sub:   'Explore changes without touching the live schedule',
           icon:  '🔮',
-          run()  { CommandPalette.close(); NIMBUS.Sandbox?.enter?.(); }
+          run()  { CommandPalette.close(); NIMBUS.SandboxAdapter?.enter?.(); }
         },
         {
           keywords: ['optimize', 'run optim', 'scheduler', 'reorder'],

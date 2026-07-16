@@ -27,7 +27,7 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Store` | `schedule-state.mjs` | All private fields become internal; expose via selectors/commands |
 | `Selection` | `schedule-state.mjs` | |
 | `UndoStack` | `schedule-state.mjs` | |
-| `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited` events, pending their real move to `schedule-workbench.mjs` in Phase 3. |
+| `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` events (the last emitted from `exit()`'s promote-then-undo closure when a promoted scenario is undone), pending their real move to `schedule-workbench.mjs` in Phase 3. |
 | `Calendar` | `schedule-services.mjs` | Capacity math only; blackout/line-calendar UI → workbench or plant-admin |
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |
 | `Alerts` | `schedule-services.mjs` | |
