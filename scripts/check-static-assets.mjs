@@ -11,7 +11,7 @@
 //   node scripts/check-static-assets.mjs   # CLI: checks the real web/ tree, exit 1 on any violation
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { resolve, dirname, relative, sep } from 'node:path';
+import { resolve, dirname, extname, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22,12 +22,19 @@ export const WEB_DIR = resolve(ROOT, 'web');
 // `import '...'`, and dynamic `import('...')`. Bare specifiers (npm packages)
 // and absolute URLs (CDN scripts) are out of scope; those are governed by the
 // compatibility inventory, not this checker.
-const STATIC_IMPORT_RE = /\bimport\s+(?:[\s\S]*?\bfrom\s+)?['"](\.\.?\/[^'"]+)['"]/g;
+//
+// Kept as three independently-anchored patterns (not one `import ... from`
+// pattern bridged by a `[\s\S]*?` lazy group) deliberately: a lazy wildcard
+// between two anchors is O(n^2) on adversarial input with no `from` downstream
+// of many `import` tokens (e.g. a large blob of the literal word "import"),
+// and this scanner runs unattended in CI over contributor-supplied files.
+const FROM_IMPORT_RE = /\bfrom\s+['"](\.\.?\/[^'"]+)['"]/g;
+const SIDE_EFFECT_IMPORT_RE = /\bimport\s+['"](\.\.?\/[^'"]+)['"]/g;
 const DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g;
 
 function localSpecifiers(source) {
   const specs = new Set();
-  for (const re of [STATIC_IMPORT_RE, DYNAMIC_IMPORT_RE]) {
+  for (const re of [FROM_IMPORT_RE, SIDE_EFFECT_IMPORT_RE, DYNAMIC_IMPORT_RE]) {
     re.lastIndex = 0;
     let m;
     while ((m = re.exec(source))) specs.add(m[1]);
@@ -70,13 +77,28 @@ export function collectStaticImportClosure(entryPath, { root = WEB_DIR } = {}) {
 }
 
 // Backend source/config that must never be reachable through the public
-// static mount, wherever it appears in the tree.
+// static mount, wherever it appears in the tree — checked by exact name...
 const FORBIDDEN_BASENAMES = new Set([
   'brain.py', 'db.py', 'master_data.py', 'auth.py', 'sap_sync.py',
   'schema.sql', '.env', 'requirements.txt', 'Dockerfile', '.dockerignore',
 ]);
 
-/** Recursively find any forbidden backend filename under `dir`. */
+// ...and by extension, as defense-in-depth: the Dockerfile now ships everything
+// under web/ verbatim (COPY web/ /app/web/, no per-file allowlist), so a stray
+// non-frontend file that doesn't match FORBIDDEN_BASENAMES exactly — a renamed
+// backend copy (db_old.py), a scratch script, a data dump — would otherwise
+// ship to the public mount undetected. Extending this list is a deliberate,
+// visible change; that's the point.
+const ALLOWED_EXTENSIONS = new Set([
+  '.html', '.css', '.js', '.mjs',
+  '.png', '.jpg', '.jpeg', '.svg', '.ico', '.webp', '.gif',
+  '.woff', '.woff2', '.ttf',
+]);
+
+/**
+ * Recursively find any file under `dir` that is either an exact-match backend
+ * filename or has an extension outside the frontend allowlist.
+ */
 export function findForbiddenFiles(dir) {
   const found = [];
   if (!existsSync(dir)) return found;
@@ -84,7 +106,9 @@ export function findForbiddenFiles(dir) {
     const full = resolve(dir, entry.name);
     if (entry.isDirectory()) {
       found.push(...findForbiddenFiles(full));
-    } else if (FORBIDDEN_BASENAMES.has(entry.name)) {
+      continue;
+    }
+    if (FORBIDDEN_BASENAMES.has(entry.name) || !ALLOWED_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
       found.push(full);
     }
   }
