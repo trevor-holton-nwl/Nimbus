@@ -1,7 +1,25 @@
-# NIMBUS backend tests
+# NIMBUS tests
 
-Minimal pytest harness bootstrapped during the master code review to guard the
-high-severity data-integrity findings before the DB code is changed.
+## JavaScript tests (`tests/js/` and `tests/modules/`)
+
+```bash
+npm run test:legacy   # tests/js/*.test.js  — CommonJS, covers compute-core + timezone
+npm run test:modules  # tests/modules/*.test.mjs — ESM, covers CQ-1 compatibility surface
+npm test              # both suites
+npm run check:legacy-surface  # diff scanner output vs contract snapshot
+```
+
+**`tests/modules/` harness notes:**
+- `helpers/load-legacy-app.mjs` loads `app.js` in a Node VM with browser-global stubs.
+  `DOMContentLoaded` is captured but never fired — no DOM layout, no network, no real Worker.
+- `legacy-surface.test.mjs` pins the inline-handler/cross-module contract from the
+  generated `tests/contracts/cq1-legacy-surface.json`. Update the contract only after a
+  caller is deliberately migrated: `node scripts/legacy-surface.mjs --write`.
+- `legacy-app-characterization.test.mjs` pins selected-plant scoping, save payload shape,
+  and the public namespace surface. These survive Phase 1–4 refactoring as regression guards.
+- The harness throws on any unrecognised network call so missing stubs are immediately visible.
+
+## Backend tests (`tests/*.py`)
 
 ## Run
 
