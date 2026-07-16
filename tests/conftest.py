@@ -95,8 +95,7 @@ def pg():
     """Returns the `db` module, guaranteed connected. Skips if the DB is down."""
     if not PG_UP:
         pytest.skip("Postgres not reachable")
-    import db
-    return db
+    return sys.modules["db"]
 
 
 @pytest.fixture
