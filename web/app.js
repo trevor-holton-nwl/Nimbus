@@ -20254,14 +20254,25 @@ saveAll() {
   }
   App._bootMain = _bootMain;
 
-  document.addEventListener('DOMContentLoaded', () => {
+  function _domReadyGate() {
     // Mandatory login gate — blocks the whole app until authenticated against
     // user_security. A cached session (page reload while signed in) skips
     // straight to _bootMain(); otherwise showLoginScreen() takes over and calls
     // App._bootMain() itself once Session.signIn() resolves.
     if (!Session.currentUser()) { showLoginScreen(); return; }
     _bootMain();
-  });
+  }
+
+  // app.js is now loaded via a dynamically-injected <script> (see app-entry.mjs),
+  // which is NOT parser-blocking — the DOMContentLoaded event can (and in
+  // practice does) fire before this file is even fetched. A bare
+  // addEventListener('DOMContentLoaded', ...) would then never run. Mirror the
+  // readyState fallback already used in nimbus-intelligence.js's boot gate.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _domReadyGate);
+  } else {
+    _domReadyGate();
+  }
 
   /* Public namespace for inline onclick handlers in index.html */
   return {
