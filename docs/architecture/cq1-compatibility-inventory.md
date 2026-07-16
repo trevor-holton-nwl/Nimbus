@@ -1,5 +1,12 @@
 # CQ-1 Compatibility Inventory
 
+**Phase 1 status (complete):** `application-foundation.mjs` (Config, Util,
+PerfMonitor, VirtualList, ErrorLog, Toast, Modal) and `schedule-state.mjs`
+(Store, Selection, UndoStack, Sandbox) are real ES modules, bridged into
+`app.js` via `app-entry.mjs` + `window.__NIMBUS_FOUNDATION`/`__NIMBUS_STATE`.
+See §6 for the still-open `Store._state`/`_rev` exceptions carried into
+Phase 2/3/4.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated
@@ -17,16 +24,16 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 
 | Legacy module | Target file | Notes |
 |---|---|---|
-| `Config` | `application-foundation.mjs` | Immutable browser/app settings only |
-| `Util` | `application-foundation.mjs` | Split: pure helpers → foundation; `fetchTraced`/i18n/pickers → foundation |
-| `PerfMonitor` | `application-foundation.mjs` | |
-| `VirtualList` | `application-foundation.mjs` | |
-| `ErrorLog` | `application-foundation.mjs` | |
-| `Toast` | `application-foundation.mjs` | |
-| `Modal` | `application-foundation.mjs` | Generic modal only; feature modals stay in owning module |
-| `Store` | `schedule-state.mjs` | All private fields become internal; expose via selectors/commands |
-| `Selection` | `schedule-state.mjs` | |
-| `UndoStack` | `schedule-state.mjs` | |
+| `Config` | `application-foundation.mjs` | Immutable browser/app settings only. Migrated Phase 1. |
+| `Util` | `application-foundation.mjs` | Split: pure helpers → foundation; `fetchTraced`/i18n/pickers → foundation. Migrated Phase 1. |
+| `PerfMonitor` | `application-foundation.mjs` | Migrated Phase 1. |
+| `VirtualList` | `application-foundation.mjs` | Migrated Phase 1. |
+| `ErrorLog` | `application-foundation.mjs` | Migrated Phase 1. |
+| `Toast` | `application-foundation.mjs` | Migrated Phase 1. |
+| `Modal` | `application-foundation.mjs` | Generic modal only; feature modals stay in owning module. Migrated Phase 1. |
+| `Store` | `schedule-state.mjs` | All private fields become internal; expose via selectors/commands. Migrated Phase 1 (`_state`/`_rev` exceptions tracked in §6). |
+| `Selection` | `schedule-state.mjs` | Migrated Phase 1. |
+| `UndoStack` | `schedule-state.mjs` | Migrated Phase 1. |
 | `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` events (the last emitted from `exit()`'s promote-then-undo closure when a promoted scenario is undone), pending their real move to `schedule-workbench.mjs` in Phase 3. |
 | `Calendar` | `schedule-services.mjs` | Capacity math only; blackout/line-calendar UI → workbench or plant-admin |
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |

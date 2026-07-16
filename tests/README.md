@@ -18,6 +18,12 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
 - `legacy-app-characterization.test.mjs` pins selected-plant scoping, save payload shape,
   and the public namespace surface. These survive Phase 1–4 refactoring as regression guards.
 - The harness throws on any unrecognised network call so missing stubs are immediately visible.
+- `foundation.test.mjs` / `schedule-state.test.mjs` — plain ESM `import` shape
+  and behavior tests for `application-foundation.mjs`/`schedule-state.mjs`
+  (no VM sandbox needed — these are real native modules). `app-entry.test.mjs`
+  covers the loader's load-then-load-in-order contract via dependency
+  injection (`loadScript`), not real DOM script tags — real-browser boot
+  ordering is a Phase 4 browser-smoke responsibility, not unit-tested here.
 
 ## Backend tests (`tests/*.py`)
 
