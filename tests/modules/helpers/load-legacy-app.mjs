@@ -223,6 +223,22 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // a real browser, application-foundation.mjs and app.js share the one page
   // window/document, so it doesn't arise there.
   if (typeof globalThis.document === 'undefined') globalThis.document = document_;
+  // Same split-realm quirk for `fetch`: Util.fetchTraced now lives in
+  // application-foundation.mjs (host realm) and calls bare `fetch(...)`.
+  // Node already defines a real global `fetch`, so — unlike `document` above —
+  // the "only if undefined" guard would never fire; the host's real fetch
+  // would silently take over and reject relative URLs like `/tasks/update`
+  // ("Failed to parse URL"). Always point the host realm's fetch at this
+  // invocation's fetchImpl_ so calls originating in application-foundation.mjs
+  // land in the same fetchCalls/stub the vm-sandboxed app.js code uses.
+  globalThis.fetch = fetchImpl_;
+  // Same split-realm quirk for `window`: Util.t() reads bare `window.__NIMBUS_LOCALES`
+  // (no `typeof window` guard — matches the original app.js code, which never
+  // needed one since app.js always ran somewhere `window` already existed).
+  // Node has no global `window` at all, so point the host realm at the exact
+  // same self-referential sandbox object the vm-evaluated app.js code sees,
+  // rather than fabricate a second, divergent window.
+  globalThis.window = sandbox.window;
 
   const ctx = createContext(sandbox);
 

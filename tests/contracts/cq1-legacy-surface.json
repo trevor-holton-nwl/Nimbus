@@ -4,11 +4,6 @@
     {
       "file": "app.js",
       "attribute": "onchange",
-      "expression": "..."
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
       "expression": "NIMBUS.Dashboard._onLineChange(this)"
     },
     {
