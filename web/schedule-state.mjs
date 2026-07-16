@@ -3,7 +3,7 @@
 // and synchronous post-commit events. Every mutator takes a `source` and
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
-import { Config, Util, PerfMonitor, ErrorLog } from './application-foundation.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
 
 // Three DI seams replace what used to be direct references from Store into modules
 // that stay in app.js (Session, Settings, Selection) — each defaults to a safe
@@ -572,4 +572,155 @@ export const Store = {
     if (task.fixed) Store._state.fixedIds.add(String(task.id));
     if (task.id != null) task.id = String(task.id);
   }
+};
+
+/* =============================================================================
+   SELECTION — multi-select store, independent of vis-timeline internals.
+   Single source of truth for "which orders are selected". All UIs (Timeline,
+   Table, Inspector, ContextMenu) subscribe to this. Never persisted, never
+   autosaved.
+   ========================================================================== */
+export const Selection = {
+  _ids: new Set(),           // Set<string>
+  _anchor: null,              // id of last-single-clicked item (for Shift range)
+  _listeners: new Set(),
+
+  /** @returns {string[]} currently selected ids */
+  ids() { return [...this._ids]; },
+  has(id) { return this._ids.has(String(id)); },
+  size() { return this._ids.size; },
+  clear() {
+    if (!this._ids.size) return;
+    this._ids.clear();
+    this._anchor = null;
+    this._emit('clear');
+  },
+  set(ids) {
+    const next = new Set(ids.map(String));
+    if (_setsEqual(next, this._ids)) return;
+    this._ids = next;
+    this._anchor = ids.length ? String(ids[ids.length - 1]) : null;
+    this._emit('set');
+  },
+  add(ids) {
+    const arr = Array.isArray(ids) ? ids : [ids];
+    let changed = false;
+    for (const id of arr) {
+      const s = String(id);
+      if (!this._ids.has(s)) { this._ids.add(s); changed = true; }
+    }
+    if (changed) {
+      this._anchor = String(arr[arr.length - 1]);
+      this._emit('add');
+    }
+  },
+  remove(ids) {
+    const arr = Array.isArray(ids) ? ids : [ids];
+    let changed = false;
+    for (const id of arr) {
+      if (this._ids.delete(String(id))) changed = true;
+    }
+    if (changed) this._emit('remove');
+  },
+  toggle(id) {
+    const s = String(id);
+    if (this._ids.has(s)) this._ids.delete(s);
+    else { this._ids.add(s); this._anchor = s; }
+    this._emit('toggle');
+  },
+
+  /** Select every id from anchor to target on the same line (inclusive). */
+  selectRange(targetId) {
+    const target = String(targetId);
+    const anchor = this._anchor;
+    if (!anchor || anchor === target) { this.set([target]); return; }
+
+    const ta = Store.tasks[anchor];
+    const tt = Store.tasks[target];
+    if (!ta || !tt || ta.PRODUCTION_LINE !== tt.PRODUCTION_LINE) {
+      this.set([target]);
+      return;
+    }
+    const line = ta.PRODUCTION_LINE;
+    const peers = Store.tasksArr
+      .filter(t => t.PRODUCTION_LINE === line && t.start_date)
+      .sort((a, b) => a.start_date - b.start_date);
+    const ia = peers.findIndex(t => String(t.id) === anchor);
+    const it = peers.findIndex(t => String(t.id) === target);
+    if (ia < 0 || it < 0) { this.set([target]); return; }
+    const [lo, hi] = ia < it ? [ia, it] : [it, ia];
+    const range = peers.slice(lo, hi + 1).map(t => String(t.id));
+    const keep = this._anchor;
+    this.set(range);
+    this._anchor = keep; // preserve anchor for further Shift-clicks
+  },
+
+  /** Summary for the Inspector multi-selection view. */
+  stats() {
+    const ids = [...this._ids];
+    let totalHours = 0;
+    const lines = new Set();
+    let fixedCount = 0;
+    for (const id of ids) {
+      const t = Store.tasks[id];
+      if (!t) continue;
+      totalHours += Util.runHours(t);
+      if (t.PRODUCTION_LINE) lines.add(t.PRODUCTION_LINE);
+      if (Store.isFixed(id)) fixedCount++;
+    }
+    return { count: ids.length, totalHours, lines: [...lines], fixedCount };
+  },
+
+  on(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); },
+  _emit(kind) {
+    const payload = { kind, ids: [...this._ids], anchor: this._anchor };
+    for (const l of this._listeners) {
+      try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${e.message}`); }
+    }
+  },
+
+  /** [{plant, id}] for the currently selected ids — additive convenience for
+   *  consumers that need plant scoping alongside the raw id (e.g. cross-plant
+   *  bulk actions). Existing bare-ID methods above are unchanged. */
+  selectedRefs() {
+    return [...this._ids].map(id => ({ plant: Store.tasks[id]?.plant ?? null, id }));
+  },
+};
+
+function _setsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+/* =============================================================================
+   UNDO STACK — minimal, in-memory, destructive ops only (10 levels).
+   Used by drag-commits and unschedule actions in the Interaction module.
+   ========================================================================== */
+export const UndoStack = {
+  MAX: 10,
+  _entries: [],
+
+  push(label, undoFn) {
+    this._entries.push({ label, undoFn, at: Date.now() });
+    if (this._entries.length > this.MAX) this._entries.shift();
+  },
+  pop() {
+    const e = this._entries.pop();
+    if (!e) return null;
+    try { e.undoFn(); Toast.show(Util.t('toast.undone', { label: e.label }), 'success'); }
+    catch (err) { ErrorLog.error('undo', `${e.label}: ${err.message}`); }
+    return e;
+  },
+  /** Take a snapshot of the given task ids so they can be restored. */
+  snapshotTasks(ids) {
+    return ids.map(id => {
+      const t = Store.tasks[id];
+      return t ? structuredClone(t) : null;
+    }).filter(Boolean);
+  },
+  restoreTasks(snapshot) {
+    const patches = snapshot.map(s => ({ id: s.id, changes: s }));
+    Store.updateMany(patches, 'undo');
+  },
 };

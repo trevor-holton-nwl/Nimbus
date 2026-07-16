@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../../web/schedule-state.mjs';
+import { Store, Selection, UndoStack } from '../../web/schedule-state.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
   const before = Store.rev();
@@ -66,4 +66,26 @@ test('Store.setSelectionRemoveHook is called by removeTask instead of a bare Sel
   Store.removeTask('rm1', 'unit-test');
   assert.equal(removedId, 'rm1');
   Store.setSelectionRemoveHook(() => {}); // reset
+});
+
+test('Selection tracks ids and selectedRefs() resolves plant per id', () => {
+  Store.setTasks([{ id: 'sel1', plant: '5512', PRODUCTION_LINE: 'L1', RUN_TIME: '1' }], 'unit-test');
+  Selection.clear();
+  Selection.add(['sel1']);
+  assert.deepEqual(Selection.ids(), ['sel1']);
+  assert.deepEqual(Selection.selectedRefs(), [{ plant: '5512', id: 'sel1' }]);
+  Selection.clear();
+});
+
+test('UndoStack.push caps at MAX(10) entries', () => {
+  for (let i = 0; i < 12; i++) UndoStack.push(`entry-${i}`, () => {});
+  assert.ok(UndoStack._entries.length <= UndoStack.MAX);
+});
+
+test('UndoStack.snapshotTasks/restoreTasks round-trip through Store', () => {
+  Store.setTasks([{ id: 'u1', RUN_TIME: '2', start_date: new Date('2026-01-01') }], 'unit-test');
+  const snap = UndoStack.snapshotTasks(['u1']);
+  Store.updateTask('u1', { RUN_TIME: '9' }, 'unit-test');
+  UndoStack.restoreTasks(snap);
+  assert.equal(Store.tasks['u1'].RUN_TIME, '2');
 });
