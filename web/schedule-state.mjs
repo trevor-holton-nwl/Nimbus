@@ -65,6 +65,7 @@ export const Store = {
   get userSettings()  { return this._state.userSettings; },
   get roleDefaults()  { return this._state.roleDefaults; },
   get masterData()    { return this._state.masterData; },
+  get dependencies()  { return this._state.dependencies; },
 
   isFixed(id)     { return this._state.fixedIds.has(String(id)); },
 
@@ -74,6 +75,17 @@ export const Store = {
   setLastOptimize(date, source) {
     this._state.meta.lastOptimize = date;
     this.emit({ type: 'meta:change', source });
+  },
+
+  /** Replace the master-data snapshot ({plants, lines} from /master-data/*) wholesale
+   *  and rebuild the derived line→plant index, mirroring the exact 3-statement sequence
+   *  every call site used to repeat verbatim. Public equivalent of the former direct
+   *  `Store._state.masterData = {...}` write (CQ-1 Phase 2 Task 4 — closes Persistence's
+   *  `_state` touch, one of the tracked §6 exceptions). */
+  setMasterData(masterData, source) {
+    this._state.masterData = masterData;
+    this.rebuildPlantIndex();
+    this.emit({ type: 'master-data-changed', source });
   },
 
   /* ----- subscription ---------------------------------------------------- */

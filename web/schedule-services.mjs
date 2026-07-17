@@ -10,6 +10,14 @@
 // (`CalendarUI`, `AlertsUIAdapter`) — see
 // docs/architecture/cq1-compatibility-inventory.md.
 //
+// This file subscribes (once, below Alerts) to the `schedule:hydrated` Store
+// event that schedule-data.mjs's Persistence emits after every load/cache-
+// restore/demo-seed, and triggers Alerts.scheduleRecompute() in response —
+// the resolution for the one real data→services dependency Persistence used
+// to satisfy with a direct `Alerts.scheduleRecompute()` call. This is a Store
+// event subscription, not an import: schedule-data.mjs still never imports
+// this file.
+//
 // nimbus-compute-core.js is loaded as a classic, parser-blocking <script> in
 // index.html BEFORE app-entry.mjs's static imports run (see index.html's
 // document.write chain), so `globalThis.NimbusComputeCore` (== window in the
@@ -634,6 +642,15 @@ Alerts.scheduleRecomputeLines = function (lines) {
   if (lines) for (const l of lines) Alerts._pendingLines.add(l);
   Alerts._armTimer();
 };
+
+// schedule-data.mjs's Persistence used to call `Alerts.scheduleRecompute()` directly
+// after every hydration (load()'s two branches, _loadCache(), _loadDemo()) — a reverse
+// dependency schedule-data.mjs must never take (it may not import schedule-services.mjs).
+// Persistence now emits this Store event instead; subscribe here, the legitimate
+// importer of both Store and Alerts, so the recompute still fires exactly the same way.
+Store.subscribe(evt => {
+  if (evt.type === 'schedule:hydrated') Alerts.scheduleRecompute();
+}, 'schedule-services.hydrated');
 
 /* =============================================================================
    UTILIZATION — scheduled vs. available hours per line per day.

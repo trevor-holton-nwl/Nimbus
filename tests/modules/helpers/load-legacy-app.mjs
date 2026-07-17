@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import * as foundation from '../../../web/application-foundation.mjs';
 import * as state from '../../../web/schedule-state.mjs';
 import * as services from '../../../web/schedule-services.mjs';
+import * as data from '../../../web/schedule-data.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -212,12 +213,13 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // location lives both on sandbox and window
   sandbox.location = location_;
 
-  // app.js now throws unless the foundation/state/services bridges are populated
+  // app.js now throws unless the foundation/state/services/data bridges are populated
   // before it runs (see web/app-entry.mjs) — pre-populate them here just like a
   // real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
   sandbox.window.__NIMBUS_STATE = state;
   sandbox.window.__NIMBUS_SERVICES = services;
+  sandbox.window.__NIMBUS_DATA = data;
 
   // application-foundation.mjs is a real ES module loaded above via a normal
   // dynamic import, so it executes in THIS host Node realm — NOT inside the
@@ -252,6 +254,13 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // invocation's fetchImpl_ so calls originating in application-foundation.mjs
   // land in the same fetchCalls/stub the vm-sandboxed app.js code uses.
   globalThis.fetch = fetchImpl_;
+  // Same split-realm quirk for `localStorage`: schedule-data.mjs's Persistence (host
+  // realm, imported above) reads/writes bare `localStorage` directly (cache save/load,
+  // selected-plant restore) — code that used to live inside app.js and so read the vm
+  // sandbox's `localStorage` stub directly. Node has no global `localStorage` by
+  // default, so mirror the SAME storage stub the vm-evaluated app.js code uses onto the
+  // host realm, rather than fabricate a second, divergent store.
+  if (typeof globalThis.localStorage === 'undefined') globalThis.localStorage = sandbox.localStorage;
   // Same split-realm quirk for `window`: Util.t() reads bare `window.__NIMBUS_LOCALES`
   // (no `typeof window` guard — matches the original app.js code, which never
   // needed one since app.js always ran somewhere `window` already existed).

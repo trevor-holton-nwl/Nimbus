@@ -40,8 +40,8 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Alerts` | `schedule-services.mjs` | Split: computation → schedule-services.mjs; drawer/bell/cell-briefing modal → app.js's AlertsUIAdapter. |
 | `Utilization` | `schedule-services.mjs` | |
 | `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; genuinely DOM-free after Phase 2 removed a checkbox-read fallback (see Task 3 Step 4). |
-| `Persistence` | `schedule-data.mjs` | `scheduleRepository` |
-| `CalendarSync` | `schedule-data.mjs` | `calendarRepository` |
+| `Persistence` | `schedule-data.mjs` | Migrated Phase 2 Task 4, name unchanged (no DOM half — pure backend fetch/localStorage cache). |
+| `CalendarSync` | `schedule-data.mjs` | Migrated Phase 2 Task 4, name unchanged (no DOM half — pure backend-authoritative calendar/blackout sync). |
 | `Session` | `schedule-data.mjs` | `session` API |
 | `Timeline` | `schedule-workbench.mjs` | vis-timeline instance stays private |
 | `Table` | `schedule-workbench.mjs` | AG Grid instance stays private |
@@ -220,8 +220,6 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Persistence` | `Store._state` | Phase 2 (schedule-data.mjs) |
-| `CalendarSync` | `Store._state` | Phase 2 (schedule-data.mjs) |
 | `Timeline` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `Hierarchy` | `Store._rev` | Phase 3 (schedule-workbench.mjs) |
 | `Dashboard` | `Store._rev`, `Store._state` | Phase 3 (schedule-workbench.mjs) |
@@ -262,6 +260,65 @@ fallback read `document.getElementById('chk-respect-fixed'/'chk-respect-calendar
 markup**, so the lookup always returned `null` and the `?? true` default
 always applied. The replacement (`opts.respectFixed ?? true`) reproduces
 that real runtime behavior exactly while making `Engine` genuinely DOM-free.
+
+**Persistence/CalendarSync's `_state` touches and the two real data→services
+seams (Phase 2 Task 4):** moving `Persistence` and `CalendarSync` into
+`schedule-data.mjs` closed both `_state` §6 rows. Every direct
+`Store._state.X` read/write inside the two modules was replaced with the
+equivalent public getter (`Store.blocks`, `Store.plantBlocks`, `Store.plants`,
+`Store.calendars`, `Store.lineSettings`, `Store.fixedIds`, `Store.tasks`,
+`Store.tasksArr`) mutated in place — preserving the exact same backing
+object's identity and therefore the exact same (lack of) event emissions —
+plus two small additions: a `Store.dependencies` getter (no prior public
+accessor existed for the dependency graph) and `Store.setMasterData(masterData,
+source)`, which bundles the `_state.masterData = {...}` write with the
+`rebuildPlantIndex()` + `master-data-changed` emit every one of its 3 call
+sites already repeated verbatim (mirroring `setLastOptimize`'s precedent from
+Task 3). Two wholesale-reassignment sites inside `CalendarSync._applyConfig`/
+`_fanOutLegacyGlobal{Line,Plant}Blocks` (`Store._state.blocks = kept` /
+`Store._state.plantBlocks = kept`) became in-place `length = 0; push(...)`
+rewrites instead of a `replaceBlocks`/`replacePlantBlocks` call, specifically
+to avoid firing an extra, previously-nonexistent `blocks:replace`/
+`plantBlocks:replace` event in the middle of a hydration pass that already
+emits its own `blocks:change`/`plantBlocks:change` right after — byte-for-byte
+event-sequence preservation took priority over reusing the wholesale-replace
+helper here.
+
+Research at the start of this task confirmed the design's assumed reverse
+dependency (`schedule-data.mjs` calling into `schedule-services.mjs`) is real
+in the pre-Phase-2 code, at two distinct call shapes, both resolved without a
+static import:
+- **`Persistence.setCalendarService({ beginRun, endRun, nextAvailable,
+  workWindow })`** — an injected-callback seam replacing 5 direct
+  `Calendar._beginRun`/`_endRun`/`nextAvailable`/`workWindow` calls inside
+  `Persistence._snapToWorkingHours`/`_dueEndOfShift`. Wired once in `app.js`
+  boot glue immediately after the `schedule-services.mjs` bridge destructure
+  resolves `Calendar`, using arrow-function wrappers (not bare method
+  references) since `Calendar`'s methods read `this._runCache`/`_runBlocks`
+  and must be invoked with `Calendar` as the receiver. Until wired (e.g. a
+  standalone unit test that imports `schedule-data.mjs` directly),
+  `_snapToWorkingHours` no-ops rather than throwing — snapping is skipped,
+  not the load.
+- **`{ type: 'schedule:hydrated', source }`** — a new `Store` event replacing
+  5 direct `Alerts.scheduleRecompute()` calls inside `Persistence.load()`'s
+  two branches, `_loadCache()`, and `_loadDemo()`. `schedule-services.mjs`
+  subscribes to it once (added right after `Alerts` in that file, since Task 2
+  already put `Alerts` there): `Store.subscribe(evt => { if (evt.type ===
+  'schedule:hydrated') Alerts.scheduleRecompute(); }, 'schedule-services.hydrated')`.
+  This is the "a post-commit event or a small public method" resolution the
+  approved design prescribes for exactly this situation — `schedule-data.mjs`
+  never imports `schedule-services.mjs`; it only emits a fact through `Store`,
+  which `schedule-services.mjs` (a legitimate importer of `schedule-state.mjs`)
+  is free to subscribe to.
+
+Both `CalendarSync._deferredHydrationPlant` (read/written by `app.js`'s
+`SandboxAdapter`) and `Persistence._dirtyIds`/`_forceIds`/`_autosave`/
+`_rememberedPlant` (read/written by `app.js`'s boot section) continued to
+resolve correctly against the now-imported objects with no code changes at
+those call sites — they were already real, intentional same-worktree
+cross-module reaches before this task, not `_state`-style leaks, and the
+`window.__NIMBUS_DATA` bridge destructure preserves the same bound
+identifiers those call sites already close over.
 
 `Store.mode()` now resolves the real `Sandbox.active` flag (Phase 1, Task 5):
 `Sandbox` is a sibling top-level export in `schedule-state.mjs`, so `mode()`
