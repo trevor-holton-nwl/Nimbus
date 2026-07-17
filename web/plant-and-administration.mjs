@@ -26,13 +26,21 @@
 // docs/architecture/cq1-compatibility-inventory.md §6. `LaborPlanning` itself
 // still has six direct `Store._state.masterData` *reads* that this task does
 // not close (not named in this task's scope; tracked as a new §6 row instead
-// of silently dropped — see the inventory). Interface/Security/AdminCockpit
-// (Task 3) have not moved yet as of this commit.
+// of silently dropped — see the inventory).
+// CQ-1 Phase 4 Task 3 moved Interface, Security, and AdminCockpit here
+// verbatim, no changes. Research confirmed Interface and Security are fully
+// self-contained (zero cross-references to any other of the 14 modules).
+// AdminCockpit's dispatch to `MasterData.render()`/`Interface.render()`/
+// `Security.render()` in `_setSub` is now a same-file bare reference (no
+// seam) — all three already lived behind the same __NIMBUS_PLANT_ADMIN
+// bridge destructure in app.js before this task, so nothing about those
+// call sites changes. AdminCockpit is by far the largest single module
+// moved in this migration (~2,260 lines).
 /* global NIMBUS */
-import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
-import { CalendarSync, Session } from './schedule-data.mjs';
+import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter } from './schedule-workbench.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
@@ -3439,4 +3447,3470 @@ export const MasterData = (() => {
   }
 
   return { render, syncLineSettings };
+})();
+
+/* =============================================================================
+   ADMIN COCKPIT — health bar, pipeline inspector, backend warnings,
+   filterable logs, upload, purge, and upload history.
+   ========================================================================== */
+export const AdminCockpit = {
+  _initialized: false,
+  _pendingFile: null,
+  _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '' },
+  _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '' },
+  _healthData: null,
+  _deepData: null,
+  _healthTimer: null,
+  _pipelineOpen: null,
+  _activeSub: 'overview',
+  _activeOvTab: 'diagnostics',
+  _dbDeepAbort: null,
+  _backendLogAbort: null,
+
+  gotoOvTab(tab) {
+    AdminCockpit._activeOvTab = tab;
+    document.querySelectorAll('.admin-ov-tabs .sub-subtab').forEach(b =>
+      b.classList.toggle('active', b.dataset.ovTab === tab));
+    ['diagnostics', 'data-ops', 'logs', 'thread'].forEach(t => {
+      const el = document.getElementById(`admin-ov-${t}`);
+      if (el) el.hidden = (t !== tab);
+    });
+    if (tab === 'thread') AdminCockpit._refreshThreadPane();
+  },
+
+  _setSub(sub) {
+    AdminCockpit._activeSub = sub;
+    document.querySelectorAll('.admin-subtab').forEach(b =>
+      b.classList.toggle('active', b.dataset.sub === sub));
+    const ov = document.getElementById('admin-overview-pane');
+    const mg = document.getElementById('admin-manage-pane');
+    const ifc = document.getElementById('admin-interface-pane');
+    const sec = document.getElementById('admin-security-pane');
+    if (ov) ov.hidden = (sub !== 'overview');
+    if (mg) mg.hidden = (sub !== 'manage');
+    if (ifc) ifc.hidden = (sub !== 'interface');
+    if (sec) sec.hidden = (sub !== 'security');
+    if (sub === 'manage') MasterData.render();
+    else if (sub === 'interface') Interface.render();
+    else if (sub === 'security') Security.render();
+    else AdminCockpit._renderOverview();
+  },
+
+  init() {
+    if (AdminCockpit._initialized) return;
+    AdminCockpit._initialized = true;
+
+    document.querySelectorAll('.admin-subtab').forEach(b =>
+      b.addEventListener('click', () => AdminCockpit._setSub(b.dataset.sub)));
+
+    // Upload zone — drag-drop + click-browse
+    const _uploadZone = document.getElementById('admin-upload-zone');
+    const _uploadFile = document.getElementById('admin-upload-file');
+    if (_uploadZone && _uploadFile) {
+      _uploadZone.onclick    = e => { if (e.target !== _uploadFile) _uploadFile.click(); };
+      _uploadZone.onkeydown  = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _uploadFile.click(); } };
+      _uploadFile.onchange   = () => { if (_uploadFile.files[0]) AdminCockpit._pickFile(_uploadFile.files[0]); };
+      _uploadZone.ondragover = e => { e.preventDefault(); _uploadZone.classList.add('drag-over'); };
+      _uploadZone.ondragleave= () => _uploadZone.classList.remove('drag-over');
+      _uploadZone.ondrop     = e => {
+        e.preventDefault();
+        _uploadZone.classList.remove('drag-over');
+        const f = e.dataTransfer.files[0];
+        if (f) AdminCockpit._pickFile(f);
+      };
+    }
+    document.getElementById('admin-upload-clear')?.addEventListener('click', AdminCockpit._clearUpload);
+    document.getElementById('admin-upload-btn')?.addEventListener('click', AdminCockpit._upload);
+    document.getElementById('admin-purge-btn')?.addEventListener('click', AdminCockpit._purge);
+
+    document.getElementById('admin-log-reload')?.addEventListener('click', () => Persistence.reload());
+    document.getElementById('admin-log-cache')?.addEventListener('click', () => Persistence.clearCache());
+    document.getElementById('admin-log-copy')?.addEventListener('click', () => ErrorLog.copy());
+    document.getElementById('admin-log-copy-filtered')?.addEventListener('click', () => AdminCockpit._copyFiltered());
+    document.getElementById('admin-log-clear')?.addEventListener('click', () => {
+      ErrorLog.clear();
+      AdminCockpit._renderLogs();
+    });
+
+    document.getElementById('admin-audit-reload')?.addEventListener('click', AdminCockpit._renderAudit);
+    document.getElementById('admin-audit-clear')?.addEventListener('click', AdminCockpit._clearAudit);
+    document.getElementById('admin-audit-log-reload')?.addEventListener('click', AdminCockpit._renderAuditLog);
+    document.getElementById('admin-audit-log-clear')?.addEventListener('click', AdminCockpit._clearAuditLog);
+    document.getElementById('admin-health-refresh')?.addEventListener('click', AdminCockpit._renderHealth);
+    document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
+    document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
+    document.getElementById('admin-db-deep')?.addEventListener('click', async e => {
+      const btn = e.target.closest('[data-maint-action]');
+      if (!btn) return;
+      const action = btn.dataset.maintAction;
+      const table  = btn.dataset.maintTable || null;
+      if (action === 'vacuum-analyze' && !table) {
+        const ok = await Modal.confirm({ title: Util.t('ui.maint_vacuum_all_confirm'), confirmLabel: Util.t('btn.run') });
+        if (!ok) return;
+      }
+      AdminCockpit._runMaintenance(action, table, btn);
+    });
+    document.getElementById('admin-backend-log-refresh')?.addEventListener('click', AdminCockpit._renderBackendLog);
+    document.getElementById('admin-backend-log-clear')?.addEventListener('click', AdminCockpit._clearBackendLog);
+    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', e => {
+      AdminCockpit._backendLogFilter.level = e.target.value;
+      AdminCockpit._renderBackendLog();
+    });
+
+    // Filter controls
+    document.getElementById('admin-log-filter-level')?.addEventListener('change', e => {
+      AdminCockpit._logFilter.level = e.target.value;
+      AdminCockpit._renderLogs();
+    });
+    document.getElementById('admin-log-filter-scope')?.addEventListener('change', e => {
+      AdminCockpit._logFilter.scope = e.target.value;
+      AdminCockpit._renderLogs();
+    });
+    document.getElementById('admin-log-search')?.addEventListener('input', e => {
+      AdminCockpit._logFilter.search = e.target.value.toLowerCase();
+      AdminCockpit._renderLogs();
+    });
+
+    ErrorLog.subscribe(() => {
+      const panel = document.getElementById('admin-tab');
+      if (panel?.classList.contains('active')) {
+        AdminCockpit._renderLogs();
+      }
+    });
+
+    document.getElementById('admin-thread-clear')?.addEventListener('click', () => {
+      PerfMonitor.clear();
+      AdminCockpit._refreshThreadPane();
+    });
+
+    PerfMonitor.subscribe(() => {
+      if (AdminCockpit._activeOvTab === 'thread') AdminCockpit._refreshThreadPane();
+    });
+
+    Store.subscribe(evt => {
+      if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
+        const panel = document.getElementById('admin-tab');
+        if (panel?.classList.contains('active')) {
+          // Defer so Persistence._lastLoad stats are fully written before rendering.
+          setTimeout(() => AdminCockpit._renderPipeline(), 50);
+        }
+      }
+    }, 'AdminCockpit');
+
+    document.addEventListener('mouseover', e => {
+      const el = e.target.closest?.('.adm-help');
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      el.style.setProperty('--tip-x', `${r.left + r.width / 2}px`);
+      el.style.setProperty('--tip-y', `${r.top}px`);
+    });
+  },
+
+  render() {
+    AdminCockpit._setSub('overview');
+    AdminCockpit._renderOverview();
+  },
+
+  _renderOverview() {
+    AdminCockpit._renderPurgeMeta();
+    AdminCockpit._renderHealth();
+    AdminCockpit._renderDiagnostics();
+    AdminCockpit._renderPipeline();
+    AdminCockpit._renderDbDeep();
+    AdminCockpit._renderBackendLog();
+    AdminCockpit._renderLogs();
+    AdminCockpit._renderAudit();
+    AdminCockpit._renderAuditLog();
+    AdminCockpit._startHealthPolling();
+  },
+
+  _startHealthPolling() {
+    if (AdminCockpit._healthTimer) return;
+    AdminCockpit._healthTimer = setInterval(() => {
+      if (document.getElementById('admin-tab')?.classList.contains('active')) {
+        AdminCockpit._renderHealth();
+      }
+    }, 30_000);
+  },
+
+  _stopHealthPolling() {
+    if (AdminCockpit._healthTimer) {
+      clearInterval(AdminCockpit._healthTimer);
+      AdminCockpit._healthTimer = null;
+    }
+  },
+
+  _renderHealth() {
+    AdminCockpit._healthAbort?.abort();
+    AdminCockpit._healthAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._healthAbort.signal, AbortSignal.timeout(6000)])
+      : AdminCockpit._healthAbort.signal;
+    Util.fetchTraced(`${Config.API_BASE}/health`, { signal: sig })
+      .then(r => r.json())
+      .then(data => {
+        AdminCockpit._healthData = data;
+        const db = data.db || {};
+        const mem = data.memory || {};
+        const cw = data.color_wheel || {};
+
+        const dbEl = document.getElementById('admin-health-db');
+        if (dbEl) {
+          const dot = dbEl.querySelector('.admin-health-dot');
+          const lbl = dbEl.querySelector('.admin-health-label');
+          const cls = !db.connected ? 'err' : db.ping_ms > 500 ? 'warn' : 'ok';
+          dot.className = `admin-health-dot ${cls}`;
+          lbl.textContent = db.connected
+            ? `DB ${db.ping_ms}ms`
+            : `DB offline${db.error ? ': ' + db.error.slice(0, 60) : ''}`;
+        }
+
+        const ordEl = document.getElementById('admin-health-orders');
+        if (ordEl) {
+          ordEl.querySelector('.admin-health-label').textContent =
+            `${(db.total_orders ?? 0).toLocaleString()} orders`;
+        }
+
+        const ovEl = document.getElementById('admin-health-overrides');
+        if (ovEl) {
+          ovEl.querySelector('.admin-health-label').textContent =
+            `${(db.user_overrides ?? 0).toLocaleString()} user overrides`;
+        }
+
+        const cwEl = document.getElementById('admin-health-color');
+        if (cwEl) {
+          const dot = cwEl.querySelector('.admin-health-dot');
+          const lbl = cwEl.querySelector('.admin-health-label');
+          const misses = cw.misses ?? 0;
+          dot.className = `admin-health-dot ${misses > 0 ? 'warn' : 'ok'}`;
+          lbl.textContent = misses > 0
+            ? Util.t('ui.color_wheel_miss', { count: misses, plural: misses === 1 ? '' : 'es' })
+            : Util.t('ui.color_wheel_all_matched');
+        }
+
+        const poolChip = document.getElementById('admin-health-pool');
+        if (poolChip) {
+          const pPool = data.pool || {};
+          const dot  = poolChip.querySelector('.admin-health-dot');
+          const plbl = poolChip.querySelector('.admin-health-label');
+          if (pPool.error) {
+            if (dot) dot.className = 'admin-health-dot warn';
+            if (plbl) plbl.textContent = Util.t('ui.pool_unavailable');
+          } else {
+            const used = (pPool.pool_size ?? 0) - (pPool.pool_available ?? 0);
+            const max  = pPool.pool_max || 1;
+            const pct  = Math.round(100 * used / max);
+            const cls  = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
+            if (dot) dot.className = `admin-health-dot ${cls}`;
+            if (plbl) plbl.textContent = `Pool ${used}/${max}`;
+          }
+        }
+
+        const ldEl = document.getElementById('admin-health-loaded');
+        if (ldEl) {
+          const lbl = ldEl.querySelector('.admin-health-label');
+          const loadedAt = mem.loaded_at ? new Date(mem.loaded_at) : null;
+          lbl.textContent = loadedAt
+            ? `Loaded ${AdminCockpit._relTime(loadedAt)}${mem.load_ms != null ? ' · ' + mem.load_ms + 'ms' : ''}`
+            : Util.t('ui.not_loaded');
+        }
+      })
+      .catch(e => {
+        const dbEl = document.getElementById('admin-health-db');
+        if (dbEl) {
+          const dot = dbEl.querySelector('.admin-health-dot');
+          const lbl = dbEl.querySelector('.admin-health-label');
+          dot.className = 'admin-health-dot err';
+          lbl.textContent = Util.t('ui.backend_unreachable');
+        }
+        if (e.name !== 'AbortError') ErrorLog.warn('admin', `Health check failed: ${e.message}`);
+      });
+  },
+
+  _renderPipeline() {
+    const wrap = document.getElementById('admin-pipeline');
+    if (!wrap) return;
+
+    AdminCockpit._pipelineAbort?.abort();
+    AdminCockpit._pipelineAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._pipelineAbort.signal, AbortSignal.timeout(8000)])
+      : AdminCockpit._pipelineAbort.signal;
+    Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep`, { signal: sig })
+      .then(r => r.json())
+      .then(data => {
+        AdminCockpit._deepData = data;
+        const p = data.pipeline || {};
+        const dbSt = data.db_stats || {};
+        const cw = data.color_wheel || {};
+        const st = Persistence.stats ? Persistence.stats() : {};
+
+        const rendered   = st.rendered ?? 0;
+        const rawDb      = p.raw_row_count ?? dbSt.total ?? 0;
+        const activePlant = st.plant ?? null;
+        // Color-merge stats come from the last /tasks response (per-request,
+        // plant-scoped) — not /diagnostics/deep, which holds load-time defaults.
+        const colorMiss  = st.color_merge_misses ?? 0;
+        // received = rows after both plant filter + color merge (what UI got)
+        const received   = st.raw_received ?? 0;
+        // Rows entering color merge = post-plant-filter count (= received + misses)
+        const preMerge   = st.pre_color_merge_count ?? (received + colorMiss);
+        // Rows removed by plant filter = raw - what entered color merge
+        const plantFiltered = activePlant ? Math.max(0, rawDb - preMerge) : 0;
+        const gap = received - rendered;
+
+        // Pipeline order: DB → [Plant filter if active] → Color Merge → Emitted → Rendered.
+        // Reordered (May 2026) so color-miss counts are plant-scoped — the merge
+        // now runs *after* the plant filter, against only the rows the user will see.
+        const steps = [
+          {
+            key: 'db',
+            label: 'DB Load',
+            count: rawDb,
+            delta: null,
+            status: p.dropped_no_start_date > 0 ? 'warn' : 'ok',
+            detail: () => AdminCockpit._pipelineDetailDB(p, dbSt),
+          },
+          ...(activePlant ? [{
+            key: 'plant-filter',
+            label: `Plant ${activePlant}`,
+            count: preMerge,
+            delta: plantFiltered > 0 ? `-${plantFiltered} (other plants)` : null,
+            status: 'ok',
+            detail: () => AdminCockpit._pipelineDetailPlantFilter(st, plantFiltered, rawDb),
+          }] : []),
+          {
+            key: 'color',
+            label: 'Color Merge',
+            count: received,
+            delta: colorMiss > 0 ? `-${colorMiss} miss${colorMiss === 1 ? '' : 'es'}` : null,
+            status: colorMiss > 0 ? 'warn' : 'ok',
+            detail: () => AdminCockpit._pipelineDetailColor(p, cw, st),
+          },
+          {
+            key: 'emitted',
+            label: 'Emitted',
+            count: received,
+            delta: null,
+            status: p.warnings?.length > 0 ? 'warn' : 'ok',
+            detail: () => AdminCockpit._pipelineDetailEmitted(p, st),
+          },
+          {
+            key: 'rendered',
+            label: 'Rendered',
+            count: rendered,
+            delta: gap > 0 ? `-${gap} gap` : null,
+            status: gap > 0 ? 'err' : 'ok',
+            detail: () => AdminCockpit._pipelineDetailRendered(st, p),
+          },
+        ];
+
+        wrap.textContent = '';
+        steps.forEach((s, i) => {
+          if (i > 0) {
+            const arrow = document.createElement('span');
+            arrow.className = 'admin-pipeline-arrow';
+            arrow.textContent = '→';
+            wrap.appendChild(arrow);
+          }
+          const box = document.createElement('div');
+          box.className = `admin-pipeline-step ${s.status}`;
+          box.dataset.key = s.key;
+
+          const cnt = document.createElement('div');
+          cnt.className = 'admin-pipeline-step-count';
+          cnt.textContent = s.count.toLocaleString();
+          box.appendChild(cnt);
+
+          const lbl = document.createElement('div');
+          lbl.className = 'admin-pipeline-step-label';
+          lbl.textContent = s.label;
+          box.appendChild(lbl);
+
+          if (s.delta) {
+            const delta = document.createElement('div');
+            delta.className = 'admin-pipeline-delta';
+            delta.textContent = s.delta;
+            box.appendChild(delta);
+          }
+
+          box.addEventListener('click', () => {
+            const detail = document.getElementById('admin-pipeline-detail');
+            if (!detail) return;
+            if (AdminCockpit._pipelineOpen === s.key) {
+              AdminCockpit._pipelineOpen = null;
+              detail.classList.remove('open');
+              detail.textContent = '';
+            } else {
+              AdminCockpit._pipelineOpen = s.key;
+              detail.classList.add('open');
+              detail.textContent = '';
+              detail.appendChild(s.detail());
+            }
+          });
+
+          wrap.appendChild(box);
+        });
+
+        // Backend warnings
+        AdminCockpit._renderBackendWarnings(p.warnings || []);
+      })
+      .catch(e => {
+        if (e.name === 'AbortError') return;
+        wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${e.message}</div>`;
+        ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
+      });
+  },
+
+  _pipelineDetailDB(p, dbSt) {
+    const frag = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'admin-pdtl-head';
+    head.textContent = Util.t('ui.db_load_details');
+    frag.appendChild(head);
+
+    const rows = [
+      [Util.t('ui.diag_total_in_db'), (dbSt.total ?? '—').toLocaleString()],
+      [Util.t('ui.diag_null_start_date'), dbSt.null_start ?? '—'],
+      [Util.t('ui.diag_null_end_date'), dbSt.null_end ?? '—'],
+      [Util.t('ui.diag_null_color'), dbSt.null_color ?? '—'],
+      [Util.t('ui.diag_null_line'), dbSt.null_line ?? '—'],
+      [Util.t('ui.diag_null_desc'), dbSt.null_desc ?? '—'],
+      [Util.t('ui.diag_null_runtime'), dbSt.null_runtime ?? '—'],
+      [Util.t('ui.diag_date_range_min'), dbSt.date_range?.min?.slice(0, 10) ?? '—'],
+      [Util.t('ui.diag_date_range_max'), dbSt.date_range?.max?.slice(0, 10) ?? '—'],
+      [Util.t('ui.diag_dropped_no_start'), p.dropped_no_start_date ?? 0],
+      [Util.t('ui.diag_load_time'), p.load_ms != null ? p.load_ms + ' ms' : '—'],
+    ];
+
+    if (dbSt.by_line && Object.keys(dbSt.by_line).length) {
+      const lbl = document.createElement('div');
+      lbl.className = 'admin-pdtl-sub';
+      lbl.textContent = Util.t('ui.orders_by_line');
+      frag.appendChild(AdminCockpit._kvTable(rows));
+      frag.appendChild(lbl);
+      frag.appendChild(AdminCockpit._lineBar(dbSt.by_line));
+      return frag;
+    }
+
+    frag.appendChild(AdminCockpit._kvTable(rows));
+    return frag;
+  },
+
+  _pipelineDetailColor(p, cw, st) {
+    const frag = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'admin-pdtl-head';
+    const scope = st?.plant ? ` (${Util.t('ui.plant_prefix')} ${st.plant})` : '';
+    head.textContent = Util.t('ui.color_wheel_details') + scope;
+    frag.appendChild(head);
+
+    // Misses are now plant-scoped — pulled from the last /tasks meta via Persistence stats.
+    const requestMiss = st?.color_merge_misses ?? 0;
+    const requestMissed = st?.missed_colors ?? [];
+    const requestMs = st?.backend_meta?.color_merge_ms;
+
+    const rows = [
+      [Util.t('ui.diag_scope'), st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant} only` : Util.t('ui.all_plants')],
+      [Util.t('ui.diag_rows_entering_merge'), st?.pre_color_merge_count ?? '—'],
+      [Util.t('ui.diag_global_wheel_colors'), cw.wheel_total ?? '—'],
+      [Util.t('ui.diag_matched_rows'), (st?.pre_color_merge_count ?? 0) - requestMiss],
+      [Util.t('ui.diag_missed_rows'), requestMiss],
+      [Util.t('ui.diag_merge_time'), requestMs != null ? requestMs + ' ms' : '—'],
+    ];
+    frag.appendChild(AdminCockpit._kvTable(rows));
+
+    if (requestMissed.length) {
+      const sub = document.createElement('div');
+      sub.className = 'admin-pdtl-sub';
+      sub.textContent = Util.t('ui.unmatched_colors', { count: requestMissed.length });
+      frag.appendChild(sub);
+      const chips = document.createElement('div');
+      chips.className = 'admin-pdtl-chips';
+      for (const c of requestMissed) {
+        const chip = document.createElement('span');
+        chip.className = 'admin-pdtl-chip warn';
+        chip.textContent = c;
+        chips.appendChild(chip);
+      }
+      frag.appendChild(chips);
+    } else {
+      const ok = document.createElement('div');
+      ok.className = 'admin-pdtl-ok';
+      ok.textContent = Util.t('empty.no_colors_matched');
+      frag.appendChild(ok);
+    }
+    return frag;
+  },
+
+  _pipelineDetailEmitted(p, st) {
+    const frag = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'admin-pdtl-head';
+    head.textContent = Util.t('ui.emitted_details');
+    frag.appendChild(head);
+
+    const scopeLbl = st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant}` : Util.t('ui.all_plants');
+    const rows = [
+      [Util.t('ui.diag_raw_from_db'), p.raw_row_count ?? '—'],
+      [Util.t('ui.diag_dropped_no_start'), p.dropped_no_start_date ?? 0],
+      [Util.t('ui.diag_active_scope'), scopeLbl],
+      [Util.t('ui.diag_rows_entering_cmerge'), st?.pre_color_merge_count ?? '—'],
+      [Util.t('ui.diag_color_merge_misses'), st?.color_merge_misses ?? 0],
+      [Util.t('ui.diag_emitted'), st?.raw_received ?? '—'],
+      [Util.t('ui.diag_unique_ids'), p.unique_id_count ?? '—'],
+      [Util.t('ui.diag_loaded_at'), p.loaded_at ? p.loaded_at.replace('T', ' ').slice(0, 19) + ' UTC' : '—'],
+    ];
+    frag.appendChild(AdminCockpit._kvTable(rows));
+
+    const warnings = p.warnings || [];
+    if (warnings.length) {
+      const sub = document.createElement('div');
+      sub.className = 'admin-pdtl-sub';
+      sub.textContent = Util.t('ui.diag_backend_load_warnings', { count: warnings.length });
+      frag.appendChild(sub);
+      frag.appendChild(AdminCockpit._warningList(warnings));
+    }
+    return frag;
+  },
+
+  _pipelineDetailPlantFilter(st, plantFiltered, rawDb) {
+    const frag = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'admin-pdtl-head';
+    head.textContent = Util.t('ui.plant_filter_details');
+    frag.appendChild(head);
+
+    // Pipeline order is now: DB → Plant filter → Color merge → Emitted.
+    // The pre-merge count here is what reaches the color merge stage.
+    const preMerge = st?.pre_color_merge_count ?? 0;
+    const rows = [
+      [Util.t('ui.diag_active_plant'), st.plant ?? '—'],
+      [Util.t('ui.diag_raw_rows_from_db'), rawDb ?? '—'],
+      [Util.t('ui.diag_rows_this_plant'), preMerge],
+      [Util.t('ui.diag_other_plant_excluded'), plantFiltered],
+      [Util.t('ui.diag_final_emitted'), st.raw_received ?? '—'],
+    ];
+    frag.appendChild(AdminCockpit._kvTable(rows));
+    return frag;
+  },
+
+  _pipelineDetailRendered(st, p) {
+    const frag = document.createDocumentFragment();
+    const head = document.createElement('div');
+    head.className = 'admin-pdtl-head';
+    head.textContent = Util.t('ui.rendering_details');
+    frag.appendChild(head);
+
+    // Gap is measured from received (post-plant-filter) so plant filtering does not
+    // look like data loss here.
+    const received = st.raw_received ?? 0;
+    const rendered = st.rendered ?? 0;
+    const gap = received - rendered;
+    const rows = [
+      [Util.t('ui.diag_received_by_ui'), received],
+      [Util.t('ui.diag_pl_filtered'), st.filtered_pl ?? 0],
+      [Util.t('ui.diag_null_id_dropped'), st.filtered_null_id ?? 0],
+      [Util.t('ui.diag_store_collisions'), st.dedup_collisions ?? 0],
+      [Util.t('ui.diag_rendered'), rendered],
+      [Util.t('ui.diag_gap'), gap],
+      [Util.t('ui.diag_source'), st.source ?? '—'],
+    ];
+    frag.appendChild(AdminCockpit._kvTable(rows));
+
+    if (gap > 0) {
+      const warn = document.createElement('div');
+      warn.className = 'admin-pdtl-warn';
+      warn.textContent = Util.t('ui.data_gap_warn', { count: gap });
+      frag.appendChild(warn);
+    }
+    return frag;
+  },
+
+  _kvTable(rows) {
+    const tbl = document.createElement('table');
+    tbl.className = 'admin-pdtl-tbl';
+    for (const [k, v] of rows) {
+      const tr = document.createElement('tr');
+      const tdK = document.createElement('td');
+      tdK.className = 'admin-pdtl-key';
+      tdK.textContent = k;
+      const tdV = document.createElement('td');
+      tdV.className = 'admin-pdtl-val';
+      tdV.textContent = String(v ?? '—');
+      tr.appendChild(tdK);
+      tr.appendChild(tdV);
+      tbl.appendChild(tr);
+    }
+    return tbl;
+  },
+
+  _lineBar(byLine) {
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-pdtl-linebars';
+    const max = Math.max(...Object.values(byLine));
+    for (const [line, cnt] of Object.entries(byLine)) {
+      const row = document.createElement('div');
+      row.className = 'admin-pdtl-linebar-row';
+      const lbl = document.createElement('span');
+      lbl.className = 'admin-pdtl-linebar-lbl';
+      lbl.textContent = line;
+      const bar = document.createElement('div');
+      bar.className = 'admin-pdtl-linebar-track';
+      const fill = document.createElement('div');
+      fill.className = 'admin-pdtl-linebar-fill';
+      fill.style.width = `${Math.round((cnt / max) * 100)}%`;
+      const num = document.createElement('span');
+      num.className = 'admin-pdtl-linebar-num';
+      num.textContent = cnt;
+      bar.appendChild(fill);
+      row.appendChild(lbl);
+      row.appendChild(bar);
+      row.appendChild(num);
+      wrap.appendChild(row);
+    }
+    return wrap;
+  },
+
+  _warningList(warnings) {
+    const ul = document.createElement('div');
+    ul.className = 'admin-bwarn-list';
+    for (const w of warnings) {
+      const row = document.createElement('div');
+      row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
+      const lvl = document.createElement('span');
+      lvl.className = 'admin-bwarn-lvl';
+      lvl.textContent = (w.level || 'warn').toUpperCase();
+      const msg = document.createElement('span');
+      msg.className = 'admin-bwarn-msg';
+      msg.textContent = w.msg || '';
+      row.appendChild(lvl);
+      row.appendChild(msg);
+      ul.appendChild(row);
+    }
+    return ul;
+  },
+
+  _renderBackendWarnings(warnings) {
+    const host = document.getElementById('admin-backend-warnings');
+    const countEl = document.getElementById('admin-bwarn-count');
+    if (!host) return;
+    host.textContent = '';
+    if (countEl) countEl.textContent = Util.t('ui.bwarn_count', { count: warnings.length });
+
+    if (!warnings.length) {
+      const ok = document.createElement('div');
+      ok.className = 'admin-bwarn-empty';
+      ok.textContent = Util.t('empty.no_backend_warnings');
+      host.appendChild(ok);
+      return;
+    }
+
+    for (const w of warnings) {
+      const row = document.createElement('div');
+      row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
+      row.style.cursor = w.context && Object.keys(w.context).length ? 'pointer' : '';
+
+      const meta = document.createElement('div');
+      meta.className = 'admin-bwarn-meta';
+      const lvl = document.createElement('span');
+      lvl.className = 'admin-bwarn-lvl';
+      lvl.textContent = (w.level || 'warn').toUpperCase();
+      const ts = document.createElement('span');
+      ts.className = 'admin-bwarn-ts';
+      ts.textContent = w.ts ? w.ts.replace('T', ' ').slice(0, 19) + ' UTC' : '';
+      meta.appendChild(lvl);
+      meta.appendChild(ts);
+
+      const msg = document.createElement('div');
+      msg.className = 'admin-bwarn-msg';
+      msg.textContent = w.msg || '';
+
+      row.appendChild(meta);
+      row.appendChild(msg);
+
+      if (w.context && Object.keys(w.context).length) {
+        const pre = document.createElement('pre');
+        pre.className = 'admin-bwarn-ctx';
+        pre.style.display = 'none';
+        pre.textContent = JSON.stringify(w.context, null, 2);
+        row.appendChild(pre);
+        row.addEventListener('click', () => {
+          pre.style.display = pre.style.display === 'none' ? '' : 'none';
+        });
+      }
+
+      host.appendChild(row);
+    }
+  },
+
+  _updatePurgeCount() {
+    const start = AdminCockpit._fpPurgeStart?.selectedDates[0];
+    const end   = AdminCockpit._fpPurgeEnd?.selectedDates[0];
+    const el    = document.getElementById('admin-past-count');
+    if (!el) return;
+    if (!start || !end) { el.textContent = ''; return; }
+    const endOfDay = new Date(end); endOfDay.setHours(23, 59, 59, 999);
+    const count = (Store.tasksArr || []).filter(t => t.end_date && t.end_date >= start && t.end_date <= endOfDay).length;
+    el.innerHTML = count > 0
+      ? `<strong style="color:var(--err,#c0392b)">${Util.t('ui.orders_in_range', {count, plural: count === 1 ? '' : 's'})}</strong>`
+      : `<span style="color:var(--text-muted,#888)">${Util.t('ui.orders_in_range', {count: 0, plural: 's'})}</span>`;
+  },
+
+  _renderPurgeMeta() {
+    const yesterday   = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+    if (!AdminCockpit._fpPurgeStart) {
+      AdminCockpit._fpPurgeStart = flatpickr('#admin-purge-start', {
+        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        onChange: () => AdminCockpit._updatePurgeCount(),
+      });
+      AdminCockpit._fpPurgeEnd = flatpickr('#admin-purge-end', {
+        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        onChange: () => AdminCockpit._updatePurgeCount(),
+      });
+    }
+    AdminCockpit._fpPurgeStart.setDate(twoWeeksAgo, false);
+    AdminCockpit._fpPurgeEnd.setDate(yesterday, false);
+    AdminCockpit._updatePurgeCount();
+  },
+
+  _setStatus(el, text, kind) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'admin-status' + (kind ? ' ' + kind : '');
+  },
+
+  _pickFile(file) {
+    if (!file) return;
+    AdminCockpit._pendingFile = file;
+    document.getElementById('admin-upload-info').hidden = false;
+    document.getElementById('admin-upload-actions').hidden = false;
+    document.getElementById('admin-upload-fname').textContent = file.name;
+    document.getElementById('admin-upload-fsize').textContent =
+      file.size < 1_048_576
+        ? `${(file.size / 1024).toFixed(1)} KB`
+        : `${(file.size / 1_048_576).toFixed(1)} MB`;
+    const status = document.getElementById('admin-upload-status');
+    if (status) { status.textContent = ''; status.className = 'admin-status'; }
+  },
+
+  _clearUpload() {
+    AdminCockpit._pendingFile = null;
+    const fi = document.getElementById('admin-upload-file');
+    if (fi) fi.value = '';
+    const info    = document.getElementById('admin-upload-info');
+    const actions = document.getElementById('admin-upload-actions');
+    const status  = document.getElementById('admin-upload-status');
+    if (info)    info.hidden = true;
+    if (actions) actions.hidden = true;
+    if (status)  { status.textContent = ''; status.className = 'admin-status'; }
+  },
+
+  _upload() {
+    const f      = AdminCockpit._pendingFile;
+    const status = document.getElementById('admin-upload-status');
+    const zone   = document.getElementById('admin-upload-zone');
+    const btn    = document.getElementById('admin-upload-btn');
+    if (!f) {
+      AdminCockpit._setStatus(status, Util.t('toast.pick_xlsx_first'), 'warn');
+      return;
+    }
+    if (zone) zone.classList.add('uploading');
+    if (btn)  btn.disabled = true;
+    AdminCockpit._setStatus(status, Util.t('toast.uploading_file', { name: f.name }), 'info');
+    const fd = new FormData();
+    fd.append('file', f);
+    const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    Util.fetchTraced(`${Config.API_BASE}/upload`, { method: 'POST', body: fd, headers: { 'x-request-id': reqId } })
+      .then(r => r.json().catch(() => ({})).then(j => ({ ok: r.ok, body: j })))
+      .then(({ ok, body }) => {
+        if (zone) zone.classList.remove('uploading');
+        if (btn)  btn.disabled = false;
+        if (!ok || body.status !== 'ok') {
+          const msg = body?.message || body?.detail || 'HTTP error';
+          AdminCockpit._setStatus(status, Util.t('toast.upload_failed', { msg }), 'error');
+          ErrorLog.error('admin', `Upload failed: ${msg}`, body,
+            { reqId, errorCode: body?.error_code || 'http.status' });
+          return;
+        }
+        const warnCount = body.warnings?.length ?? 0;
+        const w = warnCount ? ` (${warnCount} warning${warnCount === 1 ? '' : 's'})` : '';
+        AdminCockpit._setStatus(
+          status,
+          `✓ Inserted ${body.inserted}, updated ${body.updated} of ${body.raw_row_count} rows${w}`,
+          'success'
+        );
+        ErrorLog.info('admin',
+          `Upload OK: inserted=${body.inserted} updated=${body.updated} batch=${body.batch_id}`, body);
+        if (warnCount) {
+          ErrorLog.warn('admin', `Upload had ${warnCount} warning(s)`, body.warnings);
+        }
+        Toast.show(Util.t('toast.upload_ok', { count: body.inserted + body.updated }), 'success');
+        setTimeout(() => AdminCockpit._clearUpload(), 2000);
+        Persistence.reload().then(() => {
+          AdminCockpit._renderHealth();
+          AdminCockpit._renderPipeline();
+        });
+        AdminCockpit._renderAudit();
+      })
+      .catch(e => {
+        if (zone) zone.classList.remove('uploading');
+        if (btn)  btn.disabled = false;
+        AdminCockpit._setStatus(status, Util.t('toast.upload_failed', { msg: e.message }), 'error');
+        ErrorLog.error('admin', `Upload network error: ${e.message}`,
+          { reqId }, { reqId, errorCode: 'http.network' });
+      });
+  },
+
+  async _purge() {
+    const startEl = document.getElementById('admin-purge-start');
+    const endEl   = document.getElementById('admin-purge-end');
+    const status  = document.getElementById('admin-purge-status');
+    const start = startEl?.value;
+    const end   = endEl?.value;
+    if (!start || !end) {
+      AdminCockpit._setStatus(status, Util.t('toast.pick_purge_dates'), 'warn');
+      return;
+    }
+    if (start > end) {
+      AdminCockpit._setStatus(status, Util.t('toast.purge_start_before_end'), 'warn');
+      return;
+    }
+    const ok = await Modal.confirm({ title: Util.t('modal.purge_confirm', { start, end }), confirmLabel: Util.t('btn.yes_delete') });
+    if (!ok) return;
+
+    AdminCockpit._setStatus(status, Util.t('toast.purging', { start, end }), 'info');
+    const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    Util.fetchTraced(`${Config.API_BASE}/purge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
+      body: JSON.stringify({ start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
+    })
+      .then(r => r.json().catch(() => ({})))
+      .then(body => {
+        if (body.status !== 'ok') {
+          AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: body.message || body.detail || 'unknown' }), 'error');
+          ErrorLog.error('admin', `Purge failed: ${body.message || body.detail || 'unknown'}`, body,
+            { reqId, errorCode: body?.error_code || 'http.status' });
+          return;
+        }
+        AdminCockpit._setStatus(status, `✓ Deleted ${body.deleted} order${body.deleted === 1 ? '' : 's'}`, 'success');
+        ErrorLog.info('admin', `Purge: deleted ${body.deleted} (${start} → ${end})`);
+        Toast.show(Util.t('toast.purge_ok', { count: body.deleted }), 'success');
+        Persistence.reload().then(() => {
+          AdminCockpit._renderHealth();
+          AdminCockpit._renderPipeline();
+        });
+      })
+      .catch(e => {
+        AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: e.message }), 'error');
+        ErrorLog.error('admin', `Purge network error: ${e.message}`,
+          { reqId }, { reqId, errorCode: 'http.network' });
+      });
+  },
+
+  async _runMaintenance(action, table, triggerBtn) {
+    const label = triggerBtn ? triggerBtn.textContent : action;
+    if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = Util.t('ui.maint_running'); }
+    const body = table ? { table } : {};
+    try {
+      const r = await fetch(`${Config.API_BASE}/maintenance/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(res => res.json());
+      if (!r.ok) throw new Error(r.error || 'maintenance failed');
+      Toast.show(Util.t('ui.maint_done', { label }), 'success');
+      ErrorLog.info('admin', `Maintenance: ${action} ${table || '(all)'} ok`);
+      AdminCockpit._renderDbDeep();
+    } catch (e) {
+      Toast.show(Util.t('ui.maint_failed', { label, msg: e.message }), 'error');
+      ErrorLog.error('admin', `Maintenance: ${action} ${table || '(all)'} failed: ${e.message}`);
+      if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = label; }
+    }
+  },
+
+  /* FE↔BE correlation: clicking a reqId pins it as a filter on BOTH panes and
+     refreshes them so the operator sees the matching frontend + backend events. */
+  _correlateReqId(reqId) {
+    if (!reqId) return;
+    AdminCockpit._logFilter.reqId        = reqId;
+    AdminCockpit._backendLogFilter.reqId = reqId;
+    AdminCockpit._renderLogs();
+    AdminCockpit._renderBackendLog();
+  },
+
+  /* Render (or clear) a small "filtering by request <id>" chip at the top of a
+     log list. `onClear` removes the filter. Self-contained: builds the chip if
+     a reqId is set, removes any prior chip otherwise. */
+  _renderReqIdChip(listId, reqId, onClear) {
+    const list = document.getElementById(listId);
+    if (!list || !list.parentElement) return;
+    const chipId = `${listId}-reqid-chip`;
+    let chip = document.getElementById(chipId);
+    if (!reqId) { if (chip) chip.remove(); return; }
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.id = chipId;
+      chip.className = 'admin-log-reqid-chip';
+      list.parentElement.insertBefore(chip, list);
+    }
+    chip.textContent = '';
+    const label = document.createElement('span');
+    label.textContent = `req ${String(reqId).slice(0, 8)}…`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'admin-log-reqid-chip-x';
+    x.textContent = '✕';
+    x.title = 'Clear request filter';
+    x.addEventListener('click', () => { onClear(); });
+    chip.appendChild(document.createTextNode('Filtering: '));
+    chip.appendChild(label);
+    chip.appendChild(x);
+  },
+
+  _getFilteredEntries() {
+    const { level, scope, search, errorCode, reqId } = AdminCockpit._logFilter;
+    return ErrorLog.entries().filter(e => {
+      if (level !== 'all' && e.level !== level) return false;
+      if (scope !== 'all' && e.scope !== scope) return false;
+      if (errorCode && errorCode !== 'all' && e.errorCode !== errorCode) return false;
+      if (reqId && e.reqId !== reqId) return false;
+      if (search) {
+        const haystack = `${e.scope} ${e.msg} ${e.ts} ${e.errorCode || ''} ${e.reqId || ''}`.toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+  },
+
+  /* -----------------------------------------------------------------------
+     DB DEEP DIVE — fetches /diagnostics/db on demand, renders sections
+     ----------------------------------------------------------------------- */
+  _renderDbDeep() {
+    const wrap = document.getElementById('admin-db-deep');
+    if (!wrap) return;
+    wrap.innerHTML = `<div class="admin-db-loading">${Util.t('ui.diag_loading')}</div>`;
+
+    AdminCockpit._dbDeepAbort?.abort();
+    AdminCockpit._dbDeepAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._dbDeepAbort.signal, AbortSignal.timeout(12000)])
+      : AdminCockpit._dbDeepAbort.signal;
+
+    Util.fetchTraced(`${Config.API_BASE}/diagnostics/db`, { signal: sig })
+      .then(r => r.json())
+      .then(d => {
+        wrap.textContent = '';
+
+        // ── Top: summary tiles strip ──────────────────────────────────────────────
+        AdminCockpit._dbSummaryStrip(d, wrap);
+
+        if (d.fetched_at) {
+          const tsEl = document.createElement('div');
+          tsEl.className = 'admin-db-fetched';
+          tsEl.textContent = Util.t('ui.diag_last_refreshed', { time: AdminCockpit._relTime(new Date(d.fetched_at)) });
+          wrap.appendChild(tsEl);
+        }
+
+        const mkSection = (title, statusCls, buildFn, openByDefault, helpText) => {
+          const det = document.createElement('details');
+          det.className = 'admin-db-section';
+          if (openByDefault) det.open = true;
+          const sum = document.createElement('summary');
+          sum.className = 'admin-db-section-sum';
+          const dot = document.createElement('span');
+          dot.className = `admin-health-dot ${statusCls}`;
+          const ttl = document.createElement('span');
+          ttl.className = 'admin-db-section-title';
+          ttl.textContent = title;
+          sum.appendChild(dot);
+          sum.appendChild(ttl);
+          if (helpText) {
+            const hEl = document.createElement('span');
+            hEl.className = 'adm-help';
+            hEl.tabIndex = 0;
+            hEl.setAttribute('aria-label', Util.t('aria.help'));
+            hEl.addEventListener('click', e => e.stopPropagation());
+            const hDot = document.createElement('span');
+            hDot.className = 'adm-help-dot';
+            hDot.textContent = '?';
+            const hTip = document.createElement('span');
+            hTip.className = 'adm-help-tip';
+            hTip.textContent = helpText;
+            hEl.appendChild(hDot);
+            hEl.appendChild(hTip);
+            sum.appendChild(hEl);
+          }
+          det.appendChild(sum);
+          const body = document.createElement('div');
+          body.className = 'admin-db-section-body';
+          buildFn(body);
+          det.appendChild(body);
+          wrap.appendChild(det);
+        };
+
+        // ── 1. Connection Pool
+        const pool = d.pool || {};
+        const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
+        const poolMax  = pool.pool_max || 1;
+        const poolSt   = pool.error ? 'err' : (pool.requests_waiting > 0 || pool.requests_errors > 0 ? 'warn' : 'ok');
+        mkSection(Util.t('ui.diag_section_pool'), poolSt, body => {
+          if (pool.error) { body.textContent = pool.error; return; }
+          body.appendChild(AdminCockpit._dbFillBar(poolUsed, poolMax, Util.t('ui.diag_pool_utilization')));
+          body.appendChild(AdminCockpit._kvTable([
+            [Util.t('ui.diag_pool_min_max'),         `${pool.pool_min ?? '—'} / ${pool.pool_max ?? '—'}`],
+            [Util.t('ui.diag_pool_in_use'),           `${poolUsed} / ${pool.pool_available ?? '—'}`],
+            [Util.t('ui.diag_requests_waiting'),      pool.requests_waiting ?? 0],
+            [Util.t('ui.diag_requests_completed'),    (pool.requests_completed ?? 0).toLocaleString()],
+            [Util.t('ui.diag_request_errors'),        pool.requests_errors ?? 0],
+            [Util.t('ui.diag_bad_returns'),           pool.returns_bad ?? 0],
+          ]));
+          if (pool.requests_waiting > 0)
+            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_queued', { count: pool.requests_waiting }));
+          if (pool.requests_errors > 0)
+            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_errors', { count: pool.requests_errors }), true);
+        }, true, Util.t('ui.diag_desc_pool'));
+
+        // ── 2. Server Info
+        const srv = d.server || {};
+        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', body => {
+          if (srv.error) { body.textContent = srv.error; return; }
+          body.appendChild(AdminCockpit._kvTable([
+            [Util.t('ui.diag_database'),        srv.database ?? '—'],
+            [Util.t('ui.diag_database_size'),   srv.db_size   ?? '—'],
+            [Util.t('ui.diag_max_connections'), srv.max_connections ?? '—'],
+            [Util.t('ui.diag_up_since'),        srv.started_at ? AdminCockpit._relTime(new Date(srv.started_at)) : '—'],
+            [Util.t('ui.diag_version'),         (srv.version || '').split(' (')[0]],
+          ]));
+        }, true, Util.t('ui.diag_desc_server'));
+
+        // ── 3. Table Health
+        const tables = Array.isArray(d.tables) ? d.tables : [];
+        const hasTableErr = tables[0]?.error;
+        const tablesNeedWork = !hasTableErr && tables.some(t => t.needs_vacuum || t.needs_analyze);
+        mkSection(Util.t('ui.diag_section_table_health', { count: hasTableErr ? '?' : tables.length }),
+            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), body => {
+          if (hasTableErr) { body.textContent = tables[0].error; return; }
+          if (!tables.length) { body.textContent = Util.t('empty.no_user_tables'); return; }
+          const strip = document.createElement('div');
+          strip.className = 'db-maint-strip';
+          const vacAllBtn = document.createElement('button');
+          vacAllBtn.className = 'db-maint-global-btn';
+          vacAllBtn.dataset.maintAction = 'vacuum-analyze';
+          vacAllBtn.dataset.maintTable = '';
+          vacAllBtn.textContent = Util.t('ui.maint_vacuum_all');
+          strip.appendChild(vacAllBtn);
+          body.appendChild(strip);
+          body.appendChild(AdminCockpit._dbTableCards(tables));
+        }, false, Util.t('ui.diag_desc_table_health'));
+
+        // ── 4. Active Connections
+        const conn = d.connections || {};
+        const hasLong = (conn.long_running || []).length > 0;
+        mkSection(Util.t('ui.diag_section_connections', { count: conn.total ?? '?' }),
+            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), body => {
+          if (conn.error) { body.textContent = conn.error; return; }
+          body.appendChild(AdminCockpit._dbStackBar(conn.by_state || {}));
+          if (hasLong) {
+            const sub = document.createElement('div');
+            sub.className = 'admin-pdtl-sub';
+            sub.textContent = Util.t('ui.non_idle_queries');
+            body.appendChild(sub);
+            body.appendChild(AdminCockpit._dbTable(
+              ['PID', 'State', 'Dur (s)', 'Wait event', 'Query'],
+              (conn.long_running || []).map(q => ({
+                cells: [q.pid, q.state || '—', q.duration_s ?? '—', q.wait_event || '—', (q.query || '').slice(0, 120)],
+                rowWarn: (q.duration_s || 0) > 30,
+                cellWarn: [],
+              }))
+            ));
+          }
+        }, false, Util.t('ui.diag_desc_connections'));
+
+        // ── 5. Lock Waits
+        const locks = Array.isArray(d.locks) ? d.locks : [];
+        const hasLockErr = locks[0]?.error;
+        const activeLocks = !hasLockErr && locks.length > 0;
+        mkSection(Util.t('ui.diag_section_lock_waits', { count: hasLockErr ? '?' : locks.length }),
+            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), body => {
+          if (hasLockErr) { body.textContent = locks[0].error; return; }
+          if (!activeLocks) {
+            const ok = document.createElement('div');
+            ok.className = 'admin-db-ok-msg';
+            ok.textContent = Util.t('empty.no_lock_contention');
+            body.appendChild(ok);
+            return;
+          }
+          AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_blocking_locks', { count: locks.length }), true);
+          body.appendChild(AdminCockpit._dbLockChain(locks));
+        }, false, Util.t('ui.diag_desc_lock_waits'));
+
+        // ── 6. Index Usage
+        const indexes = Array.isArray(d.indexes) ? d.indexes : [];
+        const hasIdxErr = indexes[0]?.error;
+        const unusedCount = !hasIdxErr ? indexes.filter(ix => ix.unused).length : 0;
+        mkSection(unusedCount
+            ? Util.t('ui.diag_section_index_unused', { count: hasIdxErr ? '?' : indexes.length, unused: unusedCount })
+            : Util.t('ui.diag_section_index_usage', { count: hasIdxErr ? '?' : indexes.length }),
+            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), body => {
+          if (hasIdxErr) { body.textContent = indexes[0].error; return; }
+          if (!indexes.length) { body.textContent = Util.t('empty.no_indexes'); return; }
+          if (unusedCount > 0)
+            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_unused_indexes_warn', { count: unusedCount }));
+          body.appendChild(AdminCockpit._dbHBarChart(indexes));
+        }, false, Util.t('ui.diag_desc_index_usage'));
+
+        // ── 7. Slow Queries
+        const sq = d.slow_queries || {};
+        mkSection(Util.t('ui.diag_section_slow_queries'),
+            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), body => {
+          if (!sq.available) {
+            const msg = document.createElement('div');
+            msg.className = 'admin-db-na-msg';
+            msg.textContent = sq.error
+              ? `Error: ${sq.error}`
+              : Util.t('ui.diag_pg_stat_missing');
+            body.appendChild(msg);
+            return;
+          }
+          if (!(sq.queries || []).length) {
+            const ok = document.createElement('div');
+            ok.className = 'admin-db-ok-msg';
+            ok.textContent = Util.t('empty.no_queries_yet');
+            body.appendChild(ok);
+            return;
+          }
+          body.appendChild(AdminCockpit._dbSlowQueryBars(sq.queries));
+        }, false, Util.t('ui.diag_desc_slow_queries'));
+
+        // ── 8. Sequences
+        const seqs = Array.isArray(d.sequences) ? d.sequences : [];
+        const hasSeqErr = seqs[0]?.error;
+        const seqIssues = !hasSeqErr ? seqs.filter(s => s.status !== 'ok').length : 0;
+        mkSection(Util.t('ui.diag_section_sequences', { count: hasSeqErr ? '?' : seqs.length }),
+            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), body => {
+          if (hasSeqErr) { body.textContent = seqs[0].error; return; }
+          if (!seqs.length) { body.textContent = Util.t('empty.no_sequences'); return; }
+          body.appendChild(AdminCockpit._dbProgressBars(seqs));
+        }, false, Util.t('ui.diag_desc_sequences'));
+      })
+      .catch(e => {
+        if (e.name === 'AbortError') return;
+        wrap.textContent = '';
+        const err = document.createElement('div');
+        err.className = 'admin-db-error';
+        err.textContent = Util.t('ui.failed_load_db_diag', { error: e.message });
+        wrap.appendChild(err);
+        ErrorLog.warn('admin', `DB deep dive failed: ${e.message}`);
+      });
+  },
+
+  /* -----------------------------------------------------------------------
+     DB visual helpers
+     ----------------------------------------------------------------------- */
+
+  _dbSummaryStrip(d, wrap) {
+    const strip = document.createElement('div');
+    strip.className = 'admin-db-summary';
+    const mkTile = (label, num, sub, status, extra) => {
+      const tile = document.createElement('div');
+      tile.className = `admin-db-stat-tile ${status}`;
+      const top = document.createElement('div');
+      top.className = 'admin-db-stat-tile-top';
+      const dot = document.createElement('span');
+      dot.className = `admin-health-dot ${status}`;
+      const lbl = document.createElement('span');
+      lbl.className = 'admin-db-stat-tile-lbl';
+      lbl.textContent = label;
+      top.appendChild(dot); top.appendChild(lbl);
+      tile.appendChild(top);
+      const numEl = document.createElement('div');
+      numEl.className = 'admin-db-stat-tile-num';
+      numEl.innerHTML = num;
+      tile.appendChild(numEl);
+      if (extra) tile.appendChild(extra);
+      if (sub) {
+        const subEl = document.createElement('div');
+        subEl.className = 'admin-db-stat-tile-sub';
+        subEl.textContent = sub;
+        tile.appendChild(subEl);
+      }
+      return tile;
+    };
+    const pool = d.pool || {};
+    const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
+    const poolMax  = pool.pool_max || 1;
+    const poolPct  = Math.round(100 * poolUsed / poolMax);
+    const poolSt   = pool.error ? 'err' : (poolPct >= 85 || (pool.requests_waiting ?? 0) > 0 ? 'warn' : 'ok');
+    strip.appendChild(mkTile(Util.t('ui.diag_tile_pool'),
+      `${poolUsed}<span style="font-size:14px;font-weight:400;color:var(--fg-mute)">/${poolMax}</span>`,
+      Util.t('ui.diag_tile_pct_utilized', {pct: poolPct}), poolSt,
+      pool.error ? null : AdminCockpit._dbFillBar(poolUsed, poolMax, null)));
+    const conn = d.connections || {};
+    const activeConn = (conn.by_state || {})['active'] ?? 0;
+    strip.appendChild(mkTile(Util.t('ui.diag_tile_sessions'), String(conn.total ?? '—'), Util.t('ui.diag_tile_active', {count: activeConn}),
+      conn.error ? 'err' : ((conn.long_running || []).length > 0 ? 'warn' : 'ok'), null));
+    const locks = Array.isArray(d.locks) && !d.locks[0]?.error ? d.locks : [];
+    strip.appendChild(mkTile(Util.t('ui.diag_tile_lock_waits'),
+      locks.length > 0 ? `<span style="color:var(--err)">${locks.length}</span>` : '0',
+      locks.length > 0 ? Util.t('ui.diag_tile_contention') : Util.t('ui.diag_tile_clear'),
+      locks.length > 0 ? 'err' : 'ok', null));
+    const tables = Array.isArray(d.tables) && !d.tables[0]?.error ? d.tables : [];
+    const tblIssues = tables.filter(t => t.needs_vacuum || t.needs_analyze).length;
+    strip.appendChild(mkTile(Util.t('ui.diag_tile_table_issues'),
+      tblIssues > 0 ? `<span style="color:var(--warn)">${tblIssues}</span>` : '0',
+      tblIssues > 0 ? Util.t('ui.diag_tables_need_work', {total: tables.length, issues: tblIssues}) : Util.t('ui.diag_tables_healthy', {count: tables.length}),
+      tblIssues > 0 ? 'warn' : 'ok', null));
+    const sq = d.slow_queries || {};
+    let sqNum = '—', sqSub = Util.t('ui.diag_not_tracked'), sqSt = 'warn';
+    if (sq.available && (sq.queries || []).length) {
+      const top = sq.queries[0];
+      sqNum = `${top.mean_ms}<span style="font-size:12px;font-weight:400;color:var(--fg-mute)">ms</span>`;
+      sqSub = Util.t('ui.diag_avg_calls', {calls: top.calls.toLocaleString()});
+      sqSt  = top.mean_ms > 500 ? 'err' : (top.mean_ms > 100 ? 'warn' : 'ok');
+    } else if (sq.available) {
+      sqNum = '0'; sqSub = Util.t('ui.diag_no_queries'); sqSt = 'ok';
+    }
+    strip.appendChild(mkTile(Util.t('ui.diag_tile_slowest_query'), sqNum, sqSub, sqSt, null));
+    wrap.appendChild(strip);
+  },
+
+  _dbFillBar(used, max, label) {
+    const pct = max > 0 ? Math.min(100, Math.round(100 * used / max)) : 0;
+    const cls = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-fillbar';
+    const track = document.createElement('div');
+    track.className = 'admin-db-fillbar-track';
+    const fill = document.createElement('div');
+    fill.className = `admin-db-fillbar-fill ${cls}`;
+    fill.style.width = `${pct}%`;
+    fill.title = `${pct}%`;
+    track.appendChild(fill);
+    wrap.appendChild(track);
+    if (label) {
+      const lbl = document.createElement('span');
+      lbl.className = 'admin-db-fillbar-lbl';
+      lbl.textContent = `${used} / ${max} (${pct}%)`;
+      wrap.appendChild(lbl);
+    }
+    return wrap;
+  },
+
+  _dbStackBar(byState) {
+    const STATE_CLS = { 'active': 'state-active', 'idle in transaction': 'state-xit',
+      'idle in transaction (aborted)': 'state-xit', 'idle': 'state-idle' };
+    const total = Math.max(Object.values(byState).reduce((a, b) => a + b, 0), 1);
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-stackbar-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'admin-db-stackbar';
+    for (const [state, count] of Object.entries(byState)) {
+      if (!count) continue;
+      const pct = Math.max(1, Math.round(100 * count / total));
+      const seg = document.createElement('div');
+      seg.className = `admin-db-stackbar-seg ${STATE_CLS[state] || 'state-other'}`;
+      seg.style.width = `${pct}%`;
+      seg.title = `${state}: ${count}`;
+      bar.appendChild(seg);
+    }
+    wrap.appendChild(bar);
+    const legend = document.createElement('div');
+    legend.className = 'admin-db-stackbar-legend';
+    for (const [state, count] of Object.entries(byState)) {
+      if (!count) continue;
+      const chip = document.createElement('span');
+      chip.className = `admin-db-stackbar-chip ${STATE_CLS[state] || 'state-other'}`;
+      chip.textContent = `${state}: ${count}`;
+      legend.appendChild(chip);
+    }
+    wrap.appendChild(legend);
+    return wrap;
+  },
+
+  _dbTableCards(tables) {
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-tbl-cards';
+    for (const tbl of tables) {
+      const card = document.createElement('div');
+      card.className = 'admin-db-tbl-card';
+      const issues = [];
+      if (tbl.needs_vacuum)  issues.push(Util.t('ui.diag_vacuum'));
+      if (tbl.needs_analyze) issues.push(Util.t('ui.diag_analyze'));
+      if (issues.length) card.classList.add('has-issues');
+      const row1 = document.createElement('div');
+      row1.className = 'admin-db-tbl-card-row1';
+      const name = document.createElement('span');
+      name.className = 'admin-db-tbl-card-name';
+      name.textContent = tbl.table;
+      const size = document.createElement('span');
+      size.className = 'admin-db-tbl-card-size';
+      size.textContent = tbl.total_size || '';
+      const badge = document.createElement('span');
+      badge.className = `admin-db-tbl-card-badge ${issues.length ? 'warn' : 'ok'}`;
+      badge.textContent = issues.length ? issues.join(' + ') + ' ' + Util.t('ui.diag_needed') : Util.t('ui.diag_healthy');
+      row1.appendChild(name); row1.appendChild(size); row1.appendChild(badge);
+      card.appendChild(row1);
+      const total = Math.max((tbl.live_rows ?? 0) + (tbl.dead_rows ?? 0), 1);
+      const deadPct = Math.min(100, Math.round(100 * (tbl.dead_rows ?? 0) / total));
+      const barWrap = document.createElement('div');
+      barWrap.className = 'admin-db-tbl-card-barwrap';
+      const barLive = document.createElement('div');
+      barLive.className = 'admin-db-tbl-card-live';
+      barLive.style.width = `${100 - deadPct}%`;
+      barLive.title = `${Util.t('ui.diag_table_live')}: ${(tbl.live_rows ?? 0).toLocaleString()}`;
+      const barDead = document.createElement('div');
+      barDead.className = 'admin-db-tbl-card-dead';
+      barDead.style.width = `${deadPct}%`;
+      barDead.title = `${Util.t('ui.diag_table_dead')}: ${(tbl.dead_rows ?? 0).toLocaleString()} (${tbl.dead_pct}%)`;
+      barWrap.appendChild(barLive); barWrap.appendChild(barDead);
+      card.appendChild(barWrap);
+      const row2 = document.createElement('div');
+      row2.className = 'admin-db-tbl-card-row2';
+      const vacAt = tbl.last_autovacuum || tbl.last_vacuum;
+      row2.textContent = Util.t('ui.diag_table_row2', {
+        live: (tbl.live_rows ?? 0).toLocaleString(),
+        dead: (tbl.dead_rows ?? 0).toLocaleString(),
+        deadPct: tbl.dead_pct,
+        vacAt: vacAt ? AdminCockpit._relTime(new Date(vacAt)) : Util.t('ui.diag_vacuum_never'),
+      });
+      card.appendChild(row2);
+
+      const actions = document.createElement('div');
+      actions.className = 'db-maint-actions';
+      const urgentVA = tbl.needs_vacuum || tbl.needs_analyze;
+      const urgentA  = tbl.needs_analyze;
+      const vaBtn = document.createElement('button');
+      vaBtn.className = `db-maint-btn${urgentVA ? ' db-maint-btn--urgent' : ''}`;
+      vaBtn.dataset.maintAction = 'vacuum-analyze';
+      vaBtn.dataset.maintTable = tbl.table;
+      vaBtn.textContent = 'VACUUM ANALYZE';
+      const aBtn = document.createElement('button');
+      aBtn.className = `db-maint-btn${urgentA ? ' db-maint-btn--urgent' : ''}`;
+      aBtn.dataset.maintAction = 'analyze';
+      aBtn.dataset.maintTable = tbl.table;
+      aBtn.textContent = 'ANALYZE';
+      actions.appendChild(vaBtn);
+      actions.appendChild(aBtn);
+      card.appendChild(actions);
+
+      wrap.appendChild(card);
+    }
+    return wrap;
+  },
+
+  _dbHBarChart(indexes) {
+    const maxScans = Math.max(...indexes.map(ix => ix.scans ?? 0), 1);
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-hbar-chart';
+    for (const ix of indexes) {
+      const pct = Math.max(ix.unused ? 0 : 1, Math.round(100 * (ix.scans ?? 0) / maxScans));
+      const row = document.createElement('div');
+      row.className = 'admin-db-hbar-row';
+      const names = document.createElement('div');
+      names.className = 'admin-db-hbar-names';
+      const tblN = document.createElement('span');
+      tblN.className = 'admin-db-hbar-tbl';
+      tblN.textContent = ix.table || '';
+      const idxN = document.createElement('span');
+      idxN.className = `admin-db-hbar-idx${ix.unused ? ' unused' : ''}`;
+      idxN.textContent = ix.index || '';
+      names.appendChild(tblN); names.appendChild(idxN);
+      const track = document.createElement('div');
+      track.className = 'admin-db-hbar-track';
+      const fill = document.createElement('div');
+      fill.className = `admin-db-hbar-fill${ix.unused ? ' unused' : ''}`;
+      fill.style.width = `${pct}%`;
+      track.appendChild(fill);
+      const val = document.createElement('span');
+      val.className = 'admin-db-hbar-val';
+      val.textContent = (ix.scans ?? 0).toLocaleString();
+      const sizeChip = document.createElement('span');
+      sizeChip.className = 'admin-db-hbar-size';
+      sizeChip.textContent = ix.index_size || '';
+      row.appendChild(names); row.appendChild(track); row.appendChild(val); row.appendChild(sizeChip);
+      wrap.appendChild(row);
+    }
+    return wrap;
+  },
+
+  _dbSlowQueryBars(queries) {
+    const maxMs = Math.max(...queries.map(q => q.mean_ms ?? 0), 1);
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-hbar-chart';
+    for (const q of queries) {
+      const pct = Math.max(1, Math.round(100 * (q.mean_ms ?? 0) / maxMs));
+      const cls = (q.mean_ms ?? 0) > 500 ? 'err' : ((q.mean_ms ?? 0) > 100 ? 'warn' : '');
+      const row = document.createElement('div');
+      row.className = 'admin-db-hbar-row';
+      const names = document.createElement('div');
+      names.className = 'admin-db-hbar-names';
+      const qText = document.createElement('span');
+      qText.className = 'admin-db-hbar-idx';
+      qText.textContent = (q.query || '').slice(0, 90);
+      qText.title = q.query || '';
+      names.appendChild(qText);
+      const track = document.createElement('div');
+      track.className = 'admin-db-hbar-track';
+      const fill = document.createElement('div');
+      fill.className = `admin-db-hbar-fill${cls ? ' ' + cls : ''}`;
+      fill.style.width = `${pct}%`;
+      track.appendChild(fill);
+      const val = document.createElement('span');
+      val.className = 'admin-db-hbar-val';
+      val.textContent = `${q.mean_ms}ms`;
+      if (cls) val.style.color = `var(--${cls})`;
+      const callChip = document.createElement('span');
+      callChip.className = 'admin-db-hbar-size';
+      callChip.textContent = `${q.calls.toLocaleString()} calls`;
+      row.appendChild(names); row.appendChild(track); row.appendChild(val); row.appendChild(callChip);
+      wrap.appendChild(row);
+    }
+    return wrap;
+  },
+
+  _dbProgressBars(seqs) {
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-progress-list';
+    for (const s of seqs) {
+      const row = document.createElement('div');
+      row.className = 'admin-db-progress-row';
+      const name = document.createElement('span');
+      name.className = 'admin-db-progress-name';
+      name.textContent = `${s.schema}.${s.name}`;
+      const track = document.createElement('div');
+      track.className = 'admin-db-fillbar-track';
+      const fill = document.createElement('div');
+      fill.className = `admin-db-fillbar-fill ${s.status || 'ok'}`;
+      fill.style.width = `${Math.max(0.5, s.used_pct ?? 0)}%`;
+      fill.title = `${s.used_pct}%`;
+      track.appendChild(fill);
+      const lbl = document.createElement('span');
+      lbl.className = 'admin-db-fillbar-lbl';
+      lbl.textContent = `${s.used_pct}%${s.cycles ? ' ↻' : ''}  (${(s.last_value ?? 0).toLocaleString()} / ${(s.max_value ?? 0).toLocaleString()})`;
+      row.appendChild(name); row.appendChild(track); row.appendChild(lbl);
+      wrap.appendChild(row);
+    }
+    return wrap;
+  },
+
+  _dbLockChain(locks) {
+    const wrap = document.createElement('div');
+    wrap.className = 'admin-db-lock-chains';
+    for (const lk of locks) {
+      const chain = document.createElement('div');
+      chain.className = 'admin-db-lock-chain';
+      const mkNode = (pid, role, query, cls) => {
+        const node = document.createElement('div');
+        node.className = `admin-db-lock-node ${cls}`;
+        node.innerHTML = `<span class="admin-db-lock-pid">PID ${pid}</span>`
+          + `<span class="admin-db-lock-role">${role}</span>`
+          + `<div class="admin-db-lock-query">${(query || '—').slice(0, 90)}</div>`;
+        return node;
+      };
+      chain.appendChild(mkNode(lk.blocking_pid, 'BLOCKING', lk.blocking_query, 'blocking'));
+      const arrow = document.createElement('div');
+      arrow.className = 'admin-db-lock-arrow';
+      arrow.innerHTML = `<span class="admin-db-lock-type">${lk.lock_type || ''}</span> ▼`;
+      chain.appendChild(arrow);
+      chain.appendChild(mkNode(lk.blocked_pid, `BLOCKED ${lk.blocked_for_s}s`, lk.blocked_query, 'blocked'));
+      wrap.appendChild(chain);
+    }
+    return wrap;
+  },
+
+  _dbWarnBanner(parent, text, isError) {
+    const d = document.createElement('div');
+    d.className = `admin-db-banner ${isError ? 'admin-db-banner-err' : 'admin-db-banner-warn'}`;
+    d.textContent = text;
+    parent.appendChild(d);
+  },
+
+  _dbTable(headers, rowDefs) {
+    const tbl = document.createElement('table');
+    tbl.className = 'admin-db-tbl';
+    const thead = tbl.createTHead();
+    const hrow = thead.insertRow();
+    headers.forEach(h => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      hrow.appendChild(th);
+    });
+    const tbody = tbl.createTBody();
+    for (const { cells, rowWarn, rowErr, cellWarn } of rowDefs) {
+      const tr = tbody.insertRow();
+      if (rowErr)  tr.style.background = 'rgba(192,57,43,0.07)';
+      else if (rowWarn) tr.style.background = 'rgba(243,156,18,0.06)';
+      cells.forEach((c, i) => {
+        const td = tr.insertCell();
+        td.textContent = (c === null || c === undefined) ? '—' : c;
+        if (cellWarn.includes(i)) td.style.color = 'var(--warn)';
+      });
+    }
+    return tbl;
+  },
+
+  /* -----------------------------------------------------------------------
+     BACKEND EVENT LOG — fetches /logs/backend, renders like the front-end log
+     ----------------------------------------------------------------------- */
+  _renderBackendLog() {
+    const host = document.getElementById('admin-backend-log-list');
+    const countEl = document.getElementById('admin-backend-log-count');
+    if (!host) return;
+    host.innerHTML = `<div class="admin-log-empty">${Util.t('ui.loading')}</div>`;
+
+    AdminCockpit._backendLogAbort?.abort();
+    AdminCockpit._backendLogAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._backendLogAbort.signal, AbortSignal.timeout(8000)])
+      : AdminCockpit._backendLogAbort.signal;
+
+    const bf = AdminCockpit._backendLogFilter || {};
+    // Lazily inject a free-text query input beside the level select (markup is in
+    // index.html which we don't own). Drives the server-side ?q= filter.
+    const lvlSel = document.getElementById('admin-backend-log-filter-level');
+    if (lvlSel && lvlSel.parentElement && !document.getElementById('admin-backend-log-q')) {
+      const qIn = document.createElement('input');
+      qIn.id = 'admin-backend-log-q';
+      qIn.type = 'search';
+      qIn.className = 'input';
+      qIn.placeholder = 'Filter backend (msg / code / category)';
+      qIn.title = 'Server-side free-text filter';
+      qIn.addEventListener('input', Util.debounce(ev => {
+        AdminCockpit._backendLogFilter.q = ev.target.value.trim();
+        AdminCockpit._renderBackendLog();
+      }, 350));
+      lvlSel.insertAdjacentElement('afterend', qIn);
+    }
+    const lvl = bf.level || 'all';
+    const qp = [`limit=200`];
+    if (lvl !== 'all')                  qp.push('level='    + encodeURIComponent(lvl));
+    if (bf.category && bf.category !== 'all') qp.push('category=' + encodeURIComponent(bf.category));
+    if (bf.since)                       qp.push('since='    + encodeURIComponent(bf.since));
+    if (bf.q)                           qp.push('q='        + encodeURIComponent(bf.q));
+    const params = `?${qp.join('&')}`;
+    const reqIdFilter = bf.reqId || '';
+
+    // Reqid-correlation chip on the backend pane.
+    AdminCockpit._renderReqIdChip('admin-backend-log-list', reqIdFilter, () => {
+      AdminCockpit._backendLogFilter.reqId = '';
+      AdminCockpit._renderBackendLog();
+    });
+
+    Util.fetchTraced(`${Config.API_BASE}/logs/backend${params}`, { signal: sig })
+      .then(r => r.json())
+      .then(({ entries: rawEntries, total, dropped }) => {
+        host.textContent = '';
+        // Client-side reqId correlation filter (server filters category/since/q/level).
+        let entries = rawEntries || [];
+        if (reqIdFilter) entries = entries.filter(e => e.rid === reqIdFilter || e.reqId === reqIdFilter);
+        if (countEl) countEl.textContent = Util.t('ui.backend_log_count', { total, shown: entries.length });
+
+        // Overflow marker if the backend reports a dropped count.
+        if (dropped > 0) {
+          const ov = document.createElement('div');
+          ov.className = 'admin-log-older';
+          ov.textContent = `${dropped} older backend entr${dropped === 1 ? 'y' : 'ies'} dropped`;
+          host.appendChild(ov);
+        }
+
+        if (!entries.length) {
+          const empty = document.createElement('div');
+          empty.className = 'admin-log-empty';
+          empty.textContent = lvl !== 'all' ? Util.t('ui.diag_no_level_events', {level: lvl}) : Util.t('empty.no_backend_events');
+          host.appendChild(empty);
+          return;
+        }
+
+        for (const e of entries) {
+          const row = document.createElement('div');
+          row.className = `admin-log-row admin-log-${e.level || 'info'}`;
+
+          const head = document.createElement('div');
+          head.className = 'admin-log-head';
+
+          const lvlEl = document.createElement('span');
+          lvlEl.className = 'admin-log-lvl';
+          lvlEl.textContent = (e.level || 'info').toUpperCase();
+
+          const tsEl = document.createElement('span');
+          tsEl.className = 'admin-log-ts';
+          const d = e.ts ? new Date(e.ts) : null;
+          tsEl.textContent = d ? AdminCockpit._relTime(d) : '';
+          tsEl.title = e.ts || '';
+
+          const scopeEl = document.createElement('span');
+          scopeEl.className = 'admin-log-scope';
+          scopeEl.textContent = e.category || '';
+
+          head.appendChild(lvlEl);
+          head.appendChild(tsEl);
+          head.appendChild(scopeEl);
+          if (e.source === 'frontend') {
+            const src = document.createElement('span');
+            src.className = 'admin-log-src';
+            src.textContent = 'FE';
+            src.title = 'Forwarded from a frontend client';
+            head.appendChild(src);
+          }
+          const code = e.error_code || e.errorCode;
+          if (code) {
+            const codeEl = document.createElement('span');
+            codeEl.className = 'admin-log-code';
+            codeEl.textContent = code;
+            codeEl.title = 'Filter by this error code';
+            codeEl.addEventListener('click', ev => {
+              ev.stopPropagation();
+              AdminCockpit._backendLogFilter.q = code;
+              AdminCockpit._renderBackendLog();
+            });
+            head.appendChild(codeEl);
+          }
+          const rid = e.rid || e.reqId;
+          if (rid) {
+            const ridEl = document.createElement('span');
+            ridEl.className = 'admin-log-reqid';
+            ridEl.textContent = `req ${String(rid).slice(0, 8)}`;
+            ridEl.title = `Correlate request ${rid} across the frontend log`;
+            ridEl.addEventListener('click', ev => {
+              ev.stopPropagation();
+              AdminCockpit._correlateReqId(rid);
+            });
+            head.appendChild(ridEl);
+          }
+          row.appendChild(head);
+
+          const msg = document.createElement('div');
+          msg.className = 'admin-log-msg';
+          msg.textContent = e.msg || '';
+          row.appendChild(msg);
+
+          if (e.ctx && Object.keys(e.ctx).length) {
+            const pre = document.createElement('pre');
+            pre.className = 'admin-log-ctx';
+            pre.textContent = JSON.stringify(e.ctx, null, 2);
+            row.appendChild(pre);
+            row.style.cursor = 'pointer';
+            row.addEventListener('click', () => row.classList.toggle('expanded'));
+          }
+
+          host.appendChild(row);
+        }
+      })
+      .catch(e => {
+        host.textContent = '';
+        const err = document.createElement('div');
+        err.className = 'admin-log-empty';
+        err.textContent = Util.t('ui.failed_load_backend_log', { error: e.message });
+        host.appendChild(err);
+      });
+  },
+
+  _clearBackendLog() {
+    Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' })
+      .then(() => AdminCockpit._renderBackendLog())
+      .catch(() => {});
+  },
+
+  _copyFiltered() {
+    const entries = AdminCockpit._getFilteredEntries();
+    const txt = entries.map(e =>
+      `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
+    ).join('\n');
+    navigator.clipboard?.writeText(txt).then(
+      () => Toast.show(Util.t('toast.copied_filtered', { count: entries.length }), 'success'),
+      () => Toast.show(Util.t('toast.copy_failed'), 'error')
+    );
+  },
+
+  _renderLogs() {
+    const list = document.getElementById('admin-log-list');
+    if (!list) return;
+
+    // Rebuild scope filter options
+    const allEntries = ErrorLog.entries();
+    const scopeEl = document.getElementById('admin-log-filter-scope');
+    if (scopeEl) {
+      const currentScope = AdminCockpit._logFilter.scope;
+      const scopes = [...new Set(allEntries.map(e => e.scope).filter(Boolean))].sort();
+      scopeEl.textContent = '';
+      const allOpt = document.createElement('option');
+      allOpt.value = 'all';
+      allOpt.textContent = Util.t('ui.all_scopes');
+      scopeEl.appendChild(allOpt);
+      for (const s of scopes) {
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        if (s === currentScope) opt.selected = true;
+        scopeEl.appendChild(opt);
+      }
+      // Lazily inject an errorCode filter select beside the scope select (the
+      // markup lives in index.html which we don't own — build it on demand).
+      let codeEl = document.getElementById('admin-log-filter-code');
+      if (!codeEl && scopeEl.parentElement) {
+        codeEl = document.createElement('select');
+        codeEl.id = 'admin-log-filter-code';
+        codeEl.className = scopeEl.className || '';
+        codeEl.title = 'Filter by error code';
+        codeEl.addEventListener('change', ev => {
+          AdminCockpit._logFilter.errorCode = ev.target.value;
+          AdminCockpit._renderLogs();
+        });
+        scopeEl.insertAdjacentElement('afterend', codeEl);
+      }
+      if (codeEl) {
+        const curCode = AdminCockpit._logFilter.errorCode;
+        const codes = [...new Set(allEntries.map(e => e.errorCode).filter(Boolean))].sort();
+        codeEl.textContent = '';
+        const cAll = document.createElement('option');
+        cAll.value = 'all'; cAll.textContent = 'All codes';
+        codeEl.appendChild(cAll);
+        for (const c of codes) {
+          const opt = document.createElement('option');
+          opt.value = c; opt.textContent = c;
+          if (c === curCode) opt.selected = true;
+          codeEl.appendChild(opt);
+        }
+      }
+    }
+
+    // Active reqId-correlation chip (set by clicking a reqId in either pane).
+    AdminCockpit._renderReqIdChip('admin-log-list', AdminCockpit._logFilter.reqId, () => {
+      AdminCockpit._logFilter.reqId = '';
+      AdminCockpit._renderLogs();
+    });
+
+    const filtered = AdminCockpit._getFilteredEntries();
+    const visible = filtered.slice().reverse();
+
+    list.textContent = '';
+
+    // Overflow marker — N entries evicted past MAX since last clear.
+    const dropped = ErrorLog.droppedCount();
+    if (dropped > 0) {
+      const ov = document.createElement('div');
+      ov.className = 'admin-log-older';
+      ov.textContent = `${dropped} older entr${dropped === 1 ? 'y' : 'ies'} dropped (ring at ${ErrorLog.MAX})`;
+      list.appendChild(ov);
+    }
+
+    if (visible.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'admin-log-empty';
+      empty.textContent = filtered.length === 0 && allEntries.length > 0
+        ? Util.t('empty.no_entries_filter')
+        : Util.t('empty.no_log_entries');
+      list.appendChild(empty);
+    }
+
+    const SCOPE_COLORS = {
+      persistence: 'var(--info,#3498db)',
+      engine:      '#9b59b6',
+      admin:       'var(--accent,#b8791a)',
+      alerts:      'var(--err,#c0392b)',
+      store:       '#16a085',
+      calendar:    '#2ecc71',
+      interaction: '#e67e22',
+    };
+
+    for (const e of visible) {
+      const row = document.createElement('div');
+      row.className = `admin-log-row admin-log-${e.level}`;
+      row.style.cursor = e.ctx != null ? 'pointer' : '';
+
+      const head = document.createElement('div');
+      head.className = 'admin-log-head';
+
+      const lvl = document.createElement('span');
+      lvl.className = 'admin-log-lvl';
+      lvl.textContent = e.level;
+
+      const ts = document.createElement('span');
+      ts.className = 'admin-log-ts';
+      const d = e.ts ? new Date(e.ts) : null;
+      ts.textContent = d ? AdminCockpit._relTime(d) : '';
+      ts.title = e.ts || '';
+
+      const scope = document.createElement('span');
+      scope.className = 'admin-log-scope';
+      scope.textContent = e.scope || '';
+      if (SCOPE_COLORS[e.scope]) scope.style.color = SCOPE_COLORS[e.scope];
+
+      head.appendChild(lvl);
+      head.appendChild(ts);
+      head.appendChild(scope);
+      if (e.errorCode) {
+        const code = document.createElement('span');
+        code.className = 'admin-log-code';
+        code.textContent = e.errorCode;
+        code.title = 'Filter by this error code';
+        code.addEventListener('click', ev => {
+          ev.stopPropagation();
+          AdminCockpit._logFilter.errorCode = e.errorCode;
+          AdminCockpit._renderLogs();
+        });
+        head.appendChild(code);
+      }
+      if (e.reqId) {
+        const rid = document.createElement('span');
+        rid.className = 'admin-log-reqid';
+        rid.textContent = `req ${String(e.reqId).slice(0, 8)}`;
+        rid.title = `Correlate request ${e.reqId} across the backend log`;
+        rid.addEventListener('click', ev => {
+          ev.stopPropagation();
+          AdminCockpit._correlateReqId(e.reqId);
+        });
+        head.appendChild(rid);
+      }
+      row.appendChild(head);
+
+      const msg = document.createElement('div');
+      msg.className = 'admin-log-msg';
+      msg.textContent = e.msg || '';
+      row.appendChild(msg);
+
+      if (e.ctx != null) {
+        const pre = document.createElement('pre');
+        pre.className = 'admin-log-ctx';
+        pre.textContent = typeof e.ctx === 'string' ? e.ctx : JSON.stringify(e.ctx, null, 2);
+        row.appendChild(pre);
+        row.addEventListener('click', () => row.classList.toggle('expanded'));
+      }
+
+      list.appendChild(row);
+    }
+
+    const counts = document.getElementById('admin-log-counts');
+    if (counts) {
+      const errs  = ErrorLog.countBy('error');
+      const warns = ErrorLog.countBy('warn');
+      const show  = filtered.length !== allEntries.length ? Util.t('ui.log_shown', { count: filtered.length }) : '';
+      counts.textContent = Util.t('ui.log_count_summary', {
+        total: allEntries.length,
+        errs, errp: errs === 1 ? '' : 's',
+        warns, warnp: warns === 1 ? '' : 's',
+        shown: show,
+      });
+    }
+  },
+
+  _relTime(d) {
+    const diffMs = Date.now() - (d instanceof Date ? d : new Date(d)).getTime();
+    const s = Math.round(diffMs / 1000);
+    if (s < 60)    return Util.t('ui.time_s_ago', { n: s });
+    if (s < 3600)  return Util.t('ui.time_m_ago', { n: Math.floor(s / 60) });
+    if (s < 86400) return Util.t('ui.time_h_ago', { n: Math.floor(s / 3600) });
+    return Util.t('ui.time_d_ago', { n: Math.floor(s / 86400) });
+  },
+
+  async _clearAudit() {
+    const ok = await Modal.confirm({ title: Util.t('modal.delete_upload_history'), confirmLabel: Util.t('btn.yes_delete_all') });
+    if (!ok) return;
+    fetch(`${Config.API_BASE}/upload/audit/clear`, { method: 'POST' })
+      .then(r => r.json())
+      .then(body => {
+        if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_history_failed'), 'error'); return; }
+        Toast.show(Util.t('toast.history_cleared', { count: body.deleted }), 'success');
+        AdminCockpit._renderAudit();
+      })
+      .catch(e => Toast.show(Util.t('toast.clear_history_failed') + ': ' + e.message, 'error'));
+  },
+
+  _renderAudit() {
+    const host = document.getElementById('admin-audit-list');
+    if (!host) return;
+    host.textContent = Util.t('ui.loading');
+    AdminCockpit._auditAbort?.abort();
+    AdminCockpit._auditAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._auditAbort.signal, AbortSignal.timeout(8000)])
+      : AdminCockpit._auditAbort.signal;
+    Util.fetchTraced(`${Config.API_BASE}/upload/audit`, { signal: sig })
+      .then(r => r.json())
+      .then(body => {
+        host.textContent = '';
+        const items = body?.audit || [];
+        if (items.length === 0) {
+          const e = document.createElement('div');
+          e.className = 'admin-log-empty';
+          e.textContent = Util.t('empty.no_uploads');
+          host.appendChild(e);
+          return;
+        }
+        const tbl = document.createElement('table');
+        tbl.className = 'admin-audit-tbl';
+        const thead = document.createElement('thead');
+        const htr = document.createElement('tr');
+        for (const h of [Util.t('ui.audit_col_when'), Util.t('ui.audit_col_file'), Util.t('ui.audit_col_rows'), Util.t('ui.audit_col_inserted'), Util.t('ui.audit_col_updated'), Util.t('ui.audit_col_batch'), Util.t('ui.audit_col_warnings')]) {
+          const th = document.createElement('th');
+          th.textContent = h;
+          htr.appendChild(th);
+        }
+        thead.appendChild(htr);
+        tbl.appendChild(thead);
+
+        const tb = document.createElement('tbody');
+        for (const it of items) {
+          const hasWarnings = it.warnings && it.warnings.length > 0;
+
+          const tr = document.createElement('tr');
+          if (hasWarnings) tr.classList.add('admin-audit-has-warn');
+          tr.style.cursor = hasWarnings ? 'pointer' : '';
+
+          const batchShort = it.batch_id ? it.batch_id.slice(0, 8) + '…' : '—';
+          const cells = [
+            (it.uploaded_at || '').replace('T', ' ').slice(0, 19),
+            it.filename || '—',
+            String(it.row_count ?? '—'),
+            String(it.inserted ?? '—'),
+            String(it.updated ?? '—'),
+            batchShort,
+            hasWarnings ? `⚠ ${it.warnings.length}` : '✓',
+          ];
+          cells.forEach((c, i) => {
+            const td = document.createElement('td');
+            td.textContent = c;
+            if (i === 6 && hasWarnings) td.style.color = 'var(--warn,#b57a0a)';
+            if (i === 5 && it.batch_id) td.title = it.batch_id;
+            tr.appendChild(td);
+          });
+
+          if (hasWarnings) {
+            const warnRow = document.createElement('tr');
+            warnRow.className = 'admin-audit-warn-detail';
+            warnRow.style.display = 'none';
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.style.padding = '0';
+            td.appendChild(AdminCockpit._warningList(it.warnings));
+            warnRow.appendChild(td);
+            tb.appendChild(tr);
+            tb.appendChild(warnRow);
+            tr.addEventListener('click', () => {
+              warnRow.style.display = warnRow.style.display === 'none' ? '' : 'none';
+            });
+          } else {
+            tb.appendChild(tr);
+          }
+        }
+        tbl.appendChild(tb);
+        host.appendChild(tbl);
+      })
+      .catch(e => {
+        if (e?.name === 'AbortError') return;
+        host.textContent = '';
+        const err = document.createElement('div');
+        err.className = 'admin-status error';
+        err.textContent = Util.t('ui.failed_load_upload_history', { error: e.message });
+        host.appendChild(err);
+      });
+  },
+
+  async _clearAuditLog() {
+    const ok = await Modal.confirm({ title: Util.t('modal.clear_audit_log'), confirmLabel: Util.t('btn.yes_delete') });
+    if (!ok) return;
+    fetch(`${Config.API_BASE}/audit/log/clear`, { method: 'POST' })
+      .then(r => r.json())
+      .then(body => {
+        if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_failed'), 'error'); return; }
+        Toast.show(Util.t('toast.audit_log_cleared'), 'success');
+        AdminCockpit._renderAuditLog();
+      })
+      .catch(e => Toast.show(Util.t('toast.clear_failed') + ': ' + e.message, 'error'));
+  },
+
+  _renderAuditLog() {
+    const host = document.getElementById('admin-audit-log-list');
+    if (!host) return;
+    host.textContent = Util.t('ui.loading');
+    AdminCockpit._auditLogAbort?.abort();
+    AdminCockpit._auditLogAbort = new AbortController();
+    const sig = AbortSignal.any
+      ? AbortSignal.any([AdminCockpit._auditLogAbort.signal, AbortSignal.timeout(8000)])
+      : AdminCockpit._auditLogAbort.signal;
+    Util.fetchTraced(`${Config.API_BASE}/audit/log?limit=200`, { signal: sig })
+      .then(r => r.json())
+      .then(body => {
+        host.textContent = '';
+        const items = body?.entries || [];
+        if (!items.length) {
+          const e = document.createElement('div');
+          e.className = 'admin-log-empty';
+          e.textContent = Util.t('empty.no_audit_events');
+          host.appendChild(e);
+          return;
+        }
+        const tbl = document.createElement('table');
+        tbl.className = 'admin-audit-tbl';
+        const thead = document.createElement('thead');
+        const htr   = document.createElement('tr');
+        for (const h of [Util.t('ui.audit_log_col_when'), Util.t('ui.audit_log_col_user'), Util.t('ui.audit_log_col_action'), Util.t('ui.audit_log_col_plant'), Util.t('ui.audit_log_col_details')]) {
+          const th = document.createElement('th');
+          th.textContent = h;
+          htr.appendChild(th);
+        }
+        thead.appendChild(htr);
+        tbl.appendChild(thead);
+
+        const ACTION_ICONS = {
+          color_wheel_upload:  '⬆',
+          color_wheel_replace: '↻',
+          color_wheel_delete:  '⌫',
+          optimization_run:    '📈',
+        };
+        const ACTION_COLORS = {
+          color_wheel_upload:  'var(--ok,#2f7a4d)',
+          color_wheel_replace: 'var(--info,#2d5f8c)',
+          color_wheel_delete:  'var(--err,#c0392b)',
+          optimization_run:    'var(--accent,#b8791a)',
+        };
+
+        const tb = document.createElement('tbody');
+        for (const it of items) {
+          const tr = document.createElement('tr');
+          const action = it.action || '—';
+          const icon   = ACTION_ICONS[action] || '•';
+          const color  = ACTION_COLORS[action] || 'inherit';
+          const details = it.details
+            ? Object.entries(it.details).map(([k, v]) => `${k}: ${v}`).join(' · ')
+            : '—';
+          const cells = [
+            (it.ts || '').replace('T', ' ').slice(0, 19),
+            it.user || '—',
+            '',
+            it.plant || '—',
+            details,
+          ];
+          cells.forEach((c, i) => {
+            const td = document.createElement('td');
+            if (i === 2) {
+              // `action` is server-stored and not whitelisted, so render it as inert
+              // text — never innerHTML — to avoid a stored-XSS sink (R1). icon is from
+              // the fixed ACTION_ICONS map; color is a CSS var, set via style only.
+              const span = document.createElement('span');
+              span.style.color = color;
+              span.style.fontWeight = '600';
+              span.textContent = `${icon} ${action}`;
+              td.appendChild(span);
+            } else {
+              td.textContent = c;
+            }
+            if (i === 3 && it.plant) td.style.fontWeight = '600';
+            tr.appendChild(td);
+          });
+          tb.appendChild(tr);
+        }
+        tbl.appendChild(tb);
+        host.appendChild(tbl);
+      })
+      .catch(e => {
+        if (e?.name === 'AbortError') return;
+        host.textContent = '';
+        const err = document.createElement('div');
+        err.className = 'admin-status error';
+        err.textContent = Util.t('ui.failed_load_audit_log', { error: e.message });
+        host.appendChild(err);
+      });
+  },
+
+  /* ---------------------------------------------------------------------
+     THREAD PROFILER PANEL — PerfMonitor ring-buffer stats table.
+     Rendered into #admin-ov-thread on tab activation and on each
+     PerfMonitor notification (debounced 250 ms by PerfMonitor itself).
+     --------------------------------------------------------------------- */
+  _refreshThreadPane() {
+    const tbody = document.getElementById('admin-perf-tbody');
+    if (!tbody) return;
+    const rows = PerfMonitor.all();
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>`;
+      return;
+    }
+    rows.sort((a, b) => b.last - a.last);
+    const fmt = ms => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
+    const cls = ms => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
+    const ago = ts => {
+      if (!ts) return '—';
+      const s = Math.round((Date.now() - ts) / 1000);
+      if (s < 2)  return 'just now';
+      if (s < 60) return `${s}s ago`;
+      return `${Math.round(s / 60)}m ago`;
+    };
+    tbody.innerHTML = rows.map(r => {
+      const c = cls(r.last);
+      return `<tr>
+        <td class="perf-name">${r.name}</td>
+        <td class="${c}">${fmt(r.last)} ms</td>
+        <td class="${cls(r.p50)}">${fmt(r.p50)} ms</td>
+        <td class="${cls(r.p95)}">${fmt(r.p95)} ms</td>
+        <td class="${cls(r.max)}">${fmt(r.max)} ms</td>
+        <td>${r.count}</td>
+        <td class="perf-ago">${ago(r.lastTs)}</td>
+      </tr>`;
+    }).join('');
+  },
+
+  /* ---------------------------------------------------------------------
+     DIAGNOSTICS PANEL — client-side health summary, "Reset client state",
+     diagnostics bundle export. Renders into #admin-diagnostics-pane.
+     --------------------------------------------------------------------- */
+  _renderDiagnostics() {
+    const host = document.getElementById('admin-diagnostics-pane');
+    if (!host) return;
+
+    const inv  = Persistence.storageInventory();
+    const totK = (inv.totalBytes / 1024).toFixed(1);
+    const lastK = (inv.lastBytes / 1024).toFixed(1);
+    const lastWhen = inv.lastSavedAt ? new Date(inv.lastSavedAt).toLocaleTimeString() : '—';
+    const errCount  = ErrorLog.countBy('error');
+    const warnCount = ErrorLog.countBy('warn');
+    const errRate   = ErrorLog.errorRatePerMin();
+    const warnRate  = ErrorLog.warnRatePerMin();
+    const heap = (performance && performance.memory)
+      ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} / ${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
+      : 'n/a';
+    const stats = (Persistence.stats && Persistence.stats()) || {};
+
+    const autosaveTxt = inv.autosaveDisabled
+      ? `<span class="admin-bad">${Util.t('ui.ls_quota_disabled')}</span>`
+      : inv.degraded
+        ? `<span class="admin-warn">${Util.t('ui.ls_degraded')}</span>`
+        : `<span class="admin-good">${Util.t('ui.ls_healthy')}</span>`;
+    const errTxt = errRate > 10
+      ? `<span class="admin-bad">${Util.t('ui.diag_err_rate_spike', { count: errCount, rate: errRate })}</span>`
+      : errRate > 0
+        ? `<span class="admin-warn">${Util.t('ui.diag_err_rate_warn', { count: errCount, rate: errRate })}</span>`
+        : `${errCount}`;
+
+    host.innerHTML = `
+      <div class="admin-card">
+        <div class="admin-card-hd">
+          <h3>${Util.t('ui.diag_client_title')}<span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip">${Util.t('ui.diag_client_help')}</span></span></h3>
+          <div class="admin-card-actions">
+            <button class="btn btn-ghost sm" id="admin-diag-refresh" title="${Util.t('tip.refresh')}">${Util.t('btn.refresh')}</button>
+            <button class="btn btn-ghost sm" id="admin-diag-storage" title="${Util.t('tip.inspect_storage')}">${Util.t('btn.inspect_storage')}</button>
+            <button class="btn btn-ghost sm" id="admin-diag-export" title="${Util.t('tip.diag_export_bundle')}">${Util.t('btn.export_bundle')}</button>
+            <button class="btn btn-warn  sm" id="admin-diag-reset"   title="${Util.t('tip.diag_clear_cache')}">${Util.t('btn.reset_client')}</button>
+          </div>
+        </div>
+        <div class="admin-kv">
+          <span>${Util.t('ui.diag_kv_build')}</span><span>${Config.BUILD_ID}</span>
+          <span>${Util.t('ui.diag_kv_schema')}</span><span>${Config.SCHEMA_VERSION}</span>
+          <span>${Util.t('ui.diag_kv_cache')}</span><span>${Util.t('ui.diag_cache_val', { size: lastK, when: lastWhen })}</span>
+          <span>${Util.t('ui.diag_kv_storage')}</span><span>${Util.t('ui.diag_storage_val', { size: totK, count: inv.count })}</span>
+          <span>${Util.t('ui.diag_kv_autosave')}</span><span>${autosaveTxt}</span>
+          <span>${Util.t('ui.diag_kv_heap')}</span><span>${heap}</span>
+          <span>${Util.t('ui.diag_kv_errors')}</span><span>${errTxt}</span>
+          <span>${Util.t('ui.diag_kv_warnings')}</span><span>${warnCount} (${warnRate}/min)</span>
+          <span>${Util.t('ui.diag_kv_tasks')}</span><span>${Store.tasksArr.length}</span>
+          <span>${Util.t('ui.diag_kv_source')}</span><span>${stats.source || '—'}</span>
+          <span>${Util.t('ui.diag_kv_plant')}</span><span>${Store.selectedPlant || '<em>none</em>'}</span>
+        </div>
+      </div>`;
+
+    document.getElementById('admin-diag-refresh').onclick = () => AdminCockpit._renderDiagnostics();
+    document.getElementById('admin-diag-storage').onclick = () => AdminCockpit._showStorageInventory(inv);
+    document.getElementById('admin-diag-export' ).onclick = () => AdminCockpit._exportDiagnostics();
+    document.getElementById('admin-diag-reset'  ).onclick = () => AdminCockpit._resetClientState();
+  },
+
+  async _resetClientState() {
+    const ok = await Modal.confirm({
+      title:        Util.t('modal.reset_client_title'),
+      message:      Util.t('modal.reset_client_msg'),
+      detail:       Util.t('modal.reset_client_detail'),
+      confirmLabel: Util.t('modal.reset_client_confirm'),
+      tone:         'warn',
+    });
+    if (!ok) return;
+    try { localStorage.removeItem(Config.LS_KEY); } catch {}
+    try { sessionStorage.clear(); } catch {}
+    try {
+      const prefix = `${Config.LS_KEY}.quarantine.`;
+      const toRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(prefix)) toRemove.push(k);
+      }
+      toRemove.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+    } catch {}
+    ErrorLog.info('admin', 'Client state reset by user — reloading');
+    // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
+    setTimeout(() => location.reload(), 50);
+  },
+
+  _showStorageInventory(inv) {
+    if (!inv) inv = Persistence.storageInventory();
+    const top = inv.items.slice(0, 12)
+      .map(i => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
+      .join('\n') || Util.t('ui.ls_empty');
+    const lsStatus = inv.degraded ? Util.t('ui.ls_evicted_tier') : inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : Util.t('ui.ls_healthy');
+    const detail =
+      `<pre style="margin:0;font:11px ui-monospace,monospace;white-space:pre;">` +
+      Util.t('modal.ls_inv_total', { size: (inv.totalBytes / 1024).toFixed(1), count: inv.count }) + '\n' +
+      Util.t('modal.ls_inv_snapshot', { size: (inv.lastBytes / 1024).toFixed(1), status: lsStatus }) + '\n\n' +
+      Util.t('modal.ls_inventory_top_keys') + `\n${top}` +
+      `</pre>`;
+    Modal.confirm({
+      title:        Util.t('modal.ls_inventory_title'),
+      message:      Util.t('modal.ls_inventory_msg'),
+      detail,
+      confirmLabel: Util.t('btn.close'),
+      tone:         'warn',
+    });
+  },
+
+  _exportDiagnostics() {
+    const bundle = {
+      generatedAt: new Date().toISOString(),
+      build:       Config.BUILD_ID,
+      schema:      Config.SCHEMA_VERSION,
+      userAgent:   navigator.userAgent,
+      location:    location.href,
+      storage:     Persistence.storageInventory(),
+      heap: (performance && performance.memory) ? {
+        usedMB:  +(performance.memory.usedJSHeapSize / 1048576).toFixed(1),
+        limitMB: +(performance.memory.jsHeapSizeLimit / 1048576).toFixed(1),
+      } : null,
+      persistence: (Persistence.stats && Persistence.stats()) || null,
+      health:      AdminCockpit._healthData || null,
+      deep:        AdminCockpit._deepData   || null,
+      storeCounts: {
+        tasks:        Store.tasksArr.length,
+        blocks:       (Store.blocks || []).length,
+        plantBlocks:  (Store.plantBlocks || []).length,
+        lines:        Object.keys(Store.lineSettings || {}).length,
+        plants:       Object.keys(Store.plants || {}).length,
+        fixed:        Store.fixedIds ? Store.fixedIds.size : 0,
+        alerts:       (Store.alerts || []).length,
+      },
+      selectedPlant: Store.selectedPlant,
+      errorRates: {
+        errorPerMin: ErrorLog.errorRatePerMin(),
+        warnPerMin:  ErrorLog.warnRatePerMin(),
+        totalErrors: ErrorLog.countBy('error'),
+        totalWarns:  ErrorLog.countBy('warn'),
+      },
+      errors: ErrorLog.entries().slice(-500),
+      droppedErrors: ErrorLog.droppedCount(),
+    };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `nimbus-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    Toast.show(Util.t('toast.diag_bundle_downloaded'), 'success');
+  }
+};
+
+/* =============================================================================
+   INTERFACE — SAP integration console (Admin → Interface sub-tab)
+   A master-detail console rendered into #sap-interface-host, driven by the
+   /sap/interface/* endpoints:
+     • status ribbon  — aggregate health (connection, enabled, last activity, errors)
+     • object rail    — the 6 sync objects (status dot, kind, enable toggle); selects detail
+     • detail pane    — Overview (transport/secret/schedule/checklist + Test connection),
+                        Mapping (SAP→transform→NIMBUS flow + key-column guardrail),
+                        History (run timeline with counts/duration/watermark/error drill-down)
+   Dirty-tracking/save is local to this module; it does not touch MasterData.
+   Reads use Util.fetchTraced; writes use fetch with x-user-email. Reuses NIMBUS
+   component classes (.kpi-tile, .panel, .admin-health-dot, .cal-toggle-*) + a .sap-* block.
+   ========================================================================== */
+export const Interface = (() => {
+  const API = Config.API_BASE;
+  // Transform names — must mirror sap_sync.TRANSFORMS in the backend contract.
+  const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
+  const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
+
+  let _objects = [];               // last GET /objects payload — drives ribbon + rail
+  let _selected = null;            // selected object_key (master selection)
+  let _tab = 'overview';           // active detail tab: 'overview' | 'mapping' | 'history'
+  let _testResult = null;          // last {cls,dot,msg} from a Test-connection click
+  let _lastNewestKey = null;       // object_key of the most-recent run (ribbon deep-link)
+  const _config = {};              // object_key -> GET /config payload (transport/params/has_secret)
+  // Per-object mapping editor state: { rows:[{sap_field,nimbus_column,transform,active}], dirty:bool }
+  const _mapState = {};
+
+  // Master upsert keys — MUST mirror sap_sync._MASTER_KEY_COLUMNS. A master object whose
+  // active mapping omits any of these hits a NOT-NULL on upsert, so the editor blocks Save.
+  const MASTER_KEYS = {
+    subnetworks:      ['code'],
+    plants:           ['subnetwork', 'plant'],
+    production_lines: ['subnetwork', 'plant', 'production_line'],
+    materials:        ['material_id'],
+    material_plants:  ['material_id', 'plant'],
+  };
+  // One-line transform descriptions (keys mirror sap_sync.TRANSFORMS).
+  const XHINT = {
+    none: 'pass through unchanged',    alpha: 'ALPHA-pad — e.g. MATNR',
+    strip_zeros: 'drop leading zeros', dats: 'SAP YYYYMMDD → ISO date',
+    tims: 'SAP HHMMSS → time',         decimal: 'packed decimal, trailing sign',
+    uom: 'unit of measure → ISO',      bool_x: "SAP 'X' flag → boolean",
+  };
+  // Transport-specific connection fields (label + example only — scaffolds the params editor).
+  const TRANSPORT_FIELDS = {
+    file_drop: [['path', 'Share / Blob path', '/data/sap_drop'], ['glob', 'File glob', 'plants_*.xlsx']],
+    odata:     [['base_url', 'Service base URL', 'https://sap-gw/odata/ZNIMBUS_SRV'], ['entity_set', 'Entity set', 'PlantSet'], ['filter', '$filter (delta)', 'LAEDA gt {watermark}'], ['page_size', 'Page size', '1000']],
+    rfc:       [['dest', 'RFC destination', 'SAP_PRD'], ['function', 'Function module', 'Z_NIMBUS_GET_PLANTS'], ['batch', 'Batch size', '2000']],
+  };
+
+  const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function _writeHeaders(json = true) {
+    const h = { 'x-user-email': Session.actor() };
+    if (json) h['content-type'] = 'application/json';
+    return h;
+  }
+
+  // -----------------------------------------------------------------------
+  // Public entry point
+  // -----------------------------------------------------------------------
+  async function render() {
+    const host = document.getElementById('sap-interface-host');
+    if (!host) return;
+    await _reload();
+  }
+
+  // Fetch /objects, then paint the console. Used on first load + after every write.
+  async function _reload() {
+    const host = document.getElementById('sap-interface-host');
+    if (!host) return;
+    try {
+      const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+      _objects = data.objects || [];
+      if (!_selected || !_objects.some(o => o.object_key === _selected)) {
+        _selected = _objects.length ? _objects[0].object_key : null;
+      }
+      _paint();
+    } catch (e) {
+      host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">⚠</div>`
+        + `<div class="sap-empty-t">${_esc(Util.t('ui.sap_load_failed'))}</div>`
+        + `<div class="sap-empty-d">${_esc(e.message)}</div></div>`;
+      ErrorLog.error('sap-interface', `Load objects failed: ${e.message}`);
+    }
+  }
+
+  // Rebuild the whole console from cached _objects (no fetch).
+  function _paint() {
+    const host = document.getElementById('sap-interface-host');
+    if (!host) return;
+    host.innerHTML = `
+      <div class="sap-pagehead">
+        <div>
+          <div class="sap-pagehead-title"><h2>${_esc(Util.t('tab.interface'))}</h2>
+            <span class="sap-flow">SAP ECC <b>━▶</b> NIMBUS</span></div>
+          <div class="sap-pagehead-sub">${_esc(Util.t('ui.sap_subtitle'))}</div>
+        </div>
+        <span class="sap-mode-chip"><span class="admin-health-dot"></span> ${_esc(Util.t('ui.sap_stub_mode'))}</span>
+      </div>
+      ${_renderRibbon()}
+      <div class="sap-console">
+        <div id="sap-rail"></div>
+        <div id="sap-detail"></div>
+      </div>`;
+    host.querySelectorAll('[data-jump]').forEach(tile => tile.addEventListener('click', () => {
+      const j = tile.dataset.jump;
+      if (j === 'errors') { const eo = _objects.find(o => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
+      else if (j === 'last' && _lastNewestKey) { _selected = _lastNewestKey; }
+      _tab = 'history'; _renderRail(); _renderDetail();
+    }));
+    _renderRail();
+    _renderDetail();
+  }
+
+  function _renderRibbon() {
+    const enabled = _objects.filter(o => o.enabled).length;
+    let newest = null, newestObj = null;
+    _objects.forEach(o => {
+      const lr = o.last_run;
+      if (lr && lr.started_at && (!newest || new Date(lr.started_at) > new Date(newest.started_at))) { newest = lr; newestObj = o; }
+    });
+    _lastNewestKey = newestObj ? newestObj.object_key : null;
+    const errs = _objects.filter(o => o.last_run && o.last_run.status === 'error').length;
+    const tile = (k, v, d, cls, act) =>
+      `<div class="kpi-tile${cls ? ' ' + cls : ''}${act ? ' is-actionable' : ''}"${act ? ` data-jump="${act}"` : ''}>`
+      + `<div class="k">${_esc(k)}</div><div class="v">${v}</div><div class="d">${_esc(d)}</div></div>`;
+    const lastV = newest ? `<span class="sap-v-sm">${_esc(_relTime(newest.started_at))}</span>` : '—';
+    const lastD = newest ? `${newestObj.label} · ${newest.triggered_by || 'manual'}` : 'no runs yet';
+    const rowsV = newest ? Number(newest.rows_read || 0).toLocaleString() : '0';
+    const rowsD = newest ? `+${newest.rows_inserted ?? 0} ins / ~${newest.rows_updated ?? 0} upd` : '—';
+    return `<div class="sap-ribbon">
+      ${tile(Util.t('ui.sap_kpi_connection'), 'Stub', 'connectors not live', 'warn', '')}
+      ${tile(Util.t('ui.sap_kpi_objects'), `${enabled} <span class="sap-frac">/ ${_objects.length}</span>`, enabled ? `${_objects.length - enabled} awaiting setup` : 'none enabled', enabled ? '' : 'warn', '')}
+      ${tile(Util.t('ui.sap_kpi_last_activity'), lastV, lastD, '', newest ? 'last' : '')}
+      ${tile(Util.t('ui.sap_kpi_rows'), rowsV, rowsD, '', '')}
+      ${tile(Util.t('ui.sap_kpi_errors'), String(errs), errs ? 'most recent run failed' : 'no failures', errs ? 'err' : '', errs ? 'errors' : '')}
+    </div>`;
+  }
+
+  // -----------------------------------------------------------------------
+  // Object rail (master) + detail shell (Overview / Mapping / History tabs)
+  // -----------------------------------------------------------------------
+  function _renderRail() {
+    const el = document.getElementById('sap-rail');
+    if (!el) return;
+    const rows = _objects.map(o => {
+      const sel = o.object_key === _selected ? ' sap-rail-row-sel' : '';
+      const lr = o.last_run;
+      const dotCls = !lr ? '' : (lr.status === 'ok' ? 'ok' : (lr.status === 'error' ? 'err' : (lr.status === 'running' ? 'warn' : '')));
+      const statusTxt = !lr ? Util.t('ui.sap_never_run')
+        : (lr.status === 'ok' ? `ok · ${_relTime(lr.started_at)}`
+        : (lr.status === 'error' ? `failed · ${_relTime(lr.started_at)}` : lr.status));
+      const kind = o.kind || 'master';
+      return `<div class="sap-rail-row${sel}" data-obj="${_esc(o.object_key)}">
+        <span class="admin-health-dot ${dotCls}"></span>
+        <div class="sap-rail-main">
+          <div class="sap-rail-name">${_esc(o.label || o.object_key)} <span class="sap-kind sap-kind-${_esc(kind)}">${_esc(kind)}</span></div>
+          <div class="sap-rail-meta">${_esc(o.object_key)} · ${_esc(o.transport || 'file_drop')}</div>
+          <div class="sap-rail-status">${_esc(statusTxt)}</div>
+        </div>
+        <label class="cal-day-toggle-wrap sap-railsw" title="${_esc(Util.t('ui.sap_enabled'))}">
+          <input type="checkbox" data-enable="${_esc(o.object_key)}" ${o.enabled ? 'checked' : ''}>
+          <span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span>
+        </label>
+      </div>`;
+    }).join('');
+    el.innerHTML = `<div class="panel">
+      <div class="panel-head"><span class="sap-section-label">${_esc(Util.t('ui.sap_objects'))}</span>
+        <span class="sap-hint">${_objects.filter(o => o.enabled).length} / ${_objects.length}</span></div>
+      <div class="sap-rail">${rows}</div></div>`;
+    el.querySelectorAll('[data-obj]').forEach(r =>
+      r.addEventListener('click', () => { _selected = r.dataset.obj; _testResult = null; _renderRail(); _renderDetail(); }));
+    el.querySelectorAll('[data-enable]').forEach(cb => {
+      cb.addEventListener('click', e => e.stopPropagation());
+      cb.addEventListener('change', () => _saveConfig(cb.dataset.enable, { enabled: cb.checked }, cb.checked ? Util.t('toast.sap_enable_note') : null));
+    });
+  }
+
+  function _renderDetail() {
+    const el = document.getElementById('sap-detail');
+    if (!el) return;
+    const o = _objects.find(x => x.object_key === _selected);
+    if (!o) { el.innerHTML = ''; return; }
+    const kind = o.kind || 'master';
+    const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    el.innerHTML = `<div class="panel">
+      <div class="sap-detail-head">
+        <span class="sap-detail-name">${_esc(o.label || o.object_key)}</span>
+        <span class="sap-kind sap-kind-${_esc(kind)}">${_esc(kind)}</span>
+        <span class="sap-detail-key">${_esc(o.object_key)}</span>
+        <div class="sap-detail-actions">
+          <button class="btn btn-sm" data-act="dry">${_esc(Util.t('ui.sap_dry_run'))}</button>
+          <button class="btn btn-sm btn-primary" data-act="run">${_esc(Util.t('ui.sap_run_now'))} ▸</button>
+        </div>
+      </div>
+      <div class="sap-tabs">${tabBtn('overview', Util.t('ui.sap_overview'))}${tabBtn('mapping', Util.t('ui.sap_mapping'))}${tabBtn('history', Util.t('ui.sap_history'))}</div>
+      <div class="sap-tabbody" id="sap-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>
+    </div>`;
+    el.querySelectorAll('[data-tab]').forEach(b =>
+      b.addEventListener('click', () => { _tab = b.dataset.tab; _renderDetail(); }));
+    el.querySelectorAll('[data-act]').forEach(b =>
+      b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b)));
+    if (_tab === 'overview') _renderOverview(o);
+    else if (_tab === 'mapping') _renderMapping(o);
+    else _renderHistory(o);
+  }
+
+  function _relTime(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts); if (isNaN(d.getTime())) return String(ts);
+    let s = Math.floor((Date.now() - d.getTime()) / 1000); if (s < 0) s = 0;
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
+  function _cronProse(c) {
+    if (!c) return null;
+    const p = c.trim().split(/\s+/); if (p.length !== 5) return null;
+    const mi = p[0], ho = p[1], dom = p[2], mon = p[3];
+    const pad = x => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
+    if (dom === '*' && mon === '*' && p[4] === '*' && ho !== '*' && mi !== '*') return `Every day at ${pad(ho)}:${pad(mi)}`;
+    if (mi.indexOf('*/') === 0) return `Every ${mi.slice(2)} minutes`;
+    if (ho.indexOf('*/') === 0 && dom === '*') return `Every ${ho.slice(2)} hours`;
+    return null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Overview tab — transport config, secret indicator, schedule, checklist
+  // -----------------------------------------------------------------------
+  async function _renderOverview(o) {
+    const body = document.getElementById('sap-tabbody');
+    if (!body) return;
+    let cfg = _config[o.object_key];
+    if (!cfg) {
+      try {
+        cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        _config[o.object_key] = cfg;
+      } catch {
+        cfg = { transport: o.transport, source_params: {}, has_secret: false, schedule_cron: o.schedule_cron };
+      }
+    }
+    // bail if the user switched object/tab while awaiting
+    if (document.getElementById('sap-tabbody') !== body || _tab !== 'overview' || _selected !== o.object_key) return;
+
+    const transport = cfg.transport || o.transport || 'file_drop';
+    const cron = cfg.schedule_cron != null ? cfg.schedule_cron : (o.schedule_cron || '');
+    const prose = _cronProse(cron);
+    const lr = o.last_run;
+    const errBanner = (lr && lr.status === 'error')
+      ? `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${_esc(Util.t('ui.sap_last_failed'))} ${_esc(_relTime(lr.started_at))}</b><div class="sap-mono">${_esc(lr.error || '')}</div></div></div>`
+      : '';
+    const secret = cfg.has_secret
+      ? `<div class="sap-chipline"><span class="admin-health-dot ok"></span> ${_esc(Util.t('ui.sap_credential_present'))}</div>`
+      : `<div class="sap-chipline"><span class="admin-health-dot warn"></span> ${_esc(Util.t('ui.sap_no_credential'))}</div>`;
+    const activeMaps = (_mapState[o.object_key]?.rows || []).filter(m => m.active && m.sap_field && m.nimbus_column).length;
+    const steps = [
+      ['01', Util.t('ui.sap_step_transport'), true],
+      ['02', Util.t('ui.sap_step_map'), activeMaps > 0],
+      ['03', Util.t('ui.sap_step_enable'), o.enabled && !!cron],
+      ['04', Util.t('ui.sap_step_test'), false],
+      ['05', Util.t('ui.sap_step_dryrun'), !!(lr && lr.triggered_by === 'dry-run')],
+      ['06', Util.t('ui.sap_step_first'), !!(lr && lr.status === 'ok' && (lr.rows_inserted || 0) > 0)],
+    ];
+    const checklist = steps.map(s =>
+      `<div class="sap-check-step${s[2] ? ' done' : ''}"><span class="sap-check-n">${s[0]}</span><span class="sap-check-mark">${s[2] ? '✓' : ''}</span><span class="sap-check-t">${_esc(s[1])}</span></div>`).join('');
+    const tr = _testResult;
+    const testStrip = tr
+      ? `<div class="sap-test-strip ${tr.cls}"><span class="admin-health-dot ${tr.dot || ''}"></span> ${_esc(tr.msg)}</div>`
+      : `<div class="sap-test-strip"><span class="admin-health-dot"></span> ${_esc(Util.t('ui.sap_not_tested'))}</div>`;
+
+    body.innerHTML = `${errBanner}
+      <div class="sap-ov-grid">
+        <div>
+          <div class="sap-section-label">${_esc(Util.t('ui.sap_connection_section'))}</div>
+          <div class="sap-field"><label>${_esc(Util.t('ui.sap_transport'))}</label>
+            <select id="sap-transport-sel">${TRANSPORTS.map(tp => `<option${tp === transport ? ' selected' : ''}>${tp}</option>`).join('')}</select></div>
+          <div id="sap-transport-fields">${_transportFieldsHTML(transport, cfg.source_params || {})}</div>
+          <div class="sap-secretbox">${secret}<div class="sap-secret-note">${_esc(Util.t('ui.sap_secret_note'))}</div></div>
+          <div class="sap-test-row"><button class="btn" id="sap-test-btn">${_esc(Util.t('ui.sap_test_connection'))}</button></div>
+          ${testStrip}
+        </div>
+        <div>
+          <div class="sap-section-label">${_esc(Util.t('ui.sap_schedule_section'))}</div>
+          <div class="sap-field"><label>${_esc(Util.t('ui.sap_cron'))}</label>
+            <input class="sap-mono" id="sap-cron-input" value="${_esc(cron)}" placeholder="— — — — —">
+            ${prose ? `<div class="sap-cron-prose">${_esc(prose)}<span class="sap-cron-raw">${_esc(cron)}</span></div>` : `<div class="sap-help">${_esc(Util.t('ui.sap_not_scheduled'))}</div>`}</div>
+          <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">ℹ</span><div>${_esc(Util.t('ui.sap_scheduler_note_a'))} <span class="sap-mono">NIMBUS_SAP_SYNC_ENABLED=1</span> ${_esc(Util.t('ui.sap_scheduler_note_b'))}</div></div>
+          <div class="sap-section-label">${_esc(Util.t('ui.sap_delta_section'))}</div>
+          <div class="sap-kv"><span>${_esc(Util.t('ui.sap_last_watermark'))}</span><span class="sap-mono">${_esc(cfg.last_watermark || '— (full load)')}</span></div>
+        </div>
+        <div class="sap-ov-full">
+          <div class="sap-section-label">${_esc(Util.t('ui.sap_checklist'))}</div>
+          <div class="sap-check">${checklist}</div>
+        </div>
+      </div>`;
+
+    document.getElementById('sap-transport-sel')?.addEventListener('change', e => {
+      _config[o.object_key] = { ...(_config[o.object_key] || {}), transport: e.target.value };
+      _testResult = null;
+      _saveConfig(o.object_key, { transport: e.target.value }, null);
+    });
+    document.getElementById('sap-cron-input')?.addEventListener('change', e =>
+      _saveConfig(o.object_key, { schedule_cron: e.target.value.trim() || null }, null));
+    document.getElementById('sap-test-btn')?.addEventListener('click', () => _testConnection(o.object_key, transport));
+  }
+
+  function _transportFieldsHTML(transport, params) {
+    const fields = TRANSPORT_FIELDS[transport] || [];
+    if (!fields.length) return '';
+    return fields.map(f =>
+      `<div class="sap-field"><label>${_esc(f[1])}</label><input class="sap-mono" data-param="${_esc(f[0])}" value="${_esc(params[f[0]] != null ? params[f[0]] : '')}" placeholder="${_esc(f[2])}" spellcheck="false"></div>`).join('');
+  }
+
+  async function _testConnection(object, transport) {
+    const params = {};
+    document.querySelectorAll('#sap-transport-fields [data-param]').forEach(inp => {
+      if (inp.value.trim()) params[inp.dataset.param] = inp.value.trim();
+    });
+    _testResult = { cls: 'info', dot: '', msg: Util.t('ui.sap_testing') };
+    _renderDetail();
+    try {
+      const res = await fetch(`${API}/sap/interface/test-connection`, {
+        method: 'POST', headers: _writeHeaders(),
+        body: JSON.stringify({ transport, source_params: params }),
+      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      _testResult = res.ok
+        ? { cls: 'ok', dot: 'ok', msg: `${Util.t('toast.sap_conn_ok')} — ${res.detail || ''}`.trim() }
+        : { cls: 'info', dot: '', msg: res.detail || Util.t('toast.sap_conn_fail') };
+    } catch (e) {
+      _testResult = { cls: 'err', dot: 'err', msg: `${Util.t('toast.sap_conn_fail')} — ${e.message}` };
+      ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
+    }
+    if (_tab === 'overview' && _selected === object) _renderDetail();
+  }
+
+  async function _saveConfig(object, patch, confirmMsg) {
+    try {
+      await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
+        method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
+      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
+      if (confirmMsg) Toast.show(confirmMsg, 'info');
+      await _reload();
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('sap-interface', `Config save failed for ${object}: ${e.message}`);
+      await _reload();
+    }
+  }
+
+  async function _runNow(object, dryRun, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
+        method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
+      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      if (res.status === 'ok') {
+        Toast.show(`${dryRun ? Util.t('toast.sap_dryrun_done') : Util.t('toast.sap_sync_done')} (read ${res.rows_read ?? 0} · +${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
+      } else {
+        Toast.show(`${Util.t('toast.sap_sync_failed')}: ${res.error || ''}`.trim(), 'error', 6000);
+      }
+      await _reload();
+    } catch (e) {
+      Toast.show(`${Util.t('toast.sap_sync_failed')}: ${e.message}`, 'error');
+      ErrorLog.error('sap-interface', `Sync failed for ${object}: ${e.message}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Mapping tab — SAP field ━▶ transform ━▶ NIMBUS column flow editor
+  // -----------------------------------------------------------------------
+  async function _renderMapping(o) {
+    const body = document.getElementById('sap-tabbody');
+    if (!body) return;
+    if (!_mapState[o.object_key]) {
+      body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
+      try {
+        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        _mapState[o.object_key] = {
+          rows: (data.mappings || []).map(m => ({
+            sap_field: m.sap_field || '', nimbus_column: m.nimbus_column || '',
+            transform: m.transform || 'none', active: m.active !== false,
+          })),
+          dirty: false,
+        };
+      } catch (e) {
+        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_map_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
+        ErrorLog.error('sap-interface', `Load mappings failed for ${o.object_key}: ${e.message}`);
+        return;
+      }
+    }
+    if (document.getElementById('sap-tabbody') !== body || _tab !== 'mapping' || _selected !== o.object_key) return;
+    _drawMapping(o);
+  }
+
+  function _drawMapping(o) {
+    const body = document.getElementById('sap-tabbody');
+    const st = _mapState[o.object_key];
+    if (!body || !st) return;
+    const isMaster = (o.kind || 'master') === 'master';
+    const keys = MASTER_KEYS[o.object_key] || [];
+    const rails = `<div class="sap-flow-rails"><span class="sap-fr">▤ ${_esc(Util.t('ui.sap_field'))}</span><span class="sap-fr c">${_esc(Util.t('ui.sap_transform'))}</span><span class="sap-fr r">${_esc(Util.t('ui.sap_nimbus_column'))} ◆</span></div>`;
+
+    if (!st.rows.length) {
+      body.innerHTML = `${isMaster ? _keystrip(o, st) : ''}
+        <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">→</span><div>${isMaster ? _esc(Util.t('ui.sap_map_primer_master')) : _esc(Util.t('ui.sap_map_primer_orders'))}</div></div>
+        ${rails}
+        <div class="sap-ghost-row"><div class="sap-ghost-node">SAP field</div><div class="sap-ghost-mid">transform</div><div class="sap-ghost-node">nimbus_column</div></div>
+        <div class="sap-map-actions"><button class="btn btn-sm" id="sap-add-map">+ ${_esc(Util.t('ui.sap_add_first'))}</button></div>`;
+      document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
+      return;
+    }
+
+    const rows = st.rows.map((m, i) => {
+      const isKey = isMaster && keys.indexOf(m.nimbus_column) > -1;
+      const opts = TRANSFORMS.map(tr => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
+      return `<div class="sap-map-row${m.active ? '' : ' inactive'}" style="animation-delay:${i * 55}ms">
+        <input class="sap-node sap-node-sap" data-idx="${i}" data-f="sap_field" value="${_esc(m.sap_field)}" placeholder="SAP field" spellcheck="false">
+        <span class="sap-wire"><span class="sap-wire-fill" style="animation-delay:${i * 55}ms"></span></span>
+        <span class="sap-xform-wrap${m.transform === 'none' ? ' none' : ''}"><select class="sap-xform${m.transform === 'none' ? ' none' : ''}" data-idx="${i}" data-f="transform">${opts}</select><span class="sap-xform-hint">${_esc(XHINT[m.transform] || '')}</span></span>
+        <span class="sap-node-wrap"><input class="sap-node sap-node-nimbus${isKey ? ' key' : ''}" data-idx="${i}" data-f="nimbus_column" value="${_esc(m.nimbus_column)}" placeholder="nimbus_column" spellcheck="false">${isKey ? '<span class="sap-keytag" title="Key column">🔑</span>' : ''}</span>
+        <span class="sap-row-tools"><label class="cal-day-toggle-wrap sap-rowsw" title="${_esc(Util.t('ui.sap_active'))}"><input type="checkbox" data-idx="${i}" data-f="active" ${m.active ? 'checked' : ''}><span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span></label><button class="sap-icon-btn danger" data-del="${i}" title="Remove">🗑</button></span>
+      </div>`;
+    }).join('');
+
+    let guard = '', blocked = false;
+    if (isMaster && keys.length) {
+      const missing = keys.filter(k => !st.rows.some(m => m.nimbus_column === k && m.active));
+      blocked = missing.length > 0;
+      guard = _keystrip(o, st);
+      if (blocked) {
+        guard += `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${_esc(o.label || o.object_key)} ${_esc(Util.t('ui.sap_upsert_fail'))}</b> ${_esc(Util.t('ui.sap_key_missing'))} <span class="sap-mono">${missing.map(_esc).join(', ')}</span>.</div></div>`;
+      }
+    } else if (!isMaster) {
+      guard = `<div class="sap-help" style="margin-bottom:12px"><span class="sap-mono">production_order</span> ${_esc(Util.t('ui.sap_orders_identity'))}</div>`;
+    }
+
+    body.innerHTML = `${guard}${rails}<div class="sap-flow">${rows}</div>
+      <div class="sap-map-actions">
+        <button class="btn btn-sm" id="sap-add-map">+ ${_esc(Util.t('ui.sap_add_mapping'))}</button>
+        <span class="sap-spacer"></span>
+        ${st.dirty ? `<span class="sap-dirty">${_esc(Util.t('ui.sap_unsaved'))}</span>` : ''}
+        <button class="btn btn-sm btn-primary" id="sap-save-map"${blocked ? ` disabled title="${_esc(Util.t('ui.sap_resolve_keys'))}"` : ''}>${_esc(Util.t('ui.sap_save_mappings'))}</button>
+      </div>`;
+
+    body.querySelectorAll('[data-f]').forEach(inp => {
+      const isText = inp.tagName === 'INPUT' && inp.type === 'text';
+      const update = () => {
+        const row = st.rows[+inp.dataset.idx]; if (!row) return;
+        row[inp.dataset.f] = inp.type === 'checkbox' ? inp.checked : inp.value;
+        st.dirty = true;
+      };
+      if (isText) { inp.addEventListener('input', update); inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
+      else { inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
+    });
+    body.querySelectorAll('[data-del]').forEach(b =>
+      b.addEventListener('click', () => { st.rows.splice(+b.dataset.del, 1); st.dirty = true; _drawMapping(o); }));
+    document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
+    document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(o.object_key));
+  }
+
+  function _keystrip(o, st) {
+    const keys = MASTER_KEYS[o.object_key] || [];
+    if (!keys.length) return '';
+    const chips = keys.map(k => {
+      const ok = st.rows.some(m => m.nimbus_column === k && m.active);
+      return `<span class="sap-keychip${ok ? '' : ' miss'}"><span class="admin-health-dot ${ok ? 'ok' : 'err'}"></span>${_esc(k)}${ok ? '' : ` <span class="sap-req">${_esc(Util.t('ui.sap_required'))}</span>`}</span>`;
+    }).join('');
+    return `<div class="sap-keystrip"><span class="sap-ks-label">${_esc(Util.t('ui.sap_key_columns'))}</span>${chips}</div>`;
+  }
+
+  async function _saveMappings(object) {
+    const st = _mapState[object];
+    if (!st) return;
+    const mappings = st.rows
+      .filter(m => m.sap_field.trim() && m.nimbus_column.trim())
+      .map((m, i) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
+    try {
+      await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
+        method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
+      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      delete _mapState[object];
+      Toast.show(Util.t('toast.sap_mappings_saved'), 'success');
+      await _reload();
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${e.message}`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // History tab — run timeline (status, counts, duration, watermark, errors)
+  // -----------------------------------------------------------------------
+  async function _renderHistory(o) {
+    const body = document.getElementById('sap-tabbody');
+    if (!body) return;
+    body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
+    try {
+      const params = new URLSearchParams({ limit: '50', object: o.object_key });
+      const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
+      if (document.getElementById('sap-tabbody') !== body || _tab !== 'history' || _selected !== o.object_key) return;
+      const runs = data.runs || [];
+      if (!runs.length) {
+        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${_esc(Util.t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${_esc(Util.t('ui.sap_no_runs_hint'))}</div><button class="btn btn-sm" data-act-empty="dry">${_esc(Util.t('ui.sap_dry_run'))}</button></div>`;
+        body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
+        return;
+      }
+      body.innerHTML = `<div class="sap-feed">${runs.map((rn, i) => _runRow(rn, i)).join('')}</div>`;
+      body.querySelectorAll('[data-exp]').forEach(b =>
+        b.addEventListener('click', () => b.closest('.sap-run').classList.toggle('open')));
+    } catch (e) {
+      body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
+      ErrorLog.error('sap-interface', `Load runs failed: ${e.message}`);
+    }
+  }
+
+  function _runRow(rn, i) {
+    const status = rn.status || 'unknown';
+    const cls = status === 'ok' ? 'ok' : (status === 'error' ? 'err' : 'info');
+    const pill = status === 'ok' ? '<span class="sap-pill ok">ok</span>'
+      : (status === 'error' ? '<span class="sap-pill err">error</span>' : `<span class="sap-pill info">${_esc(status)}</span>`);
+    const dur = _dur(rn.started_at, rn.ended_at);
+    const counts = `read ${rn.rows_read ?? 0} · <span class="ins">+${rn.rows_inserted ?? 0} ins</span> / <span class="upd">~${rn.rows_updated ?? 0} upd</span> / <span class="fail">!${rn.rows_failed ?? 0} fail</span>`;
+    const wm = (rn.watermark_before || rn.watermark_after)
+      ? `<div class="sap-run-wm">watermark ${_esc(rn.watermark_before || '∅')} → ${_esc(rn.watermark_after || '∅')}</div>` : '';
+    const err = rn.error
+      ? `<div class="sap-run-err"><button class="sap-exp" data-exp="${i}">view error ▾</button><pre>${_esc(rn.error)}</pre></div>` : '';
+    return `<div class="sap-run ${cls}"><div class="sap-run-head">${pill}<span class="sap-run-t">${_esc(_fmtTs(rn.started_at))}</span><span class="sap-run-by">${_esc(rn.triggered_by || 'manual')}</span>${dur ? `<span class="sap-run-dur">${_esc(dur)}</span>` : ''}</div><div class="sap-run-counts">${counts}</div>${wm}${err}</div>`;
+  }
+
+  function _dur(a, b) {
+    if (!a || !b) return '';
+    const d = (new Date(b).getTime() - new Date(a).getTime()) / 1000;
+    if (isNaN(d) || d < 0) return '';
+    if (d < 1) return `${Math.round(d * 1000)}ms`;
+    if (d < 60) return `${d.toFixed(1)}s`;
+    return `${Math.floor(d / 60)}m ${Math.round(d % 60)}s`;
+  }
+
+  function _fmtTs(ts) {
+    if (!ts) return '—';
+    try {
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return String(ts);
+      return Util.fmtDTReadable ? Util.fmtDTReadable(d) : d.toLocaleString();
+    } catch { return String(ts); }
+  }
+
+  return { render };
+})();
+
+/* =============================================================================
+   SECURITY — admin sub-tab: user accounts (username / role / password) and
+   role-based plant assignment (roles + role_plants). Same self-contained,
+   paint-into-one-host-div idiom as Interface: private state, a public
+   render() entry point, an internal 'users' | 'roles' tab, full re-render on
+   every tab switch and on every write (mirrors Interface's _saveConfig: try
+   the write, Toast+log on failure, then unconditionally reload+repaint from
+   the server either way). Backend: /security/users(+/bulk, +/{username}/
+   reset-password) for accounts (auth.py); the generic /master-data/roles
+   and /master-data/role_plants (+/bulk) for roles and their plant scoping
+   (master_data.py) — this module only renders and posts, never touches
+   password hashes beyond the single write they're submitted in.
+   ========================================================================== */
+export const Security = (() => {
+  const API = Config.API_BASE;
+
+  let _tab = 'users';              // active top-level tab: 'users' | 'roles'
+
+  // ---- Users tab state ----
+  let _users = [];                 // last GET /security/users .users: [{username,role,has_password}]
+  let _usersSearch = '';           // current server-side search query
+  let _roleOptions = [];           // role names for the Role <select> (from GET /master-data/roles)
+  let _staged = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
+  const _pwOpen = new Set();       // usernames with an open inline password-reveal row
+  const _nameSaveTimers = new Map(); // username -> pending debounce timeout id
+
+  // ---- Roles tab state ----
+  let _roles = [];                 // GET /master-data/roles rows: [{role, description}]
+  let _rolePlants = [];            // GET /master-data/role_plants rows: [{role, plant}]
+  let _rolesInUse = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
+  let _selectedRole = null;
+
+  const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function _writeHeaders(json = true) {
+    const h = { 'x-user-email': Session.actor() };
+    if (json) h['content-type'] = 'application/json';
+    return h;
+  }
+
+  function _postJSON(url, body) {
+    return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
+      .then(r => {
+        if (!r.ok) {
+          // A 403 here means the backend admin gate rejected us though the UI
+          // believed we were admin (stale cached role). Reconcile + prompt
+          // re-auth instead of only bubbling a raw error to the caller.
+          if (r.status === 403) { try { Session.onAuthDenied(); } catch {} }
+          return r.json().catch(() => ({})).then(e => {
+            const err = new Error(e.detail || `HTTP ${r.status}`);
+            err.status = r.status;
+            throw err;
+          });
+        }
+        return r.json();
+      });
+  }
+
+  const _debouncedUserSearch = Util.debounce(() => _reloadUsers(), 300);
+
+  // -----------------------------------------------------------------------
+  // Public entry point
+  // -----------------------------------------------------------------------
+  async function render() {
+    const host = document.getElementById('security-host');
+    if (!host) return;
+    _paintShell();
+    await _loadActiveTab();
+  }
+
+  function _paintShell() {
+    const host = document.getElementById('security-host');
+    if (!host) return;
+    const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    host.innerHTML = `
+      <div class="sap-pagehead">
+        <div><div class="sap-pagehead-title"><h2>${_esc(Util.t('tab.security'))}</h2></div></div>
+      </div>
+      <div class="sap-tabs">${tabBtn('users', Util.t('tab.security_users'))}${tabBtn('roles', Util.t('tab.security_roles'))}</div>
+      <div id="security-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>`;
+    host.querySelectorAll('[data-tab]').forEach(b =>
+      b.addEventListener('click', () => { _tab = b.dataset.tab; _paintShell(); _loadActiveTab(); }));
+  }
+
+  function _loadActiveTab() {
+    return _tab === 'users' ? _reloadUsers() : _reloadRoles();
+  }
+
+  // -----------------------------------------------------------------------
+  // USERS tab
+  // -----------------------------------------------------------------------
+  async function _reloadUsers() {
+    const body = document.getElementById('security-tabbody');
+    try {
+      const q = _usersSearch.trim();
+      const usersUrl = `${API}/security/users` + (q ? `?search=${encodeURIComponent(q)}` : '');
+      const [usersData, rolesData] = await Promise.all([
+        Util.fetchTraced(usersUrl).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      ]);
+      _users = usersData.users || [];
+      _roleOptions = [...new Set((rolesData.rows || []).map(r => r.role).filter(Boolean))].sort();
+      if (_tab !== 'users') return; // bail if the admin switched tabs while awaiting
+      _renderUsersTab();
+    } catch (e) {
+      const is403 = e.status === 403 || /\b403\b/.test(e.message || '');
+      // Stale-admin 403 (the /master-data/roles half of the Promise.all is
+      // ungated, so a 403 here is from /security/users): reconcile + re-auth.
+      if (is403) { try { Session.onAuthDenied(); } catch {} }
+      if (body) body.innerHTML = `<div class="md-empty">${_esc(is403 ? Util.t('sec.access_revoked') : Util.t('sec.load_users_failed', { msg: e.message }))}</div>`;
+      ErrorLog.error('security', `Load users failed: ${e.message}`);
+    }
+  }
+
+  function _renderUsersTab() {
+    const body = document.getElementById('security-tabbody');
+    if (!body) return;
+    // Preserve the search box's focus/caret across the re-render a debounced
+    // keystroke-driven reload causes (captured synchronously, not via
+    // focus/blur listeners, since replacing innerHTML can race those).
+    const hadFocus = document.activeElement && document.activeElement.id === 'sec-user-search';
+    const caret = hadFocus ? document.activeElement.selectionStart : null;
+    body.innerHTML = _usersShellHtml();
+    _wireUsersShell();
+    _renderUsersRows();
+    _renderUsersActions();
+    if (hadFocus) {
+      const search = document.getElementById('sec-user-search');
+      if (search) {
+        search.focus();
+        const pos = caret ?? search.value.length;
+        search.setSelectionRange(pos, pos);
+      }
+    }
+  }
+
+  function _usersShellHtml() {
+    return `
+      <div class="panel">
+        <div class="md-toolbar">
+          <input type="search" class="input md-search" id="sec-user-search" placeholder="${_esc(Util.t('sec.search_users_ph'))}" value="${_esc(_usersSearch)}">
+          <span class="spacer"></span>
+          <button class="btn btn-ghost sm" id="sec-paste-users" title="${_esc(Util.t('tip.paste_rows'))}">${_esc(Util.t('btn.paste_rows'))}</button>
+          <span id="sec-users-actions" style="display:inline-flex;gap:8px;align-items:center"></span>
+        </div>
+        <div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:center;flex-wrap:wrap">
+          <input type="text" class="input" id="sec-new-username" placeholder="${_esc(Util.t('sec.username_ph'))}" style="flex:1;min-width:120px">
+          <input type="text" class="input" id="sec-new-firstname" placeholder="${_esc(Util.t('sec.first_name_ph'))}" maxlength="100" style="flex:1;min-width:100px">
+          <input type="text" class="input" id="sec-new-lastname" placeholder="${_esc(Util.t('sec.last_name_ph'))}" maxlength="100" style="flex:1;min-width:100px">
+          ${_roleSelectHtml('', 'id="sec-new-role-select"')}
+          <input type="password" class="input" id="sec-new-password" placeholder="${_esc(Util.t('sec.new_password_ph'))}" autocomplete="new-password" style="flex:1;min-width:120px">
+          <button class="btn btn-primary sm" id="sec-add-user-btn">${_esc(Util.t('sec.add_user'))}</button>
+        </div>
+        <div class="md-table-wrap">
+          <table class="md-table">
+            <thead><tr>
+              <th class="md-th">${_esc(Util.t('sec.username'))}</th>
+              <th class="md-th">${_esc(Util.t('sec.first_name'))}</th>
+              <th class="md-th">${_esc(Util.t('sec.last_name'))}</th>
+              <th class="md-th">${_esc(Util.t('sec.role'))}</th>
+              <th class="md-th">${_esc(Util.t('sec.password'))}</th>
+              <th class="md-th"></th>
+            </tr></thead>
+            <tbody id="sec-users-tbody"></tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  function _wireUsersShell() {
+    const search = document.getElementById('sec-user-search');
+    if (search) {
+      search.addEventListener('input', () => { _usersSearch = search.value; _debouncedUserSearch(); });
+    }
+    document.getElementById('sec-paste-users')?.addEventListener('click', _pasteUsers);
+    document.getElementById('sec-add-user-btn')?.addEventListener('click', _addUser);
+  }
+
+  function _renderUsersActions() {
+    const el = document.getElementById('sec-users-actions');
+    if (!el) return;
+    el.innerHTML = _staged.length
+      ? `<span class="md-dirty-badge">${_esc(Util.t('ui.unsaved_badge', { count: _staged.length }))}</span>
+         <button class="btn btn-primary sm" id="sec-save-staged">${_esc(Util.t('sec.save_changes'))}</button>`
+      : '';
+    document.getElementById('sec-save-staged')?.addEventListener('click', _saveStaged);
+  }
+
+  // extraAttrs is a caller-built, already-escaped attribute string (id="..." or data-x="...").
+  function _roleSelectHtml(value, extraAttrs) {
+    const opts = [`<option value=""${!value ? ' selected' : ''}>${_esc(Util.t('ui.select_placeholder'))}</option>`]
+      .concat(_roleOptions.map(r => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
+      .join('');
+    return `<select class="input" ${extraAttrs}>${opts}</select>`;
+  }
+
+  function _userRowHtml(u) {
+    const pwOpen = _pwOpen.has(u.username);
+    const pwCell = pwOpen
+      ? `<div style="display:flex;gap:6px;align-items:center">
+           <input type="password" class="input" data-pw-input="${_esc(u.username)}" placeholder="${_esc(Util.t('sec.new_password_ph'))}" autocomplete="new-password" style="width:140px">
+           <button class="btn btn-primary sm" data-pw-save="${_esc(u.username)}">${_esc(Util.t('sec.save_password'))}</button>
+           <button class="btn btn-ghost sm" data-pw-cancel="${_esc(u.username)}">${_esc(Util.t('btn.cancel'))}</button>
+         </div>`
+      : `<div style="display:flex;gap:8px;align-items:center">
+           <span class="admin-health-dot ${u.has_password ? 'ok' : 'warn'}"></span>
+           <span>${_esc(u.has_password ? Util.t('sec.password_set') : Util.t('sec.password_not_set'))}</span>
+           <button class="btn btn-ghost sm" data-pw-toggle="${_esc(u.username)}">${_esc(u.has_password ? Util.t('sec.reset_password') : Util.t('sec.set_password'))}</button>
+         </div>`;
+    return `<tr data-username="${_esc(u.username)}">
+      <td class="md-td">${_esc(u.username)}</td>
+      <td class="md-td"><input type="text" class="input" data-first-name-user="${_esc(u.username)}" value="${_esc(u.first_name || '')}" maxlength="100"></td>
+      <td class="md-td"><input type="text" class="input" data-last-name-user="${_esc(u.username)}" value="${_esc(u.last_name || '')}" maxlength="100"></td>
+      <td class="md-td">${_roleSelectHtml(u.role, `data-role-select-user="${_esc(u.username)}"`)}</td>
+      <td class="md-td">${pwCell}</td>
+      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${_esc(u.username)}" title="${_esc(Util.t('tip.delete_row'))}">🗑</button></td>
+    </tr>`;
+  }
+
+  function _stagedRowHtml(r, i) {
+    return `<tr class="md-row-new">
+      <td class="md-td">${_esc(r.username)}</td>
+      <td class="md-td"><input type="text" class="input" data-first-name-staged="${i}" value="${_esc(r.first_name || '')}" maxlength="100"></td>
+      <td class="md-td"><input type="text" class="input" data-last-name-staged="${i}" value="${_esc(r.last_name || '')}" maxlength="100"></td>
+      <td class="md-td">${_roleSelectHtml(r.role, `data-role-select-staged="${i}"`)}</td>
+      <td class="md-td">${_esc(Util.t('sec.password_not_set'))}</td>
+      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${_esc(Util.t('tip.delete_row'))}">🗑</button></td>
+    </tr>`;
+  }
+
+  function _renderUsersRows() {
+    const tbody = document.getElementById('sec-users-tbody');
+    if (!tbody) return;
+    if (!_users.length && !_staged.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="md-empty">${_esc(Util.t('sec.no_users_yet'))}</td></tr>`;
+    } else {
+      tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
+    }
+    tbody.querySelectorAll('[data-role-select-user]').forEach(sel =>
+      sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser, sel.value)));
+    tbody.querySelectorAll('[data-role-select-staged]').forEach(sel =>
+      sel.addEventListener('change', () => { _staged[+sel.dataset.roleSelectStaged].role = sel.value; }));
+    tbody.querySelectorAll('[data-first-name-user]').forEach(inp =>
+      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.firstNameUser)));
+    tbody.querySelectorAll('[data-last-name-user]').forEach(inp =>
+      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.lastNameUser)));
+    tbody.querySelectorAll('[data-first-name-staged]').forEach(inp =>
+      inp.addEventListener('blur', () => { _staged[+inp.dataset.firstNameStaged].first_name = inp.value; }));
+    tbody.querySelectorAll('[data-last-name-staged]').forEach(inp =>
+      inp.addEventListener('blur', () => { _staged[+inp.dataset.lastNameStaged].last_name = inp.value; }));
+    tbody.querySelectorAll('[data-pw-toggle]').forEach(b =>
+      b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle); _renderUsersRows(); }));
+    tbody.querySelectorAll('[data-pw-cancel]').forEach(b =>
+      b.addEventListener('click', () => { _pwOpen.delete(b.dataset.pwCancel); _renderUsersRows(); }));
+    tbody.querySelectorAll('[data-pw-save]').forEach(b =>
+      b.addEventListener('click', () => _savePassword(b.dataset.pwSave)));
+    tbody.querySelectorAll('[data-del-user]').forEach(b =>
+      b.addEventListener('click', () => _deleteUser(b.dataset.delUser)));
+    tbody.querySelectorAll('[data-del-staged]').forEach(b =>
+      b.addEventListener('click', () => { _staged.splice(+b.dataset.delStaged, 1); _renderUsersRows(); _renderUsersActions(); }));
+  }
+
+  async function _setUserRole(username, role) {
+    try {
+      await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role: role || null }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Set role failed for ${username}: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  // Debounced by username so tabbing from First Name straight into Last Name
+  // in the same row coalesces into one save (reading both fields' live
+  // values) instead of firing mid-edit and losing the second field's
+  // keystrokes to the unconditional reload/re-render below.
+  function _scheduleSetUserName(username) {
+    clearTimeout(_nameSaveTimers.get(username));
+    _nameSaveTimers.set(username, setTimeout(() => {
+      _nameSaveTimers.delete(username);
+      _setUserName(username);
+    }, 200));
+  }
+
+  async function _setUserName(username) {
+    const row = document.querySelector(`tr[data-username="${CSS.escape(username)}"]`);
+    if (!row) return;
+    const roleSelect = row.querySelector('[data-role-select-user]');
+    const firstInput = row.querySelector('[data-first-name-user]');
+    const lastInput = row.querySelector('[data-last-name-user]');
+    try {
+      await _postJSON(`${API}/security/users/bulk`, {
+        upserts: [{
+          username,
+          role: roleSelect ? (roleSelect.value || null) : null,
+          first_name: firstInput ? firstInput.value.trim() : '',
+          last_name: lastInput ? lastInput.value.trim() : '',
+        }],
+      });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Set name failed for ${username}: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  async function _savePassword(username) {
+    const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`);
+    const pw = input ? input.value : '';
+    if (!pw || pw.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
+    try {
+      await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
+      _pwOpen.delete(username);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Set password failed for ${username}: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  async function _deleteUser(username) {
+    const ok = await Modal.confirm({
+      title: Util.t('sec.confirm_delete_user_title'),
+      message: Util.t('sec.confirm_delete_user_msg', { username }),
+      confirmLabel: Util.t('btn.yes_delete'),
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await _postJSON(`${API}/security/users/bulk`, { deletes: [{ username }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Delete user failed for ${username}: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  async function _addUser() {
+    const uInput = document.getElementById('sec-new-username');
+    const fInput = document.getElementById('sec-new-firstname');
+    const lInput = document.getElementById('sec-new-lastname');
+    const rSelect = document.getElementById('sec-new-role-select');
+    const pInput = document.getElementById('sec-new-password');
+    const username = (uInput?.value || '').trim();
+    if (!username) { Toast.show(Util.t('sec.username_required'), 'error'); return; }
+    const password = pInput?.value || '';
+    if (password && password.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
+    const role = rSelect?.value || null;
+    const first_name = (fInput?.value || '').trim();
+    const last_name = (lInput?.value || '').trim();
+    try {
+      await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role, first_name, last_name }] });
+      if (password) await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Add user failed: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
+  // username/role 2-column shape (no password column — passwords are never pasted).
+  function _parseUserPaste(rawText) {
+    const lines = rawText.replace(/\r/g, '').split('\n').filter(l => l.trim());
+    if (!lines.length) return [];
+    const first = lines[0].split('\t').map(h => h.trim().toLowerCase());
+    const nameHdrs = ['username', Util.t('sec.username').toLowerCase()];
+    const roleHdrs = ['role', Util.t('sec.role').toLowerCase()];
+    const firstNameHdrs = ['first name', 'firstname', Util.t('sec.first_name').toLowerCase()];
+    const lastNameHdrs = ['last name', 'lastname', Util.t('sec.last_name').toLowerCase()];
+    const hasHeader = first.some(h =>
+      nameHdrs.includes(h) || roleHdrs.includes(h) || firstNameHdrs.includes(h) || lastNameHdrs.includes(h));
+    let headers, dataLines;
+    if (hasHeader) {
+      headers = first.map(h => {
+        if (nameHdrs.includes(h)) return 'username';
+        if (roleHdrs.includes(h)) return 'role';
+        if (firstNameHdrs.includes(h)) return 'first_name';
+        if (lastNameHdrs.includes(h)) return 'last_name';
+        return h;
+      });
+      dataLines = lines.slice(1);
+    } else {
+      headers = ['username', 'role'];
+      dataLines = lines;
+    }
+    return dataLines.map(line => {
+      const vals = line.split('\t');
+      const row = {};
+      headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+      return row;
+    }).filter(r => r.username);
+  }
+
+  async function _pasteUsers() {
+    let raw;
+    try { raw = await navigator.clipboard.readText(); }
+    catch { Toast.show(Util.t('toast.clipboard_denied'), 'error'); return; }
+    if (!raw.trim()) { Toast.show(Util.t('toast.clipboard_empty'), 'error'); return; }
+    const rows = _parseUserPaste(raw);
+    if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
+    rows.forEach(r => _staged.push({
+      username: r.username, role: r.role || '',
+      first_name: r.first_name || '', last_name: r.last_name || '',
+    }));
+    _renderUsersRows();
+    _renderUsersActions();
+  }
+
+  async function _saveStaged() {
+    if (!_staged.length) return;
+    const upserts = _staged.map(r => ({
+      username: r.username, role: r.role || null,
+      first_name: r.first_name || '', last_name: r.last_name || '',
+    }));
+    try {
+      await _postJSON(`${API}/security/users/bulk`, { upserts });
+      _staged = [];
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Save staged users failed: ${e.message}`);
+    }
+    await _reloadUsers();
+  }
+
+  // -----------------------------------------------------------------------
+  // ROLES tab — master-detail: role list (left) + its plant assignments (right)
+  // -----------------------------------------------------------------------
+  async function _reloadRoles() {
+    const body = document.getElementById('security-tabbody');
+    try {
+      const [rolesData, rpData] = await Promise.all([
+        Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/role_plants`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      ]);
+      _roles = rolesData.rows || [];
+      _rolePlants = rpData.rows || [];
+      if (_selectedRole && !_roles.some(r => r.role === _selectedRole)) _selectedRole = null;
+      // Best-effort: knowing which roles have >=1 user lets the delete button be
+      // disabled pre-emptively. Non-fatal if this fetch fails — bulk_apply's FK
+      // hardening (ForeignKeyViolation -> clean 400) remains the authoritative guard.
+      try {
+        const usersData = await Util.fetchTraced(`${API}/security/users`).then(r => { if (!r.ok) throw new Error(); return r.json(); });
+        _rolesInUse = new Set((usersData.users || []).map(u => u.role).filter(Boolean));
+      } catch { _rolesInUse = new Set(); }
+      if (_tab !== 'roles') return; // bail if the admin switched tabs while awaiting
+      _renderRolesTab();
+    } catch (e) {
+      if (body) body.innerHTML = `<div class="md-empty">Failed to load roles: ${_esc(e.message)}</div>`;
+      ErrorLog.error('security', `Load roles failed: ${e.message}`);
+    }
+  }
+
+  function _renderRolesTab() {
+    const body = document.getElementById('security-tabbody');
+    if (!body) return;
+    body.innerHTML = `<div class="sap-console"><div id="sec-roles-rail"></div><div id="sec-roles-detail"></div></div>`;
+    _renderRolesRail();
+    _renderRolesDetail();
+  }
+
+  function _roleRowHtml(r) {
+    const sel = r.role === _selectedRole ? ' sap-rail-row-sel' : '';
+    const inUse = _rolesInUse.has(r.role);
+    const delAttrs = inUse
+      ? `disabled title="${_esc(Util.t('sec.role_in_use'))}"`
+      : `title="${_esc(Util.t('tip.delete_row'))}"`;
+    return `<div class="sap-rail-row${sel}" style="display:flex;align-items:center;gap:8px" data-role="${_esc(r.role)}">
+      <div style="flex:1;min-width:0">
+        <div class="sap-rail-name" style="cursor:pointer" data-role-select="${_esc(r.role)}">${_esc(r.role)}</div>
+        <input type="text" class="input" data-role-desc="${_esc(r.role)}" value="${_esc(r.description || '')}"
+          title="${_esc(Util.t('sec.description'))}" placeholder="${_esc(Util.t('sec.description_ph'))}"
+          style="margin-top:4px;width:100%;font-size:11.5px;padding:3px 6px">
+      </div>
+      <button class="btn btn-ghost sm" data-role-desc-save="${_esc(r.role)}">${_esc(Util.t('btn.save'))}</button>
+      <button class="sap-icon-btn danger" data-role-del="${_esc(r.role)}" ${delAttrs}>🗑</button>
+    </div>`;
+  }
+
+  function _renderRolesRail() {
+    const el = document.getElementById('sec-roles-rail');
+    if (!el) return;
+    const rows = !_roles.length
+      ? `<div class="md-empty">${_esc(Util.t('sec.no_roles_yet'))}</div>`
+      : _roles.map(_roleRowHtml).join('');
+    el.innerHTML = `<div class="panel">
+      <div class="panel-head"><span class="sap-section-label">${_esc(Util.t('tab.security_roles'))}</span></div>
+      <div style="display:flex;gap:8px;padding:12px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+        <input type="text" class="input" id="sec-new-role" placeholder="${_esc(Util.t('sec.role'))}" style="flex:1;min-width:90px">
+        <input type="text" class="input" id="sec-new-role-desc" placeholder="${_esc(Util.t('sec.description_ph'))}" style="flex:1.6;min-width:110px">
+        <button class="btn btn-primary sm" id="sec-add-role-btn">${_esc(Util.t('sec.add_role'))}</button>
+      </div>
+      <div class="sap-rail" id="sec-roles-list">${rows}</div>
+    </div>`;
+    document.getElementById('sec-add-role-btn')?.addEventListener('click', _addRole);
+    el.querySelectorAll('[data-role-select]').forEach(nameEl =>
+      nameEl.addEventListener('click', () => _selectRole(nameEl.dataset.roleSelect)));
+    el.querySelectorAll('[data-role-desc-save]').forEach(b =>
+      b.addEventListener('click', () => _saveRoleDescription(b.dataset.roleDescSave)));
+    el.querySelectorAll('[data-role-del]').forEach(b =>
+      b.addEventListener('click', () => _deleteRole(b.dataset.roleDel)));
+  }
+
+  function _selectRole(role) {
+    _selectedRole = role;
+    // Local-only: toggle the selected highlight instead of rebuilding the rail,
+    // so an in-progress "add role" draft elsewhere in the rail isn't wiped.
+    document.querySelectorAll('#sec-roles-list .sap-rail-row').forEach(el =>
+      el.classList.toggle('sap-rail-row-sel', el.dataset.role === role));
+    _renderRolesDetail();
+  }
+
+  function _renderRolesDetail() {
+    const el = document.getElementById('sec-roles-detail');
+    if (!el) return;
+    const role = _selectedRole;
+    const header = role ? Util.t('sec.plants_for_role', { role }) : Util.t('sec.no_role_selected');
+    const plants = role ? _rolePlants.filter(rp => rp.role === role).map(rp => rp.plant).sort() : [];
+    const addHtml = !role ? '' : `
+      <div class="sap-section-label">${_esc(Util.t('sec.add_plant'))}</div>
+      <div class="hps-combobox" id="sec-plant-combobox" style="max-width:280px">
+        <input type="text" class="input" id="sec-plant-search" placeholder="${_esc(Util.t('sec.search_plants_ph'))}" autocomplete="off">
+        <div class="hps-dropdown" id="sec-plant-dropdown" hidden></div>
+      </div>`;
+    const listHtml = !role ? '' : !plants.length
+      ? `<div class="sap-help" style="margin-top:12px">${_esc(Util.t('sec.no_plants_yet'))}</div>`
+      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map(p =>
+          `<span class="sap-keychip">${_esc(p)}<button data-remove-plant="${_esc(p)}" title="${_esc(Util.t('tip.delete_row'))}"
+             style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
+        ).join('')}</div>`;
+    el.innerHTML = `<div class="panel">
+      <div class="sap-detail-head"><span class="sap-detail-name">${_esc(header)}</span></div>
+      <div class="panel-body">${addHtml}${listHtml}</div>
+    </div>`;
+    if (role) {
+      const srch = document.getElementById('sec-plant-search');
+      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
+      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
+      srch?.addEventListener('blur', () => { setTimeout(() => { const dd = document.getElementById('sec-plant-dropdown'); if (dd) dd.hidden = true; }, 150); });
+    }
+    el.querySelectorAll('[data-remove-plant]').forEach(b =>
+      b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant)));
+  }
+
+  // Type-to-filter Store.knownPlants() down to matches, click one to add it —
+  // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
+  // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
+  function _renderPlantDropdown(query) {
+    const dd = document.getElementById('sec-plant-dropdown');
+    if (!dd || !_selectedRole) return;
+    const assigned = new Set(_rolePlants.filter(rp => rp.role === _selectedRole).map(rp => rp.plant));
+    const all = Store.knownPlants().filter(p => !assigned.has(p));
+    const q = (query || '').trim().toLowerCase();
+    const filtered = q ? all.filter(p => p.toLowerCase().includes(q)) : all;
+    if (!filtered.length) {
+      dd.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plants available'}</div>`;
+      return;
+    }
+    dd.innerHTML = filtered.map(p => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
+    dd.querySelectorAll('[data-plant]').forEach(optEl =>
+      optEl.addEventListener('mousedown', e => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant); }));
+  }
+
+  async function _addPlantToRole(plant) {
+    if (!_selectedRole) return;
+    try {
+      await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role: _selectedRole, plant }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Add plant to role failed: ${e.message}`);
+    }
+    await _reloadRoles();
+  }
+
+  async function _removePlantFromRole(plant) {
+    if (!_selectedRole) return;
+    try {
+      await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role: _selectedRole, plant }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Remove plant from role failed: ${e.message}`);
+    }
+    await _reloadRoles();
+  }
+
+  async function _addRole() {
+    const nameInput = document.getElementById('sec-new-role');
+    const descInput = document.getElementById('sec-new-role-desc');
+    const role = (nameInput?.value || '').trim();
+    if (!role) return;
+    try {
+      await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: (descInput?.value || '').trim() }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Add role failed: ${e.message}`);
+    }
+    await _reloadRoles();
+  }
+
+  async function _saveRoleDescription(role) {
+    const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`);
+    if (!input) return;
+    try {
+      await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: input.value }] });
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Save role description failed: ${e.message}`);
+    }
+    await _reloadRoles();
+  }
+
+  async function _deleteRole(role) {
+    const ok = await Modal.confirm({
+      title: Util.t('sec.confirm_delete_role_title'),
+      message: Util.t('sec.confirm_delete_role_msg', { role }),
+      confirmLabel: Util.t('btn.yes_delete'),
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await _postJSON(`${API}/master-data/roles/bulk`, { deletes: [{ role }] });
+      if (_selectedRole === role) _selectedRole = null;
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('security', `Delete role failed: ${e.message}`);
+    }
+    await _reloadRoles();
+  }
+
+  return { render };
 })();

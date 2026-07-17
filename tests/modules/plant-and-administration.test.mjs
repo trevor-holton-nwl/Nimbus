@@ -1,7 +1,7 @@
-// Tests for web/plant-and-administration.mjs — CQ-1 Phase 4 Tasks 1-2.
+// Tests for web/plant-and-administration.mjs — CQ-1 Phase 4 Tasks 1-3.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning } from '../../web/plant-and-administration.mjs';
+import { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit } from '../../web/plant-and-administration.mjs';
 
 test('CalendarUI/Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof CalendarUI.render, 'function');
@@ -20,4 +20,15 @@ test('MasterData/LaborPlanning expose their documented public API', () => {
   assert.equal(typeof LaborPlanning.prevHorizon, 'function');
   assert.equal(typeof LaborPlanning.nextHorizon, 'function');
   assert.equal(typeof LaborPlanning.setSpan, 'function');
+});
+
+test('Interface/Security/AdminCockpit expose their documented public API', () => {
+  assert.equal(typeof Interface.render, 'function');
+  assert.equal(typeof Security.render, 'function');
+  assert.equal(typeof AdminCockpit.init, 'function');
+  assert.equal(typeof AdminCockpit.render, 'function');
+  assert.equal(typeof AdminCockpit._startHealthPolling, 'function');
+  assert.equal(typeof AdminCockpit._stopHealthPolling, 'function');
+  assert.equal(typeof AdminCockpit.gotoOvTab, 'function');
+  assert.equal(typeof AdminCockpit._setSub, 'function');
 });
