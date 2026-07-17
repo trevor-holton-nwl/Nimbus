@@ -127,3 +127,28 @@ def test_logging_does_not_raise_with_unknown_level():
     """An unrecognized level still records (maps to INFO for the stdout line)."""
     brain._log_event("trace", "test", "weird level")
     assert _last()["level"] == "trace"
+
+
+def test_admin_action_records_safe_context_without_sensitive_values():
+    """Admin-write events identify the action and affected scope, but must
+    redact secrets rather than copying request data into the log stream."""
+    token = brain._RID_CTX.set("req-admin-1")
+    try:
+        brain._log_admin_action(
+            "orders.upload", "success", actor="ops@example.com",
+            route="/upload", method="POST", duration_ms=42,
+            plant="5512", filename="plan.xlsx", inserted=12,
+            api_key="must-not-appear", password="also-secret",
+        )
+    finally:
+        brain._RID_CTX.reset(token)
+
+    event = _last()
+    assert event["category"] == "admin"
+    assert event["event"] == "orders.upload"
+    assert event["outcome"] == "success"
+    assert event["rid"] == "req-admin-1"
+    assert event["ctx"] == {
+        "actor": "ops@example.com", "route": "/upload", "method": "POST",
+        "duration_ms": 42, "plant": "5512", "filename": "plan.xlsx", "inserted": 12,
+    }

@@ -26,6 +26,11 @@ venv/
 # Playwright cache
 .playwright-mcp/
 
+# Test coverage outputs
+.coverage
+coverage/
+htmlcov/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -39,3 +44,17 @@ desktop.ini
 # Claude Code — local/transient only (skills, workflows, shared settings ARE committed)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/routines/.state/
+.claude/worktrees/
+.claude/checkpoints/
+.claude/mailbox/
+.claude/agent-registry.json
+.claude/agent-memory-local
+.claude/first-run
+.claude/assistant-daemon-state.json
+
+# Impeccable — local/transient only (design artifacts ARE committed)
+.impeccable/hook.cache.json
+.impeccable/hook.pending.json
+.impeccable/config.local.json

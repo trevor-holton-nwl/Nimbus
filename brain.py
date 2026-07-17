@@ -71,7 +71,7 @@ class _JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg":   record.getMessage(),
         }
-        for k in ("category", "ctx", "rid", "error_code", "error_type"):
+        for k in ("category", "ctx", "rid", "error_code", "error_type", "event", "outcome"):
             v = getattr(record, k, None)
             if v is not None:
                 payload[k] = v
@@ -317,12 +317,27 @@ async def request_id_mw(request: Request, call_next):
             response = await call_next(request)
         except Exception as exc:
             ms = int((time.perf_counter() - t0) * 1000)
+            operation, details = _admin_route_details(request)
+            if operation:
+                details.update(getattr(request.state, "admin_log_details", {}))
+                _log_admin_action(operation, "failure",
+                                  actor=request.headers.get("x-user-email") or request.headers.get("x-user"),
+                                  route=request.url.path, method=request.method, duration_ms=ms,
+                                  exc=exc, **details)
             _req_log.exception(f"unhandled {request.method} {request.url.path} {ms}ms rid={rid}: {exc}")
             _log_event("error", "request", f"Unhandled {request.method} {request.url.path}",
                        exc=exc, ms=ms)
             raise
         ms = int((time.perf_counter() - t0) * 1000)
         response.headers["x-request-id"] = rid
+        operation, details = _admin_route_details(request)
+        if operation:
+            details.update(getattr(request.state, "admin_log_details", {}))
+            outcome = "success" if response.status_code < 400 else "rejected"
+            _log_admin_action(operation, outcome,
+                              actor=request.headers.get("x-user-email") or request.headers.get("x-user"),
+                              route=request.url.path, method=request.method, duration_ms=ms,
+                              status=response.status_code, **details)
         if ms > 1500:
             _req_log.warning(f"slow {request.method} {request.url.path} {ms}ms rid={rid}")
             _log_event("warn", "request", f"Slow request: {request.method} {request.url.path}",
@@ -414,7 +429,7 @@ DIAGNOSTICS: dict = {
 }
 
 # In-memory backend event log — ring buffer, newest appended at right
-_BACKEND_LOG: collections.deque = collections.deque(maxlen=500)
+_BACKEND_LOG: collections.deque = collections.deque(maxlen=2000)
 
 
 _LOG_LEVELS = {"info": logging.INFO, "warn": logging.WARNING, "error": logging.ERROR}
@@ -422,7 +437,8 @@ _LOG_LEVELS = {"info": logging.INFO, "warn": logging.WARNING, "error": logging.E
 
 def _log_event(level: str, category: str, msg: str, *,
                exc: BaseException | None = None,
-               error_code: str | None = None, **ctx) -> None:
+               error_code: str | None = None,
+               event: str | None = None, outcome: str | None = None, **ctx) -> None:
     """Append a structured event to the in-memory ring buffer AND emit it as a
     JSON line via the nimbus logger (for container log aggregation).
 
@@ -444,6 +460,10 @@ def _log_event(level: str, category: str, msg: str, *,
     }
     if rid:
         entry["rid"] = rid
+    if event:
+        entry["event"] = event
+    if outcome:
+        entry["outcome"] = outcome
     if exc is not None and error_code is None and isinstance(exc, psycopg.Error):
         error_code = db.translate_db_error(exc).get("error_code")
     if error_code:
@@ -463,7 +483,96 @@ def _log_event(level: str, category: str, msg: str, *,
                  exc_info=exc if exc is not None else None,
                  extra={"category": category, "ctx": entry.get("ctx"),
                         "rid": rid, "error_code": error_code, "error_type": error_type,
+                        "event": event, "outcome": outcome,
                         "evt_level": level, "evt_ts": ts})
+
+
+_SENSITIVE_LOG_KEYS = frozenset({
+    "authorization", "api_key", "password", "password_hash", "secret", "token",
+    "cookie", "set_cookie", "raw", "body", "payload", "file_content",
+})
+
+
+def _log_admin_action(event: str, outcome: str, *, actor: str | None = None,
+                      route: str | None = None, method: str | None = None,
+                      duration_ms: int | None = None, exc: BaseException | None = None,
+                      error_code: str | None = None, **details) -> None:
+    """Emit one safe, terminal audit event for an admin write.
+
+    This is deliberately transient (stdout + the bounded process-local ring),
+    and accepts only caller-curated summaries.  Sensitive-looking keys are
+    dropped defensively so an endpoint cannot accidentally copy credentials or
+    raw request content into a diagnostic stream.
+    """
+    ctx = {
+        "actor": actor or "unknown",
+        **({"route": route} if route else {}),
+        **({"method": method} if method else {}),
+        **({"duration_ms": duration_ms} if duration_ms is not None else {}),
+    }
+    for key, value in details.items():
+        if key.lower() not in _SENSITIVE_LOG_KEYS:
+            ctx[key] = value
+    level = "info" if outcome == "success" else ("warn" if outcome == "rejected" else "error")
+    _log_event(level, "admin", f"Admin action {outcome}: {event}", exc=exc,
+               error_code=error_code, event=event, outcome=outcome, **ctx)
+
+
+# Route templates are used instead of raw paths so IDs and other target values
+# are retained in the safe structured context rather than embedded in messages.
+_ADMIN_WRITE_OPERATIONS = {
+    "/upload": "orders.upload",
+    "/bom/upload": "bom.upload",
+    "/purge": "orders.purge",
+    "/reload": "color_wheel.reload",
+    "/upload/audit/clear": "upload_audit.clear",
+    "/logs/backend/clear": "backend_log.clear",
+    "/audit/log/clear": "audit_log.clear",
+    "/color-wheel/{plant}": "color_wheel.write",
+    "/master-data/{table}/bulk": "master_data.bulk_write",
+    "/master-data/{table}/columns": "master_data.column_write",
+    "/master-data/{table}/columns/{column}": "master_data.column_write",
+    "/master-data/plants/{plant}/constraints": "plant.constraints_update",
+    "/security/users/bulk": "security.users_bulk_write",
+    "/security/users/{username}/reset-password": "security.password_reset",
+    "/sap/interface/mappings/{object}": "sap.mapping_update",
+    "/sap/interface/config/{object}": "sap.config_update",
+    "/sap/interface/test-connection": "sap.connection_test",
+    "/sap/interface/sync/{object}": "sap.manual_sync",
+    "/labor-plan": "labor_plan.write",
+    "/labor-plan/line": "labor_plan.line_write",
+    "/plant-calendar/plant-hours": "calendar.plant_hours_update",
+    "/plant-calendar/line-hours": "calendar.line_hours_update",
+    "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
+    "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
+    "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
+    "/maintenance/analyze": "maintenance.analyze",
+}
+
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "table", "column", "object", "username"})
+
+
+def _admin_route_details(request: Request) -> tuple[str | None, dict]:
+    """Return a recognized admin operation and safe path parameters only."""
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    operation = _ADMIN_WRITE_OPERATIONS.get(route_path)
+    details = {
+        key: value for key, value in request.path_params.items()
+        if key in _ADMIN_TARGET_PARAMS
+    }
+    return operation, details
+
+
+def _set_admin_log_details(request: Request, **details) -> None:
+    """Attach endpoint-curated safe summary fields to its terminal event.
+
+    Endpoint handlers must never pass raw request payloads here.  The terminal
+    middleware applies the same sensitive-key guard as _log_admin_action.
+    """
+    current = getattr(request.state, "admin_log_details", {})
+    current.update(details)
+    request.state.admin_log_details = current
 
 
 def _warn(level, msg, **ctx):
@@ -1223,7 +1332,7 @@ def baseline_correct(payload: DueDateCorrectionPayload):
 # ADMIN COCKPIT — upload, purge, audit
 # =========================
 @api.post("/upload", dependencies=[Depends(require_api_key), Depends(require_admin)])
-async def upload_orders(file: UploadFile = File(...)):
+async def upload_orders(request: Request, file: UploadFile = File(...)):
     """
     Receive an xlsx file (sequence_testing-shaped) and upsert into the orders
     table. Stateless: there is no in-memory frame to refresh — the next /tasks
@@ -1240,6 +1349,11 @@ async def upload_orders(file: UploadFile = File(...)):
     _log_event("info", "upload", "Orders uploaded and ingested",
                filename=file.filename, inserted=result.get("inserted", 0),
                updated=result.get("updated", 0), raw=result.get("raw_row_count", 0))
+    _set_admin_log_details(
+        request, filename=file.filename or "upload.xlsx",
+        rows_received=result.get("raw_row_count", 0), inserted=result.get("inserted", 0),
+        updated=result.get("updated", 0), warning_count=len(result.get("warnings") or []),
+    )
     # Soft-warn on production lines not yet in master data (lines come from the
     # ingest result now, not a global frame). Never let this blow up the response.
     try:
@@ -1544,6 +1658,11 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
             table,
             ops={"upserts": body.get("upserts", []), "deletes": body.get("deletes", [])},
             user_email=request.headers.get("x-user-email"),
+        )
+        _set_admin_log_details(
+            request, upsert_count=len(body.get("upserts", [])), delete_count=len(body.get("deletes", [])),
+            inserted=result.get("inserted", 0), updated=result.get("updated", 0),
+            deleted=result.get("deleted", 0),
         )
         # Adding/editing production lines may let orders uploaded before the line
         # existed resolve their materialized plant. Re-derive NULL-plant orders so they
@@ -2018,11 +2137,13 @@ def plant_calendar_get(plant: str):
 def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default={})):
     """Set a plant's weekly working hours. Payload: { plant, work_hours:{0..6:[h1,h2]|null} }."""
     try:
-        return md.set_plant_work_hours(
+        result = md.set_plant_work_hours(
             plant=body.get("plant", ""),
             work_hours=body.get("work_hours") or {},
             user_email=request.headers.get("x-user-email"),
         )
+        _set_admin_log_details(request, plant=body.get("plant", ""), days_configured=len(body.get("work_hours") or {}))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -2032,11 +2153,13 @@ def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={
     """Upsert per-line working hours (batched). Payload:
     { plant, lines:[{production_line, work_hours:{0..6:[h1,h2]|null}}] }."""
     try:
-        return md.set_line_work_hours(
+        result = md.set_line_work_hours(
             plant=body.get("plant", ""),
             lines=body.get("lines", []),
             user_email=request.headers.get("x-user-email"),
         )
+        _set_admin_log_details(request, plant=body.get("plant", ""), line_count=len(body.get("lines", [])))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -2047,12 +2170,17 @@ def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(defau
     { plant, upserts:[{id, line?, start, end, reason?}], deletes?:[id] }.
     line omitted/null = all lines in this plant."""
     try:
-        return md.save_line_blackouts(
+        result = md.save_line_blackouts(
             plant=body.get("plant", ""),
             upserts=body.get("upserts", []),
             deletes=body.get("deletes", []),
             user_email=request.headers.get("x-user-email"),
         )
+        _set_admin_log_details(
+            request, plant=body.get("plant", ""), upsert_count=len(body.get("upserts", [])),
+            delete_count=len(body.get("deletes", [])),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -2062,12 +2190,17 @@ def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(defa
     """Delta write of plant-level blackouts. Payload:
     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }."""
     try:
-        return md.save_plant_blackouts(
+        result = md.save_plant_blackouts(
             plant=body.get("plant", ""),
             upserts=body.get("upserts", []),
             deletes=body.get("deletes", []),
             user_email=request.headers.get("x-user-email"),
         )
+        _set_admin_log_details(
+            request, plant=body.get("plant", ""), upsert_count=len(body.get("upserts", [])),
+            delete_count=len(body.get("deletes", [])),
+        )
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -2143,7 +2276,9 @@ def maintenance_analyze(body: dict = Body(default={})):
 @api.get("/logs/backend", dependencies=[Depends(require_admin)])
 def get_backend_logs(level: str | None = None, limit: int = 200,
                      category: str | None = None, since: str | None = None,
-                     q: str | None = None, offset: int = 0):
+                     q: str | None = None, offset: int = 0,
+                     rid: str | None = None, outcome: str | None = None,
+                     event: str | None = None):
     """
     Return recent backend events from the in-memory ring buffer, newest first.
 
@@ -2152,6 +2287,9 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
       ?category=  exact category match
       ?since=     ISO-8601 — only entries with ts >= since
       ?q=         free-text, case-insensitive, matched against msg+category+ctx
+      ?rid=       exact request ID correlation match
+      ?outcome=   exact terminal outcome (success|rejected|failure)
+      ?event=     exact structured event name (for example, orders.upload)
     Paging: ?offset= (rows to skip) + ?limit= (cap). `total` is the full filtered
     count (pre-paging) so the viewer can show "showing N of total".
     """
@@ -2170,6 +2308,12 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
             hay = f"{e.get('msg', '')} {e.get('category', '')} {e.get('ctx', '')}"
             return needle in hay.lower()
         entries = [e for e in entries if _match(e)]
+    if rid:
+        entries = [e for e in entries if e.get("rid") == rid]
+    if outcome:
+        entries = [e for e in entries if e.get("outcome") == outcome]
+    if event:
+        entries = [e for e in entries if e.get("event") == event]
     total = len(entries)
     if offset:
         entries = entries[offset:]

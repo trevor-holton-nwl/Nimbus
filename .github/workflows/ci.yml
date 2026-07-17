@@ -29,6 +29,8 @@ jobs:
         # separate i18n cleanup lands; flip to blocking once locales are clean.
         run: npm run lint:errors
         continue-on-error: true
+      - name: ESLint full gate
+        run: npm run lint:errors
       - name: JS unit tests
         run: npm test
 
@@ -69,7 +71,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest ruff
+      - name: Ruff
+        run: python -m ruff check .
       - name: Bootstrap schema
         run: psql "postgresql://postgres:postgres@localhost:5432/nimbus" -f schema.sql
       - name: Run tests

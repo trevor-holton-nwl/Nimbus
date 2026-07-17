@@ -20,7 +20,14 @@ except Exception as e:  # pragma: no cover - environment dependent
 
 @pytest.fixture
 def tc():
-    return TestClient(brain.api)
+    # Endpoint behavior here is about the in-process log buffer, not the
+    # database-backed admin role state. Make that independent of whichever
+    # users happen to exist in a developer's local database.
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +138,34 @@ def test_backend_logs_combined_filters_and_paging(tc):
                   params={"level": "error", "category": "db", "limit": 10}).json()
     assert body["total"] == 2
     assert [e["msg"] for e in body["entries"]] == ["e1", "e0"]
+
+
+def test_backend_logs_filter_by_request_id_outcome_and_event(tc):
+    _seed([
+        {"ts": "2026-06-25T10:00:00", "level": "info", "category": "admin",
+         "msg": "admin action", "rid": "r1", "event": "orders.upload", "outcome": "success"},
+        {"ts": "2026-06-25T10:01:00", "level": "error", "category": "admin",
+         "msg": "admin action", "rid": "r2", "event": "orders.upload", "outcome": "failure"},
+    ])
+    body = tc.get("/logs/backend", params={"rid": "r2", "outcome": "failure",
+                                            "event": "orders.upload"}).json()
+    assert body["total"] == 1
+    assert body["entries"][0]["rid"] == "r2"
+
+
+def test_admin_write_is_automatically_recorded_with_safe_route_scope(tc):
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        r = tc.post("/logs/backend/clear", headers={"x-user-email": "ops@example.com"})
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_api_key, None)
+
+    assert r.status_code == 200
+    event = brain._BACKEND_LOG[-1]
+    assert event["event"] == "backend_log.clear"
+    assert event["outcome"] == "success"
+    assert event["ctx"]["actor"] == "ops@example.com"
+    assert event["ctx"]["status"] == 200
 
 
 # --------------------------------------------------------------------------- #
