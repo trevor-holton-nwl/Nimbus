@@ -9,21 +9,6 @@
     {
       "file": "app.js",
       "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onColorChange(this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onFormChange(this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onLineChange(this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
       "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
     },
     {
@@ -749,6 +734,21 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onColorChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onFormChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onLineChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
       "expression": "NIMBUS.Table._onChipChange('color', this)"
     },
     {
@@ -868,9 +868,7 @@
     "Compute.available",
     "Compute.utilization",
     "ErrorLog.warn",
-    "GanttFilter._buildLineDropdown",
-    "GanttFilter._refreshLineBtn",
-    "GanttFilter._selectedLines",
+    "GanttFilter.isolateLine",
     "Hierarchy.render",
     "Inspector.show",
     "Session.flushPrefs",
@@ -944,9 +942,6 @@
     "Diff._fmtDelta",
     "Diff._fmtShort",
     "Diff._renderResults",
-    "GanttFilter._buildLineDropdown",
-    "GanttFilter._refreshLineBtn",
-    "GanttFilter._selectedLines",
     "GanttFilter._toggleColorDropdown",
     "GanttFilter._toggleFormDropdown",
     "GanttFilter._toggleLineDropdown",

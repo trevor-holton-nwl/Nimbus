@@ -72,7 +72,27 @@
    reference above is unaffected by Inspector's move — it is left calling
    through `NIMBUS.Inspector` rather than simplified to a same-module bare
    reference, since both forms are equivalent at runtime and Task 2 doesn't
-   require touching Timeline's code.
+   require touching Timeline's code. Likewise, Timeline's `GanttFilter.
+   _selectedLines` cross-reference above is unaffected by GanttFilter's Task 3
+   move into schedule-workbench.mjs — it is left calling through
+   `NIMBUS.GanttFilter` rather than simplified to a same-module bare
+   reference, for the identical reason.
+   CQ-1 Phase 3 Task 3 moved Hierarchy and GanttFilter into the same
+   schedule-workbench.mjs module:
+     Hierarchy, GanttFilter
+                       — now defined in schedule-workbench.mjs
+   Neither has a DOM-remnant half — both moved whole, plus the
+   `VL_HIER_LINE_H`/`VL_HIER_TASK_H` VirtualList row-height consts they use
+   (`VL_LS_ROW_H`/`VL_ALERT_ROW_H` stay here, travelling with Dashboard/
+   AlertsUIAdapter in later tasks). Task 3 also closed GanttFilter's
+   nimbus-intelligence.js private-consumer debt: `GanttFilter._selectedLines`/
+   `_active`/`_refreshLineBtn`/`_buildLineDropdown` direct reaches became
+   `GanttFilter.selectedLines()`/`.activeFilter()`/`.isolateLine(line)`/
+   `.restoreAllLines()` — see nimbus-intelligence.js and
+   docs/architecture/cq1-compatibility-inventory.md §4 for the remaining
+   `GanttFilter._toggle*Dropdown` private-consumer rows (reached only from
+   index.html's inline onclick attributes, out of scope for this phase's
+   inline-handler migration mandate, so they stay open).
    See docs/architecture/cq1-compatibility-inventory.md §1 for the full
    ownership map, including where the modules below are headed in Phase 3-4.
 
@@ -85,9 +105,7 @@
      SessionUIAdapter   — session gates / user-settings modal / profile /
                          password self-service remnant (pure state/API moved
                          to schedule-data.mjs's Session)
-     Hierarchy         — left sidebar (lines + orders + utilisation)
      Dashboard         — home KPIs + Chart.js charts
-     GanttFilter       — filter bar above the Gantt
      Interaction       — unified click / dblclick / keyboard / drag pipeline
                          (owns all vis-timeline input events; app.js registers none)
      AdminCockpit      — upload, data management, integrity check panel
@@ -119,7 +137,7 @@ const NIMBUS = (function () {
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
   const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
   const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
-  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu } = window.__NIMBUS_WORKBENCH;
+  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter } = window.__NIMBUS_WORKBENCH;
   // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
   // statically import schedule-services.mjs — see that file's header). Arrow-function
   // wrappers, not bare method references: Calendar's methods read `this._runCache`/
@@ -197,8 +215,6 @@ const NIMBUS = (function () {
     };
   })();
 
-  const VL_HIER_LINE_H = 38;
-  const VL_HIER_TASK_H = 28;
   const VL_LS_ROW_H    = 36;
   const VL_ALERT_ROW_H = 72;
 
@@ -4165,172 +4181,6 @@ const NIMBUS = (function () {
   }
 
   /* =============================================================================
-     HIERARCHY — left sidebar with per-line order lists + utilisation chip.
-     ========================================================================== */
-  const Hierarchy = {
-    _open:      new Set(),
-    _lineItems: [],
-    _vl:        null,
-    _wired:     false,
-    _todayCache: null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
-
-    _renderPending: false,
-
-    _scheduleRender() {
-      if (Hierarchy._renderPending) return;
-      Hierarchy._renderPending = true;
-      requestAnimationFrame(() => {
-        Hierarchy._renderPending = false;
-        Hierarchy.render();
-      });
-    },
-
-    init() {
-      Store.subscribe(evt => {
-        if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
-            || evt.type === 'task:update') {
-          // Defer bulk/task updates to the next frame so multiple same-tick emits
-          // (e.g. optimize + autoReflow) coalesce into one render.
-          Hierarchy._scheduleRender();
-        } else if (evt.type === 'calendar:change' || evt.type === 'blocks:change'
-            || evt.type === 'fixed:change' || evt.type === 'plant:selected'
-            || evt.type === 'lineSettings:change') {
-          Hierarchy.render();
-        }
-      }, 'Hierarchy');
-    },
-
-    _itemH(item) {
-      return VL_HIER_LINE_H + (Hierarchy._open.has(item.name) ? item.tasks.length * VL_HIER_TASK_H : 0);
-    },
-
-    _renderItem(item) {
-      const open = Hierarchy._open.has(item.name);
-      const chip = item.pct != null
-        ? `<span class="line-util ${item.sev}">${item.pct}%</span>`
-        : `<span class="line-util">—</span>`;
-      return `<details class="line-group" data-line="${item.name}"${open ? ' open' : ''}>` +
-        `<summary>` +
-        `<span class="line-expand">${open ? '−' : '+'}</span>` +
-        `<span class="line-dot" style="background:${item.color}"></span>` +
-        (item.pinned ? '<span class="line-pin-ico" aria-hidden="true">📌</span>' : '') +
-        `<span>${item.name}</span>` +
-        `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
-        `${chip}</summary>` +
-        (open ? item.tasks.map((tk, i) => {
-          const fixed = Store.isFixed(tk.id);
-          return `<div class="hier-item${fixed ? ' fixed' : ''}" data-id="${tk.id}">` +
-            (fixed ? '<span class="lock-ico">🔒</span>' : '') +
-            `<span>[${i + 1}] ${tk.ORDER || tk.id}</span></div>`;
-        }).join('') : '') +
-        `</details>`;
-    },
-
-    render() {
-      const el = document.getElementById('hierarchy');
-      if (!el) return;
-      if (!Store.selectedPlant) {
-        if (Hierarchy._vl) { Hierarchy._vl.destroy(); Hierarchy._vl = null; }
-        EmptyState.render(el, {
-          title: t('empty.no_plant_selected'),
-          msg:   t('empty.no_plant_hierarchy')
-        });
-        return;
-      }
-
-      const lines = {};
-      for (const tk of Store.tasksForSelectedPlant()) {
-        const k = tk.PRODUCTION_LINE || 'Unknown';
-        (lines[k] ||= []).push(tk);
-      }
-      for (const l of Store.linesForSelectedPlant()) {
-        if (!lines[l]) lines[l] = [];
-      }
-      const lineNames = Object.keys(lines).sort();
-      let visibleNames = (GanttFilter?._selectedLines?.size > 0)
-        ? lineNames.filter(l => GanttFilter._selectedLines.has(l))
-        : lineNames;
-      // Surface the user's pinned lines at the top (scale-safe quick access at
-      // 70+ lines/plant), preserving alpha order within each group.
-      let _pinnedLines;
-      try { _pinnedLines = new Set(Store.pref('pinnedLines') || []); } catch { _pinnedLines = new Set(); }
-      if (_pinnedLines.size) {
-        visibleNames = [
-          ...visibleNames.filter(l => _pinnedLines.has(l)),
-          ...visibleNames.filter(l => !_pinnedLines.has(l)),
-        ];
-      }
-
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
-
-      // Utilization chip reads the SAME proportional daily-load matrix the Dashboard
-      // heatmap + Line Status use, so all three agree for today (fixes R197). Plant-scoped
-      // srcTasks matches Dashboard._filteredTasks() and is non-cacheable, so it never
-      // thrashes the shared Utilization._cache (TimelineNav's multi-day entry). Memoize locally.
-      const _todayKey = Util.dayKey(Util.startOfDay(todayStart));
-      const _utilMKey = `${todayStart.getTime()}|1|${Store._rev || 0}|${Store.selectedPlant || 'all'}`;
-      let _utilToday;
-      if (Hierarchy._todayCache && Hierarchy._todayCache.key === _utilMKey) {
-        _utilToday = Hierarchy._todayCache.matrix;
-      } else {
-        _utilToday = Utilization.computeMatrix(todayStart, 1, Store.tasksForSelectedPlant());
-        Hierarchy._todayCache = { key: _utilMKey, matrix: _utilToday };
-      }
-
-      Hierarchy._lineItems = visibleNames.map(name => {
-        const ci    = Timeline._colorIndex(name);
-        const color = Config.COLORS[ci % Config.COLORS.length];
-        const tasks = lines[name]
-          .filter(tk => tk.start_date >= todayStart && tk.start_date <= todayEnd)
-          .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-        const u   = _utilToday[name]?.[_todayKey];
-        const pct = (u && u.scheduled > 0) ? Math.round(u.pct * 100) : null;
-        const sev = u
-          ? Utilization.sev(u.pct, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
-          : 'ok';
-        return { name, tasks, color, pct, sev, pinned: _pinnedLines.has(name) };
-      });
-
-      if (!Hierarchy._vl) {
-        el.innerHTML = '';
-        Hierarchy._vl = new VirtualList(el, {
-          getRowH:   (item) => Hierarchy._itemH(item),
-          renderFn:  (item) => Hierarchy._renderItem(item),
-          mountEl:   el,
-          buffer:    4,
-        });
-      }
-
-      // Wire once on the persistent #hierarchy element (its innerHTML is
-      // cleared on plant deselect, but the node itself is never replaced).
-      // Expand/collapse is click-driven with _open as the single source of
-      // truth — the native <details> toggle is suppressed because its async
-      // `toggle` event (also queued when innerHTML inserts `details[open]`)
-      // races the VirtualList rebuild. To open a row programmatically,
-      // mutate Hierarchy._open and call render(); do not set det.open.
-      if (!Hierarchy._wired) {
-        Hierarchy._wired = true;
-        el.addEventListener('click', e => {
-          const sum = e.target.closest('details.line-group > summary');
-          if (sum) {
-            e.preventDefault();
-            const name = sum.parentElement.dataset.line;
-            if (Hierarchy._open.has(name)) Hierarchy._open.delete(name);
-            else Hierarchy._open.add(name);
-            if (Hierarchy._vl) Hierarchy._vl.update(Hierarchy._lineItems);
-            return;
-          }
-          const item = e.target.closest('.hier-item');
-          if (item) Timeline.focus(item.dataset.id);
-        });
-      }
-
-      Hierarchy._vl.update(Hierarchy._lineItems);
-    }
-  };
-
-  /* =============================================================================
      DASHBOARD — KPIs, today-by-line chart, alert summary.
      ========================================================================== */
   const Dashboard = {
@@ -5248,402 +5098,6 @@ const NIMBUS = (function () {
       setTimeout(() => { if (Timeline && Timeline.focus) Timeline.focus(id); }, 250);
     }
   };
-
-  /* =============================================================================
-     GANTT FILTER — visual filter bar for the Gantt. Dims non-matching items.
-     Does NOT affect optimiser; purely presentational.
-     ========================================================================== */
-  const GanttFilter = {
-    _active:         { text: '' },
-    _selectedLines:  new Set(),
-    _selectedColors: new Set(),
-    _selectedForms:  new Set(),
-    _pastedIds:      new Set(),
-    _bar:            null,
-    _lineSearch:     '',
-    _colorSearch:    '',
-    _formSearch:     '',
-
-    init() {
-      const bar = document.getElementById('gantt-filterbar');
-      if (!bar) return;
-      GanttFilter._bar = bar;
-      GanttFilter.populate();
-
-      const textIn   = document.getElementById('flt-text');
-      const clearBtn = document.getElementById('flt-clear');
-
-      if (textIn)   textIn.oninput   = Util.debounce(() => { GanttFilter._active.text = textIn.value.trim().toLowerCase(); GanttFilter._apply(); }, 120);
-      if (clearBtn) clearBtn.onclick = () => GanttFilter.clear();
-
-      Store.subscribe(evt => {
-        if (evt.type === 'tasks:bulk') {
-          GanttFilter.populate();
-          GanttFilter._buildLineDropdown();
-          GanttFilter._refreshLineBtn();
-          setTimeout(() => GanttFilter._apply(), 80);
-        }
-        if (evt.type === 'tasks:bulkUpdate') { setTimeout(() => GanttFilter._apply(), 80); }
-        if (evt.type === 'plant:selected') {
-          GanttFilter._selectedLines.clear();
-          GanttFilter._selectedColors.clear();
-          GanttFilter._selectedForms.clear();
-          GanttFilter._clearPoMat();
-          GanttFilter._resetSearch();
-          GanttFilter.populate();
-          GanttFilter._buildLineDropdown();
-          GanttFilter._refreshLineBtn();
-          setTimeout(() => GanttFilter._apply(), 80);
-        }
-      }, 'GanttFilter');
-
-      const _fltPairs = [
-        [document.getElementById('gantt-flt-line-btn'),  document.getElementById('gantt-line-dropdown')],
-        [document.getElementById('gantt-flt-color-btn'), document.getElementById('gantt-color-dropdown')],
-        [document.getElementById('gantt-flt-form-btn'),  document.getElementById('gantt-form-dropdown')],
-        [document.getElementById('gantt-flt-pomat-btn'), document.getElementById('gantt-pomat-dropdown')],
-      ];
-      document.addEventListener('click', e => {
-        if (_fltPairs.every(([, d]) => !d || d.hidden)) return;
-        for (const [btn, drop] of _fltPairs) {
-          if (drop && !drop.hidden && btn && !btn.contains(e.target) && !drop.contains(e.target)) {
-            drop.hidden = true;
-          }
-        }
-      });
-
-      const lineIn  = document.getElementById('gantt-line-paste-input');
-      const colorIn = document.getElementById('gantt-color-paste-input');
-      const formIn  = document.getElementById('gantt-form-paste-input');
-      Util.wirePasteToCheckboxes(lineIn,
-        () => document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      Util.wirePasteToCheckboxes(colorIn,
-        () => document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      Util.wirePasteToCheckboxes(formIn,
-        () => document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []);
-      // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color/form pickers
-      // must stay filterable, not a bare scrollable checkbox list. Paste-to-select
-      // (above) and type-to-filter (below) share the same input without conflict —
-      // wirePasteToCheckboxes only listens for 'paste', this only listens for 'input'.
-      if (lineIn)  lineIn.oninput  = () => GanttFilter._filterLineSearch(lineIn.value);
-      if (colorIn) colorIn.oninput = () => GanttFilter._filterColorSearch(colorIn.value);
-      if (formIn)  formIn.oninput  = () => GanttFilter._filterFormSearch(formIn.value);
-
-      const poTa = document.getElementById('gantt-pomat-textarea');
-      if (poTa) {
-        poTa.addEventListener('paste', GanttFilter._onPoMatPaste);
-        poTa.addEventListener('input', Util.debounce(GanttFilter._onPoMatApply, 150));
-      }
-      document.getElementById('gantt-pomat-clear')?.addEventListener('click', GanttFilter._clearPoMat);
-
-      GanttFilter._buildLineDropdown();
-    },
-
-    populate() {
-      GanttFilter._buildColorDropdown();
-      GanttFilter._buildFormDropdown();
-    },
-
-    matches(task) {
-      const { text } = GanttFilter._active;
-      if (GanttFilter._selectedColors.size > 0 && !GanttFilter._selectedColors.has((task.COLOR || '').toUpperCase())) return false;
-      if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
-      if (!Util.taskMatchesPasteSet(task, GanttFilter._pastedIds)) return false;
-      if (text) {
-        const haystack = [(task.text || ''), (task.ORDER || ''), (task.MATERIAL_DESCRIPTION || '')].join(' ').toLowerCase();
-        if (!haystack.includes(text)) return false;
-      }
-      return true;
-    },
-
-    isActive() {
-      return !!(GanttFilter._selectedColors.size || GanttFilter._selectedForms.size
-        || GanttFilter._pastedIds.size || GanttFilter._active.text);
-    },
-
-    clear() {
-      GanttFilter._active = { text: '' };
-      const textIn = document.getElementById('flt-text');
-      if (textIn) textIn.value = '';
-      GanttFilter._selectedLines.clear();
-      GanttFilter._selectedColors.clear();
-      GanttFilter._selectedForms.clear();
-      GanttFilter._clearPoMat();
-      GanttFilter._resetSearch();
-      GanttFilter._buildLineDropdown();
-      GanttFilter._refreshLineBtn();
-      GanttFilter._buildColorDropdown();
-      GanttFilter._refreshColorBtn();
-      GanttFilter._buildFormDropdown();
-      GanttFilter._refreshFormBtn();
-      Timeline.rebuild();
-      Hierarchy.render();
-      GanttFilter._apply();
-    },
-
-    // Clears the line/color/form live-search text and its <input> values without
-    // touching selections — shared by the plant-change handler and clear().
-    _resetSearch() {
-      GanttFilter._lineSearch = GanttFilter._colorSearch = GanttFilter._formSearch = '';
-      const lineIn  = document.getElementById('gantt-line-paste-input');
-      const colorIn = document.getElementById('gantt-color-paste-input');
-      const formIn  = document.getElementById('gantt-form-paste-input');
-      if (lineIn)  lineIn.value  = '';
-      if (colorIn) colorIn.value = '';
-      if (formIn)  formIn.value  = '';
-    },
-
-    _toggleLineDropdown() {
-      const drop = document.getElementById('gantt-line-dropdown');
-      if (drop) drop.hidden = !drop.hidden;
-    },
-
-    // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
-    // must stay filterable, not a bare scrollable checkbox list — this is the
-    // Gantt line filter's share of that, matching the Dashboard's line filter.
-    _filterLineSearch(q) {
-      GanttFilter._lineSearch = q || '';
-      GanttFilter._buildLineDropdown();
-    },
-
-    _buildLineDropdown() {
-      const drop = document.getElementById('gantt-line-checklist');
-      if (!drop) return;
-      const lineSet = new Set(Store.linesForSelectedPlant());
-      for (const t of Store.tasksForSelectedPlant()) {
-        if (t.PRODUCTION_LINE) lineSet.add(t.PRODUCTION_LINE);
-      }
-      const sorted = [...lineSet].sort((a, b) =>
-        a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-      for (const l of [...GanttFilter._selectedLines]) {
-        if (!lineSet.has(l)) GanttFilter._selectedLines.delete(l);
-      }
-      const q = GanttFilter._lineSearch.toLowerCase().trim();
-      const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-      const esc = s => String(s).replace(/[&<>"]/g,
-        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = visible.length
-        ? visible.map(l =>
-            `<label><input type="checkbox" value="${esc(l)}"${GanttFilter._selectedLines.has(l) ? ' checked' : ''}
-             onchange="NIMBUS.GanttFilter._onLineChange(this)"> ${esc(l)}</label>`
-          ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No lines'}</div>`;
-    },
-
-    _refreshLineBtn() {
-      const btn = document.getElementById('gantt-flt-line-btn');
-      const lbl = document.getElementById('gantt-flt-line-label');
-      if (!lbl) return;
-      const n = GanttFilter._selectedLines.size;
-      lbl.textContent = n === 0 ? t('ui.all_lines')
-        : n === 1 ? [...GanttFilter._selectedLines][0]
-        : t('ui.n_lines_filter', { count: n });
-      if (btn) btn.classList.toggle('active', n > 0);
-    },
-
-    _onLineChange(cb) {
-      if (cb.checked) GanttFilter._selectedLines.add(cb.value);
-      else            GanttFilter._selectedLines.delete(cb.value);
-      GanttFilter._refreshLineBtn();
-      Timeline.rebuild();
-      Hierarchy.render();
-    },
-
-    _clearLines() {
-      GanttFilter._selectedLines.clear();
-      GanttFilter._buildLineDropdown();
-      GanttFilter._refreshLineBtn();
-      Timeline.rebuild();
-      Hierarchy.render();
-    },
-
-    _toggleColorDropdown() {
-      const drop = document.getElementById('gantt-color-dropdown');
-      if (drop) drop.hidden = !drop.hidden;
-    },
-
-    _filterColorSearch(q) {
-      GanttFilter._colorSearch = q || '';
-      GanttFilter._buildColorDropdown();
-    },
-
-    _buildColorDropdown() {
-      const drop = document.getElementById('gantt-color-checklist');
-      if (!drop) return;
-      const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
-      const colorSet = new Set(scoped.map(t => (t.COLOR || '').toUpperCase()).filter(Boolean));
-      const sorted = [...colorSet].sort();
-      for (const c of [...GanttFilter._selectedColors]) {
-        if (!colorSet.has(c)) GanttFilter._selectedColors.delete(c);
-      }
-      const q = GanttFilter._colorSearch.toLowerCase().trim();
-      const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-      const esc = s => String(s).replace(/[&<>"]/g,
-        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = visible.length
-        ? visible.map(c =>
-            `<label><input type="checkbox" value="${esc(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
-             onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${esc(c)}</label>`
-          ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No colors'}</div>`;
-      GanttFilter._refreshColorBtn();
-    },
-
-    _refreshColorBtn() {
-      const lbl = document.getElementById('gantt-flt-color-label');
-      if (!lbl) return;
-      const n = GanttFilter._selectedColors.size;
-      lbl.textContent = n === 0 ? t('ui.all_colors')
-        : n === 1 ? [...GanttFilter._selectedColors][0]
-        : t('ui.n_colors_filter', { count: n });
-      const btn = document.getElementById('gantt-flt-color-btn');
-      if (btn) btn.classList.toggle('active', n > 0);
-    },
-
-    _onColorChange(cb) {
-      if (cb.checked) GanttFilter._selectedColors.add(cb.value.toUpperCase());
-      else            GanttFilter._selectedColors.delete(cb.value.toUpperCase());
-      GanttFilter._refreshColorBtn();
-      GanttFilter._apply();
-    },
-
-    _toggleFormDropdown() {
-      const drop = document.getElementById('gantt-form-dropdown');
-      if (drop) drop.hidden = !drop.hidden;
-    },
-
-    _filterFormSearch(q) {
-      GanttFilter._formSearch = q || '';
-      GanttFilter._buildFormDropdown();
-    },
-
-    _buildFormDropdown() {
-      const drop = document.getElementById('gantt-form-checklist');
-      if (!drop) return;
-      const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
-      const formSet = new Set(scoped.map(t => (t.FORM_SIZE || '').toUpperCase()).filter(Boolean));
-      const sorted = [...formSet].sort();
-      for (const f of [...GanttFilter._selectedForms]) {
-        if (!formSet.has(f)) GanttFilter._selectedForms.delete(f);
-      }
-      const q = GanttFilter._formSearch.toLowerCase().trim();
-      const visible = q ? sorted.filter(f => f.toLowerCase().includes(q)) : sorted;
-      const esc = s => String(s).replace(/[&<>"]/g,
-        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-      drop.innerHTML = visible.length
-        ? visible.map(f =>
-            `<label><input type="checkbox" value="${esc(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
-             onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${esc(f)}</label>`
-          ).join('')
-        : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? t('ui.no_matches') : 'No forms'}</div>`;
-      GanttFilter._refreshFormBtn();
-    },
-
-    _refreshFormBtn() {
-      const btn = document.getElementById('gantt-flt-form-btn');
-      const lbl = document.getElementById('gantt-flt-form-label');
-      if (!lbl) return;
-      const n = GanttFilter._selectedForms.size;
-      lbl.textContent = n === 0 ? t('ui.all_forms')
-        : n === 1 ? [...GanttFilter._selectedForms][0]
-        : t('ui.n_forms_filter', { count: n });
-      if (btn) btn.classList.toggle('active', n > 0);
-    },
-
-    _onFormChange(cb) {
-      if (cb.checked) GanttFilter._selectedForms.add(cb.value.toUpperCase());
-      else            GanttFilter._selectedForms.delete(cb.value.toUpperCase());
-      GanttFilter._refreshFormBtn();
-      GanttFilter._apply();
-    },
-
-    _togglePoMatDropdown() {
-      const drop = document.getElementById('gantt-pomat-dropdown');
-      if (drop) drop.hidden = !drop.hidden;
-    },
-
-    _refreshPoMatBtn() {
-      const btn = document.getElementById('gantt-flt-pomat-btn');
-      const lbl = document.getElementById('gantt-flt-pomat-label');
-      if (!lbl) return;
-      const n = GanttFilter._pastedIds.size;
-      lbl.textContent = n === 0 ? t('ui.all_pomat') : t('ui.n_pomat_filter', { count: n });
-      if (btn) btn.classList.toggle('active', n > 0);
-    },
-
-    _onPoMatApply() {
-      const ta = document.getElementById('gantt-pomat-textarea');
-      if (!ta) return;
-      GanttFilter._pastedIds = new Set(Util.parsePasteList(ta.value).map(Util.norm));
-      const cnt = document.getElementById('gantt-pomat-count');
-      if (cnt) {
-        const n = GanttFilter._pastedIds.size;
-        cnt.textContent = n ? t('ui.pomat_count', { count: n }) : '';
-      }
-      GanttFilter._refreshPoMatBtn();
-      GanttFilter._apply();
-    },
-
-    _onPoMatPaste(e) {
-      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
-      if (!text || !text.trim()) return;
-      const known = new Set();
-      (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
-        const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
-        const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
-      });
-      const { matched, total } = Util.countPasteMatches(text, known);
-      if (total) Toast.show(t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
-    },
-
-    _clearPoMat() {
-      GanttFilter._pastedIds.clear();
-      const ta = document.getElementById('gantt-pomat-textarea');
-      if (ta) ta.value = '';
-      const cnt = document.getElementById('gantt-pomat-count');
-      if (cnt) cnt.textContent = '';
-      GanttFilter._refreshPoMatBtn();
-      GanttFilter._apply();
-    },
-
-    _apply: null,  // assigned below after Util is in scope
-
-    _doApply() {
-      if (!Timeline._items) return;
-      const active = GanttFilter.isActive();
-      const badge = document.getElementById('flt-badge');
-      const bar   = document.getElementById('gantt-filterbar');
-
-      const updates = [];
-      const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
-      for (const task of scoped) {
-        if (!task.start_date || !task.end_date) continue;
-        const id = String(task.id);
-        const item = Timeline._items.get(id);
-        if (!item) continue;
-        const shouldDim = active && !GanttFilter.matches(task);
-        const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
-        const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
-        if (newClass !== item.className) updates.push({ id, className: newClass });
-      }
-      if (updates.length) {
-        Timeline._suppressEvents = true;
-        try { Timeline._items.update(updates); }
-        finally { Timeline._suppressEvents = false; }
-      }
-
-      const n = (GanttFilter._selectedColors.size > 0 ? 1 : 0)
-              + (GanttFilter._selectedForms.size  > 0 ? 1 : 0)
-              + (GanttFilter._pastedIds.size > 0 ? 1 : 0)
-              + (GanttFilter._active.text ? 1 : 0);
-      if (badge) badge.textContent = n + ' filter' + (n !== 1 ? 's' : '');
-      const wrap = document.getElementById('flt-badge-wrap');
-      if (wrap) wrap.hidden = (n === 0);
-      if (bar) bar.classList.toggle('filter-active', active);
-    }
-  };
-
-  GanttFilter._apply = Util.debounce(() => GanttFilter._doApply(), 60);
 
   /* =============================================================================
      OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a

@@ -143,10 +143,7 @@ App.gotoGanttTimeline
 Compute.available
 Compute.utilization
 ErrorLog.warn
-GanttFilter._buildLineDropdown
-GanttFilter._refreshLineBtn
-GanttFilter._selectedLines
-GanttFilter._active
+GanttFilter.isolateLine
 Inspector.show
 Modal.close
 Selection.ids
@@ -193,10 +190,6 @@ CommandPalette._panel
 CommandPalette._recent
 CommandPalette._render
 Confidence._recompute
-GanttFilter._active
-GanttFilter._buildLineDropdown
-GanttFilter._refreshLineBtn
-GanttFilter._selectedLines
 GanttFilter._toggleColorDropdown
 GanttFilter._toggleFormDropdown
 GanttFilter._toggleLineDropdown
@@ -205,8 +198,29 @@ Store._rev
 UndoStack._entries
 ```
 
-The full machine-readable list (77 entries, including app.js-generated HTML)
+The full machine-readable list (74 entries, including app.js-generated HTML)
 lives in `tests/contracts/cq1-legacy-surface.json` under `privateConsumers`.
+
+**GanttFilter's private-consumer debt (Phase 3 Task 3, partially closed):** the
+plan that drove this task described "8 `GanttFilter._*` private-consumer
+rows (all from nimbus-intelligence.js)" closing once GanttFilter got a public
+API. Re-verifying against the actual scanner and source (not the plan's
+summary) found this was only true for 4 of the 8: `_active`, `_selectedLines`,
+`_refreshLineBtn`, and `_buildLineDropdown` were reached from
+`nimbus-intelligence.js` (the isolate-line command and the confidence-score
+`anyFilterActive` computation) and are now closed — replaced with
+`GanttFilter.isolateLine(line)` / `.selectedLines()` / `.activeFilter()`. The
+other 4 — `_toggleLineDropdown`/`_toggleColorDropdown`/`_toggleFormDropdown`/
+`_togglePoMatDropdown` — are reached exclusively from `index.html`'s inline
+`onclick="NIMBUS.GanttFilter._toggle*Dropdown()"` attributes on the filter
+bar's dropdown-toggle buttons, never from `nimbus-intelligence.js`. This
+phase's Global Constraints forbid touching any inline-onclick string not
+explicitly named (only `Interaction._showMultiInspector`'s three onclick
+strings are in scope, in Task 5), so these 4 stay open here — a genuine,
+documented scope boundary, not an oversight. Closing them requires adding
+public toggle methods and updating `index.html`'s onclick attributes, which
+is appropriately deferred to whichever future phase migrates `index.html`'s
+inline handlers wholesale.
 
 ---
 
@@ -229,9 +243,7 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Hierarchy` | `Store._rev` | Phase 3 (schedule-workbench.mjs) |
 | `Dashboard` | `Store._rev`, `Store._state` | Phase 3 (schedule-workbench.mjs) |
-| `GanttFilter` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
 | `App` | `Store._state` | Phase 4 (application-shell.mjs) |
 | `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
@@ -246,6 +258,19 @@ alert-horizon-zone block in `rebuild()`) that were not previously tracked
 as a distinct row but are the same class of exception; both became
 `Store.masterData` (the existing Phase 1 public getter). Neither module
 had a `Store._rev` touch.
+
+**`Hierarchy`/`GanttFilter` closed (Phase 3 Task 3):** both moved into
+`schedule-workbench.mjs` verbatim. `Hierarchy.render`'s one
+`Store._rev || 0` read (inside its local `_utilMKey` memo-key computation)
+became `Store.rev()` (the existing Phase 1 public getter — `rev() { return
+this._rev || 0; }` — so no new getter was needed; the `|| 0` fallback moved
+into the getter itself, already there). `GanttFilter`, by contrast, was
+re-verified against its actual source rather than the row's original
+description and does **not** touch `Store._state` anywhere in its code —
+the row was carried into this table speculatively before Task 3 actually
+read the module; it closes here with no code change needed for that
+specific claim. (GanttFilter's real Task 3 debt was its nimbus-intelligence.js
+private-consumer surface, not a `Store._state` touch — see §4.2 above.)
 
 **Timeline's five forward references into app.js (Phase 3 Task 1, one
 temporary group + one permanent):** `Timeline` was the first Phase 3 module

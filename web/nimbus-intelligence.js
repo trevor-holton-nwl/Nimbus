@@ -518,10 +518,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         selStats,
         sandboxActive:  !!NIMBUS.Sandbox?.active,
         anyFilterActive: !!(
-          NIMBUS.GanttFilter?._active?.color ||
-          NIMBUS.GanttFilter?._active?.form  ||
-          NIMBUS.GanttFilter?._active?.text  ||
-          (NIMBUS.GanttFilter?._selectedLines?.size > 0)
+          NIMBUS.GanttFilter?.activeFilter()?.color ||
+          NIMBUS.GanttFilter?.activeFilter()?.form  ||
+          NIMBUS.GanttFilter?.activeFilter()?.text  ||
+          (NIMBUS.GanttFilter?.selectedLines()?.size > 0)
         ),
         undoDepth:     NIMBUS.UndoStack?._entries?.length || 0,
         blackoutRisk,
@@ -913,10 +913,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
-            NIMBUS.GanttFilter._selectedLines.clear();
-            NIMBUS.GanttFilter._selectedLines.add(line);
-            NIMBUS.GanttFilter._refreshLineBtn?.();
-            NIMBUS.GanttFilter._buildLineDropdown?.();
+            NIMBUS.GanttFilter.isolateLine(line);
             NIMBUS.Timeline.rebuild?.();
             NIMBUS.Hierarchy.render?.();
           }

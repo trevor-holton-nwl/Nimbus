@@ -60,8 +60,17 @@ test('intelligenceCommands includes Compute.utilization', () => {
   assert.ok(surface.intelligenceCommands.includes('Compute.utilization'), surface.intelligenceCommands.join(', '));
 });
 
-test('privateConsumers includes GanttFilter._selectedLines', () => {
-  assert.ok(surface.privateConsumers.includes('GanttFilter._selectedLines'), surface.privateConsumers.join(', '));
+test('privateConsumers includes GanttFilter._toggleLineDropdown', () => {
+  // CQ-1 Phase 3 Task 3 closed GanttFilter._selectedLines (and _active/
+  // _refreshLineBtn/_buildLineDropdown) as a private-consumer entry — its
+  // nimbus-intelligence.js call sites now go through the public
+  // GanttFilter.isolateLine()/.selectedLines()/.activeFilter() API instead.
+  // This regression guard now points at _toggleLineDropdown, which stays a
+  // genuine private consumer: it's reached only from index.html's inline
+  // onclick="NIMBUS.GanttFilter._toggleLineDropdown()" attribute, out of
+  // scope for this phase's inline-handler migration mandate (see
+  // docs/architecture/cq1-compatibility-inventory.md §4.2).
+  assert.ok(surface.privateConsumers.includes('GanttFilter._toggleLineDropdown'), surface.privateConsumers.join(', '));
 });
 
 test('inlineHandlers contains onclick attributes', () => {
