@@ -90,6 +90,7 @@ Do not mix both for the same screen.
 | Screen | Lifecycle | Rationale |
 |---|---|---|
 | Gantt Timeline | Mount-once / show-hide | vis-timeline setup is expensive; plant changes swap the scoped context, not the DOM node |
+| Interaction | Mount-once / show-hide (shares Gantt Timeline's) | No independent lifecycle of its own — it is the input layer (click/dblclick/contextmenu/drag/keyboard) for the one Gantt Timeline screen, installed once via `Interaction.install()` from boot. See the `uninstall()` note below §6 for the new, currently-unwired teardown method this row's "no unmount trigger today" implies. |
 | Orders table | Mount-once / show-hide | AG Grid setup is expensive; same plant-scoped swap model |
 | Dashboard | Mount-once / show-hide | `Dashboard._lsVL` (Line Status `VirtualList`) and its rendered DOM are retained across tab switches; the Chart.js rationale this row previously cited was stale — Dashboard is a hand-rolled DOM/CSS heatmap and never instantiated `Chart.js` (removed Phase 3 Task 4) |
 | Plant admin | Mount/unmount with cleanup | Heavy CRUD; must tear down on tab change to avoid stale subscriptions |
@@ -316,6 +317,97 @@ moved block became `Util.t(...)` for the same lint reason as before.
 `Store.rev()` and the new `Store.replace*` setters are available now as the
 migration target for each row above — use them instead of `_rev`/`_state`
 when a consumer's turn comes.
+
+**`Interaction` moved (Phase 3 Task 5) — no `Store._state`/`_rev` row to
+close (it never touched either), but it is the module this phase's own
+"verify lifecycle teardown" mandate targets.** `Interaction` had **zero test
+coverage anywhere in the codebase** before this task — the densest (~1,140
+lines including its header comment) and highest-risk module in the whole
+migration (the Gantt drag/keyboard input pipeline). Task 5 added
+characterization tests before moving it, in this order:
+
+- **Idempotent `install()` and the new `uninstall()`.** `install()`'s three
+  unconditional `document`-level listeners (`mousemove` edge-scroll tracking,
+  `mouseleave` tooltip hiding, `keydown` for `_onKeyDown`) plus a fourth,
+  separate `document` `keydown` listener inside `_installHoverPreview()` (a
+  dismiss-on-any-key handler, gated behind a truthy `#vis-timeline` container
+  — real in production, so a test harness must stub the container far enough
+  for it to register, not just assume it as one of the "always on" three) were
+  mechanically refactored from inline arrow functions into named, stored bound
+  references (`_edgeScrollTrackBound`, `_hideTooltipBound`, `_onKeyDownBound`,
+  `_hoverDismissBound`) — a structural change with no behavior change, needed
+  so a new `uninstall()` method has concrete references to remove. Two tests
+  pin this with a counting `document.addEventListener`/`removeEventListener`
+  stub (verified against negative controls — deliberately breaking the
+  `install()` idempotency guard and deliberately dropping one
+  `removeEventListener` call from `uninstall()` both made the corresponding
+  test fail with the expected count mismatch before the fix was restored):
+  `install()` called twice attaches exactly 2 `keydown` / 1 `mousemove` / 1
+  `mouseleave` listener (not 4/2/2), and `uninstall()` returns all three types
+  to zero. `uninstall()` reverses only the 4 `document`-level listeners and
+  cancels any live `_marqueeRAF`/`_edgeScrollRAF` — it deliberately does
+  **not** remove the container-scoped listeners bound to `#vis-timeline`
+  (click/contextmenu/pointerdown/dblclick &c. across `install()`,
+  `_installMarquee()`, `_installLabelDblclick()`, `_installHoverPreview()`) or
+  the vis-timeline/DataSet subscriptions (`Timeline._tl.on`/`_items.on`),
+  matching the plan's own scoping of the teardown to the `document`-level
+  surface — vis-timeline itself is never torn down under the Gantt Timeline
+  mount-once/show-hide lifecycle (§2), so there is nothing else to unwind yet.
+  **`uninstall()` is purely additive and intentionally unwired** — nothing
+  calls it. It exists as tested, correct, dormant machinery satisfying this
+  phase's teardown mandate without inventing an unmount trigger the Gantt
+  Timeline screen doesn't otherwise have.
+- **The inline-handler migration mandate's one concrete instance, corrected.**
+  This plan's own Architecture section named **three** inline `onclick`
+  strings inside `_showMultiInspector`'s generated multi-select panel HTML
+  (`NIMBUS.Interaction._bulkFix(true)`, `_bulkFix(false)`,
+  `NIMBUS.Selection.clear()`) — re-reading the actual panel markup during this
+  task found a **fourth**, `NIMBUS.Interaction._unscheduleSelected()`, which
+  the plan's prose missed but its own Interfaces line already implied
+  ("`._unscheduleSelected()` stay as-is (still called via real event listeners
+  now, not inline strings)"). All four buttons now carry `data-action`
+  attributes instead, wired to real `addEventListener` calls immediately after
+  the panel HTML is inserted. `node scripts/legacy-surface.mjs --write`
+  confirms all 4 `app.js`-sourced `inlineHandlers` entries disappear (not 3);
+  no other surface (`htmlCommands`/`intelligenceCommands`/`privateConsumers`)
+  changed.
+- **One same-phase forward reference, same idiom as Timeline's/Table's/
+  Dashboard's.** `AlertsUIAdapter.showForCell(...)` (inside the alertcell-click
+  delegate installed in `install()`) is a bare reference into app.js-resident
+  code that hasn't moved yet — rewritten to `NIMBUS.AlertsUIAdapter
+  .showForCell(...)`, resolving normally once `AlertsUIAdapter` itself moves
+  into this file in Task 7. All bare `t(...)` i18n calls (9 call sites) became
+  `Util.t(...)`, the same established convention as every prior task in this
+  file. `Interaction.DEBUG` and `GanttFilter._selectedLines`/
+  `._buildLineDropdown()`/`._refreshLineBtn()` — Timeline's and Interaction's
+  own pre-existing bare references to these same-file siblings — were left
+  untouched, per the existing note above (no further change needed once the
+  referenced module lands in this same file).
+- **A real doc/behavior discrepancy the new tests uncovered.** The module's
+  own header comment claimed "a user-drag on a fixed task is REVERTED in the
+  vis DataSet before it can reach the Store." Writing the first-ever
+  characterization test for `_onDataSetUpdate` (arguably the single most
+  safety-critical function in this module) found this is **not what the code
+  does and, per the codebase's single-commit history, never has been**: fixed
+  orders carry no per-item `editable:false` (only blackout blocks do), so
+  vis-timeline lets a user actually drag one, and `Store.updateTask` itself
+  has no fixed-aware guard. Inside `_onDataSetUpdate`, the
+  `Store.isFixed(id)` branch's `noActualChange` guard only distinguishes a
+  genuine drag from a programmatic echo (`Timeline.rebuild`/
+  `_applyTaskPatch` calling `_items.update()` inside `_suppressEvents`, or a
+  redraw racing a drag-commit) — a real position change on a fixed order
+  **falls through to the same commit path as a non-fixed drag** (the code's
+  own inline comment, left in place, already said as much: "Fixed items are
+  user-draggable — fall through to normal update path"). Two tests now pin
+  this precisely: a fixed task with an unchanged position is a no-op, and a
+  fixed task with a genuine position change commits to the Store exactly like
+  a non-fixed drag would. This phase's Global Constraints require preserving
+  current behavior byte-for-byte during a "verbatim move," so **the logic is
+  unchanged** — only the misleading header comment and the
+  `_onDataSetUpdate` doc-comment were corrected to describe reality. Whether
+  fixed orders should in fact be un-draggable (making the header comment's
+  original claim true) is a product/behavior question out of this phase's
+  scope — flagged here for a future task, not fixed in this one.
 
 **Temporary Engine seam (Phase 2 Task 2, resolved by Task 3):** `Alerts` moved
 to `schedule-services.mjs` in Task 2, but `Engine` — which `Alerts.applyFix`

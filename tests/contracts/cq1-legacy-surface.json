@@ -79,21 +79,6 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Interaction._bulkFix(false)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Interaction._bulkFix(true)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Interaction._unscheduleSelected()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
       "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
     },
     {
@@ -125,11 +110,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.ProdLines.openBlockModal('${line}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Selection.clear()"
     },
     {
       "file": "app.js",
