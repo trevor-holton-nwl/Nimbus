@@ -83,6 +83,29 @@ test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (
   Alerts.recompute = orig;
 });
 
+test('Store "schedule:hydrated" event triggers Alerts.scheduleRecompute (schedule-data -> schedule-services seam)', () => {
+  // Regression test for the reverse-dependency seam Task 4 introduced:
+  // schedule-data.mjs may not import schedule-services.mjs, so Persistence/
+  // CalendarSync (5 call sites: load()'s two branches, _loadCache(),
+  // _loadDemo()) emit a `{ type: 'schedule:hydrated' }` Store event instead of
+  // calling Alerts.scheduleRecompute() directly. schedule-services.mjs
+  // subscribes to that event once, at module-eval time, and forwards to
+  // Alerts.scheduleRecompute(). Verify the seam actually fires end to end —
+  // not just that each half compiles — so a typo'd event-type string or a
+  // deleted subscription fails this suite instead of silently going dark
+  // (the prior gap: alerts would stop recomputing after every load/cache
+  // restore/demo-seed with nothing catching the regression).
+  let calls = 0;
+  const origSchedule = Alerts.scheduleRecompute;
+  Alerts.scheduleRecompute = (...args) => { calls++; };
+  try {
+    Store.emit({ type: 'schedule:hydrated', source: 'unit-test' });
+    assert.equal(calls, 1, 'the schedule:hydrated subscriber must call Alerts.scheduleRecompute exactly once');
+  } finally {
+    Alerts.scheduleRecompute = origSchedule;
+  }
+});
+
 test('Utilization.computeMatrix memoizes on (startMs, days, Store.rev(), plant scope)', () => {
   Store.setTasks([], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
@@ -150,10 +173,23 @@ test('Engine.autoReflow pushes an overlapping unfixed downstream peer forward on
 
 test('Engine.runAndApply respects explicit respectFixed/respectCalendar options without reading any DOM element', () => {
   // Regression test for the DOM-read fix in Step 4: call runAndApply with both
-  // flags explicit and confirm no `document.getElementById` call is needed —
-  // this test's harness provides no `document` stub with 'chk-respect-fixed'/
-  // 'chk-respect-calendar' elements, so if Engine still reads them, this throws.
-  Store.setTasks([{ id: 'e3', PRODUCTION_LINE: 'L1', plant: '5512', RUN_TIME: '1' }], 'unit-test');
-  Store.setSelectedPlant('5512', 'unit-test');
-  assert.doesNotThrow(() => Engine.runAndApply('combined', { respectFixed: true, respectCalendar: true }));
+  // flags explicit and confirm `document.getElementById` is never invoked.
+  // The shared harness stub installed at the top of this file
+  // (`document = { getElementById: () => null }`, needed for the no-plant/
+  // no-task guard-path tests) silently absorbs any `getElementById` call and
+  // returns `null` rather than throwing, so asserting `doesNotThrow` against
+  // it alone would pass even if a DOM read were reintroduced. Swap in a
+  // counting spy for the duration of this test instead, and assert it was
+  // never called — then restore the shared stub.
+  const priorDocument = globalThis.document;
+  let calls = 0;
+  globalThis.document = { getElementById: () => { calls++; return null; } };
+  try {
+    Store.setTasks([{ id: 'e3', PRODUCTION_LINE: 'L1', plant: '5512', RUN_TIME: '1' }], 'unit-test');
+    Store.setSelectedPlant('5512', 'unit-test');
+    assert.doesNotThrow(() => Engine.runAndApply('combined', { respectFixed: true, respectCalendar: true }));
+    assert.equal(calls, 0, 'Engine.runAndApply must not call document.getElementById when respectFixed/respectCalendar are both passed explicitly');
+  } finally {
+    globalThis.document = priorDocument;
+  }
 });
