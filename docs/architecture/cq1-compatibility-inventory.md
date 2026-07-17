@@ -105,6 +105,52 @@ since the regex-based legacy-surface scanner treated the comment text itself
 as a private-consumer access — this closes that one phantom `§4.2` row (see
 below) as a side effect of the relocation, not a semantic private-access fix.
 
+**Phase 4 Task 2 status (complete):** `MasterData` and `LaborPlanning` moved
+verbatim into `plant-and-administration.mjs`, extending the `app.js` →
+`window.__NIMBUS_PLANT_ADMIN` destructure. Two fixes, both named by this
+task's plan:
+- `MasterData`'s one `Store._state.masterData = {...}; Store.rebuildPlantIndex();`
+  write (inside its bulk-paste-save success handler) became
+  `Store.setMasterData({...}, 'master-data-save')` — the existing public
+  setter added in Phase 2 Task 4 (`schedule-state.mjs`), which performs the
+  identical assign-then-rebuild-then-emit sequence. The prior code emitted
+  `{type:'master-data-changed', table, source}` unconditionally after the
+  conditional write; `Store.setMasterData` emits its own
+  `{type:'master-data-changed', source}` (no `table` field — confirmed unused
+  by every subscriber, `Store.subscribe` callsites in `app.js`/
+  `plant-and-administration.mjs` only branch on `evt.type`) as part of the
+  write itself, so the manual `table`-carrying emit now only fires on the
+  no-rows-returned branch — preserving the original one-emit-per-call shape
+  with no behavior change apart from the unused field. This closes
+  `MasterData`'s tracked §6 exception for real, not just by relocation — see
+  §6 below.
+- `LaborPlanning`'s five direct `App._laborSub`/`App._currentTab` reads
+  became `_activeTabResolvers.laborSub()`/`.currentTab()`, the same injected
+  getter seam Task 1 wired for `Plant`. Its one `NIMBUS.App.gotoLaborSub(...)`
+  inline-onclick-generated string (in an Exceptions-tab HTML template) is
+  unaffected — a forward reference into `App`, still in `app.js` until Task 4,
+  through the shared `NIMBUS` binding, same idiom as Task 1's/Phase 3's
+  forward references.
+
+**New row added (Phase 4 Task 2):** `LaborPlanning` carries six direct
+`Store._state.masterData` *reads* (`_subnetwork`, `_disaggregate`,
+`_renderKPIs`, `_renderLinePlan`'s group lookup, `init()`'s Store-subscribe
+callback) that moved verbatim along with the rest of the module. This task's
+plan named only `MasterData`'s one *write* as its Store-exception target
+(`LaborPlanning`'s `Interfaces` bullet named only its `App._laborSub`/
+`_currentTab` reads) — closing these reads was not this task's stated job.
+Tracked here under `LaborPlanning` rather than silently left unattributed or
+dropped, the same honesty precedent Task 1 set for `Plant`'s carried-forward
+`Store._state.masterData` read in `_renderSettingsPane`. Four static
+`onclick=`/`onchange=` attributes in `index.html` target `LaborPlanning`
+(`toggleGroupDropdown`, `prevHorizon`, `nextHorizon`, `setSpan`) — this task's
+Files list does not include `index.html`, so unlike Task 1's CalendarUI/
+Plant/ProdLines conversions, these were left as inline attributes; they
+resolve correctly regardless of which file defines `LaborPlanning` (same
+`NIMBUS` binding), and are folded into Task 6's precise inline-handler count
+rather than silently converted out of scope or silently omitted from that
+count.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated
@@ -161,12 +207,11 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `CalendarUI` | `plant-and-administration.mjs` | Blackout-block-tab UI remnant (capacity math stayed in `schedule-services.mjs`'s `Calendar`). Moved Phase 4 Task 1. |
 | `Plant` | `plant-and-administration.mjs` | Plant config tab. Moved Phase 4 Task 1 — now also owns `_renderSettingsPane` (relocated bodily from `App`, see the Phase 4 Task 1 status note above). |
 | `ProdLines` | `plant-and-administration.mjs` | Production lines tab. Moved Phase 4 Task 1 — no `.init()` (renders on-demand, unchanged). |
-| `LaborPlanning` | `plant-and-administration.mjs` | Labor plan editor |
-| `MasterData` | `plant-and-administration.mjs` | CRUD grid + DDL wizard |
+| `LaborPlanning` | `plant-and-administration.mjs` | Labor plan editor. Moved Phase 4 Task 2 — `App._laborSub`/`_currentTab` reads now go through the `_activeTabResolvers` seam. |
+| `MasterData` | `plant-and-administration.mjs` | CRUD grid + DDL wizard, plus Bill-of-Materials browse/filter/upload (private helpers within the module — see below). Moved Phase 4 Task 2 — its one `Store._state.masterData` write became `Store.setMasterData(...)`, closing its §6 exception. |
 | `Interface` | `plant-and-administration.mjs` | SAP sync config/run history |
 | `Security` | `plant-and-administration.mjs` | User/role admin |
 | `AdminCockpit` | `plant-and-administration.mjs` | DB console, perf profiler, diagnostics bundle |
-| `BomItems` | `plant-and-administration.mjs` | Bill of Materials browse/filter/upload |
 | `App` | `application-shell.mjs` | Tab/sub-tab routing and lifecycle owner |
 | `PlantSelector` | `application-shell.mjs` | |
 | `WelcomeSplash` | `application-shell.mjs` | |
@@ -338,10 +383,15 @@ inline handlers wholesale.
 
 ## 5. Bill of Materials
 
-BOM browsing, filtering, and upload belong to `plant-and-administration.mjs`
-(see ownership map row `BomItems`). The `POST /bom-items/upload` and
-`GET /bom-items` endpoints stay in `brain.py` / `db.py`; the admin UI that
-calls them is scoped to the plant-administration module. BOM is not part of
+**Correction (Phase 4 Task 2 research):** there is no separate `BomItems`
+module — this section previously carried a `BomItems` row in §1's ownership
+map speculatively, before any Phase 4 task had actually read the code. BOM
+browsing, filtering, and upload are a set of private helper functions living
+*inside* `MasterData` (the `bom_items` table gate, upload flow, and
+component-picker logic) — they moved into `plant-and-administration.mjs` as
+part of `MasterData` in Task 2, not as their own extraction. The `POST
+/bom-items/upload` and `GET /bom-items` endpoints stay in `brain.py` / `db.py`;
+the admin UI that calls them is `MasterData`'s own code. BOM is not part of
 the primary scheduling workflow.
 
 ---
@@ -355,10 +405,20 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
 | `App` | `Store._state` | Phase 4 (application-shell.mjs) |
 | `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
 | `Plant` | `Store._state` | Not yet scheduled — see note below |
+| `LaborPlanning` | `Store._state` | Not yet scheduled — see note below |
+
+**`MasterData` closed (Phase 4 Task 2):** its one
+`Store._state.masterData = {...}; Store.rebuildPlantIndex();` write (inside
+the bulk-paste-save success handler) became `Store.setMasterData({...},
+'master-data-save')` — the existing public setter added in Phase 2 Task 4,
+which performs the identical assign/rebuild/emit sequence. See the Phase 4
+Task 2 status note above for the emit-shape nuance (the `table` field is
+dropped from the write-triggered emit, confirmed unused by any subscriber).
+This closes the row for real, not just by relocation, per this task's
+explicit mandate.
 
 **New row added (Phase 4 Task 1):** `Plant._renderSettingsPane`'s one
 `Store._state.masterData?.plants?.find(...)` read moved verbatim along with
@@ -372,6 +432,18 @@ plan text names only `App` and `nimbus-intelligence.js` as its remaining-
 touches targets — `plant-and-administration.mjs` is not explicitly named — so
 whether Task 6 closes this specific row is not yet certain from the plan text
 alone; "Not yet scheduled" here means exactly that, not that it never will be.
+
+**New row added (Phase 4 Task 2):** `LaborPlanning` carries six direct
+`Store._state.masterData` *reads* (`_subnetwork`, `_disaggregate`,
+`_renderKPIs`'s plant-lines lookup, `_renderLinePlan`'s group lookup, a
+group-lookup inside its cell-edit handler, and `init()`'s Store-subscribe
+callback filter) that moved verbatim along with the rest of the module —
+this task's Interfaces section named only its `App._laborSub`/`_currentTab`
+reads as its scope, not these. Tracked here under its owner, `LaborPlanning`,
+rather than silently left unattributed or dropped — the same precedent as
+`Plant`'s row above. As with `Plant`'s row, whether Task 6 closes this
+specific row is not certain from the plan text alone (Task 6 names only
+`App` and `nimbus-intelligence.js`); "Not yet scheduled" means exactly that.
 
 **`Timeline`/`DependencyOverlay` closed (Phase 3 Task 1):** both moved into
 `schedule-workbench.mjs` verbatim. `DependencyOverlay.render`'s one

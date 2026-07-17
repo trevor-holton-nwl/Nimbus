@@ -2,26 +2,6 @@
   "version": 1,
   "inlineHandlers": [
     {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.LaborPlanning.setSpan(+this.value)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
-    },
-    {
       "file": "application-foundation.mjs",
       "attribute": "onchange",
       "expression": "..."
@@ -533,8 +513,23 @@
     },
     {
       "file": "plant-and-administration.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.LaborPlanning.setSpan(+this.value)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
     },
     {
       "file": "plant-and-administration.mjs",
@@ -560,6 +555,11 @@
       "file": "plant-and-administration.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.EditCalendar.open('${line}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
     },
     {
       "file": "plant-and-administration.mjs",
