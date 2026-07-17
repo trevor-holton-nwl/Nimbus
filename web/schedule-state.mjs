@@ -68,6 +68,14 @@ export const Store = {
 
   isFixed(id)     { return this._state.fixedIds.has(String(id)); },
 
+  /** Record the timestamp of the last optimizer run. Public equivalent of the
+   *  former direct `Store._state.meta.lastOptimize = ...` write (CQ-1 Phase 2
+   *  Task 3 — closes Engine's `_state` touch, one of the tracked §6 exceptions). */
+  setLastOptimize(date, source) {
+    this._state.meta.lastOptimize = date;
+    this.emit({ type: 'meta:change', source });
+  },
+
   /* ----- subscription ---------------------------------------------------- */
   subscribe(fn, label) {
     if (label) fn._pmLabel = label;

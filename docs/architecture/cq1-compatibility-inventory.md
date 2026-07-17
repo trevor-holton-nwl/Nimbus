@@ -39,7 +39,7 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |
 | `Alerts` | `schedule-services.mjs` | Split: computation → schedule-services.mjs; drawer/bell/cell-briefing modal → app.js's AlertsUIAdapter. |
 | `Utilization` | `schedule-services.mjs` | |
-| `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; no DOM |
+| `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; genuinely DOM-free after Phase 2 removed a checkbox-read fallback (see Task 3 Step 4). |
 | `Persistence` | `schedule-data.mjs` | `scheduleRepository` |
 | `CalendarSync` | `schedule-data.mjs` | `calendarRepository` |
 | `Session` | `schedule-data.mjs` | `session` API |
@@ -220,7 +220,6 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Engine` | `Store._state` | Phase 2 (schedule-services.mjs) |
 | `Persistence` | `Store._state` | Phase 2 (schedule-data.mjs) |
 | `CalendarSync` | `Store._state` | Phase 2 (schedule-data.mjs) |
 | `Timeline` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
@@ -236,19 +235,33 @@ module migrates in a later phase and stops touching these fields directly.
 migration target for each row above — use them instead of `_rev`/`_state`
 when a consumer's turn comes.
 
-**Temporary Engine seam (Phase 2 Task 2, removed by Task 3):** `Alerts` moved
+**Temporary Engine seam (Phase 2 Task 2, resolved by Task 3):** `Alerts` moved
 to `schedule-services.mjs` in Task 2, but `Engine` — which `Alerts.applyFix`
 calls into for its overlap/overload auto-fix paths (`autoReflow`/
-`runAndApply`) — does not move until Task 3, one commit later. A bare
-`Engine` reference inside `schedule-services.mjs` during that one-commit gap
-would be an undeclared identifier (this file is a real ES module under
-`web/**/*.mjs`'s `no-undef` ESLint block, with no ambient `Engine` global).
-`Alerts` carries a small private seam for exactly this gap —
-`Alerts.setEngineService({ autoReflow, runAndApply })` — wired once from
-`app.js` boot glue (right after the bridge destructure that introduces
-`Alerts`), where `Engine` still lives as of Task 2. Task 3 deletes the seam
-and both wiring sites once `Engine` is a real sibling export in
-`schedule-services.mjs` and `applyFix` can call it directly.
+`runAndApply`) — did not move until Task 3, one commit later. During that
+one-commit gap, `Alerts` carried a private seam (`Alerts.setEngineService({
+autoReflow, runAndApply })`, wired once from `app.js` boot glue) so
+`applyFix` never held a bare, undeclared `Engine` reference. Task 3 moved
+`Engine` into `schedule-services.mjs` as a real sibling export and deleted
+the seam (`Alerts._engine`/`setEngineService`) and both wiring sites —
+`applyFix` now calls `Engine.autoReflow`/`Engine.runAndApply` directly, the
+same pattern `Store.mode()` already used for a forward reference to
+`Sandbox` (a `const` declared later in the same file resolves fine, because
+the reference is only read inside a function body invoked long after module
+evaluation completes).
+
+**Engine's `_state`/DOM closures (Phase 2 Task 3):** moving `Engine` closed
+its `Store._state` §6 row two ways: `constraintsFor(plant)` now reads
+`Store.masterData` (the Phase 1 public getter) instead of
+`Store._state.masterData`, and `runAndApply`'s post-run bookkeeping calls the
+new `Store.setLastOptimize(date, source)` setter instead of writing
+`Store._state.meta.lastOptimize` directly. Task 3 also found and removed
+Engine's one DOM read: `runAndApply`'s `respectFixed`/`respectCalendar`
+fallback read `document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`
+— by inspection, **neither id exists anywhere in `index.html`'s rendered
+markup**, so the lookup always returned `null` and the `?? true` default
+always applied. The replacement (`opts.respectFixed ?? true`) reproduces
+that real runtime behavior exactly while making `Engine` genuinely DOM-free.
 
 `Store.mode()` now resolves the real `Sandbox.active` flag (Phase 1, Task 5):
 `Sandbox` is a sibling top-level export in `schedule-state.mjs`, so `mode()`

@@ -1,7 +1,7 @@
 // schedule-services.mjs — CQ-1 schedule-services module.
 //
 // Owns calendar capacity math, the Compute worker client, Alerts computation,
-// and Utilization today (Engine joins in the next Phase 2 task). Delegates
+// Utilization, and Engine (optimizer + auto-reflow). Delegates
 // algorithmic truth to nimbus-compute-core.js and preserves the existing
 // worker protocol byte-for-byte. May import from schedule-data.mjs; must
 // never be imported by it. DOM/UI code that was co-located with these
@@ -568,7 +568,7 @@ export const Alerts = {
       const newStart = Calendar.nextAvailable(line, searchFrom, dur);
       const newEnd   = new Date(newStart.getTime() + dur);
       Store.updateTask(task.id, { start_date: newStart, end_date: newEnd }, 'alerts');
-      try { Alerts._engine?.autoReflow(task.id); } catch {}
+      try { Engine.autoReflow(task.id); } catch {}
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
       Alerts.dismiss(alertId);
       Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
@@ -590,22 +590,11 @@ export const Alerts = {
         (!t.end_date   || t.end_date   >= dayStart) &&
         (!t.start_date || t.start_date <= dayEnd)
       ).map(t => t.id));
-      Alerts._engine?.runAndApply('combined', { lines: [line], startDate: dayStart, endDate: dayEnd });
+      Engine.runAndApply('combined', { lines: [line], startDate: dayStart, endDate: dayEnd });
       UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
       Alerts.dismiss(alertId);
     }
   },
-
-  // TEMPORARY seam (removed by CQ-1 Phase 2 Task 3, which moves Engine into this
-  // same module as a sibling top-level export): applyFix's optimizer/auto-reflow
-  // calls can't reference a bare `Engine` yet — it still lives in app.js as of
-  // this task, so a static reference here would be an undeclared identifier
-  // (this file is a real ES module; no ambient `Engine` global exists). Wired
-  // once from app.js boot glue right after the bridge destructure that
-  // introduces `Alerts` — see app.js. Task 3 deletes this seam and calls the
-  // (by-then sibling) `Engine` object directly instead.
-  _engine: null,
-  setEngineService(svc) { Alerts._engine = svc; },
 };
 // Adaptive debounced dispatcher — all callers funnel through this so rapid successive
 // mutations (drag → autoReflow → explicit call) collapse into one recompute. The delay
@@ -815,3 +804,606 @@ Store.subscribe(evt => {
   if (_prewarmTimer) clearTimeout(_prewarmTimer);
   _prewarmTimer = setTimeout(() => { _prewarmTimer = null; Utilization._prewarm(); }, 200);
 }, 'Utilization.prewarm');
+
+/* =============================================================================
+   ENGINE — scheduling + optimisation.
+   Two run modes:
+     • runAndApply(mode): full global re-optimise, respecting fixed + calendars.
+     • autoReflow(changedId): after a manual edit, re-flow downstream orders on
+       the same (line, day) around the change.
+   Genuinely DOM-free (CQ-1 Phase 2 Task 3 removed the last DOM read — a
+   `document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`
+   fallback whose target ids do not exist anywhere in the rendered markup, so
+   the lookup always returned null and the `?? true` default always applied;
+   see the comment inline in runAndApply below).
+   ========================================================================== */
+export const Engine = {
+  /* ----- Per-plant switchable constraints (phased registry) -------------
+     CONSTRAINT_CATALOG is the single place a constraint type is declared.
+     Today only 'colorWheel' maps to an optimizer sort term; tooling and
+     others will be added here + given a term in _sortTerms when their data
+     exists. Per-plant config (which constraints are enabled, in what order)
+     lives in plants.constraints JSONB, surfaced on
+     Store.masterData.plants[*].constraints. */
+  CONSTRAINT_CATALOG: [
+    { key: 'colorWheel', label: 'Color wheel',
+      desc: 'Sequence orders by color-wheel priority to minimize color changeovers.' },
+    // { key: 'tooling', label: 'Tooling', desc: '...' },  // added when the attribute exists
+  ],
+
+  /** Ordered constraint config stored for a plant, or null if never configured. */
+  constraintsFor(plant) {
+    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const list = row && row.constraints;
+    return Array.isArray(list) ? list : null;
+  },
+
+  /** Is a given constraint enabled for this plant? Unconfigured default:
+   *  colorWheel ON (a no-op when the plant has no wheel — every lookup then
+   *  returns 999999), everything else OFF. So "respect a wheel where one
+   *  exists" emerges without a synchronous wheel probe in the optimizer. */
+  constraintEnabled(plant, key) {
+    const c = Engine.constraintsFor(plant)?.find(x => x.key === key);
+    if (c) return !!c.enabled;
+    return key === 'colorWheel';
+  },
+
+  /** Enabled constraint keys for a plant, in configured order (defaults applied). */
+  activeConstraintKeys(plant) {
+    const list = Engine.constraintsFor(plant);
+    if (Array.isArray(list) && list.length) {
+      return list.filter(c => c.enabled)
+                 .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+                 .map(c => c.key);
+    }
+    return Engine.CONSTRAINT_CATALOG
+      .filter(c => Engine.constraintEnabled(plant, c.key))
+      .map(c => c.key);
+  },
+
+  /** Ordered list of sort terms for a mode — the single source of truth for
+   *  optimizer ordering, shared by _comparator and runAndApply's decorate
+   *  sort (so the two can no longer drift). Each term is
+   *  { get(task)->key, cmp(keyA,keyB)->number }. The colorWheel term is
+   *  included only when that constraint is enabled for the plant, which is
+   *  what makes the wheel switchable per plant. */
+  _sortTerms(mode, opts = {}) {
+    const { plant, colorMap } = opts;
+    const numCmp = (a, b) => a - b;
+    const strCmp = (a, b) => a.localeCompare(b);
+
+    if (mode === 'spt') {
+      return [{ get: t => Util.runHours(t), cmp: numCmp }];
+    }
+    if (mode === 'changeover' || mode === 'combined') {
+      // 'changeover' groups identical attributes adjacently to minimize setups;
+      // 'combined' keeps that grouping but runs the shortest job first within
+      // each group (SPT). Domain constraints (color now, tooling later) come
+      // FIRST, in the plant's configured order; the intrinsic form / material /
+      // hours heuristic always follows as the tail.
+      const terms = [];
+      for (const key of Engine.activeConstraintKeys(plant)) {
+        if (key === 'colorWheel') {
+          terms.push({
+            get: t => colorMap ? (colorMap[Util.norm(t.COLOR)] ?? 999999) : (t.ORDER_Y ?? 999999),
+            cmp: numCmp,
+          });
+        }
+        // future: if (key === 'tooling') terms.push({ get: ..., cmp: ... });
+      }
+      terms.push({ get: t => Util.norm(t.FORM_SIZE), cmp: strCmp });
+      if (mode === 'combined') {
+        terms.push({ get: t => Util.runHours(t), cmp: numCmp });
+        terms.push({ get: t => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
+      } else {
+        terms.push({ get: t => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
+        terms.push({ get: t => Util.runHours(t), cmp: numCmp });
+      }
+      return terms;
+    }
+    return []; // default: preserve input order
+  },
+
+  /** Comparator built from _sortTerms — kept for callers that want a plain
+   *  comparator. runAndApply uses the decorate variant for the Schwartzian win.
+   *  For 'combined' and 'changeover' this reflects only the legacy
+   *  color/form-grouping order — runAndApply no longer uses it for either
+   *  mode; see _dispatchDayIntegrity for the actual (day-integrity, tiered
+   *  admit-then-resequence) logic. */
+  _comparator(mode, opts = {}) {
+    const terms = Engine._sortTerms(mode, opts);
+    return (a, b) => {
+      for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
+      return 0;
+    };
+  },
+
+  /** Day-integrity dispatch — mode === 'changeover' | 'combined'. A calendar
+   *  day's own orders (dueDay === that day, per `Util.sapDueDate`) get first
+   *  refusal on every fragment of their day before any overdue carry-over or
+   *  pulled-in future order is considered, so a native order can never be
+   *  pushed to a later day while its own day still has room for it — it can
+   *  only be pulled EARLIER (by an emptier prior day) or bumped by an
+   *  overdue arrival from a prior day that legitimately needs the room.
+   *
+   *  Outer loop walks calendar days forward from `cursorInit`. Per day: rank
+   *  the remaining queue into 4 tiers (native / carry / pull-in / floater —
+   *  see `_rankForDay`), then run the same admit-then-resequence two-phase
+   *  placement as before, but bounded to that day's window so nothing can
+   *  bleed past midnight (or shift close, under respectCalendar) into a day
+   *  it doesn't belong to. Phase 1 admits ranked candidates by concrete
+   *  `fitsAt` simulation (fixed order / blackout / shift close still hard
+   *  obstacles, exactly as before — a day can fragment into multiple
+   *  sub-bucket admission passes). Phase 2 resequences each admitted
+   *  fragment by color/form and places it. Unplaced natives simply remain in
+   *  the queue — on the next day's ranking pass their dueDay is now in the
+   *  past, so they become tier-1 carry automatically; no separate "carry"
+   *  bookkeeping is needed.
+   *
+   *  Returns patches in the same {id, changes:{start_date,end_date}} shape
+   *  the decorated-sort path produces. */
+  _dispatchDayIntegrity(line, freeTasksIn, fixedTasks, cursorInit, opts) {
+    const { respectCalendar, tieBreakTerms, mode } = opts;
+    const dueMs = t => { const d = Util.sapDueDate(t); return d ? d.getTime() : Infinity; };
+    const dueDayKey = t => { const d = Util.sapDueDate(t); return d ? Util.dayKey(d) : null; };
+
+    let queue = freeTasksIn.filter(t => Util.runHours(t) > 0);
+    const patches = [];
+    let cursor = new Date(cursorInit);
+    let fixIdx = 0;
+
+    // Pure — takes/returns a fixIdx rather than closing over mutable state, so
+    // it can advance a scratch copy during phase-1 simulation without touching
+    // the real `fixIdx`, and also drive the real one after phase 2 places.
+    const nextFixIdx = (atCursor, fIdx) => {
+      while (fIdx < fixedTasks.length) {
+        const f = fixedTasks[fIdx];
+        if (!f.start_date || !f.end_date || atCursor >= f.end_date) { fIdx++; continue; }
+        break;
+      }
+      return fIdx;
+    };
+    fixIdx = nextFixIdx(cursor, fixIdx);
+
+    // Concrete-range feasibility: does `t` fit starting exactly at `at`,
+    // without crossing `dayEndMs`? Reuses the same primitives
+    // Calendar.nextAvailable already uses safely (workWindow + _overlapsBlock
+    // against a SPECIFIC [start,end) range). Deliberately never asks Calendar
+    // for an abstract "boundary time" instead — _overlapsBlock returns *some*
+    // overlapping block, not necessarily the chronologically first one when a
+    // line-specific and a plant-wide blackout coexist, so it's only safe to
+    // use as a yes/no check on one concrete candidate range, not to derive a
+    // single "bucket end" timestamp. `dayEndMs` is the actual day-integrity
+    // enforcement: with respectCalendar it's redundant with the work window's
+    // own close, but it's the ONLY day wall when respectCalendar is off.
+    const fitsAt = (at, t, fIdx, dayEndMs) => {
+      const durMs = Util.runHours(t) * Config.MS_HOUR;
+      const endMs = at.getTime() + durMs;
+      if (endMs > dayEndMs) return false;
+      if (fIdx < fixedTasks.length) {
+        const f = fixedTasks[fIdx];
+        if (f.start_date && endMs > f.start_date.getTime()) return false;
+      }
+      if (respectCalendar) {
+        const win = Calendar.workWindow(line, at);
+        if (!win || at < win[0] || at >= win[1]) return false;
+        if (endMs > win[1].getTime()) return false;
+        if (Calendar._overlapsBlock(line, at, new Date(endMs))) return false;
+      }
+      return true;
+    };
+
+    // Phase-2 comparator: color -> form -> runHours -> material (tieBreakTerms,
+    // unchanged), due date then id as final tie-breaks so same-color/form items
+    // still land in a fully deterministic order among themselves.
+    const seqCompare = (a, b) => {
+      for (const tm of tieBreakTerms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
+      const d = dueMs(a) - dueMs(b);
+      if (d) return d;
+      return String(a.id).localeCompare(String(b.id));
+    };
+
+    // Ranks `list` for calendar day `dayKeyD`: tier 0 = native (due today),
+    // tier 1 = carry (overdue from a prior day), tier 2 = pull-in (due later),
+    // tier 3 = floater (no due date). Within-tier order per mode — see the
+    // table in the function doc comment above _dispatchDayIntegrity's caller
+    // (Engine.runAndApply). Final tie-break (current start_date, then id) is
+    // what keeps re-running optimize with no edits deterministic, and keeps a
+    // single drag from reshuffling unrelated same-tier orders.
+    const rankForDay = (list, dayKeyD) => {
+      const wheelFirst = (a, b) => {
+        for (let i = 0; i < tieBreakTerms.length; i++) {
+          const c = tieBreakTerms[i].cmp(a.k[i], b.k[i]);
+          if (c) return c;
+        }
+        return 0;
+      };
+      const decorated = list.map(t => {
+        const dk = dueDayKey(t);
+        const tier = dk === null ? 3 : (dk === dayKeyD ? 0 : (dk < dayKeyD ? 1 : 2));
+        return { t, tier, due: dueMs(t), k: tieBreakTerms.map(tm => tm.get(t)) };
+      });
+      decorated.sort((a, b) => {
+        if (a.tier !== b.tier) return a.tier - b.tier;
+        let c;
+        if (a.tier === 1) {
+          c = (a.due - b.due) || wheelFirst(a, b);
+        } else if (a.tier === 2) {
+          c = mode === 'changeover'
+            ? (wheelFirst(a, b) || (a.due - b.due))
+            : ((a.due - b.due) || wheelFirst(a, b));
+        } else {
+          c = wheelFirst(a, b); // tier 0 (native) and tier 3 (floater)
+        }
+        if (c) return c;
+        const as = a.t.start_date ? a.t.start_date.getTime() : Infinity;
+        const bs = b.t.start_date ? b.t.start_date.getTime() : Infinity;
+        if (as !== bs) return as - bs;
+        return String(a.t.id).localeCompare(String(b.t.id));
+      });
+      return decorated.map(d => d.t);
+    };
+
+    // Escape hatch for an order that can never be admitted (e.g. RUN_TIME
+    // exceeds every day's total capacity on this line — a data problem, not
+    // a scheduling one): the day loop below advances one calendar day per
+    // outer iteration by construction, so a permanently-unfittable order
+    // would otherwise spin forever rather than merely hit the existing
+    // 200-iteration per-day guard. After this many CONSECUTIVE days with
+    // zero admissions, force-place the top-ranked remaining order at the
+    // current cursor (bypassing fitsAt) and warn — one order at a time, so a
+    // handful of bad rows each pay their own 90-day search, not a compounded
+    // one, and the loop is guaranteed to keep shrinking the queue.
+    const FORCE_PLACE_AFTER_DAYS = 90;
+    let emptyDayStreak = 0;
+
+    while (queue.length) {
+      const dayKeyD = Util.dayKey(cursor);
+      let dayStart, dayEnd;
+      if (respectCalendar) {
+        const win = Calendar.workWindow(line, cursor);
+        if (win) {
+          dayStart = win[0]; dayEnd = win[1];
+          if (cursor < dayStart) cursor = new Date(dayStart);
+        } else {
+          // Closed all day (weekend/holiday) — zero-width window, contributes
+          // no placements; still counts toward the force-place streak below.
+          dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
+          dayEnd = dayStart;
+        }
+      } else {
+        dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
+        dayEnd = new Date(dayStart.getTime() + Config.MS_DAY);
+      }
+      fixIdx = nextFixIdx(cursor, fixIdx);
+
+      queue = rankForDay(queue, dayKeyD);
+
+      let placedToday = 0;
+      while (cursor.getTime() < dayEnd.getTime() && queue.length) {
+        // ---- Phase 1 (admission): one linear pass over the remaining queue,
+        // in this day's tiered rank order, against a SCRATCH cursor/fixIdx.
+        // Admit whatever fits (bounded by dayEnd) at the scratch position and
+        // advance it; skip (leave in queue) whatever doesn't, and keep
+        // scanning the rest — remaining space only shrinks as items are
+        // admitted, so a skipped item can never retroactively fit later in
+        // THIS fragment. Native (tier-0) candidates are scanned first, so
+        // they can only ever be denied a fragment by an obstacle every
+        // native has already failed to fit around, never by a lower-tier
+        // item cutting in line.
+        let simCursor = new Date(cursor), simFixIdx = fixIdx;
+        const admitted = [];
+        for (const t of queue) {
+          if (fitsAt(simCursor, t, simFixIdx, dayEnd.getTime())) {
+            admitted.push(t);
+            simCursor = new Date(simCursor.getTime() + Util.runHours(t) * Config.MS_HOUR);
+            simFixIdx = nextFixIdx(simCursor, simFixIdx);
+          }
+        }
+
+        if (!admitted.length) {
+          // Nothing in the queue fits from here today — jump the REAL cursor
+          // forward (mirrors the legacy walk's convergence guard), sized to
+          // the SMALLEST remaining duration so we don't overshoot a smaller
+          // gap further out that a shorter order could still fill.
+          const minDur = Math.min(...queue.map(t => Util.runHours(t) * Config.MS_HOUR));
+          let guard = 0;
+          for (; guard < 200; guard++) {
+            const prevMs = cursor.getTime();
+            while (fixIdx < fixedTasks.length) {
+              const f = fixedTasks[fixIdx];
+              if (!f.start_date || !f.end_date) { fixIdx++; continue; }
+              if (cursor >= f.end_date) { fixIdx++; continue; }
+              if (cursor.getTime() + minDur <= f.start_date.getTime()) break;
+              cursor = new Date(f.end_date);
+              fixIdx++;
+            }
+            if (respectCalendar) cursor = Calendar.nextAvailable(line, cursor, minDur);
+            if (cursor.getTime() === prevMs) break;
+          }
+          if (guard >= 200) {
+            ErrorLog.warn('engine',
+              `Day-integrity dispatch guard hit 200 iterations on "${line}" (day ${dayKeyD}) — schedule may be suboptimal; check fixed orders / blackouts on this line.`,
+              { line, day: dayKeyD });
+          }
+          fixIdx = nextFixIdx(cursor, fixIdx);
+          // Explicit day-wall check (covers respectCalendar === false, where
+          // nothing above stops the cursor at midnight): if the smallest
+          // remaining order still can't fit before dayEnd from wherever the
+          // jump landed, today is exhausted regardless of the reason.
+          if (cursor.getTime() + minDur > dayEnd.getTime() || Util.dayKey(cursor) !== dayKeyD) {
+            cursor = new Date(dayEnd);
+            break;
+          }
+          continue;
+        }
+
+        // ---- Phase 2 (sequencing): resort ONLY this fragment's admitted set
+        // by color/form and place back-to-back for real, starting at the
+        // real cursor. Safe regardless of internal order: phase 1 only
+        // admitted this exact set because it fits, in SOME order, within one
+        // obstacle-free span bounded by dayEnd — total duration is
+        // order-independent, and there is by construction no obstacle
+        // between here and wherever this set's total duration ends.
+        admitted.sort(seqCompare);
+        for (const t of admitted) {
+          const durMs = Util.runHours(t) * Config.MS_HOUR;
+          const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
+          const end   = new Date(start.getTime() + durMs);
+          patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
+          cursor = new Date(end);
+        }
+        placedToday += admitted.length;
+        fixIdx = nextFixIdx(cursor, fixIdx);
+        const admittedIds = new Set(admitted.map(t => t.id));
+        queue = queue.filter(t => !admittedIds.has(t.id));
+      }
+
+      if (placedToday > 0) emptyDayStreak = 0;
+      else emptyDayStreak++;
+
+      if (emptyDayStreak > FORCE_PLACE_AFTER_DAYS && queue.length) {
+        const t = queue[0]; // top-ranked remaining under this day's ordering
+        const durMs = Util.runHours(t) * Config.MS_HOUR;
+        const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
+        const end   = new Date(start.getTime() + durMs);
+        patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
+        ErrorLog.warn('engine',
+          `Order "${t.text || t.id}" on "${line}" would never fit any working day (${FORCE_PLACE_AFTER_DAYS}-day search exhausted) — forced placement at ${Util.fmtDTReadable(start)}. Check RUN_TIME against available daily capacity.`,
+          { line, taskId: t.id });
+        queue = queue.filter(x => x !== t);
+        cursor = new Date(end);
+        fixIdx = nextFixIdx(cursor, fixIdx);
+        emptyDayStreak = 0;
+        continue;
+      }
+
+      // Advance to the next calendar day for the next outer iteration. Guard
+      // against moving backward — a force-placed multi-day-spanning order,
+      // or a >24h work window, can already leave cursor past "tomorrow."
+      const nextDay = new Date(dayStart);
+      nextDay.setDate(nextDay.getDate() + 1);
+      nextDay.setHours(0, 0, 0, 0);
+      if (nextDay.getTime() > cursor.getTime()) cursor = nextDay;
+    }
+    return patches;
+  },
+
+  /** Main optimiser. Groups by line, optionally respects fixed + calendar.
+   *  Writes results through Store.
+   *  opts.plant restricts to lines belonging to that plant.
+   *  opts.colorMap pre-fetched color→order_y priority map from plant wheel. */
+  runAndApply(mode = 'combined', opts = {}) {
+    const _pmT0e = performance.now();
+    let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
+    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
+    const plant           = opts.plant           ?? Store.selectedPlant;
+    if (!plant) {
+      Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
+      return;
+    }
+    const colorMap        = opts.colorMap        ?? null;
+    // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
+    // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
+    // referenced ids that do not exist anywhere in index.html/app.js's
+    // rendered markup (confirmed by inspection) — the lookup always returned
+    // null, so `?.checked` was always undefined and the `?? true` fallback
+    // always applied. This plain default reproduces that real runtime
+    // behavior exactly, while making Engine genuinely DOM-free.
+    const respectFixed    = opts.respectFixed    ?? true;
+    const respectCalendar = opts.respectCalendar ?? true;
+    const sortTerms = Engine._sortTerms(mode, { plant, colorMap });
+
+    const horizonStart = opts.startDate
+      ? new Date(opts.startDate)
+      : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
+    const horizonEnd   = opts.endDate   ? new Date(opts.endDate)          : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
+    const isAged       = t => t.end_date   && t.end_date   < horizonStart;
+    const isOutOfWin   = t => t.start_date && t.start_date > horizonEnd;
+
+    // Optional caller-supplied line filter — when present, only these lines are optimized.
+    const allowed = Array.isArray(opts.lines) && opts.lines.length
+      ? new Set(opts.lines)
+      : null;
+
+    // Group tasks by line using the pre-built plant index (avoids a full tasksArr scan).
+    // Skip non-allowed lines at insertion when a line filter is supplied so we don't
+    // pay for grouping work that will just be discarded.
+    const groups = {};
+    for (const t of Store.tasksByPlant(plant)) {
+      const line = t.PRODUCTION_LINE || 'Unknown';
+      if (allowed && !allowed.has(line)) continue;
+      (groups[line] ||= { line, tasks: [] }).tasks.push(t);
+    }
+
+    const patches = [];
+
+    // Install per-run Calendar caches (workWindow memo + pre-indexed blocks) for the
+    // duration of the scheduling pass. Torn down in finally{} so an exception
+    // mid-loop can't leak the cache into UI/Alerts callers.
+    Calendar._beginRun(plant);
+    try {
+
+    for (const line of Object.keys(groups)) {
+      if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+      const { tasks } = groups[line];
+
+      const fixedTasks = tasks.filter(t =>
+        (respectFixed && Store.isFixed(t.id)) || isAged(t) || isOutOfWin(t)
+      );
+      let freeTasks = tasks.filter(t =>
+        !(respectFixed && Store.isFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
+      );
+
+      fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
+
+      // Cursor floor is max(horizonStart, now): extending "From" backwards
+      // widens eligibility (older orders become free to move) but never
+      // schedules anything in the literal past.
+      const now = new Date();
+      now.setSeconds(0, 0);
+      const cursorFloor = horizonStart.getTime() > now.getTime() ? horizonStart : now;
+
+      let cursor;
+      if (respectCalendar) {
+        const win = Calendar.workWindow(line, cursorFloor);
+        cursor = (win && win[0].getTime() > cursorFloor.getTime())
+          ? new Date(win[0])
+          : new Date(cursorFloor);
+      } else {
+        cursor = new Date(cursorFloor);
+      }
+
+      if (mode === 'combined' || mode === 'changeover') {
+        // Day-integrity, tiered admit-then-resequence dispatch — see
+        // Engine._dispatchDayIntegrity. sortTerms here already IS
+        // Engine._sortTerms(mode, { plant, colorMap }), so it doubles as both
+        // the pull-in/floater tie-break and the phase-2 color/form sequencer.
+        patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
+          respectCalendar, tieBreakTerms: sortTerms, mode,
+        }));
+        continue;
+      }
+
+      // Schwartzian transform: decorate each task once with its ordered sort
+      // keys (from Engine._sortTerms — the single source of truth, so this can
+      // no longer drift from _comparator), then sort by comparing keys
+      // positionally. 'changeover' and 'combined' return above via
+      // _dispatchDayIntegrity — only 'spt' reaches this walk now.
+      const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
+      decorated.sort((a, b) => {
+        for (let i = 0; i < sortTerms.length; i++) {
+          const c = sortTerms[i].cmp(a.k[i], b.k[i]);
+          if (c) return c;
+        }
+        return 0;
+      });
+      freeTasks = decorated.map(d => d.t);
+
+      // Walk through free tasks, jumping past each fixed task we encounter.
+      let fixIdx = 0;
+      for (const t of freeTasks) {
+        const durMs = Util.runHours(t) * Config.MS_HOUR;
+        if (durMs <= 0) continue;
+
+        // Alternate between fixed-task collision check and calendar adjustment
+        // until cursor is stable. This handles the case where a calendar gap
+        // (blackout, closed hours) pushes cursor into a fixed task's window.
+        let guard = 0;
+        for (; guard < 200; guard++) {
+          const prevMs = cursor.getTime();
+
+          // Step 1: jump past any fixed task that cursor + duration would overlap.
+          while (fixIdx < fixedTasks.length) {
+            const f = fixedTasks[fixIdx];
+            if (!f.start_date || !f.end_date) { fixIdx++; continue; }
+            if (cursor >= f.end_date) { fixIdx++; continue; }
+            if (cursor.getTime() + durMs <= f.start_date.getTime()) break;
+            cursor = new Date(f.end_date);
+            fixIdx++;
+          }
+
+          // Step 2: advance past any closed/blackout region.
+          if (respectCalendar) {
+            const _calT0 = performance.now();
+            cursor = Calendar.nextAvailable(line, cursor, durMs);
+            _pmCalMs += performance.now() - _calT0;
+          }
+
+          // If cursor didn't move, both constraints are satisfied — done.
+          if (cursor.getTime() === prevMs) break;
+        }
+        // Guard exhausted without converging: the fixed-task + calendar constraints never
+        // settled on a stable slot. Placement still proceeds at `cursor`, but surface it
+        // so the condition isn't silently swallowed (previously a hard-to-diagnose "why
+        // didn't this order move?" at scale).
+        if (guard >= 200) {
+          ErrorLog.warn('engine',
+            `Placement guard hit 200 iterations on "${line}" for order "${t.text || t.id}" — ` +
+            `schedule may be suboptimal; check fixed orders / blackouts on this line.`,
+            { line, taskId: t.id });
+        }
+
+        const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
+        const end   = new Date(start.getTime() + durMs);
+        patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
+        cursor = new Date(end);
+      }
+    }
+
+    } finally {
+      Calendar._endRun();
+    }
+
+    if (patches.length) Store.updateMany(patches, 'engine');
+    Store.setLastOptimize(new Date(), 'engine');
+    Alerts.clearDismissed();
+    // Route through the adaptive debounce instead of a direct synchronous recompute:
+    // keeps the heavy alert pass off the tail of the placement loop and lets it
+    // coalesce with the updateMany cascade rather than firing a second worker clone
+    // in the same tick.
+    Alerts.scheduleRecompute();
+    PerfMonitor.record('Engine.calendar', _pmCalMs);
+    PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
+  },
+
+  /** After a manual edit to one task, re-flow subsequent unfixed orders on the
+   *  same line to eliminate overlap. Spans day boundaries so Day-1 overflow
+   *  cascades correctly into Day-2 tasks. Does NOT move fixed orders. */
+  autoReflow(changedId) {
+    const changed = Store.tasks[changedId];
+    if (!changed || !changed.start_date || !changed.end_date) return;
+    const _horizonStart = Util.startOfDay(new Date());
+    if (changed.end_date < _horizonStart) return; // aged task — don't reflow
+    const line = changed.PRODUCTION_LINE || 'Unknown';
+
+    const peers = Store.tasksByPlant(Store.selectedPlant)
+      .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
+                && t.start_date && t.end_date
+                && t.id !== changedId)
+      .sort((a,b) => a.start_date - b.start_date);
+
+    // Walk forward from the changed task's end, pushing any overlapping unfixed
+    // peer that starts before cursor to cursor (preserving duration).
+    let cursor = new Date(changed.end_date);
+    const patches = [];
+    for (const p of peers) {
+      // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
+      if (p.end_date <= changed.start_date) continue;
+      if (p.start_date >= cursor) { cursor = new Date(p.end_date); continue; }
+      if (Store.isFixed(p.id) || p.end_date < _horizonStart) {
+        // Fixed or aged orders don't move — if there's a conflict, an alert will fire.
+        cursor = new Date(Math.max(cursor.getTime(), p.end_date.getTime()));
+        continue;
+      }
+      const dur = p.end_date - p.start_date;
+      const newStart = Calendar.nextAvailable(line, cursor, dur);
+      const newEnd   = new Date(newStart.getTime() + dur);
+      patches.push({ id: p.id, changes: { start_date: newStart, end_date: newEnd } });
+      cursor = new Date(newEnd);
+    }
+    if (patches.length) Store.updateMany(patches, 'engine');
+    // Reflow only ever shifts dates within `line`, so scope the alert recompute to it.
+    Alerts.scheduleRecomputeLines(new Set([line]));
+  }
+};
