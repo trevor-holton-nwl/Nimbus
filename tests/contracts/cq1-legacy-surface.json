@@ -13,11 +13,6 @@
     },
     {
       "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
-    },
-    {
-      "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
     },
@@ -80,11 +75,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
     },
     {
       "file": "app.js",
@@ -689,6 +679,11 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
+      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
       "expression": "NIMBUS.Table._onChipChange('color', this)"
     },
     {
@@ -745,6 +740,11 @@
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Inspector.toggleFix(true)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
     },
     {
       "file": "schedule-workbench.mjs",

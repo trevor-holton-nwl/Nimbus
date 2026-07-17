@@ -93,6 +93,18 @@
 // spurious no-op echo is suppressed. That comment is corrected in place
 // (comment-only; the underlying logic is unchanged, preserving current
 // behavior byte-for-byte per this phase's Global Constraints).
+//
+// Task 6 added OptimizeDialog and OptimizerPreview, moved verbatim (the
+// closure-private flatpickr instances inside OptimizeDialog's IIFE are
+// unchanged). Both modules' bare `t(...)` i18n calls became `Util.t(...)`,
+// the same established convention as every other module in this file.
+// OptimizeDialog.applyPreset's one `Store._state.masterData` read is left
+// untouched — it is not one of this phase's 5 tracked §6 exceptions
+// (Timeline/Hierarchy/Dashboard/GanttFilter/DependencyOverlay), so closing it
+// is out of this task's scope. OptimizerPreview's `NIMBUS.Confidence?.
+// snapshot()/.restore()`/`._recompute()` cross-file calls stay exactly as-is
+// — `Confidence` lives entirely in nimbus-intelligence.js, out of scope for
+// CQ-1's module bridges regardless of which file OptimizerPreview lives in.
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack } from './schedule-state.mjs';
@@ -5495,4 +5507,951 @@ export const Interaction = {
       });
     }
   }
+};
+
+/* =============================================================================
+   OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
+   ========================================================================== */
+export const OptimizeDialog = (() => {
+  let _mode    = 'changeover';
+  let _preset  = '2w';
+  let _start   = null;
+  let _end     = null;
+  let _fpStart = null;
+  let _fpEnd   = null;
+  let _plant   = null;
+  let _allPlants = [];
+  let _dropdownListenerSet = false;
+  let _scope   = 'plant';            // 'plant' | 'lines'
+  let _selectedLines = new Set();    // line names when _scope === 'lines'
+  let _lineSearch = '';              // current line-list filter text
+  let _wheelCache = null;            // { plant, colorMap, wheelUsed } — populated by _updatePlantBadge
+  let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
+
+  const PRESET_DAYS = { '2w': 14 }; // UI only exposes '2w' and 'custom'
+
+  function _initPickers() {
+    if (_fpStart) return;
+    _fpStart = flatpickr('#opt-from-cal', {
+      inline: true, enableTime: true, minuteIncrement: 1,
+      dateFormat: 'Y-m-d\\TH:i',
+    });
+    _fpEnd = flatpickr('#opt-to-cal', {
+      inline: true, enableTime: true, minuteIncrement: 1,
+      dateFormat: 'Y-m-d\\TH:i',
+    });
+  }
+
+  function _buildPlantSelect() {
+    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.PRODUCTION_LINE)).filter(Boolean);
+    _allPlants = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
+    const list = document.getElementById('opt-plant-list');
+    if (!list) return;
+    if (!_allPlants.length) {
+      list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_plant_data')}</li>`;
+      _plant = null;
+      _updateTriggerLabel();
+      return;
+    }
+    _plant = (Store.selectedPlant && _allPlants.includes(Store.selectedPlant))
+      ? Store.selectedPlant
+      : (_plant && _allPlants.includes(_plant) ? _plant : null);
+    if (_plant) Store.setSelectedPlant(_plant, 'optimize-dialog');
+    _renderPlantList(_allPlants);
+    _updateTriggerLabel();
+    _initDropdownListener();
+  }
+
+  function _renderPlantList(plants) {
+    const list = document.getElementById('opt-plant-list');
+    if (!list) return;
+    if (!plants.length) {
+      list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_matches')}</li>`;
+      return;
+    }
+    list.innerHTML = plants.map(p => {
+      const safe = p.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      return `<li class="opt-plant-item${_plant === p ? ' selected' : ''}" role="option"
+           aria-selected="${_plant === p}"
+           onclick="NIMBUS.OptimizeDialog.selectPlant('${safe}')">${p}</li>`;
+    }).join('');
+  }
+
+  function _updateTriggerLabel() {
+    const lbl = document.getElementById('opt-plant-trigger-label');
+    if (lbl) lbl.textContent = _plant || Util.t('ui.select_plant_label');
+  }
+
+  function _initDropdownListener() {
+    if (_dropdownListenerSet) return;
+    _dropdownListenerSet = true;
+    document.addEventListener('click', e => {
+      const sel = document.getElementById('opt-plant-select');
+      if (sel && !sel.contains(e.target)) _closeDropdown();
+    }, true);
+  }
+
+  function toggleDropdown() {
+    const dd      = document.getElementById('opt-plant-dropdown');
+    const trigger = document.getElementById('opt-plant-trigger');
+    const sel     = document.getElementById('opt-plant-select');
+    if (!dd) return;
+    const opening = dd.hidden;
+    if (opening && trigger) {
+      const rect = trigger.getBoundingClientRect();
+      dd.style.top   = (rect.bottom + 4) + 'px';
+      dd.style.left  = rect.left + 'px';
+      dd.style.width = rect.width + 'px';
+    }
+    dd.hidden = !opening;
+    sel?.classList.toggle('open', opening);
+    if (opening) {
+      const srch = document.getElementById('opt-plant-search');
+      if (srch) { srch.value = ''; srch.focus(); }
+      _renderPlantList(_allPlants);
+    }
+  }
+
+  function _closeDropdown() {
+    const dd = document.getElementById('opt-plant-dropdown');
+    const sel = document.getElementById('opt-plant-select');
+    if (dd) dd.hidden = true;
+    sel?.classList.remove('open');
+  }
+
+  function filterPlants(query) {
+    const q = query.toLowerCase().trim();
+    _renderPlantList(q ? _allPlants.filter(p => p.toLowerCase().includes(q)) : _allPlants);
+  }
+
+  function selectPlant(plant) {
+    _plant = plant;
+    Store.setSelectedPlant(plant, 'optimize-dialog');
+    _renderPlantList(_allPlants);
+    _updateTriggerLabel();
+    _closeDropdown();
+    _updatePlantBadge();
+    _selectedLines.clear();
+    _lineSearch = '';
+    const srch = document.getElementById('opt-line-search');
+    if (srch) srch.value = '';
+    if (_scope === 'lines') _renderLines();
+    if (_preset === 'horizon') applyPreset('horizon');
+  }
+
+  function setScope(scope) {
+    _scope = scope === 'lines' ? 'lines' : 'plant';
+    document.querySelectorAll('.opt-scope-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.scope === _scope)
+    );
+    const panel = document.getElementById('opt-lines-panel');
+    if (panel) panel.hidden = _scope !== 'lines';
+    if (_scope === 'lines') _renderLines();
+  }
+
+  function _linesForPlant() {
+    if (!_plant) return [];
+    const set = new Set(Store.linesForSelectedPlant());
+    for (const t of Store.tasksByPlant(_plant)) {
+      const l = t.PRODUCTION_LINE || 'Unknown';
+      set.add(l);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }
+
+  function _renderLines() {
+    const list = document.getElementById('opt-lines-list');
+    const count = document.getElementById('opt-lines-count');
+    if (!list) return;
+
+    const allLines = _linesForPlant();
+    if (!allLines.length) {
+      list.innerHTML = `<li class="opt-lines-empty">${Util.t('ui.no_lines_plant')}</li>`;
+      if (count) count.textContent = Util.t('ui.lines_selected', { sel: 0, total: 0 });
+      return;
+    }
+
+    // Count orders per line (scoped to selected plant)
+    const orderCounts = {};
+    for (const t of Store.tasksByPlant(_plant)) {
+      const l = t.PRODUCTION_LINE || 'Unknown';
+      orderCounts[l] = (orderCounts[l] || 0) + 1;
+    }
+
+    const q = _lineSearch.toLowerCase().trim();
+    const visible = q ? allLines.filter(l => l.toLowerCase().includes(q)) : allLines;
+
+    if (!visible.length) {
+      list.innerHTML = `<li class="opt-lines-empty">${Util.t('ui.no_matches')}</li>`;
+    } else {
+      list.innerHTML = visible.map(line => {
+        const safe = line.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const checked = _selectedLines.has(line) ? 'checked' : '';
+        const oc = orderCounts[line] || 0;
+        const excluded = (Store.lineSettings[line] || {}).excludeFromOpt;
+        const exTag = excluded ? '<span class="opt-line-excluded" title="Globally excluded from optimization">excluded</span>' : '';
+        return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}" role="option" aria-selected="${!!checked}">
+            <label class="opt-line-label">
+              <input type="checkbox" ${checked} onchange="NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)">
+              <span class="opt-line-name">${line}</span>
+              ${exTag}
+              <span class="opt-line-orders">${oc} order${oc === 1 ? '' : 's'}</span>
+            </label>
+          </li>`;
+      }).join('');
+    }
+
+    if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
+  }
+
+  function filterLines(q) {
+    _lineSearch = q || '';
+    _renderLines();
+  }
+
+  function selectAllLines(checked) {
+    const allLines = _linesForPlant();
+    const q = _lineSearch.toLowerCase().trim();
+    const visible = q ? allLines.filter(l => l.toLowerCase().includes(q)) : allLines;
+    for (const l of visible) {
+      if (checked) _selectedLines.add(l);
+      else _selectedLines.delete(l);
+    }
+    _renderLines();
+  }
+
+  function _onLineToggle(line, checked) {
+    if (checked) _selectedLines.add(line);
+    else _selectedLines.delete(line);
+    const count = document.getElementById('opt-lines-count');
+    const total = _linesForPlant().length;
+    if (count) count.textContent = `${_selectedLines.size} of ${total} selected`;
+  }
+
+  function _displayDate(d) {
+    return d.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit'
+    });
+  }
+
+  function _updateSummary() {
+    const el = document.getElementById('opt-date-summary');
+    if (!el || !_start || !_end) return;
+    const days = Math.round((_end - _start) / Config.MS_DAY);
+    el.innerHTML =
+      `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayDate(_end)}</span>` +
+      `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
+  }
+
+  function applyPreset(key) {
+    _preset = key;
+    document.querySelectorAll('.opt-preset-chip').forEach(c =>
+      c.classList.toggle('active', c.dataset.preset === key)
+    );
+    const row = document.getElementById('opt-date-row');
+    if (row) row.classList.toggle('visible', key === 'custom');
+
+    if (key !== 'custom') {
+      let days;
+      if (key === 'horizon') {
+        const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+        const horizonMinutes = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? 20160;
+        days = Math.max(1, Math.ceil(horizonMinutes / 1440));
+      } else {
+        days = PRESET_DAYS[key];
+      }
+      const now = new Date();
+      now.setSeconds(0, 0);
+      _start = new Date(now);
+      _end   = new Date(now.getTime() + days * Config.MS_DAY);
+      _fpStart?.setDate(_start, false);
+      _fpEnd?.setDate(_end, false);
+      const sb = document.getElementById('opt-start-btn');
+      const eb = document.getElementById('opt-end-btn');
+      if (sb) sb.textContent = _displayDate(_start);
+      if (eb) eb.textContent = _displayDate(_end);
+    }
+    _updateSummary();
+  }
+
+  function selectMode(mode) {
+    _mode = mode;
+    document.querySelectorAll('.opt-strategy-pill').forEach(c =>
+      c.classList.toggle('active', c.dataset.mode === mode)
+    );
+  }
+
+  function _updatePlantBadge() {
+    const plant   = _plant;
+    const badgeEl = document.getElementById('opt-wheel-badge');
+    const runBtn  = document.getElementById('opt-run-btn');
+
+    if (runBtn) runBtn.disabled = !plant;
+
+    if (!badgeEl) return;
+    const setBadge = (state, icon, tip) => {
+      badgeEl.className = `opt-wheel-badge compact ${state}`;
+      badgeEl.title = tip;
+      badgeEl.innerHTML = `<span class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
+    };
+
+    if (!plant) {
+      _wheelCache = null;
+      setBadge('none', '⚠', 'No plant selected');
+      return;
+    }
+
+    setBadge('loading', '', 'Checking color wheel…');
+    const token = ++_wheelFetchToken;
+
+    // Fetch the per-plant wheel directly so we can cache the colorMap and
+    // skip a second round-trip when the user clicks Run.
+    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(body => {
+        if (token !== _wheelFetchToken) return; // stale response — ignore
+        const entries = (body && body.entries) || [];
+        if (entries.length) {
+          const colorMap = {};
+          for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
+          _wheelCache = { plant, colorMap, wheelUsed: true };
+          setBadge('active', '✓', 'Color wheel is loaded');
+        } else {
+          _wheelCache = { plant, colorMap: null, wheelUsed: false };
+          setBadge('warn', '○', 'No color wheel — will optimize without color priority');
+        }
+      })
+      .catch(() => {
+        if (token !== _wheelFetchToken) return;
+        _wheelCache = { plant, colorMap: null, wheelUsed: false };
+        setBadge('warn', '○', 'Could not check wheel — optimizing without color priority');
+      });
+  }
+
+  function open() {
+    // Plant scope is owned by the header selector. The dialog will not open
+    // without a plant set there, because the optimizer needs a concrete scope.
+    if (!Store.selectedPlant) {
+      Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
+      return;
+    }
+    const el = document.getElementById('modal-optimize');
+    if (!el) return;
+    el.hidden = false;
+    // Seed from the user's saved optimizer defaults (pref('optimizerDefaults'))
+    // when present, so the dialog opens pre-filled with their preferred strategy,
+    // time window, and option toggles. Falls back to the historical defaults
+    // (horizon preset / changeover / toolbar checkbox state) otherwise.
+    let _od = null;
+    try { _od = Store.pref('optimizerDefaults'); } catch {}
+    // Sync option checkboxes from the Gantt toolbar's existing chk- elements
+    const rfEl = document.getElementById('chk-respect-fixed');
+    const rcEl = document.getElementById('chk-respect-calendar');
+    const ofEl = document.getElementById('opt-chk-fixed');
+    const ocEl = document.getElementById('opt-chk-calendar');
+    if (rfEl && ofEl) ofEl.checked = rfEl.checked;
+    if (rcEl && ocEl) ocEl.checked = rcEl.checked;
+    // Saved defaults override the toolbar mirror when present.
+    if (_od && typeof _od === 'object') {
+      if (ofEl && typeof _od.respectFixed === 'boolean')    ofEl.checked = _od.respectFixed;
+      if (ocEl && typeof _od.respectCalendar === 'boolean') ocEl.checked = _od.respectCalendar;
+    }
+    _initPickers();
+    _buildPlantSelect();
+    // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
+    const _seedPreset = (_od && ['horizon', '2w'].includes(_od.preset)) ? _od.preset : 'horizon';
+    applyPreset(_seedPreset);
+    const _seedMode = (_od && ['spt', 'changeover', 'combined'].includes(_od.mode)) ? _od.mode : 'changeover';
+    selectMode(_seedMode);
+    // Reset the Run button HTML in case a previous session left it in the
+    // "Optimizing…" state (e.g., Cancel mid-fetch).
+    const runBtn = document.getElementById('opt-run-btn');
+    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+    _updatePlantBadge();
+    // Default scope to whole-plant on each open; clear stale line selection.
+    _selectedLines.clear();
+    _lineSearch = '';
+    const lineSrch = document.getElementById('opt-line-search');
+    if (lineSrch) lineSrch.value = '';
+    setScope('plant');
+    requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
+  }
+
+  function close(immediate = false) {
+    const el = document.getElementById('modal-optimize');
+    if (!el) return;
+    const inner = el.querySelector('.opt-modal');
+    inner?.classList.remove('visible');
+    if (immediate) {
+      // Hide the backdrop element NOW (no 230ms fade). Used when another
+      // modal is replacing this one — the heavy blur(12px) backdrop sits at
+      // z=3000 and would cover the replacement until the fade completed.
+      el.hidden = true;
+      return;
+    }
+    setTimeout(() => { el.hidden = true; }, 230);
+  }
+
+  async function run() {
+    const plant = _plant;
+    if (!plant) {
+      Toast.show(Util.t('toast.select_plant_to_opt'), 'warn');
+      return;
+    }
+    if (_scope === 'lines' && _selectedLines.size === 0) {
+      Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
+      return;
+    }
+    const sfEl = document.getElementById('opt-chk-fixed');
+    const scEl = document.getElementById('opt-chk-calendar');
+
+    // Remember the chosen strategy/window/options as this user's optimizer
+    // defaults so the dialog pre-fills the same way next time (feature: optimizer
+    // defaults). Self-service pref — persisted via the debounced PATCH.
+    try {
+      Session.setPref('optimizerDefaults', {
+        mode: _mode, preset: _preset,
+        respectFixed:    sfEl?.checked ?? true,
+        respectCalendar: scEl?.checked ?? true,
+      });
+    } catch {}
+
+    // Immediate visual feedback so the click feels responsive.
+    const runBtn = document.getElementById('opt-run-btn');
+    const origRunHTML = runBtn ? runBtn.innerHTML : null;
+    const restoreRunBtn = () => {
+      if (!runBtn) return;
+      runBtn.disabled = !_plant;
+      if (origRunHTML !== null) runBtn.innerHTML = origRunHTML;
+    };
+    if (runBtn) {
+      runBtn.disabled = true;
+      runBtn.innerHTML = `<span class="opt-run-icon">⏳</span>${Util.t('btn.optimizing')}`;
+    }
+
+    // Open the preview dialog with a spinner IMMEDIATELY — before the wheel
+    // fetch (which can take up to 1.5s on cold cache) and the config-modal
+    // close transition. Otherwise the user stares at a blurry frozen page
+    // for ~1–2s with no visible response to their click.
+    OptimizerPreview.showLoading(_mode, plant);
+    // Hide the config modal RIGHT NOW (no 230ms fade). Its backdrop sits at
+    // z-index 3000 with blur(12px) and would cover the preview spinner
+    // (z=2000) for the entire await fetch(wheel) + fade duration. Hiding
+    // immediately is what makes the spinner actually visible on click.
+    close(true);
+
+    // Use the cached per-plant wheel populated by _updatePlantBadge.
+    // Fall back to a quick fetch only if the cache hasn't filled yet (race
+    // on first open) — tighter timeout so a slow backend can't dominate UX.
+    let colorMap = null;
+    let wheelUsed = false;
+    if (_wheelCache && _wheelCache.plant === plant) {
+      colorMap  = _wheelCache.colorMap;
+      wheelUsed = _wheelCache.wheelUsed;
+    } else {
+      try {
+        const resp = await fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(1500) });
+        if (resp.ok) {
+          const body = await resp.json();
+          const entries = body.entries || [];
+          if (entries.length) {
+            colorMap = {};
+            for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
+            wheelUsed = true;
+          }
+        }
+      } catch {
+        // No wheel reachable — continue without
+      }
+    }
+
+    // Confirm only when the plant WANTS color (colorWheel constraint enabled)
+    // but no wheel is loaded. If the plant has switched color off, optimizing
+    // without it is intentional — don't nag.
+    const colorWheelOn = Engine.constraintEnabled(plant, 'colorWheel');
+    if (colorWheelOn && !wheelUsed && (_mode === 'changeover' || _mode === 'combined')) {
+      const ok = await Modal.confirm({ title: Util.t('modal.no_color_wheel_confirm_msg', { plant }) });
+      if (!ok) { OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+    }
+
+    const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
+    const optsForEngine = {
+      plant,
+      colorMap,
+      lines:           linesScope,
+      startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
+      endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
+      respectFixed:    sfEl?.checked ?? true,
+      respectCalendar: scEl?.checked ?? true,
+    };
+
+    // Config modal was already hidden (close(true) above) before the wheel
+    // fetch — no second close() needed here.
+
+    // Defer the optimizer run by one frame so the modal-close paint and the
+    // heavy subscriber fanout don't fight for the same main-thread tick.
+    // Route through OptimizerPreview (C4) — wraps Engine.runAndApply with
+    // a pre/post KPI comparison and an apply/discard step.
+    requestAnimationFrame(() => setTimeout(() => {
+      OptimizerPreview.runWithPreview(_mode, optsForEngine);
+    }, 0));
+
+    // Persist audit log entry
+    fetch(`${Config.API_BASE}/audit/log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
+      body: JSON.stringify({
+        action: 'optimization_run', plant,
+        details: {
+          mode: _mode, wheel_used: wheelUsed, task_count: Store.tasksArr.length,
+          scope: _scope, lines: linesScope || null,
+        },
+      }),
+    }).catch(() => {});
+  }
+
+  function openFromPicker() {
+    _initPickers();
+    if (_start) _fpStart.setDate(_start, false);
+    Modal.open('modal-opt-from');
+  }
+  function cancelFromPicker() {
+    if (_start) _fpStart?.setDate(_start, false);
+    Modal.close('modal-opt-from');
+  }
+  function commitFrom() {
+    const d = _fpStart && _fpStart.selectedDates[0];
+    if (d) {
+      _start = new Date(d);
+      if (_fpEnd && _start) _fpEnd.set('minDate', _start);
+      const sb = document.getElementById('opt-start-btn');
+      if (sb) sb.textContent = _displayDate(_start);
+      _updateSummary();
+    }
+    Modal.close('modal-opt-from');
+  }
+  function openToPicker() {
+    _initPickers();
+    if (_end) _fpEnd.setDate(_end, false);
+    Modal.open('modal-opt-to');
+  }
+  function cancelToPicker() {
+    if (_end) _fpEnd?.setDate(_end, false);
+    Modal.close('modal-opt-to');
+  }
+  function commitTo() {
+    const d = _fpEnd && _fpEnd.selectedDates[0];
+    if (d) {
+      _end = new Date(d);
+      const eb = document.getElementById('opt-end-btn');
+      if (eb) eb.textContent = _displayDate(_end);
+      _updateSummary();
+    }
+    Modal.close('modal-opt-to');
+  }
+
+  return { open, close, run, applyPreset, selectMode, selectPlant, toggleDropdown, filterPlants, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
+})();
+
+/* =============================================================================
+   OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
+   pre/post KPI comparison before committing. Discard reverts to the snapshot;
+   Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
+   ========================================================================== */
+export const OptimizerPreview = {
+  _snapshot: null,   // [ deep-cloned task ] taken before the run
+  _preKpis:  null,
+  _postKpis: null,
+  _mode:     null,
+  _plant:    null,
+  active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
+  _confSnapshot: null,       // Confidence.snapshot() taken just before the trial mutation
+  _abandonGuardInstalled: false,
+
+  /** Open the preview modal with a loading skeleton. Safe to call as soon as
+   *  the user clicks Run, before any await/fetch — gives instant feedback so
+   *  the user doesn't stare at a blurry frozen page during the wheel fetch
+   *  + config-close transition + engine run. */
+  showLoading(mode, plant) {
+    OptimizerPreview._installAbandonGuard();
+    const body = document.getElementById('opt-preview-body');
+    if (body) {
+      body.innerHTML =
+        '<div class="cw-loading" style="justify-content:center;flex-direction:column;gap:10px;padding:40px 20px;">'
+      + '  <div style="display:flex;align-items:center;gap:8px;">'
+      + '    <span class="cw-spin"></span>'
+      + '    <span style="font-size:14px;color:var(--fg);">Calculating optimization impact…</span>'
+      + '  </div>'
+      + `  <div style="font-size:12px;color:var(--fg-mute);">Running ${mode} on ${plant}</div>`
+      + '</div>';
+    }
+    const root = document.getElementById('modal-opt-preview');
+    if (root) root.querySelectorAll('.modal-foot button').forEach(b => { b.disabled = true; });
+    Modal.open('modal-opt-preview');
+  },
+
+  /** Close the loading dialog without doing any work. For aborts (e.g. user
+   *  cancels the no-color-wheel confirm) so the spinner doesn't linger. */
+  hideLoading() {
+    Modal.close('modal-opt-preview');
+    const root = document.getElementById('modal-opt-preview');
+    if (root) root.querySelectorAll('.modal-foot button').forEach(b => { b.disabled = false; });
+  },
+
+  /** One-time safety net: the modal's backdrop is wired (like every other modal's)
+   *  to close on an outside click, bypassing discard()/apply() entirely (app.js's
+   *  boot-time '.modal-backdrop' click handler calls Modal.close() directly). Left
+   *  alone, that would abandon a live trial with no revert AND leave `active` stuck
+   *  true, freezing Confidence forever. Treat any non-apply/discard hide as a discard. */
+  _installAbandonGuard() {
+    if (OptimizerPreview._abandonGuardInstalled) return;
+    OptimizerPreview._abandonGuardInstalled = true;
+    const el = document.getElementById('modal-opt-preview');
+    if (!el) return;
+    new MutationObserver(() => {
+      if (el.hidden && OptimizerPreview.active) OptimizerPreview.discard();
+    }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
+  },
+
+  /** Entry point — call this instead of Engine.runAndApply when you want
+   *  the preview UI. Mirrors Engine.runAndApply's signature. */
+  runWithPreview(mode = 'combined', opts = {}) {
+    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
+    const plant = opts.plant ?? Store.selectedPlant;
+    if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
+
+    // Show the preview dialog with a loading state. If `showLoading()` already
+    // ran from OptimizeDialog.run() the dialog is already up — calling it
+    // again is a no-op cheap refresh, fine.
+    OptimizerPreview.showLoading(mode, plant);
+    const previewRoot = document.getElementById('modal-opt-preview');
+    const footBtns = previewRoot ? previewRoot.querySelectorAll('.modal-foot button') : [];
+    const body = document.getElementById('opt-preview-body');
+
+    // Double rAF to ensure the loading skeleton actually paints before we
+    // block the main thread with the optimizer. Single rAF schedules a frame
+    // but synchronous work afterward can still preempt the paint.
+    let snapshot = null;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const _optTotalT0 = performance.now();
+      try {
+        // Snapshot every task in the plant — the optimizer may touch any of
+        // them transitively (auto-reflow can ripple beyond the chosen window
+        // / lines), so the undo snapshot must stay unfiltered.
+        const scopedTasks = Store.tasksByPlant(plant);
+        const ids = scopedTasks.map(t => t.id);
+        const _snapT0 = performance.now();
+        snapshot = UndoStack.snapshotTasks(ids);
+        // Publish the snapshot BEFORE mutating the Store (R6) so a mid-run throw can
+        // be rolled back in the catch — Engine.runAndApply mutates in place.
+        OptimizerPreview._snapshot = snapshot;
+        // Freeze Confidence for the whole trial window (through Apply/Discard) and
+        // snapshot it so a Discard can roll back without leaving any trace.
+        OptimizerPreview.active = true;
+        OptimizerPreview._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
+        PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
+
+        // KPI inputs are scoped to what the user actually selected on screen 1 —
+        // time window and (optionally) a subset of lines. Otherwise the before/after
+        // comparison drowns the user's slice in out-of-scope tasks.
+        const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
+        const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
+        const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
+        const inScope = t => {
+          if (lineSet && !lineSet.has(t.PRODUCTION_LINE)) return false;
+          const s = t.start_date ? t.start_date.getTime() : null;
+          const e = Util.scheduledEnd(t);
+          const eMs = e ? e.getTime() : s;
+          if (s == null) return false;
+          return eMs >= winStart && s <= winEnd;
+        };
+
+        // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+        const _preKpiT0 = performance.now();
+        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14);
+        PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
+
+        // Run the optimizer in place.
+        Engine.runAndApply(mode, opts);
+
+        // Post-KPIs from the now-mutated Store, filtered to the same scope.
+        const postTasks = Store.tasksByPlant(plant).filter(inScope);
+        const _postKpiT0 = performance.now();
+        const postKpis  = Util.scheduleKpis(postTasks, 14);
+        PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
+
+        OptimizerPreview._preKpis  = preKpis;
+        OptimizerPreview._postKpis = postKpis;
+        OptimizerPreview._mode     = mode;
+        OptimizerPreview._plant    = plant;
+
+        footBtns.forEach(b => { b.disabled = false; });
+        OptimizerPreview._render();
+      } catch (err) {
+        ErrorLog.error('optimize-preview', err?.message || String(err));
+        // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
+        // the schedule partially mutated otherwise, with no undo path.
+        if (snapshot) {
+          try {
+            UndoStack.restoreTasks(snapshot);
+            if (NIMBUS.Confidence && OptimizerPreview._confSnapshot) NIMBUS.Confidence.restore(OptimizerPreview._confSnapshot);
+            Alerts.scheduleRecompute();
+          }
+          catch { ErrorLog.error('optimize-preview', `revert failed`); }
+        }
+        OptimizerPreview._clear();
+        if (body) {
+          body.innerHTML =
+            '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
+          + '  <div style="font-size:14px;margin-bottom:8px;">Optimization failed</div>'
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${(err?.message || 'Unknown error').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div>`
+          + '</div>';
+        }
+        footBtns.forEach(b => { b.disabled = false; });
+      } finally {
+        PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
+      }
+    }));
+  },
+
+  _render() {
+    const body = document.getElementById('opt-preview-body');
+    if (!body) return;
+    const pre  = OptimizerPreview._preKpis  || {};
+    const post = OptimizerPreview._postKpis || {};
+
+    // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
+    // lowerIsBetter: true → decrease=better (green), increase=worse (red).
+    //                false → increase=better (green), decrease=worse (red).
+    //                'soft' → decrease=better (green, counts as KPI win),
+    //                         increase=warn (amber, no verdict penalty). Used for
+    //                         span and peak utilization where shrinking is desirable
+    //                         but growing shouldn't be flagged as a regression.
+    //                null → neutral in both directions.
+    const cards = [
+      {
+        label: 'Changeovers', k: 'changeovers', ico: '🔁',
+        fmt: v => String(v), unit: '', lowerIsBetter: true,
+        tip: 'Adjacent orders on the same line that differ in COLOR or FORM_SIZE. Each one costs cleanout/setup time, so fewer is better.',
+      },
+      {
+        label: 'Schedule span', k: 'span_h', ico: '↔',
+        fmt: v => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
+        tip: 'Total clock time from the earliest order start to the latest order finish, across the selected window and lines.',
+      },
+      {
+        label: 'Late orders', k: 'late_count', ico: '⏰',
+        fmt: v => String(v), unit: '', lowerIsBetter: true,
+        tip: 'Count of orders whose scheduled finish lands AFTER the SAP planning date. Equal-weight headcount — a 1-hour slip and a 40-hour slip each count as one.',
+      },
+      {
+        label: 'Cumulative lateness', k: 'late_h', ico: '⛌',
+        fmt: v => v.toFixed(1), unit: 'h', lowerIsBetter: true,
+        tip: 'Sum of due-date slip across every late order, in hours. Captures severity, not just count: ten orders slipping 1 h = 10 h; one order slipping 40 h = 40 h. Lower is better.',
+      },
+      {
+        label: 'Peak line utilization', k: 'peak_util_pct', ico: '▲',
+        fmt: v => String(v), unit: '%', lowerIsBetter: 'soft',
+        tip: 'Highest single-line single-day utilization in the 14-day horizon. High is good for throughput; over 100% means overbooked vs Calendar capacity.',
+      },
+    ];
+
+    // Verdict: count how many directional KPIs moved the right way. 'soft'
+    // cards (span, peak utilization) count decreases as wins but treat
+    // increases as neutral — they shouldn't trigger a regression verdict.
+    const directional = cards.filter(c => c.lowerIsBetter === true || c.lowerIsBetter === 'soft');
+    let better = 0, worse = 0;
+    for (const c of directional) {
+      const d = (post[c.k] ?? 0) - (pre[c.k] ?? 0);
+      if (Math.abs(d) < 0.05) { continue; }
+      if (c.lowerIsBetter === 'soft') {
+        if (d < 0) better++;
+      } else if (d < 0) better++;
+      else worse++;
+    }
+    let verdictTone, verdictTitle, verdictSub;
+    if (better === 0 && worse === 0) {
+      verdictTone = 'neutral';
+      verdictTitle = 'No measurable change';
+      verdictSub = 'The optimizer ran but the KPIs are unchanged within tolerance.';
+    } else if (worse === 0) {
+      verdictTone = 'better';
+      verdictTitle = better === directional.length ? 'Big win — every KPI improved' : 'Schedule improved';
+      verdictSub = `${better} of ${directional.length} optimization KPIs moved in your favor with no regressions.`;
+    } else if (better === 0) {
+      verdictTone = 'worse';
+      verdictTitle = 'Schedule regressed';
+      verdictSub = `${worse} of ${directional.length} optimization KPIs got worse. Discard is probably the call.`;
+    } else if (better >= worse) {
+      verdictTone = 'better';
+      verdictTitle = 'Net improvement, with trade-offs';
+      verdictSub = `${better} KPI${better===1?'':'s'} improved, ${worse} regressed. Review before applying.`;
+    } else {
+      verdictTone = 'worse';
+      verdictTitle = 'Net regression';
+      verdictSub = `${worse} KPI${worse===1?'':'s'} got worse, ${better} improved. Discard recommended.`;
+    }
+
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
+
+    const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
+    const plant = OptimizerPreview._plant || '';
+    const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+    // Per-card markup
+    const cardsHtml = cards.map(c => {
+      const preV  = pre[c.k]  ?? 0;
+      const postV = post[c.k] ?? 0;
+      const d = postV - preV;
+      const isInt = Number.isInteger(preV) && Number.isInteger(postV);
+      const absD = Math.abs(d);
+      const zero = absD < 0.05;
+
+      // Direction class
+      let dirCls = 'neutral';
+      if (!zero && c.lowerIsBetter !== null) {
+        if (c.lowerIsBetter === 'soft') {
+          dirCls = d < 0 ? 'better' : 'warn';
+        } else {
+          const improved = c.lowerIsBetter ? d < 0 : d > 0;
+          dirCls = improved ? 'better' : 'worse';
+        }
+      }
+
+      // Delta number + percent
+      const sign = d > 0 ? '+' : (d < 0 ? '−' : '');
+      const dNum = isInt ? `${Math.abs(d)}` : absD.toFixed(1);
+      const pct = (preV !== 0) ? Math.round((d / preV) * 100) : null;
+      const pctStr = (pct !== null && !zero)
+        ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
+        : '';
+      const deltaText = zero
+        ? '<span class="opt-pv-pill-icon">●</span> No change'
+        : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
+
+      // Bar — visual scale of post vs pre. For neutral/no scale, hide.
+      const maxV = Math.max(preV, postV, 0.0001);
+      const preW  = Math.max(2, Math.round((preV / maxV) * 100));
+      const postW = Math.max(2, Math.round((postV / maxV) * 100));
+
+      return `
+        <div class="opt-pv-card opt-pv-card-${dirCls}" data-key="${c.k}">
+          <div class="opt-pv-card-head">
+            <span class="opt-pv-card-ico">${c.ico}</span>
+            <span class="opt-pv-card-label">${esc(c.label)}</span>
+            <span class="opt-pv-card-help" tabindex="0" aria-label="What is this?">
+              <span class="opt-pv-help-dot">?</span>
+              <span class="opt-pv-tip">${esc(c.tip)}</span>
+            </span>
+          </div>
+          <div class="opt-pv-card-body">
+            <div class="opt-pv-num opt-pv-num-pre">
+              <div class="opt-pv-num-lbl">Before</div>
+              <div class="opt-pv-num-val">${c.fmt(preV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
+            </div>
+            <div class="opt-pv-arrow">→</div>
+            <div class="opt-pv-num opt-pv-num-post" data-target="${postV}" data-fmt="${isInt ? 'int' : 'dec'}" data-unit="${c.unit}">
+              <div class="opt-pv-num-lbl">After</div>
+              <div class="opt-pv-num-val">${c.fmt(postV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
+            </div>
+          </div>
+          <div class="opt-pv-bars">
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">pre</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill pre" style="width:${preW}%"></i></div></div>
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">post</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill post ${dirCls}" style="width:${postW}%"></i></div></div>
+          </div>
+          <div class="opt-pv-delta-pill ${dirCls}">${deltaText}</div>
+        </div>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="opt-pv-shell">
+        <div class="opt-pv-header">
+          <div class="opt-pv-chip opt-pv-chip-mode">${esc(modeLabel)}</div>
+          <div class="opt-pv-chip opt-pv-chip-plant" title="Plant scope">📍 ${esc(plant)}</div>
+          <div class="opt-pv-chip opt-pv-chip-time">⏱ ${esc(stamp)}</div>
+        </div>
+
+        <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
+          <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
+          <div class="opt-pv-verdict-text">
+            <div class="opt-pv-verdict-title">${esc(verdictTitle)}</div>
+            <div class="opt-pv-verdict-sub">${esc(verdictSub)}</div>
+          </div>
+          <div class="opt-pv-verdict-score">
+            <div class="opt-pv-score-num">${better}<span class="opt-pv-score-of">/${directional.length}</span></div>
+            <div class="opt-pv-score-lbl">KPIs improved</div>
+          </div>
+        </div>
+
+        <div class="opt-pv-grid">${cardsHtml}</div>
+
+        <div class="opt-pv-footer-note">
+          <strong>Apply</strong> keeps the new schedule (still undoable via Ctrl+Z). <strong>Discard</strong> reverts every order to its pre-optimization position.
+        </div>
+      </div>`;
+
+    // Counter animation on the "After" numbers — runs once on mount.
+    requestAnimationFrame(() => {
+      body.querySelectorAll('.opt-pv-num-post').forEach(el => {
+        const target = parseFloat(el.dataset.target);
+        if (!Number.isFinite(target)) return;
+        const fmt   = el.dataset.fmt;
+        const unit  = el.dataset.unit || '';
+        const valEl = el.querySelector('.opt-pv-num-val');
+        const dur   = 520;
+        const t0    = performance.now();
+        const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+        const tick = (now) => {
+          const t = Math.min(1, (now - t0) / dur);
+          const v = target * easeOutCubic(t);
+          const disp = fmt === 'int' ? String(Math.round(v)) : v.toFixed(1);
+          valEl.innerHTML = `${disp}<span class="opt-pv-num-unit">${unit}</span>`;
+          if (t < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+    });
+  },
+
+  apply() {
+    const snap = OptimizerPreview._snapshot;
+    const mode = OptimizerPreview._mode;
+    const plant = OptimizerPreview._plant;
+    if (!snap) { Modal.close('modal-opt-preview'); return; }
+    // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
+    UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
+      () => UndoStack.restoreTasks(snap));
+    Toast.show(Util.t('toast.opt_applied'), 'success');
+    OptimizerPreview._clear();
+    // The trial is now the committed baseline — recompute right away instead of
+    // waiting on the debounce so the badge reflects it immediately.
+    NIMBUS.Confidence?._recompute();
+    Modal.close('modal-opt-preview');
+    Alerts.scheduleRecompute();
+  },
+
+  discard() {
+    const snap = OptimizerPreview._snapshot;
+    const confSnap = OptimizerPreview._confSnapshot;
+    if (snap) {
+      UndoStack.restoreTasks(snap);
+      if (NIMBUS.Confidence && confSnap) NIMBUS.Confidence.restore(confSnap);
+      Alerts.scheduleRecompute();
+      Toast.show(Util.t('toast.opt_discarded'), 'info');
+    }
+    OptimizerPreview._clear();
+    Modal.close('modal-opt-preview');
+  },
+
+  _clear() {
+    OptimizerPreview._snapshot = null;
+    OptimizerPreview._preKpis  = null;
+    OptimizerPreview._postKpis = null;
+    OptimizerPreview._mode     = null;
+    OptimizerPreview._plant    = null;
+    OptimizerPreview.active       = false;
+    OptimizerPreview._confSnapshot = null;
+  },
 };

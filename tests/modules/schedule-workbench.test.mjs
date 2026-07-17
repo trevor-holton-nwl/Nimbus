@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction } from '../../web/schedule-workbench.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
@@ -218,4 +218,10 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
   } finally {
     Timeline._items = undefined;
   }
+});
+
+test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
+  assert.equal(typeof OptimizeDialog.open, 'function');
+  assert.equal(typeof OptimizeDialog.run, 'function');
+  assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
 });
