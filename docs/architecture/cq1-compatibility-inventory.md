@@ -1,6 +1,17 @@
 # CQ-1 Compatibility Inventory
 
-## CQ-1 status: COMPLETE (as of Phase 4 Task 7), with one deliberately deferred item
+## CQ-1 status: COMPLETE (as of Phase 4 Task 7) — module extraction is done; several deliberately deferred/open items remain (see §6-§8)
+
+The seven-file module extraction itself is finished and verified. It ships
+with a known, itemized set of gaps — none silently dropped, all detailed in
+the sections below: two open `Store` encapsulation exceptions (`Plant`,
+`LaborPlanning` — §6), 91 remaining static inline-handler attributes in
+`index.html` (§7), three design-doc completion criteria that are not met or
+only partially met — global task-ID uniqueness (not met), `hydrate` mode
+(never implemented), inline-handler elimination (not met) — and a
+Docker/browser boot smoke test that has never been run in any of CQ-1's four
+phases (§8). Read §6-§8 for the full, honest accounting before treating this
+branch as ready to promote.
 
 All four phases of the CQ-1 frontend module migration are committed. The
 monolithic `app.js` has been replaced by seven real, coarse ES modules, each
@@ -1315,3 +1326,15 @@ substitutes for this one. This is the single largest verification gap CQ-1
 closes with, and it should be the first thing run — by whoever has a Docker
 environment available — before this branch is promoted to `main` or shipped
 via the `promote-azure` skill.
+
+**Offline pytest suite — command and output, same evidentiary bar as the
+Docker gate above.** Python was not on `PATH` in this session (`python -m
+pytest` / bare `pytest` both fail to resolve), so the suite was run via the
+project's `.venv` interpreter directly: `.venv\Scripts\pytest.exe -q` from
+the repo root. Result: **90 passed, 27 skipped**, zero failures. All 27
+skips are the expected `NIMBUS_TEST_DB=1` guard (Postgres unavailable in
+this session — see `nimbus-local-env` project note); no test was skipped
+for any other reason. This is a real, executed result, not a carried-forward
+assumption — recorded here with the same command-and-output rigor as the
+Docker check immediately above, since Phase 4 touched no `.py` files and a
+reader should not have to guess whether that made the claim untested.

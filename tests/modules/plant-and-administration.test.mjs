@@ -7,6 +7,7 @@ test('CalendarUI/Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof CalendarUI.render, 'function');
   assert.equal(typeof Plant.init, 'function');
   assert.equal(typeof Plant.gotoTab, 'function');
+  assert.equal(typeof Plant._renderSettingsPane, 'function', 'App._renderSettingsPane was relocated bodily onto Plant in Task 1 — must land here');
   assert.equal(typeof ProdLines.render, 'function');
 });
 
