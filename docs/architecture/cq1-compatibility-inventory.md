@@ -91,7 +91,7 @@ Do not mix both for the same screen.
 |---|---|---|
 | Gantt Timeline | Mount-once / show-hide | vis-timeline setup is expensive; plant changes swap the scoped context, not the DOM node |
 | Orders table | Mount-once / show-hide | AG Grid setup is expensive; same plant-scoped swap model |
-| Dashboard | Mount-once / show-hide | Chart.js instances are retained |
+| Dashboard | Mount-once / show-hide | `Dashboard._lsVL` (Line Status `VirtualList`) and its rendered DOM are retained across tab switches; the Chart.js rationale this row previously cited was stale — Dashboard is a hand-rolled DOM/CSS heatmap and never instantiated `Chart.js` (removed Phase 3 Task 4) |
 | Plant admin | Mount/unmount with cleanup | Heavy CRUD; must tear down on tab change to avoid stale subscriptions |
 | Master Data | Mount/unmount with cleanup | Dynamic DDL columns; no safe keep-alive |
 | Labor Planning | Mount/unmount with cleanup | Horizon + group state resets on tab change |
@@ -243,7 +243,6 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Dashboard` | `Store._rev`, `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
 | `App` | `Store._state` | Phase 4 (application-shell.mjs) |
 | `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
@@ -299,6 +298,20 @@ that stays in `app.js` (not part of this plan's module list at all). Two
 bare `t(...)` i18n calls in `Timeline._itemForBlock` also became
 `Util.t(...)` (the established Phase 2 convention for the same lint
 reason — see `schedule-services.mjs`'s header comment).
+
+**`Dashboard` closed (Phase 3 Task 4):** moved into `schedule-workbench.mjs`
+verbatim. Dashboard's `render()` had one `Store._rev || 0` read (inside its
+7-day-matrix memo-key computation) that became `Store.rev()` (the existing
+Phase 1 public getter, same idiom as `Hierarchy` above), and
+`_renderAlertSummary`'s one `Store._state.masterData?.plants?.find(...)`
+read that became `Store.masterData?.plants?.find(...)` (the existing Phase 1
+public getter used by `Timeline`/`Engine` above) — no new getters needed for
+either. Dashboard also carried three bare cross-references into app.js-
+resident code that hasn't moved yet — `AlertsUIAdapter.renderBell()`,
+`EmptyState.render(...)`, and `App.goto(...)`/`App.gotoGanttTimeline()` — all
+rewritten through the shared `NIMBUS` binding, the same idiom as Timeline's
+five and Table's two forward references. All bare `t(...)` i18n calls in the
+moved block became `Util.t(...)` for the same lint reason as before.
 
 `Store.rev()` and the new `Store.replace*` setters are available now as the
 migration target for each row above — use them instead of `_rev`/`_state`

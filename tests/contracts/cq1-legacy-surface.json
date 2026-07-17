@@ -4,11 +4,6 @@
     {
       "file": "app.js",
       "attribute": "onchange",
-      "expression": "NIMBUS.Dashboard._onLineChange(this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
       "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
     },
     {
@@ -35,11 +30,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
     },
     {
       "file": "app.js",
@@ -80,31 +70,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.ColorWheelViewer.open('${esc(plantName)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrillClear()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._unfix('${t.id}')"
     },
     {
       "file": "app.js",
@@ -165,16 +130,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.Selection.clear()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "event.stopPropagation(); NIMBUS.Alerts.dismiss('${a.id}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
     },
     {
       "file": "app.js",
@@ -734,6 +689,11 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
+      "expression": "NIMBUS.Dashboard._onLineChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
       "expression": "NIMBUS.GanttFilter._onColorChange(this)"
     },
     {
@@ -769,6 +729,36 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrillClear()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._unfix('${t.id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
       "expression": "NIMBUS.Inspector.toggleFix(false)"
     },
     {
@@ -790,6 +780,16 @@
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "event.stopPropagation(); NIMBUS.Alerts.dismiss('${a.id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
     }
   ],
   "htmlCommands": [

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter } from '../../web/schedule-workbench.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard } from '../../web/schedule-workbench.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
@@ -49,4 +49,9 @@ test('GanttFilter.selectedLines/isolateLine/restoreAllLines/activeFilter are the
   assert.ok(GanttFilter.selectedLines().has('L1'));
   GanttFilter.restoreAllLines();
   assert.equal(GanttFilter.selectedLines().size, 0);
+});
+
+test('Dashboard exposes init/render', () => {
+  assert.equal(typeof Dashboard.init, 'function');
+  assert.equal(typeof Dashboard.render, 'function');
 });
