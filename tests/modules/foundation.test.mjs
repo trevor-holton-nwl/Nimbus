@@ -94,6 +94,11 @@ test('ErrorLog.setRouteResolver feeds _route() (tab/ganttSub) and enriches log e
   ErrorLog.setRouteResolver(() => null); // reset
 });
 
+test('Util.hoursToTimeString/timeStringToHours round-trip', () => {
+  assert.equal(Util.hoursToTimeString(13.5), '13:30');
+  assert.equal(Util.timeStringToHours('13:30'), 13.5);
+});
+
 test('ErrorLog._route() falls back to the bare tab without a ganttSub, and to null with no resolver/data', () => {
   assert.equal(ErrorLog._route(), null); // default resolver, never set
   ErrorLog.setRouteResolver(() => ({ tab: 'dashboard' }));

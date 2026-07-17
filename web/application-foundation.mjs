@@ -537,6 +537,19 @@ export const Util = {
     const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
     return { matched: distinct.filter(v => knownIdSet.has(v)).length, total: distinct.length };
   },
+
+  // Fractional-hours <-> "HH:MM" string conversion, shared by CalendarUI
+  // (blackout-block-tab UI, stays in app.js) and EditCalendar/ColorWheelViewer
+  // (schedule-workbench.mjs) — previously duplicated as CalendarUI's private
+  // _hToT/_tToH (CQ-1 Phase 3 Task 7).
+  hoursToTimeString(h) {
+    const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+  },
+  timeStringToHours(t) {
+    const [h, m] = t.split(':').map(Number);
+    return h + (m / 60);
+  },
 };
 
 /* =============================================================================

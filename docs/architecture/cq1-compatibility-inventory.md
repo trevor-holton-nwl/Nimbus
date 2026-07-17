@@ -14,7 +14,15 @@ code stays in app.js as `CalendarUI`, `AlertsUIAdapter`, and
 `SessionUIAdapter`, following the Phase 1 `SandboxAdapter` precedent. The
 `schedule:hydrated` and `session:changed` events and the
 `Persistence.setCalendarService` seam resolve the two real
-data→services dependencies found during Phase 2 research.
+data→services dependencies found during Phase 2 research. **Update (Phase 3
+Task 7):** `AlertsUIAdapter` has since moved into `schedule-workbench.mjs`
+(a deliberate, documented scope decision — see its §1 row below); `CalendarUI`
+and `SessionUIAdapter` remain in `app.js`, deliberately, targeting
+`plant-and-administration.mjs`/`application-shell.mjs` respectively in
+Phase 4 — `CalendarUI` because it is plant-admin UI (blackout-block-tab
+management, shared with `Plant`/`ProdLines`, both Phase 4 modules) and
+`SessionUIAdapter` because login gating belongs with the application shell,
+per this phase's plan's Architecture section.
 
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
@@ -43,10 +51,10 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Store` | `schedule-state.mjs` | All private fields become internal; expose via selectors/commands. Migrated Phase 1 (`_state`/`_rev` exceptions tracked in §6). |
 | `Selection` | `schedule-state.mjs` | Migrated Phase 1. |
 | `UndoStack` | `schedule-state.mjs` | Migrated Phase 1. |
-| `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` events (the last emitted from `exit()`'s promote-then-undo closure when a promoted scenario is undone), pending their real move to `schedule-workbench.mjs` in Phase 3. |
+| `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` events (the last emitted from `exit()`'s promote-then-undo closure when a promoted scenario is undone) — `SandboxAdapter` itself moved into `schedule-workbench.mjs` in Phase 3 Task 7 (see its own row below). |
 | `Calendar` | `schedule-services.mjs` | Capacity math only; blackout/line-calendar UI → workbench or plant-admin |
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |
-| `Alerts` | `schedule-services.mjs` | Split: computation → schedule-services.mjs; drawer/bell/cell-briefing modal → app.js's AlertsUIAdapter. |
+| `Alerts` | `schedule-services.mjs` | Split: computation → schedule-services.mjs; drawer/bell/cell-briefing modal → `AlertsUIAdapter`, which moved into `schedule-workbench.mjs` in Phase 3 Task 7 (see its own row below). |
 | `Utilization` | `schedule-services.mjs` | |
 | `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; genuinely DOM-free after Phase 2 removed a checkbox-read fallback (see Task 3 Step 4). |
 | `Persistence` | `schedule-data.mjs` | Migrated Phase 2 Task 4, name unchanged (no DOM half — pure backend fetch/localStorage cache). |
@@ -67,6 +75,8 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `EditCalendar` | `schedule-workbench.mjs` | Per-line working-hours modal |
 | `ColorWheelViewer` | `schedule-workbench.mjs` | Color-wheel preview modal |
 | `Printer` | `schedule-workbench.mjs` | Print/export; Printer.open() exposed via shell action |
+| `SandboxAdapter` | `schedule-workbench.mjs` | Moved Phase 3 Task 7 — the design doc's **explicitly-mandated** move (thin DOM/cross-module layer over the state-only `Sandbox`). |
+| `AlertsUIAdapter` | `schedule-workbench.mjs` | Moved Phase 3 Task 7 — **not** an explicit design-doc mandate; a deliberate, documented scope decision based on real coupling evidence (bidirectional references to/from `Timeline`, `Inspector`, `Table`, `Dashboard`, and `Interaction` — all already in this file — stronger than `Sandbox`'s coupling was before its mandated move). `VL_ALERT_ROW_H` travels with it. |
 | `Plant` | `plant-and-administration.mjs` | Plant config tab |
 | `ProdLines` | `plant-and-administration.mjs` | Production lines tab |
 | `LaborPlanning` | `plant-and-administration.mjs` | Labor plan editor |
@@ -567,6 +577,70 @@ event:
   intentionally private to `schedule-data.mjs`. Same "small public method"
   resolution CLAUDE.md's Global Constraints prescribe for a reverse-direction
   need — never a bare `KEY` export or a `window`/`globalThis` reach-around.
+
+**`SessionUIAdapter` stays in `app.js` (confirmed Phase 3 Task 7):** re-checked
+against the actual coupling during Task 7 (which moved `AlertsUIAdapter` and
+`SandboxAdapter` out of `app.js`) — `SessionUIAdapter` has **zero** coupling to
+any `schedule-workbench.mjs` module (`Timeline`, `Table`, `Inspector`,
+`Dashboard`, `Interaction`, etc.); it only touches `Session`, `Store`, `App`,
+and DOM. It matches `application-shell.mjs`'s described "login gating"
+ownership far better than `schedule-workbench.mjs`'s planner-workspace
+ownership, so it deliberately stays here, targeting `application-shell.mjs`
+in Phase 4 — the design doc's own resolution, restated in this plan's
+Architecture section.
+
+**`CalendarUI` stays in `app.js` (confirmed Phase 3 Task 7):** re-checked
+against the actual coupling during Task 7 — `CalendarUI` has exactly one
+`schedule-workbench.mjs` consumer, `EditCalendar` (which moved into
+`schedule-workbench.mjs` this task), and that consumer only ever called two
+trivial pure hour↔string conversions (`CalendarUI._hToT`/`_tToH`), not any
+DOM/state surface. Rather than leave a cross-module reach in either
+direction, both helpers moved to `Util.hoursToTimeString(h)`/
+`.timeStringToHours(t)` in `application-foundation.mjs` — `CalendarUI`'s own
+internal call sites, `Plant`'s two call sites (also in `app.js`; found during
+Task 7's re-verification — the original research undercounted `CalendarUI`'s
+consumers to "only `EditCalendar`," missing that `Plant` also called
+`CalendarUI._hToT`/`_tToH` directly), and `EditCalendar`'s five call sites all
+now call the shared `Util` helper instead. `CalendarUI._hToT`/`_tToH`
+themselves were deleted (no callers left). `CalendarUI` otherwise stays in
+`app.js`, deliberately, targeting `plant-and-administration.mjs` in Phase 4 —
+it is blackout-block-tab UI shared with `Plant`/`ProdLines`, both Phase 4
+modules, per this plan's Architecture section.
+
+**`EditCalendar`/`ColorWheelViewer`/`Printer`/`SandboxAdapter`/
+`AlertsUIAdapter` moved (Phase 3 Task 7):** all five moved into
+`schedule-workbench.mjs` verbatim, plus `AlertsUIAdapter`'s
+`VL_ALERT_ROW_H` VirtualList row-height const. None of the five had a
+`Store._state`/`_rev` touch among this phase's 5 tracked §6 exceptions
+(Timeline/Hierarchy/Dashboard/GanttFilter/DependencyOverlay), so none close a
+§6 row here — `AlertsUIAdapter.renderDrawer`/`.renderBell`'s
+`Store._state.masterData` reads and `SandboxAdapter`'s `Store._state.blocks`/
+`.plantBlocks` reads are left untouched, verbatim, same rationale as
+`OptimizeDialog.applyPreset`'s in Task 6. Two genuine same-phase forward
+references now resolve as normal same-module references with no code change
+needed: `Table`'s `_showAlertPopup` → `AlertsUIAdapter.focus`/`.showForCell`
+(accepted as temporary in Task 2) and `Interaction`'s
+`AlertsUIAdapter.showForCell(...)` (accepted as temporary in Task 5) — both
+call sites are left exactly as `NIMBUS.AlertsUIAdapter...`, which resolves
+identically whether or not the target is a same-module bare identifier.
+`AlertsUIAdapter.focus`'s one `App.gotoGanttTimeline()` call became
+`NIMBUS.App.gotoGanttTimeline()` — a **permanent** indirection (like
+Dashboard's in Task 4), since `App` never moves into `schedule-workbench.mjs`
+(Phase 4, `application-shell.mjs`). `EditCalendar`'s `save()` method's calls
+into `Plant._persistPlantHours`/`Plant.render()`/`ProdLines.render()` (both
+modules stay in `app.js`, targeting `plant-and-administration.mjs` in Phase 4)
+similarly became `NIMBUS.Plant.../NIMBUS.ProdLines...` — new forward
+references this task introduced by moving `EditCalendar` out from alongside
+`Plant`/`ProdLines`, resolved the same way as every other cross-file
+reference in this file. All bare `t(...)` i18n calls across the five modules
+became `Util.t(...)`, the same established convention as every other module
+in this file. `node scripts/legacy-surface.mjs --write` confirms the 5
+`app.js`-sourced `inlineHandlers` entries generated from `AlertsUIAdapter`'s
+and `ColorWheelViewer`'s templates (`Alerts.applyFix`, `Alerts.dismiss`,
+`AlertsUIAdapter.focus`, the `toggleDrawer();Table._openOverrideModalForId`
+combo, and `ColorWheelViewer._toggleExpand`) simply move to a
+`schedule-workbench.mjs` file attribution — same expressions, same count, no
+new entries and none removed.
 
 **`Sandbox.exit(false)` (What-If discard) event contract:** the discard path
 calls `Store.setTasks`/`replaceBlocks`/`replaceCalendars`/`replacePlants`/

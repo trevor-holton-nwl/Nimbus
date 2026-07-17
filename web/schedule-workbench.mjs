@@ -105,11 +105,45 @@
 // snapshot()/.restore()`/`._recompute()` cross-file calls stay exactly as-is
 // — `Confidence` lives entirely in nimbus-intelligence.js, out of scope for
 // CQ-1's module bridges regardless of which file OptimizerPreview lives in.
+//
+// Task 7 added EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, and
+// AlertsUIAdapter (plus AlertsUIAdapter's `VL_ALERT_ROW_H` VirtualList
+// row-height const, moved from app.js's top-of-file const group), all moved
+// verbatim. `AlertsUIAdapter`'s move is a deliberate, documented scope
+// decision, not the design doc's mandate (only `SandboxAdapter`'s move is
+// explicitly mandated) — see docs/architecture/cq1-compatibility-inventory.md
+// for the coupling evidence. Table's `_showAlertPopup` forward reference into
+// `AlertsUIAdapter` (accepted as temporary in Task 2) and Interaction's
+// `AlertsUIAdapter.showForCell(...)` forward reference (Task 5) now resolve
+// as normal same-module references — both call sites are left exactly as
+// `NIMBUS.AlertsUIAdapter...` (a bare identifier would resolve identically;
+// touching call sites that already work is not required by this task). The
+// shared hour-conversion helpers previously duplicated as `CalendarUI`'s
+// private `_hToT`/`_tToH` moved to `Util.hoursToTimeString`/`.timeStringToHours`
+// in application-foundation.mjs — `EditCalendar`'s five call sites (and
+// `CalendarUI`'s own, and `Plant`'s two, both still in app.js) now call the
+// shared helper instead of reaching across files. All bare `t(...)` i18n
+// calls across the five modules became `Util.t(...)`, the same established
+// convention as every other module in this file. `AlertsUIAdapter.focus`'s one
+// `App.gotoGanttTimeline()` call and `SandboxAdapter`'s `Store._state.blocks`/
+// `.plantBlocks` reads and `AlertsUIAdapter.renderDrawer`/`.renderBell`'s
+// `Store._state.masterData` reads are left untouched — `App.gotoGanttTimeline`
+// becomes `NIMBUS.App.gotoGanttTimeline()` (permanent indirection, same as
+// Dashboard's, since `App` never moves into this file — Phase 4,
+// `application-shell.mjs`), and none of the `Store._state` touches are among
+// this phase's 5 tracked §6 exceptions, so closing them is out of scope here.
+// `CalendarSync`/`Sandbox`/`Calendar` are new imports this task needs
+// (`SandboxAdapter` calls `Sandbox.active`/`.enter`/`CalendarSync.flushPlant`/
+// `.fetchPlantConfig`/`._deferredHydrationPlant`; `AlertsUIAdapter.showForCell`
+// calls `Calendar.effectiveCapacityHours`). `CalendarUI` and `SessionUIAdapter`
+// stay in app.js, deliberately, targeting `plant-and-administration.mjs`/
+// `application-shell.mjs` respectively in Phase 4 (see this plan's Architecture
+// section and the compatibility inventory).
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
-import { Store, Selection, UndoStack } from './schedule-state.mjs';
-import { Utilization, Alerts, Engine } from './schedule-services.mjs';
-import { Session, Persistence } from './schedule-data.mjs';
+import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
+import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
+import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 
 /* =============================================================================
    TIMELINE — vis-timeline integration.
@@ -6454,4 +6488,1014 @@ export const OptimizerPreview = {
     OptimizerPreview.active       = false;
     OptimizerPreview._confSnapshot = null;
   },
+};
+
+/* =============================================================================
+   EDIT CALENDAR — per-line working hours modal.
+   Opens from the "Edit Calendar" button in each ProdLines accordion.
+   Writes to Store.setCalendar() and triggers ProdLines.render() on save.
+   DB-ready: Store.calendars[line].workHours = { 0: [h1,h2]|null, ...6 }
+   maps to: line_calendar(line_code, day_of_week, is_open, start_hour, end_hour)
+   ========================================================================== */
+export const EditCalendar = (() => {
+  let _line = null;
+  let _fp   = []; // 14 flatpickr instances: [start0, end0, start1, end1, ..., start6, end6]
+  let _plantMode = false;
+  let _plantName = null;
+
+  function open(line) {
+    _plantMode = false;
+    _plantName = null;
+    _line = line;
+    Store.ensureCalendar(line);
+    _renderHeader();
+    _initPickers();
+    _populate();
+    const el = document.getElementById('modal-edit-calendar');
+    if (!el) return;
+    const copyBtn = el.querySelector('.cal-copy-plant-btn');
+    if (copyBtn) copyBtn.style.display = '';
+    el.hidden = false;
+    requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
+  }
+
+  function openPlant(name) {
+    _plantMode = true;
+    _plantName = name;
+    _line = null;
+    Store.ensurePlant(name);
+    _renderHeader();
+    _initPickers();
+    _populate();
+    const el = document.getElementById('modal-edit-calendar');
+    if (!el) return;
+    const copyBtn = el.querySelector('.cal-copy-plant-btn');
+    if (copyBtn) copyBtn.style.display = 'none';
+    el.hidden = false;
+    requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
+  }
+
+  function close() {
+    const el = document.getElementById('modal-edit-calendar');
+    el?.querySelector('.cal-edit-modal')?.classList.remove('visible');
+    setTimeout(() => { if (el) el.hidden = true; }, 230);
+  }
+
+  function _renderHeader() {
+    const nameEl = document.getElementById('cal-edit-line-name');
+    const plantEl = document.getElementById('cal-edit-plant-name');
+    if (_plantMode) {
+      if (nameEl)  nameEl.textContent  = `Plant ${_plantName}`;
+      if (plantEl) plantEl.textContent = '';
+    } else {
+      const plant = Store.getPlantForLine(_line);
+      if (nameEl)  nameEl.textContent  = _line;
+      if (plantEl) plantEl.textContent = `Plant ${plant}`;
+    }
+  }
+
+  function _populate() {
+    const wh = _plantMode
+      ? Store.plants[_plantName].workHours
+      : Store.calendars[_line].workHours;
+    document.querySelectorAll('.cal-preset-chip').forEach(c => c.classList.remove('active'));
+    for (let d = 0; d < 7; d++) {
+      const enabled = !!wh[d];
+      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      if (tog) tog.checked = enabled;
+      _setRowEnabled(d, enabled);
+      if (enabled && _fp.length === 14) {
+        _fp[d * 2]?.setDate(Util.hoursToTimeString(wh[d][0]), false);
+        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(wh[d][1]), false);
+      }
+      _refreshBadge(d);
+    }
+  }
+
+  function _initPickers() {
+    if (_fp.length === 14) return;
+    _fp = [];
+    for (let d = 0; d < 7; d++) {
+      const mkCfg = () => ({
+        enableTime: true, noCalendar: true,
+        dateFormat: 'H:i', altInput: true, altFormat: 'h:i K',
+        minuteIncrement: 30,
+        onChange: () => _refreshBadge(d),
+      });
+      _fp.push(
+        flatpickr(`#cal-edit-start-${d}`, mkCfg()),
+        flatpickr(`#cal-edit-end-${d}`,   mkCfg())
+      );
+    }
+  }
+
+  function _setRowEnabled(d, enabled) {
+    const row = document.getElementById(`cal-edit-row-${d}`);
+    row?.classList.toggle('cal-day-off', !enabled);
+    // Disable the altInput flatpickr renders (the visible element)
+    const startAlt = document.querySelector(`#cal-edit-start-${d} ~ input.flatpickr-input`);
+    const endAlt   = document.querySelector(`#cal-edit-end-${d} ~ input.flatpickr-input`);
+    [startAlt, endAlt].forEach(inp => { if (inp) inp.disabled = !enabled; });
+  }
+
+  function _refreshBadge(d) {
+    const badge = document.getElementById(`cal-edit-badge-${d}`);
+    if (!badge) return;
+    const tog = document.getElementById(`cal-edit-toggle-${d}`);
+    if (!tog?.checked) { badge.textContent = '—'; return; }
+    const s = _fp[d * 2]?.element?.value;
+    const e = _fp[d * 2 + 1]?.element?.value;
+    if (s && e) {
+      const hrs = Util.timeStringToHours(e) - Util.timeStringToHours(s);
+      badge.textContent = hrs > 0
+        ? `${hrs % 1 === 0 ? hrs : hrs.toFixed(1)}h`
+        : '—';
+    } else {
+      badge.textContent = '—';
+    }
+  }
+
+  function onToggle(d, checked) {
+    _setRowEnabled(d, checked);
+    if (checked && _fp.length === 14) {
+      if (!_fp[d * 2]?.element?.value)     _fp[d * 2]?.setDate('08:00', false);
+      if (!_fp[d * 2 + 1]?.element?.value) _fp[d * 2 + 1]?.setDate('17:00', false);
+    }
+    _refreshBadge(d);
+  }
+
+  function applyPreset(preset) {
+    const PRESETS = {
+      mf:  { days: [1,2,3,4,5],     s: '08:00', e: '17:00' },
+      ms:  { days: [1,2,3,4,5,6],   s: '08:00', e: '17:00' },
+      all: { days: [0,1,2,3,4,5,6], s: '08:00', e: '17:00' },
+    };
+    const p = PRESETS[preset];
+    if (!p) return;
+    document.querySelectorAll('.cal-preset-chip')
+      .forEach(c => c.classList.toggle('active', c.dataset.preset === preset));
+    for (let d = 0; d < 7; d++) {
+      const enabled = p.days.includes(d);
+      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      if (tog) tog.checked = enabled;
+      if (enabled && _fp.length === 14) {
+        _fp[d * 2]?.setDate(p.s, false);
+        _fp[d * 2 + 1]?.setDate(p.e, false);
+      }
+      _setRowEnabled(d, enabled);
+      _refreshBadge(d);
+    }
+  }
+
+  function copyFromPlant() {
+    const plant = Store.getPlantForLine(_line);
+    if (!plant) { Toast.show(Util.t('toast.no_plant_assigned_line'), 'warn'); return; }
+    Store.ensurePlant(plant);
+    const ph = Store.plants[plant].workHours;
+    for (let d = 0; d < 7; d++) {
+      const enabled = !!ph[d];
+      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      if (tog) tog.checked = enabled;
+      if (enabled && _fp.length === 14) {
+        _fp[d * 2]?.setDate(Util.hoursToTimeString(ph[d][0]), false);
+        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(ph[d][1]), false);
+      }
+      _setRowEnabled(d, enabled);
+      _refreshBadge(d);
+    }
+    document.querySelectorAll('.cal-preset-chip').forEach(c => c.classList.remove('active'));
+    Toast.show(Util.t('toast.copied_from_plant'), 'success');
+  }
+
+  function save() {
+    if (!_plantMode && !_line) return;
+    const newWh = {};
+    for (let d = 0; d < 7; d++) {
+      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      if (!tog?.checked) { newWh[d] = null; continue; }
+      const s = _fp[d * 2]?.element?.value;
+      const e = _fp[d * 2 + 1]?.element?.value;
+      if (s && e) {
+        const sh = Util.timeStringToHours(s), eh = Util.timeStringToHours(e);
+        // Reject degenerate/inverted days client-side so we never diverge from the
+        // backend (_clean_work_hours rejects end <= start with a 400).
+        if (eh <= sh) { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
+        newWh[d] = [sh, eh];
+      } else {
+        newWh[d] = null;
+      }
+    }
+    if (_plantMode) {
+      Store.plants[_plantName].workHours = newWh;
+      const changed = new Set();
+      for (let d = 0; d < 7; d++) for (const l of Store.clampLinesToPlant(_plantName, d)) changed.add(l);
+      NIMBUS.Plant._persistPlantHours(_plantName, changed);
+      NIMBUS.Plant.render();
+      close();
+      Toast.show(Util.t('toast.plant_calendar_clamped'), 'success');
+    } else {
+      Store.setCalendar(_line, newWh, 'edit-calendar');
+      const plant = Store.getPlantForLine(_line) || Store.selectedPlant;
+      if (plant) CalendarSync.saveLineHours(plant, _line, newWh);
+      NIMBUS.ProdLines.render();
+      close();
+      Toast.show(Util.t('toast.line_calendar_updated', { line: _line }), 'success');
+    }
+  }
+
+  return { open, openPlant, close, save, onToggle, applyPreset, copyFromPlant };
+})();
+
+/* =============================================================================
+   COLOR WHEEL VIEWER — modal preview of a plant's uploaded color wheel.
+   Supports search, sort, expandable rows with task counts per color.
+   ========================================================================== */
+export const ColorWheelViewer = (() => {
+  let _plant   = null;
+  let _entries = [];
+  let _search  = '';
+  let _sort    = 'priority'; // 'priority' | 'name'
+
+  const _esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+  // Map common color name fragments → hex for the swatch tiles
+  const COLOR_MAP = {
+    RED:'#e74c3c', BLUE:'#3498db', GREEN:'#2ecc71', YELLOW:'#f1c40f',
+    ORANGE:'#e67e22', PURPLE:'#9b59b6', PINK:'#e91e8c', WHITE:'#f0ede8',
+    BLACK:'#2c3e50', BROWN:'#7a5a2a', GREY:'#95a5a6', GRAY:'#95a5a6',
+    SILVER:'#bdc3c7', GOLD:'#b8791a', AMBER:'#b8791a', NAVY:'#1f2d6d',
+    TEAL:'#1abc9c', AQUA:'#00bcd4', MAROON:'#8b1a1a', OLIVE:'#6b7a2a',
+    BEIGE:'#e8dcc8', TAN:'#d4a96a', CORAL:'#ff6b6b', LIME:'#a8e063',
+    SAGE:'#87a96b', SLATE:'#708090', IVORY:'#fffff0', CREAM:'#fffdd0',
+  };
+
+  function _resolveColor(name) {
+    const u = String(name).toUpperCase().trim();
+    if (COLOR_MAP[u]) return COLOR_MAP[u];
+    for (const [k, v] of Object.entries(COLOR_MAP)) {
+      if (u.includes(k)) return v;
+    }
+    return null;
+  }
+
+  function open(plant) {
+    _plant  = plant;
+    _search = '';
+    _sort   = 'priority';
+    const el = document.getElementById('modal-cw-viewer');
+    if (!el) return;
+    el.hidden = false;
+    // Reset search UI
+    const srch = document.getElementById('cw-viewer-search');
+    if (srch) srch.value = '';
+    const sortBtns = document.querySelectorAll('.cw-sort-btn');
+    sortBtns.forEach(b => b.classList.toggle('active', b.dataset.sort === 'priority'));
+    requestAnimationFrame(() => el.querySelector('.cw-viewer-modal')?.classList.add('visible'));
+    _load();
+  }
+
+  function close() {
+    const el = document.getElementById('modal-cw-viewer');
+    if (!el) return;
+    el.querySelector('.cw-viewer-modal')?.classList.remove('visible');
+    setTimeout(() => { el.hidden = true; }, 240);
+  }
+
+  function _load() {
+    const titleEl   = document.getElementById('cw-viewer-plant-name');
+    const countEl   = document.getElementById('cw-viewer-count');
+    const listEl    = document.getElementById('cw-viewer-list');
+    if (titleEl) titleEl.textContent = _plant || '—';
+    if (countEl) countEl.textContent = '';
+    if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading_wheel')}</div>`;
+
+    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant)}`, { signal: AbortSignal.timeout(8000) })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(body => {
+        _entries = body.entries || [];
+        // Populate file meta below title
+        const metaEl = document.getElementById('cw-viewer-meta');
+        const m = body.meta || {};
+        if (metaEl) metaEl.textContent = m.filename
+          ? `${m.filename} · ${m.row_count ?? _entries.length} colors`
+          : `${_entries.length} colors`;
+        _render();
+      })
+      .catch(err => {
+        _entries = [];
+        if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.cw_no_wheel_for_plant', { plant: _esc(_plant) })}</div>`;
+        const metaEl = document.getElementById('cw-viewer-meta');
+        if (metaEl) metaEl.textContent = err.message.includes('404') ? Util.t('empty.cw_no_file') : err.message;
+      });
+  }
+
+  function _render() {
+    const listEl  = document.getElementById('cw-viewer-list');
+    const countEl = document.getElementById('cw-viewer-count');
+    if (!listEl) return;
+
+    // Task counts per color for this plant
+    const taskCounts = {};
+    for (const t of Store.tasksArr) {
+      if (_plant && Store.getPlantForLine(t.PRODUCTION_LINE) !== _plant) continue;
+      const c = Util.norm(t.COLOR);
+      if (c && c !== 'NAN') taskCounts[c] = (taskCounts[c] || 0) + 1;
+    }
+
+    let data = _entries.slice();
+    if (_search) {
+      const s = _search.toLowerCase();
+      data = data.filter(e => String(e.color || '').toLowerCase().includes(s));
+    }
+    if (_sort === 'name') {
+      data.sort((a, b) => String(a.color || '').localeCompare(String(b.color || '')));
+    } else {
+      data.sort((a, b) => (a.order_y ?? 999999) - (b.order_y ?? 999999));
+    }
+
+    if (countEl) countEl.textContent = `${data.length} color${data.length !== 1 ? 's' : ''}`;
+
+    if (!data.length) {
+      listEl.innerHTML = `<div class="cw-viewer-empty">${_search ? Util.t('empty.cw_no_search_match') : Util.t('empty.cw_no_entries')}</div>`;
+      return;
+    }
+
+    listEl.innerHTML = data.map((e, i) => {
+      const hex    = _resolveColor(e.color || '');
+      const letter = (String(e.color || '?')[0]).toUpperCase();
+      const tc     = taskCounts[Util.norm(e.color || '')] || 0;
+      const pri    = e.order_y != null && e.order_y < 999999 ? e.order_y : '—';
+      return `<div class="cw-viewer-row">
+        <div class="cw-swatch" style="${hex ? `background:${hex}` : 'background:var(--bg-strong)'}" title="${_esc(e.color)}">
+          ${!hex ? `<span class="cw-swatch-letter">${_esc(letter)}</span>` : ''}
+        </div>
+        <div class="cw-row-body">
+          <div class="cw-row-name">${_esc(e.color)}</div>
+          <div class="cw-row-sub">
+            ${Util.t('ui.priority_label')} <strong>${pri}</strong>
+            ${tc ? `<span class="cw-row-dot">·</span><span class="cw-row-tasks">${Util.t('ui.active_orders', { count: tc, plural: tc !== 1 ? 's' : '' })}</span>` : ''}
+          </div>
+        </div>
+        <div class="cw-row-rank">#${i + 1}</div>
+        <button class="cw-row-expand" onclick="NIMBUS.ColorWheelViewer._toggleExpand(this)">▾</button>
+        <div class="cw-row-detail">
+          ${tc
+            ? `<span class="cw-detail-stat ok">${Util.t('ui.active_orders', { count: tc, plural: tc !== 1 ? 's' : '' })} ${Util.t('ui.on_plant_label')} <strong>${_esc(_plant)}</strong></span>`
+            : `<span class="cw-detail-stat mute">${Util.t('ui.no_active_for_color')}</span>`}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function _toggleExpand(btn) {
+    const row    = btn.closest('.cw-viewer-row');
+    const detail = row?.querySelector('.cw-row-detail');
+    if (!detail) return;
+    const open = detail.classList.toggle('open');
+    btn.textContent = open ? '▴' : '▾';
+  }
+
+  function search(val) {
+    _search = String(val || '').toLowerCase();
+    _render();
+  }
+
+  function sort(mode) {
+    _sort = mode;
+    document.querySelectorAll('.cw-sort-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.sort === mode)
+    );
+    _render();
+  }
+
+  return { open, close, search, sort, _toggleExpand };
+})();
+
+// VirtualList row-height const for AlertsUIAdapter's drawer (moved from
+// app.js's top-of-file const group alongside VL_HIER_LINE_H/VL_HIER_TASK_H
+// and VL_LS_ROW_H, moved in Tasks 3/4 respectively).
+const VL_ALERT_ROW_H = 72;
+
+/* =============================================================================
+   ALERTS UI ADAPTER — drawer, bell badge, cell-briefing modal remnant.
+   CQ-1 Phase 2 Task 2 moved Alerts' computation half (recompute,
+   _recomputeSync, dismiss/dismissAll/clearDismissed, applyFix, and the
+   debounced scheduleRecompute/scheduleRecomputeLines dispatcher) into
+   schedule-services.mjs, where it is imported below as `Alerts` (see the
+   bridge destructure at the top of this IIFE). Only the DOM half — the
+   alert drawer, bell badge, and cell-briefing modal — stayed here, renamed
+   from `Alerts` to `AlertsUIAdapter` (verbatim bodies) so the bare name
+   `Alerts` is free for the imported computation module. `focus`/
+   `_renderDrawer`/`_renderBell` are renamed/promoted here to `focus`/
+   `renderDrawer`/`renderBell` (now public — called from Dashboard,
+   App._renderSettingsPane, and App's `alerts:change` subscriber).
+   ========================================================================== */
+export const AlertsUIAdapter = {
+  // Jump to the task related to an alert (navigates to Gantt tab and focuses it
+  // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
+  focus(alertId) {
+    const a = Store.alerts.find(x => x.id === alertId);
+    if (!a) return;
+
+    if (!a.taskId) {
+      // Line/day-level alerts (overload, closed) carry no taskId — reuse the
+      // dashboard heatmap's line+day navigation instead of silently no-oping.
+      // Timeline.gotoLineDay already forces the Timeline sub-tab visible.
+      if (a.line && a.time) Timeline.gotoLineDay(a.line, Util.dayKey(a.time));
+      return;
+    }
+
+    NIMBUS.App.gotoGanttTimeline();
+    setTimeout(() => {
+      const t = Store.tasks[a.taskId];
+      if (!t || !Timeline._tl) return;
+      // 3-day window centered on the task's start — matches the Hour/Day/Week
+      // toolbar's "day" mode (3 × 24h) so the segmented control stays honest.
+      if (t.start_date) {
+        const center = t.start_date.getTime();
+        const start = new Date(center - 1.5 * 24 * Config.MS_HOUR);
+        const end   = new Date(center + 1.5 * 24 * Config.MS_HOUR);
+        Timeline._syncViewWindow(start.getTime(), end.getTime());
+        Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
+      }
+      Timeline._tl.setSelection([String(a.taskId)]);
+      Inspector.show(t);
+      document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === 'day');
+      });
+    }, 250);
+  },
+
+  // Open a categorized, scrollable cell-briefing modal listing the alerts for
+  // a single (line, day) cell. Triggered by clicking a red/amber alert-cell
+  // highlight on the Gantt.
+  showForCell(line, dayKey) {
+    const matches = Store.alerts.filter(a =>
+      a.line === line && a.time && Util.dayKey(a.time) === dayKey);
+    if (!matches.length) return;
+
+    const day = new Date(dayKey + 'T12:00:00');
+    const dateLabel = day.toLocaleDateString('en-US',
+      { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
+
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+
+    // -------- Cell context: scheduled hours, capacity, orders, changeovers
+    const cellTasks = Store.tasksArr
+      .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
+                && t.start_date && Util.dayKey(t.start_date) === dayKey)
+      .sort((a, b) => a.start_date - b.start_date);
+    const scheduledH = cellTasks.reduce((s, t) => s + Util.runHours(t), 0);
+    const effCap   = Calendar.effectiveCapacityHours(line, day) || 0;
+    const utilPct  = effCap > 0 ? scheduledH / effCap : 0;
+    let changeovers = 0;
+    for (let i = 1; i < cellTasks.length; i++) {
+      const a = cellTasks[i-1], b = cellTasks[i];
+      if ((a.COLOR || '') !== (b.COLOR || '') || (a.FORM_SIZE || '') !== (b.FORM_SIZE || '')) changeovers++;
+    }
+
+    // -------- Categorize alerts
+    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
+    const CAT_MAP = {
+      overload:             'capacity',
+      'near-capacity':      'capacity',
+      overlap:              'conflicts',
+      blackout:             'calendar',
+      closed:               'calendar',
+      'fixed-closed':       'calendar',
+      'fixed-out-of-hours': 'calendar',
+    };
+    const byCat = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
+    for (const a of matches) (byCat[CAT_MAP[a.type] || 'exceptions']).push(a);
+
+    const errCt  = matches.filter(a => a.sev === 'err').length;
+    const warnCt = matches.filter(a => a.sev === 'warn').length;
+    const verdict = errCt > 0
+      ? `${errCt} critical${warnCt ? ` · ${warnCt} warning${warnCt > 1 ? 's' : ''}` : ''}`
+      : `${warnCt} warning${warnCt > 1 ? 's' : ''}`;
+    const verdictSev = errCt > 0 ? 'err' : 'warn';
+
+    // -------- Per-card renderers
+    const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const taskPO = id => {
+      const t = Store.tasks?.[id];
+      return t ? (t.PRODUCTION_ORDER || t.text || String(id).slice(0, 8)) : String(id).slice(0, 8);
+    };
+    const taskFixed = id => !!Store.tasks?.[id]?.fixed;
+
+    const renderChip = (id) => `
+      <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(id)}">${esc(taskPO(id))}</span>`;
+
+    const renderCard = (a) => {
+      // Headline + right-side numeric.
+      let headline = esc(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
+      let num = '';
+      let chipsHtml = '';
+
+      if (a.type === 'overload') {
+        headline = 'Overloaded';
+        num = `<span class="ac-card-num over">${(utilPct * 100).toFixed(0)}%</span>`;
+        // Show the top contributing orders by run hours.
+        const top = cellTasks.slice().sort((x,y) => Util.runHours(y) - Util.runHours(x)).slice(0, 4);
+        if (top.length) chipsHtml = `<div class="ac-chips">${top.map(t => renderChip(t.id)).join('')}</div>`;
+      } else if (a.type === 'overlap') {
+        headline = 'Order overlap';
+        const m = a.id.match(/^ovl-(.+)-(.+)$/);
+        if (m) {
+          chipsHtml = `<div class="ac-chips">${renderChip(m[1])}<span class="ac-chip-sep">⇄</span>${renderChip(m[2])}</div>`;
+        } else if (a.taskId) {
+          chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
+        }
+      } else if (a.type === 'blackout') {
+        headline = 'Blackout violation';
+        if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
+      } else if (a.type === 'fixed-closed') {
+        headline = 'Fixed order on closed day';
+        if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
+      } else if (a.type === 'fixed-out-of-hours') {
+        headline = 'Fixed order outside work hours';
+        if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
+      } else if (a.type === 'closed') {
+        headline = 'Line closed';
+      } else if (a.type === 'near-capacity') {
+        headline = 'Near capacity';
+        num = `<span class="ac-card-num">${(utilPct * 100).toFixed(0)}%</span>`;
+      }
+
+      const gotoBtn = (a.taskId || (a.line && a.time))
+        ? `<button class="btn sm" data-act="goto" data-id="${esc(a.id)}">Go to</button>` : '';
+
+      return `
+        <div class="ac-card ${CALENDAR_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
+          <div class="ac-card-headline">
+            <span class="ac-card-sev">${sevIcon[a.sev] || '•'}</span>
+            <span>${headline}</span>
+            ${num}
+          </div>
+          <div class="ac-card-msg">${esc(a.msg)}</div>
+          ${chipsHtml}
+          <div class="ac-card-actions">
+            ${gotoBtn}
+            <button class="btn sm" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>
+          </div>
+        </div>`;
+    };
+
+    const renderCategory = (key, label, alerts) => {
+      if (!alerts.length) return '';
+      return `
+        <section class="ac-cat" data-cat="${key}">
+          <h4 class="ac-cat-head">${label} <span class="ac-count">(${alerts.length})</span></h4>
+          ${alerts.map(renderCard).join('')}
+        </section>`;
+    };
+
+    // -------- Capacity bar values
+    const fillPct = Math.min(100, utilPct * 100);
+    const overPct = utilPct > 1 ? Math.min(100, (utilPct - 1) * 100) : 0;
+
+    const dlg = document.createElement('dialog');
+    dlg.className = 'ni-briefing-dlg alertcell-dlg-v2';
+    dlg.innerHTML = `
+      <div class="ac-wrap">
+        <header class="ac-head">
+          <div class="ac-head-row">
+            <span class="ac-title">${esc(line)}</span>
+            <span class="ac-date">${dateLabel}</span>
+            <button class="ac-x" data-act="close" aria-label="${Util.t('btn.close')}">×</button>
+          </div>
+          <div class="ac-verdict ac-verdict-${verdictSev}">
+            ${errCt ? '🔴' : '🟡'} ${esc(verdict)}
+          </div>
+          <div class="ac-stats">
+            <div class="ac-stat">
+              <div class="ac-stat-num ${utilPct > 1 ? 'over' : ''}">
+                ${scheduledH.toFixed(1)}h / ${effCap.toFixed(1)}h
+              </div>
+              <div class="ac-cap-bar">
+                <div class="ac-cap-fill" style="width:${fillPct.toFixed(0)}%"></div>
+                ${overPct > 0 ? `<div class="ac-cap-over" style="width:${overPct.toFixed(0)}%"></div>` : ''}
+              </div>
+              <div class="ac-stat-sub">${(utilPct * 100).toFixed(0)}% utilization</div>
+            </div>
+            <div class="ac-stat-pair">
+              <div><span class="ac-stat-num">${cellTasks.length}</span><span class="ac-stat-lbl">orders</span></div>
+              <div><span class="ac-stat-num">${changeovers}</span><span class="ac-stat-lbl">changeovers</span></div>
+            </div>
+          </div>
+        </header>
+
+        <div class="ac-body">
+          ${renderCategory('capacity',   'Capacity',              byCat.capacity)}
+          ${renderCategory('conflicts',  'Scheduling Conflicts',  byCat.conflicts)}
+          ${renderCategory('calendar',   'Calendar Restrictions', byCat.calendar)}
+          ${renderCategory('exceptions', 'Other',                 byCat.exceptions)}
+        </div>
+
+        <footer class="ac-foot">
+          <button class="ac-dismiss-all" data-act="dismiss-all">Dismiss all on this cell</button>
+          <button class="btn btn-primary sm" data-act="close">Close</button>
+        </footer>
+      </div>`;
+    document.body.appendChild(dlg);
+    try { dlg.showModal(); } catch { dlg.open = true; }
+
+    const pruneEmptyCats = () => {
+      dlg.querySelectorAll('.ac-cat').forEach(s => {
+        if (!s.querySelector('.ac-card')) s.remove();
+      });
+    };
+
+    dlg.addEventListener('click', e => {
+      const btn = e.target.closest('[data-act]');
+      if (!btn) { if (e.target === dlg) dlg.close(); return; }
+      const act = btn.dataset.act, aid = btn.dataset.id;
+      if (act === 'close')   { dlg.close(); return; }
+      if (act === 'goto')    { dlg.close(); AlertsUIAdapter.focus(aid); return; }
+      if (act === 'dismiss') {
+        Alerts.dismiss(aid);
+        btn.closest('.ac-card')?.remove();
+        pruneEmptyCats();
+        if (!dlg.querySelector('.ac-card')) dlg.close();
+        return;
+      }
+      if (act === 'dismiss-all') {
+        matches.forEach(a => Alerts.dismiss(a.id));
+        dlg.close();
+      }
+    });
+    dlg.addEventListener('close', () => dlg.remove());
+  },
+/* ----- DRAWER ---------------------------------------------------------- */
+  toggleDrawer() {
+    const d = document.getElementById('alert-drawer');
+    if (!d) return;
+    const isOpen = d.classList.toggle('open');
+    if (isOpen) AlertsUIAdapter.renderDrawer();
+  },
+
+  _renderAlertRow(a) {
+    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
+    const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const isCalendar = CALENDAR_TYPES.has(a.type);
+    const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
+    const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
+    const override = (a.type === 'closed' || a.type === 'fixed-closed' || a.type === 'fixed-out-of-hours') && a.taskId != null;
+    return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${esc(a.id)}">` +
+      `<span class="alert-ico">${ico}</span>` +
+      `<span class="alert-msg">${esc(a.msg)}</span>` +
+      `<div class="alert-actions">` +
+        ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" onclick="NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')">${Util.t('btn.go_to')}</button>` : '') +
+        (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" onclick="NIMBUS.Alerts.applyFix('${esc(a.id)}')">${Util.t('btn.fix_it')}</button>` : '') +
+        (override ? `<button class="btn btn-ghost sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')">${Util.t('btn.override')}</button>` : '') +
+        `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismiss('${esc(a.id)}')">${Util.t('btn.dismiss')}</button>` +
+      `</div></div>`;
+  },
+
+  renderDrawer() {
+    const body = document.getElementById('alert-drawer-body');
+    if (!body) return;
+    const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
+    const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
+    // Scope to the selected plant's lines, matching Dashboard._renderAlertSummary —
+    // otherwise an alert for another plant (reachable once the compute worker has
+    // permanently fallen back to an unscoped sync recompute, see CLAUDE.md) can be
+    // shown and clicked here even though Timeline/scrollToLine can't navigate to it.
+    const plantLines = new Set(Store.linesForSelectedPlant());
+    const timeFiltered = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
+    const alerts = timeFiltered.filter(a => !a.line || plantLines.has(a.line));
+    const hiddenCount = Store.alerts.length - timeFiltered.length;
+
+    if (!alerts.length) {
+      if (AlertsUIAdapter._drawerVL) { AlertsUIAdapter._drawerVL.destroy(); AlertsUIAdapter._drawerVL = null; }
+      body.innerHTML = `<div class="empty-state" style="padding:24px;color:#888;">${Util.t('empty.no_active_alerts')}</div>`;
+      return;
+    }
+
+    if (!AlertsUIAdapter._drawerVL) {
+      body.innerHTML = '';
+      AlertsUIAdapter._drawerVL = new VirtualList(body, {
+        rowH: VL_ALERT_ROW_H,
+        renderFn: (a) => AlertsUIAdapter._renderAlertRow(a),
+        mountEl: body,
+      });
+    }
+    AlertsUIAdapter._drawerVL.update(alerts);
+
+    if (hiddenCount > 0) {
+      const hzDays = Math.max(1, Math.round(hz / 1440));
+      body.insertAdjacentHTML('beforeend',
+        `<div style="padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);">` +
+        `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.</div>`);
+    }
+  },
+/* ----- BELL BADGE ------------------------------------------------------ */
+  renderBell() {
+    const badge = document.getElementById('alert-badge');
+    const bell  = document.getElementById('alert-bell');
+    const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
+    const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
+    const visible = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
+    const n = visible.length;
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.style.display = '';
+      bell.style.color = visible.some(a => a.sev === 'err') ? 'var(--err)' : 'var(--warn-text)';
+    } else {
+      badge.style.display = 'none';
+      bell.style.color = '';
+    }
+  }
+};
+
+/* =============================================================================
+   SANDBOX ADAPTER — thin app.js UI/side-effect layer over the state-only
+   `Sandbox` module (state + snapshots now live in schedule-state.mjs). Owns
+   the DOM banner/buttons and performs the cross-module side effects that
+   used to be inline in Sandbox.exit() (Alerts recompute, Persistence save,
+   CalendarSync flush/re-hydrate, Confidence snapshot/restore, Toast
+   messages) by subscribing to the `sandbox:entered`/`sandbox:exited`
+   (and `sandbox:reverted`, fired by the undo-a-promoted-scenario path)
+   events the state module emits. This is new code, not a move — it is the
+   thin UI/cross-module layer the design's ownership map calls out as
+   belonging to `schedule-workbench.mjs` eventually; for Phase 1 it stays
+   here as a boot-wired adapter.
+   ========================================================================== */
+export const SandboxAdapter = {
+  _confSnapshot: null,
+
+  init() {
+    const banner = document.getElementById('sandbox-banner');
+    if (!banner) return;
+    banner.innerHTML = `
+      <span style="font-size:14px;">🔮</span>
+      <strong>${Util.t('ui.what_if_title')}</strong> ${Util.t('ui.what_if_sub')}
+      <input class="sb-name" id="sb-scenario-name" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
+      <div style="display:flex;gap:6px;margin-left:auto;">
+        <button class="btn btn-ghost sm" id="sb-discard-btn">${Util.t('ui.discard_btn')}</button>
+        <button class="btn btn-primary sm" id="sb-apply-btn">${Util.t('ui.promote_btn')}</button>
+      </div>`;
+    document.getElementById('sb-discard-btn')?.addEventListener('click', () => Sandbox.exit(false, 'sandbox-ui'));
+    document.getElementById('sb-apply-btn')?.addEventListener('click',  () => Sandbox.exit(true, 'sandbox-ui'));
+
+    Store.subscribe(evt => {
+      if (evt.type === 'sandbox:entered') SandboxAdapter._onEntered();
+      else if (evt.type === 'sandbox:exited') SandboxAdapter._onExited(evt);
+      else if (evt.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+    }, 'SandboxAdapter');
+  },
+
+  enter() {
+    if (Sandbox.active) { Toast.show(Util.t('toast.already_in_sandbox'), 'warn'); return; }
+    Sandbox.enter('sandbox-ui');
+  },
+
+  _onEntered() {
+    // So a discarded what-if session leaves no trace in the confidence tracker,
+    // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
+    // Captured here (not in Sandbox.enter()) at the same logical moment as before —
+    // the state module doesn't know about the cross-file Confidence module.
+    SandboxAdapter._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
+
+    document.body.classList.add('sandbox-mode');
+    const banner = document.getElementById('sandbox-banner');
+    if (banner) banner.hidden = false;
+
+    document.querySelectorAll('.sandbox-btn').forEach(btn => {
+      btn.textContent = Util.t('ui.sandbox_on');
+      btn.style.color = 'var(--warn)';
+      btn.onclick = null;
+    });
+
+    Toast.show(Util.t('toast.what_if_mode'), 'info', 1500);
+  },
+
+  _onExited(evt) {
+    const { applied, snapshot: snap } = evt;
+
+    if (applied) {
+      const scenarioName = document.getElementById('sb-scenario-name')?.value || 'What-If';
+      Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
+    } else {
+      if (NIMBUS.Confidence && SandboxAdapter._confSnapshot) NIMBUS.Confidence.restore(SandboxAdapter._confSnapshot);
+      Alerts.scheduleRecompute();
+      Toast.show(Util.t('toast.scenario_discarded'), 'info');
+    }
+    SandboxAdapter._confSnapshot = null;
+
+    document.body.classList.remove('sandbox-mode');
+    const banner = document.getElementById('sandbox-banner');
+    if (banner) banner.hidden = true;
+
+    document.querySelectorAll('.sandbox-btn').forEach(btn => {
+      btn.textContent = Util.t('ui.sandbox_off');
+      btn.style.color = '';
+      btn.onclick = () => SandboxAdapter.enter();
+    });
+
+    // Promote is an explicit user action, so persist it (cache + backend) the same
+    // way Cmd/Ctrl+S-in-sandbox already does. Runs AFTER teardown (Sandbox.active is
+    // now false) so saveAll's own Sandbox.exit(true) call no-ops — no recursion.
+    // Without this, "Scenario applied" showed but a reload before a later unrelated
+    // save lost the promoted edits (autosave is suppressed during sandbox).
+    if (applied) {
+      NIMBUS.Persistence.saveAll();
+      // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
+      // guards on Sandbox.active); push the promoted config now that active=false.
+      // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
+      // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
+      if (Store.selectedPlant) {
+        const plant = Store.selectedPlant;
+        const curLine  = new Set(Store._state.blocks.filter(b => b.plant === plant).map(b => b.id));
+        const curPlant = new Set(Store._state.plantBlocks.filter(b => b.plant === plant).map(b => b.id));
+        const removed = {
+          line:  (snap?.blocks || []).filter(b => b.plant === plant && !curLine.has(b.id)).map(b => b.id),
+          plant: (snap?.plantBlocks || []).filter(b => b.plant === plant && !curPlant.has(b.id)).map(b => b.id),
+        };
+        CalendarSync.flushPlant(plant, removed);
+      }
+    }
+
+    // If a plant-config hydration was dropped because its GET resolved mid-What-If (F2),
+    // re-apply it now that Sandbox is inactive. On DISCARD we pull backend truth (the
+    // restored snapshot is the pre-hydration cached state); on promote the user's edits
+    // were just flushed, so skip to avoid re-clobbering them.
+    const deferred = CalendarSync._deferredHydrationPlant;
+    CalendarSync._deferredHydrationPlant = null;
+    if (deferred && !applied && deferred === Store.selectedPlant) {
+      CalendarSync.fetchPlantConfig(deferred);
+    }
+  },
+
+  // Fired when the user undoes a PROMOTED (applied=true) scenario via UndoStack —
+  // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/fixedIds
+  // then emits this instead of calling Alerts/Toast directly (those are cross-module
+  // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
+  _onReverted() {
+    Alerts.scheduleRecompute();
+    Toast.show(Util.t('toast.scenario_discarded'), 'info');
+  },
+};
+
+/* =============================================================================
+   PRINTER — Order list export modal with date range selector.
+   Opens a modal with From/To date pickers, renders a filterable table of
+   orders sorted by production line then start date, and supports CSV export
+   and browser print.
+   ========================================================================== */
+export const Printer = {
+  _rows: [], // last previewed rows, used by exportCsv()
+
+  open() {
+    const scheduled = Store.tasksArr.filter(t => t.start_date && t.end_date);
+    const today = new Date();
+    let defStart = today;
+    let defEnd   = new Date(today); defEnd.setDate(today.getDate() + 7);
+    if (scheduled.length) {
+      defStart = new Date(Math.min(...scheduled.map(t => t.start_date.getTime())));
+      defEnd   = new Date(Math.max(...scheduled.map(t => t.end_date.getTime())));
+    }
+    if (!Printer._fpStart) {
+      Printer._fpStart = flatpickr('#print-start', {
+        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        altInputClass: 'input', onChange() { Printer.preview(); }
+      });
+      Printer._fpEnd = flatpickr('#print-end', {
+        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        altInputClass: 'input', onChange() { Printer.preview(); }
+      });
+    }
+    Printer._fpStart.setDate(defStart, false);
+    Printer._fpEnd.setDate(defEnd, false);
+    Modal.open('modal-print');
+    Printer.preview();
+  },
+
+  preview() {
+    const startVal = document.getElementById('print-start')?.value;
+    const endVal   = document.getElementById('print-end')?.value;
+    const host     = document.getElementById('print-results');
+    if (!host) return;
+
+    if (!startVal || !endVal) {
+      host.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">Pick a date range above.</p>';
+      return;
+    }
+
+    const rangeStart = new Date(startVal + 'T00:00:00');
+    const rangeEnd   = new Date(endVal   + 'T23:59:59');
+
+    const rows = Store.tasksArr
+      .filter(t => t.start_date && t.start_date >= rangeStart && t.start_date <= rangeEnd)
+      .sort((a, b) => {
+        const la = (a.PRODUCTION_LINE || 'Unknown'), lb = (b.PRODUCTION_LINE || 'Unknown');
+        if (la !== lb) return la.localeCompare(lb);
+        return (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0);
+      });
+
+    Printer._rows = rows;
+
+    if (!rows.length) {
+      host.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">${Util.t('empty.printer_no_orders')}</p>`;
+      return;
+    }
+
+    const pad2 = n => String(n).padStart(2, '0');
+    const fmtDt = d => {
+      if (!d) return '—';
+      return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    };
+
+    const MAX_PRINT_ROWS = 500;
+    const printRows = rows.length > MAX_PRINT_ROWS ? rows.slice(0, MAX_PRINT_ROWS) : rows;
+
+    const tbl  = document.createElement('table');
+    tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;';
+
+    const colgroup = document.createElement('colgroup');
+    const widths = ['8%', '10%', '10%', '30%', '17%', '17%', '8%'];
+    for (const w of widths) {
+      const col = document.createElement('col');
+      col.style.width = w;
+      colgroup.appendChild(col);
+    }
+    tbl.appendChild(colgroup);
+
+    const thead = document.createElement('thead');
+    const htr   = document.createElement('tr');
+    for (const h of ['Line', 'Prod. Order', 'Material', 'Description', 'Start', 'End', 'Hours']) {
+      const th = document.createElement('th');
+      th.textContent = h;
+      th.style.cssText = 'text-align:left;padding:6px 8px;border-bottom:2px solid var(--line);font-size:11px;';
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr);
+    tbl.appendChild(thead);
+
+    const tb = document.createElement('tbody');
+    printRows.forEach((t, i) => {
+      const tr = document.createElement('tr');
+      tr.style.background = i % 2 === 0 ? '' : 'var(--surface-2, #f8f7f2)';
+      const cells = [
+        t.PRODUCTION_LINE || '—',
+        t.ORDER || t.PRODUCTION_ORDER || '—',
+        t.MATERIAL_NUMBER  || '—',
+        t.MATERIAL_DESCRIPTION || t.text || '—',
+        fmtDt(t.start_date),
+        fmtDt(t.end_date),
+        Util.runHours(t).toFixed(1)
+      ];
+      for (const c of cells) {
+        const td = document.createElement('td');
+        td.textContent = c;
+        td.style.cssText = 'padding:5px 8px;border-bottom:1px solid var(--line);word-break:break-word;overflow-wrap:anywhere;vertical-align:top;';
+        tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+
+    host.textContent = '';
+    const countEl = document.createElement('p');
+    countEl.style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 8px;';
+    countEl.textContent = rows.length > MAX_PRINT_ROWS
+      ? `Showing first ${MAX_PRINT_ROWS} of ${rows.length} orders — narrow the date range for a complete export (CSV exports all rows).`
+      : `${rows.length} order${rows.length === 1 ? '' : 's'} in range`;
+    host.appendChild(countEl);
+    host.appendChild(tbl);
+  },
+
+  exportCsv() {
+    if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
+    const fmtDt = d => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
+    const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
+    const lines = [
+      headers.join(','),
+      ...Printer._rows.map(t => [
+        t.PRODUCTION_LINE || '',
+        t.ORDER || t.PRODUCTION_ORDER || '',
+        t.MATERIAL_NUMBER  || '',
+        (t.MATERIAL_DESCRIPTION || t.text || '').replace(/,/g, ';'),
+        fmtDt(t.start_date),
+        fmtDt(t.end_date),
+        Util.runHours(t).toFixed(1)
+      ].join(','))
+    ];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.download = `nimbus-orders-${Util.dayKey(new Date())}.csv`;
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    URL.revokeObjectURL(a.href);
+  },
+
+  print() {
+    window.print();
+  }
 };

@@ -14,26 +14,6 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.dismiss('${esc(a.id)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
       "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
     },
     {
@@ -55,11 +35,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.ColorWheelViewer._toggleExpand(this)"
     },
     {
       "file": "app.js",
@@ -704,7 +679,32 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
+      "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Alerts.dismiss('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
       "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer._toggleExpand(this)"
     },
     {
       "file": "schedule-workbench.mjs",
