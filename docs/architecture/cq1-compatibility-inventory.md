@@ -1,5 +1,75 @@
 # CQ-1 Compatibility Inventory
 
+## CQ-1 status: COMPLETE (as of Phase 4 Task 7), with one deliberately deferred item
+
+All four phases of the CQ-1 frontend module migration are committed. The
+monolithic `app.js` has been replaced by seven real, coarse ES modules, each
+with a single clear owner, bridged into the classic-script world via
+`app-entry.mjs` and `window.__NIMBUS_*`:
+
+| File | Lines | Owns |
+|---|---:|---|
+| `application-foundation.mjs` | 1,118 | Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal |
+| `schedule-state.mjs` | 811 | Store, Selection, UndoStack, Sandbox |
+| `schedule-services.mjs` | 1,426 | Calendar (capacity math), Compute, Alerts (computation), Utilization, Engine |
+| `schedule-data.mjs` | 1,734 | Persistence, CalendarSync, Session |
+| `schedule-workbench.mjs` | 7,517 | Timeline, Table, Inspector, Hierarchy, Dashboard, TimelineNav, GanttFilter, DependencyOverlay, ContextMenu, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter |
+| `plant-and-administration.mjs` | 6,916 | CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit |
+| `application-shell.mjs` | 1,552 | SessionUIAdapter, showLoginScreen, PlantSelector, WelcomeSplash, EmptyState, App, Settings |
+
+`web/app.js` is now 731 lines and contains **no module bodies of its own** —
+only the `NimbusComputeCore` guard, the seven-bridge destructure, the DI-seam
+wiring (`Persistence.setCalendarService`, `setActiveTabResolvers`,
+`Util`/`ErrorLog`/`Store` resolver injections), `_bootMain()`/
+`_domReadyGate()` boot orchestration, and the final compatibility `return
+{...}` namespace `index.html`'s inline handlers and `nimbus-intelligence.js`
+still read. `web/app-entry.mjs` (103 lines) imports and bridges all seven.
+`nimbus-intelligence.js` (2,321 lines) remains a classic script — a
+deliberate, documented constraint (it accesses `NIMBUS` as a bare identifier
+via classic-script shared lexical scope; converting it to `type="module"`
+would sever that, and a full intelligence-layer rewrite was never in this
+migration's scope) — but its two runtime monkey-patches (`UndoStack.push`,
+`Alerts.recompute` reassignment) are gone, replaced by `Store` event
+subscriptions (Phase 4 Task 5). `grep -n "UndoStack\.push\s*=\|Alerts\.recompute\s*="
+web/nimbus-intelligence.js` returns zero matches, confirmed at Task 7.
+
+**§6 is NOT empty — this corrects an inaccurate claim in this phase's own
+plan text.** This phase's Global Constraints stated "this phase closes the
+final 3 rows... after Task 6, that table should be empty," and Task 7's own
+Step 1 instruction says to confirm §6 is empty. Neither is true at the close
+of Phase 4: §6 carries **2 open rows** — `Plant` (one
+`Store._state.masterData?.plants?.find(...)` read inside
+`_renderSettingsPane`, carried over verbatim when the method relocated from
+`App` in Task 1) and `LaborPlanning` (six `Store._state.masterData` reads,
+carried over verbatim when the module moved in Task 2). Both rows were added
+*by* Tasks 1 and 2 respectively, after each task's own move — neither was
+anticipated by the Global Constraints' 3-row enumeration (`MasterData`, `App`,
+`nimbus-intelligence.js`), and Task 6's own Step 1 instruction named only
+`app.js` and `nimbus-intelligence.js` as its reading targets, not
+`plant-and-administration.mjs`. Followed literally, Task 6 closed exactly the
+2 rows it named (`app.js (_bootMain)` and `nimbus-intelligence.js`) and left
+these 2 open — see the "§6 status after Phase 4 Task 6" note below for the
+detailed reconciliation. This report states that plainly rather than
+overwriting the table's own accurate record to match the plan's inaccurate
+prediction. Both remaining rows have a known, trivial fix available (the same
+`Store.masterData` public getter already used to close every other row in
+this table) — closing them is small, well-scoped follow-up work, not an
+architectural gap requiring a new seam.
+
+**§7 (inline-handler backlog) stands at 91,** down from the 123 present at
+the start of this phase — deliberately incomplete by this migration's own
+Global Constraints, tracked in full in §7 below, and the acknowledged blocker
+to ever promoting the new Report-Only CSP (§7's closing paragraphs, `index.html`)
+to enforcing mode.
+
+See §8 at the end of this document for the full, honest accounting against
+`docs/superpowers/specs/2026-07-16-cq1-frontend-module-migration-design.md`'s
+"Verification and completion" paragraph — including the criteria this
+migration does **not** fully satisfy (inline-handler elimination, `hydrate`
+mode, global-ID-uniqueness enforcement) and what each would take to close.
+
+---
+
 **Phase 1 status (complete):** `application-foundation.mjs` (Config, Util,
 PerfMonitor, VirtualList, ErrorLog, Toast, Modal) and `schedule-state.mjs`
 (Store, Selection, UndoStack, Sandbox) are real ES modules, bridged into
@@ -1162,3 +1232,86 @@ immediately report violations for every legitimate existing page load.
 an actual collection endpoint (and, eventually, promoting the policy to
 enforcing once the table above reaches zero) is a follow-up beyond this
 task's scope, not part of Task 6.
+
+---
+
+## 8. CQ-1 Completion — Final Criteria Report (Phase 4 Task 7)
+
+This section is the whole-migration completion gate, checked against
+`docs/superpowers/specs/2026-07-16-cq1-frontend-module-migration-design.md`'s
+own "Verification and completion" paragraph — not against this plan's stated
+intentions. Each criterion below is reported honestly: fully met, partially
+met, or not met, with what closing the gap would take.
+
+| Criterion (design doc's own wording) | Status | Evidence / gap |
+|---|---|---|
+| "`app.js` is gone or a documented small launcher" | **Met** | `web/app.js` is 731 lines: `NimbusComputeCore` guard, 7-bridge destructure, DI-seam wiring, `_bootMain`/`_domReadyGate`, final `return {...}`. Grep for `const ModuleName = {`/`(function`/`(() =>` across all ~51 extracted names returns zero matches (see the "grep for module names" note below) — no module body remains. |
+| "the seven files are clear owners" | **Met** | §1's ownership map assigns every one of the 14 tracked modules (plus `Settings`) to exactly one of the seven files; `scripts/legacy-surface.mjs`/`check:static-assets` confirm no cross-file duplication or leakage. |
+| "no task API assumes global ID uniqueness" | **Not met — deliberately deferred, unchanged since Phase 1.** | `Store.tasks`/`Store.tasksArr` remain keyed by the bare MD5 `id` (no `getTask({plant,id})` exists anywhere in `schedule-state.mjs`); only `Selection.selectedRefs()` returns `{plant,id}` pairs. §3 has said this since Phase 1 and it is still true: `make_id()` (`db.py`) excludes plant from the hash, so a reused line code across plants can still collide. Closing this needs the separate business-key migration tracked in `MIGRATION.md → task-id` (a `make_id` plant-arg change plus a `Store` re-key), out of CQ-1's scope by design. |
+| "live/draft/hydrate semantics are isolated" | **Partially met.** | `Store.mode()` exists and correctly distinguishes `'live'` vs `'draft'` (`Sandbox.active`) at every emit — draft mutations never write remotely (`Sandbox`'s own state, promote-then-Save flow unchanged). But a distinct `'hydrate'` mode was **never implemented** — `mode()` has exactly two possible return values, not three, despite the design doc naming `hydrate` as a mode alongside `live`/`draft`. Hydration today is a plain `Store.setTasks`/`replace*` call sequence plus a `schedule:hydrated` event, with no dedicated in-flight-hydration flag guarding it from a concurrent draft. Confirmed no regression (Contract 8, "Hydration cannot overwrite an active draft," has no code path that hydrates while `Sandbox.active` is true in current usage), but the three-mode isolation the design doc specifies is not literally built. |
+| "late async results cannot overwrite a newer plant/revision" | **Met** | `Alerts.recompute`'s worker path captures `reqRev = Store.rev()` before posting and checks `Store.rev() !== reqRev` on resolve (`schedule-services.mjs`); the utilization prewarm path does the same, keyed additionally on `plant`. `Store.emit()` bumps `_rev` unconditionally on every mutation, including `plant:selected`, so a plant switch is itself a revision bump — the rev-only check also catches a stale cross-plant response. |
+| "worker/core parity remains green" | **Met** | `tests/js/*.test.js` (the legacy CommonJS compute-core/timezone suite) is unmodified across all 4 phases and passes (`npm run test:legacy`, part of the 104-test `npm test` green run at Task 7). |
+| "intelligence no longer monkey-patches behavior" | **Met** | Phase 4 Task 5. `grep -n "UndoStack\.push\s*=\|Alerts\.recompute\s*=" web/nimbus-intelligence.js` returns zero matches; both are now `Store.subscribe` callbacks. |
+| "inline compatibility is removed" | **Not met — deliberately incomplete, quantified, not silently dropped.** | 91 static `index.html` `onclick=`/`onchange=` attributes remain (down from 123 at the start of this phase) — see §7's full by-module table. This was an explicit, up-front scope decision (this phase's own Architecture point 5: converting all 123 in one pass was judged the single riskiest, least-tested change in the whole migration), not an oversight. Closing this needs a dedicated follow-up phase converting the remaining `OptimizeDialog`(25)/`EditCalendar`(14)/`Table`(11)/`Modal`(9) chrome plus the smaller remainder to real listeners, one module at a time, the same pattern this migration used throughout. |
+| "the container reliably ships a coherent module graph" | **Unverified — no Docker/browser environment available in this session, and (see below) this gate has never actually been exercised in any of CQ-1's 4 phases.** | `npm run check:static-assets` (import-closure/no-backend-leak check) is green, and the Node-level static-import-closure tests pass, but neither substitutes for the real browser-boot/container smoke test the design doc's own completion criterion asks for. Flagged prominently below. |
+
+**Grep for extracted module names across `web/app.js` — a literal reading of
+this phase's own gate instruction does not hold, reported rather than
+silently reinterpreted.** Task 7's gate literally says to grep `web/app.js`
+for the ~51 module names extracted across all 4 phases and "expect zero
+matches." Run literally, every one of the 51 names has multiple bare-word
+matches in `app.js` (e.g. `Store` × 34, `App` × 35, `Session` × 16) — this is
+expected and correct, not a failure: `app.js` is the launcher that
+*references* every module by its bridged binding (the 7-bridge destructure)
+and *calls* its `.init()`/methods from `_bootMain()`/the DI-seam wiring/the
+final `return {...}`; a launcher with zero references to the things it
+launches would be useless. The gate's actual intent — confirmed by cross-
+checking it against the design doc's real completion criterion ("`app.js` is
+gone or a documented small launcher") — is that no module **body**
+(`const ModuleName = { ... }` / `= (function () {...})()` / `= (() => {...})()`
+declarations) remains. That check *does* return zero matches for all 51
+names (verified via `grep -Ec "const ${name} = (\{|\(function|\(\(\) =>)"`
+against every one), confirmed at Task 7. This document records the
+distinction rather than reporting a false "zero matches" against the
+literal, impossible-to-satisfy instruction.
+
+**Docker/browser boot smoke test — never run across any of CQ-1's 4
+phases.** This is flagged prominently per this phase's own explicit
+instruction ("this is the last chance in CQ-1 to actually exercise this, flag
+it prominently if it's still never been run by the time this phase closes").
+Checking every phase's own plan file:
+- **Phase 0:** "Build smoke: `docker build...`. If Docker is unavailable,
+  record that as an unverified environment gate" — the plan's own completion
+  checklist item ("Run container/static smoke when Docker is available")
+  was left unchecked (`- [ ]`), with no retroactive note added.
+- **Phase 1:** Same unchecked pattern (`- [ ] Docker/browser boot smoke test`,
+  `- [ ] Docker/browser smoke test run if available this session`).
+- **Phase 2:** Same (`- [ ] Docker/browser boot smoke test if available`).
+- **Phase 3:** The only phase that retroactively documented this — its own
+  plan text states plainly: "**Not run — recorded as an unverified
+  environment gate, not a pass.** No Docker/browser environment was
+  available during this phase's execution sessions... the original gate was
+  silently left unchecked with no explanation [until this retroactive note]."
+  Phase 3 also flagged that `npm test` passing is not a substitute, since the
+  Node VM harness (`load-legacy-app.mjs`) cannot populate a real `NIMBUS`
+  global and so cannot exercise `schedule-workbench.mjs`'s `NIMBUS.X` forward
+  references at all.
+- **Phase 4 (this phase, Task 7):** `docker --version` was attempted in this
+  execution's environment and returned "command not found" — Docker is
+  unavailable in this session too. This is therefore recorded as an
+  unverified environment gate, consistent with Phases 0-2's precedent and
+  Phase 3's explicit retroactive note.
+
+**Net: the real-browser/container boot path — `app-entry.mjs`'s dynamic
+`<script>` injection sequence, the classic-script hand-off to `app.js` then
+`nimbus-intelligence.js`, real `<script type="module">` timing, the
+version-guard redirect, and a live click-through of login → plant selection →
+Gantt Timeline → Save — has never been exercised by a real browser or a
+built container at any point across all four phases of CQ-1.** Every other
+gate in this document (ESLint, the 104-test Node suite, the legacy-surface
+contract diff, the static-import-closure check, the offline pytest suite) is
+green and gives real confidence in the pieces it can reach, but none of them
+substitutes for this one. This is the single largest verification gap CQ-1
+closes with, and it should be the first thing run — by whoever has a Docker
+environment available — before this branch is promoted to `main` or shipped
+via the `promote-azure` skill.

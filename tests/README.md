@@ -50,6 +50,26 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
   corrected, the behavior was not changed). `load-legacy-app.mjs`'s VM
   harness bridges `window.__NIMBUS_WORKBENCH` the same way as the Phase 1/2
   bridges, for the legacy-app characterization suite.
+- `plant-and-administration.test.mjs` — plain ESM `import` shape tests for
+  `plant-and-administration.mjs` (`CalendarUI`, `Plant`, `ProdLines`,
+  `MasterData`, `LaborPlanning`, `Interface`, `Security`, `AdminCockpit`), the
+  Phase 4 Task 1-3 module — no VM sandbox needed, a real native module.
+  `load-legacy-app.mjs`'s VM harness bridges `window.__NIMBUS_PLANT_ADMIN`
+  the same way as the earlier bridges.
+- `application-shell.test.mjs` — plain ESM `import` shape tests for
+  `application-shell.mjs` (`SessionUIAdapter`, `showLoginScreen`,
+  `PlantSelector`, `WelcomeSplash`, `EmptyState`, `App`, `Settings`), the
+  Phase 4 Task 4 module and the seventh and final CQ-1 file — asserts
+  `App._renderSettingsPane` is `undefined` on this module (relocated to
+  `Plant` in Task 1, not carried here). `load-legacy-app.mjs`'s VM harness
+  bridges `window.__NIMBUS_SHELL` the same way as the earlier bridges.
+
+**CQ-1 complete (all 4 phases):** all seven `.mjs` module files above are now
+real ES modules with their own shape/behavior test files; `app.js` is a
+731-line launcher with no module bodies of its own. See
+`docs/architecture/cq1-compatibility-inventory.md` for the full ownership map
+and the honest final-criteria report (§8) — including the one gate never
+run in any of the four phases: a real Docker/browser boot smoke test.
 
 ## Backend tests (`tests/*.py`)
 

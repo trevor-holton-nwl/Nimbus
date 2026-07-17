@@ -2,6 +2,32 @@
 
 **Status:** Approved for implementation on 2026-07-16.
 
+**Status: CQ-1 complete as of Phase 4 Task 7 (commit closing "docs: close out
+CQ-1 — all four phases of the frontend module migration complete").** All
+four phases landed; the seven modules below are real, `app.js` is the
+documented small launcher this doc's own completion bar describes, and
+`nimbus-intelligence.js` no longer monkey-patches `UndoStack.push`/
+`Alerts.recompute`. One known, deliberate gap remains, quantified rather than
+silently closed: **91 static inline event-handler attributes** still exist in
+`index.html` (down from 123 at the start of Phase 4) — full elimination was
+explicitly out of this migration's scope (converting all of them in one pass
+was judged the single riskiest, least-tested change available), and it
+remains the blocker to promoting the new Report-Only CSP to an enforcing one.
+Two further caveats, so this note doesn't read as more complete than the
+repository actually is: global task-ID uniqueness is **not** enforced (task
+lookups are still keyed by the bare, plant-blind MD5 id — see this doc's own
+`schedule-state.mjs` section and `MIGRATION.md → task-id`), and a distinct
+`hydrate` transactional mode was **never implemented** (`Store.mode()` has
+exactly two values, `'live'`/`'draft'`, not three). See
+`docs/architecture/cq1-compatibility-inventory.md` §8 for the full,
+criterion-by-criterion report against this document's own "Verification and
+completion" paragraph below, including that the Docker/browser boot smoke
+test this section calls for has never actually been run in any of CQ-1's
+four phases (no Docker/browser environment was available in any execution
+session) — this is the largest outstanding verification gap and should be
+the first thing exercised, by whoever has a Docker environment, before this
+branch ships.
+
 **Source decision:** This committed design carries the approved architecture from the workspace-level `Module_migration.md` into the isolated CQ-1 branch. The migration is a behavior-preserving architecture change; it is not a framework rewrite, bundler adoption, or scheduling-algorithm redesign.
 
 ## Goal
