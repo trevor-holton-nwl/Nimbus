@@ -969,7 +969,7 @@
     "RipplePreview._ghosts",
     "RipplePreview._lastId",
     "RipplePreview._show",
-    "Session._renderSettingsPanes",
+    "SessionUIAdapter._renderSettingsPanes",
     "Store._rev",
     "Store._state",
     "Table._clearChipFilters",

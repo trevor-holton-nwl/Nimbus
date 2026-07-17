@@ -35,6 +35,18 @@
    an injected seam (`Persistence.setCalendarService`, wired below) and a
    Store event (`schedule:hydrated`, subscribed to once in schedule-services.mjs)
    respectively — schedule-data.mjs still never imports schedule-services.mjs.
+   CQ-1 Phase 2 Task 5 moved Session's pure state/API half into the same
+   schedule-data.mjs module (window.__NIMBUS_DATA):
+     Session (currentUser/actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/
+              signIn/signOut/refresh/onAuthDenied/updateCachedUser)
+                       — now defined in schedule-data.mjs
+   Session's DOM/settings-pane half (~600 lines: gates, the user-settings
+   modal, profile/password self-service, personalization/workflow panes)
+   stayed here, renamed `SessionUIAdapter` — mirrors the Phase 1
+   Sandbox/SandboxAdapter split exactly. `signIn`/`signOut`/`refresh` now emit
+   `{type:'session:changed', kind}` instead of calling `_applyGates()`/DOM code
+   inline; `SessionUIAdapter.init()` (called from `_bootMain()`, alongside
+   `SandboxAdapter.init()`) is the sole subscriber.
    See docs/architecture/cq1-compatibility-inventory.md §1 for the full
    ownership map, including where the modules below are headed in Phase 2-4.
 
@@ -44,6 +56,9 @@
      AlertsUIAdapter    — alert drawer / bell badge / cell-briefing modal
                          remnant (computation moved to schedule-services.mjs's
                          Alerts)
+     SessionUIAdapter   — session gates / user-settings modal / profile /
+                         password self-service remnant (pure state/API moved
+                         to schedule-data.mjs's Session)
      Timeline          — vis-timeline integration (groups/items + diff rebuild)
      Table             — AG Grid integration (inline edit, filter, bulk ops)
      Inspector         — right-side detail panel
@@ -83,7 +98,7 @@ const NIMBUS = (function () {
   const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
   const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
-  const { Persistence, CalendarSync } = window.__NIMBUS_DATA;
+  const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
   // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
   // statically import schedule-services.mjs — see that file's header). Arrow-function
   // wrappers, not bare method references: Calendar's methods read `this._runCache`/
@@ -3402,94 +3417,68 @@ const NIMBUS = (function () {
   })();
 
   /* =============================================================================
-     SESSION — mandatory-login client session. Backed by localStorage (mirrors the
-     LangSwitcher get/set idiom in nimbus-intelligence.js), never the backend —
-     the backend is the source of truth for the password check (POST /security/login);
-     once authenticated, the session is just { username, role } cached locally so a
-     page reload doesn't force a re-login.
-       Session.currentUser()  — { username, role } | null
-       Session.actor()        — username for X-User/x-user-email headers, else 'system'
-       Session.isAdmin()      — true iff current user's role === 'admin'
-       Session.signIn(u, p)   — POST /security/login; persists session + re-applies gates
-       Session.signOut()      — clears session, re-applies gates, reloads the page
-       Session._applyGates()  — re-hides the Admin tab button / header user-settings button /
-                                 error-log badge for non-admins; called after sign-in/out and once
-                                 at boot (from _bootMain) so a resumed session re-gates too.
+     SESSION UI ADAPTER — DOM/settings-pane remnant of the mandatory-login client
+     session (CQ-1 Phase 2 Task 5). Session's pure state/API half (currentUser/
+     actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/signIn/signOut/refresh/
+     onAuthDenied/updateCachedUser) moved to schedule-data.mjs, bridged in as the
+     `Session` const above. This adapter owns everything that touches the DOM:
+     gates (Admin tab visibility, header user-settings button, error-log badge),
+     the User Settings modal (tab switching, Personalization/Workflow panes,
+     Profile self-service, password change), all built on top of Session's
+     public API. Mirrors the Phase 1 Sandbox/SandboxAdapter split exactly:
+     `Session.signIn`/`signOut`/`refresh` now emit `{type:'session:changed', kind}`
+     instead of calling `_applyGates()`/DOM code inline; `SessionUIAdapter.init()`
+     (called once from `_bootMain()`, alongside `SandboxAdapter.init()`) is the
+     sole subscriber.
+       SessionUIAdapter.init()        — subscribe to session:changed (call once, at boot)
+       SessionUIAdapter._applyGates() — re-hides the Admin tab button / header
+                                         user-settings button / error-log badge for
+                                         non-admins; called after every session:changed
+                                         AND once explicitly at boot (see _bootMain) so
+                                         a resumed cached session (which never fires
+                                         signIn(), so never emits) re-gates too.
      ========================================================================== */
-  const Session = (() => {
-    const KEY = 'nimbus.session';
+  const SessionUIAdapter = {
+    init() {
+      Store.subscribe(evt => {
+        if (evt.type !== 'session:changed') return;
+        SessionUIAdapter._applyGates();
+        if (evt.kind === 'refresh') {
+          // Mirrors the pre-split refresh()'s own DOM-adjacent tail exactly — Session
+          // (schedule-data.mjs) only reports the FACTS (isAdmin(), plantAccessChanged);
+          // every actual DOM/tab-navigation effect happens here.
+          try { if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions(); } catch {}
+          // If we just lost admin while sitting on the Admin tab, leave it.
+          if (!Session.isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
+            try { App.goto('home'); } catch {}
+          }
+          try {
+            if (evt.plantAccessChanged) Toast.show(t('sec.plant_access_changed'), 'warn');
+            if (typeof PlantSelector !== 'undefined') PlantSelector._reflectSelection();
+          } catch {}
+        }
+      }, 'SessionUIAdapter');
+    },
 
-    function currentUser() {
-      try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; }
-    }
-
-    function actor() {
-      const u = currentUser();
-      return u ? u.username : 'system';
-    }
-
-    function isAdmin() {
-      const u = currentUser();
-      // Prefer the reconciled is_admin flag (set by refresh() from GET /security/me,
-      // which mirrors the backend's require_admin grace) and fall back to the role
-      // cached at login for sessions that predate a refresh.
-      return !!u && (u.is_admin === true || u.role === 'admin');
-    }
-
-    // null = unrestricted (every plant); array = the caller's role_plants scope.
-    // Mirrors isAdmin()'s fallback posture: trusts whatever was last cached
-    // (login or refresh()) rather than blocking on a fresh network call.
-    function allowedPlants() {
-      const u = currentUser();
-      return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
-    }
-
-    async function signIn(username, password) {
-      const res = await fetch(`${Config.API_BASE}/security/login`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.detail || 'Invalid username or password');
-      }
-      const data = await res.json();
-      // Per-user settings + role defaults are the authoritative DB blobs; the
-      // login response may not carry them (only GET /security/me is guaranteed to),
-      // so default to {} and let refresh() fill them from /security/me at boot.
-      const settings = data.settings || {};
-      const roleSettings = data.role_settings || {};
-      localStorage.setItem(KEY, JSON.stringify({
-        username: data.username, role: data.role,
-        allowed_plants: data.allowed_plants ?? null,
-        first_name: data.first_name || null, last_name: data.last_name || null,
-        settings, role_settings: roleSettings,
-      }));
-      Store.setUserSettings(settings, 'session-signin');
-      Store.setRoleDefaults(roleSettings, 'session-signin');
-      _applyGates();
-      return data;
-    }
-
-    function signOut() {
-      localStorage.removeItem(KEY);
-      _applyGates();
-      location.reload();
-    }
+    _applyGates() {
+      const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+      if (adminBtn) adminBtn.hidden = !Session.isAdmin();
+      SessionUIAdapter._renderUserButton();
+      try { ErrorLog.renderBadge(); } catch {}
+    },
 
     // Populates/hides the header user-settings icon button (#user-settings-btn, static
     // markup in index.html) and wires its click (once) to open the User Settings modal.
-    function _renderUserButton() {
+    _renderUserButton() {
       const btn = document.getElementById('user-settings-btn');
       if (!btn) return;
-      const u = currentUser();
+      const u = Session.currentUser();
       btn.hidden = !u;
       if (!u) return;
       if (!btn._wired) {
         btn._wired = true;
         btn.addEventListener('click', () => {
-          const current = currentUser();
+          const current = Session.currentUser();
           if (!current) return;
           const signedInEl = document.getElementById('us-signed-in-as');
           const roleEl = document.getElementById('us-role');
@@ -3501,24 +3490,24 @@ const NIMBUS = (function () {
           if (lastEl) lastEl.value = current.last_name || '';
           // Build the Personalization / Workflow controls fresh so they reflect
           // the current resolved prefs each time the modal opens.
-          try { _renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${e.message}`); }
+          try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${e.message}`); }
           Modal.open('modal-user-settings');
         });
       }
       const signOutBtn = document.getElementById('us-signout-btn');
       if (signOutBtn && !signOutBtn._wired) {
         signOutBtn._wired = true;
-        signOutBtn.addEventListener('click', signOut);
+        signOutBtn.addEventListener('click', Session.signOut);
       }
       const saveBtn = document.getElementById('us-save-btn');
       if (saveBtn && !saveBtn._wired) {
         saveBtn._wired = true;
-        saveBtn.addEventListener('click', saveProfile);
+        saveBtn.addEventListener('click', SessionUIAdapter.saveProfile);
       }
       const changePwBtn = document.getElementById('us-change-password-btn');
       if (changePwBtn && !changePwBtn._wired) {
         changePwBtn._wired = true;
-        changePwBtn.addEventListener('click', changePassword);
+        changePwBtn.addEventListener('click', SessionUIAdapter.changePassword);
       }
       // Wire the User Settings tab bar (Personalization / Workflow / Profile).
       // _renderSettingsPanes() populates the Personalization/Workflow panes on
@@ -3526,13 +3515,13 @@ const NIMBUS = (function () {
       document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(tabBtn => {
         if (tabBtn._wired) return;
         tabBtn._wired = true;
-        tabBtn.addEventListener('click', () => _showUserTab(tabBtn.getAttribute('data-us-tab')));
+        tabBtn.addEventListener('click', () => SessionUIAdapter._showUserTab(tabBtn.getAttribute('data-us-tab')));
       });
-    }
+    },
 
     // Toggle the active User Settings tab: highlight the button and reveal only
     // the matching pane (#us-tab-<name>). Names mirror Settings category ids.
-    function _showUserTab(name) {
+    _showUserTab(name) {
       document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(b => {
         b.classList.toggle('active', b.getAttribute('data-us-tab') === name);
       });
@@ -3540,23 +3529,23 @@ const NIMBUS = (function () {
         const body = document.getElementById('us-tab-' + n);
         if (body) body.hidden = (n !== name);
       });
-    }
+    },
 
     /* ── Personalization + Workflow panes (Phase-1 self-service settings) ─────
        Rebuilt each time the modal opens so every control reflects the current
        resolved pref (Store.pref = user ?? role ?? system default). Labels use
        t() inline — App.init()'s one-shot [data-i18n] sweep never runs over these
-       dynamically-inserted nodes. Each control persists via setPref() and, where
-       it changes the running app, applies the effect immediately. */
-    function _optTag(value, label, selected) {
+       dynamically-inserted nodes. Each control persists via Session.setPref()
+       and, where it changes the running app, applies the effect immediately. */
+    _optTag(value, label, selected) {
       const v = String(value);
       return `<option value="${v}"${v === String(selected) ? ' selected' : ''}>${label}</option>`;
-    }
+    },
 
     // Repaint the display surfaces whose datetime labels are baked at render time,
     // so a timeFormat/dateFormat change is reflected without waiting for the next
     // natural re-render. Best-effort — never throws into the change handler.
-    function _repaintDisplayFormat() {
+    _repaintDisplayFormat() {
       if (typeof NIMBUS === 'undefined') return;
       // Timeline bar tooltips + blackout titles are baked at build time.
       try { if (NIMBUS.Timeline?.rebuild) NIMBUS.Timeline.rebuild(); } catch {}
@@ -3573,50 +3562,51 @@ const NIMBUS = (function () {
           if (task) NIMBUS.Inspector._render(task);
         }
       } catch {}
-    }
+    },
 
-    function _htmlEsc(s) {
+    _htmlEsc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
+    },
 
     // Landing-view tab choices (admin tab only for admins) and their sub-views.
-    function _landingTabDefs() {
+    _landingTabDefs() {
       const defs = [
         ['home',       t('tab.home')],
         ['gantt',      t('tab.gantt')],
         ['labor',      t('us.tab_labor')],
         ['masterdata', t('tab.masterdata')],
       ];
-      if (isAdmin()) defs.push(['admin', t('tab.admin')]);
+      if (Session.isAdmin()) defs.push(['admin', t('tab.admin')]);
       return defs;
-    }
-    function _landingSubDefs(tab) {
+    },
+    _landingSubDefs(tab) {
       if (tab === 'gantt')      return [['timeline', t('us.landing_timeline')], ['orders', t('tab.table')]];
       if (tab === 'masterdata') return [['lines', t('tab.production_lines')], ['plant', t('tab.plant')]];
       return null;   // home / labor / admin land on the tab with no sub-view here
-    }
+    },
 
     // Render the small removable list of pinned values below a pinned combobox.
-    function _renderPinnedList(listEl, key) {
+    _renderPinnedList(listEl, key) {
       if (!listEl) return;
-      const items = (pref(key) || []).slice();
+      const items = (Session.pref(key) || []).slice();
       if (!items.length) {
         listEl.innerHTML = `<div class="us-pinned-empty">${t('us.pinned_none')}</div>`;
         return;
       }
       listEl.innerHTML = items.map(v => {
-        const safe = _htmlEsc(v);
+        const safe = SessionUIAdapter._htmlEsc(v);
         return `<span class="us-pinned-item"><span class="us-pinned-name">${safe}</span>` +
           `<button type="button" class="us-pin-remove" data-val="${safe}" title="${t('us.pin_remove')}" aria-label="${t('us.pin_remove')}">×</button></span>`;
       }).join('');
-    }
+    },
 
     /* Searchable pin picker (scale-safe — never a chip selector). optionsFn()
        supplies the full candidate list; already-pinned values are filtered out.
-       Choosing appends to pref(key) via setPref; the removable list handles unpin.
-       afterChange() lets the caller refresh the affected surface immediately. */
-    function _initPinnedCombo({ inputId, dropdownId, listId, key, optionsFn, noneMsg, afterChange }) {
+       Choosing appends to Session.pref(key) via setPref; the removable list
+       handles unpin. afterChange() lets the caller refresh the affected surface
+       immediately. */
+    _initPinnedCombo({ inputId, dropdownId, listId, key, optionsFn, noneMsg, afterChange }) {
       const input    = document.getElementById(inputId);
       const dropdown = document.getElementById(dropdownId);
       const listEl   = document.getElementById(listId);
@@ -3633,15 +3623,15 @@ const NIMBUS = (function () {
       };
       const add = (val) => {
         if (val == null) return;
-        const cur = pref(key) || [];
-        if (!cur.includes(val)) setPref(key, [...cur, val]);
+        const cur = Session.pref(key) || [];
+        if (!cur.includes(val)) Session.setPref(key, [...cur, val]);
         input.value = '';
-        _renderPinnedList(listEl, key);
+        SessionUIAdapter._renderPinnedList(listEl, key);
         close();
         try { afterChange && afterChange(); } catch {}
       };
       const renderList = (query) => {
-        const already = new Set(pref(key) || []);
+        const already = new Set(Session.pref(key) || []);
         const all = (optionsFn() || []).filter(o => !already.has(o));
         const q = (query || '').trim().toLowerCase();
         filtered = q ? all.filter(o => o.toLowerCase().includes(q)) : all.slice();
@@ -3651,7 +3641,7 @@ const NIMBUS = (function () {
           return;
         }
         dropdown.innerHTML = filtered.map((o, i) => {
-          const safe = _htmlEsc(o);
+          const safe = SessionUIAdapter._htmlEsc(o);
           return `<div class="us-combo-option" role="option" data-val="${safe}" data-idx="${i}"><span>${safe}</span></div>`;
         }).join('');
         activeIdx = 0;
@@ -3675,49 +3665,49 @@ const NIMBUS = (function () {
       });
       input.addEventListener('blur', () => setTimeout(close, 120));
 
-      _renderPinnedList(listEl, key);
+      SessionUIAdapter._renderPinnedList(listEl, key);
       listEl.addEventListener('click', e => {
         const btn = e.target.closest('.us-pin-remove');
         if (!btn) return;
         const val = btn.dataset.val;
-        setPref(key, (pref(key) || []).filter(x => x !== val));
-        _renderPinnedList(listEl, key);
+        Session.setPref(key, (Session.pref(key) || []).filter(x => x !== val));
+        SessionUIAdapter._renderPinnedList(listEl, key);
         try { afterChange && afterChange(); } catch {}
       });
-    }
+    },
 
-    function _renderSettingsPanes() {
-      _renderPersonalizationPane();
-      _renderWorkflowPane();
-    }
+    _renderSettingsPanes() {
+      SessionUIAdapter._renderPersonalizationPane();
+      SessionUIAdapter._renderWorkflowPane();
+    },
 
-    function _renderPersonalizationPane() {
+    _renderPersonalizationPane() {
       const pane = document.getElementById('us-tab-personalization');
       if (!pane) return;
       // Seed from the ACTUALLY-applied theme (body.dark) so the control matches what
       // the user sees: DarkMode may have applied 'dark' from the legacy nimbus.theme
       // cache even when no user_settings.theme pref exists yet (pref() → 'light').
-      const theme = document.body.classList.contains('dark') ? 'dark' : (pref('theme') || 'light');
-      const lang  = pref('language');
+      const theme = document.body.classList.contains('dark') ? 'dark' : (Session.pref('theme') || 'light');
+      const lang  = Session.pref('language');
       const langOpts = [
         ['en', 'English'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'],
-      ].map(([c, n]) => _optTag(c, n, lang)).join('');
+      ].map(([c, n]) => SessionUIAdapter._optTag(c, n, lang)).join('');
       // Landing view — tab select + (dependent) sub-view select.
-      const lv       = pref('landingView') || {};
-      const lvTab    = _landingTabDefs().some(([v]) => v === lv.tab) ? lv.tab : 'home';
-      const landingTabOpts = _landingTabDefs().map(([v, n]) => _optTag(v, n, lvTab)).join('');
-      const lvSubDefs = _landingSubDefs(lvTab);
+      const lv       = Session.pref('landingView') || {};
+      const lvTab    = SessionUIAdapter._landingTabDefs().some(([v]) => v === lv.tab) ? lv.tab : 'home';
+      const landingTabOpts = SessionUIAdapter._landingTabDefs().map(([v, n]) => SessionUIAdapter._optTag(v, n, lvTab)).join('');
+      const lvSubDefs = SessionUIAdapter._landingSubDefs(lvTab);
       const landingSubOpts = lvSubDefs
-        ? lvSubDefs.map(([v, n]) => _optTag(v, n, lv.sub)).join('')
+        ? lvSubDefs.map(([v, n]) => SessionUIAdapter._optTag(v, n, lv.sub)).join('')
         : '';
-      // Saved grid layout — the on/off toggle mirrors pref('gridLayout') null-ness.
-      const gridLayoutOn = pref('gridLayout') != null;
+      // Saved grid layout — the on/off toggle mirrors Session.pref('gridLayout') null-ness.
+      const gridLayoutOn = Session.pref('gridLayout') != null;
       pane.innerHTML = `
         <div class="form-row">
           <label data-i18n="us.theme">${t('us.theme')}</label>
           <select id="us-pref-theme">
-            ${_optTag('light', t('us.theme_light'), theme)}
-            ${_optTag('dark',  t('us.theme_dark'),  theme)}
+            ${SessionUIAdapter._optTag('light', t('us.theme_light'), theme)}
+            ${SessionUIAdapter._optTag('dark',  t('us.theme_dark'),  theme)}
           </select>
         </div>
         <div class="form-row">
@@ -3779,8 +3769,8 @@ const NIMBUS = (function () {
         // + repaint); fall back to a bare persist if the intelligence layer is absent.
         try {
           if (typeof NIMBUS !== 'undefined' && NIMBUS.DarkMode?.set) NIMBUS.DarkMode.set(isDark);
-          else setPref('theme', isDark ? 'dark' : 'light');
-        } catch { setPref('theme', isDark ? 'dark' : 'light'); }
+          else Session.setPref('theme', isDark ? 'dark' : 'light');
+        } catch { Session.setPref('theme', isDark ? 'dark' : 'light'); }
       });
 
       const langSel = pane.querySelector('#us-pref-language');
@@ -3789,27 +3779,27 @@ const NIMBUS = (function () {
         // sync, and reloads so the whole UI re-renders in the chosen locale.
         try {
           if (typeof NIMBUS !== 'undefined' && NIMBUS.LangSwitcher?.set) NIMBUS.LangSwitcher.set(langSel.value);
-          else { setPref('language', langSel.value); location.reload(); }
-        } catch { setPref('language', langSel.value); location.reload(); }
+          else { Session.setPref('language', langSel.value); location.reload(); }
+        } catch { Session.setPref('language', langSel.value); location.reload(); }
       });
 
-      _initDefaultPlantCombo(pane);
+      SessionUIAdapter._initDefaultPlantCombo(pane);
 
       // ── Default landing view (tab + dependent sub-view) ──────────────────
       const landingTabSel = pane.querySelector('#us-landing-tab');
       const landingSubSel = pane.querySelector('#us-landing-sub');
       const _persistLanding = () => {
         const tab = landingTabSel.value;
-        const subs = _landingSubDefs(tab);
+        const subs = SessionUIAdapter._landingSubDefs(tab);
         const sub  = (subs && landingSubSel && !landingSubSel.hidden) ? landingSubSel.value : null;
-        setPref('landingView', { tab, sub });
+        Session.setPref('landingView', { tab, sub });
       };
       if (landingTabSel) {
         landingTabSel.addEventListener('change', () => {
-          const subs = _landingSubDefs(landingTabSel.value);
+          const subs = SessionUIAdapter._landingSubDefs(landingTabSel.value);
           if (landingSubSel) {
             if (subs) {
-              landingSubSel.innerHTML = subs.map(([v, n]) => _optTag(v, n, subs[0][0])).join('');
+              landingSubSel.innerHTML = subs.map(([v, n]) => SessionUIAdapter._optTag(v, n, subs[0][0])).join('');
               landingSubSel.hidden = false;
             } else {
               landingSubSel.innerHTML = '';
@@ -3838,23 +3828,23 @@ const NIMBUS = (function () {
       }
 
       // ── Pinned plants / lines ─────────────────────────────────────────────
-      _initPinnedCombo({
+      SessionUIAdapter._initPinnedCombo({
         inputId: 'us-pinplant-input', dropdownId: 'us-pinplant-dropdown', listId: 'us-pinplant-list',
         key: 'pinnedPlants', optionsFn: () => Store.knownPlants(), noneMsg: t('us.no_plants'),
         afterChange: () => { try { PlantSelector._reflectSelection(); } catch {} },
       });
-      _initPinnedCombo({
+      SessionUIAdapter._initPinnedCombo({
         inputId: 'us-pinline-input', dropdownId: 'us-pinline-dropdown', listId: 'us-pinline-list',
         key: 'pinnedLines', optionsFn: () => Store.allLines().slice().sort((a, b) => a.localeCompare(b)),
         noneMsg: t('us.no_lines'),
         afterChange: () => { try { Hierarchy.render(); } catch {} },
       });
-    }
+    },
 
     // Searchable plant combobox (scale-safe — never a chip list). Bound to
-    // pref('defaultPlant'); writes via setPref('defaultPlant', code|null). Modeled
-    // on the header PlantSelector, scoped to this modal instance.
-    function _initDefaultPlantCombo(pane) {
+    // Session.pref('defaultPlant'); writes via Session.setPref('defaultPlant',
+    // code|null). Modeled on the header PlantSelector, scoped to this modal instance.
+    _initDefaultPlantCombo(pane) {
       const input    = pane.querySelector('#us-plant-input');
       const dropdown = pane.querySelector('#us-plant-dropdown');
       const clearBtn = pane.querySelector('#us-plant-clear');
@@ -3864,7 +3854,7 @@ const NIMBUS = (function () {
       let activeIdx = -1;
 
       const options = () => Store.knownPlants();          // already allowedPlants()-scoped
-      const current = () => pref('defaultPlant') || null;
+      const current = () => Session.pref('defaultPlant') || null;
 
       const reflect = () => {
         const dp = current();
@@ -3879,7 +3869,7 @@ const NIMBUS = (function () {
         items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
         const a = items[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
       };
-      const choose = (plant) => { setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
+      const choose = (plant) => { Session.setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
 
       const renderList = (query) => {
         const all = options();
@@ -3920,13 +3910,13 @@ const NIMBUS = (function () {
       clearBtn.addEventListener('mousedown', e => e.preventDefault());
       clearBtn.addEventListener('click', () => { choose(null); input.focus(); });
       reflect();
-    }
+    },
 
-    function _renderWorkflowPane() {
+    _renderWorkflowPane() {
       const pane = document.getElementById('us-tab-workflow');
       if (!pane) return;
-      const tf = pref('timeFormat');
-      const df = pref('dateFormat');
+      const tf = Session.pref('timeFormat');
+      const df = Session.pref('dateFormat');
       const now = new Date();
       const sample = (tok) => {
         try { if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(now, tok); } catch {}
@@ -3934,11 +3924,11 @@ const NIMBUS = (function () {
       };
       const dfTokens = ['M j, Y', 'm/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y'];
       if (df && !dfTokens.includes(df)) dfTokens.unshift(df);   // keep a role/legacy value selectable
-      const dfOpts = dfTokens.map(tok => _optTag(tok, sample(tok), df)).join('');
-      const fdow = Number(pref('firstDayOfWeek'));
+      const dfOpts = dfTokens.map(tok => SessionUIAdapter._optTag(tok, sample(tok), df)).join('');
+      const fdow = Number(Session.pref('firstDayOfWeek'));
       const fdowSel = (fdow === 1) ? 1 : 0;
       // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
-      const od      = pref('optimizerDefaults');
+      const od      = Session.pref('optimizerDefaults');
       const odMode  = (od && ['spt', 'changeover', 'combined'].includes(od.mode)) ? od.mode : 'changeover';
       const odFixed = od ? od.respectFixed !== false : true;
       const odCal   = od ? od.respectCalendar !== false : true;
@@ -3946,8 +3936,8 @@ const NIMBUS = (function () {
         <div class="form-row">
           <label data-i18n="us.time_format">${t('us.time_format')}</label>
           <select id="us-pref-timeformat">
-            ${_optTag('12h', t('us.time_12h'), tf)}
-            ${_optTag('24h', t('us.time_24h'), tf)}
+            ${SessionUIAdapter._optTag('12h', t('us.time_12h'), tf)}
+            ${SessionUIAdapter._optTag('24h', t('us.time_24h'), tf)}
           </select>
         </div>
         <div class="form-row">
@@ -3958,17 +3948,17 @@ const NIMBUS = (function () {
         <div class="form-row">
           <label data-i18n="us.first_day">${t('us.first_day')}</label>
           <select id="us-pref-firstday">
-            ${_optTag(0, t('us.first_day_sun'), fdowSel)}
-            ${_optTag(1, t('us.first_day_mon'), fdowSel)}
+            ${SessionUIAdapter._optTag(0, t('us.first_day_sun'), fdowSel)}
+            ${SessionUIAdapter._optTag(1, t('us.first_day_mon'), fdowSel)}
           </select>
           <p class="us-field-hint">${t('us.first_day_hint')}</p>
         </div>
         <div class="form-row">
           <label data-i18n="us.opt_defaults">${t('us.opt_defaults')}</label>
           <select id="us-opt-mode">
-            ${_optTag('spt',        t('us.opt_mode_spt'),        odMode)}
-            ${_optTag('changeover', t('us.opt_mode_changeover'), odMode)}
-            ${_optTag('combined',   t('us.opt_mode_smart'),      odMode)}
+            ${SessionUIAdapter._optTag('spt',        t('us.opt_mode_spt'),        odMode)}
+            ${SessionUIAdapter._optTag('changeover', t('us.opt_mode_changeover'), odMode)}
+            ${SessionUIAdapter._optTag('combined',   t('us.opt_mode_smart'),      odMode)}
           </select>
           <label class="us-toggle-row" style="margin-top:8px">
             <input type="checkbox" id="us-opt-fixed"${odFixed ? ' checked' : ''}>
@@ -3983,14 +3973,14 @@ const NIMBUS = (function () {
         </div>`;
 
       const tfSel = pane.querySelector('#us-pref-timeformat');
-      tfSel.addEventListener('change', () => { setPref('timeFormat', tfSel.value); _repaintDisplayFormat(); });
+      tfSel.addEventListener('change', () => { Session.setPref('timeFormat', tfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
       const dfSel = pane.querySelector('#us-pref-dateformat');
-      dfSel.addEventListener('change', () => { setPref('dateFormat', dfSel.value); _repaintDisplayFormat(); });
+      dfSel.addEventListener('change', () => { Session.setPref('dateFormat', dfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
 
       const fdSel = pane.querySelector('#us-pref-firstday');
       if (fdSel) fdSel.addEventListener('change', () => {
         const v = fdSel.value === '1' ? 1 : 0;
-        setPref('firstDayOfWeek', v);
+        Session.setPref('firstDayOfWeek', v);
         try { App._applyFirstDayOfWeek(); } catch {}
       });
 
@@ -4000,8 +3990,8 @@ const NIMBUS = (function () {
       const fixedChk = pane.querySelector('#us-opt-fixed');
       const calChk   = pane.querySelector('#us-opt-calendar');
       const writeOpt = () => {
-        const existing = pref('optimizerDefaults') || {};
-        setPref('optimizerDefaults', {
+        const existing = Session.pref('optimizerDefaults') || {};
+        Session.setPref('optimizerDefaults', {
           mode: modeSel.value,
           preset: ['horizon', '2w'].includes(existing.preset) ? existing.preset : 'horizon',
           respectFixed: fixedChk.checked,
@@ -4015,15 +4005,17 @@ const NIMBUS = (function () {
       if (calChk)   calChk.addEventListener('change', writeOpt);
       const optClear = pane.querySelector('#us-opt-clear');
       if (optClear) optClear.addEventListener('click', () => {
-        setPref('optimizerDefaults', null);
-        _renderWorkflowPane();
+        Session.setPref('optimizerDefaults', null);
+        SessionUIAdapter._renderWorkflowPane();
       });
-    }
+    },
 
     // Self-service: PATCH /security/me with just this user's own name fields.
     // Keeps the modal open with the typed values on failure so the user can
-    // retry; on success, updates the local cache and closes.
-    async function saveProfile() {
+    // retry; on success, updates the local cache (via Session.updateCachedUser —
+    // the private nimbus.session KEY constant lives only in schedule-data.mjs)
+    // and closes.
+    async saveProfile() {
       const firstEl = document.getElementById('us-first-name');
       const lastEl = document.getElementById('us-last-name');
       const first_name = firstEl ? firstEl.value.trim() : '';
@@ -4039,23 +4031,20 @@ const NIMBUS = (function () {
           throw new Error(e.detail || `HTTP ${r.status}`);
         }
         const updated = await r.json();
-        const u = currentUser();
-        localStorage.setItem(KEY, JSON.stringify({
-          ...u, first_name: updated.first_name || null, last_name: updated.last_name || null,
-        }));
+        Session.updateCachedUser({ first_name: updated.first_name || null, last_name: updated.last_name || null });
         Modal.close('modal-user-settings');
       } catch (e) {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
         ErrorLog.error('security', `Save profile failed: ${e.message}`);
       }
-    }
+    },
 
     // Self-service: PATCH /security/me/password. Unlike saveProfile(), the
     // caller's identity header alone isn't enough here — the backend re-verifies
     // current_password (auth.change_own_password) since there's no session token
     // binding the header to a prior login. Fields are cleared on success but the
     // modal stays open (mirrors the admin panel's non-closing _savePassword).
-    async function changePassword() {
+    async changePassword() {
       const curEl = document.getElementById('us-current-password');
       const newEl = document.getElementById('us-new-password');
       const confEl = document.getElementById('us-confirm-password');
@@ -4088,152 +4077,8 @@ const NIMBUS = (function () {
         Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
         ErrorLog.error('security', `Change password failed: ${e.message}`);
       }
-    }
-
-    /* ── Self-service preference writes (Personalization / Workflow) ─────────
-       setPref(key, value) is OPTIMISTIC (mirrors _savePlantHorizon's write-then-
-       revert shape): Store.userSettings updates immediately so the UI reflects the
-       change, then a debounced PATCH /security/me/settings persists it. On success
-       we adopt the server's full merged blob and mirror it to the nimbus.session
-       cache; on failure we revert only this batch's keys in Store AND the cache and
-       Toast an i18n error. Multiple rapid setPref calls coalesce into one PATCH. */
-    let _prefTimer = null;
-    let _prefPending = {};   // key → queued new value for the next PATCH
-    let _prefPrev    = {};   // key → pre-edit value, for revert on failure
-
-    async function _flushPrefs() {
-      _prefTimer = null;
-      const patch = _prefPending; _prefPending = {};
-      const prev  = _prefPrev;    _prefPrev = {};
-      if (!Object.keys(patch).length) return;
-      try {
-        const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/settings`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ settings: patch }),
-        });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
-        const updated = await r.json();
-        // Server returns the full merged blob — adopt it as truth + mirror to cache.
-        const settings = updated.settings || {};
-        Store.setUserSettings(settings, 'settings-pref');
-        const u = currentUser();
-        if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings }));
-      } catch (e) {
-        // Revert only the keys this failed batch touched — in Store and the cache —
-        // leaving keys a still-pending batch owns untouched.
-        Store.setUserSettings(prev, 'settings-pref-revert');
-        const u = currentUser();
-        if (u) {
-          const cached = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
-          for (const k of Object.keys(prev)) {
-            if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
-          }
-          localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
-        }
-        Toast.show(t('toast.save_failed', { msg: e.message }), 'error');
-        ErrorLog.error('settings', `Save preference failed: ${e.message}`);
-      }
-    }
-
-    function setPref(key, value) {
-      // Capture the pre-edit value once per batch (first writer wins) so a revert
-      // restores the value from before this batch, not an intermediate optimistic one.
-      if (!(key in _prefPrev)) _prefPrev[key] = Store.userSettings[key];
-      _prefPending[key] = value;
-      Store.setUserSettings({ [key]: value }, 'settings-pref');   // optimistic
-      if (_prefTimer) clearTimeout(_prefTimer);
-      _prefTimer = setTimeout(_flushPrefs, 600);
-    }
-
-    // Flush any pending pref writes immediately and return the PATCH promise. The
-    // language switch must await this BEFORE location.reload() — a reload cancels
-    // the debounced timer and in-flight fetch, so without an explicit flush the DB
-    // (and the session cache _flushPrefs refreshes on success) would never catch up
-    // and the next boot would revert the language from stale truth.
-    function flushPrefs() {
-      if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
-      return _flushPrefs();
-    }
-
-    // Convenience read — resolves via Store.pref (user ?? role ?? system default).
-    function pref(key) { return Store.pref(key); }
-
-    function _applyGates() {
-      const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
-      if (adminBtn) adminBtn.hidden = !isAdmin();
-      _renderUserButton();
-      try { ErrorLog.renderBadge(); } catch {}
-    }
-
-    // Reconcile the role cached at login (which the admin UI gates on) against the
-    // backend's LIVE view via GET /security/me. The cached role can go stale — a DB
-    // reseed, a role change, or a since-deleted identity — leaving the UI offering
-    // admin controls that every request then 403s. Fire-and-forget at boot; also
-    // called after a denied admin action. Never clobbers the cache on a transient
-    // network/HTTP error (only a definitive answer updates it).
-    async function refresh() {
-      const u = currentUser();
-      if (!u) return null;                       // signed out — nothing to reconcile
-      try {
-        // Cache-busted like /tasks (see DEPLOYMENT.md) — this URL never varies,
-        // and the corp proxy caches GET responses keyed on URL regardless of
-        // normal cache semantics, so an uncached fetch here would keep re-adopting
-        // whatever settings blob was first ever fetched instead of DB truth.
-        const r = await Util.fetchTraced(
-          `${Config.API_BASE}/security/me?_cb=${Date.now()}`,
-          { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
-        );
-        if (!r.ok) return null;
-        const me = await r.json();
-        // GET /security/me now carries the caller's own settings blob + their role's
-        // defaults; cache both (localStorage = cache of DB truth so the app boots
-        // offline from the cached blob) and push them into Store for Store.pref().
-        const settings = me.settings || {};
-        const roleSettings = me.role_settings || {};
-        localStorage.setItem(KEY, JSON.stringify({
-          username: me.username || u.username,
-          role: me.role || null,
-          is_admin: !!me.is_admin,
-          allowed_plants: me.allowed_plants ?? null,
-          first_name: me.first_name || null,
-          last_name: me.last_name || null,
-          settings, role_settings: roleSettings,
-        }));
-        Store.setUserSettings(settings, 'session-refresh');
-        Store.setRoleDefaults(roleSettings, 'session-refresh');
-        _applyGates();
-        // If we just lost admin while sitting on the Admin tab, leave it.
-        if (!isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
-          try { App.goto('home'); } catch {}
-        }
-        // If plant scope changed and the currently selected plant fell outside
-        // it, clear the selection rather than leave the user looking at data
-        // they're no longer allowed to see — mirrors the admin-tab redirect above.
-        try {
-          if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions();
-          const allowed = allowedPlants();
-          if (allowed && Store.selectedPlant && !allowed.includes(Store.selectedPlant)) {
-            Store.setSelectedPlant(null, 'session-refresh');
-            Toast.show(t('sec.plant_access_changed'), 'warn');
-          }
-          if (typeof PlantSelector !== 'undefined') PlantSelector._reflectSelection();
-        } catch {}
-        return me;
-      } catch { return null; }
-    }
-
-    // A backend admin gate returned 403 though the UI believed we were an admin —
-    // the cached role is stale. Reconcile (which hides admin UI / navigates off the
-    // Admin tab if we were demoted) and tell the user plainly, rather than leaving
-    // a dead-end "HTTP 403" in the panel.
-    function onAuthDenied() {
-      refresh();
-      try { Toast.show(t('sec.access_revoked'), 'error'); } catch {}
-    }
-
-    return { currentUser, actor, isAdmin, allowedPlants, signIn, signOut, refresh, onAuthDenied, setPref, flushPrefs, pref, _applyGates };
-  })();
+    },
+  };
 
   /* =============================================================================
      AUTH (LOGIN SCREEN) — mandatory full-screen gate, JS-built only (no static
@@ -15836,11 +15681,19 @@ const NIMBUS = (function () {
      authenticated, so the exact same boot path runs either way.
      ========================================================================== */
   function _bootMain() {
-    // Re-apply session-driven UI gates now that boot is proceeding (covers both
-    // the "already signed in" resume path and the "just signed in" path — the
-    // latter's showLoginScreen already called Session._applyGates() once inside
-    // signIn(), so this is a harmless, idempotent re-run for that path).
-    Session._applyGates();
+    // Subscribe SessionUIAdapter to session:changed FIRST (CQ-1 Phase 2 Task 5 —
+    // Session.signIn/signOut/refresh now emit that event instead of calling
+    // _applyGates()/DOM code inline). Then re-apply session-driven UI gates
+    // explicitly — this covers the "already signed in on page load" resume path,
+    // which never goes through signIn() and so never fires session:changed. The
+    // "just signed in" path is covered too: showLoginScreen's signIn() already
+    // fired the event (with nobody subscribed yet, since init() hadn't run), so
+    // this explicit call is what actually applies the gates for that path as
+    // well — a harmless, idempotent single application either way (the pre-split
+    // code applied gates twice for a fresh sign-in; _applyGates is idempotent,
+    // so once is behaviorally equivalent).
+    SessionUIAdapter.init();
+    SessionUIAdapter._applyGates();
     // Hydrate per-user settings + role defaults from the cached session blob so the
     // app reflects the user's prefs immediately AND works offline. Session.refresh()
     // below overwrites these with DB truth from /security/me when the network is up.
@@ -16134,6 +15987,6 @@ const NIMBUS = (function () {
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData, WelcomeSplash,
     LaborPlanning, Interface, Security, CalendarSync,
-    Session, showLoginScreen
+    Session, SessionUIAdapter, showLoginScreen
   };
 })();

@@ -6,7 +6,7 @@
 // instead of throwing "document/window is not defined".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Persistence, CalendarSync } from '../../web/schedule-data.mjs';
+import { Persistence, CalendarSync, Session } from '../../web/schedule-data.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 
 globalThis.window = globalThis.window || {};
@@ -104,4 +104,61 @@ test('CalendarSync is exported alongside Persistence with its documented public 
   assert.equal(typeof CalendarSync.savePlantHours, 'function');
   assert.equal(typeof CalendarSync.saveLineBlackoutUpsert, 'function');
   assert.equal(typeof CalendarSync.flushPlant, 'function');
+});
+
+test('Session exposes only the pure session/pref API (no DOM-rendering methods)', () => {
+  assert.equal(typeof Session.currentUser, 'function');
+  assert.equal(typeof Session.actor, 'function');
+  assert.equal(typeof Session.isAdmin, 'function');
+  assert.equal(typeof Session.allowedPlants, 'function');
+  assert.equal(typeof Session.pref, 'function');
+  assert.equal(typeof Session.setPref, 'function');
+  assert.equal(Session._renderUserButton, undefined);
+  assert.equal(Session._renderSettingsPanes, undefined);
+  assert.equal(Session.saveProfile, undefined);
+});
+
+test('Session.currentUser()/actor()/isAdmin()/allowedPlants() read straight from localStorage', () => {
+  const origGetItem = globalThis.localStorage.getItem;
+  globalThis.localStorage.getItem = (k) => k === 'nimbus.session'
+    ? JSON.stringify({ username: 'trevor', role: 'admin', allowed_plants: ['5512'] })
+    : null;
+  try {
+    assert.deepEqual(Session.currentUser(), { username: 'trevor', role: 'admin', allowed_plants: ['5512'] });
+    assert.equal(Session.actor(), 'trevor');
+    assert.equal(Session.isAdmin(), true);
+    assert.deepEqual(Session.allowedPlants(), ['5512']);
+  } finally {
+    globalThis.localStorage.getItem = origGetItem;
+  }
+});
+
+test('Session.signIn emits a session:changed event instead of touching DOM directly', async () => {
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'session:changed') events.push(evt); });
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({
+      username: 'trevor', role: 'admin', allowed_plants: null,
+      first_name: 'Trevor', last_name: 'Holton', settings: {}, role_settings: {},
+    }),
+  });
+  try {
+    const data = await Session.signIn('trevor', 'pw');
+    assert.equal(data.username, 'trevor');
+  } finally {
+    globalThis.fetch = origFetch;
+    off();
+  }
+  assert.ok(events.some(e => e.kind === 'signin'), 'signIn must emit a session:changed/signin event');
+});
+
+test('Session.updateCachedUser merges a patch into the cached session blob', () => {
+  globalThis.localStorage.setItem('nimbus.session', JSON.stringify({ username: 'trevor', role: 'admin' }));
+  const merged = Session.updateCachedUser({ first_name: 'Trevor', last_name: 'Holton' });
+  assert.equal(merged.first_name, 'Trevor');
+  assert.equal(merged.username, 'trevor', 'existing fields must be preserved, not clobbered');
+  const stored = JSON.parse(globalThis.localStorage.getItem('nimbus.session'));
+  assert.equal(stored.last_name, 'Holton');
 });

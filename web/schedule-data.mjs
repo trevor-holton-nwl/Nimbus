@@ -1,11 +1,13 @@
 // schedule-data.mjs — CQ-1 schedule-data module.
 //
-// Owns backend fetch + localStorage cache (Persistence) and backend-
+// Owns backend fetch + localStorage cache (Persistence), backend-
 // authoritative persistence of per-plant/per-line working hours + blackout
-// blocks (CalendarSync). Must NEVER import from schedule-services.mjs — only
-// the reverse direction is allowed. Two real cross-package dependencies were
-// found during Phase 2 research and are resolved here without a reverse
-// import:
+// blocks (CalendarSync), and the mandatory-login client session's pure
+// state/API (Session — currentUser/actor/isAdmin/allowedPlants/pref/setPref/
+// signIn/signOut/refresh/onAuthDenied). Must NEVER import from
+// schedule-services.mjs — only the reverse direction is allowed. Two real
+// cross-package dependencies were found during Phase 2 research and are
+// resolved here without a reverse import:
 //   - Persistence._snapToWorkingHours/_dueEndOfShift used to call
 //     Calendar._beginRun/_endRun/nextAvailable/workWindow directly. They now
 //     go through an injected seam, `Persistence.setCalendarService({...})`,
@@ -15,6 +17,20 @@
 //     hydration. It now emits a `{ type: 'schedule:hydrated', source }` Store
 //     event instead; schedule-services.mjs subscribes to it once (see the
 //     bottom of that file, added alongside Alerts in Task 2/this task).
+// Session's DOM/settings-pane half (gates, the user-settings modal, profile/
+// password self-service — ~600 lines that used to live inline in the same
+// IIFE) stays in app.js as `SessionUIAdapter` (Task 5), mirroring the Phase 1
+// Sandbox/SandboxAdapter split: `signIn`/`signOut`/`refresh` emit a
+// `{ type: 'session:changed', kind }` Store event instead of calling
+// `_applyGates()`/DOM code inline; `SessionUIAdapter.init()` (app.js) is the
+// sole subscriber. `Session.updateCachedUser(patch)` is the one small public
+// method added for a reverse-direction need the plan's own interface list
+// didn't spell out: `SessionUIAdapter.saveProfile` (app.js) needs to merge a
+// patch into the cached session blob after a successful profile PATCH, but
+// the blob's localStorage key (`KEY`) is intentionally private to this
+// module — same "small public method" resolution CLAUDE.md's Global
+// Constraints prescribe for every reverse-direction need, never a bare
+// `KEY` export or a `window`/`globalThis` reach-around.
 // DOM/UI code that was co-located with these modules in app.js stays there —
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
@@ -1475,3 +1491,244 @@ export const CalendarSync = {
     });
   },
 };
+
+/* =============================================================================
+   SESSION — mandatory-login client session, pure state/API half. Backed by
+   localStorage (mirrors the LangSwitcher get/set idiom in
+   nimbus-intelligence.js), never the backend — the backend is the source of
+   truth for the password check (POST /security/login); once authenticated,
+   the session is just { username, role, ... } cached locally so a page reload
+   doesn't force a re-login.
+     Session.currentUser()   — { username, role, ... } | null
+     Session.actor()         — username for X-User/x-user-email headers, else 'system'
+     Session.isAdmin()       — true iff current user's role === 'admin' (or is_admin)
+     Session.allowedPlants() — null (unrestricted) | string[] (role_plants scope)
+     Session.pref(key) / .setPref(key, value) / .flushPrefs() — per-user
+       settings: optimistic Store write + a debounced PATCH /security/me/settings
+     Session.signIn(u, p)    — POST /security/login; persists session, emits
+                                {type:'session:changed', kind:'signin'}
+     Session.signOut()       — clears session, emits kind:'signout', reloads the page
+     Session.refresh()       — reconciles cached role/settings/plant-scope against
+                                GET /security/me; emits kind:'refresh'
+     Session.onAuthDenied()  — a gated request came back 403; re-reconciles via refresh()
+     Session.updateCachedUser(patch) — merge `patch` into the cached session blob;
+       the seam app.js's SessionUIAdapter.saveProfile uses instead of reaching into
+       this module's private `KEY` constant directly.
+   DOM/settings-pane code that used to live inline in this same IIFE (gates, the
+   user-settings modal, profile/password self-service, personalization/workflow
+   panes) stays in app.js as `SessionUIAdapter`, which owns the sole subscription
+   to the `session:changed` event emitted below — mirrors the Phase 1
+   Sandbox/SandboxAdapter split exactly.
+   ========================================================================== */
+export const Session = (() => {
+  const KEY = 'nimbus.session';
+
+  function currentUser() {
+    try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; }
+  }
+
+  function actor() {
+    const u = currentUser();
+    return u ? u.username : 'system';
+  }
+
+  function isAdmin() {
+    const u = currentUser();
+    // Prefer the reconciled is_admin flag (set by refresh() from GET /security/me,
+    // which mirrors the backend's require_admin grace) and fall back to the role
+    // cached at login for sessions that predate a refresh.
+    return !!u && (u.is_admin === true || u.role === 'admin');
+  }
+
+  // null = unrestricted (every plant); array = the caller's role_plants scope.
+  // Mirrors isAdmin()'s fallback posture: trusts whatever was last cached
+  // (login or refresh()) rather than blocking on a fresh network call.
+  function allowedPlants() {
+    const u = currentUser();
+    return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
+  }
+
+  async function signIn(username, password) {
+    const res = await fetch(`${Config.API_BASE}/security/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || 'Invalid username or password');
+    }
+    const data = await res.json();
+    // Per-user settings + role defaults are the authoritative DB blobs; the
+    // login response may not carry them (only GET /security/me is guaranteed to),
+    // so default to {} and let refresh() fill them from /security/me at boot.
+    const settings = data.settings || {};
+    const roleSettings = data.role_settings || {};
+    localStorage.setItem(KEY, JSON.stringify({
+      username: data.username, role: data.role,
+      allowed_plants: data.allowed_plants ?? null,
+      first_name: data.first_name || null, last_name: data.last_name || null,
+      settings, role_settings: roleSettings,
+    }));
+    Store.setUserSettings(settings, 'session-signin');
+    Store.setRoleDefaults(roleSettings, 'session-signin');
+    Store.emit({ type: 'session:changed', kind: 'signin' });
+    return data;
+  }
+
+  function signOut() {
+    localStorage.removeItem(KEY);
+    Store.emit({ type: 'session:changed', kind: 'signout' });
+    location.reload();
+  }
+
+  // Reconcile the role cached at login (which the admin UI gates on) against the
+  // backend's LIVE view via GET /security/me. The cached role can go stale — a DB
+  // reseed, a role change, or a since-deleted identity — leaving the UI offering
+  // admin controls that every request then 403s. Fire-and-forget at boot; also
+  // called after a denied admin action. Never clobbers the cache on a transient
+  // network/HTTP error (only a definitive answer updates it).
+  async function refresh() {
+    const u = currentUser();
+    if (!u) return null;                       // signed out — nothing to reconcile
+    try {
+      // Cache-busted like /tasks (see DEPLOYMENT.md) — this URL never varies,
+      // and the corp proxy caches GET responses keyed on URL regardless of
+      // normal cache semantics, so an uncached fetch here would keep re-adopting
+      // whatever settings blob was first ever fetched instead of DB truth.
+      const r = await Util.fetchTraced(
+        `${Config.API_BASE}/security/me?_cb=${Date.now()}`,
+        { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
+      );
+      if (!r.ok) return null;
+      const me = await r.json();
+      // GET /security/me now carries the caller's own settings blob + their role's
+      // defaults; cache both (localStorage = cache of DB truth so the app boots
+      // offline from the cached blob) and push them into Store for Store.pref().
+      const settings = me.settings || {};
+      const roleSettings = me.role_settings || {};
+      localStorage.setItem(KEY, JSON.stringify({
+        username: me.username || u.username,
+        role: me.role || null,
+        is_admin: !!me.is_admin,
+        allowed_plants: me.allowed_plants ?? null,
+        first_name: me.first_name || null,
+        last_name: me.last_name || null,
+        settings, role_settings: roleSettings,
+      }));
+      Store.setUserSettings(settings, 'session-refresh');
+      Store.setRoleDefaults(roleSettings, 'session-refresh');
+      // Plant-scope enforcement is Store-only business logic — safe to keep in
+      // this pure module. The actual PlantSelector DOM refresh/toast, and the
+      // admin-tab eviction (App._currentTab is DOM/UI state this module must
+      // never read), happen in SessionUIAdapter's session:changed subscriber
+      // (app.js) instead — this just reports the fact via the emitted event.
+      let plantAccessChanged = false;
+      const allowed = allowedPlants();
+      if (allowed && Store.selectedPlant && !allowed.includes(Store.selectedPlant)) {
+        Store.setSelectedPlant(null, 'session-refresh');
+        plantAccessChanged = true;
+      }
+      Store.emit({ type: 'session:changed', kind: 'refresh', plantAccessChanged });
+      return me;
+    } catch { return null; }
+  }
+
+  // A backend admin gate returned 403 though the UI believed we were an admin —
+  // the cached role is stale. Reconcile (which hides admin UI / navigates off the
+  // Admin tab if we were demoted, via SessionUIAdapter's session:changed
+  // subscriber) and tell the user plainly, rather than leaving a dead-end
+  // "HTTP 403" in the panel.
+  function onAuthDenied() {
+    refresh();
+    try { Toast.show(Util.t('sec.access_revoked'), 'error'); } catch {}
+  }
+
+  /* ── Self-service preference writes (Personalization / Workflow) ─────────
+     setPref(key, value) is OPTIMISTIC (mirrors _savePlantHorizon's write-then-
+     revert shape): Store.userSettings updates immediately so the UI reflects the
+     change, then a debounced PATCH /security/me/settings persists it. On success
+     we adopt the server's full merged blob and mirror it to the nimbus.session
+     cache; on failure we revert only this batch's keys in Store AND the cache and
+     Toast an i18n error. Multiple rapid setPref calls coalesce into one PATCH. */
+  let _prefTimer = null;
+  let _prefPending = {};   // key → queued new value for the next PATCH
+  let _prefPrev    = {};   // key → pre-edit value, for revert on failure
+
+  async function _flushPrefs() {
+    _prefTimer = null;
+    const patch = _prefPending; _prefPending = {};
+    const prev  = _prefPrev;    _prefPrev = {};
+    if (!Object.keys(patch).length) return;
+    try {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ settings: patch }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+      const updated = await r.json();
+      // Server returns the full merged blob — adopt it as truth + mirror to cache.
+      const settings = updated.settings || {};
+      Store.setUserSettings(settings, 'settings-pref');
+      const u = currentUser();
+      if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings }));
+    } catch (e) {
+      // Revert only the keys this failed batch touched — in Store and the cache —
+      // leaving keys a still-pending batch owns untouched.
+      Store.setUserSettings(prev, 'settings-pref-revert');
+      const u = currentUser();
+      if (u) {
+        const cached = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
+        for (const k of Object.keys(prev)) {
+          if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
+        }
+        localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
+      }
+      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
+      ErrorLog.error('settings', `Save preference failed: ${e.message}`);
+    }
+  }
+
+  function setPref(key, value) {
+    // Capture the pre-edit value once per batch (first writer wins) so a revert
+    // restores the value from before this batch, not an intermediate optimistic one.
+    if (!(key in _prefPrev)) _prefPrev[key] = Store.userSettings[key];
+    _prefPending[key] = value;
+    Store.setUserSettings({ [key]: value }, 'settings-pref');   // optimistic
+    if (_prefTimer) clearTimeout(_prefTimer);
+    _prefTimer = setTimeout(_flushPrefs, 600);
+  }
+
+  // Flush any pending pref writes immediately and return the PATCH promise. The
+  // language switch must await this BEFORE location.reload() — a reload cancels
+  // the debounced timer and in-flight fetch, so without an explicit flush the DB
+  // (and the session cache _flushPrefs refreshes on success) would never catch up
+  // and the next boot would revert the language from stale truth.
+  function flushPrefs() {
+    if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
+    return _flushPrefs();
+  }
+
+  // Convenience read — resolves via Store.pref (user ?? role ?? system default).
+  function pref(key) { return Store.pref(key); }
+
+  // Merge `patch` into the cached session blob and persist it. The narrow seam
+  // app.js's SessionUIAdapter.saveProfile() uses to update first_name/last_name
+  // in the cache after a successful PATCH /security/me, without reaching into
+  // this module's private `KEY` constant — SessionUIAdapter is a consumer of
+  // Session's public API only, same direction every other *UIAdapter follows.
+  function updateCachedUser(patch) {
+    const u = currentUser();
+    if (!u) return null;
+    const merged = { ...u, ...patch };
+    localStorage.setItem(KEY, JSON.stringify(merged));
+    return merged;
+  }
+
+  return {
+    currentUser, actor, isAdmin, allowedPlants,
+    signIn, signOut, refresh, onAuthDenied,
+    setPref, flushPrefs, pref, updateCachedUser,
+  };
+})();

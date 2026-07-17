@@ -42,7 +42,7 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; genuinely DOM-free after Phase 2 removed a checkbox-read fallback (see Task 3 Step 4). |
 | `Persistence` | `schedule-data.mjs` | Migrated Phase 2 Task 4, name unchanged (no DOM half — pure backend fetch/localStorage cache). |
 | `CalendarSync` | `schedule-data.mjs` | Migrated Phase 2 Task 4, name unchanged (no DOM half — pure backend-authoritative calendar/blackout sync). |
-| `Session` | `schedule-data.mjs` | `session` API |
+| `Session` | `schedule-data.mjs` | Split: pure state/API (currentUser/actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/signIn/signOut/refresh/onAuthDenied/updateCachedUser) → schedule-data.mjs; gates/user-settings modal/profile/password self-service → app.js's `SessionUIAdapter`. Migrated Phase 2 Task 5. |
 | `Timeline` | `schedule-workbench.mjs` | vis-timeline instance stays private |
 | `Table` | `schedule-workbench.mjs` | AG Grid instance stays private |
 | `Inspector` | `schedule-workbench.mjs` | |
@@ -350,6 +350,47 @@ module's top-level code executes, before app.js/nimbus-intelligence.js are
 even requested — recovering most of that gap, though not the parser-blocking
 timing itself (accepted cost of the ESM entry point). See `app-entry.mjs` and
 `tests/modules/app-entry.test.mjs` for the implementation and tests.
+
+**`Session`/`SessionUIAdapter` split and the `session:changed` event (Phase 2
+Task 5):** `Session` had no `Store._state`/`_rev` touches to close (it only
+ever used the public `Store.setUserSettings`/`setRoleDefaults`/
+`setSelectedPlant`/`selectedPlant` surface), so this task closes no §6 row —
+it is a pure DOM/state split, mirroring the Phase 1 `Sandbox`/`SandboxAdapter`
+precedent exactly. `Session`'s pure state/API (`currentUser`, `actor`,
+`isAdmin`, `allowedPlants`, `pref`/`setPref`/`flushPrefs`, `signIn`, `signOut`,
+`refresh`, `onAuthDenied`) moved into `schedule-data.mjs`; the ~600 lines of
+DOM/settings-pane code that used to run inline inside the same IIFE (gates,
+the header user-settings button, the User Settings modal's tab switching and
+Personalization/Workflow panes, profile self-service, password change) stayed
+in `app.js` as a new `SessionUIAdapter`, the sole subscriber to a new `Store`
+event:
+- **`{ type: 'session:changed', kind: 'signin'|'signout'|'refresh', plantAccessChanged? }`**
+  — replaces every inline `_applyGates()`/DOM call that used to live inside
+  `signIn`/`signOut`/`refresh`. `refresh()` still performs its own Store-only
+  business logic (clearing `Store.selectedPlant` when the reconciled
+  `allowed_plants` no longer includes it) and reports the fact via
+  `plantAccessChanged` on the emitted event — the actual `PlantSelector`
+  DOM refresh, the plant-access-changed toast, and the admin-tab eviction
+  (`App._currentTab === 'admin'` is UI state `Session` must never read) all
+  moved into `SessionUIAdapter.init()`'s subscriber. `SessionUIAdapter.init()`
+  is called once from `_bootMain()`, immediately followed by an explicit
+  `SessionUIAdapter._applyGates()` call — this explicit call is what actually
+  applies gates for both the "already signed in" resume path (which never
+  calls `signIn()` and so never emits `session:changed`) and, in practice, the
+  fresh-sign-in path too (`signIn()`'s emit fires before `_bootMain()` — and
+  therefore before `SessionUIAdapter.init()` — ever subscribes, since
+  `showLoginScreen`'s success handler calls `App._bootMain()` only after
+  `Session.signIn()` already resolved; `_applyGates` is idempotent, so this
+  reduces the pre-split code's two gate-applications for a fresh sign-in to
+  one, with no observable behavior difference).
+- **`Session.updateCachedUser(patch)`** — a small public method added for a
+  reverse-direction need the plan's own interface list didn't spell out:
+  `SessionUIAdapter.saveProfile` (app.js) needs to merge `{first_name,
+  last_name}` into the cached `nimbus.session` blob after a successful
+  `PATCH /security/me`, but that blob's localStorage key (`KEY`) is
+  intentionally private to `schedule-data.mjs`. Same "small public method"
+  resolution CLAUDE.md's Global Constraints prescribe for a reverse-direction
+  need — never a bare `KEY` export or a `window`/`globalThis` reach-around.
 
 **`Sandbox.exit(false)` (What-If discard) event contract:** the discard path
 calls `Store.setTasks`/`replaceBlocks`/`replaceCalendars`/`replacePlants`/
