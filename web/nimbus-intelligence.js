@@ -25,7 +25,7 @@
     return;
   }
 
-  const { Store, Toast, Alerts, Util, UndoStack, Utilization } = NIMBUS;
+  const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
@@ -1687,7 +1687,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.addEventListener('click', e => {
         if (e.target === dlg) { dlg.close(); return; }
         const gotoBtn = e.target.closest('[data-conf-goto]');
-        if (gotoBtn) { dlg.close(); if (typeof Alerts !== 'undefined') Alerts.focus(gotoBtn.dataset.confGoto); }
+        if (gotoBtn) { dlg.close(); if (typeof AlertsUIAdapter !== 'undefined') AlertsUIAdapter.focus(gotoBtn.dataset.confGoto); }
       });
     },
 

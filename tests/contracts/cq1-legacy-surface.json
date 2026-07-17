@@ -69,17 +69,17 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.focus('${esc(a.id)}')"
+      "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
     },
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.toggleDrawer()"
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
     },
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
     },
     {
       "file": "app.js",
@@ -234,7 +234,7 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "if(NIMBUS.Alerts.focus){NIMBUS.Alerts.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
+      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
     },
     {
       "file": "app.js",
@@ -314,7 +314,7 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.toggleDrawer()"
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
     },
     {
       "file": "index.html",
@@ -795,7 +795,7 @@
   "htmlCommands": [
     "AdminCockpit.gotoOvTab",
     "Alerts.dismissAll",
-    "Alerts.toggleDrawer",
+    "AlertsUIAdapter.toggleDrawer",
     "App.gotoGanttSub",
     "App.gotoGanttTimeline",
     "App.gotoLaborSub",
@@ -860,9 +860,9 @@
     "Timeline.zoomToFit"
   ],
   "intelligenceCommands": [
-    "Alerts.focus",
     "Alerts.recompute",
     "Alerts.scheduleRecompute",
+    "AlertsUIAdapter.focus",
     "App.goto",
     "App.gotoGanttTimeline",
     "Compute.available",

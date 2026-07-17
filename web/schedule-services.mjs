@@ -1,12 +1,14 @@
 // schedule-services.mjs — CQ-1 schedule-services module.
 //
-// Owns calendar capacity math and the Compute worker client today (Alerts
-// computation, Utilization, and Engine join in later Phase 2 tasks). Delegates
+// Owns calendar capacity math, the Compute worker client, Alerts computation,
+// and Utilization today (Engine joins in the next Phase 2 task). Delegates
 // algorithmic truth to nimbus-compute-core.js and preserves the existing
 // worker protocol byte-for-byte. May import from schedule-data.mjs; must
-// never be imported by it. DOM/UI code that was co-located with Calendar in
-// app.js (the calendar blackout-block tab) stays in app.js as a thin adapter
-// (`CalendarUI`) — see docs/architecture/cq1-compatibility-inventory.md.
+// never be imported by it. DOM/UI code that was co-located with these
+// modules in app.js (the calendar blackout-block tab; the alerts drawer,
+// bell badge, and cell-briefing modal) stays in app.js as thin adapters
+// (`CalendarUI`, `AlertsUIAdapter`) — see
+// docs/architecture/cq1-compatibility-inventory.md.
 //
 // nimbus-compute-core.js is loaded as a classic, parser-blocking <script> in
 // index.html BEFORE app-entry.mjs's static imports run (see index.html's
@@ -20,8 +22,8 @@
 // `globalThis.NimbusComputeCore` themselves before calling into Calendar —
 // see tests/modules/schedule-services.test.mjs and the load-legacy-app.mjs
 // VM harness for the two bootstrap sites.
-import { Config, Util, ErrorLog, PerfMonitor } from './application-foundation.mjs';
-import { Store } from './schedule-state.mjs';
+import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
+import { Store, UndoStack } from './schedule-state.mjs';
 
 /* =============================================================================
    CALENDAR — capacity math only (working hours, blackout-block availability).
@@ -462,3 +464,354 @@ export const Compute = (() => {
     },
   };
 })();
+
+/* =============================================================================
+   ALERTS — computation only (detect and maintain the active alert list).
+   Re-runs on any task/block/calendar change. Alerts are de-duplicated by id.
+   The DOM half (drawer, bell badge, cell-briefing modal) stayed behind in
+   app.js, renamed `AlertsUIAdapter` — see
+   docs/architecture/cq1-compatibility-inventory.md.
+   ========================================================================== */
+export const Alerts = {
+  recompute(opts = {}) {
+    // Never post the global (all-line) snapshot to the worker: when no plant is
+    // selected nothing is rendered, so route to the cheap sync path instead of
+    // structured-cloning every line's calendars/lineSettings/masterData across.
+    if (Compute.available() && Store.selectedPlant) {
+      const reqRev = Store.rev();
+      Compute.alerts(opts, Alerts._dismissed)
+        .then(({ alerts, elapsed }) => {
+          if (Store.rev() !== reqRev) return; // stale result — a newer compute is in-flight
+          const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
+          if (onlyLines) {
+            const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
+            Store.setAlerts(retained.concat(alerts), 'alerts');
+          } else {
+            Store.setAlerts(alerts, 'alerts');
+          }
+          Alerts._lastMs = elapsed;
+        })
+        .catch((e) => {
+          ErrorLog.warn('worker', 'compute fell back to main thread', { error: String(e?.message || e) });
+          Alerts._recomputeSync(opts);
+        });
+      return;
+    }
+    Alerts._recomputeSync(opts);
+  },
+
+  _recomputeSync(opts = {}) {
+    // Synchronous fallback (worker unavailable / no plant selected). Delegates to
+    // nimbus-compute-core — the SAME implementation the worker runs — so a worker-dead
+    // session and a healthy one produce identical alerts (no "two brains" divergence).
+    // Reads the same GLOBAL Store data the previous inline rule engine did (all tasks/
+    // blocks/plant-blocks/calendars/…). The core writes calendar defaults into
+    // Store.calendars/plants exactly as Store.ensure* did (same in-place side effect).
+    const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const onlyLines = (opts.lines instanceof Set && opts.lines.size) ? opts.lines : null;
+    const { alerts: kept } = globalThis.NimbusComputeCore.computeAlerts({
+      tasks:        Store.tasksArr,
+      blocks:       Store.blocks,
+      plantBlocks:  Store.plantBlocks,
+      calendars:    Store.calendars,
+      plants:       Store.plants,
+      lineSettings: Store.lineSettings,
+      masterData:   Store.masterData,
+      dismissed:    [...Alerts._dismissed],
+      opts:         { lines: onlyLines ? [...onlyLines] : null },
+    });
+    if (onlyLines) {
+      // Incremental merge: retain alerts on untouched lines, replace only the affected
+      // ones. Callers of the scoped path never move a task across lines.
+      const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
+      Store.setAlerts(retained.concat(kept), 'alerts');
+    } else {
+      Store.setAlerts(kept, 'alerts');
+    }
+    Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
+    PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);
+  },
+
+  _dismissed: new Set(),
+
+  dismiss(alertId) {
+    Alerts._dismissed.add(alertId);
+    Store.dismissAlert(alertId, 'alerts');
+  },
+  dismissAll() {
+    for (const a of Store.alerts) Alerts._dismissed.add(a.id);
+    Store.dismissAllAlerts('alerts');
+  },
+  // Clear dismissals (so new runs of recompute() can re-surface the same issue).
+  clearDismissed() { Alerts._dismissed.clear(); },
+
+  applyFix(alertId) {
+    const a = Store.alerts.find(x => x.id === alertId);
+    if (!a) return;
+
+    if (a.type === 'overlap' || a.type === 'blackout') {
+      const task = Store.tasks[a.taskId];
+      if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
+      const line = task.PRODUCTION_LINE || 'Unknown';
+      const dur  = (task.end_date - task.start_date) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
+
+      // For overlap: start searching from end of the overlapping peer
+      let searchFrom = task.start_date;
+      if (a.type === 'overlap') {
+        const peerId = a.id.replace(/^ovl-/, '').split('-')[0];
+        const peer = peerId ? Store.tasks[peerId] : null;
+        if (peer && peer.end_date) searchFrom = peer.end_date;
+        else searchFrom = task.start_date;
+      }
+
+      const snap = UndoStack.snapshotTasks([task.id]);
+      const newStart = Calendar.nextAvailable(line, searchFrom, dur);
+      const newEnd   = new Date(newStart.getTime() + dur);
+      Store.updateTask(task.id, { start_date: newStart, end_date: newEnd }, 'alerts');
+      try { Alerts._engine?.autoReflow(task.id); } catch {}
+      UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
+      Alerts.dismiss(alertId);
+      Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
+
+    } else if (a.type === 'overload') {
+      // Scope the combined optimizer to just this line+day so the optimize and the
+      // undo snapshot cover the SAME tasks. (Passing no opts re-optimized the whole
+      // plant over a 35-day horizon while the snapshot only captured one line+day,
+      // so undo silently lost every cross-line / cross-day move.)
+      const line = a.line, day = Util.dayKey(a.time || new Date());
+      const dayStart = Util.startOfDay(a.time || new Date());
+      const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
+      // Snapshot a SUPERSET of what the optimizer can move: every task on this line
+      // that runAndApply would NOT treat as aged/out-of-window — i.e. its free-set
+      // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
+      // dayKey(start) missed cross-midnight orders and lost them on undo.
+      const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
+        (t.PRODUCTION_LINE || 'Unknown') === line &&
+        (!t.end_date   || t.end_date   >= dayStart) &&
+        (!t.start_date || t.start_date <= dayEnd)
+      ).map(t => t.id));
+      Alerts._engine?.runAndApply('combined', { lines: [line], startDate: dayStart, endDate: dayEnd });
+      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
+      Alerts.dismiss(alertId);
+    }
+  },
+
+  // TEMPORARY seam (removed by CQ-1 Phase 2 Task 3, which moves Engine into this
+  // same module as a sibling top-level export): applyFix's optimizer/auto-reflow
+  // calls can't reference a bare `Engine` yet — it still lives in app.js as of
+  // this task, so a static reference here would be an undeclared identifier
+  // (this file is a real ES module; no ambient `Engine` global exists). Wired
+  // once from app.js boot glue right after the bridge destructure that
+  // introduces `Alerts` — see app.js. Task 3 deletes this seam and calls the
+  // (by-then sibling) `Engine` object directly instead.
+  _engine: null,
+  setEngineService(svc) { Alerts._engine = svc; },
+};
+// Adaptive debounced dispatcher — all callers funnel through this so rapid successive
+// mutations (drag → autoReflow → explicit call) collapse into one recompute. The delay
+// scales with the last recompute's measured cost (×1.5, clamped) so small/incremental
+// updates stay snappy while a heavy full recompute on a large board doesn't thrash the
+// main thread — replacing the old fixed 80 ms window that was too short at scale.
+const _ALERTS_MIN_DEBOUNCE_MS = 90;
+const _ALERTS_MAX_DEBOUNCE_MS = 500;
+Alerts._lastMs = 0;
+Alerts._timer = null;
+Alerts._pendingFull = false;
+Alerts._pendingLines = new Set();
+Alerts._fire = function () {
+  const full  = Alerts._pendingFull;
+  const lines = Alerts._pendingLines;
+  Alerts._pendingFull = false;
+  Alerts._pendingLines = new Set();
+  Alerts._timer = null;
+  Alerts.recompute(full ? {} : { lines });
+};
+Alerts._armTimer = function () {
+  const delay = Math.min(_ALERTS_MAX_DEBOUNCE_MS,
+                         Math.max(_ALERTS_MIN_DEBOUNCE_MS, Math.round(Alerts._lastMs * 1.5)));
+  if (Alerts._timer) clearTimeout(Alerts._timer);
+  Alerts._timer = setTimeout(Alerts._fire, delay);
+};
+// Full recompute — the default for block / calendar / plant / line-membership changes.
+Alerts.scheduleRecompute = function () {
+  Alerts._pendingFull = true;
+  Alerts._armTimer();
+};
+// Incremental recompute scoped to specific lines. Only safe for callers that never move a
+// task across lines (optimize / auto-reflow only shift dates within a line); anything that
+// could change line membership or global state must use scheduleRecompute() instead. If a
+// full recompute is also pending in the same window, the full one wins (always correct).
+Alerts.scheduleRecomputeLines = function (lines) {
+  if (lines) for (const l of lines) Alerts._pendingLines.add(l);
+  Alerts._armTimer();
+};
+
+/* =============================================================================
+   UTILIZATION — scheduled vs. available hours per line per day.
+   ========================================================================== */
+export const Utilization = {
+  _cache: null,  // { key, matrix } — memoized result of the Store-backed compute path
+  /** Returns { [line]: { [dayKey]: { scheduled, capacity, pct, tasks } } }.
+   *  Pass `srcTasks` to scope the result to a filtered task subset.
+   *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
+   *  every Store mutation, so a cache hit always reflects current data. Subset calls
+   *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
+  computeMatrix(startDate, days = 7, srcTasks = null) {
+    const start = Util.startOfDay(startDate);
+    const cacheable = srcTasks === null;
+    // Scope the memo key by selected plant. The worker prewarm (_prewarm) writes a
+    // PLANT-SCOPED matrix; this sync path is otherwise GLOBAL. Without a plant
+    // discriminator (and a matching line set) the two collide under one key and a
+    // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
+    const scope = Store.selectedPlant || 'all';
+    const cacheKey = `${start.getTime()}|${days}|${Store.rev()}|${scope}`;
+    if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
+      return Utilization._cache.matrix;
+    }
+    const _pmT0u = performance.now();
+    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
+
+    // Reproduce the exact line set the inline builder used: task lines, plus (when this
+    // is NOT a filtered subset) either the selected plant's lines or every visited
+    // calendar line. Passed explicitly so the core pins the same set.
+    const lineSet = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    if (srcTasks === null) {
+      if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
+      else Object.keys(Store.calendars).forEach(l => lineSet.add(l));
+    }
+
+    // Delegate the matrix build to nimbus-compute-core — the single source of truth,
+    // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
+    // (its worker contract); resolve them back to task OBJECTS here, which is what
+    // computeMatrix's callers expect (they read task fields off the rows).
+    const { matrix } = globalThis.NimbusComputeCore.computeUtilization({
+      tasks:        taskList,
+      lineSettings: Store.lineSettings,
+      calendars:    Store.calendars,
+      plants:       Store.plants,
+      blocks:       Store.blocks,
+      plantBlocks:  Store.plantBlocks,
+      masterData:   Store.masterData,
+      startMs:      start.getTime(),
+      days,
+      lines:        [...lineSet],
+    });
+    const byId = new Map(taskList.map(t => [t.id, t]));
+    for (const line of Object.keys(matrix)) {
+      const rows = matrix[line];
+      for (const k of Object.keys(rows)) {
+        rows[k].tasks = rows[k].tasks.map(id => byId.get(id)).filter(Boolean);
+      }
+    }
+
+    if (cacheable) Utilization._cache = { key: cacheKey, matrix };
+    PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
+    return matrix;
+  },
+
+  /** Severity bucket from a utilisation ratio.
+   *  overloadAt defaults to OVERLOAD_THRESHOLD but callers should pass
+   *  effectiveCapacity/capacity so the buffer limit is respected. */
+  sev(pct, overloadAt = Config.OVERLOAD_THRESHOLD) {
+    if (pct > overloadAt)               return 'err';
+    if (pct > Config.WARN_THRESHOLD)    return 'warn';
+    return 'ok';
+  },
+
+  /** Today's utilisation summary keyed by line. */
+  todayByLine() {
+    return Utilization.dayByLine(new Date());
+  },
+
+  /** Utilisation summary for any given day, keyed by line.
+   *  Pass `srcTasks` to scope the result to a filtered task subset. */
+  dayByLine(date, srcTasks = null) {
+    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
+    const d = Util.startOfDay(date) || Util.startOfDay(new Date());
+    const dEndMs = (() => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.getTime(); })();
+    const out = {};
+    const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    const dayKeyTarget = Util.dayKey(d);
+    // Pre-parse blackout blocks once; reused for both capacity and the per-task clip below.
+    const blockIdx = Calendar._indexCapacityBlocks();
+    for (const line of lines) {
+      const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
+      const effectiveCap = Calendar.effectiveFromCapacity(line, cap);
+      const workWin = Calendar.workWindow(line, d);
+      let sched = 0;
+      if (workWin) {
+        const plant = Store.getPlantForLine(line);
+        const blackouts = [];
+        // line:null blocks (globalLine) apply only within their own plant; concrete
+        // blocks under a reused line code are likewise resolved by plant.
+        const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) if (!x.plant || x.plant === plant) blackouts.push(x);
+        for (const x of blockIdx.globalLine) if (!x.plant || x.plant === plant) blackouts.push(x);
+        const _pb = blockIdx.plantBlocks.get(plant); if (_pb) for (const x of _pb) blackouts.push(x);
+        for (const x of blockIdx.globalPlant) blackouts.push(x);
+        for (const t of taskList) {
+          if ((t.PRODUCTION_LINE || 'Unknown') !== line) continue;
+          if (!t.start_date) continue;
+          if (!t.end_date) {
+            if (Util.dayKey(t.start_date) === dayKeyTarget) sched += Util.runHours(t);
+            continue;
+          }
+          const tStartMs = t.start_date.getTime();
+          const tEndMs   = t.end_date.getTime();
+          if (tEndMs <= tStartMs) continue;
+          if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
+          const taskRunHrs = Util.runHours(t);
+          if (taskRunHrs <= 0) continue;
+          const workingHrs = Util.mergedOverlapHours(workWin, [{ s: t.start_date, e: t.end_date }]);
+          if (workingHrs <= 0) continue;
+          const blackoutsClipped = blackouts
+            .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
+            .map(b => ({
+              s: new Date(Math.max(b.s.getTime(), tStartMs)),
+              e: new Date(Math.min(b.e.getTime(), tEndMs))
+            }));
+          const blackoutOverlap = Util.mergedOverlapHours(workWin, blackoutsClipped);
+          const dayHrs = Math.max(0, workingHrs - blackoutOverlap);
+          // Cap at RUN_TIME so SAP-bloated end_dates don't over-attribute.
+          sched += Math.min(dayHrs, taskRunHrs);
+        }
+      }
+      out[line] = {
+        capacity: cap, effectiveCapacity: effectiveCap, scheduled: sched,
+        pct: cap > 0 ? sched / cap : (sched > 0 ? 1 : 0)
+      };
+    }
+    return out;
+  }
+};
+
+// Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
+// call returns instantly from cache.
+Utilization._prewarm = function () {
+  // Skip when no plant is selected — _snap would otherwise post the global all-line
+  // snapshot to the worker for a matrix nothing on screen consumes.
+  if (!Compute.available() || !Store.selectedPlant) return;
+  const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
+  const startMs = Util.startOfDay(new Date()).getTime();
+  const rev     = Store.rev();
+  Compute.utilization(startMs, 7)
+    .then(({ matrix }) => {
+      if (Store.rev() !== rev) return; // stale — a newer mutation arrived
+      for (const line of Object.keys(matrix)) {
+        for (const k of Object.keys(matrix[line])) {
+          const row = matrix[line][k];
+          row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean);
+        }
+      }
+      Utilization._cache = { key: `${startMs}|7|${rev}|${plant}`, matrix };
+    })
+    .catch(() => {});
+};
+// Debounced so a drag-storm / autoReflow burst (many task:update/bulkUpdate events in
+// quick succession) collapses into ONE worker round-trip — i.e. one synchronous
+// structured-clone of the snapshot — instead of one per mutation.
+let _prewarmTimer = null;
+Store.subscribe(evt => {
+  if (evt.type !== 'tasks:bulk' && evt.type !== 'tasks:bulkUpdate' && evt.type !== 'task:update') return;
+  if (_prewarmTimer) clearTimeout(_prewarmTimer);
+  _prewarmTimer = setTimeout(() => { _prewarmTimer = null; Utilization._prewarm(); }, 200);
+}, 'Utilization.prewarm');

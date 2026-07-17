@@ -64,6 +64,7 @@ export const Store = {
   get selectedPlant() { return this._state.selectedPlant; },
   get userSettings()  { return this._state.userSettings; },
   get roleDefaults()  { return this._state.roleDefaults; },
+  get masterData()    { return this._state.masterData; },
 
   isFixed(id)     { return this._state.fixedIds.has(String(id)); },
 

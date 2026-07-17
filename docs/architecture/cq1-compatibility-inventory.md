@@ -37,7 +37,7 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Sandbox` | `schedule-state.mjs` | State + snapshots only (done, Phase 1). DOM banner/buttons/Toast/Confidence/Persistence/CalendarSync side effects live in `app.js`'s `SandboxAdapter` via the `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` events (the last emitted from `exit()`'s promote-then-undo closure when a promoted scenario is undone), pending their real move to `schedule-workbench.mjs` in Phase 3. |
 | `Calendar` | `schedule-services.mjs` | Capacity math only; blackout/line-calendar UI → workbench or plant-admin |
 | `Compute` | `schedule-services.mjs` | Worker client wrapper |
-| `Alerts` | `schedule-services.mjs` | |
+| `Alerts` | `schedule-services.mjs` | Split: computation → schedule-services.mjs; drawer/bell/cell-briefing modal → app.js's AlertsUIAdapter. |
 | `Utilization` | `schedule-services.mjs` | |
 | `Engine` | `schedule-services.mjs` | Optimizer + auto-reflow; no DOM |
 | `Persistence` | `schedule-data.mjs` | `scheduleRepository` |
@@ -220,8 +220,6 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Alerts` | `Store._rev`, `Store._state` | Phase 2 (schedule-services.mjs) |
-| `Utilization` | `Store._rev` | Phase 2 (schedule-services.mjs) |
 | `Engine` | `Store._state` | Phase 2 (schedule-services.mjs) |
 | `Persistence` | `Store._state` | Phase 2 (schedule-data.mjs) |
 | `CalendarSync` | `Store._state` | Phase 2 (schedule-data.mjs) |
@@ -237,6 +235,20 @@ module migrates in a later phase and stops touching these fields directly.
 `Store.rev()` and the new `Store.replace*` setters are available now as the
 migration target for each row above — use them instead of `_rev`/`_state`
 when a consumer's turn comes.
+
+**Temporary Engine seam (Phase 2 Task 2, removed by Task 3):** `Alerts` moved
+to `schedule-services.mjs` in Task 2, but `Engine` — which `Alerts.applyFix`
+calls into for its overlap/overload auto-fix paths (`autoReflow`/
+`runAndApply`) — does not move until Task 3, one commit later. A bare
+`Engine` reference inside `schedule-services.mjs` during that one-commit gap
+would be an undeclared identifier (this file is a real ES module under
+`web/**/*.mjs`'s `no-undef` ESLint block, with no ambient `Engine` global).
+`Alerts` carries a small private seam for exactly this gap —
+`Alerts.setEngineService({ autoReflow, runAndApply })` — wired once from
+`app.js` boot glue (right after the bridge destructure that introduces
+`Alerts`), where `Engine` still lives as of Task 2. Task 3 deletes the seam
+and both wiring sites once `Engine` is a real sibling export in
+`schedule-services.mjs` and `applyFix` can call it directly.
 
 `Store.mode()` now resolves the real `Sandbox.active` flag (Phase 1, Task 5):
 `Sandbox` is a sibling top-level export in `schedule-state.mjs`, so `mode()`
