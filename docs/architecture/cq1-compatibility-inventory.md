@@ -229,14 +229,51 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `Timeline` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `Hierarchy` | `Store._rev` | Phase 3 (schedule-workbench.mjs) |
 | `Dashboard` | `Store._rev`, `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `GanttFilter` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
-| `DependencyOverlay` | `Store._state` | Phase 3 (schedule-workbench.mjs) |
 | `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
 | `App` | `Store._state` | Phase 4 (application-shell.mjs) |
 | `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
+
+**`Timeline`/`DependencyOverlay` closed (Phase 3 Task 1):** both moved into
+`schedule-workbench.mjs` verbatim. `DependencyOverlay.render`'s one
+`Store._state.dependencies` read became `Store.dependencies` (the public
+getter already existed — added by Phase 2 Task 4, see below — so no new
+getter was needed). `Timeline` had two direct `Store._state.masterData`
+reads (the live ticker's alert-horizon check in `init()`, and the
+alert-horizon-zone block in `rebuild()`) that were not previously tracked
+as a distinct row but are the same class of exception; both became
+`Store.masterData` (the existing Phase 1 public getter). Neither module
+had a `Store._rev` touch.
+
+**Timeline's five forward references into app.js (Phase 3 Task 1, one
+temporary group + one permanent):** `Timeline` was the first Phase 3 module
+moved, so it now carries five cross-references into code that has not
+(`App.gotoGanttTimeline`, `EmptyState.render`) or has not yet
+(`Inspector.show`, `Interaction.DEBUG`, `GanttFilter._selectedLines`) moved
+into `schedule-workbench.mjs`. All five were bare identifiers in the
+original app.js code (safe there — same IIFE scope) but would be
+`ReferenceError`s (and `no-undef` lint failures — `web/**/*.mjs`'s ESLint
+block does not include `NIMBUS`/`t`/module names in its globals, unlike
+`web/app.js`'s block) once lifted into a real module. All five now go
+through the shared `NIMBUS` binding (`NIMBUS.App.gotoGanttTimeline()`,
+`NIMBUS.EmptyState.render(...)`, `NIMBUS.Inspector.show(...)`,
+`NIMBUS.Interaction.DEBUG`, `NIMBUS.GanttFilter._selectedLines`) — the same
+idiom already used elsewhere in app.js for cross-file calls into
+`nimbus-intelligence.js`'s `Confidence` (`NIMBUS.Confidence?.snapshot()`).
+`NIMBUS` is declared via an in-file `/* global NIMBUS */` comment in
+`schedule-workbench.mjs` (no `eslint.config.js` change). `Inspector`
+(Task 2), `GanttFilter` (Task 3), and `Interaction` (Task 5) become
+same-module lexical references once those tasks land in this same file —
+the `NIMBUS.X` indirection stays correct either way, so no further change
+is needed there when that happens. `App.gotoGanttTimeline` and
+`EmptyState.render` stay indirected permanently: `App` never moves into
+this file (Phase 4, `application-shell.mjs`) and `EmptyState` is boot UI
+that stays in `app.js` (not part of this plan's module list at all). Two
+bare `t(...)` i18n calls in `Timeline._itemForBlock` also became
+`Util.t(...)` (the established Phase 2 convention for the same lint
+reason — see `schedule-services.mjs`'s header comment).
 
 `Store.rev()` and the new `Store.replace*` setters are available now as the
 migration target for each row above — use them instead of `_rev`/`_state`

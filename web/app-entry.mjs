@@ -11,6 +11,7 @@ import * as foundation from './application-foundation.mjs';
 import * as state from './schedule-state.mjs';
 import * as services from './schedule-services.mjs';
 import * as data from './schedule-data.mjs';
+import * as workbench from './schedule-workbench.mjs';
 
 export function bootEntry({ window: win = (typeof window !== 'undefined' ? window : undefined), loadScript } = {}) {
   if (!win) return Promise.reject(new Error('NIMBUS boot error: no window available for bootEntry'));
@@ -18,6 +19,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
   win.__NIMBUS_STATE = state;
   win.__NIMBUS_SERVICES = services;
   win.__NIMBUS_DATA = data;
+  win.__NIMBUS_WORKBENCH = workbench;
 
   const inject = loadScript || defaultLoadScript;
   const v = win.NIMBUS_BUILD_ID || 'dev';
@@ -39,6 +41,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
       delete win.__NIMBUS_STATE;
       delete win.__NIMBUS_SERVICES;
       delete win.__NIMBUS_DATA;
+      delete win.__NIMBUS_WORKBENCH;
     });
 }
 

@@ -10,6 +10,7 @@ import * as foundation from '../../../web/application-foundation.mjs';
 import * as state from '../../../web/schedule-state.mjs';
 import * as services from '../../../web/schedule-services.mjs';
 import * as data from '../../../web/schedule-data.mjs';
+import * as workbench from '../../../web/schedule-workbench.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -220,6 +221,7 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   sandbox.window.__NIMBUS_STATE = state;
   sandbox.window.__NIMBUS_SERVICES = services;
   sandbox.window.__NIMBUS_DATA = data;
+  sandbox.window.__NIMBUS_WORKBENCH = workbench;
 
   // application-foundation.mjs is a real ES module loaded above via a normal
   // dynamic import, so it executes in THIS host Node realm — NOT inside the
@@ -269,6 +271,21 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // rather than fabricate a second, divergent window.
   globalThis.window = sandbox.window;
 
+  // NOTE (CQ-1 Phase 3 Task 1): schedule-workbench.mjs's `Timeline` references a
+  // handful of app.js-resident siblings (App, Inspector, Interaction, GanttFilter,
+  // EmptyState) via the bare `NIMBUS` binding rather than direct imports — safe in
+  // a real browser (classic-script top-level `const`/`let` share one realm-wide
+  // declarative scope with any module on the same page), but `NIMBUS` here only
+  // exists inside THIS vm sandbox's context (`ctx.__NIMBUS__` below), not on the
+  // host realm where schedule-workbench.mjs (a real ES module, imported above)
+  // actually executes. No current test calls a Timeline method that reaches
+  // `NIMBUS` (rebuild()/focus()/gotoLineDay()/_renderEmptyOverlay() all do), so
+  // this hasn't needed a fix yet — if a future test (e.g. Task 5's Interaction
+  // characterization tests, which can trigger a Timeline rebuild via a simulated
+  // drag) does reach one, mirror `ctx.__NIMBUS__` onto `globalThis.NIMBUS` here,
+  // the same way `NimbusComputeCore`/`fetch`/`localStorage`/`window` are mirrored
+  // above — it can't be done here directly since `ctx.__NIMBUS__` doesn't exist
+  // until after `runInContext` below runs.
   const ctx = createContext(sandbox);
 
   // Inject __NIMBUS__ capture after the IIFE so `const NIMBUS` (script-scoped)
