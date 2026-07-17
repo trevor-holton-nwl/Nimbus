@@ -1562,11 +1562,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <nav class="admin-subtabs plant-inner-tabs" role="tablist"
            style="padding:0 24px;border-top:1px solid var(--border);margin-top:0;flex-shrink:0;">
         <button class="sub-subtab active" data-plant-tab="general" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('general')" data-i18n="tab.general">General</button>
+                data-i18n="tab.general">General</button>
         <button class="sub-subtab" data-plant-tab="optimization" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('optimization')" data-i18n="tab.optimization">Optimization</button>
+                data-i18n="tab.optimization">Optimization</button>
         <button class="sub-subtab" data-plant-tab="settings" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('settings')" data-i18n="tab.system_settings">System Settings</button>
+                data-i18n="tab.system_settings">System Settings</button>
       </nav>
 
       <!-- Inner pane: General -->
@@ -1580,7 +1580,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <div class="panel" id="plant-blackouts-panel">
               <header class="panel-head">
                 <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
-                <button class="btn btn-ghost sm" onclick="NIMBUS.Plant.openBlockModal()" data-i18n="btn.add_block">+ Add</button>
+                <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
               </header>
               <div class="panel-body panel-body-flush">
                 <div id="plant-blocks-stats"></div>
@@ -1593,7 +1593,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <h3 data-i18n="ui.production_lines_panel">Production Lines</h3>
               <span class="panel-hint" id="plant-lines-count"></span>
               <button id="plant-roster-toggle" class="btn btn-ghost sm"
-                      onclick="NIMBUS.Plant.toggleRosterList()"
                       style="padding:2px 8px;font-size:12px;">▼</button>
             </header>
             <div id="plant-roster-wrap" style="display:none;max-height:392px;overflow-y:auto;">
@@ -1618,7 +1617,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         </div>
       </div>
 
-      <!-- Inner pane: System Settings (content injected by App._renderSettingsPane) -->
+      <!-- Inner pane: System Settings (content injected by Plant's settings-pane renderer) -->
       <div id="plant-tab-settings" class="cal-scroll" hidden style="flex:1;overflow-y:auto;"></div>
 
     </div>
@@ -2107,7 +2106,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.CalendarUI.saveBlockFromModal()">Save block</button>
+      <button id="modal-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>
@@ -2164,7 +2163,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-plant-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.Plant.savePlantBlockFromModal()">Save block</button>
+      <button id="modal-plant-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>
@@ -2200,7 +2199,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-lines-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.ProdLines.saveBlockFromModal()">Save block</button>
+      <button id="modal-lines-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>

@@ -14,72 +14,12 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
       "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
     },
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI._clearLineFilter()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.ColorWheelViewer.open('${esc(plantName)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.EditCalendar.open('${line}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
       "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant._confirmDeleteWheel('${esc(plantName)}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant._pillClick(${d})"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.removePlantBlock('${b.id}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.toggleBlocksList()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.ProdLines.openBlockModal('${line}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "oncontextmenu",
-      "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
     },
     {
       "file": "application-foundation.mjs",
@@ -205,11 +145,6 @@
       "file": "index.html",
       "attribute": "onclick",
       "expression": "NIMBUS.App.toggleSide('right')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI.saveBlockFromModal()"
     },
     {
       "file": "index.html",
@@ -464,36 +399,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Plant.gotoTab('general')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.gotoTab('optimization')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.gotoTab('settings')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.openBlockModal()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.savePlantBlockFromModal()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.toggleRosterList()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.Printer.exportCsv()"
     },
     {
@@ -510,11 +415,6 @@
       "file": "index.html",
       "attribute": "onclick",
       "expression": "NIMBUS.Printer.print()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.ProdLines.saveBlockFromModal()"
     },
     {
       "file": "index.html",
@@ -630,6 +530,66 @@
       "file": "index.html",
       "attribute": "oninput",
       "expression": "NIMBUS.OptimizeDialog.filterPlants(this.value)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI._clearLineFilter()"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer.open('${esc(plantName)}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.open('${line}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant._confirmDeleteWheel('${esc(plantName)}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant._pillClick(${d})"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant.removePlantBlock('${b.id}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant.toggleBlocksList()"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ProdLines.openBlockModal('${line}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "oncontextmenu",
+      "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
     },
     {
       "file": "schedule-workbench.mjs",
@@ -780,7 +740,6 @@
     "App.gotoGanttTimeline",
     "App.gotoLaborSub",
     "App.toggleSide",
-    "CalendarUI.saveBlockFromModal",
     "ColorWheelViewer.close",
     "ColorWheelViewer.search",
     "ColorWheelViewer.sort",
@@ -820,15 +779,10 @@
     "OptimizerPreview.apply",
     "OptimizerPreview.discard",
     "Persistence.saveAll",
-    "Plant.gotoTab",
-    "Plant.openBlockModal",
-    "Plant.savePlantBlockFromModal",
-    "Plant.toggleRosterList",
     "Printer.exportCsv",
     "Printer.open",
     "Printer.preview",
     "Printer.print",
-    "ProdLines.saveBlockFromModal",
     "SandboxAdapter.enter",
     "Table._clearChipFilters",
     "Table._toggleChipDropdown",
@@ -883,7 +837,6 @@
     "Utilization.computeMatrix"
   ],
   "privateConsumers": [
-    "App._renderSettingsPane",
     "CommandPalette._activate",
     "CommandPalette._buildIndex",
     "CommandPalette._buildPanel",

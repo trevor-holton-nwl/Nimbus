@@ -50,6 +50,61 @@ rows (`App`, `nimbus-intelligence.js`). §6 lists **3** open rows at the close
 of Phase 3, not 2; `MasterData`'s row closes only when the sibling
 `plant-and-administration.mjs` migration lands, which is a different plan.
 
+**Phase 4 Task 1 status (complete):** `plant-and-administration.mjs` is a real
+ES module, bridged into `app.js` via `app-entry.mjs` +
+`window.__NIMBUS_PLANT_ADMIN`, carrying `CalendarUI`, `Plant`, and
+`ProdLines` — moved verbatim except two seams identified in this phase's
+research, both resolved rather than carried forward:
+- `Plant.gotoTab('settings')`'s call into `App._renderSettingsPane()` was
+  eliminated by relocating `_renderSettingsPane`'s entire body bodily into
+  `Plant._renderSettingsPane()` (per-plant scheduling-constraint list,
+  color-wheel enable toggle — content that only ever rendered into Plant's
+  own `#plant-tab-settings` DOM and was only ever triggered from `Plant`
+  itself). `app.js`'s old call site is now a one-line stub, removed entirely
+  when Task 4 deletes the rest of `App`. This method's one
+  `Store._state.masterData` direct touch is untouched, verbatim — it is not
+  one of this task's targets; see §6 for that ongoing exception.
+- `Plant.init()`'s Store-subscribe callback's read of
+  `App._currentTab`/`_currentMasterSub` became
+  `_activeTabResolvers.currentTab()`/`.currentMasterSub()`, fed by a new
+  `PlantAdmin.setActiveTabResolvers(...)` injected-getter seam wired once in
+  `app.js` boot glue immediately after this task's bridge destructure — the
+  same one-directional "am I currently visible?" pattern used throughout this
+  migration. `LaborPlanning`'s equivalent reads (`App._laborSub`/
+  `._currentTab`) are wired through the same seam when `LaborPlanning` itself
+  moves in Task 2.
+
+`MasterData` has not moved yet (Task 2) — `Plant`'s/`ProdLines`' bare
+`MasterData.syncLineSettings(...)` calls (7 call sites) are therefore genuine
+forward references into `app.js`-resident code that hasn't moved into this
+file yet, rewritten through the shared `NIMBUS` binding
+(`NIMBUS.MasterData.syncLineSettings(...)`), the same idiom Phase 3 used for
+its own forward references into not-yet-moved modules (Timeline's/Table's/
+Dashboard's/Interaction's). They become ordinary same-module references with
+no further code change once Task 2 lands `MasterData` in this same file.
+
+Eight static `onclick=` attributes in `index.html` targeting `CalendarUI`/
+`Plant`/`ProdLines` (the plant-inner-tabs strip's 3 tab buttons, the plant
+blackout "+ Add" button, the roster-list toggle, and the three modal "Save
+block" buttons) were converted to real `addEventListener` wiring, following
+the Phase 3 `Interaction._showMultiInspector` precedent. Since `CalendarUI`
+has no `init()` at all and `ProdLines` deliberately has none (renders
+on-demand), `Plant.init()` — the one boot-time entry point already guaranteed
+to run once at boot, per `_bootMain()` — is the single wiring point for this
+whole family's static markup, via a new `Plant._wireStaticHandlers()`. The
+JS-template-generated `onclick="NIMBUS.CalendarUI/Plant/ProdLines..."` strings
+inside `CalendarUI`/`Plant`/`ProdLines`'s own re-rendered HTML (blackout-row
+remove buttons, color-wheel preview/remove, plant-hours pill click/right-click,
+etc.) are **not** in this task's scope — the plan's inline-handler mandate
+only applies to `index.html`'s static attributes, not app-generated markup —
+and are left exactly as-is (they resolve normally via the global `NIMBUS`
+binding regardless of which file defines the target module). A stale
+`index.html` HTML comment referencing `App._renderSettingsPane` by name was
+also corrected (to describe behavior without naming a `Module._member` path)
+since the regex-based legacy-surface scanner treated the comment text itself
+as a private-consumer access — this closes that one phantom `§4.2` row (see
+below) as a side effect of the relocation, not a semantic private-access fix.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated
@@ -103,8 +158,9 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Printer` | `schedule-workbench.mjs` | Print/export; Printer.open() exposed via shell action |
 | `SandboxAdapter` | `schedule-workbench.mjs` | Moved Phase 3 Task 7 — the design doc's **explicitly-mandated** move (thin DOM/cross-module layer over the state-only `Sandbox`). |
 | `AlertsUIAdapter` | `schedule-workbench.mjs` | Moved Phase 3 Task 7 — **not** an explicit design-doc mandate; a deliberate, documented scope decision based on real coupling evidence (bidirectional references to/from `Timeline`, `Inspector`, `Table`, `Dashboard`, and `Interaction` — all already in this file — stronger than `Sandbox`'s coupling was before its mandated move). `VL_ALERT_ROW_H` travels with it. |
-| `Plant` | `plant-and-administration.mjs` | Plant config tab |
-| `ProdLines` | `plant-and-administration.mjs` | Production lines tab |
+| `CalendarUI` | `plant-and-administration.mjs` | Blackout-block-tab UI remnant (capacity math stayed in `schedule-services.mjs`'s `Calendar`). Moved Phase 4 Task 1. |
+| `Plant` | `plant-and-administration.mjs` | Plant config tab. Moved Phase 4 Task 1 — now also owns `_renderSettingsPane` (relocated bodily from `App`, see the Phase 4 Task 1 status note above). |
+| `ProdLines` | `plant-and-administration.mjs` | Production lines tab. Moved Phase 4 Task 1 — no `.init()` (renders on-demand, unchanged). |
 | `LaborPlanning` | `plant-and-administration.mjs` | Labor plan editor |
 | `MasterData` | `plant-and-administration.mjs` | CRUD grid + DDL wizard |
 | `Interface` | `plant-and-administration.mjs` | SAP sync config/run history |
@@ -223,7 +279,6 @@ These are the `Module._member` accesses from `index.html` and
 `nimbus-intelligence.js`. All must be eliminated before Phase 4 completes.
 
 ```
-App._renderSettingsPane
 CommandPalette._activate
 CommandPalette._buildIndex
 CommandPalette._buildPanel
@@ -247,8 +302,16 @@ Store._rev
 UndoStack._entries
 ```
 
-The full machine-readable list (74 entries, including app.js-generated HTML)
+The full machine-readable list (73 entries, including app.js-generated HTML)
 lives in `tests/contracts/cq1-legacy-surface.json` under `privateConsumers`.
+**`App._renderSettingsPane` closed (Phase 4 Task 1):** this was a phantom
+entry — the scanner's `Module._member` regex matched an `index.html` HTML
+comment mentioning the method by name (`<!-- ... injected by
+App._renderSettingsPane -->`), not a real code access. Relocating the method
+into `Plant` (see the Phase 4 Task 1 status note above) and rewording the
+comment to describe behavior without naming a `Module._member` path dropped
+the entry count from 74 to 73 as a side effect, not a semantic fix to a real
+private-access pattern.
 
 **GanttFilter's private-consumer debt (Phase 3 Task 3, partially closed):** the
 plan that drove this task described "8 `GanttFilter._*` private-consumer
@@ -295,6 +358,20 @@ module migrates in a later phase and stops touching these fields directly.
 | `MasterData` | `Store._state` | Phase 3 (plant-and-administration.mjs) |
 | `App` | `Store._state` | Phase 4 (application-shell.mjs) |
 | `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
+| `Plant` | `Store._state` | Not yet scheduled — see note below |
+
+**New row added (Phase 4 Task 1):** `Plant._renderSettingsPane`'s one
+`Store._state.masterData?.plants?.find(...)` read moved verbatim along with
+the rest of the method's body when it relocated from `App` into `Plant` (see
+the Phase 4 Task 1 status note above) — closing this §6 exception was
+explicitly not this task's job (the plan's Interfaces section for this task
+only names moving the method, not fixing its internals). It is tracked here
+under its new owner, `Plant`, rather than silently left attributed to `App`
+(which no longer contains this code) or silently dropped. This phase's Task 6
+plan text names only `App` and `nimbus-intelligence.js` as its remaining-
+touches targets — `plant-and-administration.mjs` is not explicitly named — so
+whether Task 6 closes this specific row is not yet certain from the plan text
+alone; "Not yet scheduled" here means exactly that, not that it never will be.
 
 **`Timeline`/`DependencyOverlay` closed (Phase 3 Task 1):** both moved into
 `schedule-workbench.mjs` verbatim. `DependencyOverlay.render`'s one
