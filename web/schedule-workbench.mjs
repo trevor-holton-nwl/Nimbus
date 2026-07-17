@@ -7,35 +7,44 @@
 // SandboxAdapter/AlertsUIAdapter DOM remnants from Phase 1/2, whose coupling
 // profile puts them here — see docs/architecture/cq1-compatibility-inventory.md.
 //
-// CQ-1 Phase 3 Task 1 adds Timeline, TimelineNav, and DependencyOverlay only —
-// later tasks in this same phase add Table/Inspector/ContextMenu (Task 2),
-// Hierarchy/GanttFilter (Task 3), Dashboard (Task 4), Interaction (Task 5),
-// OptimizeDialog/OptimizerPreview (Task 6), and EditCalendar/ColorWheelViewer/
-// Printer/SandboxAdapter/AlertsUIAdapter (Task 7).
+// CQ-1 Phase 3 Task 1 added Timeline, TimelineNav, and DependencyOverlay;
+// Task 2 adds Table, Inspector, and ContextMenu. Later tasks in this same
+// phase add Hierarchy/GanttFilter (Task 3), Dashboard (Task 4), Interaction
+// (Task 5), OptimizeDialog/OptimizerPreview (Task 6), and EditCalendar/
+// ColorWheelViewer/Printer/SandboxAdapter/AlertsUIAdapter (Task 7).
 //
-// Timeline still has five genuine cross-references into app.js-resident code
-// that hasn't moved here yet — App.gotoGanttTimeline() (App never moves into
-// this file; it targets application-shell.mjs in Phase 4), Inspector.show()
-// (moves here in Task 2), Interaction.DEBUG (moves here in Task 5),
-// GanttFilter._selectedLines (moves here in Task 3), and EmptyState.render()
-// (stays in app.js — boot UI, not part of this phase's module list). All five
-// are reached via the shared `NIMBUS` binding (the classic-script top-level
-// const app.js assigns itself to) rather than as bare identifiers: unlike
-// `Timeline`/`Inspector`/etc themselves (which are function-scoped inside
-// app.js's IIFE and thus invisible outside it), `NIMBUS` is declared at the
-// classic-script's true top level, so it is part of the realm's shared global
-// declarative scope and resolvable from any module on the same page — see
-// index.html/app-entry.mjs. `web/**/*.mjs` files don't have `NIMBUS` in their
-// ESLint global list (only web/app.js and web/nimbus-intelligence.js do), so
-// it's declared via an in-file `/* global */` comment below rather than a
-// config change (Global Constraints: eslint.config.js needs zero changes).
+// Timeline still has five genuine cross-references reached via the shared
+// `NIMBUS` binding rather than as bare identifiers — App.gotoGanttTimeline()
+// (App never moves into this file; it targets application-shell.mjs in Phase
+// 4), Inspector.show() (Inspector itself moved into THIS file in Task 2, but
+// the Timeline.focus() call site was left as `NIMBUS.Inspector.show(...)`
+// rather than simplified to a bare same-module reference, since it works
+// identically either way and touching it isn't required by Task 2's scope),
+// Interaction.DEBUG (moves here in Task 5), GanttFilter._selectedLines (moves
+// here in Task 3), and EmptyState.render() (stays in app.js — boot UI, not
+// part of this phase's module list). `NIMBUS` is declared at the
+// classic-script's true top level (the const app.js assigns itself to), so it
+// is part of the realm's shared global declarative scope and resolvable from
+// any module on the same page — see index.html/app-entry.mjs. `web/**/*.mjs`
+// files don't have `NIMBUS` in their ESLint global list (only web/app.js and
+// web/nimbus-intelligence.js do), so it's declared via an in-file
+// `/* global */` comment below rather than a config change (Global
+// Constraints: eslint.config.js needs zero changes).
 // Bare `t(...)` calls became `Util.t(...)` instead (the established Phase 2
 // convention — see schedule-services.mjs), since `Util.t` is a real export
-// and `window.t` is just a thin wrapper around it.
+// and `window.t` is just a thin wrapper around it. Task 2's Table module has
+// two similar bare cross-references into app.js-resident code that hasn't
+// moved yet — `EmptyState.render(...)` and `AlertsUIAdapter.focus(...)` (the
+// latter inside `_showAlertPopup`, a genuine cross-file reference in the
+// wrong direction until `AlertsUIAdapter` moves here in Task 7) — both
+// rewritten to go through the same shared `NIMBUS` binding as Timeline's five,
+// for the identical reason (the referenced module hasn't moved into this file
+// yet, so a bare identifier would not resolve inside a real ES module).
 /* global NIMBUS */
-import { Config, Util, PerfMonitor, ErrorLog } from './application-foundation.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal } from './application-foundation.mjs';
 import { Store, Selection } from './schedule-state.mjs';
-import { Utilization } from './schedule-services.mjs';
+import { Utilization, Alerts, Engine } from './schedule-services.mjs';
+import { Session } from './schedule-data.mjs';
 
 /* =============================================================================
    TIMELINE — vis-timeline integration.
@@ -1143,5 +1152,1552 @@ export const DependencyOverlay = {
         svg.appendChild(line);
       }
     }
+  }
+};
+
+/* =============================================================================
+   TABLE — AG Grid integration with rich inline editing, filtering, and full
+   two-way sync. Uses the transaction API for fast incremental updates.
+   ========================================================================== */
+export const Table = {
+  _api:    null,
+  _colApi: null,
+  _selectedId: null,  // for the override modal
+  _noteOutsideHandler: null,
+  _noteKeyHandler: null,
+  _chipFilters: { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() },
+  _lineSearch:       '',
+  _colorSearch:      '',
+  _rangeMode:        false,
+  _rangeAnchor:      null,
+  _rangeActive:      null,
+  _rangeDragOn:      false,
+  _rangeHighlighted: new Set(),
+  _applyingLayout:   false,   // true while restoring saved layout — suppresses capture echo
+  _captureTimer:     null,
+
+  /* ── Saved grid layout (pref('gridLayout'), user tier) ────────────────────
+     gridLayout === null  → feature OFF: never applied on load, never captured.
+     gridLayout === {...}  → feature ON: applied on grid-ready, re-captured (debounced)
+                             on every column/sort/filter change. The on/off toggle in
+                             User Settings derives its state from this null-ness, so
+                             enabling captures the current live layout (→ non-null) and
+                             disabling nulls it. Shape: { columnState, sortModel, filterModel }
+                             per the settings contract; AG Grid v31 folds sort into
+                             columnState, so applyColumnState() alone restores sorting —
+                             sortModel is derived and stored only to honor the contract shape. */
+  _layoutEnabled() { try { return Store.pref('gridLayout') != null; } catch { return false; } },
+
+  _currentLayout() {
+    if (!Table._api) return { columnState: null, sortModel: null, filterModel: null };
+    let columnState = null, filterModel = null, sortModel = null;
+    try { columnState = Table._api.getColumnState(); } catch {}
+    try { filterModel = Table._api.getFilterModel(); } catch {}
+    if (columnState) {
+      sortModel = columnState
+        .filter(c => c.sort)
+        .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map(c => ({ colId: c.colId, sort: c.sort }));
+    }
+    return { columnState, sortModel, filterModel };
+  },
+
+  // Debounced capture — guarded so programmatic restores don't echo back, and
+  // a no-op while the feature is disabled.
+  _captureLayout() {
+    if (Table._applyingLayout || !Table._layoutEnabled()) return;
+    clearTimeout(Table._captureTimer);
+    Table._captureTimer = setTimeout(() => {
+      if (!Table._layoutEnabled()) return;
+      try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+    }, 400);
+  },
+
+  _applySavedLayout() {
+    const layout = (() => { try { return Store.pref('gridLayout'); } catch { return null; } })();
+    if (!layout || !Table._api) return;
+    Table._applyingLayout = true;
+    try {
+      if (Array.isArray(layout.columnState)) {
+        Table._api.applyColumnState({ state: layout.columnState, applyOrder: true });
+      }
+      if (layout.filterModel && typeof layout.filterModel === 'object') {
+        Table._api.setFilterModel(layout.filterModel);
+      }
+    } catch (e) {
+      ErrorLog.warn('table', `Apply saved grid layout failed: ${e.message}`);
+    }
+    // Release the guard on the next macrotask so any events the restore fired
+    // (sync or queued) are all ignored, but genuine later user edits are not.
+    setTimeout(() => { Table._applyingLayout = false; }, 0);
+  },
+
+  // Turn the feature on (capture current live layout) or off (null it + reset
+  // the grid to defaults). Called by the User Settings toggle.
+  _setLayoutEnabled(on) {
+    if (on) {
+      try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+    } else {
+      try { Session.setPref('gridLayout', null); } catch {}
+      Table._resetGridState();
+    }
+  },
+
+  // Reset the live grid to its default column arrangement + clear column filters.
+  _resetGridState() {
+    if (!Table._api) return;
+    Table._applyingLayout = true;
+    try {
+      Table._api.resetColumnState();
+      Table._api.setFilterModel(null);
+    } catch (e) {
+      ErrorLog.warn('table', `Reset grid layout failed: ${e.message}`);
+    }
+    setTimeout(() => { Table._applyingLayout = false; }, 0);
+  },
+
+  // "Reset grid layout" action: reset the live grid, then — if the feature is
+  // on — re-capture the now-default state so it persists (staying non-null keeps
+  // the toggle on). Returns true if the grid was available to reset.
+  _resetGridLayout() {
+    if (!Table._api) return false;
+    Table._resetGridState();
+    if (Table._layoutEnabled()) {
+      try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
+    }
+    return true;
+  },
+
+  init() {
+    const el = document.getElementById('ag-grid');
+    if (!el || typeof agGrid === 'undefined') return;
+    const gridOptions = {
+      rowData: Store.tasksForSelectedPlant(),
+      getRowId: p => String(p.data.id),
+      rowSelection: 'multiple',
+      rowMultiSelectWithClick: true,
+      animateRows: false,
+      suppressRowClickSelection: false,
+      defaultColDef: {
+        sortable: true,
+        filter:   true,
+        resizable: true,
+        flex: 1,
+        minWidth: 100,
+        cellClass: p => Table._rowClass(p.data)
+      },
+      columnDefs: [
+        {
+          headerName: '',
+          checkboxSelection: true,
+          headerCheckboxSelection: true,
+          width: 50,
+          minWidth: 50,
+          maxWidth: 50,
+          flex: 0,
+          pinned: 'left',
+          lockPosition: true,
+          suppressHeaderMenuButton: true,
+          sortable: false,
+          filter: false,
+          resizable: false
+        },
+        {
+          headerName: Util.t('col.fixed'), field: 'fixed',
+          width: 42, minWidth: 42, maxWidth: 42, flex: 0,
+          pinned: 'left',
+          editable: false,
+          cellRenderer: p => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          headerTooltip: Util.t('tip.fixed_column')
+        },
+        { headerName: Util.t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
+          editable: false, cellClass: 'cell-num' },
+        { headerName: Util.t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
+          pinned: 'left', editable: false,
+          valueGetter: p => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
+        { headerName: Util.t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
+          tooltipField: 'MATERIAL_DESCRIPTION' },
+        { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
+          editable: false, cellClass: 'cell-num',
+          valueParser: p => parseFloat(p.newValue) || 0 },
+        { headerName: Util.t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
+          cellEditor: Table._SearchableLineEditor,
+          cellEditorPopup: true,
+          cellEditorParams: () => ({ values: Table._getLineOptions() }),
+          cellRenderer: p => {
+            if (!p.value) return '';
+            const ci = Timeline._colorIndex(p.value);
+            const color = Config.COLORS[ci % Config.COLORS.length];
+            return `<span class="cell-line-tag"><span class="dot" style="background:${color}"></span>${p.value}</span>`;
+          }
+        },
+        { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false },
+        { headerName: Util.t('col.form'),  field: 'FORM_SIZE', width: 90, flex: 0, editable: false },
+        { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
+          cellClass: 'cell-num',
+          valueParser: p => parseFloat(p.newValue) || 0 },
+        { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
+          editable: false,
+          // Display-only derived value (due date minus RUN_TIME — see
+          // Util.impliedOriginalStart) instead of the raw midnight SAP
+          // date. `field` is kept alongside `valueGetter` (same precedent
+          // as the PRODUCTION_ORDER column above) purely so AG Grid's
+          // date-type inference off the raw field still drives this
+          // column's sort + agDateColumnFilter; dropping `field` entirely
+          // would degrade the filter to generic/text.
+          valueGetter: p => Util.impliedOriginalStart(p.data),
+          valueFormatter: p => Util.fmtDTReadable(p.value),
+          cellClass: 'cell-date cell-date-original' },
+        { headerName: Util.t('col.orig_end'), field: 'original_end_date', minWidth: 160,
+          editable: false,
+          valueFormatter: p => Util.fmtDTReadable(p.value),
+          cellClass: 'cell-date cell-date-original' },
+        { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
+          editable: true,
+          valueFormatter: p => Util.fmtDTReadable(p.value),
+          cellEditor: Table._DateTimeEditor,
+          cellClass: 'cell-date' },
+        { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
+          editable: false,
+          valueFormatter: p => Util.fmtDTReadable(p.value),
+          cellClass: 'cell-date' },
+        { headerName: Util.t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
+          cellRenderer: p => {
+            const rel = Store.alertsByTask().get(String(p.value)) || [];
+            if (!rel.length) return '';
+            const err = rel.some(a => a.sev === 'err');
+            const color = err ? 'var(--err)' : 'var(--warn)';
+            return `<button onclick="NIMBUS.Table._showAlertPopup('${p.value}')"
+              title="Click to view alerts"
+              style="background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit">
+              ⚐ ${rel.length}</button>`;
+          }
+        },
+        { headerName: '📝', field: 'notes', width: 180, minWidth: 80,
+          sortable: false, filter: false, editable: true, suppressHeaderMenuButton: true,
+          cellEditor: 'agLargeTextCellEditor', cellEditorPopup: true,
+          cellEditorParams: { maxLength: 500, rows: 5, cols: 50 },
+          cellRenderer: p => {
+            const note = p.value != null ? String(p.value).trim() : '';
+            if (!note) return `<span class="nb-note-empty">✎ <em>${Util.t('ui.add_note')}</em></span>`;
+            const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
+            const esc = note.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            return `<span class="nb-note-preview" title="${esc}">✎ ${preview}</span>`;
+          }
+        }
+      ],
+      onCellValueChanged: Table._onCellChanged,
+      onSelectionChanged: Table._onSelectionChanged,
+      isExternalFilterPresent: () => Table._hasChipFilters(),
+      doesExternalFilterPass: node => Table._taskPassesChipFilters(node.data),
+      noRowsOverlayComponent: Table._NoRowsOverlay,
+      onCellMouseDown: p => {
+        if (!Table._rangeMode) return;
+        p.event.preventDefault();
+        Table._rangeAnchor  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+        Table._rangeActive  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+        Table._rangeDragOn  = true;
+        Table._applyRangeHighlight();
+        document.addEventListener('mouseup', () => { Table._rangeDragOn = false; }, { once: true });
+      },
+      onCellMouseOver: p => {
+        if (!Table._rangeMode || !Table._rangeDragOn) return;
+        Table._rangeActive = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
+        Table._applyRangeHighlight();
+      },
+      onCellKeyDown: p => {
+        const ctrl = p.event.ctrlKey || p.event.metaKey;
+        const key  = p.event.key;
+        if (ctrl && key === 'y') {
+          p.event.preventDefault();
+          Table._toggleRangeMode();
+          return;
+        }
+        if (ctrl && key === 'c') {
+          if (Table._rangeMode && Table._rangeHighlighted.size > 0) {
+            Table._copyRange();
+          } else {
+            const raw = p.api.getValue(p.column.getColId(), p.node);
+            const colDef = p.column.getColDef();
+            let text = raw;
+            if (colDef.valueFormatter) {
+              const fmt = colDef.valueFormatter({ value: raw, data: p.data, node: p.node, column: p.column, api: p.api, colDef });
+              if (fmt != null) text = fmt;
+            }
+            navigator.clipboard?.writeText(text == null ? '' : String(text)).catch(() => {});
+            const cell = p.event.target?.closest?.('.ag-cell');
+            if (cell) {
+              cell.classList.add('ag-cell-copy-flash');
+              setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380);
+            }
+          }
+          return;
+        }
+        if (key === 'Escape' && Table._rangeMode) {
+          Table._clearRange();
+        }
+      },
+      // Saved grid layout — capture column order/width/visibility/pinning, sort,
+      // and built-in column filters whenever the user changes them (debounced, and
+      // only while the feature is enabled). See Table._captureLayout.
+      onSortChanged:    () => Table._captureLayout(),
+      onColumnMoved:    () => Table._captureLayout(),
+      onColumnResized:  () => Table._captureLayout(),
+      onColumnVisible:  () => Table._captureLayout(),
+      onColumnPinned:   () => Table._captureLayout(),
+      onFilterChanged:  () => Table._captureLayout(),
+      onGridReady: params => {
+        Table._api = params.api;
+        Table._colApi = params.columnApi;
+        Table._wireQuickFilter();
+        Table._initChipFilters();
+        // Restore the user's saved grid layout (if the feature is on) before
+        // first paint so the table opens in their remembered arrangement.
+        Table._applySavedLayout();
+        ErrorLog.info('table', `AG Grid ready with ${Store.tasksArr.length} rows`);
+      },
+    };
+
+    agGrid.createGrid(el, gridOptions);
+
+    // Re-render rows whenever relevant store slices change.
+    Store.subscribe(evt => Table._onStore(evt), 'Table');
+
+    // Outside-click closes any open chip dropdown. Capture phase so AG Grid
+    // (which can stopPropagation on some interactions) doesn't swallow the event.
+    const closeAllChipDropdowns = () => {
+      ['line', 'color', 'status', 'date', 'pomat'].forEach(k => {
+        const d = document.getElementById(`tbl-flt-${k}-dropdown`);
+        if (d) d.hidden = true;
+      });
+    };
+    document.addEventListener('mousedown', e => {
+      if (!e.target.closest || !e.target.closest('#table-filterbar')) {
+        closeAllChipDropdowns();
+      }
+    }, true);
+    // Closing on Escape is also expected for menu-like UI.
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') closeAllChipDropdowns();
+    });
+  },
+
+  // ── Filter chip bar ──────────────────────────────────────────────────
+  _initChipFilters() {
+    Table._refreshChipDropdowns();
+    Table._refreshChipButtons();
+
+    const lineIn  = document.getElementById('tbl-flt-line-paste-input');
+    const colorIn = document.getElementById('tbl-flt-color-paste-input');
+    Util.wirePasteToCheckboxes(lineIn,
+      () => document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+    Util.wirePasteToCheckboxes(colorIn,
+      () => document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+    // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color pickers must
+    // stay filterable, not a bare scrollable checkbox list — matches the Gantt tab's
+    // identical filter bar. Paste-to-select (above) and type-to-filter (below) share
+    // the same input without conflict — wirePasteToCheckboxes only listens for 'paste'.
+    if (lineIn)  lineIn.oninput  = () => Table._filterLineSearch(lineIn.value);
+    if (colorIn) colorIn.oninput = () => Table._filterColorSearch(colorIn.value);
+
+    const poTa = document.getElementById('tbl-flt-pomat-textarea');
+    if (poTa) {
+      poTa.addEventListener('paste', Table._onPoMatPaste);
+      poTa.addEventListener('input', Util.debounce(Table._onPoMatApply, 150));
+    }
+    document.getElementById('tbl-flt-pomat-clear')?.addEventListener('click', Table._clearPoMat);
+  },
+
+  _hasChipFilters() {
+    const f = Table._chipFilters;
+    return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null || f.poMat.size > 0;
+  },
+
+  _taskPassesChipFilters(data) {
+    if (!data) return false;
+    const f = Table._chipFilters;
+    if (f.lines.size > 0 && !f.lines.has(data.PRODUCTION_LINE)) return false;
+    if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
+    if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
+    if (f.dateKey) {
+      const dk = data.start_date ? Util.dayKey(data.start_date) : '';
+      if (dk !== f.dateKey) return false;
+    }
+    if (f.status) {
+      if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
+      if (f.status === 'fixed' && !Store.isFixed(data.id)) return false;
+      if (f.status === 'atrisk' || f.status === 'conflict') {
+        const rel = Store.alertsByTask().get(String(data.id)) || [];
+        if (f.status === 'atrisk'  && !rel.some(a => a.sev === 'warn')) return false;
+        if (f.status === 'conflict' && !rel.some(a => a.sev === 'err'))  return false;
+      }
+    }
+    return true;
+  },
+
+  _toggleChipDropdown(kind) {
+    const d = document.getElementById(`tbl-flt-${kind}-dropdown`);
+    if (!d) return;
+    // Close peers
+    ['line','color','status','date','pomat'].forEach(k => {
+      if (k !== kind) {
+        const other = document.getElementById(`tbl-flt-${k}-dropdown`);
+        if (other) other.hidden = true;
+      }
+    });
+    d.hidden = !d.hidden;
+  },
+
+  _refreshChipDropdowns() {
+    Table._buildLineChipDropdown();
+    Table._buildColorChipDropdown();
+    Table._buildStatusChipDropdown();
+    Table._buildDateChipDropdown();
+  },
+
+  // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
+  // must stay filterable — this is the Orders tab's share of that, matching the
+  // Gantt tab's identical filter bar.
+  _filterLineSearch(q) {
+    Table._lineSearch = q || '';
+    Table._buildLineChipDropdown();
+  },
+  _filterColorSearch(q) {
+    Table._colorSearch = q || '';
+    Table._buildColorChipDropdown();
+  },
+
+  // Clears the line/color live-search text and its <input> values without
+  // touching selections — shared by the plant-change handler and clear filters.
+  _resetChipSearch() {
+    Table._lineSearch = Table._colorSearch = '';
+    const lineIn  = document.getElementById('tbl-flt-line-paste-input');
+    const colorIn = document.getElementById('tbl-flt-color-paste-input');
+    if (lineIn)  lineIn.value  = '';
+    if (colorIn) colorIn.value = '';
+  },
+
+  _buildLineChipDropdown() {
+    const drop = document.getElementById('tbl-flt-line-checklist');
+    if (!drop) return;
+    const lineSet = new Set();
+    for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
+      if (t.PRODUCTION_LINE) lineSet.add(t.PRODUCTION_LINE);
+    }
+    const sorted = [...lineSet].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+    // Drop stale
+    for (const l of [...Table._chipFilters.lines]) {
+      if (!lineSet.has(l)) Table._chipFilters.lines.delete(l);
+    }
+    const q = Table._lineSearch.toLowerCase().trim();
+    const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    drop.innerHTML = visible.length
+      ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
+  },
+
+  _buildColorChipDropdown() {
+    const drop = document.getElementById('tbl-flt-color-checklist');
+    if (!drop) return;
+    const colorSet = new Set();
+    for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
+      if (t.COLOR) colorSet.add(String(t.COLOR).toUpperCase());
+    }
+    const sorted = [...colorSet].sort();
+    for (const c of [...Table._chipFilters.colors]) {
+      if (!colorSet.has(c)) Table._chipFilters.colors.delete(c);
+    }
+    const q = Table._colorSearch.toLowerCase().trim();
+    const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    drop.innerHTML = visible.length
+      ? visible.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
+  },
+
+  _buildStatusChipDropdown() {
+    const drop = document.getElementById('tbl-flt-status-dropdown');
+    if (!drop) return;
+    const cur = Table._chipFilters.status;
+    const items = [
+      { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
+      { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
+      { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
+      { v: 'fixed',    k: Util.t('ui.fixed'),        d: Util.t('ui.status_desc_fixed') },
+    ];
+    drop.innerHTML = items.map(i =>
+      `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
+         <span style="display:flex;align-items:center;gap:8px;">
+           <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+           <strong>${i.k}</strong>
+         </span>
+         <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>
+       </label>`).join('')
+      + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
+         <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
+           <input type="radio" name="tbl-flt-status" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+           <span>${Util.t('ui.any_status')}</span>
+         </label>`;
+  },
+
+  _buildDateChipDropdown() {
+    const drop = document.getElementById('tbl-flt-date-dropdown');
+    if (!drop) return;
+    const today = Util.startOfDay(new Date());
+    const tomorrow = new Date(today.getTime() + Config.MS_DAY);
+    const cur = Table._chipFilters.dateKey;
+    // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
+    // longer ranges set status='atrisk-or-window' via dedicated keys.
+    const presets = [
+      { v: Util.dayKey(today),    k: Util.t('ui.today'),    d: today.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) },
+      { v: Util.dayKey(tomorrow), k: Util.t('ui.tomorrow'), d: tomorrow.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) },
+    ];
+    drop.innerHTML = presets.map(p =>
+      `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
+         <span style="display:flex;align-items:center;gap:8px;">
+           <input type="radio" name="tbl-flt-date" value="${p.v}"${cur === p.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+           <strong>${p.k}</strong>
+         </span>
+         <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${p.d}</span>
+       </label>`).join('')
+      + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
+         <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
+           <input type="radio" name="tbl-flt-date" value=""${cur === null ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('date', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+           <span>${Util.t('ui.any_date')}</span>
+         </label>`;
+  },
+
+  _onChipChange(kind, input) {
+    const f = Table._chipFilters;
+    if (kind === 'line') {
+      if (input.checked) f.lines.add(input.value);
+      else               f.lines.delete(input.value);
+    } else if (kind === 'color') {
+      if (input.checked) f.colors.add(input.value.toUpperCase());
+      else               f.colors.delete(input.value.toUpperCase());
+    } else if (kind === 'status') {
+      f.status = input.value || null;
+    } else if (kind === 'date') {
+      f.dateKey = input.value || null;
+    }
+    Table._refreshChipButtons();
+    if (Table._api) Table._api.onFilterChanged();
+    // Single-select chips close after a pick; multi-select stay open for more choices.
+    if (kind === 'status' || kind === 'date') {
+      const d = document.getElementById(`tbl-flt-${kind}-dropdown`);
+      if (d) d.hidden = true;
+    }
+  },
+
+  _clearChipFilters() {
+    Table._chipFilters.lines.clear();
+    Table._chipFilters.colors.clear();
+    Table._chipFilters.status = null;
+    Table._chipFilters.dateKey = null;
+    Table._chipFilters.poMat.clear();
+    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    if (ta) ta.value = '';
+    const cnt = document.getElementById('tbl-flt-pomat-count');
+    if (cnt) cnt.textContent = '';
+    Table._resetChipSearch();
+    // Fold native AG column filters into the same Clear action — otherwise a
+    // restored saved layout's column filter survives this click invisibly.
+    if (Table._api && Table._api.isAnyFilterPresent()) Table._api.setFilterModel(null);
+    Table._refreshChipDropdowns();
+    Table._refreshChipButtons();
+    if (Table._api) Table._api.onFilterChanged();
+  },
+
+  _onPoMatApply() {
+    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    if (!ta) return;
+    Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+    const cnt = document.getElementById('tbl-flt-pomat-count');
+    if (cnt) {
+      const n = Table._chipFilters.poMat.size;
+      cnt.textContent = n ? Util.t('ui.pomat_count', { count: n }) : '';
+    }
+    Table._refreshChipButtons();
+    if (Table._api) Table._api.onFilterChanged();
+  },
+
+  _onPoMatPaste(e) {
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (!text || !text.trim()) return;
+    const known = new Set();
+    (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
+      const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
+      const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+    });
+    const { matched, total } = Util.countPasteMatches(text, known);
+    if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
+  },
+
+  _clearPoMat() {
+    Table._chipFilters.poMat.clear();
+    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    if (ta) ta.value = '';
+    const cnt = document.getElementById('tbl-flt-pomat-count');
+    if (cnt) cnt.textContent = '';
+    Table._refreshChipButtons();
+    if (Table._api) Table._api.onFilterChanged();
+  },
+
+  /** Driven from KPI tile clicks on the dashboard. Sets state, refreshes UI, re-filters grid. */
+  _applyChipFilter(patch) {
+    const f = Table._chipFilters;
+    if ('status' in patch)  f.status  = patch.status  || null;
+    if ('dateKey' in patch) f.dateKey = patch.dateKey || null;
+    if (patch.lines)  { f.lines.clear();  for (const l of patch.lines)  f.lines.add(l); }
+    if (patch.colors) { f.colors.clear(); for (const c of patch.colors) f.colors.add(String(c).toUpperCase()); }
+    Table._refreshChipDropdowns();
+    Table._refreshChipButtons();
+    if (Table._api) Table._api.onFilterChanged();
+  },
+
+  _refreshChipButtons() {
+    const plant = !!Store.selectedPlant;
+    const f = Table._chipFilters;
+
+    const set = (btnId, lblId, txt, active) => {
+      const b = document.getElementById(btnId);
+      const l = document.getElementById(lblId);
+      if (b) { b.disabled = !plant; b.classList.toggle('active', !!active); }
+      if (l) l.textContent = txt;
+    };
+
+    set('tbl-flt-line-btn',  'tbl-flt-line-label',
+      f.lines.size === 0 ? Util.t('ui.all_lines')
+        : f.lines.size === 1 ? [...f.lines][0]
+        : Util.t('ui.n_lines_filter', { count: f.lines.size }),
+      f.lines.size > 0);
+
+    set('tbl-flt-color-btn', 'tbl-flt-color-label',
+      f.colors.size === 0 ? Util.t('ui.all_colors')
+        : f.colors.size === 1 ? [...f.colors][0]
+        : Util.t('ui.n_colors_filter', { count: f.colors.size }),
+      f.colors.size > 0);
+
+    const STATUS_LABEL = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
+    set('tbl-flt-status-btn', 'tbl-flt-status-label',
+      f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
+      !!f.status);
+
+    let dateLabel = Util.t('ui.any_date');
+    if (f.dateKey) {
+      const todayKey = Util.dayKey(Util.startOfDay(new Date()));
+      const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date()).getTime() + Config.MS_DAY));
+      if (f.dateKey === todayKey) dateLabel = Util.t('ui.today');
+      else if (f.dateKey === tomorrowKey) dateLabel = Util.t('ui.tomorrow');
+      else dateLabel = f.dateKey;
+    }
+    set('tbl-flt-date-btn', 'tbl-flt-date-label', dateLabel, !!f.dateKey);
+
+    set('tbl-flt-pomat-btn', 'tbl-flt-pomat-label',
+      f.poMat.size === 0 ? Util.t('ui.all_pomat') : Util.t('ui.n_pomat_filter', { count: f.poMat.size }),
+      f.poMat.size > 0);
+
+    // Native AG Grid per-column filters (from a saved layout, or set directly
+    // via a column header menu) can suppress rows with zero acknowledgment in
+    // this bar otherwise — surface + fold them into the same Clear action.
+    const hasNative = !!(Table._api && Table._api.isAnyFilterPresent());
+    const hasAny = Table._hasChipFilters() || hasNative;
+    const clear = document.getElementById('tbl-flt-clear');
+    if (clear) clear.hidden = !hasAny;
+
+    const hint = document.getElementById('tbl-flt-hint');
+    if (hint && Table._api) {
+      const n = Table._api.getDisplayedRowCount();
+      let txt = plant ? Util.t('ui.orders_visible', { count: n, plural: n !== 1 ? Util.t('ui.orders_visible_plural') : '' }) : '';
+      if (plant && hasNative) txt += ' ' + Util.t('ui.column_filters_active');
+      hint.textContent = txt;
+    }
+  },
+
+  _onStore(evt) {
+    if (evt.source === 'table' && evt.type !== 'fixed:change') return;
+    if (!Table._api) return;
+    if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected'
+        || evt.type === 'lineSettings:change') {
+      const rows = Store.tasksForSelectedPlant();
+      Table._api.setGridOption('rowData', rows);
+      Table._renderEmptyState();
+      if (evt.type === 'plant:selected') {
+        // Clear chip filters on plant change — stale line/color sets don't apply.
+        Table._chipFilters.lines.clear();
+        Table._chipFilters.colors.clear();
+        Table._chipFilters.status = null;
+        Table._chipFilters.dateKey = null;
+        Table._chipFilters.poMat.clear();
+        const ta = document.getElementById('tbl-flt-pomat-textarea');
+        if (ta) ta.value = '';
+        const cnt = document.getElementById('tbl-flt-pomat-count');
+        if (cnt) cnt.textContent = '';
+        Table._resetChipSearch();
+      }
+      Table._refreshChipDropdowns();
+      Table._refreshChipButtons();
+      if (evt.type === 'tasks:bulk') {
+        ErrorLog.info('table', `Rebuilt grid with ${rows.length} rows`);
+      }
+    } else if (evt.type === 'tasks:bulkUpdate') {
+      const updated = evt.ids
+        .map(id => Store.tasks[id])
+        .filter(t => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+      Table._api.applyTransaction({ update: updated });
+      if (Table._hasChipFilters()) Table._api.onFilterChanged();
+    } else if (evt.type === 'task:update') {
+      const t = Store.tasks[evt.id];
+      if (t && Store.selectedPlant
+          && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant) {
+        Table._api.applyTransaction({ update: [t] });
+      }
+      if (Table._hasChipFilters()) Table._api.onFilterChanged();
+    } else if (evt.type === 'fixed:change') {
+      const updated = evt.ids
+        .map(id => Store.tasks[id])
+        .filter(t => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+      Table._api.applyTransaction({ update: updated });
+      if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
+    } else if (evt.type === 'alerts:change') {
+      // Incremental update: only refresh rows for task IDs that changed alert membership.
+      // Fall back to full refresh if changedIds is absent (unscoped recompute).
+      if (evt.changedIds && evt.changedIds.length) {
+        const rowNodes = [];
+        for (const taskId of evt.changedIds) {
+          const rowNode = Table._api.getRowNode(String(taskId));
+          if (rowNode) rowNodes.push(rowNode);
+        }
+        if (rowNodes.length) {
+          Table._api.refreshCells({ rowNodes, columns: ['id'], force: true });
+        }
+      } else {
+        // Unscoped recompute: refresh all visible rows (no redrawRows — would re-enter AG Grid's render cycle)
+        Table._api.refreshCells({ columns: ['id'], force: true });
+      }
+      if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
+        Table._api.onFilterChanged();
+      }
+    }
+    Table._refreshChipButtons();
+  },
+
+  _renderEmptyState() {
+    const grid = document.getElementById('ag-grid');
+    let overlay = document.getElementById('table-empty-overlay');
+    if (!Store.selectedPlant) {
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'table-empty-overlay';
+        overlay.className = 'table-empty-overlay';
+        grid?.parentElement?.appendChild(overlay);
+      }
+      NIMBUS.EmptyState.render(overlay, {
+        title: Util.t('empty.no_plant_selected'),
+        msg:   Util.t('empty.no_plant_table')
+      });
+      if (grid) grid.style.visibility = 'hidden';
+    } else {
+      if (overlay) overlay.remove();
+      if (grid) grid.style.visibility = '';
+    }
+  },
+
+  // AG Grid's built-in no-rows overlay (shown automatically once a plant is
+  // selected but the grid displays zero rows — either the plant genuinely has
+  // no orders, or the chip/quick/native filters excluded everything). Reuses
+  // the app's own EmptyState component instead of AG Grid's raw default text,
+  // and offers a one-click way out when filters are the cause.
+  _NoRowsOverlay: class {
+    init() {
+      const filtered = Table._hasChipFilters()
+        || (Table._api && Table._api.isAnyFilterPresent())
+        || !!document.getElementById('quick-filter')?.value;
+      this._eGui = document.createElement('div');
+      NIMBUS.EmptyState.render(this._eGui, filtered
+        ? { title: Util.t('empty.no_orders_filtered_title'), msg: Util.t('empty.no_orders_filtered_msg'), icon: '⌕' }
+        : { title: Util.t('empty.no_orders_plant_title'),    msg: Util.t('empty.no_orders_plant_msg') });
+      if (filtered) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-ghost sm';
+        btn.style.marginTop = '6px';
+        btn.textContent = Util.t('btn.clear_filters');
+        btn.onclick = () => {
+          Table._clearChipFilters();
+          const qf = document.getElementById('quick-filter');
+          if (qf) { qf.value = ''; Table._api.setGridOption('quickFilterText', ''); }
+        };
+        this._eGui.querySelector('.nimbus-empty-state')?.appendChild(btn);
+      }
+    }
+    getGui() { return this._eGui; }
+  },
+
+  /** Called when a grid cell is edited. Push the change through the store. */
+  _onCellChanged(p) {
+    const field = p.colDef.field;
+    const id = String(p.data.id);
+    const changes = {};
+
+    if (field === 'start_date') {
+      const d = Util.parseDate(p.newValue);
+      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api.refreshCells({ rowNodes: [p.node] }); return; }
+      changes.start_date = Util.snap(d);
+      // recompute end based on RUN_TIME
+      const dur = Util.runHours(p.data) * Config.MS_HOUR;
+      if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
+    } else if (field === 'RUN_TIME') {
+      const h = parseFloat(p.newValue) || 0;
+      changes.RUN_TIME = h;
+      if (p.data.start_date) {
+        changes.end_date = new Date(p.data.start_date.getTime() + h * Config.MS_HOUR);
+      }
+    } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
+      changes[field] = parseFloat(p.newValue) || 0;
+    } else if (field === 'notes') {
+      const trimmed = (p.newValue || '').trim();
+      Store.updateTask(id, { notes: trimmed }, 'table');
+      Table._api.applyTransaction({ update: [Store.tasks[id]] });
+      Inspector._persistNote(id, trimmed);
+      Toast.show(Util.t('toast.row_updated'), 'success', 1200);
+      return;
+    } else {
+      changes[field] = p.newValue;
+    }
+
+    Store.updateTask(id, changes, 'table');
+    Table._api.applyTransaction({ update: [Store.tasks[id]] });
+    Engine.autoReflow(id);
+    Alerts.scheduleRecompute();
+    Toast.show(Util.t('toast.row_updated'), 'success', 1200);
+  },
+
+  _onSelectionChanged() {
+    if (!Table._api) return;
+    const sel = Table._api.getSelectedRows();
+    Table._selectedId = sel.length === 1 ? String(sel[0].id) : null;
+  },
+
+  _onRowClicked(event) {
+    if (!event.data) return;
+    const task = Store.tasks[event.data.id];
+    if (task) {
+      const rightSidebar = document.getElementById('right-sidebar');
+      if (rightSidebar) {
+        rightSidebar.classList.remove('collapsed');
+        setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
+      }
+      Inspector.show(task);
+    }
+  },
+ _rowClass(data) {      if (!data) return '';
+    const ids = Store.alertsByTask().get(String(data.id)) || [];
+    if (ids.some(a => a.sev === 'err')) return 'row-alert';
+    if (ids.some(a => a.sev === 'warn')) return 'row-warn';
+    return '';
+  },
+
+  _getLineOptions() {
+    if (Store.selectedPlant) return Store.linesForSelectedPlant();
+    // No plant selected — fall back to the unscoped view rather than showing nothing.
+    const set = new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    Object.keys(Store.calendars).forEach(l => set.add(l));
+    return [...set].sort();
+  },
+
+  _wireQuickFilter() {
+    const inp = document.getElementById('quick-filter');
+    if (!inp || !Table._api) return;
+    inp.addEventListener('input', () => {
+      Table._api.setGridOption('quickFilterText', inp.value);
+    });
+  },
+
+  /* ---- public actions: fixing, override modal, export ------------------ */
+  fixSelected(fixed) {
+    if (!Table._api) return;
+    const sel = Table._api.getSelectedRows();
+    if (!sel.length) { Toast.show(Util.t('toast.select_rows_first'), 'warn'); return; }
+    const ids = sel.map(r => String(r.id));
+    Store.setFixed(ids, fixed, 'table');
+    Alerts.scheduleRecompute();
+  },
+
+  openOverrideModal() {
+    const sel = Table._api ? Table._api.getSelectedRows() : [];
+    if (sel.length !== 1) { Toast.show(Util.t('toast.select_one_row'), 'warn'); return; }
+    Table._openOverrideModalForId(String(sel[0].id));
+  },
+
+  _openOverrideModalForId(id) {
+    const t = Store.tasks[id];
+    if (!t) return;
+    const orderEl = document.getElementById('ovr-order');
+    const lineEl = document.getElementById('ovr-line');
+    const fixEl = document.getElementById('ovr-fix');
+    if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+
+    Table._selectedId = id;
+    orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.PRODUCTION_LINE || '—'}`;
+    if (!Table._fpOvrStart) {
+      Table._fpOvrStart = Util.fpDatetime('#ovr-start');
+    }
+    Table._fpOvrStart.setDate(t.start_date, false);
+    const lines = Table._getLineOptions();
+    lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('');
+    fixEl.checked = !!t.fixed;
+    Modal.open('modal-override');
+  },
+
+  applyOverride() {
+    const id = Table._selectedId;
+    if (!id) return;
+    const t = Store.tasks[id];
+    if (!t) return;
+    const startEl = document.getElementById('ovr-start');
+    const lineEl = document.getElementById('ovr-line');
+    const fixEl = document.getElementById('ovr-fix');
+    if (!startEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+
+    const newStart = Util.parseDate(startEl.value);
+    const newLine  = lineEl.value;
+    const alsoFix  = fixEl.checked;
+    if (!newStart) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
+
+    const dur = Util.runHours(t) * Config.MS_HOUR;
+    const snapped = Util.snap(newStart);
+    const newEnd = new Date(snapped.getTime() + dur);
+
+    Store.updateTask(id, {
+      start_date: snapped,
+      end_date: newEnd,
+      PRODUCTION_LINE: newLine
+    }, 'table');
+    if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
+    if (alsoFix !== Store.isFixed(id)) Store.setFixed([id], alsoFix, 'table');
+
+    // Override explicitly does NOT auto-reflow (user's manual choice),
+    // but we DO recompute alerts so conflicts become visible.
+    Alerts.scheduleRecompute();
+    Modal.close('modal-override');
+    Toast.show(alsoFix ? window.t('toast.order_overridden_fixed') : window.t('toast.order_overridden'), 'success');
+  },
+
+  exportCsv() {
+    if (!Table._api) return;
+    Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv' });
+  },
+
+  _toggleRangeMode() {
+    const badge  = document.getElementById('orders-copy-badge');
+    const gridEl = document.getElementById('ag-grid');
+    if (Table._rangeMode) {
+      Table._clearRange();
+    } else {
+      Table._rangeMode = true;
+      badge?.classList.add('active');
+      gridEl?.classList.add('nimbus-range-mode');
+    }
+  },
+
+  _applyRangeHighlight() {
+    if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
+    const gridEl = document.getElementById('ag-grid');
+    if (!gridEl) return;
+    const cols   = Table._api.getAllDisplayedColumns();
+    const colIds = cols.map(c => c.getColId());
+    const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
+    const bIdx   = colIds.indexOf(Table._rangeActive.colId);
+    if (aIdx === -1 || bIdx === -1) return;
+    const minCol = Math.min(aIdx, bIdx);
+    const maxCol = Math.max(aIdx, bIdx);
+    const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+    const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+    const newSet = new Set();
+    for (let ri = minRow; ri <= maxRow; ri++) {
+      for (let ci = minCol; ci <= maxCol; ci++) {
+        newSet.add(`${ri}|${colIds[ci]}`);
+      }
+    }
+    Table._rangeHighlighted.forEach(key => {
+      if (!newSet.has(key)) {
+        const sep = key.indexOf('|');
+        gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+          ?.classList.remove('nimbus-range-sel');
+      }
+    });
+    newSet.forEach(key => {
+      if (!Table._rangeHighlighted.has(key)) {
+        const sep = key.indexOf('|');
+        gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+          ?.classList.add('nimbus-range-sel');
+      }
+    });
+    Table._rangeHighlighted = newSet;
+  },
+
+  _clearRange() {
+    const gridEl = document.getElementById('ag-grid');
+    Table._rangeHighlighted.forEach(key => {
+      const sep = key.indexOf('|');
+      gridEl?.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`)
+        ?.classList.remove('nimbus-range-sel');
+    });
+    Table._rangeHighlighted.clear();
+    Table._rangeAnchor  = null;
+    Table._rangeActive  = null;
+    Table._rangeDragOn  = false;
+    Table._rangeMode    = false;
+    document.getElementById('orders-copy-badge')?.classList.remove('active');
+    gridEl?.classList.remove('nimbus-range-mode');
+  },
+
+  _copyRange() {
+    if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
+    const cols   = Table._api.getAllDisplayedColumns();
+    const colIds = cols.map(c => c.getColId());
+    const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
+    const bIdx   = colIds.indexOf(Table._rangeActive.colId);
+    if (aIdx === -1 || bIdx === -1) return;
+    const minCol = Math.min(aIdx, bIdx);
+    const maxCol = Math.max(aIdx, bIdx);
+    const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+    const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+    const rowStrs = [];
+    for (let ri = minRow; ri <= maxRow; ri++) {
+      const node = Table._api.getDisplayedRowAtIndex(ri);
+      if (!node) continue;
+      const cells = [];
+      for (let ci = minCol; ci <= maxCol; ci++) {
+        const colId  = colIds[ci];
+        const col    = cols[ci];
+        const raw    = Table._api.getValue(colId, node);
+        const colDef = col.getColDef();
+        let text = raw;
+        if (colDef.valueFormatter) {
+          const fmt = colDef.valueFormatter({ value: raw, data: node.data, node, column: col, api: Table._api, colDef });
+          if (fmt != null) text = fmt;
+        }
+        cells.push(text == null ? '' : String(text));
+      }
+      rowStrs.push(cells.join('\t'));
+    }
+    navigator.clipboard?.writeText(rowStrs.join('\n')).catch(() => {});
+    const gridEl = document.getElementById('ag-grid');
+    if (gridEl) {
+      Table._rangeHighlighted.forEach(key => {
+        const sep  = key.indexOf('|');
+        const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
+        if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
+      });
+    }
+    const nRows = maxRow - minRow + 1;
+    const nCols = maxCol - minCol + 1;
+    Toast.show(Util.t('toast.copied_range').replace('{r}', nRows).replace('{c}', nCols), 'success');
+    Table._clearRange();
+  },
+
+  _showAlertPopup(taskId) {
+    const rel = Store.alertsByTask().get(String(taskId)) || [];
+    if (!rel.length) return;
+    const t = Store.tasks[taskId];
+    const po = t?.PRODUCTION_ORDER || t?.ORDER || String(taskId).slice(0, 8);
+    const _esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+    const rows = rel.map(a => {
+      const icon  = a.sev === 'err' ? '🔴' : '🟡';
+      const date  = a.time ? a.time.toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '';
+      return `
+        <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
+          <span style="flex-shrink:0;font-size:13px;margin-top:1px">${icon}</span>
+          <span style="flex:1;font-size:12.5px;color:var(--fg);line-height:1.45">${_esc(a.msg)}</span>
+          ${date ? `<span style="flex-shrink:0;font-size:10.5px;color:var(--fg-mute);white-space:nowrap;margin-top:2px">${date}</span>` : ''}
+          <button data-alert-id="${_esc(a.id)}"
+            style="flex-shrink:0;padding:2px 10px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:none;cursor:pointer;color:var(--fg-mute);white-space:nowrap;margin-top:1px">
+            Go to
+          </button>
+        </div>`;
+    }).join('');
+
+    const dlg = document.createElement('dialog');
+    dlg.className = 'ni-breakdown-dlg';
+    dlg.innerHTML = `
+      <div style="padding:20px;min-width:320px;max-width:440px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ Alerts — Order <span style="color:var(--accent)">${_esc(po)}</span></h3>
+          <button data-alert-close style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute)">✕</button>
+        </div>
+        <div>${rows}</div>
+      </div>`;
+    document.body.appendChild(dlg);
+    try { dlg.showModal(); } catch { dlg.open = true; }
+    dlg.addEventListener('close', () => dlg.remove());
+    dlg.addEventListener('click', e => {
+      if (e.target === dlg || e.target.closest('[data-alert-close]')) { dlg.close(); return; }
+      const btn = e.target.closest('[data-alert-id]');
+      if (btn) { dlg.close(); NIMBUS.AlertsUIAdapter.focus(btn.dataset.alertId); }
+    });
+  },
+
+  _showNotePopover(e, id) {
+    Table._closeNotePopover();
+    const task = Store.tasks[id];
+    if (!task) return;
+    const _esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+    const pop = document.createElement('div');
+    pop.id = 'nb-note-popover';
+    const cur = task.notes || '';
+    pop.innerHTML = `
+      <div class="nb-note-pop-header">
+        <span>Order Note</span>
+        <button class="nb-note-pop-close" onclick="NIMBUS.Table._closeNotePopover()">✕</button>
+      </div>
+      <textarea id="nb-note-ta" maxlength="500" placeholder="Add a note…">${_esc(cur)}</textarea>
+      <div class="nb-note-pop-footer">
+        <span id="nb-note-cnt">${cur.length}/500</span>
+        <div class="nb-note-pop-btns">
+          <button class="nb-note-cancel" onclick="NIMBUS.Table._closeNotePopover()">Cancel</button>
+          <button class="nb-note-save" onclick="NIMBUS.Table._saveNotePopover('${id}')">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(pop);
+
+    const btn = e.target.closest('button') || e.target;
+    const rect = btn.getBoundingClientRect();
+    const popW = 284;
+    let left = Math.max(4, Math.min(rect.left, window.innerWidth - popW - 4));
+    pop.style.left = left + 'px';
+    pop.style.top = '0px'; // temp placement so offsetHeight is measurable
+    requestAnimationFrame(() => {
+      const h = pop.offsetHeight;
+      const spaceAbove = rect.top - 8;
+      const spaceBelow = window.innerHeight - rect.bottom - 8;
+      let top = spaceAbove >= h || spaceAbove >= spaceBelow
+        ? Math.max(4, rect.top - h - 4)
+        : rect.bottom + 4;
+      pop.style.top = top + 'px';
+    });
+
+    const ta = document.getElementById('nb-note-ta');
+    const cnt = document.getElementById('nb-note-cnt');
+    if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
+    ta.addEventListener('input', () => {
+      cnt.textContent = ta.value.length + '/500';
+    });
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    setTimeout(() => {
+      Table._noteOutsideHandler = ev => { if (!pop.contains(ev.target)) Table._closeNotePopover(); };
+      document.addEventListener('mousedown', Table._noteOutsideHandler);
+    }, 0);
+    Table._noteKeyHandler = ev => { if (ev.key === 'Escape') Table._closeNotePopover(); };
+    document.addEventListener('keydown', Table._noteKeyHandler);
+  },
+
+  _saveNotePopover(id) {
+    const ta = document.getElementById('nb-note-ta');
+    if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
+    if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
+    const val = ta.value.trim().slice(0, 500) || null;
+    Store.updateTask(id, { notes: val }, 'table');
+    Inspector._persistNote(id, val);
+    Table._closeNotePopover();
+    Table._api.applyTransaction({ update: [Store.tasks[id]] });
+  },
+
+  _closeNotePopover() {
+    const pop = document.getElementById('nb-note-popover');
+    if (pop) pop.remove();
+    if (Table._noteOutsideHandler) {
+      document.removeEventListener('mousedown', Table._noteOutsideHandler);
+      Table._noteOutsideHandler = null;
+    }
+    if (Table._noteKeyHandler) {
+      document.removeEventListener('keydown', Table._noteKeyHandler);
+      Table._noteKeyHandler = null;
+    }
+  },
+
+  /** A minimal inline datetime-local editor for AG Grid. */
+  _DateTimeEditor: class {
+    init(params) {
+      this._input = document.createElement('input');
+      this._input.type = 'datetime-local';
+      this._input.style.width = '100%';
+      this._input.style.height = '30px';
+      this._input.style.border = '1px solid var(--accent)';
+      this._input.style.padding = '0 6px';
+      this._input.style.fontSize = '12px';
+      this._input.value = Util.toLocalInput(params.value);
+    }
+    getGui() { return this._input; }
+    afterGuiAttached() { this._input.focus(); this._input.select(); }
+    getValue() { return Util.parseDate(this._input.value); }
+    destroy() {}
+  },
+
+  // Scale mandate (CLAUDE.md Production Scale Roadmap): the line-reassignment
+  // editor is the actual scheduling control (not just a filter), so it needs
+  // type-to-filter even more than the chip picker does — AG Grid Community has
+  // no searchable select (that's Enterprise's agRichSelectCellEditor), so this
+  // is a small hand-rolled popup editor: text input + filtered option list.
+  _SearchableLineEditor: class {
+    init(params) {
+      this._params = params;
+      this._values = (typeof params.values === 'function' ? params.values() : params.values) || [];
+      this._chosen = null;
+      this._activeIdx = 0;
+
+      this._eGui = document.createElement('div');
+      this._eGui.className = 'nse-editor';
+      this._eGui.innerHTML = `<input type="text" class="nse-input" autocomplete="off"><div class="nse-list"></div>`;
+      this._input = this._eGui.querySelector('.nse-input');
+      this._list  = this._eGui.querySelector('.nse-list');
+      this._input.value = params.value || '';
+      this._input.addEventListener('input', () => this._renderList(this._input.value));
+      this._input.addEventListener('keydown', e => this._onKeyDown(e));
+      this._renderList('');
+    }
+    _renderList(q) {
+      const query = q.toLowerCase().trim();
+      this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
+      this._activeIdx = 0;
+      const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      this._list.innerHTML = this._filtered.length
+        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
+        : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
+      this._list.querySelectorAll('.nse-opt').forEach(el => {
+        el.addEventListener('mousedown', e => { e.preventDefault(); this._choose(Number(el.dataset.i)); });
+      });
+    }
+    _choose(i) {
+      const v = this._filtered[i];
+      if (v == null) return;
+      this._chosen = v;
+      this._input.value = v;
+      this._params.api.stopEditing();
+    }
+    _onKeyDown(e) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
+      else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
+      else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
+    }
+    _move(delta) {
+      if (!this._filtered.length) return;
+      this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
+      this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
+    }
+    getGui() { return this._eGui; }
+    afterGuiAttached() { this._input.focus(); this._input.select(); }
+    getValue() {
+      if (this._chosen != null) return this._chosen;
+      const typed = this._input.value.trim();
+      const exact = this._values.find(v => v.toLowerCase() === typed.toLowerCase());
+      return exact != null ? exact : this._params.value;
+    }
+    isPopup() { return true; }
+    destroy() {}
+  }
+};
+
+/* =============================================================================
+   INSPECTOR — right-side detail panel shown on the Timeline tab.
+   Edits here write through the Store (source: 'inspector').
+   ========================================================================== */
+export const Inspector = {
+  _currentId: null,
+  _unsubStore: null,
+
+  init() {
+    Inspector._unsubStore = Store.subscribe(evt => {
+    // Allow fixed:change through even from 'inspector' so the Fix/Unfix
+    // button re-renders after toggleFix() — otherwise it never flips.
+    if (evt.source === 'inspector' && evt.type !== 'fixed:change') return;
+      if (evt.type === 'plant:selected') {
+        const t = Inspector._currentId ? Store.tasks[Inspector._currentId] : null;
+        if (!t || !Store.selectedPlant
+            || Store.getPlantForLine(t.PRODUCTION_LINE) !== Store.selectedPlant) {
+          Inspector.clear();
+        }
+        return;
+      }
+      if (!Inspector._currentId) return;
+      if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
+        Inspector._render(Store.tasks[Inspector._currentId]);
+      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change') {
+        const t = Store.tasks[Inspector._currentId];
+        if (t) Inspector._render(t);
+        else Inspector.clear();
+      }
+    }, 'Inspector');
+  },
+
+  show(task) {
+    // Refuse to inspect tasks that don't belong to the current plant scope.
+    // Only block when the task's plant is positively known and wrong — if
+    // getPlantForLine returns null (line unmapped), allow inspection rather
+    // than silently failing.
+    const taskPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || null;
+    if (Store.selectedPlant && taskPlant && taskPlant !== Store.selectedPlant) {
+      Toast.show(Util.t('toast.order_belongs_other_plant'), 'warn');
+      return;
+    }
+    Inspector._currentId = String(task.id);
+    Inspector._render(task);
+  },
+  clear() {
+    Inspector._currentId = null;
+    const body = document.getElementById('inspector-body');
+    if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
+  },
+
+  _render(task) {
+    const body = document.getElementById('inspector-body');
+    if (!body) return;
+    if (!task) { Inspector.clear(); return; }
+
+    // Order fields originate from uploaded Excel — escape before innerHTML.
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const fixed = Store.isFixed(task.id);
+    const lineOptions = Table._getLineOptions();
+    const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
+    // Display-only derived Orig Start (due date minus RUN_TIME) — see
+    // Util.impliedOriginalStart. Never reads/writes the raw
+    // original_start_date field directly for display.
+    const impliedOrigStart = Util.impliedOriginalStart(task);
+
+    body.innerHTML = `
+      ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
+      ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
+        <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
+        ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${esc(a.msg)}</div>`).join('')}
+      </div>` : ''}
+
+      <div class="insp-card">
+        <h4>${Util.t('ui.insp_order_section')}</h4>
+        <div class="insp-row"><label>${Util.t('ui.insp_id')}</label>
+          <div class="insp-val">${esc(task.id)}</div></div>
+          <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
+          <div class="insp-val">${esc(task.ORDER || task.id)}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_material_no')}</label>
+          <div class="insp-val">${esc(task.MATERIAL_NUMBER || '—')}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_material_desc')}</label>
+          <div class="insp-val">${esc(task.MATERIAL_DESCRIPTION || '—')}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_qty')}</label>
+          <div class="insp-val">${esc(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_color')}</label>
+          <div class="insp-val">${esc(task.COLOR || '—')}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_form')}</label>
+          <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
+          <div class="insp-val"><select data-field="PRODUCTION_LINE">
+            ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+          </select></div></div>
+      </div>
+
+      <div class="insp-card">
+        <h4>${Util.t('ui.insp_notes_section')}</h4>
+        <div class="insp-notes-wrap">
+          <textarea data-field="notes" maxlength="500" placeholder="${Util.t('ph.add_note')}" rows="3">${esc(task.notes || '')}</textarea>
+          <div class="insp-notes-counter"><span id="insp-notes-rem">${500 - (task.notes || '').length}</span> ${Util.t('ui.remaining')}</div>
+        </div>
+      </div>
+
+      <div class="insp-card">
+        <h4>${Util.t('ui.insp_schedule_section')}</h4>
+        <div class="insp-row"><label>${Util.t('ui.insp_orig_start')}</label>
+          <div class="insp-val">${impliedOrigStart ? Util.fmtDTReadable(impliedOrigStart) : '—'}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_orig_end')}</label>
+          <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_updated_start')}</label>
+          <div class="insp-val">
+            <input type="text" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
+            ${Inspector._varianceBadge(task)}
+          </div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_updated_end')}</label>
+          <div class="insp-val">${Util.fmtDTReadable(task.end_date)}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
+          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}"></div></div>
+      </div>
+
+      <div class="insp-actions">
+        ${fixed
+          ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFix(false)">${Util.t('btn.unfix')}</button>`
+          : `<button class="btn btn-primary" onclick="NIMBUS.Inspector.toggleFix(true)">${Util.t('btn.fix_order')}</button>`}
+        <button class="btn" data-act="override">${Util.t('btn.override_date')}</button>
+        <button class="btn btn-ghost" data-act="focus">${Util.t('btn.focus')}</button>
+      </div>
+    `;
+
+    // Wire inputs
+    body.querySelectorAll('[data-field]').forEach(el => {
+      el.onchange = () => Inspector._onFieldChange(el.dataset.field, el.value);
+    });
+    // Action buttons via listeners (id is never concatenated into an HTML attribute).
+    const _id = String(task.id);
+    body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS.Table._openOverrideModalForId(_id));
+    body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS.Timeline.focus(_id));
+    // Notes char counter (oninput fires on every keystroke)
+    const notesEl = body.querySelector('[data-field="notes"]');
+    const notesRemEl = body.querySelector('#insp-notes-rem');
+    if (notesEl && notesRemEl) {
+      notesEl.oninput = () => { notesRemEl.textContent = 500 - notesEl.value.length; };
+      const _noteId = Inspector._currentId;
+      notesEl.onblur = () => {
+        const trimmed = notesEl.value.trim() || null;
+        Store.updateTask(_noteId, { notes: trimmed }, 'inspector');
+        Inspector._persistNote(_noteId, trimmed);
+      };
+    }
+    // Upgrade start_date to Flatpickr datetime picker
+    const _dtEl = body.querySelector('[data-field="start_date"]');
+    if (_dtEl) {
+      Util.fpDatetime(_dtEl, {
+        onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
+      });
+    }
+  },
+
+  _varianceBadge(t) {
+    // Compares against the derived Orig Start (due date minus RUN_TIME —
+    // see Util.impliedOriginalStart), not the raw original_start_date, so
+    // the badge stays consistent with what the Orig Start row now shows.
+    const orig = Util.impliedOriginalStart(t);
+    if (!orig || !t.start_date) return '';
+    const curr = t.start_date instanceof Date ? t.start_date : Util.parseDate(t.start_date);
+    if (!curr) return '';
+    const deltaMs = curr.getTime() - orig.getTime();
+    if (Math.abs(deltaMs) < 60 * 1000) return '';
+    const days = deltaMs / (24 * 3600 * 1000);
+    const txt = Math.abs(days) >= 1
+      ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
+      : `${days >= 0 ? '+' : ''}${(deltaMs / Config.MS_HOUR).toFixed(1)}h`;
+    const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
+    return `<span class="insp-var ${cls}" title="${window.t('ui.insp_variance_shifted')}">${txt}</span>`;
+  },
+
+  _onFieldChange(field, value) {
+    if (!Inspector._currentId) return;
+    const id = Inspector._currentId;
+    const t  = Store.tasks[id];
+    if (!t) return;
+    const changes = {};
+    if (field === 'start_date') {
+      const d = Util.parseDate(value);
+      if (!d) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
+      changes.start_date = Util.snap(d);
+      const dur = Util.runHours(t) * Config.MS_HOUR;
+      if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
+    } else if (field === 'RUN_TIME') {
+      const h = parseFloat(value) || 0;
+      changes.RUN_TIME = h;
+      if (t.start_date) changes.end_date = new Date(t.start_date.getTime() + h * Config.MS_HOUR);
+    } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
+      changes[field] = parseFloat(value) || 0;
+    } else if (field === 'notes') {
+      changes.notes = value.trim() || null;
+      Store.updateTask(id, changes, 'inspector');
+      Inspector._persistNote(id, changes.notes);
+      return;
+    } else {
+      changes[field] = value;
+    }
+    Store.updateTask(id, changes, 'inspector');
+    if (field === 'start_date' || field === 'RUN_TIME' || field === 'PRODUCTION_LINE') {
+      Engine.autoReflow(id);
+    }
+    Alerts.scheduleRecompute();
+  },
+
+  // Per-id debounce timers. A single shared debounce timer (the old design) meant a
+  // note on order B within 800ms cancelled order A's pending POST — silent data loss
+  // (R5). Keying the timer by task id isolates each order's save.
+  _noteTimers: {},
+  _persistNote(id, notes) {
+    clearTimeout(Inspector._noteTimers[id]);
+    Inspector._noteTimers[id] = setTimeout(() => {
+      delete Inspector._noteTimers[id];
+      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+      Util.fetchTraced(`${Config.API_BASE}/task/note`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
+        body: JSON.stringify({ id, notes })
+      })
+        .then(async r => {
+          if (!r.ok) {
+            const parsed = await Util.parseBackendError(r);
+            ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
+              { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
+          }
+        })
+        .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
+          { reqId, id }, { reqId, errorCode: 'http.network' }));
+    }, 800);
+  },
+
+  toggleFix(fixed) {
+    if (!Inspector._currentId) return;
+    Store.setFixed([Inspector._currentId], fixed, 'inspector');
+    Alerts.scheduleRecompute();
+  }
+};
+
+/* =============================================================================
+   CONTEXT MENU — right-click on a timeline item.
+   ========================================================================== */
+export const ContextMenu = {
+  _targetId: null,
+
+  init() {
+    const menu = document.getElementById('ctx-menu');
+    if (!menu) return;
+    menu.querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => {
+        const action = btn.dataset.action;
+        const id = ContextMenu._targetId;
+        ContextMenu.close();
+        if (!id) return;
+        if (action === 'fix')       { Store.setFixed([id], true, 'ctx');  Alerts.scheduleRecompute(); }
+        else if (action === 'unfix'){ Store.setFixed([id], false, 'ctx'); Alerts.scheduleRecompute(); }
+        else if (action === 'override') { Table._openOverrideModalForId(id); }
+        else if (action === 'inspect')  { const t = Store.tasks[id]; if (t) Inspector.show(t); }
+      };
+    });
+    document.addEventListener('click', () => ContextMenu.close());
+    document.addEventListener('scroll', () => ContextMenu.close(), true);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') ContextMenu.close(); });
+  },
+
+  open(x, y, targetId) {
+    ContextMenu._targetId = targetId;
+    const menu = document.getElementById('ctx-menu');
+    menu.hidden = false;
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    // Position correctness (don't overflow viewport)
+    requestAnimationFrame(() => {
+      const r = menu.getBoundingClientRect();
+      if (r.right > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+      if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+    });
+    // Toggle fix/unfix visibility based on state
+    const fixed = Store.isFixed(targetId);
+    menu.querySelector('[data-action="fix"]').style.display   = fixed ? 'none' : '';
+    menu.querySelector('[data-action="unfix"]').style.display = fixed ? '' : 'none';
+  },
+  close() {
+    ContextMenu._targetId = null;
+    const menu = document.getElementById('ctx-menu');
+    if (menu) menu.hidden = true;
   }
 };

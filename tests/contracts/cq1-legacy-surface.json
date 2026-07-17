@@ -38,26 +38,6 @@
     },
     {
       "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('color', this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('date', this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('line', this)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('status', this)"
-    },
-    {
-      "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
     },
@@ -149,16 +129,6 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFix(false)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFix(true)"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
       "expression": "NIMBUS.Interaction._bulkFix(false)"
     },
     {
@@ -210,21 +180,6 @@
       "file": "app.js",
       "attribute": "onclick",
       "expression": "NIMBUS.Selection.clear()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._closeNotePopover()"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._saveNotePopover('${id}')"
-    },
-    {
-      "file": "app.js",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
     },
     {
       "file": "app.js",
@@ -790,6 +745,51 @@
       "file": "index.html",
       "attribute": "oninput",
       "expression": "NIMBUS.OptimizeDialog.filterPlants(this.value)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('color', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('date', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('line', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('status', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Inspector.toggleFix(false)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Inspector.toggleFix(true)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._closeNotePopover()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._saveNotePopover('${id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
     }
   ],
   "htmlCommands": [
