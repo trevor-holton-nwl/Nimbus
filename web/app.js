@@ -449,7 +449,7 @@ const NIMBUS = (function () {
     // explicit user/role value exists, so a legacy nimbus.locale/nimbus.theme is
     // preserved rather than clobbered by a system default.
     try {
-      const us = Store._state.userSettings || {}, rd = Store._state.roleDefaults || {};
+      const us = Store.userSettings || {}, rd = Store.roleDefaults || {};
       const lang = (us.language != null) ? us.language : (rd.language != null ? rd.language : null);
       if (lang && lang !== Util.locale()) {
         Util.setLocale(lang);
@@ -582,13 +582,13 @@ const NIMBUS = (function () {
       if (evt.type === 'master-data-changed') {
         let touched = 0;
         try {
-          const mdLines = Store._state.masterData?.lines;
+          const mdLines = Store.masterData?.lines;
           if (mdLines?.length) {
             mdLines.forEach(row => {
               const line = row.production_line;
               if (!line) return;
               Store.ensureLineSettings(line);
-              const ls = Store._state.lineSettings[line];
+              const ls = Store.lineSettings[line];
               const before = JSON.stringify(ls);
               ls.excludeFromOpt = row.excl_optimizer === 'X';
               ls.bottleneck     = row.bottleneck === 'X';

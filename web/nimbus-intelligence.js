@@ -437,7 +437,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const now = Util.startOfDay(new Date());
         const startMs = now.getTime();
         const days = 7;
-        const rev = Store._rev || 0;
+        const rev = Store.rev();
         const plant = Store.selectedPlant;
 
         let matrix = null;
@@ -451,7 +451,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
             NIMBUS.Compute.utilization(startMs, days)
               .then(({ matrix: m }) => {
-                if ((Store._rev || 0) !== rev) return; // stale
+                if (Store.rev() !== rev) return; // stale
                 Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
               })
               .catch(() => {});
@@ -1393,10 +1393,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Skip when neither alerts nor task data changed since the last score (R21):
       // _recompute fires on every alerts:change event and task mutation, and the
       // matrix build below is expensive. Store.alerts is reassigned on every change
-      // (stable array identity) and Store._rev bumps on every mutation, so this pair
+      // (stable array identity) and Store.rev() bumps on every mutation, so this pair
       // fully captures the inputs. plant:selected nulls these to force a repaint.
       const alerts = Store.alerts || [];
-      const rev = Store._rev || 0;
+      const rev = Store.rev();
       if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
@@ -1447,7 +1447,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
           NIMBUS.Compute.utilization(startMs, days)
             .then(({ matrix: m }) => {
-              if ((Store._rev || 0) !== rev) return; // stale
+              if (Store.rev() !== rev) return; // stale
               Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
             })
             .catch(() => {});
@@ -1541,7 +1541,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
       const startMs = horizonStart.getTime();
-      const rev = Store._rev || 0;
+      const rev = Store.rev();
       const plant = Store.selectedPlant;
 
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
@@ -2204,8 +2204,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     // default so a missing pref keeps deferring to the offline cache.
     _resolve() {
       try {
-        const us = Store && Store._state && Store._state.userSettings;
-        const rd = Store && Store._state && Store._state.roleDefaults;
+        const us = Store && Store.userSettings;
+        const rd = Store && Store.roleDefaults;
         if (us && us.theme != null) return us.theme;
         if (rd && rd.theme != null) return rd.theme;
       } catch { /* Store not ready — fall through to offline cache */ }

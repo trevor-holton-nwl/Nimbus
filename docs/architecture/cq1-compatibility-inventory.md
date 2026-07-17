@@ -561,10 +561,71 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `app.js` (`_bootMain`) | `Store._state` | Phase 4 Task 6 |
-| `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 Task 6 |
 | `Plant` | `Store._state` | Not yet scheduled — see note below |
 | `LaborPlanning` | `Store._state` | Not yet scheduled — see note below |
+
+**`app.js` (`_bootMain`) closed (Phase 4 Task 6):** the three real touches
+this row referred to — the session-hydration read of
+`Store._state.userSettings`/`.roleDefaults`, and the master-data-changed
+subscriber's read of `Store._state.masterData?.lines` plus its per-line
+write-then-read of `Store._state.lineSettings[line]` — all had existing
+public alternatives from earlier phases (`Store.userSettings`/
+`Store.roleDefaults`/`Store.masterData`/`Store.lineSettings`, all Phase 1
+getters), so this task switched to them rather than adding anything new.
+`Store.lineSettings` returns the same live object as `Store._state
+.lineSettings` (a getter, not a copy), so the subsequent
+`ls.excludeFromOpt = ...`/etc. in-place mutations inside the `forEach`
+still write through to the real Store state exactly as before —
+confirmed no behavior change, just no direct `_state` reach-through.
+
+**`nimbus-intelligence.js` closed (Phase 4 Task 6):** re-read the full file
+(all 2,321 lines, not just the ~1,300 unread ones this task's plan text
+estimated remained) and found seven `Store._rev`/`Store._state` touches, all
+in `Confidence`/`DarkMode` — no others existed anywhere else in the file.
+All seven had an existing public alternative and needed no new getter:
+- Five `Store._rev || 0` reads (`Confidence._readState`'s peak-utilization
+  memo-key build and its worker-refresh staleness check; `Confidence
+  ._recompute`'s R21 skip-check and its worker-refresh staleness check;
+  `Confidence.showBreakdown`'s matrix memo-key build) became `Store.rev()` —
+  the same Phase 1 getter `Hierarchy` and `Dashboard` already switched to in
+  Phase 3. The `|| 0` fallback is redundant after this change (the getter
+  already applies it) and was dropped at each call site.
+- One pair, `DarkMode._resolve`'s `Store && Store._state &&
+  Store._state.userSettings` / `.roleDefaults` defensive reads, became
+  `Store && Store.userSettings` / `Store && Store.roleDefaults` — the
+  `Store &&` guard (Store itself possibly not yet loaded) is preserved;
+  only the redundant inner `_state` reach-through is removed, since the
+  getter itself is safe to call the moment `Store` exists (`_state` is
+  always initialized in the `Store` object literal, never lazily created).
+
+`node scripts/legacy-surface.mjs --write` confirms zero remaining
+`Store._state`/`Store._rev` matches in `app.js` or `nimbus-intelligence.js`
+(both files' generated `intelligenceCommands`/comment text were checked by
+hand, since the scanner's `Module.member` regex does not specifically
+flag `_state`/`_rev` as forbidden — see the Phase 4 Task 5 status note above
+for the same scanner-limitation caveat).
+
+**§6 status after Phase 4 Task 6: 2 open rows, not 0.** This phase's Task 6
+plan text (Files list: "close the final 2 §6 rows") and Global Constraints
+("this phase closes the final 3 rows... MasterData, App,
+nimbus-intelligence.js — after Task 6, that table should be empty")
+disagree with each other once Tasks 1/2's own status notes are taken into
+account: Task 1 added a `Plant` row and Task 2 added a `LaborPlanning` row,
+neither anticipated by the Global Constraints' original 3-row enumeration,
+and both of those tasks' own status notes explicitly said "whether Task 6
+closes this specific row is not certain from the plan text alone... 'Not yet
+scheduled' means exactly that." Task 6's own Step 1 instruction names only
+`app.js` and `nimbus-intelligence.js` as its reading targets — it does not
+mention `Plant`/`LaborPlanning` or `plant-and-administration.mjs` at all.
+Followed literally, Task 6 closes exactly the 2 rows its own Step 1 names.
+`Plant`'s `_renderSettingsPane` `Store._state.masterData?.plants?.find(...)`
+read and `LaborPlanning`'s six `Store._state.masterData` reads remain open,
+tracked here, not silently closed to satisfy the Global Constraints' claim.
+Closing them is a small, well-scoped follow-up (both already have a public
+`Store.masterData` getter available — the same one-line fix pattern used
+above — nothing architecturally blocks it), but making that edit was not
+this task's stated job and doing it anyway would have gone beyond "close the
+final 2 §6 rows."
 
 **`App` row renamed, not closed (Phase 4 Task 4):** re-checked against the
 actual moved code — the `App` object literal (`.init`/`.goto`/`.gotoGanttSub`/
@@ -1012,3 +1073,92 @@ matching `*:replace` variant, or it will silently miss the state changes a
 What-If discard makes. The exact event sequence is pinned by a test in
 `tests/modules/schedule-state.test.mjs` so a future change to it (batching,
 renaming, dropping events) is a deliberate edit, not silent drift.
+
+---
+
+## 7. Inline Handler Backlog (deliberately incomplete)
+
+This phase's Architecture point 5 was explicit up front: "123 inline
+event-handler attributes exist in `index.html` today... Converting all 123 in
+one task would be the single riskiest, least-tested change of the entire
+migration — this phase does not attempt that." Each task (1, 4) converted
+only the `onclick=`/`onchange=` attributes calling that task's own moved
+module, following the Phase 3 `Interaction._showMultiInspector` precedent.
+This section quantifies exactly what is left, rather than letting CQ-1 close
+with an implied (and false) zero.
+
+**Fresh count, taken at the close of Phase 4 Task 6** (`on\w+="..."` in
+`web/index.html`, the same sweep this phase's research used, deduplicated by
+`(attribute, expression)` pair — the same dedup `scripts/legacy-surface.mjs`
+already applies): **91 unique inline handlers**, down from the 123 present
+at the start of this phase. `scripts/legacy-surface.mjs`'s existing
+`--write` output already reports this exact number as part of its combined
+`inlineHandlers.length` (136 across `index.html` + the four `.mjs` module
+files that generate HTML strings with inline handlers of their own —
+`plant-and-administration.mjs` and `schedule-workbench.mjs`, both expected:
+JS-generated HTML written by an already-migrated module is not the same
+debt as a static attribute sitting in `index.html` itself); no change to the
+scanner was needed to get the `index.html`-only figure below — it is a
+by-file breakdown of the same contract already checked in at
+`tests/contracts/cq1-legacy-surface.json`, not a new capability.
+
+By target module (static `index.html` attributes only):
+
+| Module | Count | Note |
+|---|---:|---|
+| `OptimizeDialog` | 25 | Optimize modal — largest single concentration; entirely modal-internal form controls, never converted by any task since no task's Files list ever named `OptimizeDialog`/`index.html` together |
+| `EditCalendar` | 14 | Working-hours modal (14 Flatpickr-adjacent pickers' surrounding buttons) |
+| `Table` | 11 | AG Grid toolbar/override-modal buttons |
+| `Modal` | 9 | Generic modal chrome (close/confirm/cancel), shared across every feature modal |
+| `ColorWheelViewer` | 5 | Color-wheel preview modal |
+| `AdminCockpit` | 4 | Admin Cockpit sub-tab/console buttons |
+| `GanttFilter` | 4 | The 4 `_toggle*Dropdown` handlers already tracked since Phase 3 Task 3 (§4.2) — carried forward unchanged, not newly discovered |
+| `LaborPlanning` | 4 | `toggleGroupDropdown`/`prevHorizon`/`nextHorizon`/`setSpan` — flagged as this section's target back in the Phase 4 Task 2 status note above |
+| `Printer` | 4 | Print/export modal |
+| `Dashboard` | 3 | Home KPI drill-down buttons |
+| `OptimizerPreview` | 2 | Before/after preview modal |
+| `Timeline` | 2 | Gantt toolbar buttons |
+| `Alerts` | 1 | Alert drawer fix/dismiss action (computation-half naming; resolves to `AlertsUIAdapter`'s DOM code at runtime) |
+| `AlertsUIAdapter` | 1 | Alert drawer focus action |
+| `Persistence` | 1 | Save button |
+| `SandboxAdapter` | 1 | What-If banner action |
+| **Total** | **91** | |
+
+Every one of these 91 resolves correctly today regardless of which of the
+seven real `.mjs` files defines its target module — all seven are
+destructured into the same `NIMBUS` object `index.html` calls through
+(`NIMBUS.Module.method(...)`), so none of them are *broken*; they are a
+maintainability and future-CSP-enforcement debt, not a functional bug. The
+**91-count already includes** `LaborPlanning`'s 4 and `GanttFilter`'s 4 —
+both were explicitly named as "folded into Task 6's precise inline-handler
+count rather than silently converted out of scope" by earlier tasks' status
+notes, and this section is where that promise is kept.
+
+**This is deliberately incomplete, and CQ-1 ends with it incomplete.**
+Per this plan's Architecture point 5 and Global Constraints, full inline-
+handler elimination was never in scope for CQ-1 — only the module extraction
+plus each task's own converted subset. Eliminating the remaining 91 (mostly
+concentrated in three modal-heavy modules — `OptimizeDialog`, `EditCalendar`,
+`Table` — plus the always-present `Modal` chrome) is tracked here as
+explicit follow-up work, not a silently-dropped requirement. It is also the
+blocker for ever promoting the Report-Only CSP below to enforcing mode:
+`'unsafe-inline'` cannot be dropped from `script-src` while any of these 91
+attributes still exist.
+
+**Report-only CSP (Phase 4 Task 6):** `index.html`'s `<head>` now carries a
+`Content-Security-Policy-Report-Only` meta tag. It logs violations without
+blocking anything — `'unsafe-inline'` stays in both `script-src` and
+`style-src` for exactly the reason above. `script-src`/`style-src`/`font-src`
+are scoped to the CDN origins this app actually loads from today
+(`unpkg.com`, `cdn.jsdelivr.net` for scripts and the Flatpickr/vis-timeline/
+AG Grid stylesheets; `fonts.googleapis.com`/`fonts.gstatic.com` for the
+Google Fonts `<link>`) — the plan's own illustrative CSP string omitted the
+three stylesheet origins and the Google Fonts `font-src` from `style-src`/
+`font-src` even though its own rationale said the policy should reflect "the
+exact CDN/self allowlist this app actually uses"; reconciled here by adding
+those origins rather than shipping a report-only policy that would
+immediately report violations for every legitimate existing page load.
+`report-uri /csp-report` is **not** a real working endpoint yet — wiring up
+an actual collection endpoint (and, eventually, promoting the policy to
+enforcing once the table above reaches zero) is a follow-up beyond this
+task's scope, not part of Task 6.
