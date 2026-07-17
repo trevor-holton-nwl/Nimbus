@@ -726,6 +726,7 @@ export const UndoStack = {
   push(label, undoFn) {
     this._entries.push({ label, undoFn, at: Date.now() });
     if (this._entries.length > this.MAX) this._entries.shift();
+    Store.emit({ type: 'undo:pushed', label });
   },
   pop() {
     const e = this._entries.pop();

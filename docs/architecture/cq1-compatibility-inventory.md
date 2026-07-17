@@ -237,6 +237,73 @@ module-extraction work: `app.js` now defines zero module bodies of its own.
   is missing, mirroring the same fix Task 1's commit made for
   `__NIMBUS_PLANT_ADMIN`.
 
+**Phase 4 Task 5 status (complete): `nimbus-intelligence.js`'s two remaining
+runtime monkey-patches converted to `Store` events.** `nimbus-intelligence.js`
+stays a classic script this phase (see the Architecture note above) — this
+task did not attempt the ES-module conversion, only the two behavioral
+reassignments the design doc calls out by name:
+
+- **`{ type: 'undo:pushed', label }`** — a new `Store` event emitted at the
+  end of `UndoStack.push(label, undoFn)` (`schedule-state.mjs`), right after
+  the entry is appended and the MAX(10) trim runs. `TimeMachine.init()`
+  (`nimbus-intelligence.js`) used to do `const origPush =
+  UndoStack.push.bind(UndoStack); UndoStack.push = (label, undoFn) => {
+  origPush(label, undoFn); TimeMachine._snapshotAuto(label); };` — reassigning
+  the shared singleton's method at runtime, so every caller of `UndoStack.push`
+  anywhere in the codebase (`schedule-services.mjs`'s auto-fix undo entries,
+  `schedule-workbench.mjs`'s drag/unschedule/optimize undo entries,
+  `plant-and-administration.mjs`'s labor-plan undo entries,
+  `schedule-state.mjs`'s own `Sandbox.exit(true)` promote path) silently ran
+  through intelligence-layer code the moment `nimbus-intelligence.js` loaded,
+  with no indication at any call site. It is now `Store.subscribe(evt => { if
+  (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label); },
+  'TimeMachine.autoSnapshot')` — `UndoStack.push` itself is never reassigned;
+  it unconditionally emits the fact through `Store`, and
+  `nimbus-intelligence.js` (a legitimate consumer of the global `NIMBUS`
+  namespace) subscribes to it like any other event. No behavior change: the
+  auto-snapshot still fires once per push, still receives the same `label`,
+  still runs through the same debounced `_snapshotAuto`.
+- **`{ type: 'alerts:change', source, changedIds? }`** — already existed
+  (`Store.setAlerts`/`dismissAlert`/`dismissAllAlerts`, all in
+  `schedule-state.mjs`, confirmed emitting it since Phase 1; no
+  `schedule-state.mjs` change was needed for this half of the task).
+  `Confidence.init()` used to do `const origRecompute =
+  Alerts.recompute.bind(Alerts); Alerts.recompute = (...args) => { const r =
+  origRecompute(...args); Confidence._recomputeDebounced(); return r; };` —
+  the same runtime-reassignment pattern, this time on `Alerts.recompute`. It
+  is now `Store.subscribe(evt => { if (evt.type === 'alerts:change')
+  Confidence._recomputeDebounced(); }, 'Confidence.autoRecompute')`.
+  **This is a deliberate, documented behavior improvement, not a pure
+  refactor:** the old wrap only fired when something called
+  `Alerts.recompute()` directly. `Alerts.dismissAlert()`/`dismissAllAlerts()`
+  mutate `Store.alerts` through `Store.dismissAlert`/`dismissAllAlerts` (which
+  already emit `alerts:change` themselves) without ever calling
+  `Alerts.recompute()` — so dismissing an alert or clearing all alerts
+  previously left the Confidence score stale until the next unrelated
+  recompute trigger (a task mutation, a plant switch). Subscribing to
+  `alerts:change` directly means a dismiss now also triggers a debounced
+  confidence recompute, which is strictly more correct (the score should
+  reflect the alert list actually on screen) and was called out explicitly in
+  this task's plan as an intentional improvement to document, not silently
+  slip in.
+
+Both replacements were verified with `node scripts/legacy-surface.mjs
+--write`: the literal text `Alerts.recompute` no longer appears anywhere in
+`nimbus-intelligence.js` (source code or comments) after this task, so it
+dropped out of the generated `intelligenceCommands` list. `UndoStack.push`
+still appears in that list — the scanner (`scripts/legacy-surface.mjs`) does
+plain text/regex matching for `Module.member` occurrences; it has no concept
+of "reassignment target" versus "ordinary method call," and a comment inside
+`TimeMachine.init()` (`"...write IndexedDB synchronously on EVERY
+UndoStack.push."`) still contains that literal substring, as do the many
+legitimate `UndoStack.push(...)` call sites across the other six extracted
+modules. Its continued presence in the contract is not a sign the monkey-patch
+survived — `UndoStack.push` is never reassigned anywhere in the tree after
+this task (confirmed by `grep -n "UndoStack\.push\s*="` returning zero
+matches) — it is simply the scanner's known text-matching limitation, noted
+here per this task's own Step 4 instruction rather than assuming a diff that
+was never going to happen.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated

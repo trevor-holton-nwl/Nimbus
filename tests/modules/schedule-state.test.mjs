@@ -78,6 +78,14 @@ test('UndoStack.push caps at MAX(10) entries', () => {
   assert.ok(UndoStack._entries.length <= UndoStack.MAX);
 });
 
+test('UndoStack.push emits undo:pushed with the entry label', () => {
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'undo:pushed') events.push(evt); });
+  UndoStack.push('unit-test-label', () => {});
+  off();
+  assert.ok(events.some(e => e.label === 'unit-test-label'));
+});
+
 test('UndoStack.snapshotTasks/restoreTasks round-trip through Store', () => {
   Store.setTasks([{ id: 'u1', RUN_TIME: '2', start_date: new Date('2026-01-01') }], 'unit-test');
   const snap = UndoStack.snapshotTasks(['u1']);

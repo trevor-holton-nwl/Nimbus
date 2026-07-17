@@ -1211,11 +1211,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       TimeMachine._snapshotAuto = Util.debounce(
         label => TimeMachine.snapshot(label, { auto: true }), 1000
       );
-      const origPush = UndoStack.push.bind(UndoStack);
-      UndoStack.push = (label, undoFn) => {
-        origPush(label, undoFn);
-        TimeMachine._snapshotAuto(label);
-      };
+      Store.subscribe(evt => {
+        if (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label);
+      }, 'TimeMachine.autoSnapshot');
       Store.subscribe(evt => {
         if (['tasks:bulk','tasks:bulkUpdate'].includes(evt.type) &&
             evt.source !== 'undo' && evt.source !== 'time-machine') {
@@ -1366,8 +1364,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (['tasks:bulk','tasks:bulkUpdate','task:update','task:remove'].includes(evt.type))
           Confidence._recomputeDebounced();
       });
-      const origRecompute = Alerts.recompute.bind(Alerts);
-      Alerts.recompute = (...args) => { const r = origRecompute(...args); Confidence._recomputeDebounced(); return r; };
+      Store.subscribe(evt => {
+        if (evt.type === 'alerts:change') Confidence._recomputeDebounced();
+      }, 'Confidence.autoRecompute');
       setTimeout(Confidence._recompute, 600);
     },
 
@@ -1392,7 +1391,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (NIMBUS.OptimizerPreview?.active || NIMBUS.Sandbox?.active) return;
 
       // Skip when neither alerts nor task data changed since the last score (R21):
-      // _recompute is wrapped onto EVERY Alerts.recompute and task mutation, and the
+      // _recompute fires on every alerts:change event and task mutation, and the
       // matrix build below is expensive. Store.alerts is reassigned on every change
       // (stable array identity) and Store._rev bumps on every mutation, so this pair
       // fully captures the inputs. plant:selected nulls these to force a repaint.
@@ -2306,7 +2305,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         : console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e));
       CommandPalette.init();
       TimeMachine._snapshots = [];
-      TimeMachine.init(); // monkey-patches UndoStack.push; must run even without IDB
+      TimeMachine.init(); // wires the undo:pushed subscription; must run even without IDB
       Confidence.init();
       Patterns.init();
       setTimeout(() => { RipplePreview.init(); }, 220);

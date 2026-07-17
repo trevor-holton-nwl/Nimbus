@@ -740,7 +740,6 @@
     "Timeline.zoomToFit"
   ],
   "intelligenceCommands": [
-    "Alerts.recompute",
     "Alerts.scheduleRecompute",
     "AlertsUIAdapter.focus",
     "App.goto",
