@@ -7,6 +7,15 @@ PerfMonitor, VirtualList, ErrorLog, Toast, Modal) and `schedule-state.mjs`
 See §6 for the still-open `Store._state`/`_rev` exceptions carried into
 Phase 2/3/4.
 
+**Phase 2 status (complete):** `schedule-services.mjs` (Calendar capacity math,
+Compute, Alerts computation, Utilization, Engine) and `schedule-data.mjs`
+(Persistence, CalendarSync, Session state/API) are real ES modules. DOM/UI
+code stays in app.js as `CalendarUI`, `AlertsUIAdapter`, and
+`SessionUIAdapter`, following the Phase 1 `SandboxAdapter` precedent. The
+`schedule:hydrated` and `session:changed` events and the
+`Persistence.setCalendarService` seam resolve the two real
+data→services dependencies found during Phase 2 research.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated

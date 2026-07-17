@@ -24,6 +24,14 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
   covers the loader's load-then-load-in-order contract via dependency
   injection (`loadScript`), not real DOM script tags — real-browser boot
   ordering is a Phase 4 browser-smoke responsibility, not unit-tested here.
+- `schedule-services.test.mjs` / `schedule-data.test.mjs` — plain ESM `import`
+  shape and behavior tests for `schedule-services.mjs` (Calendar capacity
+  math, Compute, Alerts computation, Utilization, Engine) and
+  `schedule-data.mjs` (Persistence, CalendarSync, Session state/API), the
+  Phase 2 modules. Cover the worker-protocol/memoization/optimistic-
+  concurrency contracts plus the two data→services seams
+  (`schedule:hydrated` event, `Persistence.setCalendarService`) — no VM
+  sandbox needed, these are real native modules too.
 
 ## Backend tests (`tests/*.py`)
 
