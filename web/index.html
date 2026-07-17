@@ -1142,7 +1142,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span class="wh-sep">·</span>
               <span class="wh-situation" id="wh-situation"></span>
             </div>
-            <button type="button" class="btn btn-primary wh-cta" onclick="NIMBUS.App.gotoGanttTimeline()">
+            <button type="button" class="btn btn-primary wh-cta" id="wh-cta-btn">
               <span data-i18n="ui.open_schedule">Open schedule</span><span aria-hidden="true">→</span>
             </button>
           </div>
@@ -1248,8 +1248,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Toolbar: view toggles + zoom + actions (always visible) -->
     <div class="gantt-toolbar">
       <div class="group">
-        <button class="seg-btn active" data-gantt-sub="timeline" onclick="NIMBUS.App.gotoGanttSub('timeline')">Gantt Timeline</button>
-        <button class="seg-btn" data-gantt-sub="orders" onclick="NIMBUS.App.gotoGanttSub('orders')">Orders</button>
+        <button class="seg-btn active" data-gantt-sub="timeline">Gantt Timeline</button>
+        <button class="seg-btn" data-gantt-sub="orders">Orders</button>
       </div>
       <div class="sep-v"></div>
       <div class="group" id="gantt-zoom-controls">
@@ -1345,7 +1345,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <aside class="side side-left" id="left-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
-          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('left')">◀</button>
+          <button class="icon-btn sm" id="left-sidebar-toggle-btn">◀</button>
         </header>
         <div id="hierarchy"></div>
         <div class="resize-handle rh-right" data-side="left"></div>
@@ -1364,7 +1364,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <aside class="side side-right" id="right-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_inspector">Inspector</h4>
-          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('right')">✕</button>
+          <button class="icon-btn sm" id="right-sidebar-toggle-btn">✕</button>
         </header>
         <div class="inspector-body" id="inspector-body">
           <div class="empty-state" data-i18n="empty.select_order">Select an order to inspect.</div>
@@ -1476,11 +1476,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Toolbar -->
     <div class="labor-toolbar" id="labor-toolbar">
       <div class="group">
-        <button class="seg-btn active" data-labor-sub="aggregate" onclick="NIMBUS.App.gotoLaborSub('aggregate')">Aggregate</button>
-        <button class="seg-btn" data-labor-sub="line-plan" onclick="NIMBUS.App.gotoLaborSub('line-plan')">Line Plan</button>
-        <button class="seg-btn" data-labor-sub="capacity" onclick="NIMBUS.App.gotoLaborSub('capacity')">Capacity</button>
-        <button class="seg-btn" data-labor-sub="exceptions" onclick="NIMBUS.App.gotoLaborSub('exceptions')">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
-        <button class="seg-btn" data-labor-sub="inputs" onclick="NIMBUS.App.gotoLaborSub('inputs')">Inputs</button>
+        <button class="seg-btn active" data-labor-sub="aggregate">Aggregate</button>
+        <button class="seg-btn" data-labor-sub="line-plan">Line Plan</button>
+        <button class="seg-btn" data-labor-sub="capacity">Capacity</button>
+        <button class="seg-btn" data-labor-sub="exceptions">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
+        <button class="seg-btn" data-labor-sub="inputs">Inputs</button>
       </div>
       <div class="sep-v"></div>
       <div class="lp-group-filter" id="lp-group-filter">

@@ -13,6 +13,7 @@ import * as services from './schedule-services.mjs';
 import * as data from './schedule-data.mjs';
 import * as workbench from './schedule-workbench.mjs';
 import * as plantAdmin from './plant-and-administration.mjs';
+import * as shell from './application-shell.mjs';
 
 export function bootEntry({ window: win = (typeof window !== 'undefined' ? window : undefined), loadScript } = {}) {
   if (!win) return Promise.reject(new Error('NIMBUS boot error: no window available for bootEntry'));
@@ -22,6 +23,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
   win.__NIMBUS_DATA = data;
   win.__NIMBUS_WORKBENCH = workbench;
   win.__NIMBUS_PLANT_ADMIN = plantAdmin;
+  win.__NIMBUS_SHELL = shell;
 
   const inject = loadScript || defaultLoadScript;
   const v = win.NIMBUS_BUILD_ID || 'dev';
@@ -45,6 +47,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
       delete win.__NIMBUS_DATA;
       delete win.__NIMBUS_WORKBENCH;
       delete win.__NIMBUS_PLANT_ADMIN;
+      delete win.__NIMBUS_SHELL;
     });
 }
 

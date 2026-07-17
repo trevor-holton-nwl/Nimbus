@@ -151,6 +151,92 @@ resolve correctly regardless of which file defines `LaborPlanning` (same
 rather than silently converted out of scope or silently omitted from that
 count.
 
+**Phase 4 Task 4 status (complete):** `application-shell.mjs` is a real ES
+module, bridged into `app.js` via `app-entry.mjs` + `window.__NIMBUS_SHELL` —
+the seventh and final bridge — carrying `SessionUIAdapter`, `showLoginScreen`,
+`EmptyState`, `PlantSelector`, `WelcomeSplash`, and `App` (minus
+`_renderSettingsPane`, relocated to `Plant` in Task 1). This closes out the
+module-extraction work: `app.js` now defines zero module bodies of its own.
+
+- **A discrepancy this task had to reconcile: `Settings`.** The per-user
+  settings catalog (`Settings.CATALOG`/`.DEFAULTS`/`.isRegion`/`.byCategory`)
+  sat in `app.js` between the bridge-wiring block and `SessionUIAdapter`, but
+  it is **not** one of CQ-1's 14 tracked modules and this task's own
+  Interfaces list never names it. It has exactly one real caller left in
+  `app.js` — the DI-seam wiring line `Store.setSettingsDefaultsResolver(()
+  => Settings.DEFAULTS)` — and no state or behavior beyond the static
+  catalog itself. Leaving it in `app.js` would have contradicted this task's
+  own mandate (the file "contains no module bodies of its own" after this
+  task): a 60-line object with two methods is a module body by any
+  reasonable reading. `Settings` therefore moved into
+  `application-shell.mjs` alongside the six named items, exported the same
+  way, and imported back into `app.js`'s bridge destructure for the wiring
+  line to use — the same "small public reach-back" pattern every other
+  cross-file seam in this migration uses. `SessionUIAdapter`'s
+  Personalization/Workflow panes are its only real reader.
+- **`_bootMain()`/`_domReadyGate()` stay in `app.js`, not
+  `application-shell.mjs`, on close reading of this task's own Step 3.** The
+  plan's Task 4 Step 3 explicitly lists `_bootMain()`'s orchestration
+  sequence and `_domReadyGate()` as content that stays in `app.js`
+  ("calling `.init()` on modules now imported from the other six files, in
+  the same order as before"). Both functions' `Store._state.userSettings`/
+  `.roleDefaults`/`.masterData`/`.lineSettings` touches (inside `_bootMain`'s
+  session-hydration and master-data-sync subscribers) are consequently
+  **not** closed by this task — despite living textually where `App` used
+  to — because they were never part of the `App` object literal that moved;
+  `App` itself (the object with `.goto`/`.init`/etc.) has **zero**
+  `Store._state`/`_rev` touches. This distinction matters for Task 6, whose
+  own Step 1 already anticipates "app.js's remaining `Store._state`/`_rev`
+  touches (now much smaller since most of `App`'s body moved to
+  `application-shell.mjs` in Task 4)" — those touches are exactly the ones
+  inside `_bootMain`, tracked below in §6 rather than silently assumed
+  closed by this task.
+- **Import list correction against the plan's illustrative snippet.** The
+  plan's Task 4 Step 2 code sample suggested importing `PerfMonitor` and
+  `Sandbox` into `application-shell.mjs` and `Alerts`/`Engine` alongside
+  `Inspector`/`ContextMenu`/`Interaction`/`SandboxAdapter` being left out of
+  its `schedule-workbench.mjs` import line. Re-checked against the actual
+  moved code: `PerfMonitor` and `Sandbox` are never referenced bare inside
+  `SessionUIAdapter`/`showLoginScreen`/`EmptyState`/`PlantSelector`/
+  `WelcomeSplash`/`App` (both only appear in `app.js`'s own bridge
+  destructure and its final `return {...}`, which stay in `app.js`, not this
+  file) — so they are not imported here. `Engine` is likewise never
+  referenced bare in the moved code (only in `app.js`'s own wiring/return),
+  so it is not imported either. `Alerts` **is** used
+  (`Alerts.scheduleRecompute()` inside `App.init`'s Store-subscribe
+  callback) and **is** imported. `Inspector`, `ContextMenu`, `SandboxAdapter`,
+  and `Interaction` are called only from `_bootMain` (which stays in
+  `app.js`, already having them via the `__NIMBUS_WORKBENCH` bridge) — not
+  from the `App` object itself — so `application-shell.mjs` does not import
+  them; only `Timeline`, `TimelineNav`, `DependencyOverlay`, `Table`,
+  `Hierarchy`, `GanttFilter`, `Dashboard`, and `AlertsUIAdapter` (all
+  referenced bare inside `App`'s own methods) are imported from
+  `schedule-workbench.mjs`.
+- **Ten static `onclick=` attributes in `index.html` targeting `App`**
+  (the work-header "Open schedule" CTA, the two Gantt-sub toggle buttons,
+  the two sidebar collapse icon buttons, and the five Labor Planning
+  sub-tab buttons) were converted to real `addEventListener`/`.onclick=`
+  wiring inside `App.init()`, following the Phase 3
+  `Interaction._showMultiInspector` / Phase 4 Task 1 `Plant.init()`
+  precedent — this task's own module's static handlers, per the plan's
+  Architecture point 5. `PlantSelector`/`WelcomeSplash`/`EmptyState`/
+  `SessionUIAdapter`/`showLoginScreen` have zero `index.html` onclick
+  references (confirmed by scan) — nothing to convert for those five.
+- **All bare `t(...)` i18n calls (85 call sites) became `Util.t(...)`,**
+  the same established Phase 2+ convention every other extracted module in
+  this migration follows (`web/**/*.mjs`'s ESLint block does not declare
+  `t` as a global, unlike `web/app.js`'s block) — the plan's "moved
+  verbatim" language did not anticipate this file being a real ES module
+  needing the same lint-driven rewrite every prior task already made;
+  reconciled the same way `Timeline`/`Table`/`Dashboard`/every other module
+  in `schedule-workbench.mjs`/`plant-and-administration.mjs` did.
+- **`tests/modules/helpers/load-legacy-app.mjs`** (the Node VM harness for
+  `legacy-app-characterization.test.mjs`) was updated to import
+  `application-shell.mjs` and populate `window.__NIMBUS_SHELL` before
+  evaluating `app.js` — required because `app.js` now throws if that bridge
+  is missing, mirroring the same fix Task 1's commit made for
+  `__NIMBUS_PLANT_ADMIN`.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated
@@ -212,10 +298,13 @@ Each NIMBUS module maps to exactly one target CQ-1 file.
 | `Interface` | `plant-and-administration.mjs` | SAP sync config/run history |
 | `Security` | `plant-and-administration.mjs` | User/role admin |
 | `AdminCockpit` | `plant-and-administration.mjs` | DB console, perf profiler, diagnostics bundle |
-| `App` | `application-shell.mjs` | Tab/sub-tab routing and lifecycle owner |
-| `PlantSelector` | `application-shell.mjs` | |
-| `WelcomeSplash` | `application-shell.mjs` | |
-| `EmptyState` | `application-shell.mjs` | |
+| `App` | `application-shell.mjs` | Tab/sub-tab routing and lifecycle owner. Moved Phase 4 Task 4, minus `_renderSettingsPane` (relocated to `Plant` in Task 1). `_bootMain()`/`_domReadyGate()` deliberately stay in `app.js` — see the Phase 4 Task 4 status note above. |
+| `PlantSelector` | `application-shell.mjs` | Global plant combobox. Moved Phase 4 Task 4. |
+| `WelcomeSplash` | `application-shell.mjs` | First-run splash screen. Moved Phase 4 Task 4. |
+| `EmptyState` | `application-shell.mjs` | Reusable "select a plant" prompt. Moved Phase 4 Task 4. |
+| `SessionUIAdapter` | `application-shell.mjs` | Login gates / User Settings modal / profile / password self-service. Moved Phase 4 Task 4 (previously missing from this table — see the Phase 3 Task 7 note above documenting why it stayed in `app.js` until now). |
+| `showLoginScreen` | `application-shell.mjs` | Standalone mandatory-login-screen function (not a module object). Moved Phase 4 Task 4 (previously missing from this table). |
+| `Settings` | `application-shell.mjs` | Per-user settings catalog (personalization/workflow keys + system defaults). Not one of CQ-1's 14 tracked modules — moved here in Phase 4 Task 4 as a judgment call; see the Phase 4 Task 4 status note above. |
 
 ---
 
@@ -405,10 +494,25 @@ module migrates in a later phase and stops touching these fields directly.
 
 | Consumer | Touches | Migrates in |
 |---|---|---|
-| `App` | `Store._state` | Phase 4 (application-shell.mjs) |
-| `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 (intelligence bridge) |
+| `app.js` (`_bootMain`) | `Store._state` | Phase 4 Task 6 |
+| `nimbus-intelligence.js` | `Store._rev`, `Store._state` | Phase 4 Task 6 |
 | `Plant` | `Store._state` | Not yet scheduled — see note below |
 | `LaborPlanning` | `Store._state` | Not yet scheduled — see note below |
+
+**`App` row renamed, not closed (Phase 4 Task 4):** re-checked against the
+actual moved code — the `App` object literal (`.init`/`.goto`/`.gotoGanttSub`/
+etc.) that moved into `application-shell.mjs` this task has **zero**
+`Store._state`/`_rev` touches. The three real touches this row always
+referred to (`_bootMain`'s session-hydration read of
+`Store._state.userSettings`/`.roleDefaults`, and its master-data-changed
+subscriber's reads/writes of `Store._state.masterData`/`.lineSettings`) live
+inside `_bootMain()`, which this task's own plan (Step 3) keeps in `app.js`
+as boot orchestration, not inside the `App` object that moved. The row is
+renamed to `app.js (_bootMain)` to reflect where the code actually lives
+after this task, rather than closed — Task 6's own Step 1 explicitly expects
+to find and close these ("app.js's remaining `Store._state`/`_rev` touches,
+now much smaller since most of `App`'s body moved to `application-shell.mjs`
+in Task 4"), so "Migrates in: Phase 4 Task 6" is precise, not a guess.
 
 **`MasterData` closed (Phase 4 Task 2):** its one
 `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write (inside

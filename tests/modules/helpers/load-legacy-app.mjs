@@ -12,6 +12,7 @@ import * as services from '../../../web/schedule-services.mjs';
 import * as data from '../../../web/schedule-data.mjs';
 import * as workbench from '../../../web/schedule-workbench.mjs';
 import * as plantAdmin from '../../../web/plant-and-administration.mjs';
+import * as shell from '../../../web/application-shell.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -216,14 +217,15 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   sandbox.location = location_;
 
   // app.js now throws unless the foundation/state/services/data/workbench/
-  // plant-admin bridges are populated before it runs (see web/app-entry.mjs) —
-  // pre-populate them here just like a real page load.
+  // plant-admin/shell bridges are populated before it runs (see
+  // web/app-entry.mjs) — pre-populate them here just like a real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
   sandbox.window.__NIMBUS_STATE = state;
   sandbox.window.__NIMBUS_SERVICES = services;
   sandbox.window.__NIMBUS_DATA = data;
   sandbox.window.__NIMBUS_WORKBENCH = workbench;
   sandbox.window.__NIMBUS_PLANT_ADMIN = plantAdmin;
+  sandbox.window.__NIMBUS_SHELL = shell;
 
   // application-foundation.mjs is a real ES module loaded above via a normal
   // dynamic import, so it executes in THIS host Node realm — NOT inside the

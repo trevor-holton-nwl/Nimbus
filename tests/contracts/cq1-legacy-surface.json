@@ -79,56 +79,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoGanttSub('orders')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoGanttSub('timeline')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoGanttTimeline()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('aggregate')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('capacity')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('exceptions')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('inputs')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.toggleSide('left')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.toggleSide('right')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.ColorWheelViewer.close()"
     },
     {
@@ -736,10 +686,6 @@
     "AdminCockpit.gotoOvTab",
     "Alerts.dismissAll",
     "AlertsUIAdapter.toggleDrawer",
-    "App.gotoGanttSub",
-    "App.gotoGanttTimeline",
-    "App.gotoLaborSub",
-    "App.toggleSide",
     "ColorWheelViewer.close",
     "ColorWheelViewer.search",
     "ColorWheelViewer.sort",
