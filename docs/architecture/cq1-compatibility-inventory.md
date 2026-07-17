@@ -24,6 +24,32 @@ management, shared with `Plant`/`ProdLines`, both Phase 4 modules) and
 `SessionUIAdapter` because login gating belongs with the application shell,
 per this phase's plan's Architecture section.
 
+**Phase 3 status (complete):** `schedule-workbench.mjs` is a real ES module,
+bridged into `app.js` via `app-entry.mjs` + `window.__NIMBUS_WORKBENCH`,
+carrying the 15 real workbench modules (`Timeline`, `Table`, `Inspector`,
+`Hierarchy`, `Dashboard`, `TimelineNav`, `GanttFilter`, `DependencyOverlay`,
+`ContextMenu`, `Interaction`, `OptimizeDialog`, `OptimizerPreview`,
+`EditCalendar`, `ColorWheelViewer`, `Printer` — `UtilStrip` never existed
+anywhere in the codebase, see this phase's plan's Architecture section) plus
+the `SandboxAdapter`/`AlertsUIAdapter` DOM adapters relocated here in Task 7
+(see their own §1 rows for the coupling rationale). `CalendarUI` and
+`SessionUIAdapter` remain in `app.js`, deliberately, targeting
+`plant-and-administration.mjs`/`application-shell.mjs` respectively in
+Phase 4. This phase closed the 5 §6 exception rows it owned (`Timeline`,
+`Hierarchy`, `Dashboard`, `GanttFilter`, `DependencyOverlay` — see the
+per-task notes in §6 below) and 4 of `GanttFilter`'s 8 tracked
+private-consumer rows (the other 4 stay open, deliberately — see §4.2).
+`Interaction` gained a real, tested `uninstall()` teardown method: additive
+and intentionally unwired, since Gantt Timeline's mount-once/show-hide
+lifecycle has no unmount trigger today (§2). **A note on §6's row count:**
+this plan's own Global Constraints explicitly excluded `MasterData` from
+this phase's scope ("closes in a different Phase 3 target file,
+`plant-and-administration.mjs`, out of scope for this plan") — its §6 row
+therefore stays open after this phase, alongside the two genuine Phase 4
+rows (`App`, `nimbus-intelligence.js`). §6 lists **3** open rows at the close
+of Phase 3, not 2; `MasterData`'s row closes only when the sibling
+`plant-and-administration.mjs` migration lands, which is a different plan.
+
 This document maps every legacy module to its target CQ-1 file, records the
 lifecycle choice for each major screen, clarifies the task-reference convention,
 and lists every intelligence/private consumer sourced from the generated
@@ -111,6 +137,18 @@ Do not mix both for the same screen.
 
 Plant changes always create a fresh scoped request/worker context regardless
 of lifecycle choice; the distinction only governs tab transitions.
+
+**Phase 3 completion check (Task 8):** of the 15 real workbench modules plus
+`SandboxAdapter`/`AlertsUIAdapter`, only `Interaction` warranted a new row
+above (added Task 5) — it is the only one that gained new lifecycle-relevant
+machinery (`uninstall()`). `Inspector`, `Hierarchy`, `GanttFilter`,
+`DependencyOverlay`, `ContextMenu`, and `TimelineNav` are sub-components
+rendered inside the Gantt Timeline screen and share its row's mount-once /
+show-hide choice with nothing further to say; `OptimizeDialog`,
+`OptimizerPreview`, `EditCalendar`, `ColorWheelViewer`, `Printer`,
+`SandboxAdapter`, and `AlertsUIAdapter` are modals/drawers opened and closed
+on demand, not independently-tabbed screens, so CQ-1 invariant §5.6 does not
+apply to them the way it does to a tab-level screen. No further rows added.
 
 ---
 

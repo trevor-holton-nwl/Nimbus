@@ -32,6 +32,24 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
   concurrency contracts plus the two data→services seams
   (`schedule:hydrated` event, `Persistence.setCalendarService`) — no VM
   sandbox needed, these are real native modules too.
+- `schedule-workbench.test.mjs` — plain ESM `import` shape and behavior tests
+  for `schedule-workbench.mjs` (`Timeline`, `Table`, `Inspector`, `Hierarchy`,
+  `Dashboard`, `TimelineNav`, `GanttFilter`, `DependencyOverlay`,
+  `ContextMenu`, `Interaction`, `OptimizeDialog`, `OptimizerPreview`,
+  `EditCalendar`, `ColorWheelViewer`, `Printer`, plus the relocated
+  `SandboxAdapter`/`AlertsUIAdapter` DOM adapters), the Phase 3 module — no
+  VM sandbox needed, these are real native modules too. A minimal
+  hand-rolled `document`/`#vis-timeline`-container stub with
+  call-counting `addEventListener`/`removeEventListener` (defined at the top
+  of the file, only installed if `globalThis.document` isn't already set)
+  backs the `Interaction` characterization tests: idempotent `install()`,
+  the new `uninstall()` teardown removing every listener `install()`
+  attached, and the `_onDataSetUpdate` fixed-task drag behavior (a real
+  drag on a fixed order commits to the Store — it is not reverted, despite
+  the module's original header comment claiming otherwise; the comment was
+  corrected, the behavior was not changed). `load-legacy-app.mjs`'s VM
+  harness bridges `window.__NIMBUS_WORKBENCH` the same way as the Phase 1/2
+  bridges, for the legacy-app characterization suite.
 
 ## Backend tests (`tests/*.py`)
 
