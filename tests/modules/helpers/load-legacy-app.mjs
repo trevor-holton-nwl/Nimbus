@@ -8,6 +8,7 @@ import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
 import * as foundation from '../../../web/application-foundation.mjs';
 import * as state from '../../../web/schedule-state.mjs';
+import * as services from '../../../web/schedule-services.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -211,10 +212,12 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // location lives both on sandbox and window
   sandbox.location = location_;
 
-  // app.js now throws unless the foundation/state bridges are populated before it
-  // runs (see web/app-entry.mjs) — pre-populate them here just like a real page load.
+  // app.js now throws unless the foundation/state/services bridges are populated
+  // before it runs (see web/app-entry.mjs) — pre-populate them here just like a
+  // real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
   sandbox.window.__NIMBUS_STATE = state;
+  sandbox.window.__NIMBUS_SERVICES = services;
 
   // application-foundation.mjs is a real ES module loaded above via a normal
   // dynamic import, so it executes in THIS host Node realm — NOT inside the
@@ -228,6 +231,18 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // a real browser, application-foundation.mjs and app.js share the one page
   // window/document, so it doesn't arise there.
   if (typeof globalThis.document === 'undefined') globalThis.document = document_;
+  // Same split-realm quirk for `NimbusComputeCore`: schedule-services.mjs's
+  // Calendar (host realm, imported above) now delegates to it via
+  // `globalThis.NimbusComputeCore` (see that file for why — nimbus-compute-
+  // core.js is a UMD module with no ES `export`, so it can't be statically
+  // imported by an .mjs file; it's loaded as a classic <script> in the real
+  // browser, ending up on `window`/`globalThis` before app-entry.mjs's static
+  // imports run). This harness already `require()`s it once (above) for the
+  // vm sandbox's bare `NimbusComputeCore` global (still read directly by any
+  // app.js code not yet migrated) — mirror that same object onto the host
+  // realm's globalThis so schedule-services.mjs's host-realm functions
+  // resolve it too, instead of throwing "NimbusComputeCore is not defined".
+  if (typeof globalThis.NimbusComputeCore === 'undefined') globalThis.NimbusComputeCore = NimbusComputeCore;
   // Same split-realm quirk for `fetch`: Util.fetchTraced now lives in
   // application-foundation.mjs (host realm) and calls bare `fetch(...)`.
   // Node already defines a real global `fetch`, so — unlike `document` above —

@@ -94,17 +94,17 @@
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Calendar._clearLineFilter()"
+      "expression": "NIMBUS.CalendarUI._clearLineFilter()"
     },
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Calendar.removeBlock('${b.id}')"
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}')"
     },
     {
       "file": "app.js",
       "attribute": "onclick",
-      "expression": "NIMBUS.Calendar.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
     },
     {
       "file": "app.js",
@@ -369,7 +369,7 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Calendar.saveBlockFromModal()"
+      "expression": "NIMBUS.CalendarUI.saveBlockFromModal()"
     },
     {
       "file": "index.html",
@@ -800,7 +800,7 @@
     "App.gotoGanttTimeline",
     "App.gotoLaborSub",
     "App.toggleSide",
-    "Calendar.saveBlockFromModal",
+    "CalendarUI.saveBlockFromModal",
     "ColorWheelViewer.close",
     "ColorWheelViewer.search",
     "ColorWheelViewer.sort",

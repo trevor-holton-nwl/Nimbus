@@ -9,11 +9,17 @@
                        — now defined in application-foundation.mjs
      Store, Selection, UndoStack, Sandbox
                        — now defined in schedule-state.mjs
+   CQ-1 Phase 2 Task 1 moved Calendar's capacity-math half and Compute out
+   into a third real ES module, bridged the same way (window.__NIMBUS_SERVICES):
+     Calendar (capacity math only), Compute
+                       — now defined in schedule-services.mjs
+   Calendar's blackout-block-tab UI half stayed here, renamed `CalendarUI`.
    See docs/architecture/cq1-compatibility-inventory.md §1 for the full
    ownership map, including where the modules below are headed in Phase 2-4.
 
    Module map (load order) — modules still defined in THIS file:
-     Calendar          — working-hours + blackout-block availability
+     CalendarUI        — blackout-block-tab UI remnant (capacity math moved
+                         to schedule-services.mjs's Calendar)
      Alerts            — overload / conflict / fixed-violation detection
      Utilization       — scheduled vs. available hours
      Engine            — optimisation (SPT / changeover / combined) + auto-scheduler
@@ -51,11 +57,12 @@ const NIMBUS = (function () {
     throw new Error('NIMBUS boot error: nimbus-compute-core.js did not load before app.js — check index.html script order / deploy.');
   }
 
-  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE) {
-    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs did not load before app.js — check app-entry.mjs.');
+  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE || !window.__NIMBUS_SERVICES) {
+    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs/schedule-services.mjs did not load before app.js — check app-entry.mjs.');
   }
   const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
+  const { Calendar, Compute } = window.__NIMBUS_SERVICES;
   window.t = (key, vars) => Util.t(key, vars);
   Util.setPreferenceResolver(key => Store.pref(key));
   Util.setActorResolver(() => Session.actor());
@@ -129,314 +136,28 @@ const NIMBUS = (function () {
   const VL_ALERT_ROW_H = 72;
 
   /* =============================================================================
-     CALENDAR — working hours, blackout blocks, availability calculations.
-     All functions operate on a `line` (string) + Date objects.
+     CALENDAR UI — blackout-block-tab UI remnant.
+     CQ-1 Phase 2 Task 1 moved the capacity-math half of the old `Calendar`
+     object (workWindow, dailyCapacityHours, effectiveFromCapacity,
+     effectiveCapacityHours, isAvailable, nextAvailable, and the private
+     _beginRun/_endRun/_indexBlocks/_dayWindow/_indexCapacityBlocks/
+     _overlapsBlock helpers) into schedule-services.mjs, where it is imported
+     below as `Calendar` (see the bridge destructure at the top of this IIFE).
+     Only the calendar tab's render/blackout-block UI stayed here, renamed
+     from `Calendar` to `CalendarUI` (verbatim bodies) so the bare name
+     `Calendar` is free for the imported capacity-math module.
      ========================================================================== */
-  const Calendar = {
-    /* ---------- Per-run caches (installed by Engine.runAndApply) ----------- */
-    // workWindow memoization, keyed by `${line}|${startOfDayMs}`. Values are
-    // `null` (closed day) or the same [Date, Date] tuple returned to every
-    // caller during one run — callers must NOT mutate window endpoints.
-    _runCache: null,
-    // Pre-parsed blackout blocks scoped to the plant being optimized.
-    // { byLine: Map<line|'__any__', BlockRec[]>, byPlant: Map<plant|'__any__', BlockRec[]> }
-    // where BlockRec = { s: ms, e: ms, startDate: Date, endDate: Date }.
-    _runBlocks: null,
-
-    /** Install per-run caches. Called once at the top of Engine.runAndApply. */
-    _beginRun(plant) {
-      Calendar._runCache  = { ww: new Map() };
-      Calendar._runBlocks = Calendar._indexBlocks(plant);
-    },
-    /** Tear down per-run caches. Called in a finally{} so it always runs. */
-    _endRun() {
-      Calendar._runCache  = null;
-      Calendar._runBlocks = null;
-    },
-    /** Parse every blackout block once and bucket by line / plant for O(1) lookup. */
-    _indexBlocks(plant) {
-      const byLine = new Map();
-      for (const b of Store.blocks) {
-        // A block applies only within its own plant (line:null = all lines in that
-        // plant). Un-stamped legacy blocks (no b.plant) fall back to global behavior.
-        if (b.plant && plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        const key = b.line || '__any__';
-        let arr = byLine.get(key);
-        if (!arr) { arr = []; byLine.set(key, arr); }
-        arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
-      }
-      const byPlant = new Map();
-      for (const b of Store.plantBlocks) {
-        if (b.plant && plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        const key = b.plant || '__any__';
-        let arr = byPlant.get(key);
-        if (!arr) { arr = []; byPlant.set(key, arr); }
-        arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
-      }
-      return { byLine, byPlant };
-    },
-
-    /** Returns [startDate, endDate] for a workHours map + date, or null if closed.
-     *  Delegates to the shared compute core (single source of truth; handles the
-     *  fractional-hour split so 08:30 isn't floored to 08:00). */
-    _dayWindow(workHours, date) {
-      return NimbusComputeCore._dayWindow(workHours, date);
-    },
-
-    /** Returns [startDate, endDate] for a line+day, intersected with plant hours.
-     *  Returns null if either the line or plant is closed that day, or the
-     *  intersection is empty. */
-    workWindow(line, date) {
-      const rc = Calendar._runCache;
-      let key;
-      if (rc) {
-        const d = new Date(date); d.setHours(0, 0, 0, 0);
-        key = line + '|' + d.getTime();
-        if (rc.ww.has(key)) return rc.ww.get(key);
-      }
-
-      Store.ensureCalendar(line);
-      const lineWin = Calendar._dayWindow(Store.calendars[line].workHours, date);
-      if (!lineWin) {
-        if (rc) rc.ww.set(key, null);
-        return null;
-      }
-
-      const plant = Store.getPlantForLine(line);
-      let result;
-      if (plant) {
-        Store.ensurePlant(plant);
-        const plantWin = Calendar._dayWindow(Store.plants[plant].workHours, date);
-        if (!plantWin) {
-          if (rc) rc.ww.set(key, null);
-          return null;
-        }
-        const s = new Date(Math.max(lineWin[0], plantWin[0]));
-        const e = new Date(Math.min(lineWin[1], plantWin[1]));
-        if (s >= e) {
-          if (rc) rc.ww.set(key, null);
-          return null;
-        }
-        result = [s, e];
-      } else {
-        result = lineWin;
-      }
-
-      if (rc) rc.ww.set(key, result);
-      return result;
-    },
-
-    /** Total working hours in a day for a given line, after blackouts. Does not apply buffer.
-     *  Uses interval union so overlapping (or accidentally duplicated) blackout
-     *  blocks can never double-count and drive capacity negative. */
-    /** Pre-parse + bucket all blackout blocks ONCE so a tight (line × day) loop can
-     *  reuse the parsed Date objects instead of re-parsing every block per cell.
-     *  Pass the returned index as the 3rd arg of dailyCapacityHours. Cheap to build
-     *  (one parse pass over Store.blocks/plantBlocks); build it once per matrix call.
-     *  Distinct from _indexBlocks(plant), which builds the Engine-run _runBlocks cache. */
-    _indexCapacityBlocks() {
-      const lineBlocks = new Map(), globalLine = [], plantBlocks = new Map(), globalPlant = [];
-      for (const b of Store.blocks) {
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        // Carry the block's plant so dailyCapacityHours can scope line:null blocks
-        // (globalLine) to their own plant; line-code reuse across plants is likewise
-        // resolved by plant, not just the line string.
-        const rec = { s, e, plant: b.plant || null };
-        if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push(rec); }
-        else globalLine.push(rec);
-      }
-      for (const b of Store.plantBlocks) {
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        if (b.plant) { let a = plantBlocks.get(b.plant); if (!a) plantBlocks.set(b.plant, a = []); a.push({ s, e }); }
-        else globalPlant.push({ s, e });
-      }
-      return { lineBlocks, globalLine, plantBlocks, globalPlant };
-    },
-
-    dailyCapacityHours(line, date, idx) {
-      const win = Calendar.workWindow(line, date);
-      if (!win) return 0;
-      const winHours = (win[1] - win[0]) / Config.MS_HOUR;
-
-      const plant = Store.getPlantForLine(line);
-      let intervals;
-      if (idx) {
-        // Reuse pre-parsed, bucketed intervals (no parseDate per cell). line:null
-        // blocks (globalLine) apply only within their own plant.
-        intervals = [];
-        const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) if (!x.plant || x.plant === plant) intervals.push(x);
-        for (const x of idx.globalLine) if (!x.plant || x.plant === plant) intervals.push(x);
-        const pb = idx.plantBlocks.get(plant); if (pb) for (const x of pb) intervals.push(x);
-        for (const x of idx.globalPlant) intervals.push(x);
-      } else {
-        intervals = [];
-        for (const b of Store.blocks) {
-          if (b.plant && b.plant !== plant) continue;
-          if (b.line && b.line !== line) continue;
-          const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-          if (s && e) intervals.push({ s, e });
-        }
-        for (const b of Store.plantBlocks) {
-          if (b.plant && b.plant !== plant) continue;
-          const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-          if (s && e) intervals.push({ s, e });
-        }
-      }
-
-      const consumed = Util.mergedOverlapHours(win, intervals);
-      return Math.max(0, winHours - consumed);
-    },
-
-    /** Maximum schedulable hours after deducting the capacity buffer.
-     *  Nothing should be scheduled past this value (= total − buffer). */
-    /** Apply a line's capacity buffer to an already-computed full-capacity value.
-     *  The single source of truth for the buffer formula — callers that have already
-     *  computed dailyCapacityHours (matrix cells, the alert overload loop) call this
-     *  instead of effectiveCapacityHours so the full-capacity scan is not repeated.
-     *  Delegates to the shared compute core. */
-    effectiveFromCapacity(line, full) {
-      return NimbusComputeCore.effectiveFromCapacity(line, full, Store.lineSettings);
-    },
-
-    effectiveCapacityHours(line, date) {
-      return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
-    },
-
-    /** True if `date` is inside the working window and not inside any blackout. */
-    isAvailable(line, date) {
-      const win = Calendar.workWindow(line, date);
-      if (!win) return false;
-      if (date < win[0] || date >= win[1]) return false;
-
-      const plant = Store.getPlantForLine(line);
-      for (const b of Store.blocks) {
-        if (b.plant && b.plant !== plant) continue;
-        if (b.line && b.line !== line) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        if (date >= s && date < e) return false;
-      }
-
-      for (const b of Store.plantBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (!s || !e) continue;
-        if (date >= s && date < e) return false;
-      }
-
-      return true;
-    },
-
-    /** Advances `from` forward until a contiguous block of `durationMs` is
-     *  available on `line`. Returns the starting Date (snapped). */
-    nextAvailable(line, from, durationMs) {
-      let cur = Util.snap(new Date(from));
-      const MAX_ITERS = 90 * 24;  // 90-day explicit bound: max day-jumps
-      let iter = 0;
-
-      while (iter++ < MAX_ITERS) {
-        const win = Calendar.workWindow(line, cur);
-        if (!win) {
-          // jump to start of next day
-          const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-          cur = next; continue;
-        }
-        if (cur < win[0]) cur = new Date(win[0]);
-        if (cur >= win[1]) {
-          // out of today's window — jump to tomorrow 00:00
-          const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-          cur = next; continue;
-        }
-        const candidateEnd = new Date(cur.getTime() + durationMs);
-        // Check that the whole range [cur, candidateEnd] fits in the window
-        // and doesn't overlap any blackout block.
-        if (candidateEnd > win[1]) {
-          // Won't fit in today's window — jump to tomorrow
-          const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-          cur = next; continue;
-        }
-        const conflict = Calendar._overlapsBlock(line, cur, candidateEnd);
-        if (conflict) {
-          cur = Util.snap(new Date(conflict.end));
-          continue;
-        }
-        return cur;
-      }
-      // Loop exhausted: no feasible slot found within 90 days. Log for diagnostics.
-      const plant = Store.getPlantForLine(line);
-      ErrorLog.error('calendar', `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`);
-      // fallback: return the original from; caller must handle
-      return Util.snap(new Date(from));
-    },
-
-    /** Find the first blackout block overlapping [start,end) on `line`, else null. */
-    _overlapsBlock(line, start, end) {
-      const rb = Calendar._runBlocks;
-      if (rb) {
-        const startMs = start.getTime ? start.getTime() : +start;
-        const endMs   = end.getTime   ? end.getTime()   : +end;
-        const scanLine = rb.byLine.get(line);
-        if (scanLine) {
-          for (const b of scanLine) {
-            if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-          }
-        }
-        const scanLineAny = rb.byLine.get('__any__');
-        if (scanLineAny) {
-          for (const b of scanLineAny) {
-            if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-          }
-        }
-        const plant = Store.getPlantForLine(line);
-        const scanPlant = plant ? rb.byPlant.get(plant) : null;
-        if (scanPlant) {
-          for (const b of scanPlant) {
-            if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-          }
-        }
-        const scanPlantAny = rb.byPlant.get('__any__');
-        if (scanPlantAny) {
-          for (const b of scanPlantAny) {
-            if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-          }
-        }
-        return null;
-      }
-
-      const plant = Store.getPlantForLine(line);
-      for (const b of Store.blocks) {
-        if (b.plant && b.plant !== plant) continue;
-        if (b.line && b.line !== line) continue;
-        const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
-        if (!bs || !be) continue;
-        if (start < be && end > bs) return { start: bs, end: be };
-      }
-      for (const b of Store.plantBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
-        if (!bs || !be) continue;
-        if (start < be && end > bs) return { start: bs, end: be };
-      }
-      return null;
-    },
-
-    /* ---------- UI: render calendar tab ----------------------------------- */
+  const CalendarUI = {
     _lineFilter: 'all',
     _blockFilter: 'all',
 
     render() {
       const body = document.getElementById('cal-hours-body');
       if (!body) return;
-      const lines = Calendar._getLines();
+      const lines = CalendarUI._getLines();
       lines.forEach(l => Store.ensureCalendar(l));
 
-      const sel = Calendar._lineFilter || 'all';
+      const sel = CalendarUI._lineFilter || 'all';
       const shownLines = sel === 'all' ? lines : lines.filter(l => l === sel);
 
       const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => t(k));
@@ -447,7 +168,7 @@ const NIMBUS = (function () {
           <option value="all"${sel === 'all' ? ' selected' : ''}>${t('ui.all_lines_count', {count: lines.length})}</option>
           ${lines.map(l => `<option value="${l}"${sel === l ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
-        ${sel !== 'all' ? `<button class="cal-filter-clear" onclick="NIMBUS.Calendar._clearLineFilter()">${t('btn.show_all')}</button>` : ''}
+        ${sel !== 'all' ? `<button class="cal-filter-clear" onclick="NIMBUS.CalendarUI._clearLineFilter()">${t('btn.show_all')}</button>` : ''}
       </div>`;
 
       html += `<div class="hours-tbl-wrap"><table class="hours-tbl">
@@ -467,9 +188,9 @@ const NIMBUS = (function () {
           const wh = cal[d];
           const off = !wh;
           html += `<td><div class="hours-cell ${off ? 'off':''}" data-line="${line}" data-day="${d}">
-            <input type="text" class="hours-start" value="${off ? '' : Calendar._hToT(wh[0])}">
+            <input type="text" class="hours-start" value="${off ? '' : CalendarUI._hToT(wh[0])}">
             <span class="dash">–</span>
-            <input type="text" class="hours-end" value="${off ? '' : Calendar._hToT(wh[1])}">
+            <input type="text" class="hours-end" value="${off ? '' : CalendarUI._hToT(wh[1])}">
           </div></td>`;
         }
         html += `</tr>`;
@@ -480,8 +201,8 @@ const NIMBUS = (function () {
 
       // Wire line selector
       document.getElementById('cal-line-select').onchange = function() {
-        Calendar._lineFilter = this.value;
-        Calendar.render();
+        CalendarUI._lineFilter = this.value;
+        CalendarUI.render();
       };
 
       // Wire up inputs
@@ -495,7 +216,7 @@ const NIMBUS = (function () {
           const cal = Store.calendars[line].workHours;
           if (!vs || !ve) { cal[day] = null; cell.classList.add('off'); }
           else {
-            cal[day] = [Calendar._tToH(vs), Calendar._tToH(ve)];
+            cal[day] = [CalendarUI._tToH(vs), CalendarUI._tToH(ve)];
             cell.classList.remove('off');
           }
           Store.emit({ type: 'calendar:change', line, source: 'calendar' });
@@ -505,19 +226,19 @@ const NIMBUS = (function () {
         flatpickr(inE, { enableTime: true, noCalendar: true, dateFormat: 'H:i', altInput: true, altFormat: 'h:i K', onChange: upd });
       });
 
-      Calendar._renderBlocks();
+      CalendarUI._renderBlocks();
     },
 
     _clearLineFilter() {
-      Calendar._lineFilter = 'all';
-      Calendar.render();
+      CalendarUI._lineFilter = 'all';
+      CalendarUI.render();
     },
 
     _renderBlocks() {
       const list = document.getElementById('cal-blocks-list');
       if (!list) return;
-      const lines     = Calendar._getLines();
-      const bFilter   = Calendar._blockFilter || 'all';
+      const lines     = CalendarUI._getLines();
+      const bFilter   = CalendarUI._blockFilter || 'all';
       const allBlocks = Store.blocks.slice().sort((a,b) => Util.parseDate(a.start) - Util.parseDate(b.start));
       const blocks    = bFilter === 'all' ? allBlocks : allBlocks.filter(b => !b.line || b.line === bFilter);
 
@@ -539,7 +260,7 @@ const NIMBUS = (function () {
             <span class="reason">${b.reason || t('ui.blackouts_label', {plural: ''})}</span>
             <span class="line-tag">${b.line || t('ui.all_lines_filter')}</span>
             <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-            <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${t('tip.remove_block')}" onclick="NIMBUS.Calendar.removeBlock('${b.id}')">×</button>
+            <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${t('tip.remove_block')}" onclick="NIMBUS.CalendarUI.removeBlock('${b.id}')">×</button>
           </div>
         `).join('');
       }
@@ -548,8 +269,8 @@ const NIMBUS = (function () {
 
       const blockSelect = document.getElementById('cal-block-filter');
       if (blockSelect) blockSelect.onchange = function() {
-        Calendar._blockFilter = this.value;
-        Calendar._renderBlocks();
+        CalendarUI._blockFilter = this.value;
+        CalendarUI._renderBlocks();
       };
     },
 
@@ -568,16 +289,16 @@ const NIMBUS = (function () {
       if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: blk-reason'); return; }
 
       lineSel.innerHTML = `<option value="">${t('ui.all_lines_filter')}</option>` +
-        Calendar._getLines().map(l => `<option value="${l}">${l}</option>`).join('');
+        CalendarUI._getLines().map(l => `<option value="${l}">${l}</option>`).join('');
 
       const now = new Date(); now.setMinutes(0, 0, 0);
       const plus1 = new Date(now.getTime() + Config.MS_HOUR);
-      if (!Calendar._fpBlkStart) {
-        Calendar._fpBlkStart = Util.fpDatetime('#blk-start');
-        Calendar._fpBlkEnd   = Util.fpDatetime('#blk-end');
+      if (!CalendarUI._fpBlkStart) {
+        CalendarUI._fpBlkStart = Util.fpDatetime('#blk-start');
+        CalendarUI._fpBlkEnd   = Util.fpDatetime('#blk-end');
       }
-      Calendar._fpBlkStart.setDate(now, false);
-      Calendar._fpBlkEnd.setDate(plus1, false);
+      CalendarUI._fpBlkStart.setDate(now, false);
+      CalendarUI._fpBlkEnd.setDate(plus1, false);
       reasonEl.value = '';
       Modal.open('modal-block');
     },
@@ -724,13 +445,13 @@ const NIMBUS = (function () {
           Plant._pillFps[d].start = flatpickr(`#plant-pill-start-${d}`, {
             enableTime: true, noCalendar: true, dateFormat: 'H:i',
             minuteIncrement: 30,
-            defaultDate: wh ? Calendar._hToT(wh[0]) : '08:00',
+            defaultDate: wh ? CalendarUI._hToT(wh[0]) : '08:00',
             onClose,
           });
           Plant._pillFps[d].end = flatpickr(`#plant-pill-end-${d}`, {
             enableTime: true, noCalendar: true, dateFormat: 'H:i',
             minuteIncrement: 30,
-            defaultDate: wh ? Calendar._hToT(wh[1]) : '17:00',
+            defaultDate: wh ? CalendarUI._hToT(wh[1]) : '17:00',
             onClose,
           });
         }
@@ -766,7 +487,7 @@ const NIMBUS = (function () {
       if (!sv || !ev) {
         Store.setPlantWorkHours(pName, d, null, 'pill');
       } else {
-        const sh = Calendar._tToH(sv), eh = Calendar._tToH(ev);
+        const sh = CalendarUI._tToH(sv), eh = CalendarUI._tToH(ev);
         if (eh <= sh) { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
         Store.setPlantWorkHours(pName, d, [sh, eh], 'pill');
       }
@@ -1172,7 +893,7 @@ const NIMBUS = (function () {
     render() {
       const body = document.getElementById('lines-body');
       if (!body) return;
-      const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : Calendar._getLines();
+      const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : CalendarUI._getLines();
 
       allLines.forEach(l => {
         Store.ensureCalendar(l);
@@ -1215,7 +936,7 @@ const NIMBUS = (function () {
         return;
       }
 
-      const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : Calendar._getLines();
+      const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : CalendarUI._getLines();
       const gi = allLines.indexOf(line);
       const color = Config.COLORS[gi % Config.COLORS.length];
       const ls = Store.lineSettings[line] || {};
@@ -1358,7 +1079,7 @@ const NIMBUS = (function () {
           <span class="ico">■</span>
           <span class="reason">${b.reason || t('ui.blackouts_label', {plural: ''})}</span>
           <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-          <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${t('tip.remove_block')}" onclick="NIMBUS.Calendar.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);">×</button>
+          <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${t('tip.remove_block')}" onclick="NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);">×</button>
         </div>`).join('');
 
       const plantRows = plantBlocks.map(b => `
@@ -1436,7 +1157,7 @@ const NIMBUS = (function () {
       const reasonEl = document.getElementById('lines-blk-reason');
       if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-reason'); return; }
 
-      lineSel.innerHTML = Calendar._getLines()
+      lineSel.innerHTML = CalendarUI._getLines()
         .map(l => `<option value="${l}"${l === line ? ' selected' : ''}>${l}</option>`).join('');
       if (line) lineSel.value = line;
 
@@ -2445,8 +2166,8 @@ const NIMBUS = (function () {
         if (tog) tog.checked = enabled;
         _setRowEnabled(d, enabled);
         if (enabled && _fp.length === 14) {
-          _fp[d * 2]?.setDate(Calendar._hToT(wh[d][0]), false);
-          _fp[d * 2 + 1]?.setDate(Calendar._hToT(wh[d][1]), false);
+          _fp[d * 2]?.setDate(CalendarUI._hToT(wh[d][0]), false);
+          _fp[d * 2 + 1]?.setDate(CalendarUI._hToT(wh[d][1]), false);
         }
         _refreshBadge(d);
       }
@@ -2486,7 +2207,7 @@ const NIMBUS = (function () {
       const s = _fp[d * 2]?.element?.value;
       const e = _fp[d * 2 + 1]?.element?.value;
       if (s && e) {
-        const hrs = Calendar._tToH(e) - Calendar._tToH(s);
+        const hrs = CalendarUI._tToH(e) - CalendarUI._tToH(s);
         badge.textContent = hrs > 0
           ? `${hrs % 1 === 0 ? hrs : hrs.toFixed(1)}h`
           : '—';
@@ -2537,8 +2258,8 @@ const NIMBUS = (function () {
         const tog = document.getElementById(`cal-edit-toggle-${d}`);
         if (tog) tog.checked = enabled;
         if (enabled && _fp.length === 14) {
-          _fp[d * 2]?.setDate(Calendar._hToT(ph[d][0]), false);
-          _fp[d * 2 + 1]?.setDate(Calendar._hToT(ph[d][1]), false);
+          _fp[d * 2]?.setDate(CalendarUI._hToT(ph[d][0]), false);
+          _fp[d * 2 + 1]?.setDate(CalendarUI._hToT(ph[d][1]), false);
         }
         _setRowEnabled(d, enabled);
         _refreshBadge(d);
@@ -2556,7 +2277,7 @@ const NIMBUS = (function () {
         const s = _fp[d * 2]?.element?.value;
         const e = _fp[d * 2 + 1]?.element?.value;
         if (s && e) {
-          const sh = Calendar._tToH(s), eh = Calendar._tToH(e);
+          const sh = CalendarUI._tToH(s), eh = CalendarUI._tToH(e);
           // Reject degenerate/inverted days client-side so we never diverge from the
           // backend (_clean_work_hours rejects end <= start with a 400).
           if (eh <= sh) { Toast.show(t('toast.end_must_be_after_start'), 'error'); return; }
@@ -2753,143 +2474,9 @@ const NIMBUS = (function () {
   })();
 
   /* =============================================================================
-     COMPUTE — singleton Web Worker wrapper for off-main-thread computation.
-     Alerts.recompute and Utilization pre-warming post through here.
-     Falls back to synchronous (main-thread) compute if the worker is unavailable.
+     COMPUTE — moved to schedule-services.mjs (CQ-1 Phase 2 Task 1). Imported
+     via the __NIMBUS_SERVICES bridge destructure at the top of this IIFE.
      ========================================================================== */
-  const Compute = (() => {
-    let _worker = null;
-    let _dead   = false;
-    let _crashCount = 0;
-    let _seq    = 0;
-    const _pending = new Map(); // id → { resolve, reject }
-
-    function _init() {
-      if (_dead || _worker) return _worker;
-      try {
-        // Cache-bust the worker with the build id so a redeployed worker isn't served
-        // stale from the HTTP cache — otherwise mirrored Calendar/Alerts fixes here
-        // would silently diverge from the worker's hand-port. (Config.BUILD_ID tracks
-        // NIMBUS_BUILD_ID, kept in sync with APP_VERSION on every deploy.)
-        _worker = new Worker('nimbus-worker.js?v=' + Config.BUILD_ID);
-        _worker.onmessage = ({ data }) => {
-          const p = _pending.get(data.id);
-          if (!p) return;
-          _pending.delete(data.id);
-          if (data.type === 'ERROR') {
-            // Worker reported a compute failure (see §1.7 contract): carries
-            // error/stack/failingType. Log before rejecting so the failure is
-            // visible even if the caller swallows the rejection.
-            const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
-            ErrorLog.error('worker', wMsg,
-              { failingType: data.failingType, jobId: data.jobId },
-              { errorCode: 'worker.compute', stack: data.stack });
-            p.reject(new Error(data.error));
-          } else {
-            p.resolve(data);
-          }
-        };
-        _worker.onerror = (ev) => {
-          // Build {message, filename, lineno, colno} from the ErrorEvent and log
-          // BEFORE deciding whether to disable the worker (the only record of why
-          // the worker crashed).
-          const detail = {
-            message:  ev?.message || 'worker error',
-            filename: ev?.filename || '',
-            lineno:   ev?.lineno ?? null,
-            colno:    ev?.colno ?? null,
-          };
-          _crashCount++;
-          const logFn = _crashCount === 1 ? 'warn' : 'error';
-          try {
-            ErrorLog[logFn]('worker', `worker crashed (attempt ${_crashCount}): ${detail.message}`, detail,
-              { errorCode: 'worker.compute' });
-          } catch {}
-          for (const p of _pending.values()) p.reject(new Error('worker error'));
-          _pending.clear();
-          _worker = null;
-          if (_crashCount >= 2) {
-            // Permanent failure: give up on the worker for the session.
-            _dead = true;
-          }
-          // Otherwise: allow retry on next _init() call (bounded at 1 retry + permanent fail on 2nd crash).
-        };
-      } catch {
-        _dead = true;
-        return null;
-      }
-      return _worker;
-    }
-
-    function _post(type, payload) {
-      const w = _init();
-      if (!w) return Promise.reject(new Error('worker unavailable'));
-      return new Promise((resolve, reject) => {
-        const id = ++_seq;
-        _pending.set(id, { resolve, reject });
-        const _cloneT0 = performance.now();
-        w.postMessage({ type, id, payload });
-        PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
-      });
-    }
-
-    function _snap() {
-      const plant = Store.selectedPlant;
-      if (!plant) {
-        // No plant selected — nothing is rendered; fall back to the global snapshot.
-        return {
-          tasks:        Store.tasksArr,
-          blocks:       Store._state.blocks,
-          plantBlocks:  Store._state.plantBlocks,
-          calendars:    Store._state.calendars,
-          plants:       Store._state.plants,
-          lineSettings: Store._state.lineSettings,
-          masterData:   Store._state.masterData,
-        };
-      }
-      // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
-      // on the main thread on every postMessage (the dominant main-thread cost of the
-      // Worker.* round trip), so we send only the selected plant's data. calendars and
-      // lineSettings MUST be scoped too: computeUtilization derives its line set from
-      // Object.keys(calendars), and those maps accumulate entries for every line visited
-      // this session — an unscoped map would make the worker compute (and clone back) a
-      // matrix for lines that aren't even on screen.
-      const lines = new Set(Store.linesForSelectedPlant());
-      const pick = obj => {
-        const out = {};
-        for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
-        return out;
-      };
-      return {
-        tasks:        Store.tasksByPlant(plant),
-        blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-        plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-        calendars:    pick(Store._state.calendars),
-        plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-        lineSettings: pick(Store._state.lineSettings),
-        masterData:   Store._state.masterData,
-      };
-    }
-
-    return {
-      available() { return !_dead && typeof Worker !== 'undefined'; },
-
-      alerts(opts, dismissed) {
-        const _t0 = performance.now();
-        return _post('ALERTS', {
-          ..._snap(),
-          dismissed: [...(dismissed || [])],
-          opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
-        }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
-      },
-
-      utilization(startMs, days) {
-        const _t0 = performance.now();
-        return _post('UTILIZATION', { ..._snap(), startMs, days })
-          .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
-      },
-    };
-  })();
 
   /* =============================================================================
      ALERTS — detect and maintain the active alert list.
@@ -18835,7 +18422,7 @@ saveAll() {
   /* Public namespace for inline onclick handlers in index.html */
   return {
     App, Engine, Alerts, Timeline, Table, Inspector,
-    Dashboard, Calendar, Plant, ProdLines, Persistence, Modal, Toast, Store, Util, Config, Settings,
+    Dashboard, Calendar, CalendarUI, Plant, ProdLines, Persistence, Modal, Toast, Store, Util, Config, Settings,
     Utilization, ContextMenu, Hierarchy,
     Selection, UndoStack, Interaction,
     ErrorLog, AdminCockpit,
