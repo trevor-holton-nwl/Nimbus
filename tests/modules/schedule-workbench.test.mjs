@@ -170,10 +170,23 @@ test('Interaction.uninstall removes every document-level listener install() atta
 // pin the REAL current behavior (a "verbatim move" task must not change
 // logic), not the aspirational behavior the stale comment described.
 
-test('Interaction._onDataSetUpdate: a fixed task with no real position change is a no-op (noActualChange guard)', () => {
+test('Interaction._onDataSetUpdate: the fixed-task noActualChange guard checks only start+group (not end) — a same-start/same-group echo with a changed end is still swallowed', () => {
   const id = 'fx-echo-1';
   const start = new Date('2026-07-01T08:00:00');
   const end   = new Date('2026-07-01T12:00:00');
+  // Same start and same group as the Store, but a DIFFERENT end — the
+  // fixed-order noActualChange guard (schedule-workbench.mjs _onDataSetUpdate)
+  // deliberately compares only start+group, not end, so this must still be
+  // treated as a no-op by that guard specifically. A same-start/same-end/
+  // same-group scenario would be caught just as well by the generic `moved`
+  // check further down (start+end+line) regardless of whether the fixed-only
+  // guard exists at all, which is why that shape doesn't actually characterize
+  // this guard (confirmed by mutation: disabling the guard while keeping that
+  // shape still passed). This shape — start+group unchanged, end changed —
+  // only stays a no-op because of the fixed-specific guard; if the guard is
+  // removed or broken, this scenario falls through to the generic `moved`
+  // check, which DOES see the changed end and commits it, failing this test.
+  const differentEnd = new Date('2026-07-01T14:00:00');
   Store.setTasks([{
     id, PRODUCTION_ORDER: 'PFX1', MATERIAL_NUMBER: 'MFX1', PRODUCTION_LINE: 'L1',
     plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
@@ -181,14 +194,11 @@ test('Interaction._onDataSetUpdate: a fixed task with no real position change is
   Store.setFixed([id], true, 'test');
   Selection.clear();
 
-  // Simulate a programmatic echo (e.g. Timeline.rebuild) reporting the exact
-  // same start/end/group already on the Store — the noActualChange guard
-  // must drop this without touching the Store.
-  Timeline._items = { get: (i) => (i === id ? { start, end, group: 'L1' } : undefined) };
+  Timeline._items = { get: (i) => (i === id ? { start, end: differentEnd, group: 'L1' } : undefined) };
   try {
     Interaction._onDataSetUpdate({ items: [id] });
-    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'a no-op echo must not touch the Store');
-    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'a no-op echo must not touch the Store');
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'the fixed-task guard must treat a same-start/same-group echo as a no-op even when end differs');
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'the fixed-task guard must not let the changed end leak into the Store');
   } finally {
     Timeline._items = undefined;
   }

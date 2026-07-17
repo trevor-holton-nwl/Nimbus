@@ -4638,7 +4638,11 @@ export const Interaction = {
    * timeline itself is never torn down under the mount-once/show-hide
    * lifecycle, so removing listeners bound to a container that outlives every
    * install()/uninstall() cycle isn't part of this phase's scope (see Task 5's
-   * plan step 3).
+   * plan step 3). Each of those three installers (plus the alertcell-
+   * delegation block above) now guards itself with its own `_*Delegated`
+   * flag — none reset by uninstall() — so a future install()/uninstall()/
+   * install() cycle attaches each container-scoped listener at most once
+   * instead of double-attaching it on reinstall.
    */
   uninstall() {
     if (!this._installed) return;
@@ -4663,7 +4667,8 @@ export const Interaction = {
    */
   _installLabelDblclick() {
     const container = document.getElementById('vis-timeline');
-    if (!container) return;
+    if (!container || Interaction._labelDblclickDelegated) return;
+    Interaction._labelDblclickDelegated = true;
 
     container.addEventListener('dblclick', (e) => {
       if (!Timeline._tl) return;
@@ -4779,37 +4784,47 @@ export const Interaction = {
       card.hidden = true;
     };
 
-    Timeline._tl.on('itemover', (props) => {
-      if (!props || props.item == null) return;
-      const id = String(props.item);
-      if (!isOrderId(id)) return;
-      // Suppress during active drag or marquee — the user is doing something.
-      if (Interaction._isDragging || Interaction._marquee) return;
+    // Container-scoped listeners (the vis-timeline itemover/itemout subscriptions
+    // and the container's own mousemove/mousedown/wheel) must only ever be wired
+    // once — install()/uninstall()/install() must not double-attach these (they
+    // are never torn down by uninstall(), unlike the document-level keydown
+    // dismiss listener below).
+    if (!Interaction._hoverPreviewDelegated) {
+      Interaction._hoverPreviewDelegated = true;
 
-      clearTimeout(showTimer);
-      activeId = id;
-      showTimer = setTimeout(() => {
-        if (activeId !== id) return;
+      Timeline._tl.on('itemover', (props) => {
+        if (!props || props.item == null) return;
+        const id = String(props.item);
+        if (!isOrderId(id)) return;
+        // Suppress during active drag or marquee — the user is doing something.
         if (Interaction._isDragging || Interaction._marquee) return;
-        card.innerHTML = renderCard(id);
-        card.hidden = false;
-        reposition();
-      }, HOVER_DELAY_MS);
-    });
 
-    Timeline._tl.on('itemout', (props) => {
-      if (!props || props.item == null) return;
-      if (String(props.item) === activeId) hide();
-    });
+        clearTimeout(showTimer);
+        activeId = id;
+        showTimer = setTimeout(() => {
+          if (activeId !== id) return;
+          if (Interaction._isDragging || Interaction._marquee) return;
+          card.innerHTML = renderCard(id);
+          card.hidden = false;
+          reposition();
+        }, HOVER_DELAY_MS);
+      });
 
-    container.addEventListener('mousemove', (e) => {
-      lastX = e.clientX; lastY = e.clientY;
-      if (!card.hidden) reposition();
-    });
+      Timeline._tl.on('itemout', (props) => {
+        if (!props || props.item == null) return;
+        if (String(props.item) === activeId) hide();
+      });
 
-    // Any of these gestures means the user moved on — drop the card.
-    container.addEventListener('mousedown', hide);
-    container.addEventListener('wheel', hide, { passive: true });
+      container.addEventListener('mousemove', (e) => {
+        lastX = e.clientX; lastY = e.clientY;
+        if (!card.hidden) reposition();
+      });
+
+      // Any of these gestures means the user moved on — drop the card.
+      container.addEventListener('mousedown', hide);
+      container.addEventListener('wheel', hide, { passive: true });
+    }
+
     // Stored (not passed inline) so uninstall() can remove it — this is a
     // SEPARATE document-level 'keydown' listener from install()'s own
     // _onKeyDownBound above; both must be individually removed.
@@ -4831,7 +4846,8 @@ export const Interaction = {
    */
   _installMarquee() {
     const container = document.getElementById('vis-timeline');
-    if (!container) return;
+    if (!container || Interaction._marqueeDelegated) return;
+    Interaction._marqueeDelegated = true;
 
     const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
     const isOrderId = (id) => !SKIP_PREFIXES.some(p => id.startsWith(p));

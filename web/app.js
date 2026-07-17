@@ -110,6 +110,37 @@
    `Confidence._drawChart` are unrelated same-named helpers, not the CDN
    `Chart` global), so Task 4 also removes the dead Chart.js `<script>` tag
    from index.html.
+   CQ-1 Phase 3 Task 5 moved Interaction into the same schedule-workbench.mjs
+   module — the densest (~1,140 lines) and, before this task, the only module
+   in the whole migration with zero test coverage anywhere in the codebase.
+   Task 5 added characterization tests first, then an install()/uninstall()
+   pair: install()'s three unconditional document-level listeners
+   (mousemove/mouseleave/keydown) plus _installHoverPreview()'s separate
+   document keydown were refactored into named, stored bound references so
+   uninstall() — new, purely additive, and intentionally unwired (Gantt
+   Timeline has no unmount trigger today) — has concrete references to remove;
+   it deliberately leaves every #vis-timeline-container-scoped listener
+   attached (see the header comment on uninstall() in schedule-workbench.mjs).
+   The plan's inline-handler-migration mandate's one concrete instance —
+   _showMultiInspector's inline onclick strings — turned out to be four call
+   sites, not the three originally named (_bulkFix(true), _bulkFix(false),
+   Selection.clear(), and a fourth, _unscheduleSelected(), missed by the
+   plan's prose); all four now wire through real addEventListener calls
+   instead. Writing the first-ever test for _onDataSetUpdate also found the
+   module's own header comment describing fixed-order drag protection didn't
+   match the code — the comment was corrected, the logic (correctly) left
+   unchanged. One same-phase forward reference, AlertsUIAdapter.showForCell
+   (...), is left calling through the shared NIMBUS binding until
+   AlertsUIAdapter itself moves in Task 7 (same rationale as Timeline's/
+   Table's/Dashboard's forward references above). See
+   docs/architecture/cq1-compatibility-inventory.md §6 for the full writeup.
+   CQ-1 Phase 3 Task 6 moved OptimizeDialog and OptimizerPreview into the same
+   schedule-workbench.mjs module, verbatim — including OptimizerPreview's
+   _installAbandonGuard() MutationObserver and its optional-chained
+   NIMBUS.Confidence?.snapshot()/.restore() cross-file call into
+   nimbus-intelligence.js, which is unaffected by which file OptimizerPreview
+   lives in and so was left exactly as-is. Neither module had a DOM-remnant
+   half or a Store._state/_rev touch to close.
    CQ-1 Phase 3 Task 7 moved EditCalendar, ColorWheelViewer, Printer,
    SandboxAdapter, and AlertsUIAdapter into the same schedule-workbench.mjs
    module. `SandboxAdapter`'s move is the design doc's explicit mandate;

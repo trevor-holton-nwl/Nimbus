@@ -15,10 +15,12 @@
 const globals = require('globals');
 
 // Third-party globals injected by the CDN <script> tags in index.html.
+// (chart.js's `Chart` global was removed here in CQ-1 Phase 3 Task 4, alongside
+// the CDN <script> tag itself and the dead Dashboard code that referenced it —
+// Dashboard's heatmap is hand-rolled DOM/CSS and never called Chart.js.)
 const CDN_GLOBALS = {
   vis: 'readonly',        // vis-timeline (the Gantt)
   agGrid: 'readonly',     // ag-grid-community (orders table)
-  Chart: 'readonly',      // chart.js (dashboard)
   flatpickr: 'readonly',  // flatpickr (all date/time inputs)
 };
 

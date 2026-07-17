@@ -286,6 +286,20 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // the same way `NimbusComputeCore`/`fetch`/`localStorage`/`window` are mirrored
   // above — it can't be done here directly since `ctx.__NIMBUS__` doesn't exist
   // until after `runInContext` below runs.
+  //
+  // IMPORTANT — this VM harness cannot substitute for a real-browser smoke test
+  // of this pattern: it never populates `globalThis.NIMBUS`, so any of the
+  // dozens of `NIMBUS.X` call sites across `schedule-workbench.mjs` that a test
+  // happens to reach would throw ReferenceError here rather than silently pass,
+  // but nothing in this suite reaches most of them (see above), so a broken
+  // `NIMBUS.EmptyState.render`/`NIMBUS.App.goto`/`NIMBUS.GanttFilter.isolateLine`
+  // call, for example, would not be caught by `npm test` alone. Phase 3's own
+  // Completion Gate required a Docker/browser boot smoke test to close this gap
+  // (or an explicit record if one couldn't be run) — none was run during Phase 3;
+  // this is recorded as an outstanding, unverified environment gate in that
+  // plan's Completion Gate section
+  // (`docs/superpowers/plans/2026-07-17-cq1-phase-3-workbench.md`), not silently
+  // assumed to be covered by this harness.
   const ctx = createContext(sandbox);
 
   // Inject __NIMBUS__ capture after the IIFE so `const NIMBUS` (script-scoped)
