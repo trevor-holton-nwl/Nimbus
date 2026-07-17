@@ -25,7 +25,7 @@
     return;
   }
 
-  const { Store, Toast, Alerts, Util, UndoStack, Utilization } = NIMBUS;
+  const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
@@ -437,7 +437,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const now = Util.startOfDay(new Date());
         const startMs = now.getTime();
         const days = 7;
-        const rev = Store._rev || 0;
+        const rev = Store.rev();
         const plant = Store.selectedPlant;
 
         let matrix = null;
@@ -451,7 +451,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
             NIMBUS.Compute.utilization(startMs, days)
               .then(({ matrix: m }) => {
-                if ((Store._rev || 0) !== rev) return; // stale
+                if (Store.rev() !== rev) return; // stale
                 Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
               })
               .catch(() => {});
@@ -518,10 +518,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         selStats,
         sandboxActive:  !!NIMBUS.Sandbox?.active,
         anyFilterActive: !!(
-          NIMBUS.GanttFilter?._active?.color ||
-          NIMBUS.GanttFilter?._active?.form  ||
-          NIMBUS.GanttFilter?._active?.text  ||
-          (NIMBUS.GanttFilter?._selectedLines?.size > 0)
+          NIMBUS.GanttFilter?.activeFilter()?.color ||
+          NIMBUS.GanttFilter?.activeFilter()?.form  ||
+          NIMBUS.GanttFilter?.activeFilter()?.text  ||
+          (NIMBUS.GanttFilter?.selectedLines()?.size > 0)
         ),
         undoDepth:     NIMBUS.UndoStack?._entries?.length || 0,
         blackoutRisk,
@@ -683,7 +683,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           label: 'Rush order: Enter Sandbox what-if mode',
           sub:   'Explore changes without touching the live schedule',
           icon:  '🔮',
-          run()  { CommandPalette.close(); NIMBUS.Sandbox?.enter?.(); }
+          run()  { CommandPalette.close(); NIMBUS.SandboxAdapter?.enter?.(); }
         },
         {
           keywords: ['optimize', 'run optim', 'scheduler', 'reorder'],
@@ -913,10 +913,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
-            NIMBUS.GanttFilter._selectedLines.clear();
-            NIMBUS.GanttFilter._selectedLines.add(line);
-            NIMBUS.GanttFilter._refreshLineBtn?.();
-            NIMBUS.GanttFilter._buildLineDropdown?.();
+            NIMBUS.GanttFilter.isolateLine(line);
             NIMBUS.Timeline.rebuild?.();
             NIMBUS.Hierarchy.render?.();
           }
@@ -1214,11 +1211,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       TimeMachine._snapshotAuto = Util.debounce(
         label => TimeMachine.snapshot(label, { auto: true }), 1000
       );
-      const origPush = UndoStack.push.bind(UndoStack);
-      UndoStack.push = (label, undoFn) => {
-        origPush(label, undoFn);
-        TimeMachine._snapshotAuto(label);
-      };
+      Store.subscribe(evt => {
+        if (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label);
+      }, 'TimeMachine.autoSnapshot');
       Store.subscribe(evt => {
         if (['tasks:bulk','tasks:bulkUpdate'].includes(evt.type) &&
             evt.source !== 'undo' && evt.source !== 'time-machine') {
@@ -1369,8 +1364,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (['tasks:bulk','tasks:bulkUpdate','task:update','task:remove'].includes(evt.type))
           Confidence._recomputeDebounced();
       });
-      const origRecompute = Alerts.recompute.bind(Alerts);
-      Alerts.recompute = (...args) => { const r = origRecompute(...args); Confidence._recomputeDebounced(); return r; };
+      Store.subscribe(evt => {
+        if (evt.type === 'alerts:change') Confidence._recomputeDebounced();
+      }, 'Confidence.autoRecompute');
       setTimeout(Confidence._recompute, 600);
     },
 
@@ -1395,12 +1391,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (NIMBUS.OptimizerPreview?.active || NIMBUS.Sandbox?.active) return;
 
       // Skip when neither alerts nor task data changed since the last score (R21):
-      // _recompute is wrapped onto EVERY Alerts.recompute and task mutation, and the
+      // _recompute fires on every alerts:change event and task mutation, and the
       // matrix build below is expensive. Store.alerts is reassigned on every change
-      // (stable array identity) and Store._rev bumps on every mutation, so this pair
+      // (stable array identity) and Store.rev() bumps on every mutation, so this pair
       // fully captures the inputs. plant:selected nulls these to force a repaint.
       const alerts = Store.alerts || [];
-      const rev = Store._rev || 0;
+      const rev = Store.rev();
       if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
@@ -1451,7 +1447,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
           NIMBUS.Compute.utilization(startMs, days)
             .then(({ matrix: m }) => {
-              if ((Store._rev || 0) !== rev) return; // stale
+              if (Store.rev() !== rev) return; // stale
               Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
             })
             .catch(() => {});
@@ -1545,7 +1541,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
       const startMs = horizonStart.getTime();
-      const rev = Store._rev || 0;
+      const rev = Store.rev();
       const plant = Store.selectedPlant;
 
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
@@ -1687,7 +1683,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.addEventListener('click', e => {
         if (e.target === dlg) { dlg.close(); return; }
         const gotoBtn = e.target.closest('[data-conf-goto]');
-        if (gotoBtn) { dlg.close(); if (typeof Alerts !== 'undefined') Alerts.focus(gotoBtn.dataset.confGoto); }
+        if (gotoBtn) { dlg.close(); if (typeof AlertsUIAdapter !== 'undefined') AlertsUIAdapter.focus(gotoBtn.dataset.confGoto); }
       });
     },
 
@@ -2208,8 +2204,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     // default so a missing pref keeps deferring to the offline cache.
     _resolve() {
       try {
-        const us = Store && Store._state && Store._state.userSettings;
-        const rd = Store && Store._state && Store._state.roleDefaults;
+        const us = Store && Store.userSettings;
+        const rd = Store && Store.roleDefaults;
         if (us && us.theme != null) return us.theme;
         if (rd && rd.theme != null) return rd.theme;
       } catch { /* Store not ready — fall through to offline cache */ }
@@ -2309,7 +2305,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         : console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e));
       CommandPalette.init();
       TimeMachine._snapshots = [];
-      TimeMachine.init(); // monkey-patches UndoStack.push; must run even without IDB
+      TimeMachine.init(); // wires the undo:pushed subscription; must run even without IDB
       Confidence.init();
       Patterns.init();
       setTimeout(() => { RipplePreview.init(); }, 220);

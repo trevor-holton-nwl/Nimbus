@@ -26,6 +26,16 @@ h1, h2, h3, h4 {
 }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* --- BOOT ERROR BANNER -----------------------------------------------------
+   Rendered by web/app-entry.mjs when the CQ-1 module chain (foundation/state
+   bridge, app.js, nimbus-intelligence.js) fails to load. Kept as a real class
+   (not an inline style attribute) so the fallback banner stays inline-style-
+   free like the rest of the app. --------------------------------------------- */
+.nimbus-boot-error-banner {
+  background: #c0392b; color: #fff; padding: 12px;
+  font: 14px monospace;
+}
+
 /* --- TOKENS --------------------------------------------------------------- */
 :root {
   /* Base palette — slate → near-black with warm amber highlight */

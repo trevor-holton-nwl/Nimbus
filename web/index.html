@@ -3,6 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- CQ-1 Phase 4 Task 6: report-only CSP. Enforcement is explicitly deferred
+     until the remaining inline-handler backlog (see
+     docs/architecture/cq1-compatibility-inventory.md §7) is gone — this tag
+     only collects violation reports today, nothing is blocked. 'unsafe-inline'
+     stays in both script-src and style-src for that reason. script-src/
+     style-src/font-src are scoped to the CDN origins this app actually loads
+     from (unpkg.com + cdn.jsdelivr.net for scripts/styles, plus
+     fonts.googleapis.com/fonts.gstatic.com for the Google Fonts stylesheet) so
+     the collected reports reflect real gaps, not known-legitimate asset
+     loads. /csp-report is not a real endpoint yet — wiring one up is a
+     follow-up, not part of this task. -->
+<meta http-equiv="Content-Security-Policy-Report-Only" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; report-uri /csp-report">
 <script>
 // Lock page zoom — Gantt timeline zoom via scroll is unaffected
 (function () {
@@ -33,9 +45,6 @@
 <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/dist/ag-grid-community.min.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-grid.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-theme-quartz.css" rel="stylesheet">
-
-<!-- Chart.js for dashboard utilization visualizations -->
-<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
 <!-- Flatpickr — styled date picker for optimization modal -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
@@ -1145,7 +1154,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span class="wh-sep">·</span>
               <span class="wh-situation" id="wh-situation"></span>
             </div>
-            <button type="button" class="btn btn-primary wh-cta" onclick="NIMBUS.App.gotoGanttTimeline()">
+            <button type="button" class="btn btn-primary wh-cta" id="wh-cta-btn">
               <span data-i18n="ui.open_schedule">Open schedule</span><span aria-hidden="true">→</span>
             </button>
           </div>
@@ -1251,8 +1260,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Toolbar: view toggles + zoom + actions (always visible) -->
     <div class="gantt-toolbar">
       <div class="group">
-        <button class="seg-btn active" data-gantt-sub="timeline" onclick="NIMBUS.App.gotoGanttSub('timeline')">Gantt Timeline</button>
-        <button class="seg-btn" data-gantt-sub="orders" onclick="NIMBUS.App.gotoGanttSub('orders')">Orders</button>
+        <button class="seg-btn active" data-gantt-sub="timeline">Gantt Timeline</button>
+        <button class="seg-btn" data-gantt-sub="orders">Orders</button>
       </div>
       <div class="sep-v"></div>
       <div class="group" id="gantt-zoom-controls">
@@ -1268,7 +1277,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="spacer"></div>
       <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize">📈 Optimize</button>
       <div class="sep-v"></div>
-      <button class="seg-btn sandbox-btn" onclick="NIMBUS.Sandbox.enter()" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
+      <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
       <div class="sep-v"></div>
       <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule">⎙ Print</button>
     </div>
@@ -1348,7 +1357,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <aside class="side side-left" id="left-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
-          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('left')">◀</button>
+          <button class="icon-btn sm" id="left-sidebar-toggle-btn">◀</button>
         </header>
         <div id="hierarchy"></div>
         <div class="resize-handle rh-right" data-side="left"></div>
@@ -1367,7 +1376,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <aside class="side side-right" id="right-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_inspector">Inspector</h4>
-          <button class="icon-btn sm" onclick="NIMBUS.App.toggleSide('right')">✕</button>
+          <button class="icon-btn sm" id="right-sidebar-toggle-btn">✕</button>
         </header>
         <div class="inspector-body" id="inspector-body">
           <div class="empty-state" data-i18n="empty.select_order">Select an order to inspect.</div>
@@ -1479,11 +1488,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Toolbar -->
     <div class="labor-toolbar" id="labor-toolbar">
       <div class="group">
-        <button class="seg-btn active" data-labor-sub="aggregate" onclick="NIMBUS.App.gotoLaborSub('aggregate')">Aggregate</button>
-        <button class="seg-btn" data-labor-sub="line-plan" onclick="NIMBUS.App.gotoLaborSub('line-plan')">Line Plan</button>
-        <button class="seg-btn" data-labor-sub="capacity" onclick="NIMBUS.App.gotoLaborSub('capacity')">Capacity</button>
-        <button class="seg-btn" data-labor-sub="exceptions" onclick="NIMBUS.App.gotoLaborSub('exceptions')">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
-        <button class="seg-btn" data-labor-sub="inputs" onclick="NIMBUS.App.gotoLaborSub('inputs')">Inputs</button>
+        <button class="seg-btn active" data-labor-sub="aggregate">Aggregate</button>
+        <button class="seg-btn" data-labor-sub="line-plan">Line Plan</button>
+        <button class="seg-btn" data-labor-sub="capacity">Capacity</button>
+        <button class="seg-btn" data-labor-sub="exceptions">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
+        <button class="seg-btn" data-labor-sub="inputs">Inputs</button>
       </div>
       <div class="sep-v"></div>
       <div class="lp-group-filter" id="lp-group-filter">
@@ -1565,11 +1574,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <nav class="admin-subtabs plant-inner-tabs" role="tablist"
            style="padding:0 24px;border-top:1px solid var(--border);margin-top:0;flex-shrink:0;">
         <button class="sub-subtab active" data-plant-tab="general" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('general')" data-i18n="tab.general">General</button>
+                data-i18n="tab.general">General</button>
         <button class="sub-subtab" data-plant-tab="optimization" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('optimization')" data-i18n="tab.optimization">Optimization</button>
+                data-i18n="tab.optimization">Optimization</button>
         <button class="sub-subtab" data-plant-tab="settings" role="tab"
-                onclick="NIMBUS.Plant.gotoTab('settings')" data-i18n="tab.system_settings">System Settings</button>
+                data-i18n="tab.system_settings">System Settings</button>
       </nav>
 
       <!-- Inner pane: General -->
@@ -1583,7 +1592,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <div class="panel" id="plant-blackouts-panel">
               <header class="panel-head">
                 <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
-                <button class="btn btn-ghost sm" onclick="NIMBUS.Plant.openBlockModal()" data-i18n="btn.add_block">+ Add</button>
+                <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
               </header>
               <div class="panel-body panel-body-flush">
                 <div id="plant-blocks-stats"></div>
@@ -1596,7 +1605,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <h3 data-i18n="ui.production_lines_panel">Production Lines</h3>
               <span class="panel-hint" id="plant-lines-count"></span>
               <button id="plant-roster-toggle" class="btn btn-ghost sm"
-                      onclick="NIMBUS.Plant.toggleRosterList()"
                       style="padding:2px 8px;font-size:12px;">▼</button>
             </header>
             <div id="plant-roster-wrap" style="display:none;max-height:392px;overflow-y:auto;">
@@ -1621,7 +1629,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         </div>
       </div>
 
-      <!-- Inner pane: System Settings (content injected by App._renderSettingsPane) -->
+      <!-- Inner pane: System Settings (content injected by Plant's settings-pane renderer) -->
       <div id="plant-tab-settings" class="cal-scroll" hidden style="flex:1;overflow-y:auto;"></div>
 
     </div>
@@ -1954,7 +1962,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <h3 data-i18n="ui.alerts_title">Alerts</h3>
     <div>
       <button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismissAll()" data-i18n="btn.dismiss_all">Dismiss all</button>
-      <button class="icon-btn sm" onclick="NIMBUS.Alerts.toggleDrawer()">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()">✕</button>
     </div>
   </header>
   <div class="drawer-body" id="alert-drawer-body"></div>
@@ -1988,10 +1996,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <button class="seg-btn" data-us-tab="profile" role="tab" data-i18n="us.tab_profile">Profile</button>
       </nav>
 
-      <!-- PANE: PERSONALIZATION (populated at runtime by Session._renderSettingsPanes) -->
+      <!-- PANE: PERSONALIZATION (populated at runtime by SessionUIAdapter._renderSettingsPanes) -->
       <div id="us-tab-personalization" class="us-tab-body"></div>
 
-      <!-- PANE: WORKFLOW (populated at runtime by Session._renderSettingsPanes) -->
+      <!-- PANE: WORKFLOW (populated at runtime by SessionUIAdapter._renderSettingsPanes) -->
       <div id="us-tab-workflow" class="us-tab-body" hidden></div>
 
       <!-- PANE: PROFILE (name fields + identity; saved via us-save-btn) -->
@@ -2110,7 +2118,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.Calendar.saveBlockFromModal()">Save block</button>
+      <button id="modal-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>
@@ -2167,7 +2175,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-plant-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.Plant.savePlantBlockFromModal()">Save block</button>
+      <button id="modal-plant-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>
@@ -2203,7 +2211,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
     <footer class="modal-foot">
       <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-lines-block')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.ProdLines.saveBlockFromModal()">Save block</button>
+      <button id="modal-lines-block-save-btn" class="btn btn-primary">Save block</button>
     </footer>
   </div>
 </div>
@@ -2772,8 +2780,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   // nimbus-compute-core.js MUST load before app.js — app.js's Calendar/Alerts/Utilization
   // delegate to window.NimbusComputeCore (the same module the worker importScripts).
   document.write('<script src="nimbus-compute-core.js?v=' + encodeURIComponent(v) + '"><\/script>');
-  document.write('<script src="app.js?v=' + encodeURIComponent(v) + '"><\/script>');
-  document.write('<script src="nimbus-intelligence.js?v=' + encodeURIComponent(v) + '"><\/script>');
+  document.write('<script type="module" src="app-entry.mjs?v=' + encodeURIComponent(v) + '"><\/script>');
 })();
 </script>
 </body>

@@ -8,8 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     COLOR_FILE=/data/color_wheel.xlsx \
-    COLOR_WHEEL_DIR=/data/color_wheels \
-    NIMBUS_STATIC_DIR=/app/web
+    COLOR_WHEEL_DIR=/data/color_wheels
 
 WORKDIR /app
 
@@ -21,13 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Backend code + everything else (schema.sql kept for reference; it is NOT served).
 COPY . .
 
-# Serve ONLY the frontend from a dedicated dir so the public ingress never exposes
-# brain.py / db.py / master_data.py / schema.sql as downloadable static files.
-# NOTE: if you add a new frontend file, add it to this list.
-RUN mkdir -p /app/web \
- && cp index.html styles.css app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js /app/web/ \
- && cp -r locales /app/web/ \
- && cp -r Images /app/web/
+# The frontend now lives under web/ in the repo, so a single directory copy is
+# the whole isolation boundary: the public ingress serves ONLY /app/web, which
+# never contains brain.py / db.py / master_data.py / schema.sql. Add a new
+# frontend file under web/ and it's picked up automatically — no list to maintain.
+COPY web/ /app/web/
 
 # Run as a non-root user; it owns the app dir and the writable color-wheel dir.
 RUN useradd --create-home --uid 10001 nimbus \

@@ -15,10 +15,12 @@
 const globals = require('globals');
 
 // Third-party globals injected by the CDN <script> tags in index.html.
+// (chart.js's `Chart` global was removed here in CQ-1 Phase 3 Task 4, alongside
+// the CDN <script> tag itself and the dead Dashboard code that referenced it —
+// Dashboard's heatmap is hand-rolled DOM/CSS and never called Chart.js.)
 const CDN_GLOBALS = {
   vis: 'readonly',        // vis-timeline (the Gantt)
   agGrid: 'readonly',     // ag-grid-community (orders table)
-  Chart: 'readonly',      // chart.js (dashboard)
   flatpickr: 'readonly',  // flatpickr (all date/time inputs)
 };
 
@@ -63,8 +65,9 @@ module.exports = [
     ],
   },
   {
-    // Frontend scripts + locale string maps.
-    files: ['app.js', 'nimbus-intelligence.js', 'locales/*.js'],
+    // Frontend scripts + locale string maps (live under web/ — the dedicated static
+    // asset directory served by brain.py's StaticFiles mount, see CQ-1 Phase 0 Task 4).
+    files: ['web/app.js', 'web/nimbus-intelligence.js', 'web/locales/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -75,7 +78,7 @@ module.exports = [
   },
   {
     // Standalone Web Worker: worker globals only (self/postMessage/onmessage), no DOM, no NIMBUS.
-    files: ['nimbus-worker.js'],
+    files: ['web/nimbus-worker.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -86,11 +89,42 @@ module.exports = [
   {
     // Shared compute core (UMD): loaded in the worker (self/importScripts), the browser
     // (window), and Node tests (module.exports) — so it needs worker + `module` globals.
-    files: ['nimbus-compute-core.js'],
+    files: ['web/nimbus-compute-core.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
       globals: { ...globals.worker, module: 'readonly' },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // ESM scripts (scanner, checkers) — Node environment.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // ESM test modules — Node environment.
+    files: ['tests/modules/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: SHARED_RULES,
+  },
+  {
+    // Browser ESM modules under web/ — browser environment. Also covers the Phase 0
+    // fixture web/_static-delivery-check.mjs; Phase 1+ will add real module entries here.
+    files: ['web/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.browser, ...CDN_GLOBALS },
     },
     rules: SHARED_RULES,
   },

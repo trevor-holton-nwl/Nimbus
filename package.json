@@ -4,10 +4,14 @@
   "private": true,
   "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. No build step; static frontend. This package.json exists only for the ESLint static-analysis gate.",
   "scripts": {
-    "lint": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js locales",
-    "lint:errors": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js locales --quiet",
-    "lint:ci": "eslint app.js nimbus-intelligence.js nimbus-worker.js nimbus-compute-core.js --quiet",
-    "test": "node --test \"tests/js/*.test.js\""
+    "lint": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js web/locales \"web/**/*.mjs\" scripts tests/modules",
+    "lint:errors": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js web/locales --quiet",
+    "lint:ci": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js \"web/**/*.mjs\" scripts tests/modules --quiet",
+    "test:legacy": "node --test \"tests/js/*.test.js\"",
+    "test:modules": "node --test \"tests/modules/*.test.mjs\"",
+    "test": "npm run test:legacy && npm run test:modules",
+    "check:legacy-surface": "node scripts/legacy-surface.mjs",
+    "check:static-assets": "node scripts/check-static-assets.mjs"
   },
   "devDependencies": {
     "eslint": "^9.0.0",

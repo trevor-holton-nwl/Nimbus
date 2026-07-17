@@ -6,7 +6,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const Core = require('../../nimbus-compute-core.js');
+const Core = require('../../web/nimbus-compute-core.js');
 
 const allDays = (window) => {
   const wh = {};

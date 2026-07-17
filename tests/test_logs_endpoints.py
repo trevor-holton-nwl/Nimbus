@@ -22,7 +22,17 @@ except Exception as e:  # pragma: no cover - environment dependent
 def tc():
     # Endpoint behavior here is about the in-process log buffer, not the
     # database-backed admin role state. Make that independent of whichever
-    # users happen to exist in a developer's local database.
+    # users happen to exist in a developer's local database — but first
+    # confirm the route actually still requires require_admin, so overriding
+    # it can't silently mask the dependency having been dropped from the route.
+    route = next(
+        route for route in brain.api.routes
+        if getattr(route, "path", None) == "/logs/backend" and "GET" in route.methods
+    )
+    assert any(
+        dependency.dependency is brain.require_admin
+        for dependency in route.dependencies
+    )
     brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
     try:
         yield TestClient(brain.api)

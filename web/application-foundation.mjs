@@ -1,0 +1,1118 @@
+// application-foundation.mjs — CQ-1 foundation module.
+// Owns immutable configuration, generic UI chrome (Toast/Modal), the perf
+// profiler, and the virtual-list windowing helper. No schedule state, no
+// feature endpoints, no scheduling rules. See docs/architecture/
+// cq1-compatibility-inventory.md for the full module ownership map.
+
+/* =============================================================================
+   CONFIG — global constants; never mutated at runtime.
+     STEP_MS          15-minute snap granularity for all drag/edit ops
+     DEFAULT_SHIFT    [startHour, endHour] used when no plant calendar exists
+     COLORS           10-color palette for production lines
+     OVERLOAD/WARN    thresholds for the utilisation alert system
+     LS_KEY           localStorage key for the v3 state cache
+     SCHEMA_VERSION   bump this when the cached snapshot shape changes
+     KNOWN_PLANTS     plant codes the app is aware of (for plant selector)
+   ========================================================================== */
+export const Config = {
+  API_BASE:         (typeof window !== 'undefined' && window.NIMBUS_API_BASE) || '',  // '' = same-origin (relative URLs); set window.NIMBUS_API_BASE only for a split dev server
+  STEP_MS:          15 * 60 * 1000,          // 15-minute snap
+  MS_MIN:           60 * 1000,               // 1 minute in ms
+  MS_HOUR:          60 * 60 * 1000,          // 1 hour in ms
+  MS_DAY:           24 * 60 * 60 * 1000,     // 1 day in ms
+  ANIM_MS:          220,                     // CSS-coupled: must outlast .side-right / .alert-drawer transition 0.22s
+  DEFAULT_SHIFT:    [7, 19],                  // 7:00 → 19:00 (12h shift)
+  WEEKEND_OFF:      true,                     // Sat/Sun closed by default
+  TZ:               'America/New_York',
+  COLORS: [                                   // production-line palette (10)
+    '#b8791a', '#2d5f8c', '#4f7a3c', '#8b4c7e', '#b14a3e',
+    '#3c6e7a', '#7a5a2a', '#5e498b', '#a8493a', '#4a7a5e'
+  ],
+  OVERLOAD_THRESHOLD: 1.0,                    // >100% → error, >80% → warn
+  WARN_THRESHOLD:     0.8,
+  SHOW_NEAR_CAPACITY_ALERTS: false,           // set true to re-enable near-capacity warnings
+  LS_KEY:             'nimbus.state.v3',          // do NOT bump for shape changes — use SCHEMA_VERSION
+  SCHEMA_VERSION:     4,                          // bump whenever _saveCache snapshot fields change
+  BUILD_ID:           (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || 'dev',
+  DEFAULT_PLANT:      null,
+  KNOWN_PLANTS:       ['5512', '1006'],
+  CENTER_ON_CLICK:    true,                       // set false to disable click-to-center in Gantt
+  DEBUG_BLOCKS:       true,                       // when true, Store.addBlock/addPlantBlock console.trace every push (for diagnosing duplicate-add bugs)
+  CONCURRENCY_CHECK:  true                         // optimistic-concurrency guard on task writes. Set false to force every write (legacy last-write-wins) if the guard misbehaves in a multi-user pilot.
+};
+
+/* =============================================================================
+   UTIL — small pure helpers (no state, no DOM)
+
+   Three DI seams replace what used to be direct references from Util into
+   modules that stay in app.js (Store, Session, Utilization) — each defaults to
+   a safe no-op/fallback matching the original try/catch-swallowed behavior:
+     setPreferenceResolver(fn)   — feeds _timeFormatPref/_dateFormatPref (was Store.pref)
+     setActorResolver(fn)        — feeds fetchTraced's x-user-email header (was Session.actor)
+     setUtilizationResolver(fn)  — feeds scheduleKpis' peak-util lookup (was Utilization.computeMatrix)
+   locale()/setLocale() replace the old `Util._locale` property so the active
+   locale is proper module state instead of a bag property.
+   ========================================================================== */
+let _prefResolver = () => undefined;
+let _actorResolver = () => undefined;
+let _utilizationResolver = null;
+let _locale = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
+
+export const Util = {
+  setPreferenceResolver(fn) { _prefResolver = typeof fn === 'function' ? fn : () => undefined; },
+  setActorResolver(fn) { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
+  setUtilizationResolver(fn) { _utilizationResolver = typeof fn === 'function' ? fn : null; },
+  locale() { return _locale; },
+  setLocale(lang) { _locale = lang; },
+
+  // Safe Date parser. Accepts Date | ISO | null. Returns Date or null.
+  parseDate(v) {
+    if (!v) return null;
+    if (v instanceof Date) return isNaN(v) ? null : v;
+    const d = new Date(v);
+    return isNaN(d) ? null : d;
+  },
+
+  // Snap a Date to the nearest STEP_MS boundary.
+  snap(date) {
+    const t = date instanceof Date ? date.getTime() : new Date(date).getTime();
+    return new Date(Math.round(t / Config.STEP_MS) * Config.STEP_MS);
+  },
+
+  // YYYY-MM-DD key (local time) for bucketing by day.
+  dayKey(d) {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  },
+
+  // Pretty date for display (e.g. "2026-04-22 09:15").
+  fmtDT(d) {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} `
+         + `${p(date.getHours())}:${p(date.getMinutes())}`;
+  },
+
+  // ── DISPLAY-ONLY format prefs (was Store.pref, now the injected resolver) ──
+  // Resolve the user's timeFormat/dateFormat preference with safe fallbacks for
+  // when the resolver isn't wired yet. These never touch stored data — they only
+  // change how a Date is rendered (see the timezone caution: timeFormat/dateFormat
+  // are display-only, save/parse/compute paths stay untouched).
+  _timeFormatPref() {
+    try { return _prefResolver('timeFormat') || '12h'; } catch { return '12h'; }
+  },
+  _dateFormatPref() {
+    try { return _prefResolver('dateFormat') || 'M j, Y'; } catch { return 'M j, Y'; }
+  },
+  // Format a Date's time part per timeFormat: 12h ("6 PM" / "6:30 PM") or 24h ("18:30").
+  _fmtTimePref(date) {
+    const min = date.getMinutes();
+    if (Util._timeFormatPref() === '24h') {
+      const p = n => String(n).padStart(2, '0');
+      return `${p(date.getHours())}:${p(min)}`;
+    }
+    const h24 = date.getHours();
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    const h12 = h24 % 12 || 12;
+    const minStr = min === 0 ? '' : `:${String(min).padStart(2, '0')}`;
+    return `${h12}${minStr} ${ampm}`;
+  },
+  // Format a Date's date part per the Flatpickr-token dateFormat pref, via the
+  // Flatpickr static formatter; falls back to compact MM/DD/YY if unavailable.
+  _fmtDatePref(date) {
+    const tok = Util._dateFormatPref();
+    try {
+      if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(date, tok);
+    } catch { /* fall through to legacy compact format */ }
+    const p = n => String(n).padStart(2, '0');
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)}`;
+  },
+  // Human-readable datetime (e.g. "May 15, 2026 · 6 PM"), routed through the
+  // per-user dateFormat + timeFormat display prefs.
+  fmtDTReadable(d) {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    return `${Util._fmtDatePref(date)} · ${Util._fmtTimePref(date)}`;
+  },
+
+  // Compact range for blackout rows. Same day: "05/15/26 · 6–7 PM". Multi-day: "05/15/26 → 05/17/26".
+  fmtBlockRange(s, e) {
+    const ds = Util.parseDate(s), de = Util.parseDate(e);
+    if (!ds || !de) return '';
+    const p = n => String(n).padStart(2, '0');
+    const dateStr = d => `${p(d.getMonth()+1)}/${p(d.getDate())}/${String(d.getFullYear()).slice(-2)}`;
+    const sameDay = ds.getFullYear() === de.getFullYear()
+                 && ds.getMonth()    === de.getMonth()
+                 && ds.getDate()     === de.getDate();
+    const fmtTime = (h24, min) => {
+      const ampm = h24 < 12 ? 'AM' : 'PM';
+      const h12  = h24 % 12 || 12;
+      const m    = min === 0 ? '' : `:${String(min).padStart(2,'0')}`;
+      return `${h12}${m}${ampm}`;
+    };
+    if (sameDay) {
+      const sAmpm = ds.getHours() < 12 ? 'AM' : 'PM';
+      const eAmpm = de.getHours() < 12 ? 'AM' : 'PM';
+      const sH    = ds.getHours() % 12 || 12;
+      const eH    = de.getHours() % 12 || 12;
+      const sM    = ds.getMinutes() === 0 ? '' : `:${String(ds.getMinutes()).padStart(2,'0')}`;
+      const eM    = de.getMinutes() === 0 ? '' : `:${String(de.getMinutes()).padStart(2,'0')}`;
+      const suffix = sAmpm === eAmpm ? `${sH}${sM}–${eH}${eM} ${eAmpm}` : `${sH}${sM}${sAmpm}–${eH}${eM}${eAmpm}`;
+      return `${dateStr(ds)} · ${suffix}`;
+    }
+    return `${dateStr(ds)} ${fmtTime(ds.getHours(), ds.getMinutes())} → ${dateStr(de)} ${fmtTime(de.getHours(), de.getMinutes())}`;
+  },
+
+  /** Sum the hours of `intervals` ([{s:Date, e:Date}, …]) intersected with `win`
+   *  ([Date, Date]), correctly unioning overlapping intervals so the same
+   *  minutes are never counted twice. Returns hours. */
+  mergedOverlapHours(win, intervals) {
+    if (!win || !intervals?.length) return 0;
+    const w0 = win[0].getTime ? win[0].getTime() : +win[0];
+    const w1 = win[1].getTime ? win[1].getTime() : +win[1];
+    if (w1 <= w0) return 0;
+    const clipped = [];
+    for (const it of intervals) {
+      if (!it?.s || !it?.e) continue;
+      const s = Math.max(w0, it.s.getTime ? it.s.getTime() : +it.s);
+      const e = Math.min(w1, it.e.getTime ? it.e.getTime() : +it.e);
+      if (e > s) clipped.push([s, e]);
+    }
+    if (!clipped.length) return 0;
+    clipped.sort((a, b) => a[0] - b[0]);
+    let total = 0;
+    let curS = clipped[0][0], curE = clipped[0][1];
+    for (let i = 1; i < clipped.length; i++) {
+      const [s, e] = clipped[i];
+      if (s <= curE) curE = Math.max(curE, e);
+      else { total += curE - curS; curS = s; curE = e; }
+    }
+    total += curE - curS;
+    return total / Config.MS_HOUR;
+  },
+
+  // "2h 30m"
+  fmtHours(hours) {
+    if (hours == null || isNaN(hours)) return '—';
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    if (h === 0) return `${m}m`;
+    if (m === 0) return `${h}h`;
+    return `${h}h ${m}m`;
+  },
+
+  // Convert a Date to <input type="datetime-local"> value.
+  toLocalInput(d) {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+         + `T${p(date.getHours())}:${p(date.getMinutes())}`;
+  },
+
+  // Convert a Date to a naive local-time string (no timezone marker), for
+  // sending a date to the backend without going through JSON.stringify's
+  // default Date serialization. Deliberately NOT `date.toISOString()` —
+  // that converts to UTC, and brain.py's `_to_pydt` strips the resulting tz
+  // label WITHOUT converting the clock digits back to local, silently
+  // corrupting the value by the client's UTC offset for any non-UTC user.
+  // Preserves seconds (unlike toLocalInput, which only goes to minute
+  // precision) since callers may encode sub-minute information in the
+  // seconds field.
+  toLocalSeconds(d) {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+         + `T${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
+  },
+
+  // Flatpickr datetime-picker factory — single source for the NIMBUS amber
+  // datetime config (30-min step, alt display). `extra` extends/overrides
+  // (e.g. an onChange handler). Accepts a selector string or element; returns
+  // the flatpickr instance. The date-only (Printer/AdminCockpit) and
+  // OptimizeDialog (1-min, inline) pickers intentionally do NOT use this.
+  // Display-only altFormat, routed through the dateFormat + timeFormat prefs
+  // (machine `dateFormat` below is unchanged — parse/save paths untouched).
+  _fpAltFormat() {
+    const df = Util._dateFormatPref();
+    const tf = Util._timeFormatPref();
+    return `${df} · ${tf === '24h' ? 'H:i' : 'h:i K'}`;
+  },
+  fpDatetime(sel, extra = {}) {
+    return flatpickr(sel, {
+      enableTime: true, dateFormat: 'Y-m-d\\TH:i',
+      altInput: true, altFormat: Util._fpAltFormat(), minuteIncrement: 30,
+      ...extra,
+    });
+  },
+
+  // Clamp a Date to a [min,max] window.
+  clamp(d, min, max) {
+    const t = d.getTime();
+    if (min && t < min.getTime()) return new Date(min);
+    if (max && t > max.getTime()) return new Date(max);
+    return d;
+  },
+
+  // Normalise a string for case-insensitive compares.
+  norm(s) { return (s ?? '').toString().trim().toUpperCase(); },
+
+  // Get run-time (hours) from a task; 0 if missing.
+  runHours(task) {
+    const v = parseFloat(task?.RUN_TIME);
+    return isNaN(v) ? 0 : v;
+  },
+
+  // Start of local day.
+  startOfDay(d) { const x = Util.parseDate(d); if (!x) return null; x.setHours(0,0,0,0); return x; },
+
+  // Add minutes.
+  addMin(d, min) { return new Date(d.getTime() + min * Config.MS_MIN); },
+
+  // Short, stable id (used for blocks / alerts).
+  uid(prefix) {
+    return `${prefix || 'x'}-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36).slice(-4)}`;
+  },
+
+  // Simple debounce.
+  debounce(fn, wait) {
+    let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), wait); };
+  },
+
+  // Deep-ish clone for plain objects + Dates.
+  clone(obj) {
+    if (obj == null || typeof obj !== 'object') return obj;
+    if (obj instanceof Date) return new Date(obj);
+    if (Array.isArray(obj)) return obj.map(Util.clone);
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = Util.clone(obj[k]);
+    return out;
+  },
+
+  // Traced fetch — attaches an x-request-id and logs slow/failed responses through ErrorLog.
+  // Drop-in replacement for fetch() everywhere in the app.
+  fetchTraced(input, init = {}) {
+    const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    const headers = new Headers(init.headers || {});
+    if (!headers.has('x-request-id')) headers.set('x-request-id', reqId);
+    if (!headers.has('x-user-email') && !headers.has('X-User')) headers.set('x-user-email', _actorResolver());
+    const method = init.method || 'GET';
+    const url    = typeof input === 'string' ? input : input.url;
+    const t0     = performance.now();
+    return fetch(input, { ...init, headers }).then(r => {
+      const ms = Math.round(performance.now() - t0);
+      if (!r.ok) {
+        // Best-effort drain of the error body to extract a backend message — clone()
+        // so the caller still gets an unread body. json() first, then text() fallback.
+        const clone = (() => { try { return r.clone(); } catch { return null; } })();
+        const drain = clone
+          ? clone.json().then(
+              j => (j && (j.message || j.detail)) || null,
+              () => clone.text().then(txt => (txt || '').slice(0, 2000) || null, () => null)
+            )
+          : Promise.resolve(null);
+        drain.then(backendMessage => {
+          const tail = backendMessage ? `: ${backendMessage}` : '';
+          ErrorLog.warn('http', `${method} ${url} → ${r.status} (${ms}ms)${tail}`,
+            { reqId, status: r.status, url, method, ms, backendMessage },
+            { reqId, errorCode: 'http.status' });
+        });
+      } else if (ms > 2000) {
+        ErrorLog.info('http', `slow: ${method} ${url} ${ms}ms`, { reqId, url, method, ms });
+      }
+      return r;
+    }).catch(e => {
+      if (e?.name === 'AbortError') throw e;
+      ErrorLog.error('http', `${method} ${url} failed: ${e.message}`,
+        { reqId, url, method, error: String(e?.message || e) },
+        { reqId, errorCode: 'http.network' });
+      throw e;
+    });
+  },
+
+  // Parse a non-ok Response body into a structured {message, errorCode, status}.
+  // Best-effort: clones the response (caller keeps the body), reads json() then text().
+  // Used by raw-fetch migration sites so each surfaces the parsed backend body.
+  parseBackendError(resp) {
+    const status = resp?.status ?? 0;
+    const clone  = (() => { try { return resp.clone(); } catch { return null; } })();
+    const read   = clone
+      ? clone.json().then(
+          j => ({ message: (j && (j.message || j.detail)) || null, errorCode: (j && j.error_code) || null }),
+          () => clone.text().then(txt => ({ message: (txt || '').slice(0, 2000) || null, errorCode: null }), () => ({ message: null, errorCode: null }))
+        )
+      : Promise.resolve({ message: null, errorCode: null });
+    return read.then(({ message, errorCode }) => ({
+      message: message || `HTTP ${status}`,
+      errorCode: errorCode || 'http.status',
+      status,
+    }));
+  },
+
+  // SAP planning baseline finish. NIMBUS keeps this in `original_end_date`
+  // (set once from ORIGINAL_END_DATE; what the variance badge compares against).
+  sapDueDate(t) {
+    return t?.original_end_date || null;
+  },
+
+  // Scheduled finish for a task — user override `end_date` if present, otherwise the SAP baseline.
+  scheduledEnd(t) {
+    return t?.end_date || Util.sapDueDate(t);
+  },
+
+  // Display-only derived "Original Start": due date minus RUN_TIME, so
+  // Orig Start and Orig End always form a runtime-consistent pair (e.g.
+  // RUN_TIME 1h, due 7:00 PM -> Orig Start 6:00 PM) instead of the raw
+  // midnight SAP date. Falls back to the raw original_start_date (coerced
+  // to a Date) when there's no due date to anchor on. Pure/cheap — no
+  // Calendar lookup, no persistence — and never writes back to the task:
+  // original_start_date itself stays untouched because it's load-bearing
+  // for _snapToWorkingHours's startMoved guard and _overlayUserMoves's
+  // move-detection. Edge case (not clamped, deliberately): an order whose
+  // RUN_TIME exceeds the gap between midnight and its due time will show
+  // an implied start before midnight (the previous calendar day).
+  impliedOriginalStart(t) {
+    const due = Util.sapDueDate(t);
+    if (!due) {
+      return t?.original_start_date instanceof Date ? t.original_start_date : Util.parseDate(t?.original_start_date);
+    }
+    return new Date(due.getTime() - Util.runHours(t) * Config.MS_HOUR);
+  },
+
+  // Hours that scheduled finish slips past the SAP planning date (clamped at 0).
+  latenessHours(t) {
+    const end = Util.scheduledEnd(t);
+    const due = Util.sapDueDate(t);
+    if (!end || !due) return 0;
+    const diff = (end.getTime() - due.getTime()) / Config.MS_HOUR;
+    return diff > 0 ? diff : 0;
+  },
+
+  // Adjacent-order changeover count across the schedule, grouped by line.
+  // A "changeover" = neighbours differ in COLOR or FORM_SIZE.
+  countChangeovers(tasks) {
+    const byLine = {};
+    for (const t of tasks) {
+      if (!t.start_date) continue;
+      const l = t.PRODUCTION_LINE || 'Unknown';
+      (byLine[l] ||= []).push(t);
+    }
+    let n = 0;
+    for (const l of Object.keys(byLine)) {
+      const sorted = byLine[l].sort((a, b) => a.start_date - b.start_date);
+      for (let i = 1; i < sorted.length; i++) {
+        const a = sorted[i - 1], b = sorted[i];
+        if ((a.COLOR || '') !== (b.COLOR || '') || (a.FORM_SIZE || '') !== (b.FORM_SIZE || '')) n++;
+      }
+    }
+    return n;
+  },
+
+  // Composite KPIs for the optimizer preview. Pure: takes a task array, no Store access.
+  // Returns { changeovers, span_h, late_count, late_h, peak_util_pct }.
+  scheduleKpis(tasks, horizonDays = 14) {
+    const changeovers = Util.countChangeovers(tasks);
+    let minStart = Infinity, maxEnd = -Infinity;
+    let lateCount = 0, lateH = 0;
+    for (const t of tasks) {
+      if (t.start_date) minStart = Math.min(minStart, t.start_date.getTime());
+      const e = Util.scheduledEnd(t);
+      if (e) maxEnd = Math.max(maxEnd, e.getTime());
+      const lh = Util.latenessHours(t);
+      if (lh > 0) { lateCount++; lateH += lh; }
+    }
+    const span_h = (minStart === Infinity || maxEnd === -Infinity) ? 0 : (maxEnd - minStart) / Config.MS_HOUR;
+    // Peak utilization from the existing Utilization matrix (via the injected resolver).
+    let peak = 0;
+    try {
+      if (!_utilizationResolver) throw new Error('utilization resolver not wired');
+      const m = _utilizationResolver(new Date(), horizonDays, tasks);
+      for (const ln of Object.keys(m)) {
+        for (const d of Object.keys(m[ln])) {
+          const p = m[ln][d]?.pct || 0;
+          if (p > peak) peak = p;
+        }
+      }
+    } catch { /* matrix unavailable — leave peak at 0 */ }
+    return {
+      changeovers,
+      span_h: Math.round(span_h * 10) / 10,
+      late_count: lateCount,
+      late_h:    Math.round(lateH * 10) / 10,
+      peak_util_pct: Math.round(peak * 100),
+    };
+  },
+
+  t(key, vars) {
+    const dict = window.__NIMBUS_LOCALES?.[_locale] || {};
+    const en   = window.__NIMBUS_LOCALES?.en || {};
+    let str = dict[key] ?? en[key] ?? key;
+    if (vars) str = str.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
+    return str;
+  },
+
+  // Required DOM element getter — throws if element not found.
+  reqEl(id) {
+    const el = document.getElementById(id);
+    if (!el) throw new Error(`required DOM element missing: ${id}`);
+    return el;
+  },
+
+  // Strips the ".0" suffix Excel appends to General-formatted numeric columns
+  // (e.g. "1000261702.0"), mirroring backend _clean_id() (brain.py) so pasted
+  // SAP-style ids match what's actually stored on tasks.
+  _stripExcelFloatSuffix(s) {
+    return /^-?\d+\.0$/.test(s) ? s.slice(0, -2) : s;
+  },
+
+  // Parse clipboard text pasted from Excel into a flat list of candidate
+  // strings. Same \r-strip/\n-split/\t-split convention as the labor-grid
+  // paste handler and MasterData._parsePaste, flattened to one list since
+  // paste-to-filter only needs "the set of strings the user pasted".
+  parsePasteList(text) {
+    if (!text) return [];
+    return text.replace(/\r/g, '').split('\n')
+      .flatMap(line => line.split('\t'))
+      .map(v => Util._stripExcelFloatSuffix(v.trim()))
+      .filter(Boolean);
+  },
+
+  // Match parsed paste text against a live list of checkbox elements (by
+  // .value, case-insensitive/trimmed), check the matches, and dispatch a
+  // bubbling 'change' on each newly-checked box so the panel's own
+  // onchange="..." handler does the Set-update + apply work — no separate
+  // "select" logic to keep in sync.
+  matchPasteToCheckboxes(text, checkboxEls) {
+    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
+    const byValue = new Map();
+    checkboxEls.forEach(cb => byValue.set(Util.norm(cb.value), cb));
+    let matched = 0;
+    distinct.forEach(v => {
+      const cb = byValue.get(v);
+      if (!cb) return;
+      matched++;
+      if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+    });
+    return { matched, total: distinct.length };
+  },
+
+  // One-time wiring for a small paste-capture <input> sitting atop a
+  // checkbox panel. getCheckboxEls is called lazily at paste-time so it
+  // always sees the panel's current (rebuilt) checkbox list.
+  wirePasteToCheckboxes(inputEl, getCheckboxEls) {
+    if (!inputEl || inputEl._pasteWired) return;
+    inputEl._pasteWired = true;
+    inputEl.addEventListener('paste', e => {
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      inputEl.value = '';
+      if (!text || !text.trim()) return;
+      const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls());
+      if (!total) return;
+      Toast.show(Util.t('toast.paste_checkbox_match', { matched, total }), matched > 0 ? 'success' : 'warn');
+    });
+  },
+
+  // Sub-feature B predicate shared by GanttFilter.matches() and
+  // Table._taskPassesChipFilters(). Frontend task objects carry the
+  // production order as .ORDER (brain.py aliases PRODUCTION_ORDER -> ORDER
+  // in the /tasks response) — .PRODUCTION_ORDER is kept as a fallback only
+  // for parity with the same convention used by Table's own valueGetter.
+  taskMatchesPasteSet(task, idSet) {
+    if (!idSet || idSet.size === 0) return true;
+    const po  = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
+    const mat = Util.norm(task.MATERIAL_NUMBER);
+    return (po && idSet.has(po)) || (mat && idSet.has(mat));
+  },
+
+  // Diagnostic "how many of these pasted values matched a known id" count,
+  // used for the paste toast on the Production Order / Material filter.
+  countPasteMatches(text, knownIdSet) {
+    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
+    return { matched: distinct.filter(v => knownIdSet.has(v)).length, total: distinct.length };
+  },
+
+  // Fractional-hours <-> "HH:MM" string conversion, shared by CalendarUI
+  // (blackout-block-tab UI, stays in app.js) and EditCalendar/ColorWheelViewer
+  // (schedule-workbench.mjs) — previously duplicated as CalendarUI's private
+  // _hToT/_tToH (CQ-1 Phase 3 Task 7).
+  hoursToTimeString(h) {
+    const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+  },
+  timeStringToHours(t) {
+    const [h, m] = t.split(':').map(Number);
+    return h + (m / 60);
+  },
+};
+
+/* =============================================================================
+   VIRTUAL LIST — minimal padding-based windowing helper.
+   Renders only the items visible in the scroll viewport plus a buffer,
+   using paddingTop/paddingBottom spacers so the scrollbar reflects true height.
+
+   Usage (fixed height):
+     const vl = new VirtualList(scrollEl, { rowH: 36, renderFn: (item) => '<div>...</div>' });
+     vl.update(items);
+
+   Usage (variable height — e.g. expandable rows):
+     const vl = new VirtualList(scrollEl, { getRowH: (item) => item.open ? 120 : 36, renderFn });
+     vl.update(items);
+   ========================================================================== */
+export class VirtualList {
+  constructor(scrollEl, { rowH, getRowH, renderFn, mountEl, buffer = 5 } = {}) {
+    this._scroll   = scrollEl;
+    this._mount    = mountEl || scrollEl;
+    this._fixedH   = typeof rowH === 'number' ? rowH : null;
+    this._getRowH  = getRowH || null;
+    this._renderFn = renderFn;
+    this._buf      = buffer;
+    this._items    = [];
+    this._offsets  = null;
+    this._inner    = document.createElement('div');
+    this._mount.appendChild(this._inner);
+    this._onScroll = () => this._paint();
+    scrollEl.addEventListener('scroll', this._onScroll, { passive: true });
+  }
+
+  update(items) {
+    this._items = items;
+    if (this._getRowH) {
+      const n = items.length;
+      this._offsets = new Float64Array(n + 1);
+      for (let i = 0; i < n; i++) {
+        this._offsets[i + 1] = this._offsets[i] + this._getRowH(items[i]);
+      }
+    }
+    this._paint();
+  }
+
+  _totalH() {
+    if (this._fixedH !== null) return this._items.length * this._fixedH;
+    return this._offsets ? this._offsets[this._items.length] : 0;
+  }
+
+  _offsetOf(i) {
+    if (this._fixedH !== null) return i * this._fixedH;
+    return this._offsets ? this._offsets[i] : 0;
+  }
+
+  _paint() {
+    const n = this._items.length;
+    if (!n) {
+      this._inner.style.paddingTop = '0';
+      this._inner.style.paddingBottom = '0';
+      this._inner.innerHTML = '';
+      return;
+    }
+    const scrollTop = this._scroll.scrollTop;
+    const viewH     = this._scroll.clientHeight || 600;
+    const buf       = this._buf;
+    let lo, hi;
+
+    if (this._fixedH !== null) {
+      lo = Math.max(0, Math.floor(scrollTop / this._fixedH) - buf);
+      hi = Math.min(n, Math.ceil((scrollTop + viewH) / this._fixedH) + buf);
+    } else {
+      // Binary search for first item whose bottom edge is below scrollTop
+      let l = 0, r = n - 1;
+      while (l < r) {
+        const m = (l + r) >> 1;
+        if (this._offsets[m + 1] <= scrollTop) l = m + 1; else r = m;
+      }
+      lo = Math.max(0, l - buf);
+      // Walk forward until item top exceeds viewport bottom
+      let e = lo;
+      while (e < n && this._offsets[e] < scrollTop + viewH) e++;
+      hi = Math.min(n, e + buf);
+    }
+
+    this._inner.style.paddingTop    = this._offsetOf(lo) + 'px';
+    this._inner.style.paddingBottom = (this._totalH() - this._offsetOf(hi)) + 'px';
+
+    let html = '';
+    for (let i = lo; i < hi; i++) html += this._renderFn(this._items[i], i);
+    this._inner.innerHTML = html;
+  }
+
+  destroy() {
+    this._scroll.removeEventListener('scroll', this._onScroll);
+    this._inner.remove();
+    this._items = [];
+  }
+}
+
+/* =============================================================================
+   PERF MONITOR — ring-buffer profiler for main-thread operations.
+   Records named operation durations and exposes rolling p50/p95/max stats.
+   AdminCockpit "Thread" tab reads PerfMonitor.all() to render the task-manager view.
+   ========================================================================== */
+export const PerfMonitor = (() => {
+  const _MAX = 100;
+  const _buckets = new Map(); // name → { buf: Float32Array, head, count, last, lastTs }
+  const _listeners = new Set();
+  let _notifyTimer = null;
+
+  function record(name, ms) {
+    let b = _buckets.get(name);
+    if (!b) {
+      b = { buf: new Float32Array(_MAX), head: 0, count: 0, last: 0, lastTs: 0 };
+      _buckets.set(name, b);
+    }
+    b.buf[b.head % _MAX] = ms;
+    b.head++;
+    b.count++;
+    b.last   = ms;
+    b.lastTs = Date.now();
+    _notify();
+  }
+
+  function time(name, fn) {
+    const t = performance.now();
+    const r = fn();
+    record(name, performance.now() - t);
+    return r;
+  }
+
+  function stats(name) {
+    const b = _buckets.get(name);
+    if (!b) return null;
+    const n = Math.min(b.count, _MAX);
+    const sorted = Array.from(b.buf.subarray(0, n)).sort((a, c) => a - c);
+    return {
+      last:   b.last,
+      lastTs: b.lastTs,
+      count:  b.count,
+      p50:    sorted[Math.floor(n * 0.50)] ?? 0,
+      p95:    sorted[Math.floor(n * 0.95)] ?? 0,
+      max:    sorted[n - 1] ?? 0,
+    };
+  }
+
+  function all() {
+    return [..._buckets.keys()].map(k => ({ name: k, ...stats(k) }));
+  }
+
+  function clear() { _buckets.clear(); _notify(); }
+  function subscribe(fn) { _listeners.add(fn); }
+
+  function _notify() {
+    if (_notifyTimer) return;
+    _notifyTimer = setTimeout(() => { _notifyTimer = null; _listeners.forEach(fn => fn()); }, 250);
+  }
+
+  return { record, time, stats, all, clear, subscribe };
+})();
+
+/* =============================================================================
+   ERROR LOG — structured in-memory log for the whole app.
+     Levels: info | warn | error.  Caps at MAX entries.
+     Exposed UI: badge in header + drawer. Keyboard: Ctrl+Alt+L.
+
+   Four DI seams replace what used to be direct references from ErrorLog into
+   modules that stay in app.js (Store, App, Session, AdminCockpit) — each
+   defaults to a safe no-op/fallback matching the original try/catch-swallowed
+   behavior:
+     setPlantResolver(fn)      — feeds _plant() (was Store.selectedPlant)
+     setRouteResolver(fn)      — feeds _route() (was App._currentTab/_ganttSub)
+     setAdminGate(fn)          — feeds renderBadge()'s visibility gate (was Session.isAdmin())
+     setBadgeClickHandler(fn)  — feeds the badge button's onclick (was App.goto + AdminCockpit.gotoOvTab)
+   renderBadge() is public (renamed from the former _renderBadge — the two
+   external call sites, Session._applyGates and _bootMain, plus the three
+   internal self-references inside ErrorLog itself, all move to this name).
+   ========================================================================== */
+let _plantResolver = () => null;
+let _routeResolver = () => null; // returns { tab, ganttSub } or null
+let _adminGate = () => false;
+let _badgeClick = () => {};
+
+export const ErrorLog = {
+  MAX: 500,
+  _entries: [],
+  _listeners: new Set(),
+  _recent: [],            // rolling 60s window of {ts, level} for rate alarms
+  _globalsInstalled: false,
+  _droppedCount: 0,       // count of entries evicted past MAX (surfaced as an overflow marker)
+  _breadcrumbs: [],       // rolling ring of recent typed Interaction events (see Interaction._log)
+  BREADCRUMB_MAX: 15,
+  // Per-page-load session id — generated once at module init so all entries from one
+  // page load share an id (lets backend correlate a frontend batch to a session).
+  SESSION_ID: (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+
+  setPlantResolver(fn) { _plantResolver = typeof fn === 'function' ? fn : () => null; },
+  setRouteResolver(fn) { _routeResolver = typeof fn === 'function' ? fn : () => null; },
+  setAdminGate(fn) { _adminGate = typeof fn === 'function' ? fn : () => false; },
+  setBadgeClickHandler(fn) { _badgeClick = typeof fn === 'function' ? fn : () => {}; },
+
+  // -- Guarded cross-module accessors -------------------------------------
+  // ErrorLog is defined early (before Store / App), so every reach into a
+  // later module is wrapped — a not-yet-ready module must never make a log
+  // push throw.
+  _buildId() {
+    // NIMBUS_BUILD_ID is the deploy build token; Config.BUILD_ID already mirrors it
+    // (falling back to 'dev'). APP_VERSION lives in the cache-bust IIFE, out of scope here.
+    try { return (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || Config.BUILD_ID; }
+    catch { return 'dev'; }
+  },
+  _plant() {
+    try { return _plantResolver() || null; }
+    catch { return null; }
+  },
+  _route() {
+    try {
+      const r = _routeResolver();
+      if (!r) return null;
+      const tab = r.tab || null;
+      if (tab === 'gantt' && r.ganttSub) return `gantt/${r.ganttSub}`;
+      return tab;
+    } catch { return null; }
+  },
+
+  // Record a typed breadcrumb (called by Interaction._log). Cheap, always on.
+  breadcrumb(type, data) {
+    try {
+      ErrorLog._breadcrumbs.push({ t: Date.now(), type, ...(data && typeof data === 'object' ? { d: data } : {}) });
+      if (ErrorLog._breadcrumbs.length > ErrorLog.BREADCRUMB_MAX) {
+        ErrorLog._breadcrumbs.splice(0, ErrorLog._breadcrumbs.length - ErrorLog.BREADCRUMB_MAX);
+      }
+    } catch {}
+  },
+
+  _push(level, scope, msg, ctx, opts) {
+    // opts (all optional): { reqId, errorCode, stack } — explicit structured fields.
+    const e = {
+      ts: new Date().toISOString(),
+      level, scope, msg,
+      ctx: ctx === undefined ? null : ErrorLog._safeCtx(ctx),
+    };
+    // Additive structured fields. All optional — old readers ignore unknown keys.
+    if (opts) {
+      if (opts.reqId      != null) e.reqId      = opts.reqId;
+      if (opts.errorCode  != null) e.errorCode  = opts.errorCode;
+      if (opts.stack      != null) e.stack      = opts.stack;
+    }
+    // Central enrichment.
+    if (level === 'error' && !e.stack) {
+      try { e.stack = new Error().stack; } catch {}
+    }
+    e.buildId   = ErrorLog._buildId();
+    e.sessionId = ErrorLog.SESSION_ID;
+    const plant = ErrorLog._plant(); if (plant) e.plant = plant;
+    const route = ErrorLog._route(); if (route) e.route = route;
+    // Attach breadcrumbs to error-level entries for postmortem context.
+    if (level === 'error' && ErrorLog._breadcrumbs.length) {
+      e.ctx = ErrorLog._safeCtx({ ...(e.ctx && typeof e.ctx === 'object' ? e.ctx : (e.ctx != null ? { _ctx: e.ctx } : {})), breadcrumbs: ErrorLog._breadcrumbs.slice() });
+    }
+
+    ErrorLog._entries.push(e);
+    if (ErrorLog._entries.length > ErrorLog.MAX) {
+      const drop = ErrorLog._entries.length - ErrorLog.MAX;
+      ErrorLog._entries.splice(0, drop);
+      ErrorLog._droppedCount += drop;
+    }
+    ErrorLog._pushRecent(level);
+    // mirror to console so power users see it
+    const fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
+    console[fn](`[${scope}]`, msg, ctx ?? '');
+    for (const l of ErrorLog._listeners) { try { l(e); } catch {} }
+    ErrorLog.renderBadge();
+    ErrorLog._scheduleSave();
+    if (level === 'error') ErrorLog._scheduleShip(e);
+  },
+  // Optional 4th arg `opts` carries structured {reqId, errorCode, stack}. Callers that
+  // pass only (scope, msg, ctx) keep working unchanged.
+  info (scope, msg, ctx, opts) { ErrorLog._push('info',  scope, msg, ctx, opts); },
+  warn (scope, msg, ctx, opts) { ErrorLog._push('warn',  scope, msg, ctx, opts); },
+  error(scope, msg, ctx, opts) { ErrorLog._push('error', scope, msg, ctx, opts); },
+
+  _pushRecent(level) {
+    const now = Date.now();
+    ErrorLog._recent.push({ ts: now, level });
+    while (ErrorLog._recent.length && ErrorLog._recent[0].ts < now - 60_000) ErrorLog._recent.shift();
+  },
+  errorRatePerMin() { return ErrorLog._recent.filter(e => e.level === 'error').length; },
+  warnRatePerMin()  { return ErrorLog._recent.filter(e => e.level === 'warn').length; },
+
+  installGlobalHandlers() {
+    if (ErrorLog._globalsInstalled) return;
+    ErrorLog._globalsInstalled = true;
+    window.addEventListener('error', e => {
+      const loc = e.filename ? `${e.filename}:${e.lineno || '?'}:${e.colno || '?'}` : '';
+      ErrorLog.error('uncaught', `${e.message || 'Unknown error'}${loc ? ' @ ' + loc : ''}`, e.error?.stack);
+    });
+    window.addEventListener('unhandledrejection', e => {
+      const reason = e.reason instanceof Error
+        ? `${e.reason.message}\n${e.reason.stack || ''}`
+        : String(e.reason);
+      ErrorLog.error('promise', reason);
+    });
+  },
+
+  entries() { return ErrorLog._entries.slice(); },
+  countBy(level) { return ErrorLog._entries.filter(e => e.level === level).length; },
+  // Number of entries evicted past MAX since last clear (0 when none dropped).
+  droppedCount() { return ErrorLog._droppedCount; },
+  clear() {
+    ErrorLog._entries = [];
+    ErrorLog._recent = [];        // clear the rolling rate window so the badge clears immediately
+    ErrorLog._droppedCount = 0;
+    ErrorLog.renderBadge();
+    ErrorLog._scheduleSave();
+    for (const l of ErrorLog._listeners) { try { l({ cleared: true }); } catch {} }
+  },
+  subscribe(fn) { ErrorLog._listeners.add(fn); return () => ErrorLog._listeners.delete(fn); },
+
+  /* -----------------------------------------------------------------------
+     DURABILITY — self-contained IndexedDB ring snapshot (own db/store, does
+     NOT touch IntelDB which another module owns). Restored on boot, saved
+     (debounced) on push. Fire-and-forget; never throws into a log push.
+     ----------------------------------------------------------------------- */
+  _DB_NAME:  'nimbus-errorlog',
+  _DB_STORE: 'ring',
+  _dbPromise: null,
+  _openDb() {
+    if (ErrorLog._dbPromise) return ErrorLog._dbPromise;
+    ErrorLog._dbPromise = new Promise((resolve, reject) => {
+      try {
+        if (typeof indexedDB === 'undefined') { resolve(null); return; }
+        const req = indexedDB.open(ErrorLog._DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(ErrorLog._DB_STORE)) db.createObjectStore(ErrorLog._DB_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror   = () => reject(req.error);
+      } catch (e) { reject(e); }
+    }).catch(() => null);
+    return ErrorLog._dbPromise;
+  },
+  _scheduleSave: Util.debounce(function () { ErrorLog._saveNow(); }, 800),
+  _saveNow() {
+    ErrorLog._openDb().then(db => {
+      if (!db) return;
+      try {
+        const tx = db.transaction(ErrorLog._DB_STORE, 'readwrite');
+        // Snapshot the tail (entries are already capped at MAX).
+        tx.objectStore(ErrorLog._DB_STORE).put(ErrorLog._entries.slice(-ErrorLog.MAX), 'entries');
+      } catch {}
+    }).catch(() => {});
+  },
+  /** Restore persisted entries from a previous page load (prepended, capped). */
+  restore() {
+    return ErrorLog._openDb().then(db => {
+      if (!db) return;
+      return new Promise(resolve => {
+        try {
+          const tx  = db.transaction(ErrorLog._DB_STORE, 'readonly');
+          const req = tx.objectStore(ErrorLog._DB_STORE).get('entries');
+          req.onsuccess = () => {
+            const prev = Array.isArray(req.result) ? req.result : [];
+            if (prev.length) {
+              ErrorLog._entries = prev.concat(ErrorLog._entries).slice(-ErrorLog.MAX);
+              ErrorLog.renderBadge();
+            }
+            resolve();
+          };
+          req.onerror = () => resolve();
+        } catch { resolve(); }
+      });
+    }).catch(() => {});
+  },
+
+  /* -----------------------------------------------------------------------
+     SHIP — batch error-level entries to POST /logs/frontend, fire-and-forget,
+     deduped by sessionId+reqId+ts, capped per batch (§1.6).
+     ----------------------------------------------------------------------- */
+  SHIP_BATCH_MAX: 50,
+  _shipQueue: [],
+  _shipSeen: new Set(),
+  _flushShip: Util.debounce(function () { ErrorLog._shipNow(); }, 1500),
+  // Enqueue synchronously (dedupe), then debounce the actual network flush.
+  _scheduleShip(e) { ErrorLog._enqueueShip(e); ErrorLog._flushShip(); },
+  _enqueueShip(e) {
+    const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}`;
+    if (ErrorLog._shipSeen.has(key)) return;
+    ErrorLog._shipSeen.add(key);
+    if (ErrorLog._shipSeen.size > 2000) ErrorLog._shipSeen.clear(); // bound the dedupe set
+    ErrorLog._shipQueue.push({
+      ts: e.ts, level: e.level, scope: e.scope, msg: e.msg,
+      errorCode: e.errorCode, reqId: e.reqId, stack: e.stack,
+      buildId: e.buildId, sessionId: e.sessionId, plant: e.plant, route: e.route,
+      ctx: e.ctx,
+    });
+  },
+  _shipNow() {
+    if (!ErrorLog._shipQueue.length) return;
+    const batch = ErrorLog._shipQueue.splice(0, ErrorLog.SHIP_BATCH_MAX);
+    try {
+      // fire-and-forget; never block UI, swallow all failures (the entries are
+      // still in the local ring + IndexedDB). Use bare fetch (not fetchTraced) so
+      // a failed ship can't recursively enqueue another error-level entry.
+      const url = `${Config.API_BASE}/logs/frontend`;
+      if (typeof fetch === 'function') {
+        fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entries: batch }),
+          keepalive: true,
+        }).catch(() => {});
+      }
+    } catch {}
+  },
+
+  _safeCtx(v) {
+    try { JSON.stringify(v); return v; }
+    catch { try { return String(v); } catch { return '[unserialisable]'; } }
+  },
+
+  // Debounced so rapid bursts of log pushes don't thrash the DOM. Guarded for
+  // headless callers (Node unit tests import this module with no `document`
+  // global) — real browser callers always have `document`, so this is a no-op
+  // there.
+  renderBadge: Util.debounce(function () {
+    if (typeof document === 'undefined') return;
+    if (!_adminGate()) {
+      const existing = document.getElementById('err-log-btn');
+      if (existing) existing.hidden = true;
+      return;
+    }
+    let btn = document.getElementById('err-log-btn');
+    if (!btn) {
+      const host = document.getElementById('alert-bell')?.parentElement
+                || document.querySelector('.topbar-actions')
+                || document.body;
+      btn = document.createElement('button');
+      btn.id = 'err-log-btn';
+      btn.className = 'icon-btn';
+      btn.innerHTML = '<span class="log-ico" aria-hidden="true">🖥️</span>'
+                     + '<span class="badge" id="err-log-badge" hidden>0</span>';
+      btn.onclick = () => { try { _badgeClick(); } catch {} };
+      host.appendChild(btn);
+    }
+    const tip = Util.t('tip.open_admin_log');
+    btn.title = tip;
+    btn.setAttribute('aria-label', tip);
+    const sessionEntries = ErrorLog._entries.filter(e => e.sessionId === ErrorLog.SESSION_ID);
+    const errs  = sessionEntries.filter(e => e.level === 'error').length;
+    const warns = sessionEntries.filter(e => e.level === 'warn').length;
+    const total = errs + warns;
+    const badge = btn.querySelector('#err-log-badge');
+    badge.hidden = total === 0;
+    badge.textContent = total;
+    badge.classList.toggle('warn', !errs && !!warns);
+  }, 80),
+
+  copy() {      const txt = ErrorLog._entries.map(e =>
+      `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
+    ).join('\n');
+    navigator.clipboard?.writeText(txt).then(
+      () => Toast.show(Util.t('toast.log_copied'), 'success'),
+      () => Toast.show(Util.t('toast.copy_failed'), 'error')
+    );
+  }
+};
+
+/* =============================================================================
+   TOAST — transient notification banners (top-right stack).
+     Toast.show(msg, type?, ms?)  — show a message; type: 'info'|'warn'|'error'|'success'
+     Cap of 3 visible at once: drops oldest non-error first when exceeded.
+     Dedupes by (msg, type) — repeats refresh the existing toast's timer.
+     Default duration 1500ms; callers may override.
+   ========================================================================== */
+export const Toast = (function() {
+  const MAX_VISIBLE = 3;
+  const _visible = [];
+
+  function _scheduleRemoval(entry, ms) {
+    entry.timerId = setTimeout(() => _remove(entry), ms);
+  }
+
+  function _remove(entry) {
+    if (entry._removing) return;
+    entry._removing = true;
+    if (entry.timerId) { clearTimeout(entry.timerId); entry.timerId = null; }
+    const idx = _visible.indexOf(entry);
+    if (idx !== -1) _visible.splice(idx, 1);
+    entry.el.classList.add('leaving');
+    setTimeout(() => entry.el.remove(), Config.ANIM_MS);
+  }
+
+  function _evictOne() {
+    let victim = _visible.find(e => e.type !== 'error');
+    if (!victim) victim = _visible[0];
+    if (victim) _remove(victim);
+  }
+
+  return {
+    show(msg, type = 'info', ms = 1500) {
+      const stack = document.getElementById('toast-stack');
+      if (!stack) return;
+
+      const dup = _visible.find(e => !e._removing && e.msg === msg && e.type === type);
+      if (dup) {
+        if (dup.timerId) clearTimeout(dup.timerId);
+        _scheduleRemoval(dup, ms);
+        return;
+      }
+
+      while (_visible.length >= MAX_VISIBLE) _evictOne();
+
+      const el = document.createElement('div');
+      el.className = `toast ${type}`;
+      el.textContent = msg;
+      stack.appendChild(el);
+
+      const entry = { el, msg, type, timerId: null, _removing: false };
+      _visible.push(entry);
+      _scheduleRemoval(entry, ms);
+    }
+  };
+})();
+
+/* =============================================================================
+   MODAL — show/hide helpers for all modals (driven by hidden attribute).
+     Modal.open(id)                  — unhide modal with the given element ID
+     Modal.close(id)                 — hide modal with the given element ID
+     Modal.confirm(msg, onOk, onCancel?) — two-button confirmation dialog
+   ========================================================================== */
+export const Modal = {
+  open(id)  { const el = document.getElementById(id); if (el) el.hidden = false; },
+  close(id) { const el = document.getElementById(id); if (el) el.hidden = true;  },
+
+  // Promise-based confirmation dialog.
+  // opts: { title, message, detail (HTML string), confirmLabel, tone: 'danger'|'warn' }
+  confirm(opts = {}) {
+    return new Promise(resolve => {
+      document.getElementById('confirm-title').textContent   = opts.title   || 'Confirm';
+      document.getElementById('confirm-message').textContent = opts.message || '';
+      const det = document.getElementById('confirm-detail');
+      if (opts.detail) { det.innerHTML = opts.detail; det.hidden = false; }
+      else             { det.textContent = ''; det.hidden = true; }
+      const okBtn = document.getElementById('confirm-ok-btn');
+      okBtn.textContent  = opts.confirmLabel || 'Confirm';
+      okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
+      const closeBtn = document.getElementById('confirm-close-btn');
+      const done = ok => { cleanup(); resolve(ok); };
+      const cleanup = () => {
+        okBtn.removeEventListener('click', onOk);
+        document.getElementById('confirm-cancel-btn').removeEventListener('click', onCancel);
+        closeBtn.removeEventListener('click', onCancel);
+        Modal.close('confirm-modal');
+      };
+      const onOk     = () => done(true);
+      const onCancel = () => done(false);
+      okBtn.addEventListener('click', onOk);
+      document.getElementById('confirm-cancel-btn').addEventListener('click', onCancel);
+      closeBtn.addEventListener('click', onCancel);
+      Modal.open('confirm-modal');
+    });
+  }
+};

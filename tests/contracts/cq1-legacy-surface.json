@@ -1,0 +1,857 @@
+{
+  "version": 1,
+  "inlineHandlers": [
+    {
+      "file": "application-foundation.mjs",
+      "attribute": "onchange",
+      "expression": "..."
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(0,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(1,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(2,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(3,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(4,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(5,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.EditCalendar.onToggle(6,this.checked)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onchange",
+      "expression": "NIMBUS.LaborPlanning.setSpan(+this.value)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AdminCockpit.gotoOvTab('data-ops')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AdminCockpit.gotoOvTab('diagnostics')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AdminCockpit.gotoOvTab('logs')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AdminCockpit.gotoOvTab('thread')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Alerts.dismissAll()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer.sort('name')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer.sort('priority')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._clearFilters()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.applyPreset('all')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.applyPreset('mf')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.applyPreset('ms')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.copyFromPlant()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.save()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.GanttFilter._toggleColorDropdown()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.GanttFilter._toggleFormDropdown()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.GanttFilter._toggleLineDropdown()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.GanttFilter._togglePoMatDropdown()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.nextHorizon()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.prevHorizon()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.toggleGroupDropdown(event)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('md-addcol-modal')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('md-renamelabel-modal')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('md-schema-export-modal')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-block')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-lines-block')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-override')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-plant-block')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-print')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-user-settings')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.applyPreset('2w')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.applyPreset('custom')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.applyPreset('horizon')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.cancelFromPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.cancelToPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.commitFrom()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.commitTo()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.open()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.openFromPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.openToPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.run()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectAllLines(false)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectAllLines(true)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectMode('changeover')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectMode('combined')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectMode('spt')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.setScope('lines')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.setScope('plant')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.toggleDropdown()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizerPreview.apply()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizerPreview.discard()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Persistence.saveAll()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Printer.exportCsv()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Printer.open()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Printer.preview()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Printer.print()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.SandboxAdapter.enter()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._clearChipFilters()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._toggleChipDropdown('color')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._toggleChipDropdown('date')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._toggleChipDropdown('line')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._toggleChipDropdown('pomat')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._toggleChipDropdown('status')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table.applyOverride()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table.exportCsv()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table.fixSelected(false)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table.fixSelected(true)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table.openOverrideModal()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Timeline.gotoNow()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Timeline.zoomToFit()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "if(event.target===this)NIMBUS.ColorWheelViewer.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "if(event.target===this)NIMBUS.EditCalendar.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "if(event.target===this)NIMBUS.OptimizeDialog.cancelFromPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "if(event.target===this)NIMBUS.OptimizeDialog.cancelToPicker()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
+      "expression": "if(event.target===this)NIMBUS.OptimizeDialog.close()"
+    },
+    {
+      "file": "index.html",
+      "attribute": "oninput",
+      "expression": "NIMBUS.ColorWheelViewer.search(this.value)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "oninput",
+      "expression": "NIMBUS.Dashboard._filterLineSearch(this.value)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "oninput",
+      "expression": "NIMBUS.OptimizeDialog.filterLines(this.value)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "oninput",
+      "expression": "NIMBUS.OptimizeDialog.filterPlants(this.value)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.LaborPlanning.setSpan(+this.value)"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI._clearLineFilter()"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer.open('${esc(plantName)}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.EditCalendar.open('${line}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant._confirmDeleteWheel('${esc(plantName)}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant._pillClick(${d})"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant.removePlantBlock('${b.id}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Plant.toggleBlocksList()"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ProdLines.openBlockModal('${line}')"
+    },
+    {
+      "file": "plant-and-administration.mjs",
+      "attribute": "oncontextmenu",
+      "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Dashboard._onLineChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onColorChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onFormChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onLineChange(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('color', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('date', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('line', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('status', this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Alerts.dismiss('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.ColorWheelViewer._toggleExpand(this)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrillClear()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._unfix('${t.id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Inspector.toggleFix(false)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Inspector.toggleFix(true)"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._closeNotePopover()"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._saveNotePopover('${id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "event.stopPropagation(); NIMBUS.Alerts.dismiss('${a.id}')"
+    },
+    {
+      "file": "schedule-workbench.mjs",
+      "attribute": "onclick",
+      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
+    }
+  ],
+  "htmlCommands": [
+    "AdminCockpit.gotoOvTab",
+    "Alerts.dismissAll",
+    "AlertsUIAdapter.toggleDrawer",
+    "ColorWheelViewer.close",
+    "ColorWheelViewer.search",
+    "ColorWheelViewer.sort",
+    "Dashboard._clearFilters",
+    "Dashboard._filterLineSearch",
+    "Dashboard._toggleDropdown",
+    "EditCalendar.applyPreset",
+    "EditCalendar.close",
+    "EditCalendar.copyFromPlant",
+    "EditCalendar.onToggle",
+    "EditCalendar.save",
+    "GanttFilter._toggleColorDropdown",
+    "GanttFilter._toggleFormDropdown",
+    "GanttFilter._toggleLineDropdown",
+    "GanttFilter._togglePoMatDropdown",
+    "LaborPlanning.nextHorizon",
+    "LaborPlanning.prevHorizon",
+    "LaborPlanning.setSpan",
+    "LaborPlanning.toggleGroupDropdown",
+    "Modal.close",
+    "OptimizeDialog.applyPreset",
+    "OptimizeDialog.cancelFromPicker",
+    "OptimizeDialog.cancelToPicker",
+    "OptimizeDialog.close",
+    "OptimizeDialog.commitFrom",
+    "OptimizeDialog.commitTo",
+    "OptimizeDialog.filterLines",
+    "OptimizeDialog.filterPlants",
+    "OptimizeDialog.open",
+    "OptimizeDialog.openFromPicker",
+    "OptimizeDialog.openToPicker",
+    "OptimizeDialog.run",
+    "OptimizeDialog.selectAllLines",
+    "OptimizeDialog.selectMode",
+    "OptimizeDialog.setScope",
+    "OptimizeDialog.toggleDropdown",
+    "OptimizerPreview.apply",
+    "OptimizerPreview.discard",
+    "Persistence.saveAll",
+    "Printer.exportCsv",
+    "Printer.open",
+    "Printer.preview",
+    "Printer.print",
+    "SandboxAdapter.enter",
+    "Table._clearChipFilters",
+    "Table._toggleChipDropdown",
+    "Table.applyOverride",
+    "Table.exportCsv",
+    "Table.fixSelected",
+    "Table.openOverrideModal",
+    "Timeline.gotoNow",
+    "Timeline.zoomToFit"
+  ],
+  "intelligenceCommands": [
+    "Alerts.scheduleRecompute",
+    "AlertsUIAdapter.focus",
+    "App.goto",
+    "App.gotoGanttTimeline",
+    "Compute.available",
+    "Compute.utilization",
+    "ErrorLog.warn",
+    "GanttFilter.isolateLine",
+    "Hierarchy.render",
+    "Inspector.show",
+    "Session.flushPrefs",
+    "Session.setPref",
+    "Store.alerts",
+    "Store.blocks",
+    "Store.isFixed",
+    "Store.plantBlocks",
+    "Store.pref",
+    "Store.rev",
+    "Store.roleDefaults",
+    "Store.selectedPlant",
+    "Store.setFixed",
+    "Store.subscribe",
+    "Store.tasks",
+    "Store.tasksArr",
+    "Store.updateMany",
+    "Store.userSettings",
+    "Timeline.focus",
+    "Timeline.gotoNow",
+    "Timeline.rebuild",
+    "Toast.show",
+    "UndoStack._entries",
+    "UndoStack.push",
+    "UndoStack.restoreTasks",
+    "UndoStack.snapshotTasks",
+    "Util.debounce",
+    "Util.norm",
+    "Util.startOfDay",
+    "Util.t",
+    "Utilization._cache",
+    "Utilization.computeMatrix"
+  ],
+  "privateConsumers": [
+    "CommandPalette._activate",
+    "CommandPalette._buildIndex",
+    "CommandPalette._buildPanel",
+    "CommandPalette._buildSelectionCommands",
+    "CommandPalette._cursor",
+    "CommandPalette._esc",
+    "CommandPalette._fuzzy",
+    "CommandPalette._highlight",
+    "CommandPalette._index",
+    "CommandPalette._lastQuery",
+    "CommandPalette._move",
+    "CommandPalette._panel",
+    "CommandPalette._recent",
+    "CommandPalette._render",
+    "CommandPalette._results",
+    "CommandPalette._search",
+    "Confidence._apply",
+    "Confidence._badge",
+    "Confidence._drawChart",
+    "Confidence._history",
+    "Confidence._injectBadge",
+    "Confidence._lastAlertsSrc",
+    "Confidence._lastRev",
+    "Confidence._recompute",
+    "Confidence._recomputeDebounced",
+    "Confidence._score",
+    "Confidence._sparkline",
+    "DarkMode._key",
+    "DarkMode._resolve",
+    "DarkMode._syncPill",
+    "Dashboard._clearFilters",
+    "Dashboard._filterLineSearch",
+    "Dashboard._renderHeatmap",
+    "Dashboard._toggleDropdown",
+    "Diff._enrich",
+    "Diff._fmtDelta",
+    "Diff._fmtShort",
+    "Diff._renderResults",
+    "GanttFilter._toggleColorDropdown",
+    "GanttFilter._toggleFormDropdown",
+    "GanttFilter._toggleLineDropdown",
+    "GanttFilter._togglePoMatDropdown",
+    "IntelDB._db",
+    "LangSwitcher._key",
+    "LangSwitcher._langs",
+    "NeedsEngine._bank",
+    "NeedsEngine._buildBank",
+    "NeedsEngine._cachedState",
+    "NeedsEngine._readState",
+    "OptimizerPreview._render",
+    "Patterns._LS_KEY",
+    "Patterns._THRESHOLD",
+    "Patterns._observe",
+    "Patterns._pairs",
+    "RipplePreview._active",
+    "RipplePreview._clearGhosts",
+    "RipplePreview._debouncedShow",
+    "RipplePreview._ghosts",
+    "RipplePreview._lastId",
+    "RipplePreview._show",
+    "SessionUIAdapter._renderSettingsPanes",
+    "Table._clearChipFilters",
+    "Table._toggleChipDropdown",
+    "TimeMachine._panel",
+    "TimeMachine._plantSnaps",
+    "TimeMachine._relTime",
+    "TimeMachine._renderPanel",
+    "TimeMachine._snapshotAuto",
+    "TimeMachine._snapshots",
+    "UndoStack._entries",
+    "Utilization._cache"
+  ]
+}
