@@ -2,17 +2,21 @@
    N.I.M.B.U.S. 2.0 — Application
    Organised as modules inside a single `NIMBUS` namespace.
 
-   Module map (load order):
-     Config            — constants + default calendars
-     Util              — date / duration helpers
-     Store             — reactive pub/sub state (single source of truth)
+   CQ-1 Phase 1 moved 11 of these modules out of this file into two real ES
+   modules, bridged in via app-entry.mjs (window.__NIMBUS_FOUNDATION /
+   __NIMBUS_STATE — see the destructure at the top of this IIFE):
+     Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal
+                       — now defined in application-foundation.mjs
+     Store, Selection, UndoStack, Sandbox
+                       — now defined in schedule-state.mjs
+   See docs/architecture/cq1-compatibility-inventory.md §1 for the full
+   ownership map, including where the modules below are headed in Phase 2-4.
+
+   Module map (load order) — modules still defined in THIS file:
      Calendar          — working-hours + blackout-block availability
      Alerts            — overload / conflict / fixed-violation detection
      Utilization       — scheduled vs. available hours
      Engine            — optimisation (SPT / changeover / combined) + auto-scheduler
-     ErrorLog          — error/info log with header badge + panel
-     Toast             — transient notification toasts
-     Modal             — generic modal show/hide
      Timeline          — vis-timeline integration (groups/items + diff rebuild)
      Table             — AG Grid integration (inline edit, filter, bulk ops)
      Inspector         — right-side detail panel
@@ -22,9 +26,6 @@
      GanttFilter       — filter bar above the Gantt
      DependencyOverlay — finish-to-start dependency arrows overlay
      ContextMenu       — right-click context menu
-     Selection         — multi-select with Shift/Ctrl/Cmd + keyboard nav
-     UndoStack         — 10-level undo for destructive ops
-     Sandbox           — sandboxed simulation / what-if preview
      Interaction       — unified click / dblclick / keyboard / drag pipeline
                          (owns all vis-timeline input events; app.js registers none)
      Persistence       — backend fetch + localStorage cache (nimbus.state.v3)
@@ -33,24 +34,10 @@
      App               — bootstrap + tab switching
    ========================================================================== */
 
-/* =============================================================================
-   CACHE-BUST GUARD
-   Stores a version token in sessionStorage. If the token changes (new deploy),
-   appends ?v=<token> to the URL so the browser fetches fresh assets.
-   Change APP_VERSION any time you deploy a new build.
-   ========================================================================== */
-(function () {
-  const APP_VERSION = '2026-07-13-d'; // ← bump this string on every deploy (keep in sync with NIMBUS_BUILD_ID in index.html)
-  const KEY = 'nimbus.app.ver';
-  const stored = sessionStorage.getItem(KEY);
-  if (stored !== APP_VERSION) {
-    sessionStorage.setItem(KEY, APP_VERSION);
-    const base = window.location.pathname + window.location.search.replace(/[?&]_v=[^&]*/g, '');
-    const sep  = base.includes('?') ? '&' : '?';
-    window.location.replace(base + sep + '_v=' + APP_VERSION);
-  }
-})();
-
+// CACHE-BUST GUARD moved to web/app-entry.mjs's runCacheBustGuard() (CQ-1): it
+// now runs before app.js is even requested, off `NIMBUS_BUILD_ID` instead of a
+// second, separately-bumped `APP_VERSION` constant here. See that file for the
+// full rationale.
 
 const NIMBUS = (function () {
   'use strict';
@@ -79,7 +66,6 @@ const NIMBUS = (function () {
   ErrorLog.setBadgeClickHandler(() => { App.goto('admin'); AdminCockpit.gotoOvTab('logs'); });
   Store.setAllowedPlantsResolver(() => Session.allowedPlants());
   Store.setSettingsDefaultsResolver(() => Settings.DEFAULTS);
-  Store.setSelectionRemoveHook(id => Selection.remove(id));
 
   /* =============================================================================
      SETTINGS — per-user settings catalog + system defaults (single source of

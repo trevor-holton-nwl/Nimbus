@@ -55,17 +55,13 @@ test('Store.setSettingsDefaultsResolver feeds Store.pref()\'s fallback tier', ()
   Store.setSettingsDefaultsResolver(() => ({})); // reset
 });
 
-test('Store.setSelectionRemoveHook is called by removeTask instead of a bare Selection reference', () => {
-  // NIMBUS's own Selection module doesn't live in this file yet (a later CQ-1 task
-  // moves it here) and the browser defines an unrelated global `Selection` (the DOM
-  // Selection API) — removeTask must go through the injected hook, never a bare
-  // `Selection.remove(...)` reference that would resolve to the wrong thing.
+test('Store.removeTask removes the id from Selection directly (Selection is a sibling export in this module)', () => {
   Store.setTasks([{ id: 'rm1', RUN_TIME: '1' }], 'unit-test');
-  let removedId = null;
-  Store.setSelectionRemoveHook(id => { removedId = id; });
+  Selection.clear();
+  Selection.add(['rm1']);
+  assert.ok(Selection.has('rm1'));
   Store.removeTask('rm1', 'unit-test');
-  assert.equal(removedId, 'rm1');
-  Store.setSelectionRemoveHook(() => {}); // reset
+  assert.ok(!Selection.has('rm1'));
 });
 
 test('Selection tracks ids and selectedRefs() resolves plant per id', () => {
@@ -121,6 +117,33 @@ test('Sandbox.exit(false) restores the pre-enter snapshot and emits sandbox:exit
   const exitEvt = events.find(e => e.type === 'sandbox:exited');
   assert.equal(exitEvt.applied, false);
   assert.equal(exitEvt.snapshot, snap);
+});
+
+test('Sandbox.exit(false) emits one *:replace event per restored field, pinned so drift is deliberate', () => {
+  // Each Store.replaceX() call fires its own '<field>:replace' event, distinct
+  // from the '<field>:change' events that field's normal mutators fire — see
+  // docs/architecture/cq1-compatibility-inventory.md §6. Nothing subscribes to
+  // the *:replace variants today (a grep across web/ confirms it), so the extra
+  // events are inert — but a future consumer of 'blocks:change'/'calendar:change'/
+  // etc. must also handle the '*:replace' counterpart, or it will silently miss
+  // updates made during a What-If discard. This test exists so a change to that
+  // event contract (fewer/more/renamed events) is a deliberate edit here, not a
+  // silent regression.
+  Store.setTasks([{ id: 'sb-repl', RUN_TIME: '1' }], 'unit-test');
+  Sandbox.enter('unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt.type));
+  Sandbox.exit(false, 'unit-test');
+  off();
+  assert.deepEqual(events, [
+    'tasks:bulk',
+    'blocks:replace',
+    'calendar:replace',
+    'plants:replace',
+    'plantBlocks:replace',
+    'fixed:replace',
+    'sandbox:exited',
+  ]);
 });
 
 test('Sandbox.exit(true) pushes exactly one UndoStack entry and emits applied:true', () => {

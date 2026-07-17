@@ -66,3 +66,41 @@ test('ErrorLog.info/warn/error record entries readable via entries()', () => {
   assert.equal(entries[0].level, 'warn');
   assert.equal(entries[0].scope, 'unit-test');
 });
+
+test('ErrorLog.setPlantResolver feeds _plant() and enriches new log entries with plant', () => {
+  ErrorLog.clear();
+  ErrorLog.setPlantResolver(() => '5512');
+  assert.equal(ErrorLog._plant(), '5512');
+  ErrorLog.warn('unit-test', 'plant-scoped');
+  const entries = ErrorLog.entries();
+  assert.equal(entries[entries.length - 1].plant, '5512');
+  ErrorLog.setPlantResolver(() => null); // reset
+});
+
+test('ErrorLog._plant() defaults to null and swallows a throwing resolver', () => {
+  assert.equal(ErrorLog._plant(), null); // default resolver, never set
+  ErrorLog.setPlantResolver(() => { throw new Error('boom'); });
+  assert.equal(ErrorLog._plant(), null); // throwing resolver caught, not propagated
+  ErrorLog.setPlantResolver(() => null); // reset
+});
+
+test('ErrorLog.setRouteResolver feeds _route() (tab/ganttSub) and enriches log entries with route', () => {
+  ErrorLog.clear();
+  ErrorLog.setRouteResolver(() => ({ tab: 'gantt', ganttSub: 'timeline' }));
+  assert.equal(ErrorLog._route(), 'gantt/timeline');
+  ErrorLog.warn('unit-test', 'route-scoped');
+  const entries = ErrorLog.entries();
+  assert.equal(entries[entries.length - 1].route, 'gantt/timeline');
+  ErrorLog.setRouteResolver(() => null); // reset
+});
+
+test('ErrorLog._route() falls back to the bare tab without a ganttSub, and to null with no resolver/data', () => {
+  assert.equal(ErrorLog._route(), null); // default resolver, never set
+  ErrorLog.setRouteResolver(() => ({ tab: 'dashboard' }));
+  assert.equal(ErrorLog._route(), 'dashboard');
+  ErrorLog.setRouteResolver(() => null);
+  assert.equal(ErrorLog._route(), null);
+  ErrorLog.setRouteResolver(() => { throw new Error('boom'); });
+  assert.equal(ErrorLog._route(), null); // throwing resolver caught, not propagated
+  ErrorLog.setRouteResolver(() => null); // reset
+});

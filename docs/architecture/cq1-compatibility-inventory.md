@@ -243,14 +243,41 @@ when a consumer's turn comes.
 reads it directly with no seam — `'draft'` while a What-If session is active,
 `'live'` otherwise.
 
-`Store.removeTask()` calls an injected `_selectionRemoveHook` (wired via
-`Store.setSelectionRemoveHook(fn)`) instead of a bare `Selection.remove(...)`
-reference, for the same reason `Util`/`ErrorLog` use resolver seams for
-not-yet-extracted modules — except here the risk is sharper than a lint
-error: browsers define a real, unrelated global `Selection` (the DOM
-Selection API, `window.Selection`), so an unguarded reference would silently
-resolve to the wrong thing and throw `Selection.remove is not a function` at
-runtime instead of failing fast. `app.js` wires
-`Store.setSelectionRemoveHook(id => Selection.remove(id))` once, alongside
-the other DI seams. Remove this seam once `Selection` itself moves into
-`schedule-state.mjs` and `removeTask()` can reference it directly.
+`Store.removeTask()` now references `Selection` directly (a `typeof
+Selection !== 'undefined'` guard, same pattern as `Store.mode()`'s reference
+to `Sandbox`) instead of the injected `_selectionRemoveHook` seam this
+document previously described. That seam existed only because `Selection`
+didn't yet live in this file (Task 3); it was co-located here in Task 4 of
+this same Phase 1 diff, and the indirection has since been removed — there is
+no live `_selectionRemoveHook`/`setSelectionRemoveHook` in `schedule-state.mjs`
+or `app.js` anymore.
+
+**Boot-timing change (script-load path, not app behavior):** pre-CQ-1, `app.js`
+loaded via a parser-blocking `document.write('<script src="app.js">')`, so its
+cache-bust guard (the redirect-on-stale-build check formerly at the very top
+of `app.js`) ran near-instantly, mid-HTML-parse. Under the CQ-1 entry point,
+`app.js` is instead fetched by a dynamically-created `<script>` from inside
+`app-entry.mjs`'s `bootEntry()`, itself only reached after this deferred
+`type="module"` entry point runs (post-full-parse) and its own static
+imports (`application-foundation.mjs`, `schedule-state.mjs`) resolve. Left
+alone, that would delay the redirect check until after app.js's own network
+fetch completed too — a real (if low-severity) window for a user to see a
+flash of stale UI on deploy day before the reload fires. The guard was moved
+to `app-entry.mjs`'s `runCacheBustGuard()`, which runs as soon as this
+module's top-level code executes, before app.js/nimbus-intelligence.js are
+even requested — recovering most of that gap, though not the parser-blocking
+timing itself (accepted cost of the ESM entry point). See `app-entry.mjs` and
+`tests/modules/app-entry.test.mjs` for the implementation and tests.
+
+**`Sandbox.exit(false)` (What-If discard) event contract:** the discard path
+calls `Store.setTasks`/`replaceBlocks`/`replaceCalendars`/`replacePlants`/
+`replacePlantBlocks`/`replaceFixedIds`, each of which fires its own event
+(`tasks:bulk`, `blocks:replace`, `calendar:replace`, `plants:replace`,
+`plantBlocks:replace`, `fixed:replace`) before the final `sandbox:exited`.
+Nothing subscribes to the five `*:replace` event types today, so this is
+inert — but any **future** consumer of `blocks:change` / `calendar:change` /
+`plants:change` / `plantBlocks:change` / `fixed:change` must also handle the
+matching `*:replace` variant, or it will silently miss the state changes a
+What-If discard makes. The exact event sequence is pinned by a test in
+`tests/modules/schedule-state.test.mjs` so a future change to it (batching,
+renaming, dropping events) is a deliberate edit, not silent drift.

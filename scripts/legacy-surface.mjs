@@ -9,7 +9,7 @@
 //   node scripts/legacy-surface.mjs          # diff vs contract; exit 1 on drift
 //   node scripts/legacy-surface.mjs --write  # write / overwrite contract
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -18,19 +18,39 @@ export const ROOT = resolve(__dirname, '..');
 const CONTRACT_PATH = resolve(ROOT, 'tests/contracts/cq1-legacy-surface.json');
 
 // ---------------------------------------------------------------------------
+// Discover every `.mjs` file under web/ (the CQ-1 module-extraction targets —
+// application-foundation.mjs, schedule-state.mjs, app-entry.mjs today, and
+// whatever Phase 2+ adds: schedule-services.mjs, schedule-data.mjs, etc.).
+// Scanned the same way app.js is scanned (§1 below) so text moving out of
+// app.js into one of these files doesn't silently drop out of the inventory —
+// see the CQ-1 review finding this fixes: the scanner used to hardcode
+// exactly 3 sources and never looked at these files at all.
+// ---------------------------------------------------------------------------
+export function discoverModuleSources(root = ROOT) {
+  const webDir = resolve(root, 'web');
+  return readdirSync(webDir)
+    .filter(f => f.endsWith('.mjs'))
+    .sort()
+    .map(f => ({ file: f, source: readFileSync(resolve(webDir, f), 'utf8') }));
+}
+
+// ---------------------------------------------------------------------------
 // Core scanner — pure function, no I/O.
 // ---------------------------------------------------------------------------
 
 /**
  * Scan legacy source texts for the CQ-1 compatibility surface.
  *
- * @param {{ htmlSource: string, intelligenceSource: string, appSource: string }} sources
+ * @param {{ htmlSource: string, intelligenceSource: string, appSource: string,
+ *           moduleSources?: {file: string, source: string}[] }} sources
  * @returns {{ version: number, inlineHandlers: object[], htmlCommands: string[],
  *             intelligenceCommands: string[], privateConsumers: string[] }}
  */
-export function scanLegacySurface({ htmlSource, intelligenceSource, appSource }) {
+export function scanLegacySurface({ htmlSource, intelligenceSource, appSource, moduleSources = [] }) {
   // -- 1. Inline handlers --------------------------------------------------
-  // Scan on[a-z]+="..." in index.html and JS template literals in app.js.
+  // Scan on[a-z]+="..." in index.html, JS template literals in app.js, and
+  // the same in every extracted CQ-1 .mjs module (moduleSources) — any of
+  // these can contain JS-generated HTML strings with onclick="..." etc.
   const handlerRe = /\bon([a-z]+)="([^"]+)"/g;
   const handlerMap = new Map();
 
@@ -45,6 +65,7 @@ export function scanLegacySurface({ htmlSource, intelligenceSource, appSource })
 
   collectHandlers(htmlSource, 'index.html');
   collectHandlers(appSource, 'app.js');
+  for (const { file, source } of moduleSources) collectHandlers(source, file);
 
   const inlineHandlers = [...handlerMap.values()].sort((a, b) => {
     const ka = `${a.file}|${a.attribute}|${a.expression}`;
@@ -138,8 +159,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const htmlSource = readFileSync(resolve(ROOT, 'web/index.html'), 'utf8');
   const intelligenceSource = readFileSync(resolve(ROOT, 'web/nimbus-intelligence.js'), 'utf8');
   const appSource = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
+  const moduleSources = discoverModuleSources(ROOT);
 
-  const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource });
+  const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, moduleSources });
 
   if (process.argv.includes('--write')) {
     writeFileSync(CONTRACT_PATH, JSON.stringify(surface, null, 2) + '\n', 'utf8');

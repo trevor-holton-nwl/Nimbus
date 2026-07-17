@@ -5,18 +5,13 @@
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
 
-// Three DI seams replace what used to be direct references from Store into modules
-// that stay in app.js (Session, Settings, Selection) — each defaults to a safe
-// fallback (no scoping / no defaults / no-op) when unset.
-//
-// _selectionRemoveHook in particular replaces a bare `Selection` reference: NIMBUS's
-// own Selection module doesn't live in this file until a later CQ-1 task, and the
-// browser defines a *real*, unrelated global `Selection` (the DOM Selection API,
-// window.Selection) — so a same-file `typeof Selection !== 'undefined'` guard would
-// find that global instead and then throw calling its nonexistent `.remove()`.
+// Two DI seams replace what used to be direct references from Store into modules
+// that stay in app.js (Session, Settings) — each defaults to a safe fallback
+// (no scoping / no defaults) when unset. Selection needs no such seam: it is a
+// sibling top-level export in this same module (see below), so `removeTask()`
+// references it directly — same as `mode()` does for `Sandbox`.
 let _allowedPlantsResolver = () => null;
 let _settingsDefaultsResolver = () => ({});
-let _selectionRemoveHook = () => {};
 
 /* =============================================================================
    STORE — single reactive source of truth.
@@ -48,7 +43,6 @@ export const Store = {
 
   setAllowedPlantsResolver(fn) { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
   setSettingsDefaultsResolver(fn) { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
-  setSelectionRemoveHook(fn) { _selectionRemoveHook = typeof fn === 'function' ? fn : () => {}; },
   rev() { return this._rev || 0; },
   // 'draft' once What-If mode is active. `Sandbox` is declared further down in
   // this same module (a sibling top-level const) — referencing it here is safe
@@ -166,9 +160,12 @@ export const Store = {
     }
 
     this._state.fixedIds.delete(key);
-    // Selection lives in app.js until a later CQ-1 task moves it into this module —
-    // see setSelectionRemoveHook() above for why this isn't a bare `Selection.remove()`.
-    _selectionRemoveHook(key);
+    // `Selection` is declared further down in this same module (a sibling
+    // top-level const) — referencing it here is safe even though it appears
+    // "before" its declaration in file order, because removeTask() is never
+    // *called* until well after module evaluation completes (same reasoning
+    // as Store.mode()'s reference to Sandbox, above).
+    if (typeof Selection !== 'undefined') Selection.remove(key);
     this.emit({ type: 'task:remove', id: key, prev, source });
     return prev;
   },
@@ -763,7 +760,14 @@ export const Sandbox = {
         Store.emit({ type: 'sandbox:reverted', source: 'undo' });
       });
     } else {
-      // Discard: restore the pre-enter snapshot wholesale.
+      // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
+      // fires its own '<field>:replace' event (distinct from that field's normal
+      // '<field>:change' event) — a future consumer of 'blocks:change' /
+      // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'fixed:change'
+      // must also handle the '*:replace' counterpart or it will silently miss
+      // updates that happen via a What-If discard. See
+      // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
+      // event-sequence test in tests/modules/schedule-state.test.mjs.
       Store.setTasks(snap.tasks, 'sandbox');
       Store.replaceBlocks(snap.blocks, 'sandbox');
       Store.replaceCalendars(snap.calendars, 'sandbox');

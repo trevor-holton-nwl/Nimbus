@@ -135,10 +135,13 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
     document: document_,
     navigator: { userAgent: 'Node/TestHarness', language: 'en-US' },
 
-    // Storage — pre-seed sessionStorage with the current APP_VERSION so the
-    // cache-bust guard at the top of app.js doesn't call window.location.replace.
+    // Storage. (The cache-bust guard that used to live at the top of app.js and
+    // read this same 'nimbus.app.ver' key has moved to app-entry.mjs's
+    // runCacheBustGuard() — app.js loaded directly via this VM harness no
+    // longer touches sessionStorage for that purpose, but an empty seed is
+    // kept here as a harmless, deterministic default for any other reader.)
     localStorage:  makeStorage(storageSeed),
-    sessionStorage: makeStorage({ 'nimbus.app.ver': '2026-07-13-d' }),
+    sessionStorage: makeStorage({}),
 
     // Web APIs
     performance: { now: () => 0 },
