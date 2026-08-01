@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-07-17-a';</script>
-<link rel="stylesheet" href="styles.css?v=2026-07-17-a">
+<script>window.NIMBUS_BUILD_ID = '2026-07-31-a';</script>
+<link rel="stylesheet" href="styles.css?v=2026-07-31-a">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1094,39 +1094,22 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="app">
 
   <!-- =========================================================
-       TOP BAR — brand + primary tabs + global actions
+       COMMAND BAND — hamburger, brand, active-section label, global actions
+       (JS wiring for hamburger/section-label/confidence ring is a later task)
        ========================================================= -->
-  <header class="topbar">
+  <header class="cmd-band">
+    <button type="button" id="nav-drawer-toggle" class="cmd-hamburger" aria-label="Menu" aria-expanded="false" aria-controls="nav-drawer">
+      <span class="cmd-hamburger-bar"></span>
+      <span class="cmd-hamburger-bar"></span>
+      <span class="cmd-hamburger-bar"></span>
+    </button>
+
     <div class="brand">
-      <span class="brand-mark"></span>
-      <span class="brand-name">NIMBUS 🧹</span>
-      <span class="brand-ver"></span>
+      <span class="cmd-brand-name">NIMBUS</span>
+      <span class="cmd-brand-tag">SCHEDULING</span>
     </div>
 
-    <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
-      <label class="hps-label" for="hps-input" data-i18n="ui.plant_label">Plant</label>
-      <div class="hps-combobox" id="hps-combobox">
-        <input type="text" id="hps-input" class="hps-input" placeholder="Select" data-i18n-placeholder="ph.select_plant"
-               autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false">
-        <button type="button" class="hps-clear" id="hps-clear" title="Clear plant filter" data-i18n-title="tip.clear_plant_filter" hidden>×</button>
-        <div class="hps-dropdown" id="hps-dropdown" role="listbox" hidden></div>
-      </div>
-    </div>
-
-    <nav class="tabs" role="tablist">
-      <button class="tab-btn active" data-tab="home" role="tab">
-        <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
-      </button>
-      <button class="tab-btn" data-tab="gantt" role="tab">
-        <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
-      </button>
-      <button class="tab-btn" data-tab="labor" role="tab">
-        <span class="tab-ico">☖</span><span data-i18n="tab.labor">Labor Plan</span>
-      </button>
-      <button class="tab-btn" data-tab="masterdata" role="tab">
-        <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
-      </button>
-    </nav>
+    <span class="cmd-section-label" id="cmd-band-section-label"></span>
 
     <div class="topbar-actions">
       <button id="alert-bell" class="icon-btn" data-i18n-title="tip.click_view_alerts" title="Alerts">
@@ -1137,6 +1120,26 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button id="user-settings-btn" class="icon-btn" hidden data-i18n-title="tip.user_settings" title="User Settings"><img src="/Images/user.png" alt="" class="user-icon-avatar"></button>
     </div>
   </header>
+
+  <!-- =========================================================
+       CONTEXT BAR — relocated plant selector + Lines pill
+       (Lines-pill click dispatch is a later task)
+       ========================================================= -->
+  <div class="context-bar">
+    <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
+      <label class="hps-label" for="hps-input" data-i18n="ui.plant_label">Plant</label>
+      <div class="hps-combobox" id="hps-combobox">
+        <input type="text" id="hps-input" class="hps-input" placeholder="Select" data-i18n-placeholder="ph.select_plant"
+               autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false">
+        <button type="button" class="hps-clear" id="hps-clear" title="Clear plant filter" data-i18n-title="tip.clear_plant_filter" hidden>×</button>
+        <div class="hps-dropdown" id="hps-dropdown" role="listbox" hidden></div>
+      </div>
+    </div>
+
+    <button type="button" class="context-pill" id="context-lines-pill">
+      <span data-i18n="ui.lines_section">Lines</span>
+    </button>
+  </div>
 
   <!-- =========================================================
        TAB: DASHBOARD
@@ -1953,6 +1956,54 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </section>
 
 </div><!-- /.app -->
+
+<!-- =========================================================
+     NAV DRAWER (slide-in) + scrim — replaces the old horizontal nav.tabs.
+     Open/close wiring (hamburger, scrim click, PLANT row, admin-gate hidden
+     toggle already exists in application-shell.mjs) is a later task; the
+     markup here is inert (no .open class, hamburger/close/plant buttons have
+     no handlers yet).
+     ========================================================= -->
+<div class="drawer-scrim" id="nav-drawer-scrim"></div>
+<nav class="nav-drawer" id="nav-drawer" aria-label="Primary">
+  <div class="nav-drawer-head">
+    <span class="nav-drawer-brand">NIMBUS</span>
+    <button type="button" class="nav-drawer-close" id="nav-drawer-close" aria-label="Close menu">×</button>
+  </div>
+
+  <div class="nav-drawer-section nav-drawer-nav" role="tablist">
+    <div class="nav-drawer-eyebrow">NAVIGATE</div>
+    <button class="tab-btn active" data-tab="home" role="tab">
+      <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
+    </button>
+    <button class="tab-btn" data-tab="gantt" role="tab">
+      <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
+    </button>
+    <button class="tab-btn" data-tab="labor" role="tab">
+      <span class="tab-ico">☖</span><span data-i18n="tab.labor">Labor Plan</span>
+    </button>
+    <button class="tab-btn" data-tab="masterdata" role="tab">
+      <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
+    </button>
+    <!-- Activates the dormant admin-gate in application-shell.mjs
+         (`adminBtn.hidden = !Session.isAdmin()`), which previously targeted
+         a non-existent node. Defaults hidden (matches the #user-settings-btn
+         precedent of hidden-until-resolved) — the gate corrects this on init
+         for whichever way Session.isAdmin() resolves. -->
+    <button class="tab-btn" data-tab="admin" role="tab" hidden>
+      <span class="tab-ico">⚙</span><span data-i18n="tab.admin">Admin Cockpit</span>
+    </button>
+  </div>
+
+  <div class="nav-drawer-section nav-drawer-plant">
+    <div class="nav-drawer-eyebrow">PLANT</div>
+    <button type="button" class="nav-drawer-plant-row" id="nav-drawer-plant-btn">
+      <span class="nav-drawer-plant-label">Change Plant</span>
+    </button>
+  </div>
+
+  <div class="nav-drawer-footer">NIMBUS Production Scheduling</div>
+</nav>
 
 <!-- =========================================================
      ALERT DRAWER (slide-in)

@@ -122,39 +122,234 @@ h1, h2, h3, h4 {
 /* --- SHELL LAYOUT --------------------------------------------------------- */
 .app { display: flex; flex-direction: column; height: 100%; }
 
-/* --- TOP BAR -------------------------------------------------------------- */
-.topbar {
+/* --- COMMAND BAND (Command Band re-skin: Task 3 chrome) --------------------
+   Replaces the old single .topbar with two stacked bars: .cmd-band (dark
+   chrome masthead: hamburger, brand, active-section label, global actions)
+   and .context-bar (light, plant selector + Lines pill) below it. See
+   .nav-drawer further down for the left slide-in nav that replaced the old
+   horizontal nav.tabs strip. ------------------------------------------------ */
+.cmd-band {
   flex-shrink: 0;
-  display: flex; align-items: center; gap: 18px;
-  padding: 0 16px;
-  height: var(--chrome-h);
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 14px;
+  height: var(--band-h);
+  background: var(--chrome-bg);
+  color: var(--chrome-fg);
   position: relative;
   z-index: 100;
 }
-.topbar::after {
-  content: ''; position: absolute;
-  left: 0; right: 0; bottom: -1px;
-  height: 1px;
-  background: var(--accent);
-  pointer-events: none;
+
+.cmd-hamburger {
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  width: 32px; height: 30px;
+  padding: 0 7px;
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-md);
+  transition: background var(--t-fast);
+}
+.cmd-hamburger:hover { background: var(--chrome-panel); }
+.cmd-hamburger-bar {
+  display: block; height: 2px; border-radius: 2px;
+  background: var(--chrome-fg-mute);
 }
 
+/* .brand is the shared brand wrapper — was sized for the old single .topbar
+   (height/line-height: var(--chrome-h), border-right: var(--line)); now it
+   lives inside the shorter, always-dark .cmd-band only, so both are repointed
+   to band-scoped tokens. */
 .brand {
   display: flex; align-items: baseline; gap: 7px;
   font-family: 'Archivo', sans-serif;
   padding-right: 12px;
-  border-right: 1px solid var(--line);
-  height: var(--chrome-h);
-  line-height: var(--chrome-h);
+  border-right: 1px solid var(--chrome-border);
+  height: var(--band-h);
+  line-height: var(--band-h);
 }
-.brand-mark { color: var(--accent); font-size: 16px; line-height: 1; }
-.brand-name { font-weight: 800; letter-spacing: 0.01em; font-size: 14px; }
-.brand-ver  { font-weight: 600; color: var(--fg-mute); font-size: 11px; letter-spacing: 0.08em; }
+.cmd-brand-name { font-weight: 800; letter-spacing: 0.02em; font-size: 15px; color: var(--chrome-fg); }
+.cmd-brand-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 500; font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--chrome-fg-faint);
+}
 
-/* Tabs */
-.tabs { display: flex; gap: 2px; flex: 1; }
+/* Active-section label — text is set on every nav by a later task (Task 4);
+   intentionally carries no data-i18n (see global-constraints.md i18n rules:
+   a dynamically-updated label must be set via inline Util.t(), not a static
+   sweep attribute). */
+.cmd-section-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px; font-weight: 600;
+  color: var(--chrome-fg-mute);
+  padding-left: 12px;
+  border-left: 1px solid var(--chrome-border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- CONTEXT BAR ------------------------------------------------------------
+   position:relative + z-index:90 (not auto) is deliberate: .hps-dropdown
+   (position:absolute; z-index:80) is anchored inside here via #hps-combobox,
+   which itself has no stacking context (position:relative, z-index:auto) — so
+   the dropdown's stacking context bubbles up to whichever ancestor first
+   establishes one. z-index:90 keeps that bubble-up point comfortably above
+   ordinary tab-panel content (nothing in the Gantt/Dashboard/AG-Grid body
+   exceeds z-index:20) without creating a LOW-ranked stacking context that
+   would cap/trap the dropdown below it — the failure mode this rule exists
+   to avoid. overflow:visible is explicit so the bar itself never clips the
+   dropdown that paints below it. -------------------------------------------- */
+.context-bar {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 18px;
+  height: var(--context-h);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 90;
+  overflow: visible;
+}
+.context-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 27px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+  color: var(--fg-mute);
+  font-size: 12px; font-weight: 500;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.context-pill:hover { background: var(--bg-subtle); color: var(--fg); }
+
+/* --- LEFT NAV DRAWER + SCRIM (Command Band re-skin) -------------------------
+   Replaces the old horizontal nav.tabs strip. Reuses the existing .tab-btn
+   class/data-tab contract untouched (see overrides below) so the tab-switch
+   JS (App.goto, the admin-gate in application-shell.mjs) needs zero query-
+   selector changes. Open/close is wired by a later task (Task 4) via the
+   .open class toggle below — inert until then. z-index is placed below
+   .modal-backdrop (2000) so modals still win, mirroring the existing
+   .alert-drawer (500) / #sandbox-banner (450) band. ------------------------- */
+.drawer-scrim {
+  position: fixed; inset: 0;
+  background: rgba(12, 28, 48, 0.4);
+  z-index: 1400;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-med);
+}
+.drawer-scrim.open { opacity: 1; pointer-events: all; }
+
+.nav-drawer {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  width: 264px;
+  background: var(--chrome-bg);
+  display: flex; flex-direction: column;
+  box-shadow: 2px 0 16px rgba(12,28,48,0.35);
+  transform: translateX(-100%);
+  transition: transform 0.22s cubic-bezier(0.4,0,0.2,1);
+  z-index: 1401;
+}
+.nav-drawer.open { transform: translateX(0); }
+
+.nav-drawer-head {
+  display: flex; align-items: center; gap: 10px;
+  height: var(--band-h);
+  padding: 0 16px;
+  background: var(--chrome-bg-deep);
+  color: var(--chrome-fg);
+  flex-shrink: 0;
+}
+.nav-drawer-brand { font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 14px; letter-spacing: 0.02em; }
+.nav-drawer-close {
+  margin-left: auto;
+  width: 26px; height: 26px;
+  background: transparent; border: 0;
+  border-radius: var(--r-sm);
+  color: var(--chrome-fg-faint);
+  font-size: 18px; line-height: 1;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.nav-drawer-close:hover { color: var(--chrome-fg); background: var(--chrome-panel); }
+
+.nav-drawer-section { padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.nav-drawer-nav { flex: 1; overflow-y: auto; }
+.nav-drawer-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em;
+  color: var(--chrome-fg-faint);
+  padding: 6px 12px 4px;
+}
+.nav-drawer-plant { border-top: 1px solid var(--chrome-border); }
+.nav-drawer-plant-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 9px 12px;
+  border: 0; border-radius: var(--r-md);
+  background: var(--chrome-panel);
+  color: var(--chrome-fg);
+  font-size: 12.5px; font-weight: 600;
+  transition: background var(--t-fast);
+}
+.nav-drawer-plant-row:hover { background: var(--chrome-border); }
+
+.nav-drawer-footer {
+  padding: 10px 20px;
+  border-top: 1px solid var(--chrome-border);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--chrome-fg-faint);
+  flex-shrink: 0;
+}
+
+/* R3-1 — drawer-scoped .tab-btn overrides (required, not optional).
+   .tab-btn is reused verbatim inside .nav-drawer (same class/data-tab the
+   tab-switch JS queries), but several existing .tab-btn rules were written
+   for the old light, horizontal, width-constrained topbar strip and bleed
+   into the new full-width vertical dark drawer unless scoped off. All
+   selectors below are #nav-drawer-prefixed (adds an ID to the specificity)
+   so they win over the originals regardless of source order — a plain
+   .nav-drawer-prefixed selector would tie on specificity with e.g. the
+   max-width:1200px media query's `.tab-btn span:not(.tab-ico)` rule and the
+   outcome would depend on declaration order instead of being deterministic.
+   Base idle/hover color is also repointed here (light --fg-mute/--bg-subtle
+   is unreadable on the dark drawer) — not called out by name in the task
+   brief, but the same category of bleed-in as the two rules it does name. */
+#nav-drawer .tab-btn {
+  width: 100%;
+  justify-content: flex-start;
+  height: auto;
+  padding: 9px 12px;
+  color: var(--chrome-fg-mute);
+}
+/* Counters the @media (max-width:1200px) truncation (max-width:90px + ellipsis)
+   meant for the narrow horizontal strip — wrong for a full-width drawer. */
+#nav-drawer .tab-btn span:not(.tab-ico) {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+#nav-drawer .tab-btn:hover { color: var(--chrome-fg); background: var(--chrome-panel); }
+/* Drawer's own active-rail treatment (inset accent bar) replaces the topbar's
+   outline-based active state. */
+#nav-drawer .tab-btn.active {
+  color: var(--chrome-fg);
+  background: var(--chrome-panel);
+  border-color: transparent;
+  outline: none;
+  box-shadow: inset 3px 0 0 var(--chrome-accent);
+}
+#nav-drawer .tab-btn .tab-ico { color: var(--chrome-fg-faint); }
+#nav-drawer .tab-btn.active .tab-ico { color: var(--chrome-accent); }
+/* Neutralizes the Master Data tab's light-theme green-chip idle/hover/active
+   treatment (base rules a few lines below), which would otherwise ride the
+   same .tab-btn[data-tab="masterdata"] selector into the dark drawer. */
+#nav-drawer .tab-btn[data-tab="masterdata"]:not(.active) { background: transparent; border-color: transparent; }
+#nav-drawer .tab-btn[data-tab="masterdata"]:not(.active):hover { background: var(--chrome-panel); border-color: transparent; }
+#nav-drawer .tab-btn[data-tab="masterdata"].active { background: var(--chrome-panel); }
 .tab-btn {
   display: flex; align-items: center; gap: 7px;
   padding: 6px 12px;
@@ -2024,6 +2219,13 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
    P6: SANDBOX MODE
    ========================================================================== */
 .sandbox-mode .topbar {
+  border-top: 3px solid var(--warn);
+}
+/* .topbar no longer exists in the DOM (Task 3 replaced it with .cmd-band) —
+   the rule above is now dead/orphaned but left in place rather than edited
+   (not called out by the task brief); this is the additive equivalent so the
+   sandbox-mode visual indicator keeps working on the new chrome. */
+.sandbox-mode .cmd-band {
   border-top: 3px solid var(--warn);
 }
 #sandbox-banner {
