@@ -1,4 +1,4 @@
-// schedule-data.mjs — CQ-1 schedule-data module.
+// schedule-data.mts — CQ-1 schedule-data module.
 //
 // Owns backend fetch + localStorage cache (Persistence), backend-
 // authoritative persistence of per-plant/per-line working hours + blackout
@@ -35,22 +35,162 @@
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs } from './types.mjs';
+import type { components } from './types/api-generated.mjs';
+
+// -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
+//    of this phase) — see docs/typescript_migration.md §F. Endpoints brain.py
+//    does not yet model (/health, /plant-calendar, /master-data/*, /security/*)
+//    get hand-written local interfaces below instead, per this phase's scope.
+type TasksResponse        = components['schemas']['TasksResponse'];
+type TaskDTOWire          = components['schemas']['TaskDTO'];
+type BulkUpdateResult     = components['schemas']['BulkUpdateResult'];
+type TaskUpdateResultWire = components['schemas']['TaskUpdateResult'];
+type TasksRefreshResponse = components['schemas']['TasksRefreshResponse'];
+type BaselineCorrectResult = components['schemas']['BaselineCorrectResult'];
+
+// -- Local type declarations (Phase 4 conversion; scoped to this file, for the
+//    endpoints Task 1 did not add a backend response_model= for) ------------
+
+/** GET /master-data/plants and /master-data/production_lines share this
+ *  envelope (master_data.py); `rows`' element shape differs per endpoint, so
+ *  this is generic over it. */
+interface MasterDataRowsResponse<T> {
+  rows: T[];
+}
+
+interface MasterLineRow {
+  production_line: string;
+  plant: string;
+  pl_group?: string;
+}
+
+interface MasterPlantRow {
+  subnetwork: string;
+  plant: string;
+}
+
+/** GET /health (brain.py) — only the fields this file reads are modeled;
+ *  the reconnect watcher only cares that the request resolves 200. */
+interface HealthResponse {
+  db?: unknown;
+  pool?: unknown;
+  memory?: unknown;
+  color_wheel?: unknown;
+}
+
+/** GET /plant-calendar (brain.py) response envelope. */
+interface PlantCalendarConfig {
+  plant_work_hours?: WorkHours;
+  line_work_hours?: Record<string, WorkHours>;
+  line_blackouts?: Array<{ id: string; line: string | null; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
+  plant_blackouts?: Array<{ id: string; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
+}
+
+/** The subset of GET/POST /security/* fields this file reads/writes
+ *  (brain.py's /security/login, /security/me, /security/me/settings). */
+interface SessionUserBlob {
+  username: string;
+  role: string | null;
+  is_admin?: boolean;
+  allowed_plants?: string[] | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  settings?: Record<string, unknown>;
+  role_settings?: Record<string, unknown>;
+}
+
+/** The cached shape written to localStorage under Session's own KEY —
+ *  a superset of SessionUserBlob with is_admin always present post-cache. */
+interface CachedSessionUser {
+  username: string;
+  role: string | null;
+  is_admin?: boolean;
+  allowed_plants: string[] | null;
+  first_name: string | null;
+  last_name: string | null;
+  settings: Record<string, unknown>;
+  role_settings: Record<string, unknown>;
+}
+
+/** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
+ *  `Error` so both the retry-vs-terminal check and the rejection log can read
+ *  them back — mirrors nimbus-worker.ts's `err as Error` idiom (Phase 0). */
+interface SaveError extends Error {
+  httpStatus?: number;
+  errorCode?: string;
+  reqId?: string;
+}
+
+/** Shape of `Persistence._lastLoad` / `Persistence.stats()`. Named (rather
+ *  than referenced back via `typeof Persistence._lastLoad`, as this phase's
+ *  brief originally suggested) because `typeof Persistence....` inside
+ *  `Persistence`'s own object-literal method signatures is circular — TS
+ *  needs the whole `Persistence` object's type to resolve `stats()`'s return
+ *  type, which itself depends on `Persistence`'s type (TS2307/TS7022). A
+ *  named interface breaks the cycle without changing any runtime shape. */
+interface LoadStats {
+  source: 'backend' | 'cache' | 'demo' | null;
+  ts: string | null;
+  plant: string | null;
+  raw_received: number;
+  backend_meta: Record<string, unknown> | null;
+  color_merge_misses: number;
+  missed_colors: string[];
+  pre_color_merge_count: number;
+  filtered_pl: number;
+  filtered_null_id: number;
+  dedup_collisions: number;
+  rendered: number;
+  errors: number;
+}
+
+/** Return shape shared by every CalendarSync write helper (`_post` and its
+ *  callers). `skipped` marks the two guarded no-op paths (`_hydrating` /
+ *  `Sandbox.active`) — additive vs. the bare `{ ok; status?; error? }` shape
+ *  named in this phase's plan, since the existing early-return literal
+ *  `{ ok: true, skipped: true }` needs it and this file's zero-behavior-change
+ *  discipline forbids dropping that field to fit a narrower type. */
+interface CalendarSyncResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  skipped?: boolean;
+}
+
+/** The injected calendar-capacity seam (Persistence.setCalendarService) —
+ *  schedule-data.mts must never import schedule-services.mts directly (see
+ *  this file's header comment); this is the whole shape it's allowed to see. */
+interface CalendarService {
+  beginRun(plant: string | null): void;
+  endRun(): void;
+  nextAvailable(line: string, from: Date, durationMs: number): Date;
+  workWindow(line: string, date: Date): [Date, Date] | null;
+}
 
 // Injected calendar-capacity seam — replaces the former direct `Calendar.*` references
-// (schedule-data.mjs must never import schedule-services.mjs). Defaults to a no-op so a
+// (schedule-data.mts must never import schedule-services.mjs). Defaults to a no-op so a
 // snap-affecting load path degrades to "skip snapping" instead of throwing when called
 // before app.js's boot glue wires the real Calendar functions (see
 // Persistence.setCalendarService below).
-let _calendarService = null;
+let _calendarService: CalendarService | null = null;
 
 /* =============================================================================
    PERSISTENCE — backend fetch, demo fallback, save + local cache.
    ========================================================================== */
 export const Persistence = {
-  _currentLoadedPlant: null,  // plant whose tasks are currently in Store (null = all plants)
-  _dirtyIds: new Set(),       // task ids mutated since last successful backend save
-  _forceIds: new Set(),       // dirty ids written by an authoritative bulk op (optimize) —
+  _currentLoadedPlant: null as string | null,  // plant whose tasks are currently in Store (null = all plants)
+  _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
+  _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
                               // these skip the optimistic-concurrency version check on save
+  // Lazily-set by _writeCacheWithQuotaGuard/_quarantineCache — declared here
+  // (rather than left to first assignment) since plain object-literal
+  // properties need their type fixed at the literal's declaration.
+  _lastCacheBytes: 0,
+  _lastCacheAt: 0,
+  _cacheDegraded: false,
+  _autosaveDisabled: false,
+  _lastQuarantineKey: null as string | null,
   // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
   _lastLoad: {
     source: null,          // 'backend' | 'cache' | 'demo'
@@ -69,18 +209,18 @@ export const Persistence = {
     dedup_collisions: 0,   // ids that collided during Store.setTasks
     rendered: 0,           // Store.tasksArr.length after load
     errors: 0
-  },
+  } as LoadStats,
 
   /** Inject the calendar-capacity seam (`schedule-services.mjs`'s `Calendar`). Wired
    *  once from app.js boot glue right after the schedule-services.mjs bridge resolves.
    *  Until this is called, snap-affecting load paths no-op rather than throw — see
    *  `_snapToWorkingHours`. */
-  setCalendarService(svc) { _calendarService = svc; },
+  setCalendarService(svc: CalendarService): void { _calendarService = svc; },
 
-  stats() { return { ...Persistence._lastLoad }; },
+  stats(): LoadStats { return { ...Persistence._lastLoad }; },
 
-  load({ force = false, plant = null } = {}) {
-    const stats = Persistence._lastLoad = {
+  load({ force = false, plant = null }: { force?: boolean; plant?: string | null } = {}): Promise<void> {
+    const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
       raw_received: 0, backend_meta: null,
       color_merge_misses: 0, missed_colors: [], pre_color_merge_count: 0,
@@ -99,8 +239,8 @@ export const Persistence = {
       Store.setTasks([], 'persistence');
       Persistence._currentLoadedPlant = null;
       return Promise.all([
-        fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
-        fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+        fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+        fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           Store.setMasterData({
@@ -115,7 +255,7 @@ export const Persistence = {
     return fetch(tasksUrl, { signal: AbortSignal.timeout(8000) })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status} from /tasks`);
-        return r.json();
+        return r.json() as Promise<TasksResponse>;
       })
       .then(payload => {
         // A successful HTTP 200 is authoritative — after this point we
@@ -125,9 +265,9 @@ export const Persistence = {
         stats.backend_meta = payload?.meta ?? null;
         // Lift per-request color stats out of meta so the pipeline panel
         // can read them without digging into backend_meta.
-        stats.color_merge_misses = payload?.meta?.color_merge_misses ?? 0;
-        stats.missed_colors = payload?.meta?.missed_colors ?? [];
-        stats.pre_color_merge_count = payload?.meta?.pre_color_merge_count ?? 0;
+        stats.color_merge_misses = (payload?.meta?.color_merge_misses as number | undefined) ?? 0;
+        stats.missed_colors = (payload?.meta?.missed_colors as string[] | undefined) ?? [];
+        stats.pre_color_merge_count = (payload?.meta?.pre_color_merge_count as number | undefined) ?? 0;
         ErrorLog.info('persistence',
           `Backend returned ${stats.raw_received} rows`,
           { meta: stats.backend_meta });
@@ -146,8 +286,8 @@ export const Persistence = {
           // Fetch master-data so orderless plants/lines appear in Master Data tabs,
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
-            fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
-            fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+            fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+            fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           ]).then(([pData, lData]) => {
             if (pData || lData) {
               Store.setMasterData({
@@ -185,10 +325,10 @@ export const Persistence = {
           try { return Persistence._prepTask(raw); }
           catch (e) {
             stats.errors++;
-            ErrorLog.error('persistence', `Row prep failed for id=${raw.id}: ${e.message}`, raw);
+            ErrorLog.error('persistence', `Row prep failed for id=${raw.id}: ${(e as Error).message}`, raw);
             return null;
           }
-        }).filter(Boolean);
+        }).filter(Boolean) as NimbusTask[];
 
         // Restore user state (blocks, calendars, fixedIds, lineSettings) from localStorage
         // before setTasks so alerts compute with the correct context. The backend is
@@ -265,8 +405,8 @@ export const Persistence = {
 
         // Load master-data plants and lines in parallel (non-blocking).
         Promise.all([
-          fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
-          fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
+          fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+          fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
         ]).then(([pData, lData]) => {
           if (pData || lData) {
             Store.setMasterData({
@@ -300,7 +440,7 @@ export const Persistence = {
           // Start polling /health with exponential backoff so the UI recovers
           // automatically once the server comes back up.
           try { Persistence._reconnect.start(); } catch (e) {
-            ErrorLog.warn('persistence', `Reconnect watcher failed to start: ${e.message}`);
+            ErrorLog.warn('persistence', `Reconnect watcher failed to start: ${(e as Error).message}`);
           }
         }
       });
@@ -310,13 +450,13 @@ export const Persistence = {
   // until the backend responds, then triggers a force-reload of /tasks.
   _reconnect: {
     attempts: 0,
-    timer:    null,
+    timer:    null as ReturnType<typeof setTimeout> | null,
     running:  false,
-    start() {
+    start(): void {
       if (this.running) return;
       this.running = true;
       this.attempts = 0;
-      const tick = () => {
+      const tick = (): void => {
         this.attempts++;
         Util.fetchTraced(`${Config.API_BASE}/health`, { signal: AbortSignal.timeout(4000) })
           .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -327,7 +467,7 @@ export const Persistence = {
             ErrorLog.info('persistence', 'Backend recovered — reloading');
             Toast.show(Util.t('toast.backend_recovered'), 'success', 3000);
             try { Persistence.load({ force: true, plant: Persistence._currentLoadedPlant }); } catch (e) {
-              ErrorLog.error('persistence', `Reload after reconnect failed: ${e.message}`);
+              ErrorLog.error('persistence', `Reload after reconnect failed: ${(e as Error).message}`);
             }
           })
           .catch(() => {
@@ -337,21 +477,21 @@ export const Persistence = {
       };
       this.timer = setTimeout(tick, 1000);
     },
-    stop() {
+    stop(): void {
       if (this.timer) { clearTimeout(this.timer); this.timer = null; }
       this.running = false;
       this.attempts = 0;
     },
   },
 
-  _prepTask(raw) {
+  _prepTask(raw: Record<string, unknown>): NimbusTask {
     // Coerce date-like string fields to Date.
     for (const k of Object.keys(raw)) {
       if (k.toLowerCase().includes('date') && typeof raw[k] === 'string') {
-        raw[k] = Util.parseDate(raw[k]);
+        raw[k] = Util.parseDate(raw[k] as string);
       }
     }
-    return raw;
+    return raw as unknown as NimbusTask;
   },
 
   // Apply user-explicitly-moved positions from the localStorage cache back onto
@@ -359,7 +499,7 @@ export const Persistence = {
   // from the cached original_start_date are overlaid — those are the ones the user
   // has consciously dragged beyond the auto-snap baseline. This prevents
   // _snapToWorkingHours from re-snapping user placements over blackout blocks.
-  _overlayUserMoves(backendTasks, cachedTasks) {
+  _overlayUserMoves(backendTasks: NimbusTask[], cachedTasks: Array<Record<string, unknown>>): void {
     const byId = new Map(cachedTasks.map(t => [t.id, t]));
     for (const t of backendTasks) {
       const cached = byId.get(t.id);
@@ -395,9 +535,9 @@ export const Persistence = {
   // by the phase below (see _relayDueDateCorrections — only the caller in
   // CalendarSync._applyConfig relays them; the pre-hydration call from
   // Persistence.load deliberately does not).
-  _snapToWorkingHours(tasks, plant) {
-    const movedIds = [];
-    const corrections = [];
+  _snapToWorkingHours(tasks: NimbusTask[], plant: string | null): { movedIds: string[]; corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> } {
+    const movedIds: string[] = [];
+    const corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> = [];
     if (!_calendarService) return { movedIds, corrections }; // no-op until wired — matches
                                                               // "skip snapping" behavior when
                                                               // the calendar service isn't available
@@ -415,7 +555,7 @@ export const Persistence = {
       // (never touched by loop 1) is still anchored to the true raw
       // value — so none of the raw shapes below could ever match, and the
       // correction would silently never fire for that order.
-      const pristineOriginalStart = new Map();
+      const pristineOriginalStart = new Map<NimbusTask, Date>();
       for (const t of tasks) {
         if (t.original_start_date instanceof Date) pristineOriginalStart.set(t, t.original_start_date);
       }
@@ -604,11 +744,11 @@ export const Persistence = {
   // Bounded to 14 days so a fully closed/misconfigured calendar can't spin
   // forever; returns null if no open day is found in that window (caller
   // falls back to the run-time-implied end).
-  _dueEndOfShift(line, date) {
+  _dueEndOfShift(line: string, date: Date): Date | null {
     let cur = new Date(date);
     const MAX_DAYS = 14;
     for (let i = 0; i < MAX_DAYS; i++) {
-      const win = _calendarService.workWindow(line, cur);
+      const win = _calendarService!.workWindow(line, cur);
       if (win) return win[1];
       cur = new Date(cur);
       cur.setDate(cur.getDate() + 1);
@@ -626,15 +766,15 @@ export const Persistence = {
   // rows in one shot, risking Postgres's bound-parameter ceiling on the
   // server's VALUES-join UPDATE. Batches are sent sequentially (not in
   // parallel) so a struggling backend isn't hit with concurrent bursts.
-  _relayDueDateCorrections(corrections) {
+  _relayDueDateCorrections(corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }>): void {
     if (!corrections || !corrections.length) return;
     const CHUNK = 500;
-    const chunks = [];
+    const chunks: Array<Array<{ id: string; basic_finish_date: Date; base_version: number }>> = [];
     for (let i = 0; i < corrections.length; i += CHUNK) {
       chunks.push(corrections.slice(i, i + CHUNK));
     }
 
-    const sendNext = (idx) => {
+    const sendNext = (idx: number): void => {
       if (idx >= chunks.length) return;
       const chunk = chunks[idx];
       const body = JSON.stringify({
@@ -652,7 +792,7 @@ export const Persistence = {
         headers: { 'Content-Type': 'application/json' },
         body,
       })
-        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(r => r.ok ? r.json() as Promise<BaselineCorrectResult> : Promise.reject(new Error(`HTTP ${r.status}`)))
         .then(result => {
           // Re-stamp row_version for corrected rows, mirroring saveAll() — a
           // stale cached xmin would false-conflict this order's next
@@ -674,13 +814,13 @@ export const Persistence = {
     sendNext(0);
   },
 
-  _loadCache() {
-    let raw;
+  _loadCache(): boolean {
+    let raw: string | null | undefined;
     try { raw = localStorage.getItem(Config.LS_KEY); }
-    catch (e) { ErrorLog.error('persistence', `localStorage unavailable: ${e.message}`); return false; }
+    catch (e) { ErrorLog.error('persistence', `localStorage unavailable: ${(e as Error).message}`); return false; }
     if (!raw) return false;
 
-    let data;
+    let data: StoredState | undefined;
     try { data = JSON.parse(raw); }
     catch {
       ErrorLog.error('persistence', `Cache JSON parse failed (${raw.length} bytes) — quarantining and clearing`);
@@ -731,13 +871,13 @@ export const Persistence = {
       Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
       Toast.show(Util.t('toast.loaded_cache', { count: tasks.length }), 'info');
       return true;
-    } catch (e) { ErrorLog.error('persistence', `Cache load failed: ${e.message}`); return false; }
+    } catch (e) { ErrorLog.error('persistence', `Cache load failed: ${(e as Error).message}`); return false; }
   },
 
   // Restore non-task user state from a cache snapshot. Called both from _loadCache()
   // and from the backend load path (where the backend owns task dates but localStorage
   // owns everything else: blocks, calendars, fixedIds, lineSettings, plants).
-  _restoreNonTaskState(data) {
+  _restoreNonTaskState(data: Partial<StoredState>): void {
     if (data.lineSettings && Object.keys(data.lineSettings).length) {
       const ls = Store.lineSettings;
       for (const k of Object.keys(ls)) delete ls[k];
@@ -751,7 +891,7 @@ export const Persistence = {
     if (Array.isArray(data.blocks))
       for (const b of data.blocks) {
         lineAttempts++;
-        Store.addBlock({ ...b, start: Util.parseDate(b.start), end: Util.parseDate(b.end) }, 'persistence');
+        Store.addBlock({ ...b, start: Util.parseDate(b.start), end: Util.parseDate(b.end) } as NimbusBlock, 'persistence');
       }
     if (data.calendars) {
       const cal = Store.calendars;
@@ -773,7 +913,7 @@ export const Persistence = {
     if (Array.isArray(data.plantBlocks))
       for (const b of data.plantBlocks) {
         plantAttempts++;
-        Store.addPlantBlock({ ...b, start: Util.parseDate(b.start), end: Util.parseDate(b.end) }, 'persistence');
+        Store.addPlantBlock({ ...b, start: Util.parseDate(b.start), end: Util.parseDate(b.end) } as NimbusPlantBlock, 'persistence');
       }
     if (data.userSettings) Object.assign(Store.userSettings, data.userSettings);
 
@@ -785,12 +925,12 @@ export const Persistence = {
     }
   },
 
-  _loadDemo() {
+  _loadDemo(): void {
     const lines = ['Line 1', 'Line 2', 'Line 3', 'Line 4'];
     const colors = ['WHITE', 'IVORY', 'TAN', 'BROWN', 'CHARCOAL', 'BLACK'];
     const forms  = ['SM', 'MD', 'LG', 'XL'];
-    const today = Util.startOfDay(new Date());
-    const tasks = [];
+    const today = Util.startOfDay(new Date())!;
+    const tasks: Record<string, unknown>[] = [];
     let id = 1;
     for (let day = 0; day < 5; day++) {
       const dayDate = new Date(today); dayDate.setDate(today.getDate() + day);
@@ -827,7 +967,7 @@ export const Persistence = {
       tasks[2].fixed = true;
       tasks[10].fixed = true;
     }
-    Store.setTasks(tasks, 'persistence');
+    Store.setTasks(tasks as unknown as NimbusTask[], 'persistence');
     // Calendars, plant, and line settings
     for (const line of lines) {
       Store.ensureCalendar(line);
@@ -837,12 +977,12 @@ export const Persistence = {
     // Example blackout block (maintenance on Line 2 from 12:00-13:00 tomorrow)
     const tomNoon = new Date(today); tomNoon.setDate(today.getDate() + 1); tomNoon.setHours(12, 0, 0, 0);
     const tomOne  = new Date(tomNoon); tomOne.setHours(13, 0, 0, 0);
-    Store.addBlock({ line: 'Line 2', start: tomNoon, end: tomOne, reason: 'Maintenance' }, 'persistence');
+    Store.addBlock({ line: 'Line 2', start: tomNoon, end: tomOne, reason: 'Maintenance' } as NimbusBlock, 'persistence');
     Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
     Toast.show(Util.t('toast.demo_mode', { count: tasks.length }), 'info');
   },
 
-  saveAll() {
+  saveAll(): void {
     // In sandbox, promote-then-save runs through Sandbox.exit(true), which itself
     // calls saveAll() after teardown — so return here to avoid a double POST (the
     // re-entrant call below does the single persist).
@@ -880,18 +1020,18 @@ export const Persistence = {
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 
     // Retry up to 3 times on network failures; don't retry 4xx (server rejections).
-    const _post = (attempt) => Util.fetchTraced(`${Config.API_BASE}/tasks/update`, {
+    const _post = (attempt: number): Promise<BulkUpdateResult> => Util.fetchTraced(`${Config.API_BASE}/tasks/update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
       body,
     }).then(async r => {
       if (!r.ok) {
         const parsed = await Util.parseBackendError(r);
-        const err = new Error(parsed.message);
+        const err = new Error(parsed.message) as SaveError;
         err.httpStatus = r.status; err.errorCode = parsed.errorCode; err.reqId = reqId;
         throw err;
       }
-      return r.json();
+      return r.json() as Promise<BulkUpdateResult>;
     }).catch(e => {
       if (e.httpStatus || attempt >= 3) throw e;
       return new Promise(res => setTimeout(res, 2000)).then(() => _post(attempt + 1));
@@ -960,22 +1100,22 @@ export const Persistence = {
    *  the stale local copies. Writes _state directly and emits ONCE with source
    *  'refresh' — the dirty/autosave subscribers ignore that source so we don't
    *  re-dirty or write the rows we just pulled (see project_store_fanout). */
-  _refreshTasks(ids) {
+  _refreshTasks(ids: string[]): void {
     if (!ids || !ids.length) return;
     fetch(`${Config.API_BASE}/tasks/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(r => r.ok ? r.json() as Promise<TasksRefreshResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(({ data }) => {
-        const applied = [];
+        const applied: string[] = [];
         for (const row of (data || [])) {
           const tk = Store.tasks[String(row.id)];
           if (!tk) continue;
           tk.start_date  = Util.parseDate(row.start_date);
           tk.end_date    = Util.parseDate(row.end_date);
-          tk.row_version = row.row_version;
+          tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
           applied.push(String(row.id));
@@ -988,7 +1128,7 @@ export const Persistence = {
   },
 
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
-  reload() {
+  reload(): Promise<void> {
     ErrorLog.info('persistence', 'Manual reload triggered — clearing dependencies');
     const deps = Store.dependencies;
     for (const k of Object.keys(deps)) delete deps[k];
@@ -997,7 +1137,7 @@ export const Persistence = {
 
   /** Fetch tasks for a specific plant, replacing whatever is currently in Store.
    *  Skips the fetch if that plant is already loaded. */
-  loadForPlant(plant) {
+  loadForPlant(plant: string | null): Promise<void> {
     if (!plant || plant === Persistence._currentLoadedPlant) return Promise.resolve();
     const deps = Store.dependencies;
     for (const k of Object.keys(deps)) delete deps[k];
@@ -1007,7 +1147,7 @@ export const Persistence = {
   /** The plant the user last had selected, read straight from the cache so the
    *  boot load can scope to it (the backend is stateless — unscoped means
    *  fetching every plant's orders, which doesn't scale). null = none remembered. */
-  _rememberedPlant() {
+  _rememberedPlant(): string | null {
     try {
       const raw = localStorage.getItem(Config.LS_KEY);
       if (!raw) return null;
@@ -1016,14 +1156,16 @@ export const Persistence = {
   },
 
   /** Wipe the localStorage cache (user-initiated from the Log drawer). */
-  clearCache() {
+  clearCache(): void {
     try { localStorage.removeItem(Config.LS_KEY); ErrorLog.info('persistence', 'Cache cleared'); Toast.show(Util.t('toast.cache_cleared'), 'success'); }
-    catch (e) { ErrorLog.error('persistence', `Cache clear failed: ${e.message}`); }
+    catch (e) { ErrorLog.error('persistence', `Cache clear failed: ${(e as Error).message}`); }
   },
 
-  _saveCache() {
+  _saveCache(): void {
     try {
-      const snapshot = {
+      // Annotated so a future field rename on either side (Store or StoredState)
+      // is caught here rather than silently drifting.
+      const snapshot: StoredState = {
         _schemaVersion: Config.SCHEMA_VERSION,
         _buildId:       Config.BUILD_ID,
         _savedAt:       new Date().toISOString(),
@@ -1039,17 +1181,30 @@ export const Persistence = {
       };
       Persistence._writeCacheWithQuotaGuard(snapshot);
     } catch (e) {
-      ErrorLog.warn('persistence', `Cache save failed: ${e.message}`);
+      ErrorLog.warn('persistence', `Cache save failed: ${(e as Error).message}`);
     }
   },
 
-  _writeCacheWithQuotaGuard(snapshot) {
+  _writeCacheWithQuotaGuard(snapshot: StoredState): boolean {
     const baseMeta = {
       _schemaVersion: snapshot._schemaVersion,
       _buildId:       snapshot._buildId,
       _savedAt:       snapshot._savedAt,
     };
-    const tiers = [
+    // NOTE (deviation from the task brief's inline guidance): the brief suggested
+    // typing `tiers` as `StoredState[]` on the theory that every tier "still
+    // satisfies the full shape." That is not actually true of the last (most
+    // degraded) tier below — it omits `blocks`/`calendars`/`plants`/`plantBlocks`
+    // entirely, not just sets them empty. Fabricating those fields as `[]`/`{}`
+    // to force a `StoredState[]` fit would be a real behavior change, not a
+    // types-only one: `_restoreNonTaskState`'s `if (data.calendars) {...}` guard
+    // treats a present-but-empty `{}` as truthy and would clear every entry in
+    // Store.calendars on the next load of this degraded cache, whereas an
+    // absent key today leaves Store.calendars untouched. `Partial<StoredState>`
+    // is the correct, honest type for `tiers` — every tier is still a valid
+    // (partial) StoredState snapshot, and JSON.stringify/localStorage.setItem
+    // below don't care that some tiers omit keys.
+    const tiers: Array<Partial<StoredState>> = [
       snapshot,
       { ...snapshot, tasks: snapshot.tasks.slice(-2000) },
       { ...snapshot, tasks: snapshot.tasks.slice(-500) },
@@ -1075,8 +1230,9 @@ export const Persistence = {
         return true;
       } catch (e) {
         // Try next tier on QuotaExceededError; bail on anything else from tier 0
-        if (i === 0 && e?.name !== 'QuotaExceededError' && e?.code !== 22) {
-          ErrorLog.warn('persistence', `Cache write failed (${e.name}): ${e.message}`);
+        const err = e as DOMException;
+        if (i === 0 && err?.name !== 'QuotaExceededError' && err?.code !== 22) {
+          ErrorLog.warn('persistence', `Cache write failed (${err.name}): ${err.message}`);
           return false;
         }
       }
@@ -1086,7 +1242,7 @@ export const Persistence = {
     return false;
   },
 
-  _quarantineCache(raw) {
+  _quarantineCache(raw: string): void {
     try {
       const key = `${Config.LS_KEY}.quarantine.${Date.now()}`;
       localStorage.setItem(key, raw.slice(0, 200_000));
@@ -1094,19 +1250,19 @@ export const Persistence = {
     } catch {}
   },
 
-  storageInventory() {
+  storageInventory(): { totalBytes: number; count: number; items: Array<{ key: string; bytes: number }>; degraded: boolean; lastBytes: number; lastSavedAt: number; autosaveDisabled: boolean } {
     let total = 0, count = 0;
-    const items = [];
+    const items: Array<{ key: string; bytes: number }> = [];
     try {
       for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
+        const k = localStorage.key(i) as string;
         const v = localStorage.getItem(k) || '';
         const bytes = (k.length + v.length) * 2;   // UTF-16 estimate
         total += bytes;
         count++;
         items.push({ key: k, bytes });
       }
-    } catch (e) { ErrorLog.warn('persistence', `Inventory failed: ${e.message}`); }
+    } catch (e) { ErrorLog.warn('persistence', `Inventory failed: ${(e as Error).message}`); }
     items.sort((a, b) => b.bytes - a.bytes);
     return {
       totalBytes:       total,
@@ -1122,7 +1278,7 @@ export const Persistence = {
   /** Restore the persisted plant selection (if any). Called at boot once Store
    *  is populated enough to know what plants exist. Falls back to null when
    *  the persisted plant no longer matches a known plant. */
-  restoreSelectedPlant() {
+  restoreSelectedPlant(): void {
     try {
       const raw = localStorage.getItem(Config.LS_KEY);
       if (!raw) return;
@@ -1157,12 +1313,12 @@ export const Persistence = {
    ========================================================================== */
 export const CalendarSync = {
   _hydrating: false,
-  _pendingLineHours: {},   // plant → { line → workHours } awaiting a batched flush
-  _whDebounce: {},         // plant → timeout id
-  _deferredHydrationPlant: null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
+  _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
+  _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
+  _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
 
   /* ----- load / hydration ----------------------------------------------- */
-  fetchPlantConfig(plant) {
+  fetchPlantConfig(plant: string | null): Promise<void> {
     if (!plant) return Promise.resolve();
     // Ensure the line→plant index is current before _applyConfig so getPlantForLine
     // resolves reliably even when the master-data fetch REJECTED (the .finally still
@@ -1170,7 +1326,7 @@ export const CalendarSync = {
     Store.rebuildPlantIndex();
     return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
                             { signal: AbortSignal.timeout(8000) })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(cfg => CalendarSync._applyConfig(plant, cfg))
       .catch(e => {
         // The localStorage restore already painted the UI — degrade gracefully.
@@ -1179,7 +1335,7 @@ export const CalendarSync = {
       });
   },
 
-  _applyConfig(plant, cfg) {
+  _applyConfig(plant: string, cfg: PlantCalendarConfig): void {
     // Never overwrite live What-If state — mirror the _post guard. A plant switch or a
     // late in-flight fetch during What-If must not clobber sandbox edits (the write path
     // already no-ops under Sandbox.active; the hydration write path must too). (F2)
@@ -1204,15 +1360,15 @@ export const CalendarSync = {
     try {
       if (has.plantHours) {
         Store.ensurePlant(plant);
-        Store.plants[plant].workHours = cfg.plant_work_hours;
+        Store.plants[plant].workHours = cfg.plant_work_hours!;
       }
       if (has.lineHours) {
         // Clear this plant's line calendars (backend line set ∪ getPlantForLine===plant), then apply.
-        const backendLines = new Set(Object.keys(cfg.line_work_hours));
+        const backendLines = new Set(Object.keys(cfg.line_work_hours!));
         for (const line of Object.keys(Store.calendars)) {
           if (backendLines.has(line) || Store.getPlantForLine(line) === plant) delete Store.calendars[line];
         }
-        for (const [line, wh] of Object.entries(cfg.line_work_hours)) {
+        for (const [line, wh] of Object.entries(cfg.line_work_hours!)) {
           Store.ensureCalendar(line);
           Store.calendars[line].workHours = wh;
         }
@@ -1224,18 +1380,18 @@ export const CalendarSync = {
         const keptBlocks = Store.blocks.filter(b => b.plant !== plant);
         Store.blocks.length = 0;
         Store.blocks.push(...keptBlocks);
-        for (const b of cfg.line_blackouts) {
+        for (const b of cfg.line_blackouts!) {
           Store.blocks.push({ id: b.id, line: b.line || null, plant,
-            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' });
+            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusBlock);
         }
       }
       if (has.plantBlackouts) {
         const keptPlantBlocks = Store.plantBlocks.filter(b => b.plant !== plant);
         Store.plantBlocks.length = 0;
         Store.plantBlocks.push(...keptPlantBlocks);
-        for (const b of cfg.plant_blackouts) {
+        for (const b of cfg.plant_blackouts!) {
           Store.plantBlocks.push({ id: b.id, plant,
-            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' });
+            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusPlantBlock);
         }
       }
       // Notify subscribers + refresh the offline cache with backend truth. These
@@ -1284,7 +1440,7 @@ export const CalendarSync = {
         // the accurate hours ever get a chance to run.
         Persistence._relayDueDateCorrections(corrections);
       } catch (e) {
-        ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${e.message}`);
+        ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${(e as Error).message}`);
       }
     }
     // Migrate the slices the backend still lacks but local has. Covers first upgrade
@@ -1294,9 +1450,9 @@ export const CalendarSync = {
     this._migrateMissingSlices(plant, has);
   },
 
-  _migrateMissingSlices(plant, has) {
+  _migrateMissingSlices(plant: string, has: { plantHours: boolean; lineHours: boolean; lineBlackouts: boolean; plantBlackouts: boolean }): void {
     if (!plant) return;
-    const jobs = [];
+    const jobs: Array<Promise<{ ok: boolean; status?: number; error?: string }>> = [];
     if (!has.plantHours) {
       const wh = Store.plants[plant]?.workHours || null;
       // Don't migrate the auto-seeded DEFAULT_SHIFT — a missing backend row means
@@ -1339,7 +1495,7 @@ export const CalendarSync = {
 
   // True when a weekly workHours map equals the DEFAULT_SHIFT / WEEKEND_OFF seed, i.e.
   // represents "no override" — used to skip migrating auto-seeded defaults. (F11)
-  _isDefaultWorkHours(wh) {
+  _isDefaultWorkHours(wh: WorkHours | null | undefined): boolean {
     if (!wh) return true;
     for (let d = 0; d < 7; d++) {
       const v = wh[d];
@@ -1357,7 +1513,7 @@ export const CalendarSync = {
   // every plant). Replace each with one deterministic stamped copy per known plant so no
   // single plant captures it and none is dropped from other plants. Idempotent — after
   // the first run there are no un-stamped line-less blocks left to fan out. (F8)
-  _fanOutLegacyGlobalLineBlocks() {
+  _fanOutLegacyGlobalLineBlocks(): void {
     const plants = Store.knownPlants();
     if (!plants.length) return;
     const legacy = Store.blocks.filter(b => !b.plant && !b.line);
@@ -1374,7 +1530,7 @@ export const CalendarSync = {
     ErrorLog.info('calendar-sync', `Fanned out ${legacy.length} legacy global line blackout(s) across ${plants.length} plant(s)`);
   },
 
-  _fanOutLegacyGlobalPlantBlocks() {
+  _fanOutLegacyGlobalPlantBlocks(): void {
     const plants = Store.knownPlants();
     if (!plants.length) return;
     const legacy = Store.plantBlocks.filter(b => !b.plant);
@@ -1391,20 +1547,20 @@ export const CalendarSync = {
   },
 
   /* ----- immediate per-edit saves --------------------------------------- */
-  savePlantHours(plant, workHours) {
+  savePlantHours(plant: string | null, workHours: WorkHours | undefined): Promise<CalendarSyncResult> {
     if (!plant) return Promise.resolve({ ok: false });
     return this._post('/plant-calendar/plant-hours', { plant, work_hours: workHours }, 'plant-hours');
   },
 
   // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
   // fan-out from a single plant-hours edit into ONE /line-hours request.
-  saveLineHours(plant, line, workHours) {
+  saveLineHours(plant: string | null, line: string, workHours: WorkHours): void {
     if (!plant || !line) return;
     (this._pendingLineHours[plant] ||= {})[line] = workHours;
     clearTimeout(this._whDebounce[plant]);
     this._whDebounce[plant] = setTimeout(() => this._flushLineHours(plant), 600);
   },
-  _flushLineHours(plant) {
+  _flushLineHours(plant: string): Promise<CalendarSyncResult> | undefined {
     const pending = this._pendingLineHours[plant];
     if (!pending || !Object.keys(pending).length) return;
     delete this._pendingLineHours[plant];
@@ -1412,19 +1568,19 @@ export const CalendarSync = {
     return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
   },
 
-  saveLineBlackoutUpsert(block) {
+  saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
     return this._post('/plant-calendar/line-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, true)] }, 'line-blackout-upsert');
   },
-  saveLineBlackoutDelete(plant, id) {
+  saveLineBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
     if (!plant || !id) return Promise.resolve({ ok: false });
     return this._post('/plant-calendar/line-blackouts', { plant, deletes: [id] }, 'line-blackout-delete');
   },
-  savePlantBlackoutUpsert(block) {
+  savePlantBlackoutUpsert(block: NimbusPlantBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
     return this._post('/plant-calendar/plant-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, false)] }, 'plant-blackout-upsert');
   },
-  savePlantBlackoutDelete(plant, id) {
+  savePlantBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
     if (!plant || !id) return Promise.resolve({ ok: false });
     return this._post('/plant-calendar/plant-blackouts', { plant, deletes: [id] }, 'plant-blackout-delete');
   },
@@ -1435,7 +1591,7 @@ export const CalendarSync = {
    *  the pre-sandbox snapshot is still alive (it is nulled before flush). Without the
    *  deletes, a blackout removed in What-If would resurrect from the backend on the next
    *  hydration. (F3) */
-  flushPlant(plant, removed) {
+  flushPlant(plant: string, removed?: { line: string[]; plant: string[] }): void {
     if (!plant) return;
     removed = removed || { line: [], plant: [] };
     this.savePlantHours(plant, Store.plants[plant]?.workHours);
@@ -1458,14 +1614,15 @@ export const CalendarSync = {
   },
 
   /* ----- internals ------------------------------------------------------- */
-  _blockPayload(b, withLine) {
+  _blockPayload(b: NimbusBlock | NimbusPlantBlock, withLine: boolean): { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; line?: string | null } {
     const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-    const o = { id: b.id, start: s ? s.toISOString() : null, end: e ? e.toISOString() : null, reason: b.reason || null };
-    if (withLine) o.line = b.line || null;
+    const o: { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; line?: string | null } =
+      { id: b.id, start: s ? s.toISOString() : null, end: e ? e.toISOString() : null, reason: b.reason || null };
+    if (withLine) o.line = (b as NimbusBlock).line || null;
     return o;
   },
 
-  _post(path, body, label) {
+  _post(path: string, body: Record<string, unknown>, label: string): Promise<CalendarSyncResult> {
     // Single choke point for every backend write. Two guards: never POST while
     // applying a backend GET (_hydrating), and never leak What-If edits (Sandbox).
     if (this._hydrating || (typeof Sandbox !== 'undefined' && Sandbox.active)) {
@@ -1524,16 +1681,26 @@ export const CalendarSync = {
 export const Session = (() => {
   const KEY = 'nimbus.session';
 
-  function currentUser() {
-    try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; }
+  function currentUser(): CachedSessionUser | null {
+    // Guard (not the `as string` assertion) so the type checker is satisfied
+    // without relying on JSON.parse(null) throwing into the catch below — but
+    // the try/catch itself stays wrapped around BOTH the read and the parse,
+    // unlike the brief's own inline guard example, which would have dropped
+    // it and let a malformed cached JSON string throw uncaught instead of
+    // returning null (a real behavior regression this file's zero-behavior-
+    // change discipline forbids).
+    try {
+      const raw = localStorage.getItem(KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
   }
 
-  function actor() {
+  function actor(): string {
     const u = currentUser();
     return u ? u.username : 'system';
   }
 
-  function isAdmin() {
+  function isAdmin(): boolean {
     const u = currentUser();
     // Prefer the reconciled is_admin flag (set by refresh() from GET /security/me,
     // which mirrors the backend's require_admin grace) and fall back to the role
@@ -1544,12 +1711,12 @@ export const Session = (() => {
   // null = unrestricted (every plant); array = the caller's role_plants scope.
   // Mirrors isAdmin()'s fallback posture: trusts whatever was last cached
   // (login or refresh()) rather than blocking on a fresh network call.
-  function allowedPlants() {
+  function allowedPlants(): string[] | null {
     const u = currentUser();
     return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
   }
 
-  async function signIn(username, password) {
+  async function signIn(username: string, password: string): Promise<SessionUserBlob> {
     const res = await fetch(`${Config.API_BASE}/security/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1559,7 +1726,7 @@ export const Session = (() => {
       const e = await res.json().catch(() => ({}));
       throw new Error(e.detail || 'Invalid username or password');
     }
-    const data = await res.json();
+    const data = await res.json() as SessionUserBlob;
     // Per-user settings + role defaults are the authoritative DB blobs; the
     // login response may not carry them (only GET /security/me is guaranteed to),
     // so default to {} and let refresh() fill them from /security/me at boot.
@@ -1589,7 +1756,7 @@ export const Session = (() => {
   // admin controls that every request then 403s. Fire-and-forget at boot; also
   // called after a denied admin action. Never clobbers the cache on a transient
   // network/HTTP error (only a definitive answer updates it).
-  async function refresh() {
+  async function refresh(): Promise<SessionUserBlob | null> {
     const u = currentUser();
     if (!u) return null;                       // signed out — nothing to reconcile
     try {
@@ -1602,7 +1769,7 @@ export const Session = (() => {
         { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
       );
       if (!r.ok) return null;
-      const me = await r.json();
+      const me = await r.json() as SessionUserBlob;
       // GET /security/me now carries the caller's own settings blob + their role's
       // defaults; cache both (localStorage = cache of DB truth so the app boots
       // offline from the cached blob) and push them into Store for Store.pref().
@@ -1640,7 +1807,7 @@ export const Session = (() => {
   // Admin tab if we were demoted, via SessionUIAdapter's session:changed
   // subscriber) and tell the user plainly, rather than leaving a dead-end
   // "HTTP 403" in the panel.
-  function onAuthDenied() {
+  function onAuthDenied(): void {
     refresh();
     try { Toast.show(Util.t('sec.access_revoked'), 'error'); } catch {}
   }
@@ -1652,11 +1819,11 @@ export const Session = (() => {
      we adopt the server's full merged blob and mirror it to the nimbus.session
      cache; on failure we revert only this batch's keys in Store AND the cache and
      Toast an i18n error. Multiple rapid setPref calls coalesce into one PATCH. */
-  let _prefTimer = null;
-  let _prefPending = {};   // key → queued new value for the next PATCH
-  let _prefPrev    = {};   // key → pre-edit value, for revert on failure
+  let _prefTimer: ReturnType<typeof setTimeout> | null = null;
+  let _prefPending: Record<string, unknown> = {};   // key → queued new value for the next PATCH
+  let _prefPrev: Record<string, unknown>    = {};   // key → pre-edit value, for revert on failure
 
-  async function _flushPrefs() {
+  async function _flushPrefs(): Promise<void> {
     _prefTimer = null;
     const patch = _prefPending; _prefPending = {};
     const prev  = _prefPrev;    _prefPrev = {};
@@ -1668,7 +1835,7 @@ export const Session = (() => {
         body: JSON.stringify({ settings: patch }),
       });
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
-      const updated = await r.json();
+      const updated = await r.json() as { settings?: Record<string, unknown> };
       // Server returns the full merged blob — adopt it as truth + mirror to cache.
       const settings = updated.settings || {};
       Store.setUserSettings(settings, 'settings-pref');
@@ -1680,18 +1847,18 @@ export const Session = (() => {
       Store.setUserSettings(prev, 'settings-pref-revert');
       const u = currentUser();
       if (u) {
-        const cached = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
+        const cached: Record<string, unknown> = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
         for (const k of Object.keys(prev)) {
           if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
         }
         localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
       }
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('settings', `Save preference failed: ${e.message}`);
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('settings', `Save preference failed: ${(e as Error).message}`);
     }
   }
 
-  function setPref(key, value) {
+  function setPref(key: string, value: unknown): void {
     // Capture the pre-edit value once per batch (first writer wins) so a revert
     // restores the value from before this batch, not an intermediate optimistic one.
     if (!(key in _prefPrev)) _prefPrev[key] = Store.userSettings[key];
@@ -1706,23 +1873,23 @@ export const Session = (() => {
   // the debounced timer and in-flight fetch, so without an explicit flush the DB
   // (and the session cache _flushPrefs refreshes on success) would never catch up
   // and the next boot would revert the language from stale truth.
-  function flushPrefs() {
+  function flushPrefs(): Promise<void> {
     if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
     return _flushPrefs();
   }
 
   // Convenience read — resolves via Store.pref (user ?? role ?? system default).
-  function pref(key) { return Store.pref(key); }
+  function pref(key: string): unknown { return Store.pref(key); }
 
   // Merge `patch` into the cached session blob and persist it. The narrow seam
   // app.js's SessionUIAdapter.saveProfile() uses to update first_name/last_name
   // in the cache after a successful PATCH /security/me, without reaching into
   // this module's private `KEY` constant — SessionUIAdapter is a consumer of
   // Session's public API only, same direction every other *UIAdapter follows.
-  function updateCachedUser(patch) {
+  function updateCachedUser(patch: Partial<CachedSessionUser>): CachedSessionUser | null {
     const u = currentUser();
     if (!u) return null;
-    const merged = { ...u, ...patch };
+    const merged = { ...u, ...patch } as CachedSessionUser;
     localStorage.setItem(KEY, JSON.stringify(merged));
     return merged;
   }

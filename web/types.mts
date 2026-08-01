@@ -168,3 +168,54 @@ export type SelectionEmitKind = 'clear' | 'set' | 'add' | 'remove' | 'toggle';
 export type WorkerRequestType = 'ALERTS' | 'UTILIZATION';
 
 export type WorkerResponseType = 'ALERTS' | 'UTILIZATION' | 'ERROR';
+
+// ---------------------------------------------------------------------------
+// §F/§G — Client<->server wire encodings and localStorage (de)serialization
+// ---------------------------------------------------------------------------
+
+/** Naive local timestamp, NO trailing "Z"/offset — the /tasks read path's and
+ *  the task-save path's (Util.toLocalSeconds) wire encoding. Parsed as LOCAL
+ *  time by `new Date(...)`. See docs/typescript_migration.md §F. */
+export type NaiveLocalTs = string;
+
+/** UTC ISO-8601 timestamp (Date#toISOString(), trailing "Z") — the blackout-
+ *  block write encoding (CalendarSync._blockPayload). Same conceptual
+ *  "timestamp" as NaiveLocalTs, a DIFFERENT wire format — never conflate the
+ *  two (§F). */
+export type IsoUtcTs = string;
+
+/** The in-memory Store shape: Dates are real Date objects, fixedIds is a real Set. */
+export interface LiveState {
+  tasks: NimbusTask[];
+  blocks: NimbusBlock[];
+  calendars: Record<string, { workHours: WorkHours }>;
+  plants: Record<string, { workHours: WorkHours }>;
+  plantBlocks: NimbusPlantBlock[];
+  lineSettings: Record<string, NimbusLineSetting>;
+  fixedIds: Set<string>;
+  selectedPlant: string | null;
+  userSettings: Record<string, unknown>;
+}
+
+/** The localStorage-serialized shape (Persistence._saveCache / Config.LS_KEY,
+ *  gated by Config.SCHEMA_VERSION). JSON.stringify turns every Date into an
+ *  ISO string and the fixedIds Set into a string[]. `tasks` is deliberately
+ *  NOT NimbusTask[] — its date fields are strings on disk, not Dates (T-6);
+ *  re-coerced back into NimbusTask via Persistence._prepTask on read. `tasks`
+ *  may also be PARTIAL: _writeCacheWithQuotaGuard writes progressively
+ *  smaller tiers (last 2000 / last 500 / none) on QuotaExceededError. See
+ *  docs/typescript_migration.md §G. */
+export interface StoredState {
+  _schemaVersion: number;
+  _buildId: string | null;
+  _savedAt: string;
+  tasks: Array<Record<string, unknown>>;
+  blocks: NimbusBlock[];
+  calendars: Record<string, { workHours: WorkHours }>;
+  fixedIds: string[];
+  plants: Record<string, { workHours: WorkHours }>;
+  plantBlocks: NimbusPlantBlock[];
+  lineSettings: Record<string, NimbusLineSetting>;
+  selectedPlant: string | null;
+  userSettings: Record<string, unknown>;
+}
