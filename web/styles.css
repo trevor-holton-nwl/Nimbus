@@ -38,51 +38,76 @@ h1, h2, h3, h4 {
 
 /* --- TOKENS --------------------------------------------------------------- */
 :root {
-  /* Base palette — slate → near-black with warm amber highlight */
-  --bg:           #f5f4ef;          /* warm off-white page */
+  /* Base palette — cool slate with navy/blue accent (Command Band re-skin) */
+  --bg:           #e9edf2;          /* light blue-gray page */
   --bg-elev:      #ffffff;          /* cards / panels */
-  --bg-subtle:    #ecebe4;          /* input / subtle fill */
-  --bg-strong:    #e0dfd6;          /* header rail */
-  --line:         #d9d8cf;          /* hairline borders */
-  --line-strong:  #c7c6bd;
-  --fg:           #1a1b1f;          /* body text */
-  --fg-mute:      #6b6c73;          /* secondary text */
-  --fg-faint:     #9a9ba1;          /* tertiary */
+  --bg-subtle:    #f4f7fa;          /* input / subtle fill */
+  --bg-strong:    #eef1f5;          /* header rail */
+  --line:         #d5dce4;          /* hairline borders */
+  --line-strong:  #c6d0db;
+  --fg:           #1c2b3a;          /* body text */
+  --fg-mute:      #5d7186;          /* secondary text */
+  --fg-faint:     #8fa1b3;          /* tertiary */
 
-  /* Accent — warm amber (production / foundry feel, avoids generic blue) */
-  --accent:        #b8791a;
-  --accent-hot:    #a26615;
-  --accent-soft:   #f0dcb4;
-  --accent-wash:   #faf3e3;
+  /* Accent — navy/blue (cool command aesthetic) */
+  --accent:        #1f5fbf;
+  --accent-hot:    #1a4fa0;
+  --accent-soft:   #c9ddf7;
+  --accent-wash:   #dde9f8;
+  --accent-rgb:    31, 95, 191;     /* RGB triplet for rgba() fallback */
 
   /* Secondary accent — deep slate for primary buttons */
-  --primary:       #1f2430;
-  --primary-hot:   #2a3040;
-  --primary-fg:    #fcfbf6;
+  --primary:       #12263f;
+  --primary-hot:   #1f3a5c;
+  --primary-fg:    #ffffff;
 
   /* Semantic */
-  --ok:       #2f7a4d;
-  --ok-soft:  #d8ecdf;
-  --warn:     #b57a0a;
+  --ok:       #1e7a4a;
+  --ok-soft:  #dff0e6;
+  --warn:     #93610a;
   --warn-text:#8a5c08;             /* AA-safe (5.8:1 on white) text/icon color — --warn itself is ~3.2:1, background-only */
-  --warn-soft:#f6e5bd;
+  --warn-soft:#f8ecd0;
   --warn-vivid:#f39c12;            /* vivid amber — distinct from the muted --warn */
   --tab-md-bg:          #f0fdf4;   /* Master Data tab tint (light) */
   --tab-md-bg-hover:    #dcfce7;
-  --err:      #b1362a;
-  --err-soft: #f4d5d0;
-  --info:     #2d5f8c;
-  --info-soft:#d7e5f2;
+  --err:      #b02a20;
+  --err-soft: #f7ddd9;
+  --info:     #1f5fbf;
+  --info-soft:#dde9f8;
+
+  /* Chrome (always-dark command band/drawer, fixed in both light/dark theme) */
+  --chrome-bg:        #12263f;
+  --chrome-bg-deep:   #0c1c30;
+  --chrome-panel:     #1f3a5c;
+  --chrome-border:    #2c4a6b;
+  --chrome-fg:        #ffffff;
+  --chrome-fg-mute:   #a7b8ca;
+  --chrome-fg-faint:  #7e93ab;
+  --chrome-accent:    #4d9fff;
+  --chrome-accent-fg: #0c1c30;
+
+  /* Undefined tokens — introduced in Command Band re-skin */
+  --border:          #d5dce4;      /* same as --line */
+  --border-subtle:   #eef1f5;      /* light neutral for row dividers */
+  --bg-hover:        #eef4fb;      /* subtle hover tint */
+  --font-mono:       'JetBrains Mono', ui-monospace, monospace;
+  --nimbus-amber:    var(--accent); /* points to navy accent now */
+  --amber:           var(--accent); /* points to navy accent now */
+  --bg-float:        var(--chrome-panel); /* dark float surface */
+  --surface:         #ffffff;       /* same as --bg-elev */
+  --text-muted:      #5d7186;       /* same as --fg-mute */
+  --line-subtle:     #e8eff3;       /* light neutral for row hairlines */
+  --surface-2:       #f9fafb;       /* very subtle off-white/blue-gray stripe */
 
   /* Production-line palette — 10 distinct, saturated but not neon */
   --l0: #89419f; --l1: #2d5f8c; --l2: #4f7a3c; --l3: #8b4c7e; --l4: #b14a3e;
   --l5: #3c6e7a; --l6: #7a5a2a; --l7: #5e498b; --l8: #ae4268; --l9: #4a7a5e;
 
   /* Radii + spacing */
-  --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --r-xl: 14px;
-  --shadow-sm: 0 1px 2px rgba(26,27,31,0.06);
-  --shadow-md: 0 2px 6px rgba(26,27,31,0.08), 0 1px 2px rgba(26,27,31,0.04);
-  --shadow-lg: 0 8px 24px rgba(26,27,31,0.12), 0 2px 6px rgba(26,27,31,0.06);
+  --r-sm: 4px; --r-md: 4px; --r-lg: 8px; --r-xl: 14px;
+  --shadow-sm: 0 1px 2px rgba(12,28,48,0.06);
+  --shadow-md: 0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04);
+  --shadow-lg: 0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28);
 
   /* Transitions */
   --t-fast: 0.12s ease;
