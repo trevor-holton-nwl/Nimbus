@@ -1075,6 +1075,11 @@ window.__NIMBUS_LOCALES.en = {
   'aria.welcome_dialog':               'Welcome to NIMBUS — select a plant to begin',
   'aria.open_command_palette':         'Open command palette',
   'aria.command_palette':              'Command palette',
+  'aria.nav_drawer_toggle':            'Toggle navigation menu',
+
+  // Nav drawer (Command Band re-skin)
+  'ui.nav_drawer_heading':             'NAVIGATE',
+  'ui.nav_drawer_footer':              'NIMBUS Production Scheduling',
 
   /* ── SAP Interface (data sync) ───────────────────────────────────────────── */
   'ui.sap_transport':                  'Transport',
