@@ -12,6 +12,8 @@ fails this test immediately, without needing a live database.
 """
 import os
 
+import pytest
+
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
@@ -68,9 +70,6 @@ def test_openapi_schema_includes_new_components():
     for expected in ("TasksResponse", "TaskDTO", "LinkDTO", "TaskUpdateResult",
                      "BulkUpdateResult", "TasksRefreshResponse", "BaselineCorrectResult"):
         assert expected in names, f"{expected} missing from OpenAPI components.schemas"
-
-
-import pytest
 
 
 @pytest.mark.pg
