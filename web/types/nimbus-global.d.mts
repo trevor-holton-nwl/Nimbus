@@ -48,12 +48,15 @@ declare global {
         };
         Timeline?: {
           rebuild?(): void;
+          focus?(id: string): void;
         };
         TimelineNav?: {
           render?(): void;
         };
         Table?: {
           _api?: NimbusVendor.AgGridApi;
+          _openOverrideModalForId?(id: string): void;
+          _applyChipFilter?(patch: any): void;
         };
         Store?: unknown;
         DarkMode?: {
@@ -66,9 +69,30 @@ declare global {
           close?(): void;
         };
         Confidence?: {
-          snapshot?(): void;
-          restore?(): void;
+          snapshot?(): any;
+          restore?(snap?: any): void;
           _recompute?(): void;
+        };
+        /* Task 2 stopgap additions (schedule-workbench.mts Table-onward region)
+           — these members are reached but not precisely typed here; args/return
+           are deliberately loose (`any`) per this file's own additive-only
+           convention. Tasks 3-8 may tighten them alongside their own region's
+           real typing. */
+        AlertsUIAdapter?: {
+          focus?(id: any): void;
+          renderBell?(): void;
+          toggleDrawer?(): void;
+          showForCell?(group: any, dayKey: any): void;
+        };
+        Plant?: {
+          _persistPlantHours?(plantName: any, changed: any): void;
+          render?(): void;
+        };
+        ProdLines?: {
+          render?(): void;
+        };
+        Persistence?: {
+          saveAll?(): void;
         };
       };
 }

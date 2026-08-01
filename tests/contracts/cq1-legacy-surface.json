@@ -679,7 +679,7 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
-      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}"
+      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId || ''}'),200);}"
     }
   ],
   "htmlCommands": [

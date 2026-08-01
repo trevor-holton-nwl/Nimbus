@@ -1325,21 +1325,23 @@ export const DependencyOverlay = {
    two-way sync. Uses the transaction API for fast incremental updates.
    ========================================================================== */
 export const Table = {
-  _api:    null,
-  _colApi: null,
-  _selectedId: null,  // for the override modal
-  _noteOutsideHandler: null,
-  _noteKeyHandler: null,
-  _chipFilters: { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() },
+  _api:    null as any,
+  _colApi: null as any,
+  _selectedId: null as any,  // for the override modal
+  _noteOutsideHandler: null as any,
+  _noteKeyHandler: null as any,
+  _chipFilters: { lines: new Set<string>(), colors: new Set<string>(), status: null as any, dateKey: null as any, poMat: new Set<string>() },
   _lineSearch:       '',
   _colorSearch:      '',
   _rangeMode:        false,
-  _rangeAnchor:      null,
-  _rangeActive:      null,
+  _rangeAnchor:      null as any,
+  _rangeActive:      null as any,
   _rangeDragOn:      false,
-  _rangeHighlighted: new Set(),
+  _rangeHighlighted: new Set<string>(),
   _applyingLayout:   false,   // true while restoring saved layout — suppresses capture echo
-  _captureTimer:     null,
+  _captureTimer:     null as any,
+  _fpOvrStart:       null as any,  // Flatpickr instance for the override modal's start-date input
+  _suppressSelectionEcho: false,
 
   /* ── Saved grid layout (pref('gridLayout'), user tier) ────────────────────
      gridLayout === null  → feature OFF: never applied on load, never captured.
@@ -1355,14 +1357,14 @@ export const Table = {
 
   _currentLayout() {
     if (!Table._api) return { columnState: null, sortModel: null, filterModel: null };
-    let columnState = null, filterModel = null, sortModel = null;
+    let columnState: any = null, filterModel: any = null, sortModel: any = null;
     try { columnState = Table._api.getColumnState(); } catch {}
     try { filterModel = Table._api.getFilterModel(); } catch {}
     if (columnState) {
       sortModel = columnState
-        .filter(c => c.sort)
-        .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
-        .map(c => ({ colId: c.colId, sort: c.sort }));
+        .filter((c: any) => c.sort)
+        .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map((c: any) => ({ colId: c.colId, sort: c.sort }));
     }
     return { columnState, sortModel, filterModel };
   },
@@ -1379,7 +1381,7 @@ export const Table = {
   },
 
   _applySavedLayout() {
-    const layout = (() => { try { return Store.pref('gridLayout'); } catch { return null; } })();
+    const layout: any = (() => { try { return Store.pref('gridLayout'); } catch { return null; } })();
     if (!layout || !Table._api) return;
     Table._applyingLayout = true;
     try {
@@ -1389,7 +1391,7 @@ export const Table = {
       if (layout.filterModel && typeof layout.filterModel === 'object') {
         Table._api.setFilterModel(layout.filterModel);
       }
-    } catch (e) {
+    } catch (e: any) {
       ErrorLog.warn('table', `Apply saved grid layout failed: ${e.message}`);
     }
     // Release the guard on the next macrotask so any events the restore fired
@@ -1399,7 +1401,7 @@ export const Table = {
 
   // Turn the feature on (capture current live layout) or off (null it + reset
   // the grid to defaults). Called by the User Settings toggle.
-  _setLayoutEnabled(on) {
+  _setLayoutEnabled(on: any) {
     if (on) {
       try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
     } else {
@@ -1415,7 +1417,7 @@ export const Table = {
     try {
       Table._api.resetColumnState();
       Table._api.setFilterModel(null);
-    } catch (e) {
+    } catch (e: any) {
       ErrorLog.warn('table', `Reset grid layout failed: ${e.message}`);
     }
     setTimeout(() => { Table._applyingLayout = false; }, 0);
@@ -1436,9 +1438,9 @@ export const Table = {
   init() {
     const el = document.getElementById('ag-grid');
     if (!el || typeof agGrid === 'undefined') return;
-    const gridOptions = {
+    const gridOptions: any = {
       rowData: Store.tasksForSelectedPlant(),
-      getRowId: p => String(p.data.id),
+      getRowId: (p: any) => String(p.data.id),
       rowSelection: 'multiple',
       rowMultiSelectWithClick: true,
       animateRows: false,
@@ -1449,7 +1451,7 @@ export const Table = {
         resizable: true,
         flex: 1,
         minWidth: 100,
-        cellClass: p => Table._rowClass(p.data)
+        cellClass: (p: any) => Table._rowClass(p.data)
       },
       columnDefs: [
         {
@@ -1472,24 +1474,24 @@ export const Table = {
           width: 42, minWidth: 42, maxWidth: 42, flex: 0,
           pinned: 'left',
           editable: false,
-          cellRenderer: p => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          cellRenderer: (p: any) => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
           headerTooltip: Util.t('tip.fixed_column')
         },
         { headerName: Util.t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
           editable: false, cellClass: 'cell-num' },
         { headerName: Util.t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
           pinned: 'left', editable: false,
-          valueGetter: p => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
+          valueGetter: (p: any) => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
         { headerName: Util.t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
           tooltipField: 'MATERIAL_DESCRIPTION' },
         { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
           editable: false, cellClass: 'cell-num',
-          valueParser: p => parseFloat(p.newValue) || 0 },
+          valueParser: (p: any) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
           cellEditorPopup: true,
           cellEditorParams: () => ({ values: Table._getLineOptions() }),
-          cellRenderer: p => {
+          cellRenderer: (p: any) => {
             if (!p.value) return '';
             const ci = Timeline._colorIndex(p.value);
             const color = Config.COLORS[ci % Config.COLORS.length];
@@ -1500,7 +1502,7 @@ export const Table = {
         { headerName: Util.t('col.form'),  field: 'FORM_SIZE', width: 90, flex: 0, editable: false },
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
           cellClass: 'cell-num',
-          valueParser: p => parseFloat(p.newValue) || 0 },
+          valueParser: (p: any) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
           editable: false,
           // Display-only derived value (due date minus RUN_TIME — see
@@ -1510,24 +1512,24 @@ export const Table = {
           // date-type inference off the raw field still drives this
           // column's sort + agDateColumnFilter; dropping `field` entirely
           // would degrade the filter to generic/text.
-          valueGetter: p => Util.impliedOriginalStart(p.data),
-          valueFormatter: p => Util.fmtDTReadable(p.value),
+          valueGetter: (p: any) => Util.impliedOriginalStart(p.data),
+          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.orig_end'), field: 'original_end_date', minWidth: 160,
           editable: false,
-          valueFormatter: p => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
           editable: true,
-          valueFormatter: p => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
           cellEditor: Table._DateTimeEditor,
           cellClass: 'cell-date' },
         { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
           editable: false,
-          valueFormatter: p => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date' },
         { headerName: Util.t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
-          cellRenderer: p => {
+          cellRenderer: (p: any) => {
             const rel = Store.alertsByTask().get(String(p.value)) || [];
             if (!rel.length) return '';
             const err = rel.some(a => a.sev === 'err');
@@ -1542,7 +1544,7 @@ export const Table = {
           sortable: false, filter: false, editable: true, suppressHeaderMenuButton: true,
           cellEditor: 'agLargeTextCellEditor', cellEditorPopup: true,
           cellEditorParams: { maxLength: 500, rows: 5, cols: 50 },
-          cellRenderer: p => {
+          cellRenderer: (p: any) => {
             const note = p.value != null ? String(p.value).trim() : '';
             if (!note) return `<span class="nb-note-empty">✎ <em>${Util.t('ui.add_note')}</em></span>`;
             const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
@@ -1554,9 +1556,9 @@ export const Table = {
       onCellValueChanged: Table._onCellChanged,
       onSelectionChanged: Table._onSelectionChanged,
       isExternalFilterPresent: () => Table._hasChipFilters(),
-      doesExternalFilterPass: node => Table._taskPassesChipFilters(node.data),
+      doesExternalFilterPass: (node: any) => Table._taskPassesChipFilters(node.data),
       noRowsOverlayComponent: Table._NoRowsOverlay,
-      onCellMouseDown: p => {
+      onCellMouseDown: (p: any) => {
         if (!Table._rangeMode) return;
         p.event.preventDefault();
         Table._rangeAnchor  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
@@ -1565,12 +1567,12 @@ export const Table = {
         Table._applyRangeHighlight();
         document.addEventListener('mouseup', () => { Table._rangeDragOn = false; }, { once: true });
       },
-      onCellMouseOver: p => {
+      onCellMouseOver: (p: any) => {
         if (!Table._rangeMode || !Table._rangeDragOn) return;
         Table._rangeActive = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
         Table._applyRangeHighlight();
       },
-      onCellKeyDown: p => {
+      onCellKeyDown: (p: any) => {
         const ctrl = p.event.ctrlKey || p.event.metaKey;
         const key  = p.event.key;
         if (ctrl && key === 'y') {
@@ -1611,7 +1613,7 @@ export const Table = {
       onColumnVisible:  () => Table._captureLayout(),
       onColumnPinned:   () => Table._captureLayout(),
       onFilterChanged:  () => Table._captureLayout(),
-      onGridReady: params => {
+      onGridReady: (params: any) => {
         Table._api = params.api;
         Table._colApi = params.columnApi;
         Table._wireQuickFilter();
@@ -1636,7 +1638,7 @@ export const Table = {
         if (d) d.hidden = true;
       });
     };
-    document.addEventListener('mousedown', e => {
+    document.addEventListener('mousedown', (e: any) => {
       if (!e.target.closest || !e.target.closest('#table-filterbar')) {
         closeAllChipDropdowns();
       }
@@ -1652,12 +1654,12 @@ export const Table = {
     Table._refreshChipDropdowns();
     Table._refreshChipButtons();
 
-    const lineIn  = document.getElementById('tbl-flt-line-paste-input');
-    const colorIn = document.getElementById('tbl-flt-color-paste-input');
+    const lineIn: any  = document.getElementById('tbl-flt-line-paste-input');
+    const colorIn: any = document.getElementById('tbl-flt-color-paste-input');
     Util.wirePasteToCheckboxes(lineIn,
-      () => document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      () => (document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
     Util.wirePasteToCheckboxes(colorIn,
-      () => document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      () => (document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
     // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color pickers must
     // stay filterable, not a bare scrollable checkbox list — matches the Gantt tab's
     // identical filter bar. Paste-to-select (above) and type-to-filter (below) share
@@ -1678,7 +1680,7 @@ export const Table = {
     return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null || f.poMat.size > 0;
   },
 
-  _taskPassesChipFilters(data) {
+  _taskPassesChipFilters(data: any) {
     if (!data) return false;
     const f = Table._chipFilters;
     if (f.lines.size > 0 && !f.lines.has(data.PRODUCTION_LINE)) return false;
@@ -1700,7 +1702,7 @@ export const Table = {
     return true;
   },
 
-  _toggleChipDropdown(kind) {
+  _toggleChipDropdown(kind: any) {
     const d = document.getElementById(`tbl-flt-${kind}-dropdown`);
     if (!d) return;
     // Close peers
@@ -1723,11 +1725,11 @@ export const Table = {
   // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
   // must stay filterable — this is the Orders tab's share of that, matching the
   // Gantt tab's identical filter bar.
-  _filterLineSearch(q) {
+  _filterLineSearch(q: any) {
     Table._lineSearch = q || '';
     Table._buildLineChipDropdown();
   },
-  _filterColorSearch(q) {
+  _filterColorSearch(q: any) {
     Table._colorSearch = q || '';
     Table._buildColorChipDropdown();
   },
@@ -1736,8 +1738,8 @@ export const Table = {
   // touching selections — shared by the plant-change handler and clear filters.
   _resetChipSearch() {
     Table._lineSearch = Table._colorSearch = '';
-    const lineIn  = document.getElementById('tbl-flt-line-paste-input');
-    const colorIn = document.getElementById('tbl-flt-color-paste-input');
+    const lineIn: any  = document.getElementById('tbl-flt-line-paste-input');
+    const colorIn: any = document.getElementById('tbl-flt-color-paste-input');
     if (lineIn)  lineIn.value  = '';
     if (colorIn) colorIn.value = '';
   },
@@ -1745,7 +1747,7 @@ export const Table = {
   _buildLineChipDropdown() {
     const drop = document.getElementById('tbl-flt-line-checklist');
     if (!drop) return;
-    const lineSet = new Set();
+    const lineSet = new Set<string>();
     for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
       if (t.PRODUCTION_LINE) lineSet.add(t.PRODUCTION_LINE);
     }
@@ -1757,7 +1759,7 @@ export const Table = {
     }
     const q = Table._lineSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     drop.innerHTML = visible.length
       ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
@@ -1766,7 +1768,7 @@ export const Table = {
   _buildColorChipDropdown() {
     const drop = document.getElementById('tbl-flt-color-checklist');
     if (!drop) return;
-    const colorSet = new Set();
+    const colorSet = new Set<string>();
     for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
       if (t.COLOR) colorSet.add(String(t.COLOR).toUpperCase());
     }
@@ -1776,7 +1778,7 @@ export const Table = {
     }
     const q = Table._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     drop.innerHTML = visible.length
       ? visible.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
@@ -1810,7 +1812,7 @@ export const Table = {
   _buildDateChipDropdown() {
     const drop = document.getElementById('tbl-flt-date-dropdown');
     if (!drop) return;
-    const today = Util.startOfDay(new Date());
+    const today = Util.startOfDay(new Date())!;
     const tomorrow = new Date(today.getTime() + Config.MS_DAY);
     const cur = Table._chipFilters.dateKey;
     // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
@@ -1834,7 +1836,7 @@ export const Table = {
          </label>`;
   },
 
-  _onChipChange(kind, input) {
+  _onChipChange(kind: any, input: any) {
     const f = Table._chipFilters;
     if (kind === 'line') {
       if (input.checked) f.lines.add(input.value);
@@ -1862,7 +1864,7 @@ export const Table = {
     Table._chipFilters.status = null;
     Table._chipFilters.dateKey = null;
     Table._chipFilters.poMat.clear();
-    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
     if (ta) ta.value = '';
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) cnt.textContent = '';
@@ -1876,7 +1878,7 @@ export const Table = {
   },
 
   _onPoMatApply() {
-    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
     if (!ta) return;
     Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
     const cnt = document.getElementById('tbl-flt-pomat-count');
@@ -1888,10 +1890,10 @@ export const Table = {
     if (Table._api) Table._api.onFilterChanged();
   },
 
-  _onPoMatPaste(e) {
-    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+  _onPoMatPaste(e: any) {
+    const text = (e.clipboardData || (window as any).clipboardData).getData('text/plain');
     if (!text || !text.trim()) return;
-    const known = new Set();
+    const known = new Set<string>();
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
       const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
       const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
@@ -1902,7 +1904,7 @@ export const Table = {
 
   _clearPoMat() {
     Table._chipFilters.poMat.clear();
-    const ta = document.getElementById('tbl-flt-pomat-textarea');
+    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
     if (ta) ta.value = '';
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) cnt.textContent = '';
@@ -1911,7 +1913,7 @@ export const Table = {
   },
 
   /** Driven from KPI tile clicks on the dashboard. Sets state, refreshes UI, re-filters grid. */
-  _applyChipFilter(patch) {
+  _applyChipFilter(patch: any) {
     const f = Table._chipFilters;
     if ('status' in patch)  f.status  = patch.status  || null;
     if ('dateKey' in patch) f.dateKey = patch.dateKey || null;
@@ -1926,8 +1928,8 @@ export const Table = {
     const plant = !!Store.selectedPlant;
     const f = Table._chipFilters;
 
-    const set = (btnId, lblId, txt, active) => {
-      const b = document.getElementById(btnId);
+    const set = (btnId: any, lblId: any, txt: any, active: any) => {
+      const b: any = document.getElementById(btnId);
       const l = document.getElementById(lblId);
       if (b) { b.disabled = !plant; b.classList.toggle('active', !!active); }
       if (l) l.textContent = txt;
@@ -1945,15 +1947,15 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
+    const STATUS_LABEL: any = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);
 
     let dateLabel = Util.t('ui.any_date');
     if (f.dateKey) {
-      const todayKey = Util.dayKey(Util.startOfDay(new Date()));
-      const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date()).getTime() + Config.MS_DAY));
+      const todayKey = Util.dayKey(Util.startOfDay(new Date())!);
+      const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date())!.getTime() + Config.MS_DAY));
       if (f.dateKey === todayKey) dateLabel = Util.t('ui.today');
       else if (f.dateKey === tomorrowKey) dateLabel = Util.t('ui.tomorrow');
       else dateLabel = f.dateKey;
@@ -1981,7 +1983,7 @@ export const Table = {
     }
   },
 
-  _onStore(evt) {
+  _onStore(evt: any) {
     if (evt.source === 'table' && evt.type !== 'fixed:change') return;
     if (!Table._api) return;
     if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected'
@@ -1996,7 +1998,7 @@ export const Table = {
         Table._chipFilters.status = null;
         Table._chipFilters.dateKey = null;
         Table._chipFilters.poMat.clear();
-        const ta = document.getElementById('tbl-flt-pomat-textarea');
+        const ta: any = document.getElementById('tbl-flt-pomat-textarea');
         if (ta) ta.value = '';
         const cnt = document.getElementById('tbl-flt-pomat-count');
         if (cnt) cnt.textContent = '';
@@ -2009,8 +2011,8 @@ export const Table = {
       }
     } else if (evt.type === 'tasks:bulkUpdate') {
       const updated = evt.ids
-        .map(id => Store.tasks[id])
-        .filter(t => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+        .map((id: any) => Store.tasks[id])
+        .filter((t: any) => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
@@ -2022,8 +2024,8 @@ export const Table = {
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'fixed:change') {
       const updated = evt.ids
-        .map(id => Store.tasks[id])
-        .filter(t => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+        .map((id: any) => Store.tasks[id])
+        .filter((t: any) => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
@@ -2059,7 +2061,7 @@ export const Table = {
         overlay.className = 'table-empty-overlay';
         grid?.parentElement?.appendChild(overlay);
       }
-      NIMBUS.EmptyState.render(overlay, {
+      NIMBUS!.EmptyState!.render!(overlay, {
         title: Util.t('empty.no_plant_selected'),
         msg:   Util.t('empty.no_plant_table')
       });
@@ -2076,12 +2078,13 @@ export const Table = {
   // the app's own EmptyState component instead of AG Grid's raw default text,
   // and offers a one-click way out when filters are the cause.
   _NoRowsOverlay: class {
+    _eGui: any;
     init() {
       const filtered = Table._hasChipFilters()
         || (Table._api && Table._api.isAnyFilterPresent())
-        || !!document.getElementById('quick-filter')?.value;
+        || !!(document.getElementById('quick-filter') as any)?.value;
       this._eGui = document.createElement('div');
-      NIMBUS.EmptyState.render(this._eGui, filtered
+      NIMBUS!.EmptyState!.render!(this._eGui, filtered
         ? { title: Util.t('empty.no_orders_filtered_title'), msg: Util.t('empty.no_orders_filtered_msg'), icon: '⌕' }
         : { title: Util.t('empty.no_orders_plant_title'),    msg: Util.t('empty.no_orders_plant_msg') });
       if (filtered) {
@@ -2092,7 +2095,7 @@ export const Table = {
         btn.textContent = Util.t('btn.clear_filters');
         btn.onclick = () => {
           Table._clearChipFilters();
-          const qf = document.getElementById('quick-filter');
+          const qf: any = document.getElementById('quick-filter');
           if (qf) { qf.value = ''; Table._api.setGridOption('quickFilterText', ''); }
         };
         this._eGui.querySelector('.nimbus-empty-state')?.appendChild(btn);
@@ -2102,10 +2105,10 @@ export const Table = {
   },
 
   /** Called when a grid cell is edited. Push the change through the store. */
-  _onCellChanged(p) {
+  _onCellChanged(p: any) {
     const field = p.colDef.field;
     const id = String(p.data.id);
-    const changes = {};
+    const changes: any = {};
 
     if (field === 'start_date') {
       const d = Util.parseDate(p.newValue);
@@ -2146,7 +2149,7 @@ export const Table = {
     Table._selectedId = sel.length === 1 ? String(sel[0].id) : null;
   },
 
-  _onRowClicked(event) {
+  _onRowClicked(event: any) {
     if (!event.data) return;
     const task = Store.tasks[event.data.id];
     if (task) {
@@ -2158,7 +2161,7 @@ export const Table = {
       Inspector.show(task);
     }
   },
- _rowClass(data) {      if (!data) return '';
+ _rowClass(data: any) {      if (!data) return '';
     const ids = Store.alertsByTask().get(String(data.id)) || [];
     if (ids.some(a => a.sev === 'err')) return 'row-alert';
     if (ids.some(a => a.sev === 'warn')) return 'row-warn';
@@ -2174,7 +2177,7 @@ export const Table = {
   },
 
   _wireQuickFilter() {
-    const inp = document.getElementById('quick-filter');
+    const inp: any = document.getElementById('quick-filter');
     if (!inp || !Table._api) return;
     inp.addEventListener('input', () => {
       Table._api.setGridOption('quickFilterText', inp.value);
@@ -2182,11 +2185,11 @@ export const Table = {
   },
 
   /* ---- public actions: fixing, override modal, export ------------------ */
-  fixSelected(fixed) {
+  fixSelected(fixed: any) {
     if (!Table._api) return;
     const sel = Table._api.getSelectedRows();
     if (!sel.length) { Toast.show(Util.t('toast.select_rows_first'), 'warn'); return; }
-    const ids = sel.map(r => String(r.id));
+    const ids = sel.map((r: any) => String(r.id));
     Store.setFixed(ids, fixed, 'table');
     Alerts.scheduleRecompute();
   },
@@ -2197,12 +2200,12 @@ export const Table = {
     Table._openOverrideModalForId(String(sel[0].id));
   },
 
-  _openOverrideModalForId(id) {
+  _openOverrideModalForId(id: any) {
     const t = Store.tasks[id];
     if (!t) return;
     const orderEl = document.getElementById('ovr-order');
-    const lineEl = document.getElementById('ovr-line');
-    const fixEl = document.getElementById('ovr-fix');
+    const lineEl: any = document.getElementById('ovr-line');
+    const fixEl: any = document.getElementById('ovr-fix');
     if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     Table._selectedId = id;
@@ -2222,15 +2225,15 @@ export const Table = {
     if (!id) return;
     const t = Store.tasks[id];
     if (!t) return;
-    const startEl = document.getElementById('ovr-start');
-    const lineEl = document.getElementById('ovr-line');
-    const fixEl = document.getElementById('ovr-fix');
+    const startEl: any = document.getElementById('ovr-start');
+    const lineEl: any = document.getElementById('ovr-line');
+    const fixEl: any = document.getElementById('ovr-fix');
     if (!startEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     const newStart = Util.parseDate(startEl.value);
     const newLine  = lineEl.value;
     const alsoFix  = fixEl.checked;
-    if (!newStart) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
+    if (!newStart) { Toast.show((window as any).t('toast.invalid_date'), 'error'); return; }
 
     const dur = Util.runHours(t) * Config.MS_HOUR;
     const snapped = Util.snap(newStart);
@@ -2248,7 +2251,7 @@ export const Table = {
     // but we DO recompute alerts so conflicts become visible.
     Alerts.scheduleRecompute();
     Modal.close('modal-override');
-    Toast.show(alsoFix ? window.t('toast.order_overridden_fixed') : window.t('toast.order_overridden'), 'success');
+    Toast.show(alsoFix ? (window as any).t('toast.order_overridden_fixed') : (window as any).t('toast.order_overridden'), 'success');
   },
 
   exportCsv() {
@@ -2273,7 +2276,7 @@ export const Table = {
     const gridEl = document.getElementById('ag-grid');
     if (!gridEl) return;
     const cols   = Table._api.getAllDisplayedColumns();
-    const colIds = cols.map(c => c.getColId());
+    const colIds = cols.map((c: any) => c.getColId());
     const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
     const bIdx   = colIds.indexOf(Table._rangeActive.colId);
     if (aIdx === -1 || bIdx === -1) return;
@@ -2281,7 +2284,7 @@ export const Table = {
     const maxCol = Math.max(aIdx, bIdx);
     const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
     const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
-    const newSet = new Set();
+    const newSet = new Set<string>();
     for (let ri = minRow; ri <= maxRow; ri++) {
       for (let ci = minCol; ci <= maxCol; ci++) {
         newSet.add(`${ri}|${colIds[ci]}`);
@@ -2323,7 +2326,7 @@ export const Table = {
   _copyRange() {
     if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
     const cols   = Table._api.getAllDisplayedColumns();
-    const colIds = cols.map(c => c.getColId());
+    const colIds = cols.map((c: any) => c.getColId());
     const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
     const bIdx   = colIds.indexOf(Table._rangeActive.colId);
     if (aIdx === -1 || bIdx === -1) return;
@@ -2331,11 +2334,11 @@ export const Table = {
     const maxCol = Math.max(aIdx, bIdx);
     const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
     const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
-    const rowStrs = [];
+    const rowStrs: any[] = [];
     for (let ri = minRow; ri <= maxRow; ri++) {
       const node = Table._api.getDisplayedRowAtIndex(ri);
       if (!node) continue;
-      const cells = [];
+      const cells: any[] = [];
       for (let ci = minCol; ci <= maxCol; ci++) {
         const colId  = colIds[ci];
         const col    = cols[ci];
@@ -2361,17 +2364,17 @@ export const Table = {
     }
     const nRows = maxRow - minRow + 1;
     const nCols = maxCol - minCol + 1;
-    Toast.show(Util.t('toast.copied_range').replace('{r}', nRows).replace('{c}', nCols), 'success');
+    Toast.show(Util.t('toast.copied_range').replace('{r}', String(nRows)).replace('{c}', String(nCols)), 'success');
     Table._clearRange();
   },
 
-  _showAlertPopup(taskId) {
+  _showAlertPopup(taskId: any) {
     const rel = Store.alertsByTask().get(String(taskId)) || [];
     if (!rel.length) return;
     const t = Store.tasks[taskId];
     const po = t?.PRODUCTION_ORDER || t?.ORDER || String(taskId).slice(0, 8);
-    const _esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const _esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
 
     const rows = rel.map(a => {
       const icon  = a.sev === 'err' ? '🔴' : '🟡';
@@ -2401,19 +2404,19 @@ export const Table = {
     document.body.appendChild(dlg);
     try { dlg.showModal(); } catch { dlg.open = true; }
     dlg.addEventListener('close', () => dlg.remove());
-    dlg.addEventListener('click', e => {
+    dlg.addEventListener('click', (e: any) => {
       if (e.target === dlg || e.target.closest('[data-alert-close]')) { dlg.close(); return; }
       const btn = e.target.closest('[data-alert-id]');
-      if (btn) { dlg.close(); NIMBUS.AlertsUIAdapter.focus(btn.dataset.alertId); }
+      if (btn) { dlg.close(); NIMBUS!.AlertsUIAdapter!.focus!(btn.dataset.alertId); }
     });
   },
 
-  _showNotePopover(e, id) {
+  _showNotePopover(e: any, id: any) {
     Table._closeNotePopover();
     const task = Store.tasks[id];
     if (!task) return;
-    const _esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const _esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
 
     const pop = document.createElement('div');
     pop.id = 'nb-note-popover';
@@ -2449,7 +2452,7 @@ export const Table = {
       pop.style.top = top + 'px';
     });
 
-    const ta = document.getElementById('nb-note-ta');
+    const ta: any = document.getElementById('nb-note-ta');
     const cnt = document.getElementById('nb-note-cnt');
     if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
     ta.addEventListener('input', () => {
@@ -2459,15 +2462,15 @@ export const Table = {
     ta.setSelectionRange(ta.value.length, ta.value.length);
 
     setTimeout(() => {
-      Table._noteOutsideHandler = ev => { if (!pop.contains(ev.target)) Table._closeNotePopover(); };
+      Table._noteOutsideHandler = (ev: any) => { if (!pop.contains(ev.target)) Table._closeNotePopover(); };
       document.addEventListener('mousedown', Table._noteOutsideHandler);
     }, 0);
-    Table._noteKeyHandler = ev => { if (ev.key === 'Escape') Table._closeNotePopover(); };
+    Table._noteKeyHandler = (ev: any) => { if (ev.key === 'Escape') Table._closeNotePopover(); };
     document.addEventListener('keydown', Table._noteKeyHandler);
   },
 
-  _saveNotePopover(id) {
-    const ta = document.getElementById('nb-note-ta');
+  _saveNotePopover(id: any) {
+    const ta: any = document.getElementById('nb-note-ta');
     if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
     if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
     const val = ta.value.trim().slice(0, 500) || null;
@@ -2492,7 +2495,8 @@ export const Table = {
 
   /** A minimal inline datetime-local editor for AG Grid. */
   _DateTimeEditor: class {
-    init(params) {
+    [k: string]: any;
+    init(params: any) {
       this._input = document.createElement('input');
       this._input.type = 'datetime-local';
       this._input.style.width = '100%';
@@ -2514,7 +2518,8 @@ export const Table = {
   // no searchable select (that's Enterprise's agRichSelectCellEditor), so this
   // is a small hand-rolled popup editor: text input + filtered option list.
   _SearchableLineEditor: class {
-    init(params) {
+    [k: string]: any;
+    init(params: any) {
       this._params = params;
       this._values = (typeof params.values === 'function' ? params.values() : params.values) || [];
       this._chosen = null;
@@ -2527,45 +2532,45 @@ export const Table = {
       this._list  = this._eGui.querySelector('.nse-list');
       this._input.value = params.value || '';
       this._input.addEventListener('input', () => this._renderList(this._input.value));
-      this._input.addEventListener('keydown', e => this._onKeyDown(e));
+      this._input.addEventListener('keydown', (e: any) => this._onKeyDown(e));
       this._renderList('');
     }
-    _renderList(q) {
+    _renderList(q: any) {
       const query = q.toLowerCase().trim();
-      this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
+      this._filtered = query ? this._values.filter((v: any) => v.toLowerCase().includes(query)) : this._values;
       this._activeIdx = 0;
-      const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
+        ? this._filtered.map((v: any, i: any) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
-      this._list.querySelectorAll('.nse-opt').forEach(el => {
-        el.addEventListener('mousedown', e => { e.preventDefault(); this._choose(Number(el.dataset.i)); });
+      this._list.querySelectorAll('.nse-opt').forEach((el: any) => {
+        el.addEventListener('mousedown', (e: any) => { e.preventDefault(); this._choose(Number(el.dataset.i)); });
       });
     }
-    _choose(i) {
+    _choose(i: any) {
       const v = this._filtered[i];
       if (v == null) return;
       this._chosen = v;
       this._input.value = v;
       this._params.api.stopEditing();
     }
-    _onKeyDown(e) {
+    _onKeyDown(e: any) {
       if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
       else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
       else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
     }
-    _move(delta) {
+    _move(delta: any) {
       if (!this._filtered.length) return;
       this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
-      this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
+      this._list.querySelectorAll('.nse-opt').forEach((el: any, i: any) => el.classList.toggle('active', i === this._activeIdx));
     }
     getGui() { return this._eGui; }
     afterGuiAttached() { this._input.focus(); this._input.select(); }
     getValue() {
       if (this._chosen != null) return this._chosen;
       const typed = this._input.value.trim();
-      const exact = this._values.find(v => v.toLowerCase() === typed.toLowerCase());
+      const exact = this._values.find((v: any) => v.toLowerCase() === typed.toLowerCase());
       return exact != null ? exact : this._params.value;
     }
     isPopup() { return true; }
@@ -2578,8 +2583,8 @@ export const Table = {
    Edits here write through the Store (source: 'inspector').
    ========================================================================== */
 export const Inspector = {
-  _currentId: null,
-  _unsubStore: null,
+  _currentId: null as any,
+  _unsubStore: null as any,
 
   init() {
     Inspector._unsubStore = Store.subscribe(evt => {
@@ -2605,7 +2610,7 @@ export const Inspector = {
     }, 'Inspector');
   },
 
-  show(task) {
+  show(task: any) {
     // Refuse to inspect tasks that don't belong to the current plant scope.
     // Only block when the task's plant is positively known and wrong — if
     // getPlantForLine returns null (line unmapped), allow inspection rather
@@ -2624,13 +2629,13 @@ export const Inspector = {
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
 
-  _render(task) {
+  _render(task: any) {
     const body = document.getElementById('inspector-body');
     if (!body) return;
     if (!task) { Inspector.clear(); return; }
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
     const fixed = Store.isFixed(task.id);
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
@@ -2703,18 +2708,18 @@ export const Inspector = {
     `;
 
     // Wire inputs
-    body.querySelectorAll('[data-field]').forEach(el => {
+    body.querySelectorAll('[data-field]').forEach((el: any) => {
       el.onchange = () => Inspector._onFieldChange(el.dataset.field, el.value);
     });
     // Action buttons via listeners (id is never concatenated into an HTML attribute).
     const _id = String(task.id);
-    body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS.Table._openOverrideModalForId(_id));
-    body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS.Timeline.focus(_id));
+    body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS!.Table!._openOverrideModalForId!(_id));
+    body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS!.Timeline!.focus!(_id));
     // Notes char counter (oninput fires on every keystroke)
-    const notesEl = body.querySelector('[data-field="notes"]');
+    const notesEl: any = body.querySelector('[data-field="notes"]');
     const notesRemEl = body.querySelector('#insp-notes-rem');
     if (notesEl && notesRemEl) {
-      notesEl.oninput = () => { notesRemEl.textContent = 500 - notesEl.value.length; };
+      notesEl.oninput = () => { notesRemEl.textContent = String(500 - notesEl.value.length); };
       const _noteId = Inspector._currentId;
       notesEl.onblur = () => {
         const trimmed = notesEl.value.trim() || null;
@@ -2723,7 +2728,7 @@ export const Inspector = {
       };
     }
     // Upgrade start_date to Flatpickr datetime picker
-    const _dtEl = body.querySelector('[data-field="start_date"]');
+    const _dtEl: any = body.querySelector('[data-field="start_date"]');
     if (_dtEl) {
       Util.fpDatetime(_dtEl, {
         onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
@@ -2731,7 +2736,7 @@ export const Inspector = {
     }
   },
 
-  _varianceBadge(t) {
+  _varianceBadge(t: any) {
     // Compares against the derived Orig Start (due date minus RUN_TIME —
     // see Util.impliedOriginalStart), not the raw original_start_date, so
     // the badge stays consistent with what the Orig Start row now shows.
@@ -2746,18 +2751,18 @@ export const Inspector = {
       ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
       : `${days >= 0 ? '+' : ''}${(deltaMs / Config.MS_HOUR).toFixed(1)}h`;
     const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
-    return `<span class="insp-var ${cls}" title="${window.t('ui.insp_variance_shifted')}">${txt}</span>`;
+    return `<span class="insp-var ${cls}" title="${(window as any).t('ui.insp_variance_shifted')}">${txt}</span>`;
   },
 
-  _onFieldChange(field, value) {
+  _onFieldChange(field: any, value: any) {
     if (!Inspector._currentId) return;
     const id = Inspector._currentId;
     const t  = Store.tasks[id];
     if (!t) return;
-    const changes = {};
+    const changes: any = {};
     if (field === 'start_date') {
       const d = Util.parseDate(value);
-      if (!d) { Toast.show(window.t('toast.invalid_date'), 'error'); return; }
+      if (!d) { Toast.show((window as any).t('toast.invalid_date'), 'error'); return; }
       changes.start_date = Util.snap(d);
       const dur = Util.runHours(t) * Config.MS_HOUR;
       if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
@@ -2785,8 +2790,8 @@ export const Inspector = {
   // Per-id debounce timers. A single shared debounce timer (the old design) meant a
   // note on order B within 800ms cancelled order A's pending POST — silent data loss
   // (R5). Keying the timer by task id isolates each order's save.
-  _noteTimers: {},
-  _persistNote(id, notes) {
+  _noteTimers: {} as any,
+  _persistNote(id: any, notes: any) {
     clearTimeout(Inspector._noteTimers[id]);
     Inspector._noteTimers[id] = setTimeout(() => {
       delete Inspector._noteTimers[id];
@@ -2810,7 +2815,7 @@ export const Inspector = {
     }, 800);
   },
 
-  toggleFix(fixed) {
+  toggleFix(fixed: any) {
     if (!Inspector._currentId) return;
     Store.setFixed([Inspector._currentId], fixed, 'inspector');
     Alerts.scheduleRecompute();
@@ -2821,7 +2826,7 @@ export const Inspector = {
    CONTEXT MENU — right-click on a timeline item.
    ========================================================================== */
 export const ContextMenu = {
-  _targetId: null,
+  _targetId: null as any,
 
   init() {
     const menu = document.getElementById('ctx-menu');
@@ -2843,9 +2848,9 @@ export const ContextMenu = {
     document.addEventListener('keydown', e => { if (e.key === 'Escape') ContextMenu.close(); });
   },
 
-  open(x, y, targetId) {
+  open(x: any, y: any, targetId: any) {
     ContextMenu._targetId = targetId;
-    const menu = document.getElementById('ctx-menu');
+    const menu: any = document.getElementById('ctx-menu');
     menu.hidden = false;
     menu.style.left = x + 'px';
     menu.style.top  = y + 'px';
@@ -2878,10 +2883,10 @@ const VL_HIER_TASK_H = 28;
    ========================================================================== */
 export const Hierarchy = {
   _open:      new Set(),
-  _lineItems: [],
-  _vl:        null,
+  _lineItems: [] as any[],
+  _vl:        null as any,
   _wired:     false,
-  _todayCache: null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
+  _todayCache: null as any,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
 
   _renderPending: false,
 
@@ -2909,11 +2914,11 @@ export const Hierarchy = {
     }, 'Hierarchy');
   },
 
-  _itemH(item) {
+  _itemH(item: any) {
     return VL_HIER_LINE_H + (Hierarchy._open.has(item.name) ? item.tasks.length * VL_HIER_TASK_H : 0);
   },
 
-  _renderItem(item) {
+  _renderItem(item: any) {
     const open = Hierarchy._open.has(item.name);
     const chip = item.pct != null
       ? `<span class="line-util ${item.sev}">${item.pct}%</span>`
@@ -2926,7 +2931,7 @@ export const Hierarchy = {
       `<span>${item.name}</span>` +
       `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
       `${chip}</summary>` +
-      (open ? item.tasks.map((tk, i) => {
+      (open ? item.tasks.map((tk: any, i: any) => {
         const fixed = Store.isFixed(tk.id);
         return `<div class="hier-item${fixed ? ' fixed' : ''}" data-id="${tk.id}">` +
           (fixed ? '<span class="lock-ico">🔒</span>' : '') +
@@ -2940,14 +2945,14 @@ export const Hierarchy = {
     if (!el) return;
     if (!Store.selectedPlant) {
       if (Hierarchy._vl) { Hierarchy._vl.destroy(); Hierarchy._vl = null; }
-      NIMBUS.EmptyState.render(el, {
+      NIMBUS!.EmptyState!.render!(el, {
         title: Util.t('empty.no_plant_selected'),
         msg:   Util.t('empty.no_plant_hierarchy')
       });
       return;
     }
 
-    const lines = {};
+    const lines: any = {};
     for (const tk of Store.tasksForSelectedPlant()) {
       const k = tk.PRODUCTION_LINE || 'Unknown';
       (lines[k] ||= []).push(tk);
@@ -2961,8 +2966,8 @@ export const Hierarchy = {
       : lineNames;
     // Surface the user's pinned lines at the top (scale-safe quick access at
     // 70+ lines/plant), preserving alpha order within each group.
-    let _pinnedLines;
-    try { _pinnedLines = new Set(Store.pref('pinnedLines') || []); } catch { _pinnedLines = new Set(); }
+    let _pinnedLines: Set<string>;
+    try { _pinnedLines = new Set((Store.pref('pinnedLines') as any) || []); } catch { _pinnedLines = new Set(); }
     if (_pinnedLines.size) {
       visibleNames = [
         ...visibleNames.filter(l => _pinnedLines.has(l)),
@@ -2991,8 +2996,8 @@ export const Hierarchy = {
       const ci    = Timeline._colorIndex(name);
       const color = Config.COLORS[ci % Config.COLORS.length];
       const tasks = lines[name]
-        .filter(tk => tk.start_date >= todayStart && tk.start_date <= todayEnd)
-        .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+        .filter((tk: any) => tk.start_date >= todayStart && tk.start_date <= todayEnd)
+        .sort((a: any, b: any) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       const u   = _utilToday[name]?.[_todayKey];
       const pct = (u && u.scheduled > 0) ? Math.round(u.pct * 100) : null;
       const sev = u
@@ -3020,7 +3025,7 @@ export const Hierarchy = {
     // mutate Hierarchy._open and call render(); do not set det.open.
     if (!Hierarchy._wired) {
       Hierarchy._wired = true;
-      el.addEventListener('click', e => {
+      el.addEventListener('click', (e: any) => {
         const sum = e.target.closest('details.line-group > summary');
         if (sum) {
           e.preventDefault();
@@ -3061,11 +3066,11 @@ export const Hierarchy = {
    ========================================================================== */
 export const GanttFilter = {
   _active:         { text: '' },
-  _selectedLines:  new Set(),
-  _selectedColors: new Set(),
-  _selectedForms:  new Set(),
-  _pastedIds:      new Set(),
-  _bar:            null,
+  _selectedLines:  new Set<string>(),
+  _selectedColors: new Set<string>(),
+  _selectedForms:  new Set<string>(),
+  _pastedIds:      new Set<string>(),
+  _bar:            null as any,
   _lineSearch:     '',
   _colorSearch:    '',
   _formSearch:     '',
@@ -3076,7 +3081,7 @@ export const GanttFilter = {
     GanttFilter._bar = bar;
     GanttFilter.populate();
 
-    const textIn   = document.getElementById('flt-text');
+    const textIn: any   = document.getElementById('flt-text');
     const clearBtn = document.getElementById('flt-clear');
 
     if (textIn)   textIn.oninput   = Util.debounce(() => { GanttFilter._active.text = textIn.value.trim().toLowerCase(); GanttFilter._apply(); }, 120);
@@ -3109,7 +3114,7 @@ export const GanttFilter = {
       [document.getElementById('gantt-flt-form-btn'),  document.getElementById('gantt-form-dropdown')],
       [document.getElementById('gantt-flt-pomat-btn'), document.getElementById('gantt-pomat-dropdown')],
     ];
-    document.addEventListener('click', e => {
+    document.addEventListener('click', (e: any) => {
       if (_fltPairs.every(([, d]) => !d || d.hidden)) return;
       for (const [btn, drop] of _fltPairs) {
         if (drop && !drop.hidden && btn && !btn.contains(e.target) && !drop.contains(e.target)) {
@@ -3118,15 +3123,15 @@ export const GanttFilter = {
       }
     });
 
-    const lineIn  = document.getElementById('gantt-line-paste-input');
-    const colorIn = document.getElementById('gantt-color-paste-input');
-    const formIn  = document.getElementById('gantt-form-paste-input');
+    const lineIn: any  = document.getElementById('gantt-line-paste-input');
+    const colorIn: any = document.getElementById('gantt-color-paste-input');
+    const formIn: any  = document.getElementById('gantt-form-paste-input');
     Util.wirePasteToCheckboxes(lineIn,
-      () => document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      () => (document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
     Util.wirePasteToCheckboxes(colorIn,
-      () => document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      () => (document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
     Util.wirePasteToCheckboxes(formIn,
-      () => document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []);
+      () => (document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
     // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color/form pickers
     // must stay filterable, not a bare scrollable checkbox list. Paste-to-select
     // (above) and type-to-filter (below) share the same input without conflict —
@@ -3150,7 +3155,7 @@ export const GanttFilter = {
     GanttFilter._buildFormDropdown();
   },
 
-  matches(task) {
+  matches(task: any) {
     const { text } = GanttFilter._active;
     if (GanttFilter._selectedColors.size > 0 && !GanttFilter._selectedColors.has((task.COLOR || '').toUpperCase())) return false;
     if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
@@ -3169,7 +3174,7 @@ export const GanttFilter = {
 
   clear() {
     GanttFilter._active = { text: '' };
-    const textIn = document.getElementById('flt-text');
+    const textIn: any = document.getElementById('flt-text');
     if (textIn) textIn.value = '';
     GanttFilter._selectedLines.clear();
     GanttFilter._selectedColors.clear();
@@ -3191,9 +3196,9 @@ export const GanttFilter = {
   // touching selections — shared by the plant-change handler and clear().
   _resetSearch() {
     GanttFilter._lineSearch = GanttFilter._colorSearch = GanttFilter._formSearch = '';
-    const lineIn  = document.getElementById('gantt-line-paste-input');
-    const colorIn = document.getElementById('gantt-color-paste-input');
-    const formIn  = document.getElementById('gantt-form-paste-input');
+    const lineIn: any  = document.getElementById('gantt-line-paste-input');
+    const colorIn: any = document.getElementById('gantt-color-paste-input');
+    const formIn: any  = document.getElementById('gantt-form-paste-input');
     if (lineIn)  lineIn.value  = '';
     if (colorIn) colorIn.value = '';
     if (formIn)  formIn.value  = '';
@@ -3207,7 +3212,7 @@ export const GanttFilter = {
   // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
   // must stay filterable, not a bare scrollable checkbox list — this is the
   // Gantt line filter's share of that, matching the Dashboard's line filter.
-  _filterLineSearch(q) {
+  _filterLineSearch(q: any) {
     GanttFilter._lineSearch = q || '';
     GanttFilter._buildLineDropdown();
   },
@@ -3226,8 +3231,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._lineSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = s => String(s).replace(/[&<>"]/g,
-      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g,
+      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
     drop.innerHTML = visible.length
       ? visible.map(l =>
           `<label><input type="checkbox" value="${esc(l)}"${GanttFilter._selectedLines.has(l) ? ' checked' : ''}
@@ -3247,7 +3252,7 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onLineChange(cb) {
+  _onLineChange(cb: any) {
     if (cb.checked) GanttFilter._selectedLines.add(cb.value);
     else            GanttFilter._selectedLines.delete(cb.value);
     GanttFilter._refreshLineBtn();
@@ -3268,7 +3273,7 @@ export const GanttFilter = {
     if (drop) drop.hidden = !drop.hidden;
   },
 
-  _filterColorSearch(q) {
+  _filterColorSearch(q: any) {
     GanttFilter._colorSearch = q || '';
     GanttFilter._buildColorDropdown();
   },
@@ -3284,8 +3289,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = s => String(s).replace(/[&<>"]/g,
-      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g,
+      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
     drop.innerHTML = visible.length
       ? visible.map(c =>
           `<label><input type="checkbox" value="${esc(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
@@ -3306,7 +3311,7 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onColorChange(cb) {
+  _onColorChange(cb: any) {
     if (cb.checked) GanttFilter._selectedColors.add(cb.value.toUpperCase());
     else            GanttFilter._selectedColors.delete(cb.value.toUpperCase());
     GanttFilter._refreshColorBtn();
@@ -3318,7 +3323,7 @@ export const GanttFilter = {
     if (drop) drop.hidden = !drop.hidden;
   },
 
-  _filterFormSearch(q) {
+  _filterFormSearch(q: any) {
     GanttFilter._formSearch = q || '';
     GanttFilter._buildFormDropdown();
   },
@@ -3334,8 +3339,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._formSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(f => f.toLowerCase().includes(q)) : sorted;
-    const esc = s => String(s).replace(/[&<>"]/g,
-      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g,
+      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
     drop.innerHTML = visible.length
       ? visible.map(f =>
           `<label><input type="checkbox" value="${esc(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
@@ -3356,7 +3361,7 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onFormChange(cb) {
+  _onFormChange(cb: any) {
     if (cb.checked) GanttFilter._selectedForms.add(cb.value.toUpperCase());
     else            GanttFilter._selectedForms.delete(cb.value.toUpperCase());
     GanttFilter._refreshFormBtn();
@@ -3378,7 +3383,7 @@ export const GanttFilter = {
   },
 
   _onPoMatApply() {
-    const ta = document.getElementById('gantt-pomat-textarea');
+    const ta: any = document.getElementById('gantt-pomat-textarea');
     if (!ta) return;
     GanttFilter._pastedIds = new Set(Util.parsePasteList(ta.value).map(Util.norm));
     const cnt = document.getElementById('gantt-pomat-count');
@@ -3390,10 +3395,10 @@ export const GanttFilter = {
     GanttFilter._apply();
   },
 
-  _onPoMatPaste(e) {
-    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+  _onPoMatPaste(e: any) {
+    const text = (e.clipboardData || (window as any).clipboardData).getData('text/plain');
     if (!text || !text.trim()) return;
-    const known = new Set();
+    const known = new Set<string>();
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
       const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
       const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
@@ -3404,7 +3409,7 @@ export const GanttFilter = {
 
   _clearPoMat() {
     GanttFilter._pastedIds.clear();
-    const ta = document.getElementById('gantt-pomat-textarea');
+    const ta: any = document.getElementById('gantt-pomat-textarea');
     if (ta) ta.value = '';
     const cnt = document.getElementById('gantt-pomat-count');
     if (cnt) cnt.textContent = '';
@@ -3412,7 +3417,7 @@ export const GanttFilter = {
     GanttFilter._apply();
   },
 
-  _apply: null,  // assigned below after Util is in scope
+  _apply: null as any,  // assigned below after Util is in scope
 
   _doApply() {
     if (!Timeline._items) return;
@@ -3420,15 +3425,15 @@ export const GanttFilter = {
     const badge = document.getElementById('flt-badge');
     const bar   = document.getElementById('gantt-filterbar');
 
-    const updates = [];
+    const updates: any[] = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
-      const item = Timeline._items.get(id);
+      const item: any = Timeline._items.get(id);
       if (!item) continue;
       const shouldDim = active && !GanttFilter.matches(task);
-      const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
+      const baseClass = (item.className || '').split(' ').filter((c: any) => c !== 'dimmed').join(' ');
       const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
       if (newClass !== item.className) updates.push({ id, className: newClass });
     }
@@ -3455,7 +3460,7 @@ export const GanttFilter = {
   // private-field sequences these replace.
   selectedLines() { return GanttFilter._selectedLines; },
   activeFilter()  { return GanttFilter._active; },
-  isolateLine(line) {
+  isolateLine(line: any) {
     GanttFilter._selectedLines.clear();
     GanttFilter._selectedLines.add(line);
     GanttFilter._refreshLineBtn();
@@ -3480,14 +3485,18 @@ const VL_LS_ROW_H = 36;
    DASHBOARD — KPIs, today-by-line chart, alert summary.
    ========================================================================== */
 export const Dashboard = {
-  _prevKpi:    {},
+  _prevKpi:    {} as any,
 
-  _filterLines:  new Set(),
+  _filterLines:  new Set<string>(),
+  _allLines:     null as any,
+  _resizeDebounced: null as any,
+  _matrix7Cache: null as any,
+  _lsVL:         null as any,
 
   _latenessHorizon: 14,                  // days; toggled by 7/14/28 segment buttons
-  _latenessDrillKey: null,               // 'LINE|YYYY-MM-DD' for the currently-drilled cell
+  _latenessDrillKey: null as any,               // 'LINE|YYYY-MM-DD' for the currently-drilled cell
 
-  _renderDebounced: null,
+  _renderDebounced: null as any,
   init() {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
@@ -3518,7 +3527,7 @@ export const Dashboard = {
       if (d) d.hidden = true;
       if (btn) btn.setAttribute('aria-expanded', 'false');
     };
-    document.addEventListener('click', e => {
+    document.addEventListener('click', (e: any) => {
       if (!e.target.closest('#line-filter-group')) closeLineFilterDropdown();
     });
     document.addEventListener('keydown', e => {
@@ -3527,14 +3536,14 @@ export const Dashboard = {
     // Wire lateness-horizon segment buttons.
     const horizonGroup = document.getElementById('lateness-horizon-group');
     if (horizonGroup) {
-      horizonGroup.addEventListener('click', e => {
+      horizonGroup.addEventListener('click', (e: any) => {
         const btn = e.target.closest('button[data-h]');
         if (!btn) return;
         const h = parseInt(btn.dataset.h, 10);
         if (!Number.isFinite(h) || h === Dashboard._latenessHorizon) return;
         Dashboard._latenessHorizon = h;
         horizonGroup.querySelectorAll('button').forEach(b =>
-          b.classList.toggle('active', parseInt(b.dataset.h, 10) === h)
+          b.classList.toggle('active', parseInt(b.dataset.h || '', 10) === h)
         );
         Dashboard._latenessDrillKey = null;
         Dashboard._renderLatenessHeatmap();
@@ -3567,18 +3576,18 @@ export const Dashboard = {
 
   _lineSearch: '',
 
-  _filterLineSearch(q) {
+  _filterLineSearch(q: any) {
     Dashboard._lineSearch = q || '';
     Dashboard._renderLineChecklist();
   },
 
   _refreshLineDropdown() {
-    const btn  = document.getElementById('line-filter-btn');
+    const btn: any  = document.getElementById('line-filter-btn');
     const drop = document.getElementById('line-filter-dropdown');
     if (!btn || !drop) return;
 
     Dashboard._lineSearch = '';
-    const srch = document.getElementById('line-filter-search');
+    const srch: any = document.getElementById('line-filter-search');
     if (srch) srch.value = '';
 
     if (!Store.selectedPlant) {
@@ -3607,10 +3616,10 @@ export const Dashboard = {
     if (!list) return;
     const all = Dashboard._allLines || [];
     const q = Dashboard._lineSearch.toLowerCase().trim();
-    const visible = q ? all.filter(l => l.toLowerCase().includes(q)) : all;
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const visible = q ? all.filter((l: any) => l.toLowerCase().includes(q)) : all;
+    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     list.innerHTML = visible.length
-      ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
+      ? visible.map((l: any) => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${all.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
   },
 
@@ -3639,7 +3648,7 @@ export const Dashboard = {
     }
   },
 
-  _toggleDropdown(id, btnId) {
+  _toggleDropdown(id: any, btnId: any) {
     const drop = document.getElementById(id);
     if (!drop) return;
     drop.hidden = !drop.hidden;
@@ -3647,7 +3656,7 @@ export const Dashboard = {
     if (btn) btn.setAttribute('aria-expanded', String(!drop.hidden));
   },
 
-  _onLineChange(cb) {
+  _onLineChange(cb: any) {
     if (cb.checked) Dashboard._filterLines.add(cb.value);
     else Dashboard._filterLines.delete(cb.value);
     Dashboard._refreshFilterBtns();
@@ -3665,19 +3674,19 @@ export const Dashboard = {
       const heatmapPanel = document.getElementById('util-heatmap-panel')?.closest('.panel');
       const lineStatusCard = document.getElementById('line-status-card');
       if (!heatmapPanel || !lineStatusCard) return;
-      const head = heatmapPanel.querySelector('.panel-head');
-      const body = heatmapPanel.querySelector('.panel-body');
+      const head: any = heatmapPanel.querySelector('.panel-head');
+      const body: any = heatmapPanel.querySelector('.panel-body');
       if (!head || !body) return;
-      lineStatusCard.style.maxHeight = (head.offsetHeight + body.offsetHeight) + 'px';
+      (lineStatusCard as any).style.maxHeight = (head.offsetHeight + body.offsetHeight) + 'px';
     });
   },
 
   render() {
     // Only render heavy bits if the home tab is currently active — but still
     // update the alert bell badge on every change.
-    NIMBUS.AlertsUIAdapter.renderBell();
+    NIMBUS!.AlertsUIAdapter!.renderBell!();
 
-    if (!document.getElementById('home-tab').classList.contains('active')) return;
+    if (!document.getElementById('home-tab')!.classList.contains('active')) return;
 
     Dashboard._renderEmptyState();
     if (!Store.selectedPlant) return;
@@ -3694,7 +3703,7 @@ export const Dashboard = {
     // this every render (plant change, filter toggle, 300ms-debounced Store events)
     // rebuilt the whole O(lines×days) matrix from scratch.
     const _scope = (Store.selectedPlant || '') + '|' + [...Dashboard._filterLines].sort().join(',');
-    const _mkey  = `${Util.startOfDay(_now7).getTime()}|7|${Store.rev()}|${_scope}`;
+    const _mkey  = `${Util.startOfDay(_now7)!.getTime()}|7|${Store.rev()}|${_scope}`;
     let _matrix7;
     if (Dashboard._matrix7Cache && Dashboard._matrix7Cache.key === _mkey) {
       _matrix7 = Dashboard._matrix7Cache.matrix;
@@ -3728,34 +3737,34 @@ export const Dashboard = {
         else homeContainer.appendChild(overlay);
       }
       if (overlay) {
-        NIMBUS.EmptyState.render(overlay, {
+        NIMBUS!.EmptyState!.render!(overlay, {
           title: Util.t('empty.pick_plant_dashboard'),
           msg:   Util.t('ui.select_plant_dashboard_msg')
         });
       }
       if (situationEl) { situationEl.textContent = ''; situationEl.classList.remove('warn'); }
-      dataPanels.forEach(el => el.style.display = 'none');
+      dataPanels.forEach((el: any) => el.style.display = 'none');
     } else {
       if (overlay) overlay.remove();
-      dataPanels.forEach(el => el.style.display = '');
+      dataPanels.forEach((el: any) => el.style.display = '');
     }
   },
 
-  _renderKPIs(matrix7, tasksArg) {
+  _renderKPIs(matrix7: any, tasksArg: any) {
     const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
     const today = Util.startOfDay(new Date());
 
-    const todayOrders = tasks.filter(t => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
+    const todayOrders = tasks.filter((t: any) => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
 
     // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
-    const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
+    const lateCount = tasks.filter((t: any) => Util.latenessHours(t) > 0).length;
 
     // Alerts Today tile (kpi.conflicts_pending, action:'alerts-today') must count exactly
     // what its click-through shows -- Table._applyChipFilter({status:'conflict', dateKey:today})
     // -- i.e. today's orders carrying >=1 err alert.
     const alertsByTask = Store.alertsByTask();
-    const conflictsToday = todayOrders.filter(t =>
-      (alertsByTask.get(String(t.id)) || []).some(a => a.sev === 'err')).length;
+    const conflictsToday = todayOrders.filter((t: any) =>
+      (alertsByTask.get(String(t.id)) || []).some((a: any) => a.sev === 'err')).length;
     const conflictCls = conflictsToday > 0 ? 'err' : '';
 
     // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
@@ -3801,8 +3810,8 @@ export const Dashboard = {
     if (!stack) return;
 
     // Build tiles, animating numeric values that changed since last render.
-    tiles.forEach((tile, idx) => {
-      let el = stack.children[idx];
+    tiles.forEach((tile: any, idx: any) => {
+      let el: any = stack.children[idx];
       if (!el) {
         // Real <button> so keyboard/screen-reader users get focus + Enter/Space
         // activation natively — a div with a hand-rolled role/tabindex promised
@@ -3837,10 +3846,10 @@ export const Dashboard = {
       Dashboard._prevKpi[tile.k] = tile.v;
     });
     // Remove extra tiles if lines reduced
-    while (stack.children.length > tiles.length) stack.removeChild(stack.lastChild);
+    while (stack.children.length > tiles.length) stack.removeChild(stack.lastChild!);
   },
 
-  _tileTooltip(action) {
+  _tileTooltip(action: any) {
     switch (action) {
       case 'orders-today': return 'Open Orders table filtered to today';
       case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
@@ -3850,34 +3859,34 @@ export const Dashboard = {
     }
   },
 
-  _tileClick(action) {
+  _tileClick(action: any) {
     switch (action) {
       case 'orders-today': {
-        NIMBUS.App.goto('table');
+        NIMBUS!.App!.goto!('table');
         const todayDt = Util.startOfDay(new Date());
         const ymd = Util.dayKey(todayDt);
         setTimeout(() => {
-          if (NIMBUS.Table && NIMBUS.Table._applyChipFilter) {
-            NIMBUS.Table._applyChipFilter({ dateKey: ymd });
+          if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
+            NIMBUS!.Table!._applyChipFilter!({ dateKey: ymd });
           }
         }, 120);
         break;
       }
       case 'late': {
-        NIMBUS.App.goto('table');
+        NIMBUS!.App!.goto!('table');
         setTimeout(() => {
-          if (NIMBUS.Table && NIMBUS.Table._applyChipFilter) {
-            NIMBUS.Table._applyChipFilter({ status: 'late' });
+          if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
+            NIMBUS!.Table!._applyChipFilter!({ status: 'late' });
           }
         }, 120);
         break;
       }
       case 'alerts-today': {
-        NIMBUS.App.goto('table');
+        NIMBUS!.App!.goto!('table');
         const ymd = Util.dayKey(Util.startOfDay(new Date()));
         setTimeout(() => {
-          if (NIMBUS.Table && NIMBUS.Table._applyChipFilter) {
-            NIMBUS.Table._applyChipFilter({ status: 'conflict', dateKey: ymd });
+          if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
+            NIMBUS!.Table!._applyChipFilter!({ status: 'conflict', dateKey: ymd });
           }
         }, 120);
         break;
@@ -3893,7 +3902,7 @@ export const Dashboard = {
   // Work-header situation line: "3 need attention · 42 orders scheduled today" (or the
   // all-clear phrasing). Fed directly from _renderKPIs' own todayOrders/conflictsToday/
   // lateCount so the header always agrees with the tiles below it — no separate recompute.
-  _renderSituation({ todayCount, attention }) {
+  _renderSituation({ todayCount, attention }: any) {
     const el = document.getElementById('wh-situation');
     if (!el) return;
     const totalPlural = todayCount === 1 ? '' : 's';
@@ -3908,10 +3917,10 @@ export const Dashboard = {
     el.classList.toggle('warn', attention > 0);
   },
 
-  _animateTicker(el, from, to, toStr, dur) {
+  _animateTicker(el: any, from: any, to: any, toStr: any, dur: any) {
     const suffix = toStr.replace(/[\d.]/g, '');
     const start = performance.now();
-    const step = ts => {
+    const step = (ts: any) => {
       const p = Math.min((ts - start) / dur, 1);
       const eased = p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
       const cur = from + (to - from) * eased;
@@ -3924,19 +3933,19 @@ export const Dashboard = {
 
   // Read a real CSS custom property so heatmap colors stay theme-correct and
   // in sync with DESIGN.md's tokens instead of hand-duplicated light/dark hex pairs.
-  _cssVar(name, fallback) {
+  _cssVar(name: any, fallback: any) {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
   },
-  _lerpHex(a, b, frac) {
-    const p = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  _lerpHex(a: any, b: any, frac: any) {
+    const p = (h: any) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
     const ca = p(a), cb = p(b);
     const rgb = [0, 1, 2].map(i => Math.round(ca[i] + (cb[i] - ca[i]) * frac));
     return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
   },
   // WCAG relative luminance — picks readable text color from the actual resolved
   // background instead of a hand-tuned per-theme pct threshold.
-  _relLuminance(hex) {
+  _relLuminance(hex: any) {
     const c = [1, 3, 5].map(i => {
       const v = parseInt(hex.slice(i, i + 2), 16) / 255;
       return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
@@ -3944,7 +3953,7 @@ export const Dashboard = {
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   },
 
-  _renderHeatmap(matrix) {
+  _renderHeatmap(matrix: any) {
     const container = document.getElementById('util-heatmap-panel');
     if (!container) return;
 
@@ -3966,13 +3975,13 @@ export const Dashboard = {
     const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
     const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
     const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
-    function heatBg(pct) {
+    function heatBg(pct: any) {
       if (pct <= 0)    return idleBg;
       if (pct <= 0.5)  return Dashboard._lerpHex(idleBg, warnBg, pct / 0.5);
       if (pct <= 1.0)  return Dashboard._lerpHex(warnBg, vividBg, (pct - 0.5) / 0.5);
       return Dashboard._lerpHex(vividBg, errBg, Math.min((pct - 1.0) / 0.25, 1));
     }
-    function heatText(pct, bg) {
+    function heatText(pct: any, bg: any) {
       if (pct <= 0) return muteTxt;
       return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
     }
@@ -4017,15 +4026,15 @@ export const Dashboard = {
   },
 
 
-  _nextChangeover(lineTasks, now) {
-    const activeIdx = lineTasks.findIndex(t => t.start_date && t.end_date && t.start_date <= now && t.end_date > now);
+  _nextChangeover(lineTasks: any, now: any) {
+    const activeIdx = lineTasks.findIndex((t: any) => t.start_date && t.end_date && t.start_date <= now && t.end_date > now);
 
     let refIdx, scanFrom;
     if (activeIdx >= 0) {
       refIdx   = activeIdx;
       scanFrom = activeIdx + 1;
     } else {
-      const futureIdx = lineTasks.findIndex(t => t.start_date && t.start_date > now);
+      const futureIdx = lineTasks.findIndex((t: any) => t.start_date && t.start_date > now);
       if (futureIdx < 0) return null;
 
       // Idle: reference is whatever the line most recently finished running
@@ -4060,7 +4069,7 @@ export const Dashboard = {
     return null;
   },
 
-  _fmtNextCO(dt, now) {
+  _fmtNextCO(dt: any, now: any) {
     if (!dt) return '—';
     const ms = dt - now;
     if (ms <= 0) return 'now';
@@ -4076,9 +4085,9 @@ export const Dashboard = {
     if (!el) return;
     const tasks = Dashboard._filteredTasks();
     const now   = new Date();
-    const esc   = s => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc   = (s: any) => String(s || '').replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
 
-    const byLine = {};
+    const byLine: any = {};
     for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
     for (const tk of tasks) { const l = tk.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
     const lines = Object.keys(byLine).sort();
@@ -4093,10 +4102,10 @@ export const Dashboard = {
     const todayKey = Util.dayKey(Util.startOfDay(now));
 
     // Pre-compute row data so renderFn is a pure template with no heavy closures.
-    const rowData = lines.map(line => {
+    const rowData = lines.map((line: any) => {
       const ci    = Timeline._colorIndex(line);
       const color = Config.COLORS[ci % Config.COLORS.length];
-      const u     = matrix[line]?.[todayKey];
+      const u: any = matrix[line]?.[todayKey];
       const sched   = u ? u.scheduled.toFixed(2)                         : '0.00';
       const cap     = u ? u.capacity.toFixed(2)                          : '0.00';
       const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
@@ -4105,7 +4114,7 @@ export const Dashboard = {
       const sev     = u ? Utilization.sev(u.pct, overloadAt) : 'ok';
       const barW    = Math.min(pct, 100);
       const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
-      const sorted  = byLine[line].slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+      const sorted  = byLine[line].slice().sort((a: any, b: any) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       const nxtCO   = Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now);
       return { line, color, sched, cap, effCap, pct, sev, barW, isOver, nxtCO };
     });
@@ -4121,7 +4130,7 @@ export const Dashboard = {
       el.appendChild(hdr);
       Dashboard._lsVL = new VirtualList(el, {
         rowH: VL_LS_ROW_H,
-        renderFn: (d) =>
+        renderFn: (d: any) =>
           `<div class="ls-row">` +
           `<div class="ls-dot" style="background:${d.color}"></div>` +
           `<div class="ls-code">${esc(d.line)}</div>` +
@@ -4141,7 +4150,7 @@ export const Dashboard = {
     if (!list || !count) return;
 
     const plantLines = new Set(Store.linesForSelectedPlant());
-    const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+    const plantRow = Store.masterData?.plants?.find((p: any) => p.plant === Store.selectedPlant) ?? null;
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
     const alerts = Store.alerts.filter(a => {
@@ -4152,7 +4161,7 @@ export const Dashboard = {
     });
 
     // Sort errors first, then warnings, then info — soonest within each severity.
-    const SEV_RANK = { err: 0, warn: 1, info: 2 };
+    const SEV_RANK: any = { err: 0, warn: 1, info: 2 };
     alerts.sort((a, b) => {
       const sa = SEV_RANK[a.sev] ?? 9, sb = SEV_RANK[b.sev] ?? 9;
       if (sa !== sb) return sa - sb;
@@ -4168,7 +4177,7 @@ export const Dashboard = {
       : `${alerts.length} open`;
 
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
-    const _esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const _esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     list.innerHTML = alerts.slice(0, 8).map(a => `
       <div class="alert-row sev-${a.sev}" onclick="if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}">          <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
         <div class="msg">${_esc(a.msg)}</div>
@@ -4197,11 +4206,11 @@ export const Dashboard = {
       </div>
     `).join('');
   },
-  _unfix(id) {
+  _unfix(id: any) {
     Store.setFixed([id], false, 'dashboard');
     Alerts.scheduleRecompute();
   },
-  _gotoLine(line, dateStr) {
+  _gotoLine(line: any, dateStr: any) {
     Timeline.gotoLineDay(line, dateStr);
   },
 
@@ -4222,16 +4231,16 @@ export const Dashboard = {
     const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
     // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
-    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.PRODUCTION_LINE || 'Unknown')])].sort();
-    const days  = [];
+    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map((t: any) => t.PRODUCTION_LINE || 'Unknown')])].sort();
+    const days: string[]  = [];
     {
-      const d = Util.startOfDay(new Date());
+      const d = Util.startOfDay(new Date())!;
       for (let i = 0; i < horizonDays; i++) {
         days.push(Util.dayKey(d));
         d.setDate(d.getDate() + 1);
       }
     }
-    const cells = {};
+    const cells: any = {};
     for (const ln of allLines) {
       cells[ln] = {};
       for (const dk of days) cells[ln][dk] = { lateHours: 0, lateCount: 0, tasks: [] };
@@ -4258,7 +4267,7 @@ export const Dashboard = {
 
     // Sort lines by cumulative late hours in horizon (desc), tiebreak alphabetical.
     // All lines are rendered; the scroll-wrap viewport shows ~9 at a time.
-    const lineTotals = allLines.map(ln => {
+    const lineTotals = allLines.map((ln: any) => {
       let total = 0;
       for (const dk of days) total += cells[ln][dk].lateHours;
       return { ln, total };
@@ -4273,13 +4282,13 @@ export const Dashboard = {
     const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
     const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
     const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
-    function cellBg(h) {
+    function cellBg(h: any) {
       if (h <= 0)  return idleBg;
       if (h <= 8)  return amber;
       if (h <= 24) return orange;
       return red;
     }
-    function cellText(h, bg) {
+    function cellText(h: any, bg: any) {
       if (h <= 0) return muteTxt;
       return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
     }
@@ -4297,7 +4306,7 @@ export const Dashboard = {
     }
 
     // Data rows
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
       html += `<div class="lh-line-label" title="${esc(line)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${esc(line)}</span></div>`;
@@ -4337,12 +4346,12 @@ export const Dashboard = {
     Dashboard._renderLatenessDrill(cells);
   },
 
-  _latenessDrill(line, dateStr) {
+  _latenessDrill(line: any, dateStr: any) {
     Dashboard._latenessDrillKey = `${line}|${dateStr}`;
     Dashboard._renderLatenessHeatmap();   // re-render so drill stays in sync
   },
 
-  _renderLatenessDrill(cells) {
+  _renderLatenessDrill(cells: any) {
     const drill = document.getElementById('lateness-drill');
     if (!drill) return;
     const key = Dashboard._latenessDrillKey;
@@ -4353,12 +4362,12 @@ export const Dashboard = {
       drill.hidden = true; drill.innerHTML = '';
       return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
     const rows = cell.tasks
       .slice()
-      .sort((a, b) => Util.latenessHours(b) - Util.latenessHours(a))
+      .sort((a: any, b: any) => Util.latenessHours(b) - Util.latenessHours(a))
       .slice(0, 12)
-      .map(t => {
+      .map((t: any) => {
         const lh = Util.latenessHours(t);
         const days = lh / 24;
         const lateLbl = days >= 1 ? `+${days.toFixed(1)}d` : `+${lh.toFixed(1)}h`;
@@ -4389,8 +4398,8 @@ export const Dashboard = {
     if (drill) { drill.hidden = true; drill.innerHTML = ''; }
   },
 
-  _jumpToOrder(id) {
-    NIMBUS.App.gotoGanttTimeline();
+  _jumpToOrder(id: any) {
+    NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => { if (Timeline && Timeline.focus) Timeline.focus(id); }, 250);
   }
 };
@@ -4435,11 +4444,20 @@ export const Interaction = {
   DBLCLICK_SUPPRESS_MS: 300,
 
   _justDoubleClicked: false,
-  _dblTimer: null,
-  _trace: [],
+  _alertcellDelegated: false,
+  _edgeScrollTrackBound: null as any,
+  _hideTooltipBound: null as any,
+  _onKeyDownBound: null as any,
+  _hoverDismissBound: null as any,
+  _labelDblclickDelegated: false,
+  _isolateToastShown: false,
+  _hoverPreviewDelegated: false,
+  _marqueeDelegated: false,
+  _dblTimer: null as any,
+  _trace: [] as any[],
   _installed: false,
-  _marquee: null,
-  _marqueeRAF: null,
+  _marquee: null as any,
+  _marqueeRAF: null as any,
 
   // True iff the pointer strayed >~8px from its mousedown point (PEAK
   // displacement, not net endpoint displacement — see install() for why)
@@ -4455,7 +4473,7 @@ export const Interaction = {
   _panDuringGesture: false,
 
   trace() { return this._trace.slice(-50); },
-  _log(type, data) {
+  _log(type: any, data: any) {
     const entry = { t: Date.now(), type, ...data };
     this._trace.push(entry);
     if (this._trace.length > 200) this._trace.shift();
@@ -4522,14 +4540,14 @@ export const Interaction = {
     const _tlContainer = document.getElementById('vis-timeline');
     if (_tlContainer && !Interaction._alertcellDelegated) {
       Interaction._alertcellDelegated = true;
-      let _downX = null, _downY = null;
+      let _downX: any = null, _downY: any = null;
 
       _tlContainer.addEventListener('mousedown', e => {
         // New gesture starting: clear the previous gesture's verdict. Must
         // happen here (not in a click handler) so both click consumers of
         // this flag see an unconsumed verdict for the CURRENT gesture.
         Interaction._panDuringGesture = false;
-        const p = Timeline._tl && Timeline._tl.getEventProperties(e);
+        const p = Timeline._tl && (Timeline._tl as any).getEventProperties(e);
         const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
         if (onRealItem) {
           // Mousedown started on an order item — this is an item-drag
@@ -4567,7 +4585,7 @@ export const Interaction = {
       _tlContainer.addEventListener('click', e => {
         if (!Timeline._tl) return;
         if (Interaction._panDuringGesture) return; // panned during this gesture — not a real click
-        const p = Timeline._tl.getEventProperties(e);
+        const p = (Timeline._tl as any).getEventProperties(e);
         if (!p || !p.group || !p.time) return;
         // If the click is on a real foreground item (an order), let normal
         // selection handle it — don't hijack order clicks because the cell
@@ -4575,8 +4593,8 @@ export const Interaction = {
         if (p.item && !String(p.item).startsWith('alertcell-')) return;
         const dayKey = Util.dayKey(p.time);
         const cellId = `alertcell-${p.group}-${dayKey}`;
-        if (!Timeline._items.get(cellId)) return; // no alert highlight here
-        NIMBUS.AlertsUIAdapter.showForCell(p.group, dayKey);
+        if (!Timeline._items!.get(cellId)) return; // no alert highlight here
+        NIMBUS!.AlertsUIAdapter!.showForCell!(p.group, dayKey);
       });
     }
 
@@ -4587,7 +4605,7 @@ export const Interaction = {
     const container = document.getElementById('vis-timeline');
     if (container) {
       container.addEventListener('contextmenu', e => {
-        const p = Timeline._tl.getEventProperties(e);
+        const p = (Timeline._tl as any).getEventProperties(e);
         e.preventDefault();
         if (p.what === 'item' && p.item != null) {
           const id = String(p.item);
@@ -4596,15 +4614,15 @@ export const Interaction = {
           if (ContextMenu && typeof ContextMenu.open === 'function') {
             ContextMenu.open(e.clientX, e.clientY, id);
           }
-        } else if (ContextMenu && typeof ContextMenu.openCanvas === 'function') {
+        } else if (ContextMenu && typeof (ContextMenu as any).openCanvas === 'function') {
           // Canvas context menu — optional extension point.
-          ContextMenu.openCanvas(e.clientX, e.clientY);
+          (ContextMenu as any).openCanvas(e.clientX, e.clientY);
         }
       });
     }
 
     /* ----- DataSet 'update' — drag commit only, no cascade on zoom ------ */
-    Timeline._items.on('*', (event, props) => {
+    (Timeline._items as any).on('*', (event: any, props: any) => {
       if (Timeline._suppressEvents) return;
       if (event !== 'update' || !props || !props.items) return;
       Interaction._onDataSetUpdate(props);
@@ -4616,7 +4634,7 @@ export const Interaction = {
 
     /* ----- Track mouse X for edge-scroll during order drag --------------- */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
-    this._edgeScrollTrackBound = e => {
+    this._edgeScrollTrackBound = (e: any) => {
       if (Interaction._isDragging) Interaction._dragMouseX = e.clientX;
     };
     document.addEventListener('mousemove', this._edgeScrollTrackBound);
@@ -4624,20 +4642,20 @@ export const Interaction = {
     /* ----- Hide tooltip when mouse leaves the browser window ------------- */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
     this._hideTooltipBound = () => {
-      const tip = document.querySelector('.vis-tooltip');
+      const tip: any = document.querySelector('.vis-tooltip');
       if (tip) tip.style.display = 'none';
     };
     document.addEventListener('mouseleave', this._hideTooltipBound);
 
     /* ----- keyboard ------------------------------------------------------ */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
-    this._onKeyDownBound = e => Interaction._onKeyDown(e);
+    this._onKeyDownBound = (e: any) => Interaction._onKeyDown(e);
     document.addEventListener('keydown', this._onKeyDownBound);
 
     /* ----- Selection → vis-timeline + Inspector sync (one-way, write) --- */
     Selection.on(evt => {
       Timeline._suppressEvents = true;
-      try { Timeline._tl.setSelection(evt.ids); }
+      try { Timeline._tl!.setSelection(evt.ids); }
       finally { Timeline._suppressEvents = false; }
 
       // Preserve the original UX: opening the right sidebar when a single
@@ -4738,7 +4756,7 @@ export const Interaction = {
 
     container.addEventListener('dblclick', (e) => {
       if (!Timeline._tl) return;
-      const p = Timeline._tl.getEventProperties(e);
+      const p = (Timeline._tl as any).getEventProperties(e);
       if (!p || p.what !== 'group-label' || p.group == null) return;
 
       e.stopPropagation();
@@ -4775,9 +4793,9 @@ export const Interaction = {
     if (!container) return;
 
     const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id) => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
+    const isOrderId = (id: any) => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
 
-    let card = document.getElementById('nimbus-hover-card');
+    let card: any = document.getElementById('nimbus-hover-card');
     if (!card) {
       card = document.createElement('div');
       card.id = 'nimbus-hover-card';
@@ -4785,8 +4803,8 @@ export const Interaction = {
       document.body.appendChild(card);
     }
 
-    let showTimer = null;
-    let activeId  = null;
+    let showTimer: any = null;
+    let activeId: any  = null;
     let lastX = 0, lastY = 0;
 
     const HOVER_DELAY_MS = 500;
@@ -4806,10 +4824,10 @@ export const Interaction = {
       card.style.top  = y + 'px';
     };
 
-    const renderCard = (id) => {
+    const renderCard = (id: any) => {
       const t = Store.tasks[id];
       if (!t) return '';
-      const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+      const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
       const qty = t['ORDER_QUANTITY_(GMEIN)'] ?? '—';
       const run = Util.runHours(t);
       const line = t.PRODUCTION_LINE || '—';
@@ -4858,7 +4876,7 @@ export const Interaction = {
     if (!Interaction._hoverPreviewDelegated) {
       Interaction._hoverPreviewDelegated = true;
 
-      Timeline._tl.on('itemover', (props) => {
+      (Timeline._tl as any).on('itemover', (props: any) => {
         if (!props || props.item == null) return;
         const id = String(props.item);
         if (!isOrderId(id)) return;
@@ -4876,7 +4894,7 @@ export const Interaction = {
         }, HOVER_DELAY_MS);
       });
 
-      Timeline._tl.on('itemout', (props) => {
+      (Timeline._tl as any).on('itemout', (props: any) => {
         if (!props || props.item == null) return;
         if (String(props.item) === activeId) hide();
       });
@@ -4916,9 +4934,9 @@ export const Interaction = {
     Interaction._marqueeDelegated = true;
 
     const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id) => !SKIP_PREFIXES.some(p => id.startsWith(p));
+    const isOrderId = (id: any) => !SKIP_PREFIXES.some(p => id.startsWith(p));
 
-    const _rectsIntersect = (a, b) =>
+    const _rectsIntersect = (a: any, b: any) =>
       !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
 
     const centerOf = () => container.querySelector('.vis-panel.vis-center');
@@ -4937,7 +4955,7 @@ export const Interaction = {
     // Returns the anchor's current screen X by projecting anchorTime through
     // the live timeline window — so the selection box left edge stays pinned
     // to the same calendar moment even as the view pans during edge-scroll.
-    const getAnchorScreenX = (cr) => {
+    const getAnchorScreenX = (cr: any) => {
       const s = Interaction._marquee;
       const tl = Timeline._tl;
       if (!s || !tl || !s.anchorTime) return s ? s.anchorX : 0;
@@ -4951,8 +4969,8 @@ export const Interaction = {
     // Snapshot every order item's on-screen rect once. Re-taken on edge-scroll
     // (items move) but reused across plain pointermove frames, so the hit-test no
     // longer calls getBoundingClientRect() per item per frame (R18 — layout thrash).
-    const refreshItemRects = (s) => {
-      const itemSet = Timeline._tl && Timeline._tl.itemSet && Timeline._tl.itemSet.items;
+    const refreshItemRects = (s: any) => {
+      const itemSet = Timeline._tl && (Timeline._tl as any).itemSet && (Timeline._tl as any).itemSet.items;
       const m = new Map();
       if (itemSet) {
         for (const id of Object.keys(itemSet)) {
@@ -4968,7 +4986,7 @@ export const Interaction = {
 
     // Shared overlay + hit-test update — called from both pointermove and the
     // edge-scroll RAF so selection expands as the view pans.
-    const updateOverlay = (mx, my) => {
+    const updateOverlay = (mx: any, my: any) => {
       const s = Interaction._marquee;
       if (!s) return;
       const cr = s.centerRect;
@@ -5000,7 +5018,7 @@ export const Interaction = {
       s.lastHits = hits;
       const next = new Set(s.baseIds);
       for (const h of hits) next.add(h);
-      Selection.set([...next]);
+      Selection.set([...next] as any);
     };
 
     // RAF loop: pans the timeline while the cursor is within ZONE px of either
@@ -5038,10 +5056,10 @@ export const Interaction = {
         let vfraction = 0;
         if (my < cr.top + ZONE)         vfraction = -((cr.top + ZONE - my) / ZONE);
         else if (my > cr.bottom - ZONE) vfraction =  (my - (cr.bottom - ZONE)) / ZONE;
-        if (vfraction !== 0 && tl && tl._setScrollTop) {
-          const before = tl._getScrollTop ? tl._getScrollTop() : 0;
-          tl._setScrollTop(before - vfraction * MAX_VPXL);
-          const after = tl._getScrollTop ? tl._getScrollTop() : before;
+        if (vfraction !== 0 && tl && (tl as any)._setScrollTop) {
+          const before = (tl as any)._getScrollTop ? (tl as any)._getScrollTop() : 0;
+          (tl as any)._setScrollTop(before - vfraction * MAX_VPXL);
+          const after = (tl as any)._getScrollTop ? (tl as any)._getScrollTop() : before;
           s.scrollDelta += (after - before);
           scrolled = true;
         }
@@ -5052,7 +5070,7 @@ export const Interaction = {
       Interaction._marqueeRAF = requestAnimationFrame(tick);
     };
 
-    const onPointerDown = (e) => {
+    const onPointerDown = (e: any) => {
       if (e.button !== 0) return;
       if (!(e.ctrlKey || e.metaKey)) return;
       const center = centerOf();
@@ -5101,7 +5119,7 @@ export const Interaction = {
       startMarqueeScroll();
     };
 
-    const onPointerMove = (e) => {
+    const onPointerMove = (e: any) => {
       const s = Interaction._marquee;
       if (!s || e.pointerId !== s.pointerId) return;
       s.curMouseX = e.clientX;
@@ -5109,7 +5127,7 @@ export const Interaction = {
       updateOverlay(e.clientX, e.clientY);
     };
 
-    const onPointerUp = (e) => {
+    const onPointerUp = (e: any) => {
       const s = Interaction._marquee;
       if (!s || e.pointerId !== s.pointerId) return;
       try { container.releasePointerCapture(s.pointerId); } catch {}
@@ -5125,7 +5143,7 @@ export const Interaction = {
     container.addEventListener('pointercancel', onPointerUp,  true);
   },
 
-  _onClick(props) {
+  _onClick(props: any) {
     this._log('click', { what: props.what, item: props.item });
 
     // If a double-click just fired, swallow this follow-up select.
@@ -5171,7 +5189,7 @@ export const Interaction = {
         && !Interaction._isDragging
         && (Date.now() - (Interaction._lastDragEndTs || 0)) > 400) {
       // zoom:false → pan only; preserves the current time window width.
-      Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false });
+      Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false } as any);
     }
     // --- END center-on-click ---
 
@@ -5179,7 +5197,7 @@ export const Interaction = {
     if (typeof DependencyOverlay !== 'undefined') DependencyOverlay.highlightChain(id);
   },
 
-  _onDoubleClick(props) {
+  _onDoubleClick(props: any) {
     this._log('doubleClick', { what: props.what, item: props.item });
     if (props.what !== 'item' || props.item == null) return;
 
@@ -5196,16 +5214,16 @@ export const Interaction = {
     Selection.set([id]);
     // Double-click action: focus-zoom AND open the full edit modal (if present).
     if (typeof Timeline.focus === 'function') Timeline.focus(id);
-    if (Modal && typeof Modal.openEdit === 'function') Modal.openEdit(t);
+    if (Modal && typeof (Modal as any).openEdit === 'function') (Modal as any).openEdit(t);
   },
 
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a fixed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
-  _onDataSetUpdate(props) {
+  _onDataSetUpdate(props: any) {
     for (const id of props.items) {
-      const v = Timeline._items.get(id);
+      const v: any = Timeline._items!.get(id);
       if (!v) continue;
       const t = Store.tasks[id];
       if (!t) continue;
@@ -5284,7 +5302,7 @@ export const Interaction = {
           // Update the vis item too
           Timeline._suppressEvents = true;
           try {
-            Timeline._items.update({ id: sid, start: sNewStart, end: sNewEnd, group: sNewLine });
+            Timeline._items!.update({ id: sid, start: sNewStart, end: sNewEnd, group: sNewLine });
           } finally { Timeline._suppressEvents = false; }
         }
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
@@ -5311,18 +5329,18 @@ export const Interaction = {
     }
   },
 
-  _ghostDragId: null,
-  _edgeScrollRAF: null,
+  _ghostDragId: null as any,
+  _edgeScrollRAF: null as any,
   _isDragging: false,
   _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
-  _dragMouseX: null,
+  _dragMouseX: null as any,
 
   _startEdgeScroll() {
     if (this._edgeScrollRAF) return;
     const tick = () => {
       if (!Interaction._isDragging) { Interaction._edgeScrollRAF = null; return; }
       const tl   = Timeline._tl;
-      const rect = document.querySelector('#vis-timeline').getBoundingClientRect();
+      const rect = document.querySelector('#vis-timeline')!.getBoundingClientRect();
       const ZONE = 100;
       const MAX_SPEED = 0.004;
       let fraction = 0;
@@ -5334,10 +5352,10 @@ export const Interaction = {
         }
       }
       if (fraction !== 0) {
-        const w = tl.getWindow();
+        const w = tl!.getWindow();
         const spanMs = w.end.getTime() - w.start.getTime();
         const shiftMs = fraction * MAX_SPEED * spanMs;
-        tl.setWindow(
+        tl!.setWindow(
           new Date(w.start.getTime() + shiftMs),
           new Date(w.end.getTime()  + shiftMs),
           { animation: false }
@@ -5349,7 +5367,7 @@ export const Interaction = {
   },
 
   /** Fires at 60fps during drag — show ghost positions for companion items. */
-  _onTimeChange(props) {
+  _onTimeChange(props: any) {
     if (!props || !props.id || Timeline._suppressEvents) return;
     const dragId = String(props.id);
     if (dragId.startsWith('blk-')) return;
@@ -5357,7 +5375,7 @@ export const Interaction = {
     this._isDragging = true;
     this._startEdgeScroll();
 
-    const _tip = document.querySelector('.vis-tooltip');
+    const _tip: any = document.querySelector('.vis-tooltip');
     if (_tip) _tip.style.display = 'none';
 
     const selIds = Selection.ids().filter(sid => sid !== dragId);
@@ -5369,7 +5387,7 @@ export const Interaction = {
     const deltaMs = dragMs - t.start_date.getTime();
 
     this._ghostDragId = dragId;
-    const updates = [];
+    const updates: any[] = [];
 
     // Pre-bucket non-selected, datable tasks by line ONCE per frame (R19) — the old
     // code re-scanned all of Store.tasksArr for every selected companion, i.e.
@@ -5391,13 +5409,13 @@ export const Interaction = {
       if (!st || !st.start_date) continue;
       const ghostStart = new Date(st.start_date.getTime() + deltaMs);
       const ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
-      const item = Timeline._items.get(sid);
+      const item: any = Timeline._items!.get(sid);
       if (!item) continue;
 
       // Check for ghost collisions with non-selected tasks on same line.
       const line = st.PRODUCTION_LINE || 'Unknown';
       const peers = peersByLine.get(line) || [];
-      const hasConflict = peers.some(peer =>
+      const hasConflict = peers.some((peer: any) =>
         ghostStart < peer.end_date && ghostEnd > peer.start_date
       );
 
@@ -5412,7 +5430,7 @@ export const Interaction = {
 
     if (updates.length) {
       Timeline._suppressEvents = true;
-      try { Timeline._items.update(updates); }
+      try { Timeline._items!.update(updates); }
       finally { Timeline._suppressEvents = false; }
     }
   },
@@ -5422,12 +5440,12 @@ export const Interaction = {
     this._isDragging = false;
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
 
-    const _tip = document.querySelector('.vis-tooltip');
+    const _tip: any = document.querySelector('.vis-tooltip');
     if (_tip) _tip.style.display = '';
 
-    const updates = [];
+    const updates: any[] = [];
     for (const sid of Selection.ids()) {
-      const item = Timeline._items.get(sid);
+      const item: any = Timeline._items!.get(sid);
       if (!item) continue;
       const newCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
       if (newCls !== item.className) {
@@ -5442,13 +5460,13 @@ export const Interaction = {
     }
     if (updates.length) {
       Timeline._suppressEvents = true;
-      try { Timeline._items.update(updates); }
+      try { Timeline._items!.update(updates); }
       finally { Timeline._suppressEvents = false; }
     }
     this._ghostDragId = null;
   },
 
-  _onKeyDown(e) {
+  _onKeyDown(e: any) {
     // Ignore when typing in inputs.
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
@@ -5478,9 +5496,9 @@ export const Interaction = {
     if (e.key === 'Enter' && Selection.size() === 1) {
       const id = Selection.ids()[0];
       const t = Store.tasks[id];
-      if (t && Modal && typeof Modal.openEdit === 'function') {
+      if (t && Modal && typeof (Modal as any).openEdit === 'function') {
         e.preventDefault();
-        Modal.openEdit(t);
+        (Modal as any).openEdit(t);
       }
       return;
     }
@@ -5521,7 +5539,7 @@ export const Interaction = {
     Toast.show(Util.t('toast.unscheduled_orders', { count: ids.length }), 'success');
   },
 
-  _navigateSelection(key) {
+  _navigateSelection(key: any) {
     const currentId = Selection.ids()[0];
     const cur = Store.tasks[currentId];
     if (!cur || !cur.start_date) return;
@@ -5533,7 +5551,7 @@ export const Interaction = {
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
       const peers = Store.tasksArr
         .filter(t => t.PRODUCTION_LINE === cur.PRODUCTION_LINE && t.start_date)
-        .sort((a, b) => a.start_date - b.start_date);
+        .sort((a: any, b: any) => a.start_date - b.start_date);
       const i = peers.findIndex(t => String(t.id) === currentId);
       const j = key === 'ArrowLeft' ? i - 1 : i + 1;
       if (j >= 0 && j < peers.length) Selection.set([String(peers[j].id)]);
@@ -5546,8 +5564,8 @@ export const Interaction = {
       const candidates = Store.tasksArr
         .filter(t => t.PRODUCTION_LINE === targetLine && t.start_date);
       if (!candidates.length) return;
-      candidates.sort((a, b) => Math.abs(a.start_date - cur.start_date)
-                              - Math.abs(b.start_date - cur.start_date));
+      candidates.sort((a: any, b: any) => Math.abs(a.start_date - (cur.start_date as any))
+                              - Math.abs(b.start_date - (cur.start_date as any)));
       Selection.set([String(candidates[0].id)]);
     }
   },
@@ -5585,7 +5603,7 @@ export const Interaction = {
     panel.querySelector('[data-action="clear"]')?.addEventListener('click', () => Selection.clear());
   },
 
-  _bulkFix(fixed) {
+  _bulkFix(fixed: any) {
     const ids = Selection.ids();
     if (!ids.length) return;
     Store.setFixed(ids, fixed, 'interaction');
@@ -5599,12 +5617,12 @@ export const Interaction = {
       try {
         Table._suppressSelectionEcho = true;
         Table._api.deselectAll();
-        Table._api.forEachNode(node => {
+        Table._api.forEachNode((node: any) => {
           if (node.data && evt.ids.includes(String(node.data.id))) {
             node.setSelected(true, false);
           }
         });
-      } catch (e) {
+      } catch (e: any) {
         ErrorLog.warn('interaction', `Table sync failed: ${e.message}`);
       } finally {
         Table._suppressSelectionEcho = false;
@@ -5616,9 +5634,9 @@ export const Interaction = {
       Table._api.addEventListener('selectionChanged', () => {
         if (Table._suppressSelectionEcho) return;
         const rows = Table._api.getSelectedRows ? Table._api.getSelectedRows() : [];
-        const ids = rows.map(r => String(r.id));
+        const ids = rows.map((r: any) => String(r.id));
         const current = new Set(Selection.ids());
-        const same = ids.length === current.size && ids.every(id => current.has(id));
+        const same = ids.length === current.size && ids.every((id: any) => current.has(id));
         if (!same) Selection.set(ids);
       });
     }
@@ -5631,17 +5649,17 @@ export const Interaction = {
 export const OptimizeDialog = (() => {
   let _mode    = 'changeover';
   let _preset  = '2w';
-  let _start   = null;
-  let _end     = null;
-  let _fpStart = null;
-  let _fpEnd   = null;
-  let _plant   = null;
-  let _allPlants = [];
+  let _start: any   = null;
+  let _end: any     = null;
+  let _fpStart: any = null;
+  let _fpEnd: any   = null;
+  let _plant: any   = null;
+  let _allPlants: any[] = [];
   let _dropdownListenerSet = false;
   let _scope   = 'plant';            // 'plant' | 'lines'
-  let _selectedLines = new Set();    // line names when _scope === 'lines'
+  let _selectedLines = new Set<string>();    // line names when _scope === 'lines'
   let _lineSearch = '';              // current line-list filter text
-  let _wheelCache = null;            // { plant, colorMap, wheelUsed } — populated by _updatePlantBadge
+  let _wheelCache: any = null;            // { plant, colorMap, wheelUsed } — populated by _updatePlantBadge
   let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
 
   const PRESET_DAYS = { '2w': 14 }; // UI only exposes '2w' and 'custom'
@@ -5678,14 +5696,14 @@ export const OptimizeDialog = (() => {
     _initDropdownListener();
   }
 
-  function _renderPlantList(plants) {
+  function _renderPlantList(plants: any) {
     const list = document.getElementById('opt-plant-list');
     if (!list) return;
     if (!plants.length) {
       list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_matches')}</li>`;
       return;
     }
-    list.innerHTML = plants.map(p => {
+    list.innerHTML = plants.map((p: any) => {
       const safe = p.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `<li class="opt-plant-item${_plant === p ? ' selected' : ''}" role="option"
            aria-selected="${_plant === p}"
@@ -5701,7 +5719,7 @@ export const OptimizeDialog = (() => {
   function _initDropdownListener() {
     if (_dropdownListenerSet) return;
     _dropdownListenerSet = true;
-    document.addEventListener('click', e => {
+    document.addEventListener('click', (e: any) => {
       const sel = document.getElementById('opt-plant-select');
       if (sel && !sel.contains(e.target)) _closeDropdown();
     }, true);
@@ -5722,7 +5740,7 @@ export const OptimizeDialog = (() => {
     dd.hidden = !opening;
     sel?.classList.toggle('open', opening);
     if (opening) {
-      const srch = document.getElementById('opt-plant-search');
+      const srch: any = document.getElementById('opt-plant-search');
       if (srch) { srch.value = ''; srch.focus(); }
       _renderPlantList(_allPlants);
     }
@@ -5735,12 +5753,12 @@ export const OptimizeDialog = (() => {
     sel?.classList.remove('open');
   }
 
-  function filterPlants(query) {
+  function filterPlants(query: any) {
     const q = query.toLowerCase().trim();
-    _renderPlantList(q ? _allPlants.filter(p => p.toLowerCase().includes(q)) : _allPlants);
+    _renderPlantList(q ? _allPlants.filter((p: any) => p.toLowerCase().includes(q)) : _allPlants);
   }
 
-  function selectPlant(plant) {
+  function selectPlant(plant: any) {
     _plant = plant;
     Store.setSelectedPlant(plant, 'optimize-dialog');
     _renderPlantList(_allPlants);
@@ -5749,15 +5767,15 @@ export const OptimizeDialog = (() => {
     _updatePlantBadge();
     _selectedLines.clear();
     _lineSearch = '';
-    const srch = document.getElementById('opt-line-search');
+    const srch: any = document.getElementById('opt-line-search');
     if (srch) srch.value = '';
     if (_scope === 'lines') _renderLines();
     if (_preset === 'horizon') applyPreset('horizon');
   }
 
-  function setScope(scope) {
+  function setScope(scope: any) {
     _scope = scope === 'lines' ? 'lines' : 'plant';
-    document.querySelectorAll('.opt-scope-btn').forEach(b =>
+    document.querySelectorAll('.opt-scope-btn').forEach((b: any) =>
       b.classList.toggle('active', b.dataset.scope === _scope)
     );
     const panel = document.getElementById('opt-lines-panel');
@@ -5788,7 +5806,7 @@ export const OptimizeDialog = (() => {
     }
 
     // Count orders per line (scoped to selected plant)
-    const orderCounts = {};
+    const orderCounts: any = {};
     for (const t of Store.tasksByPlant(_plant)) {
       const l = t.PRODUCTION_LINE || 'Unknown';
       orderCounts[l] = (orderCounts[l] || 0) + 1;
@@ -5800,7 +5818,7 @@ export const OptimizeDialog = (() => {
     if (!visible.length) {
       list.innerHTML = `<li class="opt-lines-empty">${Util.t('ui.no_matches')}</li>`;
     } else {
-      list.innerHTML = visible.map(line => {
+      list.innerHTML = visible.map((line: any) => {
         const safe = line.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const checked = _selectedLines.has(line) ? 'checked' : '';
         const oc = orderCounts[line] || 0;
@@ -5820,12 +5838,12 @@ export const OptimizeDialog = (() => {
     if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
   }
 
-  function filterLines(q) {
+  function filterLines(q: any) {
     _lineSearch = q || '';
     _renderLines();
   }
 
-  function selectAllLines(checked) {
+  function selectAllLines(checked: any) {
     const allLines = _linesForPlant();
     const q = _lineSearch.toLowerCase().trim();
     const visible = q ? allLines.filter(l => l.toLowerCase().includes(q)) : allLines;
@@ -5836,7 +5854,7 @@ export const OptimizeDialog = (() => {
     _renderLines();
   }
 
-  function _onLineToggle(line, checked) {
+  function _onLineToggle(line: any, checked: any) {
     if (checked) _selectedLines.add(line);
     else _selectedLines.delete(line);
     const count = document.getElementById('opt-lines-count');
@@ -5844,7 +5862,7 @@ export const OptimizeDialog = (() => {
     if (count) count.textContent = `${_selectedLines.size} of ${total} selected`;
   }
 
-  function _displayDate(d) {
+  function _displayDate(d: any) {
     return d.toLocaleString('en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
       hour: 'numeric', minute: '2-digit'
@@ -5860,9 +5878,9 @@ export const OptimizeDialog = (() => {
       `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
   }
 
-  function applyPreset(key) {
+  function applyPreset(key: any) {
     _preset = key;
-    document.querySelectorAll('.opt-preset-chip').forEach(c =>
+    document.querySelectorAll('.opt-preset-chip').forEach((c: any) =>
       c.classList.toggle('active', c.dataset.preset === key)
     );
     const row = document.getElementById('opt-date-row');
@@ -5871,11 +5889,11 @@ export const OptimizeDialog = (() => {
     if (key !== 'custom') {
       let days;
       if (key === 'horizon') {
-        const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+        const plantRow = Store._state.masterData?.plants?.find((p: any) => p.plant === Store.selectedPlant) ?? null;
         const horizonMinutes = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? 20160;
         days = Math.max(1, Math.ceil(horizonMinutes / 1440));
       } else {
-        days = PRESET_DAYS[key];
+        days = (PRESET_DAYS as any)[key];
       }
       const now = new Date();
       now.setSeconds(0, 0);
@@ -5891,9 +5909,9 @@ export const OptimizeDialog = (() => {
     _updateSummary();
   }
 
-  function selectMode(mode) {
+  function selectMode(mode: any) {
     _mode = mode;
-    document.querySelectorAll('.opt-strategy-pill').forEach(c =>
+    document.querySelectorAll('.opt-strategy-pill').forEach((c: any) =>
       c.classList.toggle('active', c.dataset.mode === mode)
     );
   }
@@ -5901,12 +5919,12 @@ export const OptimizeDialog = (() => {
   function _updatePlantBadge() {
     const plant   = _plant;
     const badgeEl = document.getElementById('opt-wheel-badge');
-    const runBtn  = document.getElementById('opt-run-btn');
+    const runBtn: any = document.getElementById('opt-run-btn');
 
     if (runBtn) runBtn.disabled = !plant;
 
     if (!badgeEl) return;
-    const setBadge = (state, icon, tip) => {
+    const setBadge = (state: any, icon: any, tip: any) => {
       badgeEl.className = `opt-wheel-badge compact ${state}`;
       badgeEl.title = tip;
       badgeEl.innerHTML = `<span class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
@@ -5929,7 +5947,7 @@ export const OptimizeDialog = (() => {
         if (token !== _wheelFetchToken) return; // stale response — ignore
         const entries = (body && body.entries) || [];
         if (entries.length) {
-          const colorMap = {};
+          const colorMap: any = {};
           for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
           _wheelCache = { plant, colorMap, wheelUsed: true };
           setBadge('active', '✓', 'Color wheel is loaded');
@@ -5959,13 +5977,13 @@ export const OptimizeDialog = (() => {
     // when present, so the dialog opens pre-filled with their preferred strategy,
     // time window, and option toggles. Falls back to the historical defaults
     // (horizon preset / changeover / toolbar checkbox state) otherwise.
-    let _od = null;
+    let _od: any = null;
     try { _od = Store.pref('optimizerDefaults'); } catch {}
     // Sync option checkboxes from the Gantt toolbar's existing chk- elements
-    const rfEl = document.getElementById('chk-respect-fixed');
-    const rcEl = document.getElementById('chk-respect-calendar');
-    const ofEl = document.getElementById('opt-chk-fixed');
-    const ocEl = document.getElementById('opt-chk-calendar');
+    const rfEl: any = document.getElementById('chk-respect-fixed');
+    const rcEl: any = document.getElementById('chk-respect-calendar');
+    const ofEl: any = document.getElementById('opt-chk-fixed');
+    const ocEl: any = document.getElementById('opt-chk-calendar');
     if (rfEl && ofEl) ofEl.checked = rfEl.checked;
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
     // Saved defaults override the toolbar mirror when present.
@@ -5988,7 +6006,7 @@ export const OptimizeDialog = (() => {
     // Default scope to whole-plant on each open; clear stale line selection.
     _selectedLines.clear();
     _lineSearch = '';
-    const lineSrch = document.getElementById('opt-line-search');
+    const lineSrch: any = document.getElementById('opt-line-search');
     if (lineSrch) lineSrch.value = '';
     setScope('plant');
     requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
@@ -6019,8 +6037,8 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
       return;
     }
-    const sfEl = document.getElementById('opt-chk-fixed');
-    const scEl = document.getElementById('opt-chk-calendar');
+    const sfEl: any = document.getElementById('opt-chk-fixed');
+    const scEl: any = document.getElementById('opt-chk-calendar');
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
@@ -6034,7 +6052,7 @@ export const OptimizeDialog = (() => {
     } catch {}
 
     // Immediate visual feedback so the click feels responsive.
-    const runBtn = document.getElementById('opt-run-btn');
+    const runBtn: any = document.getElementById('opt-run-btn');
     const origRunHTML = runBtn ? runBtn.innerHTML : null;
     const restoreRunBtn = () => {
       if (!runBtn) return;
@@ -6060,7 +6078,7 @@ export const OptimizeDialog = (() => {
     // Use the cached per-plant wheel populated by _updatePlantBadge.
     // Fall back to a quick fetch only if the cache hasn't filled yet (race
     // on first open) — tighter timeout so a slow backend can't dominate UX.
-    let colorMap = null;
+    let colorMap: any = null;
     let wheelUsed = false;
     if (_wheelCache && _wheelCache.plant === plant) {
       colorMap  = _wheelCache.colorMap;
@@ -6176,20 +6194,20 @@ export const OptimizeDialog = (() => {
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
-  _snapshot: null,   // [ deep-cloned task ] taken before the run
-  _preKpis:  null,
-  _postKpis: null,
-  _mode:     null,
-  _plant:    null,
+  _snapshot: null as any,   // [ deep-cloned task ] taken before the run
+  _preKpis:  null as any,
+  _postKpis: null as any,
+  _mode:     null as any,
+  _plant:    null as any,
   active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
-  _confSnapshot: null,       // Confidence.snapshot() taken just before the trial mutation
+  _confSnapshot: null as any,       // Confidence.snapshot() taken just before the trial mutation
   _abandonGuardInstalled: false,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
    *  the user clicks Run, before any await/fetch — gives instant feedback so
    *  the user doesn't stare at a blurry frozen page during the wheel fetch
    *  + config-close transition + engine run. */
-  showLoading(mode, plant) {
+  showLoading(mode: any, plant: any) {
     OptimizerPreview._installAbandonGuard();
     const body = document.getElementById('opt-preview-body');
     if (body) {
@@ -6203,7 +6221,7 @@ export const OptimizerPreview = {
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
-    if (root) root.querySelectorAll('.modal-foot button').forEach(b => { b.disabled = true; });
+    if (root) root.querySelectorAll('.modal-foot button').forEach((b: any) => { b.disabled = true; });
     Modal.open('modal-opt-preview');
   },
 
@@ -6212,7 +6230,7 @@ export const OptimizerPreview = {
   hideLoading() {
     Modal.close('modal-opt-preview');
     const root = document.getElementById('modal-opt-preview');
-    if (root) root.querySelectorAll('.modal-foot button').forEach(b => { b.disabled = false; });
+    if (root) root.querySelectorAll('.modal-foot button').forEach((b: any) => { b.disabled = false; });
   },
 
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
@@ -6232,7 +6250,7 @@ export const OptimizerPreview = {
 
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
-  runWithPreview(mode = 'combined', opts = {}) {
+  runWithPreview(mode: any = 'combined', opts: any = {}) {
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
@@ -6248,7 +6266,7 @@ export const OptimizerPreview = {
     // Double rAF to ensure the loading skeleton actually paints before we
     // block the main thread with the optimizer. Single rAF schedules a frame
     // but synchronous work afterward can still preempt the paint.
-    let snapshot = null;
+    let snapshot: any = null;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const _optTotalT0 = performance.now();
       try {
@@ -6265,7 +6283,7 @@ export const OptimizerPreview = {
         // Freeze Confidence for the whole trial window (through Apply/Discard) and
         // snapshot it so a Discard can roll back without leaving any trace.
         OptimizerPreview.active = true;
-        OptimizerPreview._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
+        OptimizerPreview._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
         PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
         // KPI inputs are scoped to what the user actually selected on screen 1 —
@@ -6274,7 +6292,7 @@ export const OptimizerPreview = {
         const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
         const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
         const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
-        const inScope = t => {
+        const inScope = (t: any) => {
           if (lineSet && !lineSet.has(t.PRODUCTION_LINE)) return false;
           const s = t.start_date ? t.start_date.getTime() : null;
           const e = Util.scheduledEnd(t);
@@ -6302,16 +6320,16 @@ export const OptimizerPreview = {
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
 
-        footBtns.forEach(b => { b.disabled = false; });
+        footBtns.forEach((b: any) => { b.disabled = false; });
         OptimizerPreview._render();
-      } catch (err) {
+      } catch (err: any) {
         ErrorLog.error('optimize-preview', err?.message || String(err));
         // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
         // the schedule partially mutated otherwise, with no undo path.
         if (snapshot) {
           try {
             UndoStack.restoreTasks(snapshot);
-            if (NIMBUS.Confidence && OptimizerPreview._confSnapshot) NIMBUS.Confidence.restore(OptimizerPreview._confSnapshot);
+            if (NIMBUS!.Confidence && OptimizerPreview._confSnapshot) NIMBUS!.Confidence!.restore!(OptimizerPreview._confSnapshot);
             Alerts.scheduleRecompute();
           }
           catch { ErrorLog.error('optimize-preview', `revert failed`); }
@@ -6321,10 +6339,10 @@ export const OptimizerPreview = {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
           + '  <div style="font-size:14px;margin-bottom:8px;">Optimization failed</div>'
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${(err?.message || 'Unknown error').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${(err?.message || 'Unknown error').replace(/[<>&]/g, (c: any) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as any)[c]))}</div>`
           + '</div>';
         }
-        footBtns.forEach(b => { b.disabled = false; });
+        footBtns.forEach((b: any) => { b.disabled = false; });
       } finally {
         PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
       }
@@ -6348,27 +6366,27 @@ export const OptimizerPreview = {
     const cards = [
       {
         label: 'Changeovers', k: 'changeovers', ico: '🔁',
-        fmt: v => String(v), unit: '', lowerIsBetter: true,
+        fmt: (v: any) => String(v), unit: '', lowerIsBetter: true,
         tip: 'Adjacent orders on the same line that differ in COLOR or FORM_SIZE. Each one costs cleanout/setup time, so fewer is better.',
       },
       {
         label: 'Schedule span', k: 'span_h', ico: '↔',
-        fmt: v => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
+        fmt: (v: any) => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
         tip: 'Total clock time from the earliest order start to the latest order finish, across the selected window and lines.',
       },
       {
         label: 'Late orders', k: 'late_count', ico: '⏰',
-        fmt: v => String(v), unit: '', lowerIsBetter: true,
+        fmt: (v: any) => String(v), unit: '', lowerIsBetter: true,
         tip: 'Count of orders whose scheduled finish lands AFTER the SAP planning date. Equal-weight headcount — a 1-hour slip and a 40-hour slip each count as one.',
       },
       {
         label: 'Cumulative lateness', k: 'late_h', ico: '⛌',
-        fmt: v => v.toFixed(1), unit: 'h', lowerIsBetter: true,
+        fmt: (v: any) => v.toFixed(1), unit: 'h', lowerIsBetter: true,
         tip: 'Sum of due-date slip across every late order, in hours. Captures severity, not just count: ten orders slipping 1 h = 10 h; one order slipping 40 h = 40 h. Lower is better.',
       },
       {
         label: 'Peak line utilization', k: 'peak_util_pct', ico: '▲',
-        fmt: v => String(v), unit: '%', lowerIsBetter: 'soft',
+        fmt: (v: any) => String(v), unit: '%', lowerIsBetter: 'soft',
         tip: 'Highest single-line single-day utilization in the 14-day horizon. High is good for throughput; over 100% means overbooked vs Calendar capacity.',
       },
     ];
@@ -6409,8 +6427,8 @@ export const OptimizerPreview = {
       verdictSub = `${worse} KPI${worse===1?'':'s'} got worse, ${better} improved. Discard recommended.`;
     }
 
-    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
-      ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
+    const esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
+      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as any))[c]);
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
     const plant = OptimizerPreview._plant || '';
@@ -6510,16 +6528,16 @@ export const OptimizerPreview = {
 
     // Counter animation on the "After" numbers — runs once on mount.
     requestAnimationFrame(() => {
-      body.querySelectorAll('.opt-pv-num-post').forEach(el => {
+      body.querySelectorAll('.opt-pv-num-post').forEach((el: any) => {
         const target = parseFloat(el.dataset.target);
         if (!Number.isFinite(target)) return;
         const fmt   = el.dataset.fmt;
         const unit  = el.dataset.unit || '';
-        const valEl = el.querySelector('.opt-pv-num-val');
+        const valEl: any = el.querySelector('.opt-pv-num-val');
         const dur   = 520;
         const t0    = performance.now();
-        const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
-        const tick = (now) => {
+        const easeOutCubic = (x: any) => 1 - Math.pow(1 - x, 3);
+        const tick = (now: any) => {
           const t = Math.min(1, (now - t0) / dur);
           const v = target * easeOutCubic(t);
           const disp = fmt === 'int' ? String(Math.round(v)) : v.toFixed(1);
@@ -6543,7 +6561,7 @@ export const OptimizerPreview = {
     OptimizerPreview._clear();
     // The trial is now the committed baseline — recompute right away instead of
     // waiting on the debounce so the badge reflects it immediately.
-    NIMBUS.Confidence?._recompute();
+    NIMBUS!.Confidence?._recompute?.();
     Modal.close('modal-opt-preview');
     Alerts.scheduleRecompute();
   },
@@ -6553,7 +6571,7 @@ export const OptimizerPreview = {
     const confSnap = OptimizerPreview._confSnapshot;
     if (snap) {
       UndoStack.restoreTasks(snap);
-      if (NIMBUS.Confidence && confSnap) NIMBUS.Confidence.restore(confSnap);
+      if (NIMBUS!.Confidence && confSnap) NIMBUS!.Confidence!.restore!(confSnap);
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.opt_discarded'), 'info');
     }
@@ -6580,12 +6598,12 @@ export const OptimizerPreview = {
    maps to: line_calendar(line_code, day_of_week, is_open, start_hour, end_hour)
    ========================================================================== */
 export const EditCalendar = (() => {
-  let _line = null;
-  let _fp   = []; // 14 flatpickr instances: [start0, end0, start1, end1, ..., start6, end6]
+  let _line: any = null;
+  let _fp: any[]   = []; // 14 flatpickr instances: [start0, end0, start1, end1, ..., start6, end6]
   let _plantMode = false;
-  let _plantName = null;
+  let _plantName: any = null;
 
-  function open(line) {
+  function open(line: any) {
     _plantMode = false;
     _plantName = null;
     _line = line;
@@ -6595,13 +6613,13 @@ export const EditCalendar = (() => {
     _populate();
     const el = document.getElementById('modal-edit-calendar');
     if (!el) return;
-    const copyBtn = el.querySelector('.cal-copy-plant-btn');
+    const copyBtn: any = el.querySelector('.cal-copy-plant-btn');
     if (copyBtn) copyBtn.style.display = '';
     el.hidden = false;
     requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
   }
 
-  function openPlant(name) {
+  function openPlant(name: any) {
     _plantMode = true;
     _plantName = name;
     _line = null;
@@ -6611,7 +6629,7 @@ export const EditCalendar = (() => {
     _populate();
     const el = document.getElementById('modal-edit-calendar');
     if (!el) return;
-    const copyBtn = el.querySelector('.cal-copy-plant-btn');
+    const copyBtn: any = el.querySelector('.cal-copy-plant-btn');
     if (copyBtn) copyBtn.style.display = 'none';
     el.hidden = false;
     requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
@@ -6643,12 +6661,12 @@ export const EditCalendar = (() => {
     document.querySelectorAll('.cal-preset-chip').forEach(c => c.classList.remove('active'));
     for (let d = 0; d < 7; d++) {
       const enabled = !!wh[d];
-      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
       if (tog) tog.checked = enabled;
       _setRowEnabled(d, enabled);
       if (enabled && _fp.length === 14) {
-        _fp[d * 2]?.setDate(Util.hoursToTimeString(wh[d][0]), false);
-        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(wh[d][1]), false);
+        _fp[d * 2]?.setDate(Util.hoursToTimeString(wh[d]![0]), false);
+        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(wh[d]![1]), false);
       }
       _refreshBadge(d);
     }
@@ -6671,19 +6689,19 @@ export const EditCalendar = (() => {
     }
   }
 
-  function _setRowEnabled(d, enabled) {
+  function _setRowEnabled(d: any, enabled: any) {
     const row = document.getElementById(`cal-edit-row-${d}`);
     row?.classList.toggle('cal-day-off', !enabled);
     // Disable the altInput flatpickr renders (the visible element)
     const startAlt = document.querySelector(`#cal-edit-start-${d} ~ input.flatpickr-input`);
     const endAlt   = document.querySelector(`#cal-edit-end-${d} ~ input.flatpickr-input`);
-    [startAlt, endAlt].forEach(inp => { if (inp) inp.disabled = !enabled; });
+    [startAlt, endAlt].forEach((inp: any) => { if (inp) inp.disabled = !enabled; });
   }
 
-  function _refreshBadge(d) {
+  function _refreshBadge(d: any) {
     const badge = document.getElementById(`cal-edit-badge-${d}`);
     if (!badge) return;
-    const tog = document.getElementById(`cal-edit-toggle-${d}`);
+    const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
     if (!tog?.checked) { badge.textContent = '—'; return; }
     const s = _fp[d * 2]?.element?.value;
     const e = _fp[d * 2 + 1]?.element?.value;
@@ -6697,7 +6715,7 @@ export const EditCalendar = (() => {
     }
   }
 
-  function onToggle(d, checked) {
+  function onToggle(d: any, checked: any) {
     _setRowEnabled(d, checked);
     if (checked && _fp.length === 14) {
       if (!_fp[d * 2]?.element?.value)     _fp[d * 2]?.setDate('08:00', false);
@@ -6706,8 +6724,8 @@ export const EditCalendar = (() => {
     _refreshBadge(d);
   }
 
-  function applyPreset(preset) {
-    const PRESETS = {
+  function applyPreset(preset: any) {
+    const PRESETS: any = {
       mf:  { days: [1,2,3,4,5],     s: '08:00', e: '17:00' },
       ms:  { days: [1,2,3,4,5,6],   s: '08:00', e: '17:00' },
       all: { days: [0,1,2,3,4,5,6], s: '08:00', e: '17:00' },
@@ -6715,10 +6733,10 @@ export const EditCalendar = (() => {
     const p = PRESETS[preset];
     if (!p) return;
     document.querySelectorAll('.cal-preset-chip')
-      .forEach(c => c.classList.toggle('active', c.dataset.preset === preset));
+      .forEach((c: any) => c.classList.toggle('active', c.dataset.preset === preset));
     for (let d = 0; d < 7; d++) {
       const enabled = p.days.includes(d);
-      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
       if (tog) tog.checked = enabled;
       if (enabled && _fp.length === 14) {
         _fp[d * 2]?.setDate(p.s, false);
@@ -6736,11 +6754,11 @@ export const EditCalendar = (() => {
     const ph = Store.plants[plant].workHours;
     for (let d = 0; d < 7; d++) {
       const enabled = !!ph[d];
-      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
       if (tog) tog.checked = enabled;
       if (enabled && _fp.length === 14) {
-        _fp[d * 2]?.setDate(Util.hoursToTimeString(ph[d][0]), false);
-        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(ph[d][1]), false);
+        _fp[d * 2]?.setDate(Util.hoursToTimeString(ph[d]![0]), false);
+        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(ph[d]![1]), false);
       }
       _setRowEnabled(d, enabled);
       _refreshBadge(d);
@@ -6751,9 +6769,9 @@ export const EditCalendar = (() => {
 
   function save() {
     if (!_plantMode && !_line) return;
-    const newWh = {};
+    const newWh: any = {};
     for (let d = 0; d < 7; d++) {
-      const tog = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
       if (!tog?.checked) { newWh[d] = null; continue; }
       const s = _fp[d * 2]?.element?.value;
       const e = _fp[d * 2 + 1]?.element?.value;
@@ -6769,17 +6787,17 @@ export const EditCalendar = (() => {
     }
     if (_plantMode) {
       Store.plants[_plantName].workHours = newWh;
-      const changed = new Set();
+      const changed = new Set<string>();
       for (let d = 0; d < 7; d++) for (const l of Store.clampLinesToPlant(_plantName, d)) changed.add(l);
-      NIMBUS.Plant._persistPlantHours(_plantName, changed);
-      NIMBUS.Plant.render();
+      NIMBUS!.Plant!._persistPlantHours!(_plantName, changed);
+      NIMBUS!.Plant!.render!();
       close();
       Toast.show(Util.t('toast.plant_calendar_clamped'), 'success');
     } else {
       Store.setCalendar(_line, newWh, 'edit-calendar');
       const plant = Store.getPlantForLine(_line) || Store.selectedPlant;
       if (plant) CalendarSync.saveLineHours(plant, _line, newWh);
-      NIMBUS.ProdLines.render();
+      NIMBUS!.ProdLines!.render!();
       close();
       Toast.show(Util.t('toast.line_calendar_updated', { line: _line }), 'success');
     }
@@ -6793,13 +6811,13 @@ export const EditCalendar = (() => {
    Supports search, sort, expandable rows with task counts per color.
    ========================================================================== */
 export const ColorWheelViewer = (() => {
-  let _plant   = null;
-  let _entries = [];
+  let _plant: any   = null;
+  let _entries: any[] = [];
   let _search  = '';
   let _sort    = 'priority'; // 'priority' | 'name'
 
-  const _esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const _esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (c: any) =>
+    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
 
   // Map common color name fragments → hex for the swatch tiles
   const COLOR_MAP = {
@@ -6812,16 +6830,16 @@ export const ColorWheelViewer = (() => {
     SAGE:'#87a96b', SLATE:'#708090', IVORY:'#fffff0', CREAM:'#fffdd0',
   };
 
-  function _resolveColor(name) {
+  function _resolveColor(name: any) {
     const u = String(name).toUpperCase().trim();
-    if (COLOR_MAP[u]) return COLOR_MAP[u];
+    if ((COLOR_MAP as any)[u]) return (COLOR_MAP as any)[u];
     for (const [k, v] of Object.entries(COLOR_MAP)) {
       if (u.includes(k)) return v;
     }
     return null;
   }
 
-  function open(plant) {
+  function open(plant: any) {
     _plant  = plant;
     _search = '';
     _sort   = 'priority';
@@ -6829,10 +6847,10 @@ export const ColorWheelViewer = (() => {
     if (!el) return;
     el.hidden = false;
     // Reset search UI
-    const srch = document.getElementById('cw-viewer-search');
+    const srch: any = document.getElementById('cw-viewer-search');
     if (srch) srch.value = '';
     const sortBtns = document.querySelectorAll('.cw-sort-btn');
-    sortBtns.forEach(b => b.classList.toggle('active', b.dataset.sort === 'priority'));
+    sortBtns.forEach((b: any) => b.classList.toggle('active', b.dataset.sort === 'priority'));
     requestAnimationFrame(() => el.querySelector('.cw-viewer-modal')?.classList.add('visible'));
     _load();
   }
@@ -6878,7 +6896,7 @@ export const ColorWheelViewer = (() => {
     if (!listEl) return;
 
     // Task counts per color for this plant
-    const taskCounts = {};
+    const taskCounts: any = {};
     for (const t of Store.tasksArr) {
       if (_plant && Store.getPlantForLine(t.PRODUCTION_LINE) !== _plant) continue;
       const c = Util.norm(t.COLOR);
@@ -6930,7 +6948,7 @@ export const ColorWheelViewer = (() => {
     }).join('');
   }
 
-  function _toggleExpand(btn) {
+  function _toggleExpand(btn: any) {
     const row    = btn.closest('.cw-viewer-row');
     const detail = row?.querySelector('.cw-row-detail');
     if (!detail) return;
@@ -6938,14 +6956,14 @@ export const ColorWheelViewer = (() => {
     btn.textContent = open ? '▴' : '▾';
   }
 
-  function search(val) {
+  function search(val: any) {
     _search = String(val || '').toLowerCase();
     _render();
   }
 
-  function sort(mode) {
+  function sort(mode: any) {
     _sort = mode;
-    document.querySelectorAll('.cw-sort-btn').forEach(b =>
+    document.querySelectorAll('.cw-sort-btn').forEach((b: any) =>
       b.classList.toggle('active', b.dataset.sort === mode)
     );
     _render();
@@ -6974,9 +6992,10 @@ const VL_ALERT_ROW_H = 72;
    App._renderSettingsPane, and App's `alerts:change` subscriber).
    ========================================================================== */
 export const AlertsUIAdapter = {
+  _drawerVL: null as any,
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
-  focus(alertId) {
+  focus(alertId: any) {
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return;
 
@@ -6988,9 +7007,9 @@ export const AlertsUIAdapter = {
       return;
     }
 
-    NIMBUS.App.gotoGanttTimeline();
+    NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => {
-      const t = Store.tasks[a.taskId];
+      const t = Store.tasks[a.taskId!];
       if (!t || !Timeline._tl) return;
       // 3-day window centered on the task's start — matches the Hour/Day/Week
       // toolbar's "day" mode (3 × 24h) so the segmented control stays honest.
@@ -7003,7 +7022,7 @@ export const AlertsUIAdapter = {
       }
       Timeline._tl.setSelection([String(a.taskId)]);
       Inspector.show(t);
-      document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+      document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach((b: any) => {
         b.classList.toggle('active', b.dataset.view === 'day');
       });
     }, 250);
@@ -7012,7 +7031,7 @@ export const AlertsUIAdapter = {
   // Open a categorized, scrollable cell-briefing modal listing the alerts for
   // a single (line, day) cell. Triggered by clicking a red/amber alert-cell
   // highlight on the Gantt.
-  showForCell(line, dayKey) {
+  showForCell(line: any, dayKey: any) {
     const matches = Store.alerts.filter(a =>
       a.line === line && a.time && Util.dayKey(a.time) === dayKey);
     if (!matches.length) return;
@@ -7021,14 +7040,14 @@ export const AlertsUIAdapter = {
     const dateLabel = day.toLocaleDateString('en-US',
       { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
 
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
+      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as any)[c]));
 
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
     const cellTasks = Store.tasksArr
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
                 && t.start_date && Util.dayKey(t.start_date) === dayKey)
-      .sort((a, b) => a.start_date - b.start_date);
+      .sort((a: any, b: any) => a.start_date - b.start_date);
     const scheduledH = cellTasks.reduce((s, t) => s + Util.runHours(t), 0);
     const effCap   = Calendar.effectiveCapacityHours(line, day) || 0;
     const utilPct  = effCap > 0 ? scheduledH / effCap : 0;
@@ -7049,8 +7068,8 @@ export const AlertsUIAdapter = {
       'fixed-closed':       'calendar',
       'fixed-out-of-hours': 'calendar',
     };
-    const byCat = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    for (const a of matches) (byCat[CAT_MAP[a.type] || 'exceptions']).push(a);
+    const byCat: any = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
+    for (const a of matches) (byCat[(CAT_MAP as any)[a.type] || 'exceptions']).push(a);
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;
@@ -7060,17 +7079,17 @@ export const AlertsUIAdapter = {
     const verdictSev = errCt > 0 ? 'err' : 'warn';
 
     // -------- Per-card renderers
-    const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const taskPO = id => {
+    const sevIcon: any = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const taskPO = (id: any) => {
       const t = Store.tasks?.[id];
       return t ? (t.PRODUCTION_ORDER || t.text || String(id).slice(0, 8)) : String(id).slice(0, 8);
     };
-    const taskFixed = id => !!Store.tasks?.[id]?.fixed;
+    const taskFixed = (id: any) => !!Store.tasks?.[id]?.fixed;
 
-    const renderChip = (id) => `
+    const renderChip = (id: any) => `
       <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(id)}">${esc(taskPO(id))}</span>`;
 
-    const renderCard = (a) => {
+    const renderCard = (a: any) => {
       // Headline + right-side numeric.
       let headline = esc(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
       let num = '';
@@ -7125,7 +7144,7 @@ export const AlertsUIAdapter = {
         </div>`;
     };
 
-    const renderCategory = (key, label, alerts) => {
+    const renderCategory = (key: any, label: any, alerts: any) => {
       if (!alerts.length) return '';
       return `
         <section class="ac-cat" data-cat="${key}">
@@ -7190,7 +7209,7 @@ export const AlertsUIAdapter = {
       });
     };
 
-    dlg.addEventListener('click', e => {
+    dlg.addEventListener('click', (e: any) => {
       const btn = e.target.closest('[data-act]');
       if (!btn) { if (e.target === dlg) dlg.close(); return; }
       const act = btn.dataset.act, aid = btn.dataset.id;
@@ -7218,11 +7237,11 @@ export const AlertsUIAdapter = {
     if (isOpen) AlertsUIAdapter.renderDrawer();
   },
 
-  _renderAlertRow(a) {
+  _renderAlertRow(a: any) {
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
-    const sevIcon = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const sevIcon: any = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
     const isCalendar = CALENDAR_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
     const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
@@ -7263,14 +7282,14 @@ export const AlertsUIAdapter = {
       body.innerHTML = '';
       AlertsUIAdapter._drawerVL = new VirtualList(body, {
         rowH: VL_ALERT_ROW_H,
-        renderFn: (a) => AlertsUIAdapter._renderAlertRow(a),
+        renderFn: (a: any) => AlertsUIAdapter._renderAlertRow(a),
         mountEl: body,
       });
     }
     AlertsUIAdapter._drawerVL.update(alerts);
 
     if (hiddenCount > 0) {
-      const hzDays = Math.max(1, Math.round(hz / 1440));
+      const hzDays = Math.max(1, Math.round((hz as any) / 1440));
       body.insertAdjacentHTML('beforeend',
         `<div style="padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);">` +
         `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.</div>`);
@@ -7286,12 +7305,12 @@ export const AlertsUIAdapter = {
     const visible = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
     const n = visible.length;
     if (n > 0) {
-      badge.textContent = n > 99 ? '99+' : String(n);
-      badge.style.display = '';
-      bell.style.color = visible.some(a => a.sev === 'err') ? 'var(--err)' : 'var(--warn-text)';
+      badge!.textContent = n > 99 ? '99+' : String(n);
+      badge!.style.display = '';
+      bell!.style.color = visible.some(a => a.sev === 'err') ? 'var(--err)' : 'var(--warn-text)';
     } else {
-      badge.style.display = 'none';
-      bell.style.color = '';
+      badge!.style.display = 'none';
+      bell!.style.color = '';
     }
   }
 };
@@ -7310,7 +7329,7 @@ export const AlertsUIAdapter = {
    here as a boot-wired adapter.
    ========================================================================== */
 export const SandboxAdapter = {
-  _confSnapshot: null,
+  _confSnapshot: null as any,
 
   init() {
     const banner = document.getElementById('sandbox-banner');
@@ -7343,13 +7362,13 @@ export const SandboxAdapter = {
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
     // Captured here (not in Sandbox.enter()) at the same logical moment as before —
     // the state module doesn't know about the cross-file Confidence module.
-    SandboxAdapter._confSnapshot = NIMBUS.Confidence?.snapshot() ?? null;
+    SandboxAdapter._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
 
     document.body.classList.add('sandbox-mode');
     const banner = document.getElementById('sandbox-banner');
     if (banner) banner.hidden = false;
 
-    document.querySelectorAll('.sandbox-btn').forEach(btn => {
+    document.querySelectorAll('.sandbox-btn').forEach((btn: any) => {
       btn.textContent = Util.t('ui.sandbox_on');
       btn.style.color = 'var(--warn)';
       btn.onclick = null;
@@ -7358,14 +7377,14 @@ export const SandboxAdapter = {
     Toast.show(Util.t('toast.what_if_mode'), 'info', 1500);
   },
 
-  _onExited(evt) {
+  _onExited(evt: any) {
     const { applied, snapshot: snap } = evt;
 
     if (applied) {
-      const scenarioName = document.getElementById('sb-scenario-name')?.value || 'What-If';
+      const scenarioName = (document.getElementById('sb-scenario-name') as any)?.value || 'What-If';
       Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
     } else {
-      if (NIMBUS.Confidence && SandboxAdapter._confSnapshot) NIMBUS.Confidence.restore(SandboxAdapter._confSnapshot);
+      if (NIMBUS!.Confidence && SandboxAdapter._confSnapshot) NIMBUS!.Confidence!.restore!(SandboxAdapter._confSnapshot);
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
@@ -7375,7 +7394,7 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (banner) banner.hidden = true;
 
-    document.querySelectorAll('.sandbox-btn').forEach(btn => {
+    document.querySelectorAll('.sandbox-btn').forEach((btn: any) => {
       btn.textContent = Util.t('ui.sandbox_off');
       btn.style.color = '';
       btn.onclick = () => SandboxAdapter.enter();
@@ -7387,18 +7406,18 @@ export const SandboxAdapter = {
     // Without this, "Scenario applied" showed but a reload before a later unrelated
     // save lost the promoted edits (autosave is suppressed during sandbox).
     if (applied) {
-      NIMBUS.Persistence.saveAll();
+      NIMBUS!.Persistence!.saveAll!();
       // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
       // guards on Sandbox.active); push the promoted config now that active=false.
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
       if (Store.selectedPlant) {
         const plant = Store.selectedPlant;
-        const curLine  = new Set(Store._state.blocks.filter(b => b.plant === plant).map(b => b.id));
-        const curPlant = new Set(Store._state.plantBlocks.filter(b => b.plant === plant).map(b => b.id));
+        const curLine  = new Set(Store._state.blocks.filter((b: any) => b.plant === plant).map((b: any) => b.id));
+        const curPlant = new Set(Store._state.plantBlocks.filter((b: any) => b.plant === plant).map((b: any) => b.id));
         const removed = {
-          line:  (snap?.blocks || []).filter(b => b.plant === plant && !curLine.has(b.id)).map(b => b.id),
-          plant: (snap?.plantBlocks || []).filter(b => b.plant === plant && !curPlant.has(b.id)).map(b => b.id),
+          line:  (snap?.blocks || []).filter((b: any) => b.plant === plant && !curLine.has(b.id)).map((b: any) => b.id),
+          plant: (snap?.plantBlocks || []).filter((b: any) => b.plant === plant && !curPlant.has(b.id)).map((b: any) => b.id),
         };
         CalendarSync.flushPlant(plant, removed);
       }
@@ -7432,7 +7451,9 @@ export const SandboxAdapter = {
    and browser print.
    ========================================================================== */
 export const Printer = {
-  _rows: [], // last previewed rows, used by exportCsv()
+  _rows: [] as any[], // last previewed rows, used by exportCsv()
+  _fpStart: null as any,
+  _fpEnd: null as any,
 
   open() {
     const scheduled = Store.tasksArr.filter(t => t.start_date && t.end_date);
@@ -7440,8 +7461,8 @@ export const Printer = {
     let defStart = today;
     let defEnd   = new Date(today); defEnd.setDate(today.getDate() + 7);
     if (scheduled.length) {
-      defStart = new Date(Math.min(...scheduled.map(t => t.start_date.getTime())));
-      defEnd   = new Date(Math.max(...scheduled.map(t => t.end_date.getTime())));
+      defStart = new Date(Math.min(...scheduled.map(t => t.start_date!.getTime())));
+      defEnd   = new Date(Math.max(...scheduled.map(t => t.end_date!.getTime())));
     }
     if (!Printer._fpStart) {
       Printer._fpStart = flatpickr('#print-start', {
@@ -7460,8 +7481,8 @@ export const Printer = {
   },
 
   preview() {
-    const startVal = document.getElementById('print-start')?.value;
-    const endVal   = document.getElementById('print-end')?.value;
+    const startVal = (document.getElementById('print-start') as any)?.value;
+    const endVal   = (document.getElementById('print-end') as any)?.value;
     const host     = document.getElementById('print-results');
     if (!host) return;
 
@@ -7488,8 +7509,8 @@ export const Printer = {
       return;
     }
 
-    const pad2 = n => String(n).padStart(2, '0');
-    const fmtDt = d => {
+    const pad2 = (n: any) => String(n).padStart(2, '0');
+    const fmtDt = (d: any) => {
       if (!d) return '—';
       return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     };
@@ -7555,7 +7576,7 @@ export const Printer = {
 
   exportCsv() {
     if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
-    const fmtDt = d => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
+    const fmtDt = (d: any) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
     const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
     const lines = [
       headers.join(','),
