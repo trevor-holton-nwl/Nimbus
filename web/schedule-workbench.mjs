@@ -991,11 +991,16 @@ export const TimelineNav = {
     const toX = ms => ((ms - scheduleMin) / totalMs) * cssW;
 
     const isDark = document.body.classList.contains('dark');
-    const navBg        = isDark ? '#1c1d26' : '#ecebe4';
-    const navDivider   = isDark ? 'rgba(140,142,160,0.30)' : 'rgba(217,216,207,0.6)';
-    const navLabelScrim = isDark ? 'rgba(25,26,34,0.85)'  : 'rgba(236,235,228,0.82)';
-    const navLabelText = isDark ? 'rgba(237,235,227,0.88)' : 'rgba(60,55,45,0.88)';
-    const navWindow    = isDark ? '#ffb84d' : '#ff0033';
+    // Command Band re-skin (Task 6): this minimap renders in the content area
+    // (isDark tracks the user's own Dark Mode toggle, not the always-dark chrome
+    // band), so backgrounds/dividers repoint toward the light/dark *content*
+    // neutrals (--bg-subtle/--line/--fg), not --chrome-*. Dark-branch literals
+    // that already matched a neutral (cool, non-amber) dark token are left as-is.
+    const navBg        = isDark ? '#1c1d26' : '#f4f7fa';
+    const navDivider   = isDark ? 'rgba(140,142,160,0.30)' : 'rgba(213,220,228,0.6)';
+    const navLabelScrim = isDark ? 'rgba(25,26,34,0.85)'  : 'rgba(244,247,250,0.82)';
+    const navLabelText = isDark ? 'rgba(237,235,227,0.88)' : 'rgba(28,43,58,0.88)';
+    const navWindow    = isDark ? '#4d9fff' : '#ff0033';
 
     // Background
     ctx.fillStyle = navBg;
@@ -1003,7 +1008,7 @@ export const TimelineNav = {
 
     // Draw per-day utilization heat bands
     const matrix = Utilization.computeMatrix(new Date(scheduleMin), Math.ceil(totalMs / Config.MS_DAY) + 2);
-    const SEV_COLORS = { ok: 'rgba(47,122,77,0.25)', warn: 'rgba(230,180,0,0.40)', err: 'rgba(210,150,0,0.55)' };
+    const SEV_COLORS = { ok: 'rgba(30,122,74,0.25)', warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
     for (const line of Object.keys(matrix)) {
       for (const [dayKey, row] of Object.entries(matrix[line])) {
         if (!row.pct) continue;
@@ -1156,7 +1161,10 @@ export const DependencyOverlay = {
     // Arrow head marker
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
     ['ok','tight','gap','critical','highlight'].forEach(cls => {
-      const color = { ok: '#2f7a4d', tight: '#b57a0a', gap: '#b1362a', critical: '#b1362a', highlight: '#b8791a' }[cls];
+      // Command Band re-skin (Task 6): 'tight' (getting-tight warning) -> --warn,
+      // 'highlight' (active/selected chain) -> --accent. ok/gap/critical verified
+      // NOT amber (green/red already) — left unchanged per guardrails.
+      const color = { ok: '#2f7a4d', tight: '#93610a', gap: '#b1362a', critical: '#b1362a', highlight: '#1f5fbf' }[cls];
       const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
       marker.setAttribute('id', `arr-${cls}`);
       marker.setAttribute('markerWidth', '8');

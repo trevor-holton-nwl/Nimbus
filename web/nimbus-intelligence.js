@@ -53,7 +53,7 @@
 #ni-cmd-fab.ni-fab-locked::after { content:'Select a plant to unlock'; }
 #ni-cmd-fab.ni-fab-active {
   background:var(--accent);
-  box-shadow:0 4px 20px rgba(184,121,26,0.45);
+  box-shadow:0 4px 20px rgba(var(--accent-rgb,31,95,191),0.45);
 }
 #ni-cmd-fab::after {
   content:'ctrl + k';
@@ -71,7 +71,7 @@
 #ni-cmd-panel {
   position:fixed; bottom:80px; right:24px; z-index:9989;
   width:520px; max-height:calc(100vh - 104px);
-  background:linear-gradient(160deg,#ffffff 0%,#faf9f6 100%);
+  background:linear-gradient(160deg,var(--bg-elev) 0%,var(--bg-subtle) 100%);
   border:1.5px solid rgba(199,198,189,0.7);
   border-radius:20px;
   box-shadow:0 24px 64px rgba(26,27,31,0.18),0 8px 24px rgba(26,27,31,0.1),0 1px 4px rgba(26,27,31,0.06);
@@ -147,7 +147,11 @@ body.dark #ni-cmd-fab {
   box-shadow:0 4px 16px rgba(0,0,0,0.5),0 1px 4px rgba(0,0,0,0.3);
 }
 body.dark #ni-cmd-fab:hover {
-  background:#f0ede4;
+  /* Hardcoded (not var(--bg-subtle)): this rule inverts the FAB to a near-white
+     circle in dark mode, but body.dark redefines --bg-subtle to a DARK value —
+     using the var() here would repaint the button dark instead of a cool-tinted
+     near-white hover shade. */
+  background:#f4f7fa;
   box-shadow:0 6px 24px rgba(0,0,0,0.55),0 2px 6px rgba(0,0,0,0.35);
 }
 body.dark #ni-cmd-fab.ni-fab-active {
