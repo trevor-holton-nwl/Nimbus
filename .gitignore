@@ -17,6 +17,10 @@ web/application-foundation.mjs
 web/schedule-state.mjs
 web/schedule-services.mjs
 
+# Intermediate OpenAPI JSON dump (regenerated every `npm run generate:api-types`
+# run) — the generated web/types/api-generated.d.mts it feeds IS committed.
+web/types/.openapi-schema.json
+
 # Python
 __pycache__/
 *.pyc

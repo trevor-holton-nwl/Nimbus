@@ -21,7 +21,8 @@
   "include": [
     "web/**/*.mts",
     "web/nimbus-compute-core.d.ts",
-    "web/types/vendor.d.ts"
+    "web/types/vendor.d.ts",
+    "web/types/api-generated.d.mts"
   ],
   // Compiled output lands in place, in the same directory as its source
   // (rootDir === outDir === "web" — see docs/typescript_migration.md). TS's default

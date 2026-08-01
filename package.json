@@ -15,11 +15,13 @@
     "test:modules": "node --test \"tests/modules/*.test.mjs\"",
     "test": "npm run test:legacy && npm run test:modules",
     "check:legacy-surface": "node scripts/legacy-surface.mjs",
-    "check:static-assets": "node scripts/check-static-assets.mjs"
+    "check:static-assets": "node scripts/check-static-assets.mjs",
+    "generate:api-types": "python scripts/dump_openapi.py > web/types/.openapi-schema.json && openapi-typescript web/types/.openapi-schema.json -o web/types/api-generated.d.mts"
   },
   "devDependencies": {
     "eslint": "^9.0.0",
     "globals": "^15.0.0",
+    "openapi-typescript": "^7.13.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.0.0"
   }
