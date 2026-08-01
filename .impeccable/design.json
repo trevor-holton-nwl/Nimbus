@@ -1,52 +1,52 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-13T00:00:00Z",
+  "generatedAt": "2026-08-01T00:00:00Z",
   "title": "Design System: NIMBUS",
   "extensions": {
     "colorMeta": {
-      "foundry-amber": {
+      "command-blue": {
         "role": "primary",
-        "displayName": "Foundry Amber",
-        "canonical": "oklch(60% 0.13 70)",
+        "displayName": "Command Blue",
+        "canonical": "oklch(50% 0.16 259)",
         "tonalRamp": [
-          "oklch(20% 0.05 70)",
-          "oklch(30% 0.07 70)",
-          "oklch(40% 0.09 70)",
-          "oklch(50% 0.11 70)",
-          "oklch(60% 0.13 70)",
-          "oklch(70% 0.12 70)",
-          "oklch(85% 0.08 70)",
-          "oklch(95% 0.03 70)"
+          "oklch(22% 0.04 255)",
+          "oklch(27% 0.05 255)",
+          "oklch(44% 0.14 259)",
+          "oklch(50% 0.16 259)",
+          "oklch(70% 0.16 254)",
+          "oklch(77% 0.12 253)",
+          "oklch(89% 0.04 255)",
+          "oklch(93% 0.02 254)"
         ]
       },
-      "deep-slate": {
+      "deep-navy": {
         "role": "secondary",
-        "displayName": "Deep Slate",
-        "canonical": "oklch(28% 0.02 255)",
+        "displayName": "Deep Navy",
+        "canonical": "oklch(27% 0.05 255)",
         "tonalRamp": [
-          "oklch(12% 0.01 255)",
-          "oklch(20% 0.015 255)",
-          "oklch(28% 0.02 255)",
-          "oklch(36% 0.02 255)",
-          "oklch(45% 0.02 255)",
-          "oklch(60% 0.015 255)",
-          "oklch(78% 0.01 255)",
-          "oklch(92% 0.005 255)"
+          "oklch(19% 0.03 254)",
+          "oklch(22% 0.04 255)",
+          "oklch(27% 0.05 255)",
+          "oklch(34% 0.07 255)",
+          "oklch(42% 0.08 253)",
+          "oklch(48% 0.09 251)",
+          "oklch(77% 0.12 253)",
+          "oklch(89% 0.04 255)"
         ]
       },
-      "warm-mill-white": { "role": "neutral", "displayName": "Warm Mill White", "canonical": "oklch(96% 0.005 90)" },
-      "near-black-ink": { "role": "neutral", "displayName": "Near-Black Ink", "canonical": "oklch(18% 0.005 260)" }
+      "cool-mist": { "role": "neutral", "displayName": "Cool Mist", "canonical": "oklch(94% 0.01 254)" },
+      "ink-navy": { "role": "neutral", "displayName": "Ink Navy", "canonical": "oklch(28% 0.03 249)" }
     },
     "typographyMeta": {
       "display": { "displayName": "Display", "purpose": "Page/section titles, brand mark, modal headings. Archivo, 700 weight." },
       "body": { "displayName": "Body", "purpose": "Default text everywhere — dense information UI, smaller and tighter than an editorial site." },
-      "label": { "displayName": "Mono / Label", "purpose": "IDs, timestamps, stat numbers, version strings — anything generated or measured rather than written." },
+      "label": { "displayName": "Mono / Label", "purpose": "IDs, timestamps, stat numbers, version strings — anything generated or measured rather than written. Includes the Mono-Eyebrow (tracked uppercase section/readout labels, e.g. panel headers and KPI category labels) and Mono-KPI-Value (large KPI-tile numerics) sub-patterns — see DESIGN.md §3." },
       "control": { "displayName": "Control", "purpose": "Interactive chrome (buttons, tabs, inputs, filter dropdowns) — the app's most common text size by volume, not a one-off." }
     },
     "shadows": [
-      { "name": "sm", "value": "0 1px 2px rgba(26,27,31,0.06)", "purpose": "Barest lift — icon-button hover, small popovers. Dark mode: rgba(0,0,0,0.35)." },
-      { "name": "md", "value": "0 2px 6px rgba(26,27,31,0.08), 0 1px 2px rgba(26,27,31,0.04)", "purpose": "Dropdowns, tooltips, small floating panels. Dark mode: rgba(0,0,0,0.4)." },
-      { "name": "lg", "value": "0 8px 24px rgba(26,27,31,0.12), 0 2px 6px rgba(26,27,31,0.06)", "purpose": "Modals and the welcome-splash card — the only surfaces that read as floating above everything else. Dark mode: rgba(0,0,0,0.5)." }
+      { "name": "sm", "value": "0 1px 2px rgba(12,28,48,0.06)", "purpose": "Barest lift — icon-button hover, small popovers. Dark mode: rgba(0,0,0,0.35)." },
+      { "name": "md", "value": "0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04)", "purpose": "Dropdowns, tooltips, small floating panels. Dark mode: 0 2px 6px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.28)." },
+      { "name": "lg", "value": "0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28)", "purpose": "Modals — the only surface that reads as floating above everything else. Deepened in the Command Band re-skin to match the new chrome's modal depth. Dark mode: 0 8px 24px rgba(0,0,0,0.5), 0 2px 6px rgba(0,0,0,0.3) — unchanged from before." }
     ],
     "motion": [
       { "name": "t-fast", "value": "0.12s ease", "purpose": "Default for color/background/border transitions on buttons, tabs, icon-buttons." },
@@ -58,7 +58,7 @@
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Deep Slate CTA button — the action color, distinct from Foundry Amber.",
+      "description": "Deep Navy CTA button — the content-area action color, distinct from the on-chrome Chrome Accent blue (see DESIGN.md §2, The CTA/Chrome Color Rule).",
       "html": "<button class=\"ds-btn-primary\">Optimize Schedule</button>",
       "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid var(--primary); background: var(--primary); color: var(--primary-fg); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast), border-color var(--t-fast); } .ds-btn-primary:hover { background: var(--primary-hot); border-color: var(--primary-hot); } .ds-btn-primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }"
     },
@@ -82,7 +82,7 @@
       "name": "Input",
       "kind": "input",
       "refersTo": "input",
-      "description": "Default text input with the Foundry Amber focus ring.",
+      "description": "Default text input with the Command Blue focus ring.",
       "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Search orders…\" />",
       "css": ".ds-input { height: 30px; padding: 5px 10px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--bg-elev); color: var(--fg); font-size: 12.5px; transition: border-color var(--t-fast), box-shadow var(--t-fast); } .ds-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }"
     },
@@ -90,7 +90,7 @@
       "name": "Tabs",
       "kind": "nav",
       "refersTo": "tab-btn-active",
-      "description": "Top-bar tab pair — idle vs. active state, active marked by a Foundry Amber outline.",
+      "description": "In-content sub-tab pair (Admin / Master Data / Gantt Timeline-Orders / Labor) — idle vs. active state, active marked by a Command Blue outline. The app's top-level nav itself now lives in the dark left drawer with its own Chrome Accent rail treatment (see DESIGN.md §5, Tabs).",
       "html": "<div class=\"ds-tabs\"><button class=\"ds-tab-btn\">Orders</button><button class=\"ds-tab-btn ds-tab-btn--active\">Gantt</button></div>",
       "css": ".ds-tabs { display: flex; gap: 2px; } .ds-tab-btn { display: flex; align-items: center; gap: 7px; height: 30px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid transparent; background: transparent; color: var(--fg-mute); font-size: 12.5px; font-weight: 500; transition: background var(--t-fast); } .ds-tab-btn:hover { color: var(--fg); background: var(--bg-subtle); } .ds-tab-btn--active { color: var(--fg); background: var(--bg-subtle); border-color: var(--line); font-size: 13px; font-weight: 700; outline: 2px solid var(--accent); outline-offset: 0; }"
     },
@@ -120,25 +120,28 @@
     }
   ],
   "narrative": {
-    "northStar": "The Foundry Console",
-    "overview": "NIMBUS is a control-room instrument, not a consumer app that happens to render a Gantt chart. The palette is deep slate shot through with a single molten-amber accent — the visual grammar of a foundry control panel, not a SaaS dashboard. Every surface is dense with real information (order counts, due dates, line utilization) because the people using it are experts scheduling production every day, not casual visitors who need to be onboarded gently. The system is deliberately restrained: one accent color, hairline borders as the default separator, shadows reserved for the handful of surfaces that genuinely float above the page (modals, the welcome splash). It rejects two failure modes explicitly — the bubbly, gradient-hero gloss of generic consumer SaaS, and the dated grid-of-forms clunkiness of legacy ERP screens. NIMBUS sits between them: modern craft applied to an industrial, information-dense tool.",
+    "northStar": "Command Band",
+    "overview": "NIMBUS is a control-room instrument, not a consumer app that happens to render a Gantt chart. The chrome is a permanently-dark navy command band and left drawer wrapping a cool gray-blue page of flat white cards, with a bright signal-blue accent for the on-chrome CTA and highlight — the visual grammar of a mission-control console, not a SaaS dashboard. Every surface is dense with real information (order counts, due dates, line utilization) because the people using it are experts scheduling production every day, not casual visitors who need to be onboarded gently. The system still separates regions with hairline borders by default and reserves shadows for genuinely floating surfaces (modals, popovers), but color now does more work than the old single-accent system: navy is chrome/structure, bright blue is the on-chrome highlight/CTA, and a darker navy fill is the CTA anywhere in the light content area (see the CTA/Chrome Color Rule). It rejects the same two failure modes as before — the bubbly, gradient-hero gloss of generic consumer SaaS, and the dated grid-of-forms clunkiness of legacy ERP screens. NIMBUS sits between them: modern craft applied to an industrial, information-dense tool.",
     "keyCharacteristics": [
-      "Deep slate + warm amber, nothing else competing for identity",
-      "Hairline borders and flat surfaces by default; shadows are the exception, not the rule",
-      "JetBrains Mono for anything numeric or machine-generated (IDs, timestamps, stat figures)",
+      "Navy chrome (command band + left drawer) fixed dark in both light/dark theme, wrapping a cool gray-blue content area",
+      "Bright blue is the on-chrome CTA/highlight; navy fill is the content-area CTA — two CTA colors doing two different jobs",
+      "Hairline borders and flat surfaces by default; shadows are the exception, now navy-tinted rather than warm-tinted",
+      "JetBrains Mono for anything numeric or machine-generated, including the Mono-Eyebrow label and Mono-KPI-Value patterns",
       "Brisk, exact motion — nothing lingers, nothing bounces"
     ],
     "rules": [
-      { "name": "The One-Accent Rule", "body": "Foundry Amber never becomes a background fill or a large surface. It is a line, an outline, an icon, a focus ring — never a wash of color.", "section": "colors" },
+      { "name": "The CTA/Chrome Color Rule", "body": "Navy is chrome/structure (command band, drawer — fixed dark in both themes). Bright blue (--chrome-accent) is the on-chrome highlight and the CTA that lives ON the band/drawer (e.g. Save). Content-area CTAs (.btn-primary, .seg-btn.active outside the chrome) are navy fill (--primary), not blue. --accent blue is for links, active-tab outlines, and focus rings in the light content area only — never a solid CTA fill there.", "section": "colors" },
+      { "name": "The One-Accent Rule (retired)", "body": "The prior rule — a single accent color (Foundry Amber) that was never a background fill, only a line/outline/icon/focus ring — no longer holds. This re-skin intentionally introduces a second, filled CTA color (navy) and a chrome-scoped bright-blue CTA alongside the outline-only accent. Kept as a historical marker; see The CTA/Chrome Color Rule for what replaced it.", "section": "colors" },
       { "name": "The Hairline-Over-Shadow Rule", "body": "Regions are separated by a 1px border by default. A shadow is a deliberate signal that something is floating above the page (a modal, a popover), not a decorative default on every card.", "section": "colors" },
-      { "name": "The Dark-Mode Remap, Not Reversal", "body": "In dark mode, Foundry Amber shifts brighter (#d4920f) and quietly takes over the Secondary/primary-button role too — dark mode is not a naive color inversion, it's a re-tuned palette on the same structure. Coverage is incomplete today: some newer components hardcode light-mode colors, and a few token names are referenced in dark-mode CSS without a matching :root definition.", "section": "colors" },
-      { "name": "The Mono-Means-Machine Rule", "body": "If a string was generated, measured, or timestamped rather than written by a person, it renders in JetBrains Mono. This is the fastest visual cue in the system for \"this is data, not copy.\"", "section": "typography" },
+      { "name": "The Dark-Mode Remap, Not Reversal", "body": "Dark mode re-lights the same navy/blue structure rather than inverting it: --accent brightens (#1f5fbf to #4d9fff), and --primary gets its own lighter navy (#12263f to #2b4f78) rather than reusing the light-mode value, so content-area CTAs still read as a distinct action color against a dark background. The --chrome-* tokens do not change between themes at all — the command band and drawer are fixed-dark chrome, a deliberate structural exception. Coverage elsewhere is still incomplete today: some newer components hardcode light-mode colors, and a few token names may be referenced in dark-mode CSS without a matching :root definition.", "section": "colors" },
+      { "name": "The Mono-Means-Machine Rule", "body": "If a string was generated, measured, or timestamped rather than written by a person, it renders in JetBrains Mono. This is the fastest visual cue in the system for \"this is data, not copy.\" The Mono-Eyebrow/Mono-KPI-Value pairing on every KPI tile is the most consistent, highest-visibility application of this rule today.", "section": "typography" },
       { "name": "The Floating-Means-Floating Rule", "body": "A shadow above the sm step is reserved for something the user should read as temporarily suspended over the interface (a modal, an overlay). Don't reach for shadow-lg on a static panel just to make it feel premium.", "section": "elevation" }
     ],
     "dos": [
-      "Do keep Foundry Amber to lines, outlines, icons, and focus rings — never a background wash (The One-Accent Rule).",
+      "Do follow the CTA/Chrome Color Rule: navy chrome, bright-blue on-chrome CTA/highlight, navy-fill content-area CTAs, blue outline/ring for links and focus in the content area — never mix the four up.",
       "Do separate regions with a 1px Hairline border by default; reach for a shadow only when something is genuinely floating above the page (modal, popover, splash card).",
-      "Do render anything generated/measured/timestamped in JetBrains Mono (IDs, durations, stat numbers, version strings).",
+      "Do render anything generated/measured/timestamped in JetBrains Mono (IDs, durations, stat numbers, version strings) — including the Mono-Eyebrow label and Mono-KPI-Value numeric patterns used throughout KPI tiles and panel headers.",
+      "Do use a colored top-border for KPI/stat-tile severity (border-top: 3px solid var(--warn|--err)) — the one sanctioned exception to the no-colored-accent-stripe don't (top-border, not side).",
       "Do use Flatpickr for every date/time input — never native <input type=\"date\">, datetime-local, or time (the one exception is the AG Grid inline date-cell editor).",
       "Do use searchable/filterable comboboxes for plant and line selection, scoped to the plant→line hierarchy — this system is built to hold 50+ plants and 3,500+ lines, not the pilot's handful.",
       "Do re-skin third-party components (vis-timeline, Flatpickr, AG Grid) to the token system rather than shipping their default look.",
@@ -148,8 +151,8 @@
       "Don't use bubble or chip selectors for plants or lines — they break down past ~10 entries and this system must scale to thousands.",
       "Don't add gradient-hero sections, gradient text, or glassmorphism as a decorative default — that's the generic-consumer-SaaS gloss this system explicitly rejects.",
       "Don't use dated grid-of-forms ERP layouts, oversized bordered table cells, or beige/gray corporate-form styling — that's the legacy-ERP clunk this system explicitly rejects.",
-      "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead.",
-      "Don't reference a CSS variable name that isn't defined in :root or body.dark — a few token names (--border, --border-subtle, --font-mono, --nimbus-amber, --bg-float) are referenced somewhere without a definition. Check before reusing one.",
+      "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile border-top severity pattern — top, not side, and only on .kpi-tile.)",
+      "Don't reference a CSS variable name that isn't defined in :root or body.dark without checking first. The specific tokens this used to warn about (--border, --border-subtle, --font-mono, --nimbus-amber/--amber, --bg-float) are now all defined in :root as of the Command Band re-skin, but dark-mode coverage is still incomplete for some tokens (e.g. --bg-hover) — check before reusing one.",
       "Don't reach for --shadow-lg on a static, non-floating panel just to make it feel more \"premium\" — see The Floating-Means-Floating Rule."
     ]
   }
