@@ -145,7 +145,7 @@ import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -3053,19 +3053,39 @@ export const ContextMenu = {
 const VL_HIER_LINE_H = 38;
 const VL_HIER_TASK_H = 28;
 
+// -- Local type declarations (CQ-1 Phase 6 Task 4 conversion; scoped to
+//    Hierarchy/GanttFilter) --------------------------------------------------
+
+/** Utilization.computeMatrix's return shape, named locally since the real
+ *  interface (schedule-services.mts's UtilizationMatrixResolved) is module-
+ *  private to that file — see its own header comment on why it isn't exported. */
+type HierarchyUtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
+
+/** Hierarchy._lineItems — one VirtualList row per production line, rebuilt
+ *  fresh on every render() from Store.tasksForSelectedPlant() plus the
+ *  today-scoped utilization matrix (memoized on Hierarchy._todayCache). */
+interface HierarchyLineItem {
+  name: string;
+  tasks: NimbusTask[];
+  color: string;
+  pct: number | null;
+  sev: UtilSevBucket;
+  pinned: boolean;
+}
+
 /* =============================================================================
    HIERARCHY — left sidebar with per-line order lists + utilisation chip.
    ========================================================================== */
 export const Hierarchy = {
-  _open:      new Set(),
-  _lineItems: [] as any[],
-  _vl:        null as any,
+  _open:      new Set<string>(),
+  _lineItems: [] as HierarchyLineItem[],
+  _vl:        null as VirtualList<HierarchyLineItem> | null,
   _wired:     false,
-  _todayCache: null as any,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
+  _todayCache: null as { key: string; matrix: HierarchyUtilMatrix } | null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
 
   _renderPending: false,
 
-  _scheduleRender() {
+  _scheduleRender(): void {
     if (Hierarchy._renderPending) return;
     Hierarchy._renderPending = true;
     requestAnimationFrame(() => {
@@ -3074,7 +3094,7 @@ export const Hierarchy = {
     });
   },
 
-  init() {
+  init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
           || evt.type === 'task:update') {
@@ -3089,11 +3109,11 @@ export const Hierarchy = {
     }, 'Hierarchy');
   },
 
-  _itemH(item: any) {
+  _itemH(item: HierarchyLineItem): number {
     return VL_HIER_LINE_H + (Hierarchy._open.has(item.name) ? item.tasks.length * VL_HIER_TASK_H : 0);
   },
 
-  _renderItem(item: any) {
+  _renderItem(item: HierarchyLineItem): string {
     const open = Hierarchy._open.has(item.name);
     const chip = item.pct != null
       ? `<span class="line-util ${item.sev}">${item.pct}%</span>`
@@ -3106,7 +3126,7 @@ export const Hierarchy = {
       `<span>${item.name}</span>` +
       `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
       `${chip}</summary>` +
-      (open ? item.tasks.map((tk: any, i: any) => {
+      (open ? item.tasks.map((tk, i) => {
         const fixed = Store.isFixed(tk.id);
         return `<div class="hier-item${fixed ? ' fixed' : ''}" data-id="${tk.id}">` +
           (fixed ? '<span class="lock-ico">🔒</span>' : '') +
@@ -3115,7 +3135,7 @@ export const Hierarchy = {
       `</details>`;
   },
 
-  render() {
+  render(): void {
     const el = document.getElementById('hierarchy');
     if (!el) return;
     if (!Store.selectedPlant) {
@@ -3127,7 +3147,7 @@ export const Hierarchy = {
       return;
     }
 
-    const lines: any = {};
+    const lines: Record<string, NimbusTask[]> = {};
     for (const tk of Store.tasksForSelectedPlant()) {
       const k = tk.PRODUCTION_LINE || 'Unknown';
       (lines[k] ||= []).push(tk);
@@ -3136,13 +3156,13 @@ export const Hierarchy = {
       if (!lines[l]) lines[l] = [];
     }
     const lineNames = Object.keys(lines).sort();
-    let visibleNames = (GanttFilter?._selectedLines?.size > 0)
+    let visibleNames = (GanttFilter._selectedLines.size > 0)
       ? lineNames.filter(l => GanttFilter._selectedLines.has(l))
       : lineNames;
     // Surface the user's pinned lines at the top (scale-safe quick access at
     // 70+ lines/plant), preserving alpha order within each group.
     let _pinnedLines: Set<string>;
-    try { _pinnedLines = new Set((Store.pref('pinnedLines') as any) || []); } catch { _pinnedLines = new Set(); }
+    try { _pinnedLines = new Set((Store.pref('pinnedLines') as string[] | undefined) ?? []); } catch { _pinnedLines = new Set(); }
     if (_pinnedLines.size) {
       visibleNames = [
         ...visibleNames.filter(l => _pinnedLines.has(l)),
@@ -3159,7 +3179,7 @@ export const Hierarchy = {
     // thrashes the shared Utilization._cache (TimelineNav's multi-day entry). Memoize locally.
     const _todayKey = Util.dayKey(Util.startOfDay(todayStart));
     const _utilMKey = `${todayStart.getTime()}|1|${Store.rev()}|${Store.selectedPlant || 'all'}`;
-    let _utilToday;
+    let _utilToday: HierarchyUtilMatrix;
     if (Hierarchy._todayCache && Hierarchy._todayCache.key === _utilMKey) {
       _utilToday = Hierarchy._todayCache.matrix;
     } else {
@@ -3167,23 +3187,23 @@ export const Hierarchy = {
       Hierarchy._todayCache = { key: _utilMKey, matrix: _utilToday };
     }
 
-    Hierarchy._lineItems = visibleNames.map(name => {
+    Hierarchy._lineItems = visibleNames.map((name): HierarchyLineItem => {
       const ci    = Timeline._colorIndex(name);
       const color = Config.COLORS[ci % Config.COLORS.length];
       const tasks = lines[name]
-        .filter((tk: any) => tk.start_date >= todayStart && tk.start_date <= todayEnd)
-        .sort((a: any, b: any) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+        .filter(tk => !!tk.start_date && tk.start_date.getTime() >= todayStart.getTime() && tk.start_date.getTime() <= todayEnd.getTime())
+        .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       const u   = _utilToday[name]?.[_todayKey];
-      const pct = (u && u.scheduled > 0) ? Math.round(u.pct * 100) : null;
-      const sev = u
-        ? Utilization.sev(u.pct, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
+      const pct = (u && u.scheduled > 0) ? Math.round(u.pct! * 100) : null;
+      const sev: UtilSevBucket = u
+        ? Utilization.sev(u.pct!, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
         : 'ok';
       return { name, tasks, color, pct, sev, pinned: _pinnedLines.has(name) };
     });
 
     if (!Hierarchy._vl) {
       el.innerHTML = '';
-      Hierarchy._vl = new VirtualList(el, {
+      Hierarchy._vl = new VirtualList<HierarchyLineItem>(el, {
         getRowH:   (item) => Hierarchy._itemH(item),
         renderFn:  (item) => Hierarchy._renderItem(item),
         mountEl:   el,
@@ -3200,24 +3220,32 @@ export const Hierarchy = {
     // mutate Hierarchy._open and call render(); do not set det.open.
     if (!Hierarchy._wired) {
       Hierarchy._wired = true;
-      el.addEventListener('click', (e: any) => {
-        const sum = e.target.closest('details.line-group > summary');
+      el.addEventListener('click', (e: MouseEvent) => {
+        const target = e.target as Element | null;
+        const sum = target?.closest('details.line-group > summary') as HTMLElement | null;
         if (sum) {
           e.preventDefault();
-          const name = sum.parentElement.dataset.line;
+          const name = sum.parentElement!.dataset.line!;
           if (Hierarchy._open.has(name)) Hierarchy._open.delete(name);
           else Hierarchy._open.add(name);
           if (Hierarchy._vl) Hierarchy._vl.update(Hierarchy._lineItems);
           return;
         }
-        const item = e.target.closest('.hier-item');
-        if (item) Timeline.focus(item.dataset.id);
+        const item = target?.closest('.hier-item') as HTMLElement | null;
+        if (item) Timeline.focus(item.dataset.id!);
       });
     }
 
     Hierarchy._vl.update(Hierarchy._lineItems);
   }
 };
+
+/** GanttFilter._active — the free-text filter box's live state (kept as an
+ *  object, not a bare string, so activeFilter() can hand callers a live
+ *  reference rather than a stale snapshot). */
+interface GanttFilterActiveState {
+  text: string;
+}
 
 /* =============================================================================
    GANTT FILTER — visual filter bar for the Gantt. Dims non-matching items.
@@ -3240,26 +3268,26 @@ export const Hierarchy = {
    as a deliberate scope boundary, not an oversight.
    ========================================================================== */
 export const GanttFilter = {
-  _active:         { text: '' },
+  _active:         { text: '' } as GanttFilterActiveState,
   _selectedLines:  new Set<string>(),
   _selectedColors: new Set<string>(),
   _selectedForms:  new Set<string>(),
   _pastedIds:      new Set<string>(),
-  _bar:            null as any,
+  _bar:            null as HTMLElement | null,
   _lineSearch:     '',
   _colorSearch:    '',
   _formSearch:     '',
 
-  init() {
+  init(): void {
     const bar = document.getElementById('gantt-filterbar');
     if (!bar) return;
     GanttFilter._bar = bar;
     GanttFilter.populate();
 
-    const textIn: any   = document.getElementById('flt-text');
+    const textIn = document.getElementById('flt-text') as HTMLInputElement | null;
     const clearBtn = document.getElementById('flt-clear');
 
-    if (textIn)   textIn.oninput   = Util.debounce(() => { GanttFilter._active.text = textIn.value.trim().toLowerCase(); GanttFilter._apply(); }, 120);
+    if (textIn)   textIn.oninput   = Util.debounce(() => { GanttFilter._active.text = textIn.value.trim().toLowerCase(); GanttFilter._apply!(); }, 120);
     if (clearBtn) clearBtn.onclick = () => GanttFilter.clear();
 
     Store.subscribe(evt => {
@@ -3267,9 +3295,9 @@ export const GanttFilter = {
         GanttFilter.populate();
         GanttFilter._buildLineDropdown();
         GanttFilter._refreshLineBtn();
-        setTimeout(() => GanttFilter._apply(), 80);
+        setTimeout(() => GanttFilter._apply!(), 80);
       }
-      if (evt.type === 'tasks:bulkUpdate') { setTimeout(() => GanttFilter._apply(), 80); }
+      if (evt.type === 'tasks:bulkUpdate') { setTimeout(() => GanttFilter._apply!(), 80); }
       if (evt.type === 'plant:selected') {
         GanttFilter._selectedLines.clear();
         GanttFilter._selectedColors.clear();
@@ -3279,34 +3307,41 @@ export const GanttFilter = {
         GanttFilter.populate();
         GanttFilter._buildLineDropdown();
         GanttFilter._refreshLineBtn();
-        setTimeout(() => GanttFilter._apply(), 80);
+        setTimeout(() => GanttFilter._apply!(), 80);
       }
     }, 'GanttFilter');
 
-    const _fltPairs = [
+    const _fltPairs: Array<[HTMLElement | null, HTMLElement | null]> = [
       [document.getElementById('gantt-flt-line-btn'),  document.getElementById('gantt-line-dropdown')],
       [document.getElementById('gantt-flt-color-btn'), document.getElementById('gantt-color-dropdown')],
       [document.getElementById('gantt-flt-form-btn'),  document.getElementById('gantt-form-dropdown')],
       [document.getElementById('gantt-flt-pomat-btn'), document.getElementById('gantt-pomat-dropdown')],
     ];
-    document.addEventListener('click', (e: any) => {
+    document.addEventListener('click', (e: MouseEvent) => {
       if (_fltPairs.every(([, d]) => !d || d.hidden)) return;
+      const target = e.target as Node;
       for (const [btn, drop] of _fltPairs) {
-        if (drop && !drop.hidden && btn && !btn.contains(e.target) && !drop.contains(e.target)) {
+        if (drop && !drop.hidden && btn && !btn.contains(target) && !drop.contains(target)) {
           drop.hidden = true;
         }
       }
     });
 
-    const lineIn: any  = document.getElementById('gantt-line-paste-input');
-    const colorIn: any = document.getElementById('gantt-color-paste-input');
-    const formIn: any  = document.getElementById('gantt-form-paste-input');
-    Util.wirePasteToCheckboxes(lineIn,
-      () => (document.getElementById('gantt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
-    Util.wirePasteToCheckboxes(colorIn,
-      () => (document.getElementById('gantt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
-    Util.wirePasteToCheckboxes(formIn,
-      () => (document.getElementById('gantt-form-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
+    const lineIn  = document.getElementById('gantt-line-paste-input') as HTMLInputElement | null;
+    const colorIn = document.getElementById('gantt-color-paste-input') as HTMLInputElement | null;
+    const formIn  = document.getElementById('gantt-form-paste-input') as HTMLInputElement | null;
+    if (lineIn) {
+      Util.wirePasteToCheckboxes(lineIn,
+        () => Array.from(document.getElementById('gantt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
+    if (colorIn) {
+      Util.wirePasteToCheckboxes(colorIn,
+        () => Array.from(document.getElementById('gantt-color-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
+    if (formIn) {
+      Util.wirePasteToCheckboxes(formIn,
+        () => Array.from(document.getElementById('gantt-form-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
     // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color/form pickers
     // must stay filterable, not a bare scrollable checkbox list. Paste-to-select
     // (above) and type-to-filter (below) share the same input without conflict —
@@ -3325,12 +3360,12 @@ export const GanttFilter = {
     GanttFilter._buildLineDropdown();
   },
 
-  populate() {
+  populate(): void {
     GanttFilter._buildColorDropdown();
     GanttFilter._buildFormDropdown();
   },
 
-  matches(task: any) {
+  matches(task: NimbusTask): boolean {
     const { text } = GanttFilter._active;
     if (GanttFilter._selectedColors.size > 0 && !GanttFilter._selectedColors.has((task.COLOR || '').toUpperCase())) return false;
     if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
@@ -3342,14 +3377,14 @@ export const GanttFilter = {
     return true;
   },
 
-  isActive() {
+  isActive(): boolean {
     return !!(GanttFilter._selectedColors.size || GanttFilter._selectedForms.size
       || GanttFilter._pastedIds.size || GanttFilter._active.text);
   },
 
-  clear() {
+  clear(): void {
     GanttFilter._active = { text: '' };
-    const textIn: any = document.getElementById('flt-text');
+    const textIn = document.getElementById('flt-text') as HTMLInputElement | null;
     if (textIn) textIn.value = '';
     GanttFilter._selectedLines.clear();
     GanttFilter._selectedColors.clear();
@@ -3364,22 +3399,22 @@ export const GanttFilter = {
     GanttFilter._refreshFormBtn();
     Timeline.rebuild();
     Hierarchy.render();
-    GanttFilter._apply();
+    GanttFilter._apply!();
   },
 
   // Clears the line/color/form live-search text and its <input> values without
   // touching selections — shared by the plant-change handler and clear().
-  _resetSearch() {
+  _resetSearch(): void {
     GanttFilter._lineSearch = GanttFilter._colorSearch = GanttFilter._formSearch = '';
-    const lineIn: any  = document.getElementById('gantt-line-paste-input');
-    const colorIn: any = document.getElementById('gantt-color-paste-input');
-    const formIn: any  = document.getElementById('gantt-form-paste-input');
+    const lineIn  = document.getElementById('gantt-line-paste-input') as HTMLInputElement | null;
+    const colorIn = document.getElementById('gantt-color-paste-input') as HTMLInputElement | null;
+    const formIn  = document.getElementById('gantt-form-paste-input') as HTMLInputElement | null;
     if (lineIn)  lineIn.value  = '';
     if (colorIn) colorIn.value = '';
     if (formIn)  formIn.value  = '';
   },
 
-  _toggleLineDropdown() {
+  _toggleLineDropdown(): void {
     const drop = document.getElementById('gantt-line-dropdown');
     if (drop) drop.hidden = !drop.hidden;
   },
@@ -3387,12 +3422,12 @@ export const GanttFilter = {
   // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
   // must stay filterable, not a bare scrollable checkbox list — this is the
   // Gantt line filter's share of that, matching the Dashboard's line filter.
-  _filterLineSearch(q: any) {
+  _filterLineSearch(q: string): void {
     GanttFilter._lineSearch = q || '';
     GanttFilter._buildLineDropdown();
   },
 
-  _buildLineDropdown() {
+  _buildLineDropdown(): void {
     const drop = document.getElementById('gantt-line-checklist');
     if (!drop) return;
     const lineSet = new Set(Store.linesForSelectedPlant());
@@ -3406,8 +3441,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._lineSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g,
-      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
+      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(l =>
           `<label><input type="checkbox" value="${esc(l)}"${GanttFilter._selectedLines.has(l) ? ' checked' : ''}
@@ -3416,7 +3451,7 @@ export const GanttFilter = {
       : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
   },
 
-  _refreshLineBtn() {
+  _refreshLineBtn(): void {
     const btn = document.getElementById('gantt-flt-line-btn');
     const lbl = document.getElementById('gantt-flt-line-label');
     if (!lbl) return;
@@ -3427,7 +3462,7 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onLineChange(cb: any) {
+  _onLineChange(cb: HTMLInputElement): void {
     if (cb.checked) GanttFilter._selectedLines.add(cb.value);
     else            GanttFilter._selectedLines.delete(cb.value);
     GanttFilter._refreshLineBtn();
@@ -3435,7 +3470,7 @@ export const GanttFilter = {
     Hierarchy.render();
   },
 
-  _clearLines() {
+  _clearLines(): void {
     GanttFilter._selectedLines.clear();
     GanttFilter._buildLineDropdown();
     GanttFilter._refreshLineBtn();
@@ -3443,17 +3478,17 @@ export const GanttFilter = {
     Hierarchy.render();
   },
 
-  _toggleColorDropdown() {
+  _toggleColorDropdown(): void {
     const drop = document.getElementById('gantt-color-dropdown');
     if (drop) drop.hidden = !drop.hidden;
   },
 
-  _filterColorSearch(q: any) {
+  _filterColorSearch(q: string): void {
     GanttFilter._colorSearch = q || '';
     GanttFilter._buildColorDropdown();
   },
 
-  _buildColorDropdown() {
+  _buildColorDropdown(): void {
     const drop = document.getElementById('gantt-color-checklist');
     if (!drop) return;
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
@@ -3464,8 +3499,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g,
-      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
+      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(c =>
           `<label><input type="checkbox" value="${esc(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
@@ -3475,7 +3510,7 @@ export const GanttFilter = {
     GanttFilter._refreshColorBtn();
   },
 
-  _refreshColorBtn() {
+  _refreshColorBtn(): void {
     const lbl = document.getElementById('gantt-flt-color-label');
     if (!lbl) return;
     const n = GanttFilter._selectedColors.size;
@@ -3486,24 +3521,24 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onColorChange(cb: any) {
+  _onColorChange(cb: HTMLInputElement): void {
     if (cb.checked) GanttFilter._selectedColors.add(cb.value.toUpperCase());
     else            GanttFilter._selectedColors.delete(cb.value.toUpperCase());
     GanttFilter._refreshColorBtn();
-    GanttFilter._apply();
+    GanttFilter._apply!();
   },
 
-  _toggleFormDropdown() {
+  _toggleFormDropdown(): void {
     const drop = document.getElementById('gantt-form-dropdown');
     if (drop) drop.hidden = !drop.hidden;
   },
 
-  _filterFormSearch(q: any) {
+  _filterFormSearch(q: string): void {
     GanttFilter._formSearch = q || '';
     GanttFilter._buildFormDropdown();
   },
 
-  _buildFormDropdown() {
+  _buildFormDropdown(): void {
     const drop = document.getElementById('gantt-form-checklist');
     if (!drop) return;
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
@@ -3514,8 +3549,8 @@ export const GanttFilter = {
     }
     const q = GanttFilter._formSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(f => f.toLowerCase().includes(q)) : sorted;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g,
-      (c: any) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
+      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(f =>
           `<label><input type="checkbox" value="${esc(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
@@ -3525,7 +3560,7 @@ export const GanttFilter = {
     GanttFilter._refreshFormBtn();
   },
 
-  _refreshFormBtn() {
+  _refreshFormBtn(): void {
     const btn = document.getElementById('gantt-flt-form-btn');
     const lbl = document.getElementById('gantt-flt-form-label');
     if (!lbl) return;
@@ -3536,19 +3571,19 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onFormChange(cb: any) {
+  _onFormChange(cb: HTMLInputElement): void {
     if (cb.checked) GanttFilter._selectedForms.add(cb.value.toUpperCase());
     else            GanttFilter._selectedForms.delete(cb.value.toUpperCase());
     GanttFilter._refreshFormBtn();
-    GanttFilter._apply();
+    GanttFilter._apply!();
   },
 
-  _togglePoMatDropdown() {
+  _togglePoMatDropdown(): void {
     const drop = document.getElementById('gantt-pomat-dropdown');
     if (drop) drop.hidden = !drop.hidden;
   },
 
-  _refreshPoMatBtn() {
+  _refreshPoMatBtn(): void {
     const btn = document.getElementById('gantt-flt-pomat-btn');
     const lbl = document.getElementById('gantt-flt-pomat-label');
     if (!lbl) return;
@@ -3557,8 +3592,8 @@ export const GanttFilter = {
     if (btn) btn.classList.toggle('active', n > 0);
   },
 
-  _onPoMatApply() {
-    const ta: any = document.getElementById('gantt-pomat-textarea');
+  _onPoMatApply(): void {
+    const ta = document.getElementById('gantt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
     GanttFilter._pastedIds = new Set(Util.parsePasteList(ta.value).map(Util.norm));
     const cnt = document.getElementById('gantt-pomat-count');
@@ -3567,11 +3602,11 @@ export const GanttFilter = {
       cnt.textContent = n ? Util.t('ui.pomat_count', { count: n }) : '';
     }
     GanttFilter._refreshPoMatBtn();
-    GanttFilter._apply();
+    GanttFilter._apply!();
   },
 
-  _onPoMatPaste(e: any) {
-    const text = (e.clipboardData || (window as any).clipboardData).getData('text/plain');
+  _onPoMatPaste(e: ClipboardEvent): void {
+    const text = (e.clipboardData || (window as unknown as { clipboardData?: DataTransfer }).clipboardData)?.getData('text/plain');
     if (!text || !text.trim()) return;
     const known = new Set<string>();
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
@@ -3582,33 +3617,33 @@ export const GanttFilter = {
     if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
   },
 
-  _clearPoMat() {
+  _clearPoMat(): void {
     GanttFilter._pastedIds.clear();
-    const ta: any = document.getElementById('gantt-pomat-textarea');
+    const ta = document.getElementById('gantt-pomat-textarea') as HTMLTextAreaElement | null;
     if (ta) ta.value = '';
     const cnt = document.getElementById('gantt-pomat-count');
     if (cnt) cnt.textContent = '';
     GanttFilter._refreshPoMatBtn();
-    GanttFilter._apply();
+    GanttFilter._apply!();
   },
 
-  _apply: null as any,  // assigned below after Util is in scope
+  _apply: null as (() => void) | null,  // assigned below after Util is in scope
 
-  _doApply() {
+  _doApply(): void {
     if (!Timeline._items) return;
     const active = GanttFilter.isActive();
     const badge = document.getElementById('flt-badge');
     const bar   = document.getElementById('gantt-filterbar');
 
-    const updates: any[] = [];
+    const updates: Array<{ id: string; className: string }> = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
-      const item: any = Timeline._items.get(id);
+      const item = Timeline._items.get(id) as TimelineVisItem | null;
       if (!item) continue;
       const shouldDim = active && !GanttFilter.matches(task);
-      const baseClass = (item.className || '').split(' ').filter((c: any) => c !== 'dimmed').join(' ');
+      const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
       const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
       if (newClass !== item.className) updates.push({ id, className: newClass });
     }
@@ -3633,15 +3668,15 @@ export const GanttFilter = {
   // private-consumer debt tracked in cq1-compatibility-inventory.md §4.2 for
   // nimbus-intelligence.js call sites). Exact same behavior as the direct
   // private-field sequences these replace.
-  selectedLines() { return GanttFilter._selectedLines; },
-  activeFilter()  { return GanttFilter._active; },
-  isolateLine(line: any) {
+  selectedLines(): Set<string> { return GanttFilter._selectedLines; },
+  activeFilter(): GanttFilterActiveState { return GanttFilter._active; },
+  isolateLine(line: string): void {
     GanttFilter._selectedLines.clear();
     GanttFilter._selectedLines.add(line);
     GanttFilter._refreshLineBtn();
     GanttFilter._buildLineDropdown();
   },
-  restoreAllLines() {
+  restoreAllLines(): void {
     GanttFilter._selectedLines.clear();
     GanttFilter._refreshLineBtn();
     GanttFilter._buildLineDropdown();
