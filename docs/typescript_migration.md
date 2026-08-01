@@ -206,7 +206,7 @@ Every converted module is a *tracked hand-written `.mjs` today* that becomes *ge
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: `tsconfig.json` + `tsconfig.worker.json`, build/typecheck npm scripts, CI step, Docker multi-stage build, ESLint TS support, ambient `.d.ts` for compute-core + CDN libs, pilot-convert `nimbus-worker.ts` | **Done** |
-| 1 | `application-foundation.mjs` → `.mts` (`Config`, `Util`, `VirtualList`, `PerfMonitor`, `ErrorLog`, `Toast`, `Modal`) **+ create `web/types.ts`** with the domain typedefs from §C/§D. **Foundation is the DAG leaf (zero imports) — convert it first** so every downstream `.mts` can resolve typed `Config`/`Util` via a real `.mts` sibling, rather than hitting `TS7016 "could not find a declaration file"` on an untyped `.mjs`. | Future |
+| 1 | `application-foundation.mjs` → `.mts` (`Config`, `Util`, `VirtualList`, `PerfMonitor`, `ErrorLog`, `Toast`, `Modal`) **+ create `web/types.ts`** with the domain typedefs from §C/§D. **Foundation is the DAG leaf (zero imports) — convert it first** so every downstream `.mts` can resolve typed `Config`/`Util` via a real `.mts` sibling, rather than hitting `TS7016 "could not find a declaration file"` on an untyped `.mjs`. | **Done** |
 | 2 | `schedule-state.mjs` → `.mts` (`Store`, `Selection`, `UndoStack`, `Sandbox`) — the state core; heaviest domain-type payoff | Future |
 | 3 | `schedule-services.mjs` → `.mts` (`Calendar`, `Compute`, `Alerts`, `Utilization`, `Engine`) | Future |
 | 4 | `schedule-data.mjs` → `.mts` (`Persistence`, `CalendarSync`, `Session`) — do the API-contract + `StoredState`/`LiveState` typedefs here (§F/§G) | Future |
@@ -216,6 +216,8 @@ Every converted module is a *tracked hand-written `.mjs` today* that becomes *ge
 | 8 (optional/deferred) | Convert `app.js`/`nimbus-intelligence.js` from classic-script shared-global-scope into real ES modules, eliminating the `window.__NIMBUS_*` bridge entirely — much larger, genuinely optional, worth revisiting only if the bridge itself becomes a real pain point | Deferred |
 
 > **Phase order changed 2026-07-28** — foundation (was Phase 2) now precedes state (was Phase 1). The DAG (§A) makes foundation the leaf every other module imports; converting it first is what lets each later `.mts` get *typed* imports instead of erroring on an untyped `.mjs` sibling. See Open decisions if you'd rather keep state-first and hand-write a `foundation.d.mts` shim instead.
+>
+> **Phase 1 landed 2026-08-01** — `web/types.mts` (not the table's literal "`.ts`") was created per resolved decision #4 (standardize on `.mts`; see below), so don't be confused if you're hunting for a `web/types.ts` file — it doesn't exist. `application-foundation.mjs` → `.mts` conversion is complete and green (`npm run typecheck` / `npm run build` / `npm test` all pass).
 
 **Phases 1–7 are independent of Phase 8.** Each module is consumed by `app.js`/`nimbus-intelligence.js` via the `window.__NIMBUS_*` bridge; converting a producer to `.mts` doesn't require touching the bridge or the classic scripts — the compiled `.mjs` is indistinguishable at that boundary from hand-written `.mjs`. Phase 8 (eliminating the bridge) is a separate, much larger architectural decision.
 

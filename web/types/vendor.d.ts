@@ -80,6 +80,7 @@ declare global {
     (selector: string | HTMLElement, options?: NimbusVendor.FlatpickrOptions): NimbusVendor.FlatpickrInstance;
     localize(locale: unknown): void;
     l10ns: Record<string, unknown>;
+    formatDate(date: Date, format: string, customLocale?: unknown): string;
   };
 }
 

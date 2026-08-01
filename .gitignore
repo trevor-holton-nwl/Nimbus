@@ -13,6 +13,7 @@ node_modules/
 # are never accidentally ignored.
 web/nimbus-worker.js
 web/types.mjs
+web/application-foundation.mjs
 
 # Python
 __pycache__/
