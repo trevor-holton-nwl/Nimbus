@@ -1367,10 +1367,13 @@ interface AgGridColumn {
 }
 
 /** Minimal AG Grid RowNode surface Table's range-copy/cell-mouse/cell-key-down
- *  code reads. */
+ *  code reads. `setSelected` added by CQ-1 Phase 6 Task 6 (Interaction.
+ *  _wireTableSync's Selection→Table mirroring, via Table._api.forEachNode) —
+ *  a real AG Grid RowNode method, not a Table-specific invention. */
 interface AgGridRowNode {
   data: NimbusTask;
   rowIndex: number | null;
+  setSelected(selected: boolean, clearSelection?: boolean): void;
 }
 
 /** Table's own column-def shape — a precise subset of AG Grid's ColDef, scoped
@@ -4656,6 +4659,100 @@ export const Dashboard = {
   }
 };
 
+// -- Local type declarations (CQ-1 Phase 6 Task 6 conversion; scoped to
+//    Interaction) ------------------------------------------------------------
+
+/** Interaction._trace's ring-buffer entry shape (Interaction.trace()/._log()) —
+ *  a free-form debug breadcrumb, hence the index signature for whatever `data`
+ *  bag a given call site passes (see _log's own {what,item}/{id,reason}/
+ *  {id,newLine} shapes below). */
+interface InteractionTraceEntry {
+  t: number;
+  type: string;
+  [key: string]: unknown;
+}
+
+/** vis-timeline's 'timechange' event payload (fires at up to 60fps *during* an
+ *  item drag, before the drag commits as a DataSet 'update') — distinct from
+ *  NimbusVendor.VisEventProperties (the getEventProperties/'click' shape):
+ *  'timechange' carries `id`/`time`/`group` directly, not `item`/`what`. See
+ *  Interaction._onTimeChange. `time` is defensively typed as Date|string|number
+ *  because the handler itself normalizes it (`instanceof Date` check) rather
+ *  than trusting a single shape. */
+interface VisTimeChangeProps {
+  id: string | number;
+  time: Date | string | number;
+  group?: string | number | null;
+}
+
+/** vis-data DataSet 'update' event payload, narrowed to the non-null shape
+ *  Interaction._onDataSetUpdate actually receives (its caller in install()
+ *  already guards `!props || !props.items`) — see NimbusVendor.VisDataSet.on
+ *  in types/vendor.d.ts for the raw (nullable) contract this narrows. */
+type InteractionDataSetUpdateProps = { items: Array<string | number>; data?: TimelineVisItem[] };
+
+/** vis-timeline's Timeline instance also exposes internal, UNDOCUMENTED
+ *  members Interaction's marquee reaches for (on-screen item DOM boxes for
+ *  hit-testing, and the scrollable-content vertical-scroll accessors) — kept
+ *  separate from NimbusVendor.VisTimelineInstance in types/vendor.d.ts (which
+ *  documents only the real, STABLE public API) since these are internals that
+ *  could change on any vis-timeline upgrade without a version bump signal. */
+interface VisInternalTimeline {
+  itemSet?: { items?: Record<string, { dom?: { box?: HTMLElement } } | undefined> };
+  _setScrollTop?(top: number): void;
+  _getScrollTop?(): number;
+}
+
+/** One order item's on-screen rect, snapshotted once per marquee gesture (or
+ *  edge-scroll tick) for cheap repeated hit-testing — see
+ *  Interaction._installMarquee's refreshItemRects/_rectsIntersect. Distinct
+ *  from DOMRect (MarqueeState.centerRect): this is a plain 4-number literal,
+ *  not a real getBoundingClientRect() result. */
+interface MarqueeRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** Ctrl/Cmd+drag rubber-band selection state — one live instance while a
+ *  marquee gesture is in progress (Interaction._marquee), built in
+ *  _installMarquee's onPointerDown and consumed by updateOverlay/
+ *  startMarqueeScroll/onPointerMove/onPointerUp. `anchorTime`/`scrollDelta`
+ *  are only populated when Timeline._tl is truthy at gesture start (see
+ *  onPointerDown); `itemRects` is populated lazily by refreshItemRects. */
+interface MarqueeState {
+  pointerId: number;
+  anchorX: number;
+  anchorY: number;
+  centerRect: DOMRect;
+  overlay: HTMLDivElement;
+  baseIds: Set<string>;
+  lastHits: Set<string>;
+  curMouseX: number;
+  curMouseY: number;
+  anchorTime?: Date;
+  scrollDelta?: number;
+  itemRects?: Map<string, MarqueeRect>;
+}
+
+/** _onKeyDown's arrow-navigation keys (Interaction._navigateSelection). */
+type ArrowKey = 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown';
+
+/** `Modal.openEdit` is guarded (`typeof ... === 'function'`) at both
+ *  _onDoubleClick and _onKeyDown's Enter-to-edit branch, but does not exist
+ *  anywhere in the real Modal export (application-foundation.mts's Modal has
+ *  only open/close/confirm) or anywhere else in the codebase — genuinely
+ *  dead/vestigial code, always false at runtime today. Typed as an optional
+ *  extension (not `any`) so the existing defensive guard keeps its exact
+ *  behavior under strict typing. */
+type ModalWithOpenEdit = typeof Modal & { openEdit?: (task: NimbusTask) => void };
+
+/** `ContextMenu.openCanvas` — same situation as ModalWithOpenEdit above: the
+ *  real ContextMenu export (this file, Task 3) has no such method; the
+ *  install() contextmenu handler's own comment calls it out as "an optional
+ *  extension point" that nothing implements yet. */
+type ContextMenuWithOpenCanvas = typeof ContextMenu & { openCanvas?: (x: number, y: number) => void };
 
 /* =============================================================================
    INTERACTION — unified input pipeline for the Timeline.
@@ -4697,19 +4794,19 @@ export const Interaction = {
 
   _justDoubleClicked: false,
   _alertcellDelegated: false,
-  _edgeScrollTrackBound: null as any,
-  _hideTooltipBound: null as any,
-  _onKeyDownBound: null as any,
-  _hoverDismissBound: null as any,
+  _edgeScrollTrackBound: null as ((e: MouseEvent) => void) | null,
+  _hideTooltipBound: null as (() => void) | null,
+  _onKeyDownBound: null as ((e: KeyboardEvent) => void) | null,
+  _hoverDismissBound: null as (() => void) | null,
   _labelDblclickDelegated: false,
   _isolateToastShown: false,
   _hoverPreviewDelegated: false,
   _marqueeDelegated: false,
-  _dblTimer: null as any,
-  _trace: [] as any[],
+  _dblTimer: null as ReturnType<typeof setTimeout> | null,
+  _trace: [] as InteractionTraceEntry[],
   _installed: false,
-  _marquee: null as any,
-  _marqueeRAF: null as any,
+  _marquee: null as MarqueeState | null,
+  _marqueeRAF: null as number | null,
 
   // True iff the pointer strayed >~8px from its mousedown point (PEAK
   // displacement, not net endpoint displacement — see install() for why)
@@ -4724,9 +4821,9 @@ export const Interaction = {
   // this flag's tracker at all (see install()), so there's no overlap.
   _panDuringGesture: false,
 
-  trace() { return this._trace.slice(-50); },
-  _log(type: any, data: any) {
-    const entry = { t: Date.now(), type, ...data };
+  trace(): InteractionTraceEntry[] { return this._trace.slice(-50); },
+  _log(type: string, data: Record<string, unknown>): void {
+    const entry: InteractionTraceEntry = { t: Date.now(), type, ...data };
     this._trace.push(entry);
     if (this._trace.length > 200) this._trace.shift();
     // Always feed the lightweight breadcrumb ring (attached to error-level entries
@@ -4735,7 +4832,7 @@ export const Interaction = {
     if (this.DEBUG) ErrorLog.info('interaction', type, data);
   },
 
-  install() {
+  install(): void {
     if (this._installed) return;
     if (!Timeline._tl) {
       // Timeline not ready yet — retry shortly. Bootstrap calls us after
@@ -4746,7 +4843,7 @@ export const Interaction = {
     this._installed = true;
 
     /* ----- click: modifier keys, background clear, multi-select ---------- */
-    Timeline._tl.on('click', props => Interaction._onClick(props));
+    Timeline._tl.on('click', props => Interaction._onClick(props as NimbusVendor.VisEventProperties));
 
     /* ----- alert-cell click: use vis-timeline's coordinate-mapping API
        (getEventProperties) instead of DOM-target matching. Background items
@@ -4792,14 +4889,14 @@ export const Interaction = {
     const _tlContainer = document.getElementById('vis-timeline');
     if (_tlContainer && !Interaction._alertcellDelegated) {
       Interaction._alertcellDelegated = true;
-      let _downX: any = null, _downY: any = null;
+      let _downX: number | null = null, _downY: number | null = null;
 
       _tlContainer.addEventListener('mousedown', e => {
         // New gesture starting: clear the previous gesture's verdict. Must
         // happen here (not in a click handler) so both click consumers of
         // this flag see an unconsumed verdict for the CURRENT gesture.
         Interaction._panDuringGesture = false;
-        const p = Timeline._tl && (Timeline._tl as any).getEventProperties(e);
+        const p = Timeline._tl && Timeline._tl.getEventProperties(e);
         const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
         if (onRealItem) {
           // Mousedown started on an order item — this is an item-drag
@@ -4819,7 +4916,7 @@ export const Interaction = {
       // strays past threshold, then disarms itself so the rest of the
       // gesture's mousemoves are a single cheap null-check.
       _tlContainer.addEventListener('mousemove', e => {
-        if (_downX === null) return; // not armed — no mousedown captured, or started on an item
+        if (_downX === null || _downY === null) return; // not armed — no mousedown captured, or started on an item
         const dx = e.clientX - _downX, dy = e.clientY - _downY;
         if ((dx * dx + dy * dy) > 64) {
           Interaction._panDuringGesture = true;
@@ -4837,7 +4934,7 @@ export const Interaction = {
       _tlContainer.addEventListener('click', e => {
         if (!Timeline._tl) return;
         if (Interaction._panDuringGesture) return; // panned during this gesture — not a real click
-        const p = (Timeline._tl as any).getEventProperties(e);
+        const p = Timeline._tl.getEventProperties(e);
         if (!p || !p.group || !p.time) return;
         // If the click is on a real foreground item (an order), let normal
         // selection handle it — don't hijack order clicks because the cell
@@ -4846,18 +4943,18 @@ export const Interaction = {
         const dayKey = Util.dayKey(p.time);
         const cellId = `alertcell-${p.group}-${dayKey}`;
         if (!Timeline._items!.get(cellId)) return; // no alert highlight here
-        NIMBUS!.AlertsUIAdapter!.showForCell!(p.group, dayKey);
+        NIMBUS!.AlertsUIAdapter!.showForCell!(String(p.group), dayKey);
       });
     }
 
     /* ----- doubleClick: focus + edit ------------------------------------- */
-    Timeline._tl.on('doubleClick', props => Interaction._onDoubleClick(props));
+    Timeline._tl.on('doubleClick', props => Interaction._onDoubleClick(props as NimbusVendor.VisEventProperties));
 
     /* ----- context menu -------------------------------------------------- */
     const container = document.getElementById('vis-timeline');
     if (container) {
       container.addEventListener('contextmenu', e => {
-        const p = (Timeline._tl as any).getEventProperties(e);
+        const p = Timeline._tl!.getEventProperties(e);
         e.preventDefault();
         if (p.what === 'item' && p.item != null) {
           const id = String(p.item);
@@ -4866,27 +4963,27 @@ export const Interaction = {
           if (ContextMenu && typeof ContextMenu.open === 'function') {
             ContextMenu.open(e.clientX, e.clientY, id);
           }
-        } else if (ContextMenu && typeof (ContextMenu as any).openCanvas === 'function') {
+        } else if (ContextMenu && typeof (ContextMenu as ContextMenuWithOpenCanvas).openCanvas === 'function') {
           // Canvas context menu — optional extension point.
-          (ContextMenu as any).openCanvas(e.clientX, e.clientY);
+          (ContextMenu as ContextMenuWithOpenCanvas).openCanvas!(e.clientX, e.clientY);
         }
       });
     }
 
     /* ----- DataSet 'update' — drag commit only, no cascade on zoom ------ */
-    (Timeline._items as any).on('*', (event: any, props: any) => {
+    Timeline._items!.on('*', (event, props) => {
       if (Timeline._suppressEvents) return;
       if (event !== 'update' || !props || !props.items) return;
       Interaction._onDataSetUpdate(props);
     });
 
     /* ----- Multi-drag ghost preview via timechange ----------------------- */
-    Timeline._tl.on('timechange', props => Interaction._onTimeChange(props));
+    Timeline._tl.on('timechange', props => Interaction._onTimeChange(props as VisTimeChangeProps));
     Timeline._tl.on('timechanged', ()   => Interaction._clearGhosts());
 
     /* ----- Track mouse X for edge-scroll during order drag --------------- */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
-    this._edgeScrollTrackBound = (e: any) => {
+    this._edgeScrollTrackBound = (e: MouseEvent) => {
       if (Interaction._isDragging) Interaction._dragMouseX = e.clientX;
     };
     document.addEventListener('mousemove', this._edgeScrollTrackBound);
@@ -4894,14 +4991,14 @@ export const Interaction = {
     /* ----- Hide tooltip when mouse leaves the browser window ------------- */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
     this._hideTooltipBound = () => {
-      const tip: any = document.querySelector('.vis-tooltip');
+      const tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
       if (tip) tip.style.display = 'none';
     };
     document.addEventListener('mouseleave', this._hideTooltipBound);
 
     /* ----- keyboard ------------------------------------------------------ */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
-    this._onKeyDownBound = (e: any) => Interaction._onKeyDown(e);
+    this._onKeyDownBound = (e: KeyboardEvent) => Interaction._onKeyDown(e);
     document.addEventListener('keydown', this._onKeyDownBound);
 
     /* ----- Selection → vis-timeline + Inspector sync (one-way, write) --- */
@@ -4980,12 +5077,14 @@ export const Interaction = {
    * install() cycle attaches each container-scoped listener at most once
    * instead of double-attaching it on reinstall.
    */
-  uninstall() {
+  uninstall(): void {
     if (!this._installed) return;
-    document.removeEventListener('keydown', this._onKeyDownBound);
-    document.removeEventListener('keydown', this._hoverDismissBound);
-    document.removeEventListener('mousemove', this._edgeScrollTrackBound);
-    document.removeEventListener('mouseleave', this._hideTooltipBound);
+    // Non-null: install() always sets all four together before _installed
+    // flips true, and nothing else clears them individually.
+    document.removeEventListener('keydown', this._onKeyDownBound!);
+    document.removeEventListener('keydown', this._hoverDismissBound!);
+    document.removeEventListener('mousemove', this._edgeScrollTrackBound!);
+    document.removeEventListener('mouseleave', this._hideTooltipBound!);
     if (this._marqueeRAF) { cancelAnimationFrame(this._marqueeRAF); this._marqueeRAF = null; }
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
     this._installed = false;
@@ -5001,14 +5100,14 @@ export const Interaction = {
    * vis's own dblclick handler, which would otherwise try to treat the
    * event as an item double-click.
    */
-  _installLabelDblclick() {
+  _installLabelDblclick(): void {
     const container = document.getElementById('vis-timeline');
     if (!container || Interaction._labelDblclickDelegated) return;
     Interaction._labelDblclickDelegated = true;
 
     container.addEventListener('dblclick', (e) => {
       if (!Timeline._tl) return;
-      const p = (Timeline._tl as any).getEventProperties(e);
+      const p = Timeline._tl.getEventProperties(e);
       if (!p || p.what !== 'group-label' || p.group == null) return;
 
       e.stopPropagation();
@@ -5040,29 +5139,30 @@ export const Interaction = {
    * follows the cursor and disappears on itemout, drag start, or marquee
    * start.
    */
-  _installHoverPreview() {
+  _installHoverPreview(): void {
     const container = document.getElementById('vis-timeline');
     if (!container) return;
 
     const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: any) => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
+    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
 
-    let card: any = document.getElementById('nimbus-hover-card');
-    if (!card) {
-      card = document.createElement('div');
-      card.id = 'nimbus-hover-card';
-      card.hidden = true;
-      document.body.appendChild(card);
+    let _cardEl = document.getElementById('nimbus-hover-card') as HTMLDivElement | null;
+    if (!_cardEl) {
+      _cardEl = document.createElement('div');
+      _cardEl.id = 'nimbus-hover-card';
+      _cardEl.hidden = true;
+      document.body.appendChild(_cardEl);
     }
+    const card: HTMLDivElement = _cardEl;
 
-    let showTimer: any = null;
-    let activeId: any  = null;
+    let showTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeId: string | null = null;
     let lastX = 0, lastY = 0;
 
     const HOVER_DELAY_MS = 500;
     const OFFSET_X = 16, OFFSET_Y = 18;
 
-    const reposition = () => {
+    const reposition = (): void => {
       if (card.hidden) return;
       const cw = card.offsetWidth, ch = card.offsetHeight;
       const vw = window.innerWidth, vh = window.innerHeight;
@@ -5076,10 +5176,10 @@ export const Interaction = {
       card.style.top  = y + 'px';
     };
 
-    const renderCard = (id: any) => {
+    const renderCard = (id: string): string => {
       const t = Store.tasks[id];
       if (!t) return '';
-      const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
+      const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
       const qty = t['ORDER_QUANTITY_(GMEIN)'] ?? '—';
       const run = Util.runHours(t);
       const line = t.PRODUCTION_LINE || '—';
@@ -5113,8 +5213,8 @@ export const Interaction = {
       `;
     };
 
-    const hide = () => {
-      clearTimeout(showTimer);
+    const hide = (): void => {
+      clearTimeout(showTimer ?? undefined);
       showTimer = null;
       activeId  = null;
       card.hidden = true;
@@ -5128,14 +5228,15 @@ export const Interaction = {
     if (!Interaction._hoverPreviewDelegated) {
       Interaction._hoverPreviewDelegated = true;
 
-      (Timeline._tl as any).on('itemover', (props: any) => {
+      Timeline._tl!.on('itemover', (rawProps: unknown) => {
+        const props = rawProps as NimbusVendor.VisEventProperties | null;
         if (!props || props.item == null) return;
         const id = String(props.item);
         if (!isOrderId(id)) return;
         // Suppress during active drag or marquee — the user is doing something.
         if (Interaction._isDragging || Interaction._marquee) return;
 
-        clearTimeout(showTimer);
+        clearTimeout(showTimer ?? undefined);
         activeId = id;
         showTimer = setTimeout(() => {
           if (activeId !== id) return;
@@ -5146,7 +5247,8 @@ export const Interaction = {
         }, HOVER_DELAY_MS);
       });
 
-      (Timeline._tl as any).on('itemout', (props: any) => {
+      Timeline._tl!.on('itemout', (rawProps: unknown) => {
+        const props = rawProps as NimbusVendor.VisEventProperties | null;
         if (!props || props.item == null) return;
         if (String(props.item) === activeId) hide();
       });
@@ -5180,25 +5282,25 @@ export const Interaction = {
    * - Hit-testing uses vis-timeline's internal `itemSet.items[id].dom.box`,
    *   the same access pattern other vis integrations rely on.
    */
-  _installMarquee() {
+  _installMarquee(): void {
     const container = document.getElementById('vis-timeline');
     if (!container || Interaction._marqueeDelegated) return;
     Interaction._marqueeDelegated = true;
 
     const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: any) => !SKIP_PREFIXES.some(p => id.startsWith(p));
+    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => id.startsWith(p));
 
-    const _rectsIntersect = (a: any, b: any) =>
+    const _rectsIntersect = (a: MarqueeRect, b: MarqueeRect): boolean =>
       !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
 
-    const centerOf = () => container.querySelector('.vis-panel.vis-center');
+    const centerOf = (): Element | null => container.querySelector('.vis-panel.vis-center');
 
     // Returns the anchor's current screen Y by accumulating the actual
     // scroll delta from each _setScrollTop call. Avoids getBCR() entirely
     // because dom.center.style.transform is set in _redraw() which fires
     // asynchronously — reading BCR right after _setScrollTop always sees
     // the stale pre-scroll position.
-    const getAnchorScreenY = () => {
+    const getAnchorScreenY = (): number => {
       const s = Interaction._marquee;
       if (!s) return 0;
       return s.anchorY + (s.scrollDelta || 0);
@@ -5207,7 +5309,7 @@ export const Interaction = {
     // Returns the anchor's current screen X by projecting anchorTime through
     // the live timeline window — so the selection box left edge stays pinned
     // to the same calendar moment even as the view pans during edge-scroll.
-    const getAnchorScreenX = (cr: any) => {
+    const getAnchorScreenX = (cr: DOMRect): number => {
       const s = Interaction._marquee;
       const tl = Timeline._tl;
       if (!s || !tl || !s.anchorTime) return s ? s.anchorX : 0;
@@ -5221,9 +5323,10 @@ export const Interaction = {
     // Snapshot every order item's on-screen rect once. Re-taken on edge-scroll
     // (items move) but reused across plain pointermove frames, so the hit-test no
     // longer calls getBoundingClientRect() per item per frame (R18 — layout thrash).
-    const refreshItemRects = (s: any) => {
-      const itemSet = Timeline._tl && (Timeline._tl as any).itemSet && (Timeline._tl as any).itemSet.items;
-      const m = new Map();
+    const refreshItemRects = (s: MarqueeState): void => {
+      const tlInternal = Timeline._tl as unknown as VisInternalTimeline | null;
+      const itemSet = tlInternal?.itemSet?.items;
+      const m = new Map<string, MarqueeRect>();
       if (itemSet) {
         for (const id of Object.keys(itemSet)) {
           if (!isOrderId(id)) continue;
@@ -5238,7 +5341,7 @@ export const Interaction = {
 
     // Shared overlay + hit-test update — called from both pointermove and the
     // edge-scroll RAF so selection expands as the view pans.
-    const updateOverlay = (mx: any, my: any) => {
+    const updateOverlay = (mx: number, my: number): void => {
       const s = Interaction._marquee;
       if (!s) return;
       const cr = s.centerRect;
@@ -5254,11 +5357,11 @@ export const Interaction = {
       s.overlay.style.width  = (right - left)   + 'px';
       s.overlay.style.height = (bottom - top)   + 'px';
 
-      const rect = { left, right, top, bottom };
+      const rect: MarqueeRect = { left, right, top, bottom };
       if (!s.itemRects) refreshItemRects(s);
 
-      const hits = new Set();
-      for (const [id, r] of s.itemRects) {
+      const hits = new Set<string>();
+      for (const [id, r] of s.itemRects!) {
         if (_rectsIntersect(rect, r)) hits.add(id);
       }
 
@@ -5270,12 +5373,12 @@ export const Interaction = {
       s.lastHits = hits;
       const next = new Set(s.baseIds);
       for (const h of hits) next.add(h);
-      Selection.set([...next] as any);
+      Selection.set([...next]);
     };
 
     // RAF loop: pans the timeline while the cursor is within ZONE px of either
     // edge, then calls updateOverlay so newly exposed items enter the selection.
-    const startMarqueeScroll = () => {
+    const startMarqueeScroll = (): void => {
       if (Interaction._marqueeRAF) return;
       const ZONE = 80, MAX_SPEED = 0.003;
       const MAX_VPXL = MAX_SPEED * (Interaction._marquee?.centerRect?.width || 1200);
@@ -5305,14 +5408,15 @@ export const Interaction = {
 
         // Vertical scroll — read props.scrollTop before AND after the call so
         // we accumulate the actual clamped delta without any DOM/BCR timing issues.
+        const tlInternal = tl as unknown as VisInternalTimeline | null;
         let vfraction = 0;
         if (my < cr.top + ZONE)         vfraction = -((cr.top + ZONE - my) / ZONE);
         else if (my > cr.bottom - ZONE) vfraction =  (my - (cr.bottom - ZONE)) / ZONE;
-        if (vfraction !== 0 && tl && (tl as any)._setScrollTop) {
-          const before = (tl as any)._getScrollTop ? (tl as any)._getScrollTop() : 0;
-          (tl as any)._setScrollTop(before - vfraction * MAX_VPXL);
-          const after = (tl as any)._getScrollTop ? (tl as any)._getScrollTop() : before;
-          s.scrollDelta += (after - before);
+        if (vfraction !== 0 && tlInternal?._setScrollTop) {
+          const before = tlInternal._getScrollTop ? tlInternal._getScrollTop() : 0;
+          tlInternal._setScrollTop(before - vfraction * MAX_VPXL);
+          const after = tlInternal._getScrollTop ? tlInternal._getScrollTop() : before;
+          s.scrollDelta = (s.scrollDelta ?? 0) + (after - before);
           scrolled = true;
         }
 
@@ -5322,17 +5426,18 @@ export const Interaction = {
       Interaction._marqueeRAF = requestAnimationFrame(tick);
     };
 
-    const onPointerDown = (e: any) => {
+    const onPointerDown = (e: PointerEvent): void => {
       if (e.button !== 0) return;
       if (!(e.ctrlKey || e.metaKey)) return;
       const center = centerOf();
-      if (!center || !center.contains(e.target)) return;
+      if (!center || !center.contains(e.target as Node | null)) return;
       // Don't hijack presses that land on a foreground item or label — those
       // are handled by vis (drag-item) and our click handler (Ctrl+click).
       // Background items (past-zone, alert-horizon-zone, alertcell) also
       // carry .vis-item but live in .vis-background; they must not block.
-      if (e.target.closest('.vis-foreground .vis-item')) return;
-      if (e.target.closest('.vis-labelset')) return;
+      const target = e.target as Element | null;
+      if (target?.closest('.vis-foreground .vis-item')) return;
+      if (target?.closest('.vis-labelset')) return;
 
       e.stopPropagation();
       e.preventDefault();
@@ -5343,7 +5448,7 @@ export const Interaction = {
       center.appendChild(overlay);
 
       const cr = center.getBoundingClientRect();
-      Interaction._marquee = {
+      const marquee: MarqueeState = {
         pointerId: e.pointerId,
         anchorX: e.clientX,
         anchorY: e.clientY,
@@ -5354,6 +5459,7 @@ export const Interaction = {
         curMouseX: e.clientX,
         curMouseY: e.clientY,
       };
+      Interaction._marquee = marquee;
 
       // Pin the anchor in timeline-time (X) and scroll-space (Y) so the box
       // expands correctly in both directions during edge-scroll.
@@ -5363,15 +5469,15 @@ export const Interaction = {
         const spanMs = w.end.getTime() - w.start.getTime();
         const crWidth = cr.right - cr.left;
         const frac = crWidth > 0 ? (e.clientX - cr.left) / crWidth : 0;
-        Interaction._marquee.anchorTime = new Date(w.start.getTime() + frac * spanMs);
-        Interaction._marquee.scrollDelta = 0;
+        marquee.anchorTime = new Date(w.start.getTime() + frac * spanMs);
+        marquee.scrollDelta = 0;
       }
 
-      refreshItemRects(Interaction._marquee);
+      refreshItemRects(marquee);
       startMarqueeScroll();
     };
 
-    const onPointerMove = (e: any) => {
+    const onPointerMove = (e: PointerEvent): void => {
       const s = Interaction._marquee;
       if (!s || e.pointerId !== s.pointerId) return;
       s.curMouseX = e.clientX;
@@ -5379,13 +5485,13 @@ export const Interaction = {
       updateOverlay(e.clientX, e.clientY);
     };
 
-    const onPointerUp = (e: any) => {
+    const onPointerUp = (e: PointerEvent): void => {
       const s = Interaction._marquee;
       if (!s || e.pointerId !== s.pointerId) return;
       try { container.releasePointerCapture(s.pointerId); } catch {}
       s.overlay.remove();
       Interaction._marquee = null;
-      cancelAnimationFrame(Interaction._marqueeRAF);
+      cancelAnimationFrame(Interaction._marqueeRAF!);
       Interaction._marqueeRAF = null;
     };
 
@@ -5395,7 +5501,7 @@ export const Interaction = {
     container.addEventListener('pointercancel', onPointerUp,  true);
   },
 
-  _onClick(props: any) {
+  _onClick(props: NimbusVendor.VisEventProperties): void {
     this._log('click', { what: props.what, item: props.item });
 
     // If a double-click just fired, swallow this follow-up select.
@@ -5441,7 +5547,7 @@ export const Interaction = {
         && !Interaction._isDragging
         && (Date.now() - (Interaction._lastDragEndTs || 0)) > 400) {
       // zoom:false → pan only; preserves the current time window width.
-      Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false } as any);
+      Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false });
     }
     // --- END center-on-click ---
 
@@ -5449,12 +5555,12 @@ export const Interaction = {
     if (typeof DependencyOverlay !== 'undefined') DependencyOverlay.highlightChain(id);
   },
 
-  _onDoubleClick(props: any) {
+  _onDoubleClick(props: NimbusVendor.VisEventProperties): void {
     this._log('doubleClick', { what: props.what, item: props.item });
     if (props.what !== 'item' || props.item == null) return;
 
     this._justDoubleClicked = true;
-    clearTimeout(this._dblTimer);
+    clearTimeout(this._dblTimer ?? undefined);
     this._dblTimer = setTimeout(() => { this._justDoubleClicked = false; },
                                 this.DBLCLICK_SUPPRESS_MS);
 
@@ -5466,16 +5572,17 @@ export const Interaction = {
     Selection.set([id]);
     // Double-click action: focus-zoom AND open the full edit modal (if present).
     if (typeof Timeline.focus === 'function') Timeline.focus(id);
-    if (Modal && typeof (Modal as any).openEdit === 'function') (Modal as any).openEdit(t);
+    if (Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') (Modal as ModalWithOpenEdit).openEdit!(t);
   },
 
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a fixed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
-  _onDataSetUpdate(props: any) {
-    for (const id of props.items) {
-      const v: any = Timeline._items!.get(id);
+  _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
+    for (const rawId of props.items) {
+      const id = String(rawId);
+      const v = Timeline._items!.get(id) as TimelineVisItem | null;
       if (!v) continue;
       const t = Store.tasks[id];
       if (!t) continue;
@@ -5541,8 +5648,10 @@ export const Interaction = {
         Store.updateTask(id, { start_date: newStart, end_date: newEnd, PRODUCTION_LINE: newLine }, 'timeline');
 
         // Apply the same delta to each companion
-        const skippedFixed = [];
-        const companionPatches = [];
+        // (skippedFixed stays empty today — selIds above already excludes fixed
+        // tasks — but is preserved as-is; not this task's scope to remove.)
+        const skippedFixed: string[] = [];
+        const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
         for (const sid of selIds) {
           const st = Store.tasks[sid];
           if (!st || !st.start_date) continue;
@@ -5581,13 +5690,13 @@ export const Interaction = {
     }
   },
 
-  _ghostDragId: null as any,
-  _edgeScrollRAF: null as any,
+  _ghostDragId: null as string | null,
+  _edgeScrollRAF: null as number | null,
   _isDragging: false,
   _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
-  _dragMouseX: null as any,
+  _dragMouseX: null as number | null,
 
-  _startEdgeScroll() {
+  _startEdgeScroll(): void {
     if (this._edgeScrollRAF) return;
     const tick = () => {
       if (!Interaction._isDragging) { Interaction._edgeScrollRAF = null; return; }
@@ -5619,7 +5728,7 @@ export const Interaction = {
   },
 
   /** Fires at 60fps during drag — show ghost positions for companion items. */
-  _onTimeChange(props: any) {
+  _onTimeChange(props: VisTimeChangeProps): void {
     if (!props || !props.id || Timeline._suppressEvents) return;
     const dragId = String(props.id);
     if (dragId.startsWith('blk-')) return;
@@ -5627,7 +5736,7 @@ export const Interaction = {
     this._isDragging = true;
     this._startEdgeScroll();
 
-    const _tip: any = document.querySelector('.vis-tooltip');
+    const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
     if (_tip) _tip.style.display = 'none';
 
     const selIds = Selection.ids().filter(sid => sid !== dragId);
@@ -5639,14 +5748,14 @@ export const Interaction = {
     const deltaMs = dragMs - t.start_date.getTime();
 
     this._ghostDragId = dragId;
-    const updates: any[] = [];
+    const updates: Array<Partial<TimelineVisItem> & { id: string }> = [];
 
     // Pre-bucket non-selected, datable tasks by line ONCE per frame (R19) — the old
     // code re-scanned all of Store.tasksArr for every selected companion, i.e.
     // O(selected × allTasks) per 60fps frame. Selection (drag id + companions) is
     // excluded up front so the per-companion check is just an overlap test.
     const selSet = new Set(Selection.ids().map(String));
-    const peersByLine = new Map();
+    const peersByLine = new Map<string, NimbusTask[]>();
     for (const peer of Store.tasksArr) {
       if (selSet.has(String(peer.id))) continue;
       if (!peer.start_date || !peer.end_date) continue;
@@ -5661,14 +5770,14 @@ export const Interaction = {
       if (!st || !st.start_date) continue;
       const ghostStart = new Date(st.start_date.getTime() + deltaMs);
       const ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
-      const item: any = Timeline._items!.get(sid);
+      const item = Timeline._items!.get(sid) as TimelineVisItem | null;
       if (!item) continue;
 
       // Check for ghost collisions with non-selected tasks on same line.
       const line = st.PRODUCTION_LINE || 'Unknown';
       const peers = peersByLine.get(line) || [];
-      const hasConflict = peers.some((peer: any) =>
-        ghostStart < peer.end_date && ghostEnd > peer.start_date
+      const hasConflict = peers.some((peer) =>
+        ghostStart < peer.end_date! && ghostEnd > peer.start_date!
       );
 
       const baseCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
@@ -5688,16 +5797,16 @@ export const Interaction = {
   },
 
   /** Clear ghost states from all companion items after drag ends. */
-  _clearGhosts() {
+  _clearGhosts(): void {
     this._isDragging = false;
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
 
-    const _tip: any = document.querySelector('.vis-tooltip');
+    const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
     if (_tip) _tip.style.display = '';
 
-    const updates: any[] = [];
+    const updates: Array<Partial<TimelineVisItem> & { id: string }> = [];
     for (const sid of Selection.ids()) {
-      const item: any = Timeline._items!.get(sid);
+      const item = Timeline._items!.get(sid) as TimelineVisItem | null;
       if (!item) continue;
       const newCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
       if (newCls !== item.className) {
@@ -5718,10 +5827,11 @@ export const Interaction = {
     this._ghostDragId = null;
   },
 
-  _onKeyDown(e: any) {
+  _onKeyDown(e: KeyboardEvent): void {
     // Ignore when typing in inputs.
-    const tag = (e.target && e.target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+    const target = e.target as HTMLElement | null;
+    const tag = (target && target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
 
     const mod = e.metaKey || e.ctrlKey;
 
@@ -5748,9 +5858,9 @@ export const Interaction = {
     if (e.key === 'Enter' && Selection.size() === 1) {
       const id = Selection.ids()[0];
       const t = Store.tasks[id];
-      if (t && Modal && typeof (Modal as any).openEdit === 'function') {
+      if (t && Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') {
         e.preventDefault();
-        (Modal as any).openEdit(t);
+        (Modal as ModalWithOpenEdit).openEdit!(t);
       }
       return;
     }
@@ -5780,7 +5890,7 @@ export const Interaction = {
     }
   },
 
-  _unscheduleSelected() {
+  _unscheduleSelected(): void {
     const ids = Selection.ids().filter(id => !Store.isFixed(id));
     if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_fixed'), 'warn'); return; }
     const snap = UndoStack.snapshotTasks(ids);
@@ -5791,7 +5901,7 @@ export const Interaction = {
     Toast.show(Util.t('toast.unscheduled_orders', { count: ids.length }), 'success');
   },
 
-  _navigateSelection(key: any) {
+  _navigateSelection(key: ArrowKey): void {
     const currentId = Selection.ids()[0];
     const cur = Store.tasks[currentId];
     if (!cur || !cur.start_date) return;
@@ -5803,7 +5913,7 @@ export const Interaction = {
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
       const peers = Store.tasksArr
         .filter(t => t.PRODUCTION_LINE === cur.PRODUCTION_LINE && t.start_date)
-        .sort((a: any, b: any) => a.start_date - b.start_date);
+        .sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime());
       const i = peers.findIndex(t => String(t.id) === currentId);
       const j = key === 'ArrowLeft' ? i - 1 : i + 1;
       if (j >= 0 && j < peers.length) Selection.set([String(peers[j].id)]);
@@ -5816,14 +5926,14 @@ export const Interaction = {
       const candidates = Store.tasksArr
         .filter(t => t.PRODUCTION_LINE === targetLine && t.start_date);
       if (!candidates.length) return;
-      candidates.sort((a: any, b: any) => Math.abs(a.start_date - (cur.start_date as any))
-                              - Math.abs(b.start_date - (cur.start_date as any)));
+      candidates.sort((a, b) => Math.abs(a.start_date!.getTime() - cur.start_date!.getTime())
+                              - Math.abs(b.start_date!.getTime() - cur.start_date!.getTime()));
       Selection.set([String(candidates[0].id)]);
     }
   },
 
   /** Replaces the single-task Inspector with a multi-selection summary view. */
-  _showMultiInspector() {
+  _showMultiInspector(): void {
     const panel = document.querySelector('#right-sidebar .inspector-body, #inspector-body');
     if (!panel) return;
     const s = Selection.stats();
@@ -5855,27 +5965,28 @@ export const Interaction = {
     panel.querySelector('[data-action="clear"]')?.addEventListener('click', () => Selection.clear());
   },
 
-  _bulkFix(fixed: any) {
+  _bulkFix(fixed: boolean): void {
     const ids = Selection.ids();
     if (!ids.length) return;
     Store.setFixed(ids, fixed, 'interaction');
     this._showMultiInspector();
   },
 
-  _wireTableSync() {
+  _wireTableSync(): void {
     // Selection → Table: when selection changes, highlight rows in AG Grid.
     Selection.on(evt => {
       if (!Table || !Table._api) return;
       try {
         Table._suppressSelectionEcho = true;
         Table._api.deselectAll();
-        Table._api.forEachNode((node: any) => {
+        Table._api.forEachNode((rawNode) => {
+          const node = rawNode as AgGridRowNode;
           if (node.data && evt.ids.includes(String(node.data.id))) {
             node.setSelected(true, false);
           }
         });
-      } catch (e: any) {
-        ErrorLog.warn('interaction', `Table sync failed: ${e.message}`);
+      } catch (e: unknown) {
+        ErrorLog.warn('interaction', `Table sync failed: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
         Table._suppressSelectionEcho = false;
       }
@@ -5885,10 +5996,10 @@ export const Interaction = {
     if (Table && Table._api && typeof Table._api.addEventListener === 'function') {
       Table._api.addEventListener('selectionChanged', () => {
         if (Table._suppressSelectionEcho) return;
-        const rows = Table._api!.getSelectedRows();
-        const ids = rows.map((r: any) => String(r.id));
+        const rows = Table._api!.getSelectedRows() as NimbusTask[];
+        const ids = rows.map((r) => String(r.id));
         const current = new Set(Selection.ids());
-        const same = ids.length === current.size && ids.every((id: any) => current.has(id));
+        const same = ids.length === current.size && ids.every((id) => current.has(id));
         if (!same) Selection.set(ids);
       });
     }

@@ -34,6 +34,15 @@ declare global {
       clear(): void;
       get(id?: string | number): T | T[] | null;
       getIds(): Array<string | number>;
+      /** vis-data's DataSet pub/sub — added by CQ-1 Phase 6 Task 6
+       *  (schedule-workbench.mts's Interaction module subscribes to '*' to
+       *  catch drag-commit 'update' events on Timeline._items) as the real
+       *  vis-data DataSet API surface that module uses. `properties` is `null`
+       *  for some event kinds (e.g. a bare 'remove' by id only) — real vis-data
+       *  behavior, not a NIMBUS invention. */
+      on(event: 'add' | 'update' | 'remove' | '*',
+         callback: (event: string, properties: { items: Array<string | number>; data?: T[] } | null, senderId?: string | number | null) => void): void;
+      off(event: 'add' | 'update' | 'remove' | '*', callback?: (...args: unknown[]) => void): void;
     }
 
     /** A vis-timeline DataView — a filtered, read-only projection over a VisDataSet
@@ -41,6 +50,29 @@ declare global {
     interface VisDataView<T = unknown> {
       refresh(): void;
       get(id?: string | number): T | T[] | null;
+    }
+
+    /** vis-timeline's internal event→props mapping — the shape returned both by
+     *  calling `getEventProperties(rawEvent)` directly AND (structurally) by
+     *  the Timeline's own 'click'/'doubleClick' event payloads, since
+     *  getEventProperties is the same internal mapper vis-timeline uses to
+     *  build those payloads from a raw DOM event. Added by CQ-1 Phase 6 Task 6
+     *  (schedule-workbench.mts's Interaction module — pan-vs-click
+     *  disambiguation, the alertcell click delegate, and the group-label
+     *  double-click isolate gesture) with only the fields that module reads;
+     *  the real vis-timeline v7.7.3 payload also carries pageX/pageY/x/y/
+     *  snappedTime, omitted here since no caller uses them. */
+    interface VisEventProperties {
+      event?: {
+        shiftKey?: boolean;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        srcEvent?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean };
+      };
+      item?: string | number | null;
+      group?: string | number | null;
+      what?: string;
+      time?: Date;
     }
 
     interface VisTimelineInstance {
@@ -52,10 +84,18 @@ declare global {
       getItemRange(): { min: Date; max: Date };
       getWindow(): { start: Date; end: Date };
       setWindow(start: Date, end: Date, options?: { animation?: boolean | { duration: number } }): void;
-      focus(id: string, options?: { animation?: boolean | { duration: number } }): void;
+      /** `zoom` added by CQ-1 Phase 6 Task 6 (Interaction._onClick's
+       *  center-on-click pan uses `{ zoom: false }` to pan without changing
+       *  the viewport width) — a real vis-timeline v7.7.3 focus() option. */
+      focus(id: string, options?: { animation?: boolean | { duration: number }; zoom?: boolean }): void;
       setSelection(ids: string[]): void;
       redraw(): void;
       destroy(): void;
+      /** Maps a raw DOM MouseEvent to vis-timeline's coordinate-mapped event
+       *  properties (group/item/what/time) — added by CQ-1 Phase 6 Task 6
+       *  (schedule-workbench.mts's Interaction module, the only caller today)
+       *  as the real vis-timeline v7.7.3 API surface that module uses. */
+      getEventProperties(event: Event): VisEventProperties;
       [method: string]: unknown;
     }
 
