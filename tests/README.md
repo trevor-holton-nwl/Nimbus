@@ -58,11 +58,13 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
   the same way as the earlier bridges.
 - `application-shell.test.mjs` — plain ESM `import` shape tests for
   `application-shell.mjs` (`SessionUIAdapter`, `showLoginScreen`,
-  `PlantSelector`, `WelcomeSplash`, `EmptyState`, `App`, `Settings`), the
-  Phase 4 Task 4 module and the seventh and final CQ-1 file — asserts
+  `PlantSelector`, `EmptyState`, `App`, `Settings`), the Phase 4 Task 4
+  module and the seventh and final CQ-1 file — asserts
   `App._renderSettingsPane` is `undefined` on this module (relocated to
-  `Plant` in Task 1, not carried here). `load-legacy-app.mjs`'s VM harness
-  bridges `window.__NIMBUS_SHELL` the same way as the earlier bridges.
+  `Plant` in Task 1, not carried here), and that `WelcomeSplash` is no
+  longer exported (retired outright by the Command Band re-skin's
+  chrome-wiring task). `load-legacy-app.mjs`'s VM harness bridges
+  `window.__NIMBUS_SHELL` the same way as the earlier bridges.
 
 **CQ-1 complete (all 4 phases):** all seven `.mjs` module files above are now
 real ES modules with their own shape/behavior test files; `app.js` is a

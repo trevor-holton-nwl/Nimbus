@@ -1,6 +1,6 @@
 // application-shell.mjs — CQ-1 application-shell module.
 // Owns ordered boot, login gating, top-level routing, screen lifecycle,
-// plant selector, empty/welcome states. Composes the other six CQ-1 modules
+// plant selector, empty state. Composes the other six CQ-1 modules
 // without duplicating their state, calculations, or endpoint calls. This is
 // the last of the seven files — after this phase, app.js contains no module
 // bodies of its own, only bridge wiring and boot orchestration (see the
@@ -9,7 +9,7 @@
 // `_bootMain()`/`_domReadyGate()` are deliberately NOT here. Per this phase's
 // plan (Task 4 Step 3), they stay literally in app.js as "boot orchestration"
 // — by the time they run, every module they call `.init()` on (including
-// this file's own `App`, `PlantSelector`, `WelcomeSplash`) is already
+// this file's own `App`, `PlantSelector`) is already
 // available in app.js's own scope via its seven bridge destructures, so
 // moving the boot sequence here would buy nothing and would strand
 // `App._bootMain = _bootMain` (the linkage `showLoginScreen`, below, calls)
@@ -157,6 +157,44 @@ const SessionUIAdapter = {
     try { ErrorLog.renderBadge(); } catch {}
   },
 
+  // Avatar initials (Command Band re-skin, Task 4) — first_name/last_name are
+  // the primary source; falls back to username-derived initials, then to
+  // null (caller renders the static /Images/user.png icon) if there is no
+  // name or username to derive anything from at all.
+  _initialsFor(u) {
+    const first = (u.first_name || '').trim();
+    const last  = (u.last_name  || '').trim();
+    if (first && last) return (first[0] + last[0]).toUpperCase();
+    if (first) return first.slice(0, 2).toUpperCase();
+    if (last)  return last.slice(0, 2).toUpperCase();
+    const uname = (u.username || '').trim();
+    if (!uname) return null;
+    // "john.doe" / "john_doe" / "john doe" → JD; a bare "jdoe" → first 2 chars.
+    const parts = uname.split(/[.\s_-]+/).filter(Boolean);
+    return (parts.length > 1 ? parts[0][0] + parts[1][0] : uname.slice(0, 2)).toUpperCase();
+  },
+
+  // Renders in place into #user-settings-btn — no id/class change, no change
+  // to the click wiring below. Uses an inline style (not a new styles.css
+  // rule, out of scope for this task) sized to match the existing
+  // .user-icon-avatar 22px circle, colored with the same --chrome-* tokens
+  // the dark command band already uses elsewhere (not a new hardcoded color).
+  _renderAvatar(btn, u) {
+    const initials = SessionUIAdapter._initialsFor(u);
+    if (!initials) {
+      if (!btn.querySelector('img.user-icon-avatar')) {
+        btn.innerHTML = '<img src="/Images/user.png" alt="" class="user-icon-avatar">';
+      }
+      return;
+    }
+    btn.innerHTML =
+      `<span class="user-icon-avatar" aria-hidden="true" style="` +
+      `display:flex;align-items:center;justify-content:center;` +
+      `background:var(--chrome-accent);color:var(--chrome-accent-fg);` +
+      `font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;` +
+      `line-height:1;">${initials}</span>`;
+  },
+
   // Populates/hides the header user-settings icon button (#user-settings-btn, static
   // markup in index.html) and wires its click (once) to open the User Settings modal.
   _renderUserButton() {
@@ -165,6 +203,7 @@ const SessionUIAdapter = {
     const u = Session.currentUser();
     btn.hidden = !u;
     if (!u) return;
+    SessionUIAdapter._renderAvatar(btn, u);
     if (!btn._wired) {
       btn._wired = true;
       btn.addEventListener('click', () => {
@@ -722,6 +761,10 @@ const SessionUIAdapter = {
       }
       const updated = await r.json();
       Session.updateCachedUser({ first_name: updated.first_name || null, last_name: updated.last_name || null });
+      // Refresh the header avatar immediately — updateCachedUser() doesn't emit an
+      // event, and the next natural _renderUserButton() call is a future
+      // session:changed (signin/refresh), which could be a while away.
+      SessionUIAdapter._renderUserButton();
       Modal.close('modal-user-settings');
     } catch (e) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
@@ -772,10 +815,10 @@ const SessionUIAdapter = {
 
 /* =============================================================================
    AUTH (LOGIN SCREEN) — mandatory full-screen gate, JS-built only (no static
-   index.html markup for the overlay itself — mirrors WelcomeSplash's technique:
-   build a full-viewport overlay, append to document.body, call Util.t(...) inline for
-   every label rather than relying on the [data-i18n] sweep, which only runs
-   inside App.init() — i.e. AFTER this gate has already decided whether to run it).
+   index.html markup for the overlay itself — build a full-viewport overlay,
+   append to document.body, call Util.t(...) inline for every label rather
+   than relying on the [data-i18n] sweep, which only runs inside App.init()
+   — i.e. AFTER this gate has already decided whether to run it).
    showLoginScreen() is called from the DOMContentLoaded gate (see _bootMain in
    app.js) when no session is cached; on successful sign-in it tears itself down
    and calls App._bootMain() — the same boot path a resumed session takes.
@@ -1044,159 +1087,6 @@ const PlantSelector = {
 };
 
 /* =============================================================================
-   WELCOME SPLASH — one-time page-load overlay directing the user to pick a plant.
-   Shows on boot (only when selectedPlant is null) and self-dismisses on
-   plant:selected. Never re-shows mid-session even if the plant is cleared.
-   ========================================================================== */
-const WelcomeSplash = (() => {
-  let _el    = null;   // root overlay element
-  let _svg   = null;   // arrow SVG element
-  let _rafId = null;   // rAF loop id for live arrow positioning
-  let _shown = false;  // one-shot guard
-
-  function _buildDOM() {
-    const root = document.createElement('div');
-    root.className = 'welcome-splash';
-    root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-modal', 'true');
-    root.setAttribute('aria-label', Util.t('aria.welcome_dialog'));
-
-    const card = document.createElement('div');
-    card.className = 'welcome-splash-card';
-
-    card.innerHTML = `
-      <div class="ws-orb">🧹</div>
-      <div class="ws-title">${Util.t('ui.welcome_title')}</div>
-      <p class="ws-subtitle">${Util.t('ui.welcome_subtitle')}</p>`;
-
-    root.appendChild(card);
-    return root;
-  }
-
-  function _buildArrowSVG() {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'ws-arrow-svg');
-    svg.setAttribute('aria-hidden', 'true');
-
-    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    defs.innerHTML = `
-      <filter id="ws-glow" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur stdDeviation="2.5" result="blur"/>
-        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-      </filter>`;
-    svg.appendChild(defs);
-
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('fill', 'none');
-    path.setAttribute('stroke', 'rgba(184,121,26,0.70)');
-    path.setAttribute('stroke-width', '1.5');
-    path.setAttribute('stroke-dasharray', '5 4');
-    path.setAttribute('stroke-linecap', 'round');
-    path.setAttribute('filter', 'url(#ws-glow)');
-    svg.appendChild(path);
-
-    const arrowHead = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-    arrowHead.setAttribute('class', 'ws-arrow-tip');
-    arrowHead.setAttribute('fill', 'rgba(184,121,26,0.90)');
-    arrowHead.setAttribute('filter', 'url(#ws-glow)');
-    svg.appendChild(arrowHead);
-
-    svg._path      = path;
-    svg._arrowHead = arrowHead;
-    return svg;
-  }
-
-  function _positionArrow() {
-    if (!_el || !_svg) return;
-    const plantEl = document.getElementById('header-plant-selector');
-    const card    = _el.querySelector('.welcome-splash-card');
-    if (!plantEl || !card) return;
-
-    const pr = plantEl.getBoundingClientRect();
-    const cr = card.getBoundingClientRect();
-
-    // Arrow base: left-center of card
-    const x0 = cr.left - 10;
-    const y0 = cr.top + cr.height / 2;
-
-    // Arrow tip: bottom-middle of plant selector
-    const x1 = pr.left + pr.width * 0.25;
-    const y1 = pr.bottom + 6;
-
-    // L-shaped path: go left to plant selector's X, then straight up to its bottom
-    const cornerX = x1;
-    const cornerY = y0;
-    _svg._path.setAttribute('d', `M ${x0} ${y0} L ${cornerX} ${cornerY} L ${x1} ${y1}`);
-
-    // Arrowhead: pointing along the final vertical segment (upward)
-    const angle = Math.atan2(y1 - cornerY, x1 - cornerX);
-    const hs = 8; // half-spread of arrowhead base
-    const al = 14; // length of arrowhead
-    const bx = x1 - Math.cos(angle) * al;
-    const by = y1 - Math.sin(angle) * al;
-    const lx = bx + Math.cos(angle + Math.PI / 2) * hs;
-    const ly = by + Math.sin(angle + Math.PI / 2) * hs;
-    const rx = bx - Math.cos(angle + Math.PI / 2) * hs;
-    const ry = by - Math.sin(angle + Math.PI / 2) * hs;
-    _svg._arrowHead.setAttribute('points', `${x1},${y1} ${lx},${ly} ${rx},${ry}`);
-  }
-
-  function _startArrowLoop() {
-    function tick() {
-      _positionArrow();
-      _rafId = requestAnimationFrame(tick);
-    }
-    _rafId = requestAnimationFrame(tick);
-  }
-
-  function _stopArrowLoop() {
-    if (_rafId != null) { cancelAnimationFrame(_rafId); _rafId = null; }
-  }
-
-  return {
-    init() {
-      if (_shown) return;
-      _shown = true;
-
-      _el  = _buildDOM();
-      _svg = _buildArrowSVG();
-      document.body.appendChild(_el);
-      document.body.appendChild(_svg);
-      document.body.classList.add('welcome-active');
-
-      // Position arrow immediately, then keep it live as viewport changes.
-      requestAnimationFrame(() => { _positionArrow(); _startArrowLoop(); });
-
-      Store.subscribe(evt => {
-        if (evt.type === 'plant:selected' && evt.plant) WelcomeSplash.dismiss();
-      }, 'WelcomeSplash');
-
-      // Pause the rAF loop when the tab is hidden so we're not burning CPU
-      // doing layout thrash for a viewport nobody is looking at.
-      if (typeof App !== 'undefined' && App.registerPausable) {
-        App.registerPausable(WelcomeSplash);
-      }
-    },
-
-    pause() { _stopArrowLoop(); },
-    resume() { if (_el && _rafId == null) _startArrowLoop(); },
-
-    dismiss() {
-      if (!_el) return;
-      _stopArrowLoop();
-      document.body.classList.remove('welcome-active');
-      _el.classList.add('ws-dismissing');
-      if (_svg) _svg.style.opacity = '0';
-      if (_svg) _svg.style.transition = 'opacity 0.35s ease-in';
-      setTimeout(() => {
-        _el?.remove();  _el  = null;
-        _svg?.remove(); _svg = null;
-      }, 460);
-    },
-  };
-})();
-
-/* =============================================================================
    APP — bootstrap, tab switching, side-panel + resize handles.
    ========================================================================== */
 const App = {
@@ -1205,12 +1095,109 @@ const App = {
   _ganttSub: 'timeline',
   _laborSub: 'aggregate',
   _pausables: new Set(),
+  _drawerOpen: false,
 
   // Register any object with pause()/resume() to be auto-paused on tab hide.
   registerPausable(obj) {
     if (obj && (typeof obj.pause === 'function' || typeof obj.resume === 'function')) {
       App._pausables.add(obj);
     }
+  },
+
+  /* ── Nav drawer (Command Band re-skin, Task 4) ────────────────────────────
+     Open/close + a11y: ESC closes, a simple focus trap keeps focus inside the
+     drawer while open, aria-expanded mirrors state, body scroll is locked, and
+     focus returns to the hamburger on close. Mutual exclusion on open: close
+     the alert drawer (same idiom the command-palette FAB already uses —
+     nimbus-intelligence.js — `document.getElementById('alert-drawer')?.classList
+     .remove('open')`) and close the command palette via its own real
+     NIMBUS.CommandPalette.close() (idempotent — safe even if already closed;
+     no new close mechanism invented here). */
+  _openDrawer() {
+    const drawer = document.getElementById('nav-drawer');
+    const scrim  = document.getElementById('nav-drawer-scrim');
+    const toggle = document.getElementById('nav-drawer-toggle');
+    if (!drawer || !scrim) return;
+    document.getElementById('alert-drawer')?.classList.remove('open');
+    try { if (typeof NIMBUS !== 'undefined') NIMBUS.CommandPalette?.close?.(); } catch {}
+    drawer.classList.add('open');
+    scrim.classList.add('open');
+    App._drawerOpen = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'true');
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', App._onDrawerKeydown);
+    const closeBtn = document.getElementById('nav-drawer-close');
+    (closeBtn || drawer).focus();
+  },
+
+  _closeDrawer() {
+    const drawer = document.getElementById('nav-drawer');
+    const scrim  = document.getElementById('nav-drawer-scrim');
+    const toggle = document.getElementById('nav-drawer-toggle');
+    if (!drawer || !scrim) return;
+    drawer.classList.remove('open');
+    scrim.classList.remove('open');
+    App._drawerOpen = false;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    document.body.style.overflow = '';
+    document.removeEventListener('keydown', App._onDrawerKeydown);
+    toggle?.focus();
+  },
+
+  // ESC closes the drawer; Tab/Shift+Tab is a simple focus trap scoped to the
+  // drawer's own interactive elements while it is open. Kept deliberately
+  // simple per the brief — this is a slide-in nav drawer, not a complex widget.
+  _onDrawerKeydown(e) {
+    if (!App._drawerOpen) return;
+    if (e.key === 'Escape') { e.preventDefault(); App._closeDrawer(); return; }
+    if (e.key !== 'Tab') return;
+    const drawer = document.getElementById('nav-drawer');
+    if (!drawer) return;
+    const focusables = [...drawer.querySelectorAll(
+      'button:not([hidden]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )].filter(el => !el.disabled);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last  = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  },
+
+  // Command-band active-section label — MUST be set via inline Util.t() on
+  // every navigation, NOT a static data-i18n attribute: App.init()'s
+  // [data-i18n] sweep is one-shot and never re-runs on this dynamically-
+  // updated node (see global-constraints.md's i18n note + the CSS comment
+  // on .cmd-section-label in styles.css).
+  _updateSectionLabel(tab) {
+    const el = document.getElementById('cmd-band-section-label');
+    if (!el) return;
+    const KEY = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
+    el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
+  },
+
+  // Lines pill (context bar) — dispatcher only, no new line-filter UI or data
+  // path. Routes to whichever tab/sub-tab's EXISTING line filter is active;
+  // see the task report for the full tab → target dispatch table.
+  _dispatchLinesPill(e) {
+    const tab = App._currentTab;
+    if (tab === 'home') {
+      Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn');
+    } else if (tab === 'gantt') {
+      if (App._ganttSub === 'orders') Table._toggleChipDropdown('line');
+      else GanttFilter._toggleLineDropdown();
+    } else if (tab === 'labor') {
+      LaborPlanning.toggleGroupDropdown(e);
+    }
+    // masterdata / admin: no equivalent line filter — the pill is hidden for
+    // these tabs (see _updateLinesPillVisibility), so this is unreachable.
+  },
+
+  // Hidden entirely on tabs with no equivalent line filter (masterdata/admin);
+  // visible (and dispatched per-tab by _dispatchLinesPill) everywhere else.
+  _updateLinesPillVisibility(tab) {
+    const pill = document.getElementById('context-lines-pill');
+    if (!pill) return;
+    pill.hidden = (tab === 'masterdata' || tab === 'admin');
   },
 
   init() {
@@ -1229,6 +1216,29 @@ const App = {
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.onclick = () => App.goto(btn.dataset.tab);
     });
+
+    /* Nav drawer (Command Band re-skin) — hamburger open, scrim/close-button
+       close, ESC + focus trap + aria-expanded + scroll-lock + focus-return
+       live in _openDrawer/_closeDrawer/_onDrawerKeydown above. There is no
+       data-i18n-aria-label sweep mechanism, so the hamburger's aria-label is
+       set here via inline Util.t() (mirrors the existing inline-aria-label
+       pattern used elsewhere, e.g. nimbus-intelligence.js's command-palette
+       FAB) rather than the static "Menu" placeholder Task 3 left in markup. */
+    const navDrawerToggle = document.getElementById('nav-drawer-toggle');
+    if (navDrawerToggle) {
+      navDrawerToggle.setAttribute('aria-label', Util.t('aria.nav_drawer_toggle'));
+      navDrawerToggle.addEventListener('click', () => {
+        App._drawerOpen ? App._closeDrawer() : App._openDrawer();
+      });
+    }
+    document.getElementById('nav-drawer-scrim')?.addEventListener('click', () => App._closeDrawer());
+    document.getElementById('nav-drawer-close')?.addEventListener('click', () => App._closeDrawer());
+
+    /* Lines pill (context bar) — dispatch-only click handler; visibility is
+       kept in sync with the active tab on every App.goto(), set once here
+       for the initial ('home') tab. */
+    document.getElementById('context-lines-pill')?.addEventListener('click', e => App._dispatchLinesPill(e));
+    App._updateLinesPillVisibility(App._currentTab);
 
     /* Manage Master Data sub-tabs (Production Lines / Plant) */
     document.querySelectorAll('.md-master-subtabs .admin-subtab').forEach(btn => {
@@ -1366,6 +1376,9 @@ const App = {
     // handler, and the Ctrl+Alt+L shortcut simultaneously (all three route through here).
     if (tab === 'admin' && !Session.isAdmin()) return;
 
+    // Close the nav drawer on every navigation (Command Band re-skin, Task 4).
+    if (App._drawerOpen) App._closeDrawer();
+
     // Redirect legacy 'table' references to the Orders sub-tab inside Scheduling Board
     if (tab === 'table') { App.goto('gantt'); App.gotoGanttSub('orders'); return; }
 
@@ -1378,6 +1391,8 @@ const App = {
     }
     if (App._currentTab && App._currentTab !== tab) App._prevTab = App._currentTab;
     App._currentTab = tab;
+    App._updateSectionLabel(tab);
+    App._updateLinesPillVisibility(tab);
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.getElementById(tab + '-tab').classList.add('active');
     document.querySelectorAll('.tab-btn').forEach(b => {
@@ -1549,4 +1564,4 @@ const App = {
   }
 };
 
-export { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, WelcomeSplash, App };
+export { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App };

@@ -90,8 +90,9 @@ export const Persistence = {
     ErrorLog.info('persistence', `Load requested (force=${force}, plant=${plant ?? 'all'})`);
 
     // A plant is the scaling unit — never request the whole order book. With no
-    // plant selected we leave the board empty (WelcomeSplash takes over) and only
-    // load master data so the plant picker is populated and the user can choose one.
+    // plant selected we leave the board empty (each plant-scoped module renders its
+    // own EmptyState "select a plant" prompt) and only load master data so the
+    // plant picker is populated and the user can choose one.
     if (!plant) {
       ErrorLog.info('persistence', 'No plant selected — skipping /tasks; loading master data for the picker');
       stats.source = 'backend';
