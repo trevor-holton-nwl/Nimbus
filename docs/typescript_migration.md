@@ -207,7 +207,7 @@ Every converted module is a *tracked hand-written `.mjs` today* that becomes *ge
 |---|---|---|
 | 0 | Foundation: `tsconfig.json` + `tsconfig.worker.json`, build/typecheck npm scripts, CI step, Docker multi-stage build, ESLint TS support, ambient `.d.ts` for compute-core + CDN libs, pilot-convert `nimbus-worker.ts` | **Done** |
 | 1 | `application-foundation.mjs` → `.mts` (`Config`, `Util`, `VirtualList`, `PerfMonitor`, `ErrorLog`, `Toast`, `Modal`) **+ create `web/types.ts`** with the domain typedefs from §C/§D. **Foundation is the DAG leaf (zero imports) — convert it first** so every downstream `.mts` can resolve typed `Config`/`Util` via a real `.mts` sibling, rather than hitting `TS7016 "could not find a declaration file"` on an untyped `.mjs`. | **Done** |
-| 2 | `schedule-state.mjs` → `.mts` (`Store`, `Selection`, `UndoStack`, `Sandbox`) — the state core; heaviest domain-type payoff | Future |
+| 2 | `schedule-state.mjs` → `.mts` (`Store`, `Selection`, `UndoStack`, `Sandbox`) — the state core; heaviest domain-type payoff | **Done** |
 | 3 | `schedule-services.mjs` → `.mts` (`Calendar`, `Compute`, `Alerts`, `Utilization`, `Engine`) | Future |
 | 4 | `schedule-data.mjs` → `.mts` (`Persistence`, `CalendarSync`, `Session`) — do the API-contract + `StoredState`/`LiveState` typedefs here (§F/§G) | Future |
 | 5 | `application-shell.mjs` → `.mts` | Future |

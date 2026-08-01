@@ -1,17 +1,77 @@
-// schedule-state.mjs — CQ-1 schedule-state module.
+// schedule-state.mts — CQ-1 schedule-state module.
 // Owns schedule state, derived indexes, selection, undo, sandbox snapshots,
 // and synchronous post-commit events. Every mutator takes a `source` and
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
+
+// -- Local type declarations (Phase 2 conversion; scoped to this file) ------
+type AllowedPlantsResolver = () => string[] | null;
+type SettingsDefaultsResolver = () => Record<string, unknown>;
+
+interface CalendarEntry {
+  workHours: WorkHours;
+}
+
+/** The raw event object a mutator builds before Store.emit() enriches it with revision/mode. */
+interface StoreEventInput {
+  type: StoreEventType;
+  [key: string]: unknown;
+}
+
+/** What a subscriber actually receives — StoreEventInput plus the two fields emit() always adds. */
+interface StoreEvent extends StoreEventInput {
+  revision: number;
+  mode: StoreMode;
+}
+
+interface StoreState {
+  tasks: Record<string, NimbusTask>;
+  dependencies: Record<string, string[]>;
+  calendars: Record<string, CalendarEntry>;
+  blocks: NimbusBlock[];
+  alerts: NimbusAlert[];
+  fixedIds: Set<string>;
+  meta: { lastOptimize: Date | null };
+  plants: Record<string, CalendarEntry>;
+  plantBlocks: NimbusPlantBlock[];
+  lineSettings: Record<string, NimbusLineSetting>;
+  selectedPlant: string | null;
+  masterData: NimbusMasterData | null;
+  /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
+  userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
+  roleDefaults: Record<string, unknown>;
+}
+
+interface SelectionEmitPayload {
+  kind: SelectionEmitKind;
+  ids: string[];
+  anchor: string | null;
+}
+
+interface UndoEntry {
+  label: string;
+  undoFn: () => void;
+  at: number;
+}
+
+interface SandboxSnapshot {
+  tasks: NimbusTask[];
+  blocks: NimbusBlock[];
+  calendars: Record<string, CalendarEntry>;
+  plants: Record<string, CalendarEntry>;
+  plantBlocks: NimbusPlantBlock[];
+  fixedIds: Set<string>;
+}
 
 // Two DI seams replace what used to be direct references from Store into modules
 // that stay in app.js (Session, Settings) — each defaults to a safe fallback
 // (no scoping / no defaults) when unset. Selection needs no such seam: it is a
 // sibling top-level export in this same module (see below), so `removeTask()`
 // references it directly — same as `mode()` does for `Sandbox`.
-let _allowedPlantsResolver = () => null;
-let _settingsDefaultsResolver = () => ({});
+let _allowedPlantsResolver: AllowedPlantsResolver = () => null;
+let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
 
 /* =============================================================================
    STORE — single reactive source of truth.
@@ -19,55 +79,62 @@ let _settingsDefaultsResolver = () => ({});
    Subscribers tag their own mutations with `source` so they can skip echoes.
    ========================================================================== */
 export const Store = {
-  _tasksByPlant: {},   // plant → [task refs] — derived index rebuilt on setTasks
-  _lineToPlant: {},    // line → plant — O(1) cache for getPlantForLine, rebuilt alongside _tasksByPlant
-  _linesByPlant: {},        // plant → [line names] — union of masterData/calendars/lineSettings/tasks, rebuilt in rebuildPlantIndex
-  _masterLinesByPlant: {},  // plant → [masterData line rows] — masterData.lines grouped by plant, rebuilt in rebuildPlantIndex
+  _tasksByPlant: {} as Record<string, NimbusTask[]>,
+  _lineToPlant: {} as Record<string, string | null>,
+  _linesByPlant: {} as Record<string, string[]>,
+  _masterLinesByPlant: {} as Record<string, NimbusMasterData['lines']>,
   _state: {
-    tasks:        {},           // id → task object
-    dependencies: {},           // targetId → [sourceIds]
-    calendars:    {},           // line → { workHours: {0..6: [h1,h2]|null} }
-    blocks:       [],           // [{id, line, start, end, reason}]
-    alerts:       [],           // [{id, sev, type, msg, taskId?, line?, time?}]
-    fixedIds:     new Set(),    // ids of tasks locked from optimiser
+    tasks:        {},
+    dependencies: {},
+    calendars:    {},
+    blocks:       [],
+    alerts:       [],
+    fixedIds:     new Set<string>(),
     meta:         { lastOptimize: null },
-    plants:       {},           // plantName → { workHours: {0..6: [h1,h2]|null} }
-    plantBlocks:  [],           // [{id, plant, start, end, reason}]
-    lineSettings: {},           // line → { plant, bufferUnit, bufferPct, bufferHours, bottleneck, excludeFromOpt }
-    selectedPlant: null,        // single plant selected from Dashboard filter; drives Plant tab + optimization
-    masterData: null,           // { plants: [...], lines: [...] } from /master-data/* endpoints
-    userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 }, // per-user prefs blob (DB truth merged in by Session) + legacy horizon caps; null = no cap, values in minutes
-    roleDefaults: {}            // roles.settings for the signed-in user's role — Store.pref() fallback below userSettings
-  },
-  _listeners: new Set(),
+    plants:       {},
+    plantBlocks:  [],
+    lineSettings: {},
+    selectedPlant: null,
+    masterData: null,
+    userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
+    roleDefaults: {}
+  } as StoreState,
+  _listeners: new Set<((event: StoreEvent) => void) & { _pmLabel?: string }>(),
+  // Lazily populated by alertsByTask() below — declared here (not left to first
+  // assignment) because plain object-literal properties, unlike class fields
+  // assigned in a constructor, need their type fixed at the literal's declaration.
+  _alertsByTaskSrc: null as NimbusAlert[] | null,
+  _alertsByTask: new Map<string, NimbusAlert[]>(),
+  // Set by emit() on first mutation; read by rev(). Same reasoning as above.
+  _rev: 0,
 
-  setAllowedPlantsResolver(fn) { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
-  setSettingsDefaultsResolver(fn) { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
-  rev() { return this._rev || 0; },
+  setAllowedPlantsResolver(fn: AllowedPlantsResolver): void { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
+  setSettingsDefaultsResolver(fn: SettingsDefaultsResolver): void { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
+  rev(): number { return this._rev || 0; },
   // 'draft' once What-If mode is active. `Sandbox` is declared further down in
   // this same module (a sibling top-level const) — referencing it here is safe
   // even though it appears "before" its declaration in file order, because
   // mode() is never *called* until well after module evaluation completes.
-  mode() { return (typeof Sandbox !== 'undefined' && Sandbox.active) ? 'draft' : 'live'; },
+  mode(): StoreMode { return (typeof Sandbox !== 'undefined' && Sandbox.active) ? 'draft' : 'live'; },
 
   /* ----- basic access ---------------------------------------------------- */
-  get state()     { return this._state; },
-  get tasks()     { return this._state.tasks; },
-  get blocks()    { return this._state.blocks; },
-  get alerts()    { return this._state.alerts; },
-  get calendars() { return this._state.calendars; },
-  get fixedIds()  { return this._state.fixedIds; },
-  get tasksArr()      { return Object.values(this._state.tasks); },
-  get plants()        { return this._state.plants; },
-  get plantBlocks()   { return this._state.plantBlocks; },
-  get lineSettings()  { return this._state.lineSettings; },
-  get selectedPlant() { return this._state.selectedPlant; },
-  get userSettings()  { return this._state.userSettings; },
-  get roleDefaults()  { return this._state.roleDefaults; },
-  get masterData()    { return this._state.masterData; },
-  get dependencies()  { return this._state.dependencies; },
+  get state(): StoreState     { return this._state; },
+  get tasks(): Record<string, NimbusTask>     { return this._state.tasks; },
+  get blocks(): NimbusBlock[]    { return this._state.blocks; },
+  get alerts(): NimbusAlert[]    { return this._state.alerts; },
+  get calendars(): Record<string, CalendarEntry> { return this._state.calendars; },
+  get fixedIds(): Set<string>  { return this._state.fixedIds; },
+  get tasksArr(): NimbusTask[]      { return Object.values(this._state.tasks); },
+  get plants(): Record<string, CalendarEntry>        { return this._state.plants; },
+  get plantBlocks(): NimbusPlantBlock[]   { return this._state.plantBlocks; },
+  get lineSettings(): Record<string, NimbusLineSetting>  { return this._state.lineSettings; },
+  get selectedPlant(): string | null { return this._state.selectedPlant; },
+  get userSettings(): StoreState['userSettings']  { return this._state.userSettings; },
+  get roleDefaults(): Record<string, unknown>  { return this._state.roleDefaults; },
+  get masterData(): NimbusMasterData | null    { return this._state.masterData; },
+  get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
 
-  isFixed(id)     { return this._state.fixedIds.has(String(id)); },
+  isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
 
   /** Record the timestamp of the last optimizer run. Public equivalent of the
    *  former direct `Store._state.meta.lastOptimize = ...` write (CQ-1 Phase 2
@@ -78,7 +145,7 @@ export const Store = {
    *  spuriously bump `Store._rev` and trigger the debounced autosave subscriber on
    *  every optimize call, a real behavior change this setter must not introduce.
    *  `source` is accepted only for signature symmetry with the other setters. */
-  setLastOptimize(date, _source) {
+  setLastOptimize(date: Date | null, _source?: string): void {
     this._state.meta.lastOptimize = date;
   },
 
@@ -87,26 +154,26 @@ export const Store = {
    *  every call site used to repeat verbatim. Public equivalent of the former direct
    *  `Store._state.masterData = {...}` write (CQ-1 Phase 2 Task 4 — closes Persistence's
    *  `_state` touch, one of the tracked §6 exceptions). */
-  setMasterData(masterData, source) {
+  setMasterData(masterData: NimbusMasterData | null, source?: string): void {
     this._state.masterData = masterData;
     this.rebuildPlantIndex();
     this.emit({ type: 'master-data-changed', source });
   },
 
   /* ----- subscription ---------------------------------------------------- */
-  subscribe(fn, label) {
+  subscribe(fn: ((event: StoreEvent) => void) & { _pmLabel?: string }, label?: string): () => void {
     if (label) fn._pmLabel = label;
     this._listeners.add(fn);
     return () => this._listeners.delete(fn);
   },
-  emit(event) {
+  emit(event: StoreEventInput): void {
     // event: { type, source?, id?, changes?, ... }
     // Monotonic revision — any state change bumps it. Used as a cheap, always-correct
     // cache key by memoized read-models (e.g. Utilization.computeMatrix).
     this._rev = (this._rev || 0) + 1;
     // revision/mode are additive — existing listeners that only read
     // evt.type/evt.source/etc. are unaffected.
-    const enriched = { ...event, revision: this._rev, mode: this.mode() };
+    const enriched: StoreEvent = { ...event, revision: this._rev, mode: this.mode() };
     for (const l of this._listeners) {
       const _t = performance.now();
       try { l(enriched); } catch (e) { console.error('[Store] listener error:', e); }
@@ -116,10 +183,10 @@ export const Store = {
 
   /* ----- mutations ------------------------------------------------------- */
   // Replace all tasks (e.g. after backend load or optimiser run).
-  setTasks(tasks, source) {
+  setTasks(tasks: NimbusTask[], source?: string): { inserted: number; collisions: number } {
     this._state.tasks = {};
     let collisions = 0;
-    const collisionSamples = [];
+    const collisionSamples: Array<{ id: string; text?: string; line: string }> = [];
     for (const t of tasks) {
       Store._normalizeDates(t);
       if (t.id == null || String(t.id).trim() === '') {
@@ -150,10 +217,10 @@ export const Store = {
   // in place, so subscribers (e.g. AG Grid, diff-rebuild) can diff by identity.
   // Backwards-compatible: the emitted event still carries {id, changes, source};
   // {prev, next} are additive fields for consumers that want them.
-  updateTask(id, changes, source) {
+  updateTask(id: string, changes: Partial<NimbusTask>, source?: string): void {
     const prev = this._state.tasks[id];
     if (!prev) return;
-    const next = { ...prev, ...changes };
+    const next = { ...prev, ...changes } as NimbusTask;
     Store._normalizeDates(next);
     this._state.tasks[id] = next;
     // Keep the _tasksByPlant index coherent with this reference swap. That index caches
@@ -169,7 +236,7 @@ export const Store = {
 
   // Remove a task, cleaning up dependencies, fixedIds, and (if present)
   // the Selection set. Emits 'task:remove'.
-  removeTask(id, source) {
+  removeTask(id: string | number, source?: string): NimbusTask | null {
     const key = String(id);
     const prev = this._state.tasks[key];
     if (!prev) return null;
@@ -197,7 +264,7 @@ export const Store = {
   },
 
   // Update several tasks at once (used by the optimiser).
-  updateMany(patches, source) {
+  updateMany(patches: Array<{ id: string; changes: Partial<NimbusTask> }>, source?: string): void {
     // patches: [{id, changes}]
     for (const p of patches) {
       const task = this._state.tasks[p.id];
@@ -209,7 +276,7 @@ export const Store = {
   },
 
   // Toggle fixed flag on a task (or group of tasks).
-  setFixed(ids, fixed, source) {
+  setFixed(ids: string | number | Array<string | number>, fixed: boolean, source?: string): void {
     const arr = Array.isArray(ids) ? ids : [ids];
     for (const id of arr) {
       const key = String(id);
@@ -222,21 +289,21 @@ export const Store = {
   },
 
   /* ----- calendar & blocks ---------------------------------------------- */
-  setCalendar(line, workHours, source) {
+  setCalendar(line: string, workHours: WorkHours, source?: string): void {
     if (!this._state.calendars[line]) this._state.calendars[line] = { workHours: {} };
     this._state.calendars[line].workHours = workHours;
     this.emit({ type: 'calendar:change', line, source });
   },
-  ensureCalendar(line) {
+  ensureCalendar(line: string): void {
     if (this._state.calendars[line]) return;
-    const defaults = {};
+    const defaults: WorkHours = {};
     for (let d = 0; d < 7; d++) {
       if (Config.WEEKEND_OFF && (d === 0 || d === 6)) defaults[d] = null;
-      else defaults[d] = [...Config.DEFAULT_SHIFT];
+      else defaults[d] = [...Config.DEFAULT_SHIFT] as [number, number];
     }
     this._state.calendars[line] = { workHours: defaults };
   },
-  addBlock(block, source) {
+  addBlock(block: NimbusBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addBlock]', { source, block });
     const newS = Util.parseDate(block.start)?.getTime();
     const newE = Util.parseDate(block.end)?.getTime();
@@ -255,7 +322,7 @@ export const Store = {
     this._state.blocks.push(block);
     this.emit({ type: 'blocks:change', source });
   },
-  removeBlock(blockId, source) {
+  removeBlock(blockId: string, source?: string): void {
     const i = this._state.blocks.findIndex(b => b.id === blockId);
     if (i >= 0) {
       this._state.blocks.splice(i, 1);
@@ -264,22 +331,22 @@ export const Store = {
   },
 
   /* ----- plants & plant-blocks ------------------------------------------ */
-  ensurePlant(name) {
+  ensurePlant(name: string | null): void {
     if (!name) return;
     if (this._state.plants[name]) return;
-    const defaults = {};
+    const defaults: WorkHours = {};
     for (let d = 0; d < 7; d++) {
       if (Config.WEEKEND_OFF && (d === 0 || d === 6)) defaults[d] = null;
-      else defaults[d] = [...Config.DEFAULT_SHIFT];
+      else defaults[d] = [...Config.DEFAULT_SHIFT] as [number, number];
     }
     this._state.plants[name] = { workHours: defaults };
   },
-  setPlantWorkHours(plant, dow, range, source) {
+  setPlantWorkHours(plant: string, dow: number, range: [number, number] | null, source?: string): void {
     this.ensurePlant(plant);
     this._state.plants[plant].workHours[dow] = range;
     this.emit({ type: 'calendar:change', source });
   },
-  clampLinesToPlant(plant, dow) {
+  clampLinesToPlant(plant: string, dow: number): string[] {
     const plantHours = this._state.plants[plant]?.workHours[dow];
     const changed = [];  // line codes whose hours this call actually rewrote (F9)
     const plantLineSet = new Set(Store._linesByPlant[plant] || []);
@@ -287,7 +354,7 @@ export const Store = {
       if (!plantLineSet.has(line)) continue;
       const lineHours = this._state.calendars[line].workHours[dow];
       if (!lineHours) continue;
-      let next;
+      let next: [number, number] | null;
       if (!plantHours) {
         next = null;
       } else {
@@ -309,7 +376,7 @@ export const Store = {
     this.emit({ type: 'calendar:change', source: 'plant-clamp' });
     return changed;
   },
-  addPlantBlock(block, source) {
+  addPlantBlock(block: NimbusPlantBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addPlantBlock]', { source, block });
     const newS = Util.parseDate(block.start)?.getTime();
     const newE = Util.parseDate(block.end)?.getTime();
@@ -327,7 +394,7 @@ export const Store = {
     this._state.plantBlocks.push(block);
     this.emit({ type: 'plantBlocks:change', source });
   },
-  removePlantBlock(id, source) {
+  removePlantBlock(id: string, source?: string): void {
     const i = this._state.plantBlocks.findIndex(b => b.id === id);
     if (i >= 0) {
       this._state.plantBlocks.splice(i, 1);
@@ -336,7 +403,7 @@ export const Store = {
   },
 
   /* ----- line settings -------------------------------------------------- */
-  ensureLineSettings(line) {
+  ensureLineSettings(line: string): void {
     if (this._state.lineSettings[line]) return;
     this._state.lineSettings[line] = {
       plant: null,
@@ -348,7 +415,7 @@ export const Store = {
       plGroup: '',
     };
   },
-  setLineSetting(line, patch, source) {
+  setLineSetting(line: string, patch: Partial<NimbusLineSetting>, source?: string): void {
     this.ensureLineSettings(line);
     Object.assign(this._state.lineSettings[line], patch);
     // Only a `plant` change can move a line between plant buckets — skip the
@@ -356,8 +423,8 @@ export const Store = {
     if ('plant' in patch) this.rebuildPlantIndex();
     this.emit({ type: 'lineSettings:change', line, source });
   },
-  getPlantForLine(line) {
-    const fromSettings = (this._state.lineSettings[line] || {}).plant;
+  getPlantForLine(line: string): string | null {
+    const fromSettings = (this._state.lineSettings[line] || ({} as NimbusLineSetting)).plant;
     if (fromSettings) return fromSettings;
     // O(1) cache (line → master-data plant), rebuilt alongside _tasksByPlant. Consulted
     // before the linear .find fallback so this stays O(1) on hot paths (tasksForSelectedPlant,
@@ -367,7 +434,7 @@ export const Store = {
     const mdLine = (this._state.masterData?.lines ?? []).find(r => r.production_line === line);
     return mdLine?.plant ?? null;
   },
-  setSelectedPlant(plant, source) {
+  setSelectedPlant(plant: string | null, source?: string): void {
     const next = plant || null;
     if (next === this._state.selectedPlant) return; // no-op: don't re-emit
     this._state.selectedPlant = next;
@@ -377,21 +444,21 @@ export const Store = {
   /* ----- plant-scoped accessors ----------------------------------------- */
   // The selected plant is a true global filter. When null, callers see an
   // empty world and render an EmptyState prompt instead of their usual view.
-  tasksByPlant(plant) {
+  tasksByPlant(plant: string | null): NimbusTask[] {
     return plant ? (Store._tasksByPlant[plant] || []) : Store.tasksArr;
   },
-  rebuildPlantIndex() {
+  rebuildPlantIndex(): void {
     // Rebuild the line → master-data plant cache first so the getPlantForLine calls
     // below (and on every later hot path) resolve in O(1) instead of scanning lines.
-    const l2p = {};
-    const masterByPlant = {};
+    const l2p: Record<string, string | null> = {};
+    const masterByPlant: Record<string, NimbusMasterData['lines']> = {};
     for (const r of (Store._state.masterData?.lines ?? [])) {
       if (r.production_line && l2p[r.production_line] === undefined) l2p[r.production_line] = r.plant ?? null;
       if (r.plant) (masterByPlant[r.plant] ||= []).push(r);
     }
     Store._lineToPlant = l2p;
     Store._masterLinesByPlant = masterByPlant;
-    const idx = {};
+    const idx: Record<string, NimbusTask[]> = {};
     for (const t of Store.tasksArr) {
       const p = t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE);
       if (!p) continue;
@@ -401,13 +468,13 @@ export const Store = {
 
     // Names-only index for dropdown/chip/heatmap consumers — same 4 sources
     // allLines() unions, bucketed by plant instead of collapsed into one flat set.
-    const namesByPlant = {};
-    const addName = (plant, line) => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
+    const namesByPlant: Record<string, Set<string>> = {};
+    const addName = (plant: string | null, line: string): void => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
     for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE), t.PRODUCTION_LINE);
     for (const line of Object.keys(this._state.calendars))    addName(Store.getPlantForLine(line), line);
     for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
     for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.production_line);
-    const linesByPlant = {};
+    const linesByPlant: Record<string, string[]> = {};
     for (const [plant, set] of Object.entries(namesByPlant)) {
       linesByPlant[plant] = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
     }
@@ -415,11 +482,11 @@ export const Store = {
   },
 
   /* ----- wholesale replace (bulk hydration paths) ------------------------ */
-  replaceBlocks(blocks, source) { this._state.blocks = blocks; this.emit({ type: 'blocks:replace', source }); },
-  replaceCalendars(calendars, source) { this._state.calendars = calendars; this.emit({ type: 'calendar:replace', source }); },
-  replacePlants(plants, source) { this._state.plants = plants; this.emit({ type: 'plants:replace', source }); },
-  replacePlantBlocks(plantBlocks, source) { this._state.plantBlocks = plantBlocks; this.emit({ type: 'plantBlocks:replace', source }); },
-  replaceFixedIds(idSet, source) {
+  replaceBlocks(blocks: NimbusBlock[], source?: string): void { this._state.blocks = blocks; this.emit({ type: 'blocks:replace', source }); },
+  replaceCalendars(calendars: Record<string, CalendarEntry>, source?: string): void { this._state.calendars = calendars; this.emit({ type: 'calendar:replace', source }); },
+  replacePlants(plants: Record<string, CalendarEntry>, source?: string): void { this._state.plants = plants; this.emit({ type: 'plants:replace', source }); },
+  replacePlantBlocks(plantBlocks: NimbusPlantBlock[], source?: string): void { this._state.plantBlocks = plantBlocks; this.emit({ type: 'plantBlocks:replace', source }); },
+  replaceFixedIds(idSet: Set<string>, source?: string): void {
     this._state.fixedIds = new Set([...idSet]);
     for (const id of this._state.fixedIds) {
       const t = this._state.tasks[id];
@@ -431,10 +498,10 @@ export const Store = {
   // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
   // prev→next, keeping the cached plant buckets coherent without a full O(n) rebuild.
   // Moves the task between buckets if its resolved plant changed (line/plant edit).
-  _reindexTask(prev, next) {
+  _reindexTask(prev: NimbusTask, next: NimbusTask): void {
     const idx = Store._tasksByPlant;
     if (!idx) return; // index not built yet (pre-setTasks) — nothing to keep coherent
-    const plantOf = t => t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE) || null;
+    const plantOf = (t: NimbusTask): string | null => t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE) || null;
     const oldP = plantOf(prev);
     const newP = plantOf(next);
     if (oldP === newP) {
@@ -452,8 +519,8 @@ export const Store = {
     }
     if (newP) (idx[newP] ||= []).push(next);
   },
-  allLines() {
-    const set = new Set();
+  allLines(): string[] {
+    const set = new Set<string>();
     for (const t of Store.tasksArr) {
       if (t.PRODUCTION_LINE) set.add(t.PRODUCTION_LINE);
     }
@@ -465,21 +532,21 @@ export const Store = {
     });
     return [...set];
   },
-  tasksForSelectedPlant() {
+  tasksForSelectedPlant(): NimbusTask[] {
     const plant = this._state.selectedPlant;
     if (!plant) return [];
     // Read straight from the _tasksByPlant index (rebuilt on setTasks / lineSettings /
     // master-data changes) instead of re-filtering every task via getPlantForLine.
     return Store.tasksByPlant(plant);
   },
-  linesForSelectedPlant() {
+  linesForSelectedPlant(): string[] {
     const plant = this._state.selectedPlant;
     return plant ? (Store._linesByPlant[plant] || []) : [];
   },
-  masterLinesForPlant(plant) {
+  masterLinesForPlant(plant: string | null): NimbusMasterData['lines'] {
     return plant ? (Store._masterLinesByPlant[plant] || []) : [];
   },
-  knownPlants() {
+  knownPlants(): string[] {
     // Prefer master-data plants when available (authoritative source).
     const masterPlants = Store._state.masterData?.plants?.map(p => p.plant) ?? [];
     let all;
@@ -501,12 +568,12 @@ export const Store = {
   },
 
   /* ----- alerts ---------------------------------------------------------- */
-  setAlerts(alerts, source) {
+  setAlerts(alerts: NimbusAlert[], source?: string): void {
     // Compute which task IDs changed alert membership for incremental table updates.
     const oldAlerts = this._state.alerts || [];
     const oldTaskIds = new Set(oldAlerts.map(a => a.taskId).filter(id => id != null));
     const newTaskIds = new Set(alerts.map(a => a.taskId).filter(id => id != null));
-    const changedIds = [];
+    const changedIds: string[] = [];
     // Tasks that had alerts before but don't now
     for (const id of oldTaskIds) {
       if (!newTaskIds.has(id)) changedIds.push(id);
@@ -518,7 +585,7 @@ export const Store = {
     this._state.alerts = alerts;
     this.emit({ type: 'alerts:change', source, changedIds: changedIds.length ? changedIds : undefined });
   },
-  dismissAlert(alertId, source) {
+  dismissAlert(alertId: string, source?: string): void {
     const next = this._state.alerts.filter(a => a.id !== alertId);
     if (next.length !== this._state.alerts.length) {
       // Reassign (not splice-in-place) so the array identity changes and the
@@ -527,7 +594,7 @@ export const Store = {
       this.emit({ type: 'alerts:change', source });
     }
   },
-  dismissAllAlerts(source) {
+  dismissAllAlerts(source?: string): void {
     this._state.alerts = [];
     this.emit({ type: 'alerts:change', source });
   },
@@ -535,9 +602,9 @@ export const Store = {
    *  Store.alerts array identity (every mutator reassigns the array, so the memo
    *  invalidates on any change). Replaces O(rows × alerts) Store.alerts.filter()
    *  scans in grid cell renderers / row-class / popovers (R16). Treat as read-only. */
-  alertsByTask() {
+  alertsByTask(): Map<string, NimbusAlert[]> {
     if (this._alertsByTaskSrc !== this._state.alerts) {
-      const m = new Map();
+      const m = new Map<string, NimbusAlert[]>();
       for (const a of this._state.alerts) {
         if (a.taskId == null) continue;
         const k = String(a.taskId);
@@ -550,13 +617,13 @@ export const Store = {
     }
     return this._alertsByTask;
   },
-  setUserSettings(patch, source) {
+  setUserSettings(patch: Record<string, unknown>, source?: string): void {
     Object.assign(this._state.userSettings, patch);
     this.emit({ type: 'settings:change', source });
   },
   // Replace the role-defaults snapshot wholesale (roles.settings for the signed-in
   // user's role). Session.signIn/refresh push this from GET /security/me.role_settings.
-  setRoleDefaults(obj, source) {
+  setRoleDefaults(obj: Record<string, unknown> | null | undefined, source?: string): void {
     this._state.roleDefaults = (obj && typeof obj === 'object') ? { ...obj } : {};
     this.emit({ type: 'settings:change', source });
   },
@@ -565,11 +632,11 @@ export const Store = {
      Never throws — returns undefined for an unknown key with no default. `opts.plant`
      scaffolds a region/{plant} fallback (see note) and may be passed now for
      forward-compat; it is ignored today. */
-  pref(key, opts = {}) {
+  pref(key: string, opts: { plant?: string } = {}): unknown {
     try {
-      const us   = this._state.userSettings || {};
-      const rd   = this._state.roleDefaults || {};
-      const defs = _settingsDefaultsResolver() || {};
+      const us   = this._state.userSettings || ({} as Record<string, unknown>);
+      const rd   = this._state.roleDefaults || ({} as Record<string, unknown>);
+      const defs = _settingsDefaultsResolver() || ({} as Record<string, unknown>);
       // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
       // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
       // a per-plant regional default keyed on opts.plant would slot in between the
@@ -581,8 +648,8 @@ export const Store = {
   },
 
   /* ----- internals ------------------------------------------------------- */
-  _normalizeDates(task) {
-    for (const k of ['start_date','end_date','BASIC_START_DATE','BASIC_FINISH_DATE','original_start_date','original_end_date']) {
+  _normalizeDates(task: NimbusTask): void {
+    for (const k of ['start_date','end_date','BASIC_START_DATE','BASIC_FINISH_DATE','original_start_date','original_end_date'] as const) {
       const v = task[k];
       if (v && !(v instanceof Date)) task[k] = Util.parseDate(v);
     }
@@ -603,28 +670,28 @@ export const Store = {
    autosaved.
    ========================================================================== */
 export const Selection = {
-  _ids: new Set(),           // Set<string>
-  _anchor: null,              // id of last-single-clicked item (for Shift range)
-  _listeners: new Set(),
+  _ids: new Set<string>(),           // Set<string>
+  _anchor: null as string | null,              // id of last-single-clicked item (for Shift range)
+  _listeners: new Set<(payload: SelectionEmitPayload) => void>(),
 
   /** @returns {string[]} currently selected ids */
-  ids() { return [...this._ids]; },
-  has(id) { return this._ids.has(String(id)); },
-  size() { return this._ids.size; },
-  clear() {
+  ids(): string[] { return [...this._ids]; },
+  has(id: string | number): boolean { return this._ids.has(String(id)); },
+  size(): number { return this._ids.size; },
+  clear(): void {
     if (!this._ids.size) return;
     this._ids.clear();
     this._anchor = null;
     this._emit('clear');
   },
-  set(ids) {
+  set(ids: Array<string | number>): void {
     const next = new Set(ids.map(String));
     if (_setsEqual(next, this._ids)) return;
     this._ids = next;
     this._anchor = ids.length ? String(ids[ids.length - 1]) : null;
     this._emit('set');
   },
-  add(ids) {
+  add(ids: string | number | Array<string | number>): void {
     const arr = Array.isArray(ids) ? ids : [ids];
     let changed = false;
     for (const id of arr) {
@@ -636,7 +703,7 @@ export const Selection = {
       this._emit('add');
     }
   },
-  remove(ids) {
+  remove(ids: string | number | Array<string | number>): void {
     const arr = Array.isArray(ids) ? ids : [ids];
     let changed = false;
     for (const id of arr) {
@@ -644,7 +711,7 @@ export const Selection = {
     }
     if (changed) this._emit('remove');
   },
-  toggle(id) {
+  toggle(id: string | number): void {
     const s = String(id);
     if (this._ids.has(s)) this._ids.delete(s);
     else { this._ids.add(s); this._anchor = s; }
@@ -652,7 +719,7 @@ export const Selection = {
   },
 
   /** Select every id from anchor to target on the same line (inclusive). */
-  selectRange(targetId) {
+  selectRange(targetId: string | number): void {
     const target = String(targetId);
     const anchor = this._anchor;
     if (!anchor || anchor === target) { this.set([target]); return; }
@@ -666,7 +733,7 @@ export const Selection = {
     const line = ta.PRODUCTION_LINE;
     const peers = Store.tasksArr
       .filter(t => t.PRODUCTION_LINE === line && t.start_date)
-      .sort((a, b) => a.start_date - b.start_date);
+      .sort((a, b) => Number(a.start_date) - Number(b.start_date));
     const ia = peers.findIndex(t => String(t.id) === anchor);
     const it = peers.findIndex(t => String(t.id) === target);
     if (ia < 0 || it < 0) { this.set([target]); return; }
@@ -678,10 +745,10 @@ export const Selection = {
   },
 
   /** Summary for the Inspector multi-selection view. */
-  stats() {
+  stats(): { count: number; totalHours: number; lines: string[]; fixedCount: number } {
     const ids = [...this._ids];
     let totalHours = 0;
-    const lines = new Set();
+    const lines = new Set<string>();
     let fixedCount = 0;
     for (const id of ids) {
       const t = Store.tasks[id];
@@ -693,23 +760,23 @@ export const Selection = {
     return { count: ids.length, totalHours, lines: [...lines], fixedCount };
   },
 
-  on(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); },
-  _emit(kind) {
+  on(fn: (payload: SelectionEmitPayload) => void): () => void { this._listeners.add(fn); return () => this._listeners.delete(fn); },
+  _emit(kind: SelectionEmitKind): void {
     const payload = { kind, ids: [...this._ids], anchor: this._anchor };
     for (const l of this._listeners) {
-      try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${e.message}`); }
+      try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${(e as Error).message}`); }
     }
   },
 
   /** [{plant, id}] for the currently selected ids — additive convenience for
    *  consumers that need plant scoping alongside the raw id (e.g. cross-plant
    *  bulk actions). Existing bare-ID methods above are unchanged. */
-  selectedRefs() {
+  selectedRefs(): Array<{ plant: string | null; id: string }> {
     return [...this._ids].map(id => ({ plant: Store.tasks[id]?.plant ?? null, id }));
   },
 };
 
-function _setsEqual(a, b) {
+function _setsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) return false;
   for (const v of a) if (!b.has(v)) return false;
   return true;
@@ -721,28 +788,28 @@ function _setsEqual(a, b) {
    ========================================================================== */
 export const UndoStack = {
   MAX: 10,
-  _entries: [],
+  _entries: [] as UndoEntry[],
 
-  push(label, undoFn) {
+  push(label: string, undoFn: () => void): void {
     this._entries.push({ label, undoFn, at: Date.now() });
     if (this._entries.length > this.MAX) this._entries.shift();
     Store.emit({ type: 'undo:pushed', label });
   },
-  pop() {
+  pop(): UndoEntry | null {
     const e = this._entries.pop();
     if (!e) return null;
     try { e.undoFn(); Toast.show(Util.t('toast.undone', { label: e.label }), 'success'); }
-    catch (err) { ErrorLog.error('undo', `${e.label}: ${err.message}`); }
+    catch (err) { ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); }
     return e;
   },
   /** Take a snapshot of the given task ids so they can be restored. */
-  snapshotTasks(ids) {
+  snapshotTasks(ids: string[]): NimbusTask[] {
     return ids.map(id => {
       const t = Store.tasks[id];
       return t ? structuredClone(t) : null;
-    }).filter(Boolean);
+    }).filter(Boolean) as NimbusTask[];
   },
-  restoreTasks(snapshot) {
+  restoreTasks(snapshot: NimbusTask[]): void {
     const patches = snapshot.map(s => ({ id: s.id, changes: s }));
     Store.updateMany(patches, 'undo');
   },
@@ -758,9 +825,9 @@ export const UndoStack = {
    ========================================================================== */
 export const Sandbox = {
   active: false,
-  _snapshot: null,
+  _snapshot: null as SandboxSnapshot | null,
 
-  enter(source) {
+  enter(source?: string): boolean {
     if (this.active) return false;
     this._snapshot = {
       tasks:       Store.tasksArr.map(t => Util.clone(t)),
@@ -775,9 +842,9 @@ export const Sandbox = {
     return true;
   },
 
-  exit(apply, source) {
+  exit(apply: boolean, source?: string): SandboxSnapshot | null {
     if (!this.active) return null;
-    const snap = this._snapshot;
+    const snap = this._snapshot!;
 
     if (apply) {
       // Promote sandbox state to real state with a single undoable entry.
