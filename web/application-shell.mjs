@@ -1234,6 +1234,16 @@ const App = {
     document.getElementById('nav-drawer-scrim')?.addEventListener('click', () => App._closeDrawer());
     document.getElementById('nav-drawer-close')?.addEventListener('click', () => App._closeDrawer());
 
+    /* Drawer's PLANT row — secondary affordance per UI_FRONTEND_MIGRATION.md
+       Step 5: closes the drawer, then focuses/opens the relocated
+       #header-plant-selector combobox (real PlantSelector methods, no new
+       mechanism invented). */
+    document.getElementById('nav-drawer-plant-btn')?.addEventListener('click', () => {
+      App._closeDrawer();
+      PlantSelector._input?.focus();
+      PlantSelector._openDropdown();
+    });
+
     /* Lines pill (context bar) — dispatch-only click handler; visibility is
        kept in sync with the active tab on every App.goto(), set once here
        for the initial ('home') tab. */
