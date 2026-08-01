@@ -59,6 +59,20 @@ declare global {
       [method: string]: unknown;
     }
 
+    /** One entry of AgGridApi's getColumnState()/applyColumnState() contract —
+     *  named (CQ-1 Phase 6 Task 3) so schedule-workbench.mts's Table module can
+     *  reference it directly for its saved-grid-layout feature instead of an
+     *  inline literal type. */
+    interface AgGridColumnState {
+      colId: string;
+      sort?: 'asc' | 'desc' | null;
+      sortIndex?: number;
+      hide?: boolean;
+      width?: number;
+      pinned?: 'left' | 'right' | null;
+      [k: string]: unknown;
+    }
+
     interface AgGridApi {
       setGridOption(key: string, value: unknown): void;
       applyTransaction(txn: { add?: unknown[]; update?: unknown[]; remove?: unknown[] }): unknown;
@@ -68,8 +82,27 @@ declare global {
       refreshCells(params?: Record<string, unknown>): void;
       setColumnDefs(defs: unknown[]): void;
       getDisplayedRowCount(): number;
-      getColumnState(): Array<{ colId: string; sort?: 'asc' | 'desc' | null; sortIndex?: number; [k: string]: unknown }>;
+      getColumnState(): AgGridColumnState[];
       getFilterModel(): Record<string, unknown>;
+      /* Members below added by CQ-1 Phase 6 Task 3 (schedule-workbench.mts's
+       * Table module — the AG Grid orders-grid wrapper, plus its Interaction-
+       * module two-way-sync consumers further down the same file that reach
+       * the same Table._api instance) as the real, precise AgGridApi surface
+       * that module actually calls became known. Real AG Grid v31 Grid API
+       * methods, not invented. */
+      getDisplayedRowAtIndex(index: number): unknown | undefined;
+      getRowNode(id: string): unknown | undefined;
+      getValue(colKey: string, rowNode: unknown): unknown;
+      applyColumnState(params: { state: AgGridColumnState[]; applyOrder?: boolean }): void;
+      resetColumnState(): void;
+      setFilterModel(model: Record<string, unknown> | null): void;
+      isAnyFilterPresent(): boolean;
+      onFilterChanged(): void;
+      getAllDisplayedColumns(): unknown[];
+      exportDataAsCsv(params?: Record<string, unknown>): void;
+      deselectAll(): void;
+      addEventListener(eventType: string, listener: (...args: unknown[]) => void): void;
+      stopEditing(cancel?: boolean): void;
       [method: string]: unknown;
     }
 

@@ -78,11 +78,17 @@ declare global {
            are deliberately loose (`any`) per this file's own additive-only
            convention. Tasks 3-8 may tighten them alongside their own region's
            real typing. */
+        /** Tightened by Task 3 (Table._showAlertPopup's real forward reference —
+         *  AlertsUIAdapter itself still doesn't move into schedule-workbench.mts
+         *  until Task 7). `toggleDrawer` dropped: real TS call sites never call
+         *  it via `NIMBUS.AlertsUIAdapter.toggleDrawer()` (only present inside
+         *  generated onclick="..." HTML-attribute strings, which tsc never
+         *  type-checks) — see docs/typescript_migration.md Phase 6 Task 3. */
         AlertsUIAdapter?: {
-          focus?(id: any): void;
+          focus?(alertId: string): void;
+          showForCell?(line: string, dayKey: string): void;
           renderBell?(): void;
-          toggleDrawer?(): void;
-          showForCell?(group: any, dayKey: any): void;
+          renderDrawer?(): void;
         };
         Plant?: {
           _persistPlantHours?(plantName: any, changed: any): void;

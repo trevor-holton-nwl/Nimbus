@@ -1320,27 +1320,170 @@ export const DependencyOverlay = {
   }
 };
 
+// -- Local type declarations (CQ-1 Phase 6 Task 3 conversion; scoped to
+//    Table/Inspector/ContextMenu — later tasks add their own module-scoped
+//    types further down this same file as they convert
+//    Hierarchy/GanttFilter/Dashboard/etc.) -----------------------------------
+
+/** Table._chipFilters's status radio value — 'late' reads Util.latenessHours,
+ *  'conflict'/'atrisk' read Store.alertsByTask() severities, 'fixed' reads
+ *  Store.isFixed. Also the shape Table._applyChipFilter's `patch.status` and
+ *  the Dashboard KPI-tile-click callers (still stopgap-typed, reached only via
+ *  the loose NIMBUS.Table ambient shim) pass in. */
+type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'fixed';
+
+/** Table._chipFilters — the Orders-tab filter-chip bar's live selection state. */
+interface TableChipFilters {
+  lines: Set<string>;
+  colors: Set<string>;
+  status: TableStatusFilter | null;
+  dateKey: string | null;
+  poMat: Set<string>;
+}
+
+/** Table._currentLayout()/_applySavedLayout()/_setLayoutEnabled() — the saved
+ *  grid-layout contract shape (Store.pref('gridLayout'), user tier). sortModel
+ *  is derived from columnState and stored only to honor the contract shape —
+ *  AG Grid v31 folds sort into columnState, so applyColumnState() alone
+ *  restores sorting. */
+interface TableGridLayout {
+  columnState: NimbusVendor.AgGridColumnState[] | null;
+  sortModel: Array<{ colId: string; sort: 'asc' | 'desc' | null }> | null;
+  filterModel: Record<string, unknown> | null;
+}
+
+/** Table's Ctrl+Y range-select mode — a {row, column} anchor/active corner pair. */
+interface TableRangeCell {
+  rowIndex: number | null;
+  colId: string;
+}
+
+/** Minimal AG Grid Column instance surface Table/ContextMenu code calls
+ *  (getAllDisplayedColumns()'s elements, and the column param threaded through
+ *  onCellMouseDown/onCellMouseOver/onCellKeyDown). */
+interface AgGridColumn {
+  getColId(): string;
+  getColDef(): TableColDef;
+}
+
+/** Minimal AG Grid RowNode surface Table's range-copy/cell-mouse/cell-key-down
+ *  code reads. */
+interface AgGridRowNode {
+  data: NimbusTask;
+  rowIndex: number | null;
+}
+
+/** Table's own column-def shape — a precise subset of AG Grid's ColDef, scoped
+ *  to the fields Table's columnDefs array actually sets. NimbusVendor.
+ *  AgGridOptions itself stays structurally loose ([key: string]: unknown) per
+ *  vendor.d.ts's own comment — this is Table's own precise shape assigned INTO
+ *  that loose contract, not a tightening of the vendor ambient type. */
+interface TableColDef {
+  headerName?: string;
+  field?: string;
+  width?: number;
+  minWidth?: number;
+  maxWidth?: number;
+  flex?: number;
+  hide?: boolean;
+  pinned?: 'left' | 'right';
+  lockPosition?: boolean;
+  suppressHeaderMenuButton?: boolean;
+  sortable?: boolean;
+  filter?: boolean;
+  resizable?: boolean;
+  editable?: boolean;
+  checkboxSelection?: boolean;
+  headerCheckboxSelection?: boolean;
+  tooltipField?: string;
+  headerTooltip?: string;
+  cellClass?: (p: { data: NimbusTask | null }) => string;
+  cellRenderer?: (p: { value: unknown }) => string;
+  cellEditor?: unknown;
+  cellEditorPopup?: boolean;
+  cellEditorParams?: () => Record<string, unknown>;
+  valueGetter?: (p: { data: NimbusTask }) => unknown;
+  valueFormatter?: (p: TableValueFormatterParams) => string;
+  valueParser?: (p: { newValue: string }) => unknown;
+}
+
+/** Shared by AG Grid's own valueFormatter invocation ({value}, from the column
+ *  render pipeline) and Table's manual re-invocations from the Ctrl+C single-
+ *  cell/range-copy paths (the richer object built by hand at those call sites). */
+interface TableValueFormatterParams {
+  value: unknown;
+  data?: NimbusTask;
+  node?: AgGridRowNode;
+  column?: AgGridColumn;
+  api?: NimbusVendor.AgGridApi;
+  colDef?: TableColDef;
+}
+
+/** Table._onCellChanged — AG Grid's onCellValueChanged event, scoped to the
+ *  fields that handler reads. */
+interface TableCellValueChangedEvent {
+  colDef: TableColDef;
+  data: NimbusTask;
+  newValue: unknown;
+  node: AgGridRowNode;
+}
+
+/** Shared by Table's onCellMouseDown/onCellMouseOver grid options. */
+interface TableCellMouseEvent {
+  event: MouseEvent;
+  node: AgGridRowNode;
+  column: AgGridColumn;
+}
+
+/** Table's onCellKeyDown grid option — Ctrl+Y range toggle / Ctrl+C copy / Esc. */
+interface TableCellKeyDownEvent {
+  event: KeyboardEvent;
+  api: NimbusVendor.AgGridApi;
+  column: AgGridColumn;
+  node: AgGridRowNode;
+  data: NimbusTask;
+}
+
+/** Table.init()'s onGridReady grid option. `columnApi` is AG Grid's pre-v31
+ *  column-API object — merged into the main Grid API in v31, so this field is
+ *  dead (assigned, never read: Table._colApi) but kept for parity with the
+ *  pre-existing runtime behavior (Global Constraints: no logic changes). */
+interface TableGridReadyEvent {
+  api: NimbusVendor.AgGridApi;
+  columnApi?: unknown;
+}
+
+/** Table._SearchableLineEditor's AG Grid CellEditorParams — the PRODUCTION_LINE
+ *  column's cellEditorParams() factory returns { values: () => string[] } (see
+ *  columnDefs above), and AG Grid merges in `value`/`api` itself at cell-edit-
+ *  start time. */
+interface TableLineEditorParams {
+  value: string | null;
+  values: string[] | (() => string[]);
+  api: NimbusVendor.AgGridApi;
+}
+
 /* =============================================================================
    TABLE — AG Grid integration with rich inline editing, filtering, and full
    two-way sync. Uses the transaction API for fast incremental updates.
    ========================================================================== */
 export const Table = {
-  _api:    null as any,
-  _colApi: null as any,
-  _selectedId: null as any,  // for the override modal
-  _noteOutsideHandler: null as any,
-  _noteKeyHandler: null as any,
-  _chipFilters: { lines: new Set<string>(), colors: new Set<string>(), status: null as any, dateKey: null as any, poMat: new Set<string>() },
+  _api:    null as NimbusVendor.AgGridApi | null,
+  _colApi: null as unknown,
+  _selectedId: null as string | null,  // for the override modal
+  _noteOutsideHandler: null as ((ev: MouseEvent) => void) | null,
+  _noteKeyHandler: null as ((ev: KeyboardEvent) => void) | null,
+  _chipFilters: { lines: new Set<string>(), colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>() } as TableChipFilters,
   _lineSearch:       '',
   _colorSearch:      '',
   _rangeMode:        false,
-  _rangeAnchor:      null as any,
-  _rangeActive:      null as any,
+  _rangeAnchor:      null as TableRangeCell | null,
+  _rangeActive:      null as TableRangeCell | null,
   _rangeDragOn:      false,
   _rangeHighlighted: new Set<string>(),
   _applyingLayout:   false,   // true while restoring saved layout — suppresses capture echo
-  _captureTimer:     null as any,
-  _fpOvrStart:       null as any,  // Flatpickr instance for the override modal's start-date input
+  _captureTimer:     null as ReturnType<typeof setTimeout> | null,
+  _fpOvrStart:       null as NimbusVendor.FlatpickrInstance | null,  // Flatpickr instance for the override modal's start-date input
   _suppressSelectionEcho: false,
 
   /* ── Saved grid layout (pref('gridLayout'), user tier) ────────────────────
@@ -1353,35 +1496,37 @@ export const Table = {
                              per the settings contract; AG Grid v31 folds sort into
                              columnState, so applyColumnState() alone restores sorting —
                              sortModel is derived and stored only to honor the contract shape. */
-  _layoutEnabled() { try { return Store.pref('gridLayout') != null; } catch { return false; } },
+  _layoutEnabled(): boolean { try { return Store.pref('gridLayout') != null; } catch { return false; } },
 
-  _currentLayout() {
+  _currentLayout(): TableGridLayout {
     if (!Table._api) return { columnState: null, sortModel: null, filterModel: null };
-    let columnState: any = null, filterModel: any = null, sortModel: any = null;
+    let columnState: NimbusVendor.AgGridColumnState[] | null = null;
+    let filterModel: Record<string, unknown> | null = null;
+    let sortModel: Array<{ colId: string; sort: 'asc' | 'desc' | null }> | null = null;
     try { columnState = Table._api.getColumnState(); } catch {}
     try { filterModel = Table._api.getFilterModel(); } catch {}
     if (columnState) {
       sortModel = columnState
-        .filter((c: any) => c.sort)
-        .sort((a: any, b: any) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
-        .map((c: any) => ({ colId: c.colId, sort: c.sort }));
+        .filter(c => c.sort)
+        .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map(c => ({ colId: c.colId, sort: c.sort ?? null }));
     }
     return { columnState, sortModel, filterModel };
   },
 
   // Debounced capture — guarded so programmatic restores don't echo back, and
   // a no-op while the feature is disabled.
-  _captureLayout() {
+  _captureLayout(): void {
     if (Table._applyingLayout || !Table._layoutEnabled()) return;
-    clearTimeout(Table._captureTimer);
+    clearTimeout(Table._captureTimer ?? undefined);
     Table._captureTimer = setTimeout(() => {
       if (!Table._layoutEnabled()) return;
       try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
     }, 400);
   },
 
-  _applySavedLayout() {
-    const layout: any = (() => { try { return Store.pref('gridLayout'); } catch { return null; } })();
+  _applySavedLayout(): void {
+    const layout = (() => { try { return Store.pref('gridLayout') as TableGridLayout | null; } catch { return null; } })();
     if (!layout || !Table._api) return;
     Table._applyingLayout = true;
     try {
@@ -1391,8 +1536,8 @@ export const Table = {
       if (layout.filterModel && typeof layout.filterModel === 'object') {
         Table._api.setFilterModel(layout.filterModel);
       }
-    } catch (e: any) {
-      ErrorLog.warn('table', `Apply saved grid layout failed: ${e.message}`);
+    } catch (e: unknown) {
+      ErrorLog.warn('table', `Apply saved grid layout failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     // Release the guard on the next macrotask so any events the restore fired
     // (sync or queued) are all ignored, but genuine later user edits are not.
@@ -1401,7 +1546,7 @@ export const Table = {
 
   // Turn the feature on (capture current live layout) or off (null it + reset
   // the grid to defaults). Called by the User Settings toggle.
-  _setLayoutEnabled(on: any) {
+  _setLayoutEnabled(on: boolean): void {
     if (on) {
       try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
     } else {
@@ -1411,14 +1556,14 @@ export const Table = {
   },
 
   // Reset the live grid to its default column arrangement + clear column filters.
-  _resetGridState() {
+  _resetGridState(): void {
     if (!Table._api) return;
     Table._applyingLayout = true;
     try {
       Table._api.resetColumnState();
       Table._api.setFilterModel(null);
-    } catch (e: any) {
-      ErrorLog.warn('table', `Reset grid layout failed: ${e.message}`);
+    } catch (e: unknown) {
+      ErrorLog.warn('table', `Reset grid layout failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     setTimeout(() => { Table._applyingLayout = false; }, 0);
   },
@@ -1426,7 +1571,7 @@ export const Table = {
   // "Reset grid layout" action: reset the live grid, then — if the feature is
   // on — re-capture the now-default state so it persists (staying non-null keeps
   // the toggle on). Returns true if the grid was available to reset.
-  _resetGridLayout() {
+  _resetGridLayout(): boolean {
     if (!Table._api) return false;
     Table._resetGridState();
     if (Table._layoutEnabled()) {
@@ -1435,12 +1580,12 @@ export const Table = {
     return true;
   },
 
-  init() {
+  init(): void {
     const el = document.getElementById('ag-grid');
     if (!el || typeof agGrid === 'undefined') return;
-    const gridOptions: any = {
+    const gridOptions = {
       rowData: Store.tasksForSelectedPlant(),
-      getRowId: (p: any) => String(p.data.id),
+      getRowId: (p: { data: NimbusTask }) => String(p.data.id),
       rowSelection: 'multiple',
       rowMultiSelectWithClick: true,
       animateRows: false,
@@ -1451,7 +1596,7 @@ export const Table = {
         resizable: true,
         flex: 1,
         minWidth: 100,
-        cellClass: (p: any) => Table._rowClass(p.data)
+        cellClass: (p: { data: NimbusTask | null }) => Table._rowClass(p.data)
       },
       columnDefs: [
         {
@@ -1474,26 +1619,26 @@ export const Table = {
           width: 42, minWidth: 42, maxWidth: 42, flex: 0,
           pinned: 'left',
           editable: false,
-          cellRenderer: (p: any) => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          cellRenderer: (p: { value: unknown }) => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
           headerTooltip: Util.t('tip.fixed_column')
         },
         { headerName: Util.t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
           editable: false, cellClass: 'cell-num' },
         { headerName: Util.t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
           pinned: 'left', editable: false,
-          valueGetter: (p: any) => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
+          valueGetter: (p: { data: NimbusTask }) => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
         { headerName: Util.t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
           tooltipField: 'MATERIAL_DESCRIPTION' },
         { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
           editable: false, cellClass: 'cell-num',
-          valueParser: (p: any) => parseFloat(p.newValue) || 0 },
+          valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
           cellEditorPopup: true,
           cellEditorParams: () => ({ values: Table._getLineOptions() }),
-          cellRenderer: (p: any) => {
+          cellRenderer: (p: { value: unknown }) => {
             if (!p.value) return '';
-            const ci = Timeline._colorIndex(p.value);
+            const ci = Timeline._colorIndex(String(p.value));
             const color = Config.COLORS[ci % Config.COLORS.length];
             return `<span class="cell-line-tag"><span class="dot" style="background:${color}"></span>${p.value}</span>`;
           }
@@ -1502,7 +1647,7 @@ export const Table = {
         { headerName: Util.t('col.form'),  field: 'FORM_SIZE', width: 90, flex: 0, editable: false },
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
           cellClass: 'cell-num',
-          valueParser: (p: any) => parseFloat(p.newValue) || 0 },
+          valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
           editable: false,
           // Display-only derived value (due date minus RUN_TIME — see
@@ -1512,24 +1657,24 @@ export const Table = {
           // date-type inference off the raw field still drives this
           // column's sort + agDateColumnFilter; dropping `field` entirely
           // would degrade the filter to generic/text.
-          valueGetter: (p: any) => Util.impliedOriginalStart(p.data),
-          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
+          valueGetter: (p: { data: NimbusTask }) => Util.impliedOriginalStart(p.data),
+          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.orig_end'), field: 'original_end_date', minWidth: 160,
           editable: false,
-          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
           editable: true,
-          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellEditor: Table._DateTimeEditor,
           cellClass: 'cell-date' },
         { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
           editable: false,
-          valueFormatter: (p: any) => Util.fmtDTReadable(p.value),
+          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date' },
         { headerName: Util.t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
-          cellRenderer: (p: any) => {
+          cellRenderer: (p: { value: unknown }) => {
             const rel = Store.alertsByTask().get(String(p.value)) || [];
             if (!rel.length) return '';
             const err = rel.some(a => a.sev === 'err');
@@ -1544,7 +1689,7 @@ export const Table = {
           sortable: false, filter: false, editable: true, suppressHeaderMenuButton: true,
           cellEditor: 'agLargeTextCellEditor', cellEditorPopup: true,
           cellEditorParams: { maxLength: 500, rows: 5, cols: 50 },
-          cellRenderer: (p: any) => {
+          cellRenderer: (p: { value: unknown }) => {
             const note = p.value != null ? String(p.value).trim() : '';
             if (!note) return `<span class="nb-note-empty">✎ <em>${Util.t('ui.add_note')}</em></span>`;
             const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
@@ -1552,13 +1697,13 @@ export const Table = {
             return `<span class="nb-note-preview" title="${esc}">✎ ${preview}</span>`;
           }
         }
-      ],
+      ] as TableColDef[],
       onCellValueChanged: Table._onCellChanged,
       onSelectionChanged: Table._onSelectionChanged,
       isExternalFilterPresent: () => Table._hasChipFilters(),
-      doesExternalFilterPass: (node: any) => Table._taskPassesChipFilters(node.data),
+      doesExternalFilterPass: (node: { data: NimbusTask }) => Table._taskPassesChipFilters(node.data),
       noRowsOverlayComponent: Table._NoRowsOverlay,
-      onCellMouseDown: (p: any) => {
+      onCellMouseDown: (p: TableCellMouseEvent) => {
         if (!Table._rangeMode) return;
         p.event.preventDefault();
         Table._rangeAnchor  = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
@@ -1567,12 +1712,12 @@ export const Table = {
         Table._applyRangeHighlight();
         document.addEventListener('mouseup', () => { Table._rangeDragOn = false; }, { once: true });
       },
-      onCellMouseOver: (p: any) => {
+      onCellMouseOver: (p: TableCellMouseEvent) => {
         if (!Table._rangeMode || !Table._rangeDragOn) return;
         Table._rangeActive = { rowIndex: p.node.rowIndex, colId: p.column.getColId() };
         Table._applyRangeHighlight();
       },
-      onCellKeyDown: (p: any) => {
+      onCellKeyDown: (p: TableCellKeyDownEvent) => {
         const ctrl = p.event.ctrlKey || p.event.metaKey;
         const key  = p.event.key;
         if (ctrl && key === 'y') {
@@ -1586,13 +1731,13 @@ export const Table = {
           } else {
             const raw = p.api.getValue(p.column.getColId(), p.node);
             const colDef = p.column.getColDef();
-            let text = raw;
+            let text: unknown = raw;
             if (colDef.valueFormatter) {
               const fmt = colDef.valueFormatter({ value: raw, data: p.data, node: p.node, column: p.column, api: p.api, colDef });
               if (fmt != null) text = fmt;
             }
             navigator.clipboard?.writeText(text == null ? '' : String(text)).catch(() => {});
-            const cell = p.event.target?.closest?.('.ag-cell');
+            const cell = (p.event.target as Element | null)?.closest('.ag-cell');
             if (cell) {
               cell.classList.add('ag-cell-copy-flash');
               setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380);
@@ -1613,7 +1758,7 @@ export const Table = {
       onColumnVisible:  () => Table._captureLayout(),
       onColumnPinned:   () => Table._captureLayout(),
       onFilterChanged:  () => Table._captureLayout(),
-      onGridReady: (params: any) => {
+      onGridReady: (params: TableGridReadyEvent) => {
         Table._api = params.api;
         Table._colApi = params.columnApi;
         Table._wireQuickFilter();
@@ -1638,8 +1783,9 @@ export const Table = {
         if (d) d.hidden = true;
       });
     };
-    document.addEventListener('mousedown', (e: any) => {
-      if (!e.target.closest || !e.target.closest('#table-filterbar')) {
+    document.addEventListener('mousedown', (e: MouseEvent) => {
+      const target = e.target as Element | null;
+      if (!target?.closest || !target.closest('#table-filterbar')) {
         closeAllChipDropdowns();
       }
     }, true);
@@ -1650,16 +1796,20 @@ export const Table = {
   },
 
   // ── Filter chip bar ──────────────────────────────────────────────────
-  _initChipFilters() {
+  _initChipFilters(): void {
     Table._refreshChipDropdowns();
     Table._refreshChipButtons();
 
-    const lineIn: any  = document.getElementById('tbl-flt-line-paste-input');
-    const colorIn: any = document.getElementById('tbl-flt-color-paste-input');
-    Util.wirePasteToCheckboxes(lineIn,
-      () => (document.getElementById('tbl-flt-line-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
-    Util.wirePasteToCheckboxes(colorIn,
-      () => (document.getElementById('tbl-flt-color-checklist')?.querySelectorAll('input[type=checkbox]') || []) as any);
+    const lineIn  = document.getElementById('tbl-flt-line-paste-input') as HTMLInputElement | null;
+    const colorIn = document.getElementById('tbl-flt-color-paste-input') as HTMLInputElement | null;
+    if (lineIn) {
+      Util.wirePasteToCheckboxes(lineIn,
+        () => Array.from(document.getElementById('tbl-flt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
+    if (colorIn) {
+      Util.wirePasteToCheckboxes(colorIn,
+        () => Array.from(document.getElementById('tbl-flt-color-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
     // Scale mandate (CLAUDE.md Production Scale Roadmap): line/color pickers must
     // stay filterable, not a bare scrollable checkbox list — matches the Gantt tab's
     // identical filter bar. Paste-to-select (above) and type-to-filter (below) share
@@ -1675,12 +1825,12 @@ export const Table = {
     document.getElementById('tbl-flt-pomat-clear')?.addEventListener('click', Table._clearPoMat);
   },
 
-  _hasChipFilters() {
+  _hasChipFilters(): boolean {
     const f = Table._chipFilters;
     return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null || f.poMat.size > 0;
   },
 
-  _taskPassesChipFilters(data: any) {
+  _taskPassesChipFilters(data: NimbusTask | null): boolean {
     if (!data) return false;
     const f = Table._chipFilters;
     if (f.lines.size > 0 && !f.lines.has(data.PRODUCTION_LINE)) return false;
@@ -1702,7 +1852,7 @@ export const Table = {
     return true;
   },
 
-  _toggleChipDropdown(kind: any) {
+  _toggleChipDropdown(kind: string): void {
     const d = document.getElementById(`tbl-flt-${kind}-dropdown`);
     if (!d) return;
     // Close peers
@@ -1715,7 +1865,7 @@ export const Table = {
     d.hidden = !d.hidden;
   },
 
-  _refreshChipDropdowns() {
+  _refreshChipDropdowns(): void {
     Table._buildLineChipDropdown();
     Table._buildColorChipDropdown();
     Table._buildStatusChipDropdown();
@@ -1725,26 +1875,26 @@ export const Table = {
   // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
   // must stay filterable — this is the Orders tab's share of that, matching the
   // Gantt tab's identical filter bar.
-  _filterLineSearch(q: any) {
+  _filterLineSearch(q: string): void {
     Table._lineSearch = q || '';
     Table._buildLineChipDropdown();
   },
-  _filterColorSearch(q: any) {
+  _filterColorSearch(q: string): void {
     Table._colorSearch = q || '';
     Table._buildColorChipDropdown();
   },
 
   // Clears the line/color live-search text and its <input> values without
   // touching selections — shared by the plant-change handler and clear filters.
-  _resetChipSearch() {
+  _resetChipSearch(): void {
     Table._lineSearch = Table._colorSearch = '';
-    const lineIn: any  = document.getElementById('tbl-flt-line-paste-input');
-    const colorIn: any = document.getElementById('tbl-flt-color-paste-input');
+    const lineIn  = document.getElementById('tbl-flt-line-paste-input') as HTMLInputElement | null;
+    const colorIn = document.getElementById('tbl-flt-color-paste-input') as HTMLInputElement | null;
     if (lineIn)  lineIn.value  = '';
     if (colorIn) colorIn.value = '';
   },
 
-  _buildLineChipDropdown() {
+  _buildLineChipDropdown(): void {
     const drop = document.getElementById('tbl-flt-line-checklist');
     if (!drop) return;
     const lineSet = new Set<string>();
@@ -1759,13 +1909,13 @@ export const Table = {
     }
     const q = Table._lineSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
   },
 
-  _buildColorChipDropdown() {
+  _buildColorChipDropdown(): void {
     const drop = document.getElementById('tbl-flt-color-checklist');
     if (!drop) return;
     const colorSet = new Set<string>();
@@ -1778,17 +1928,17 @@ export const Table = {
     }
     const q = Table._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
   },
 
-  _buildStatusChipDropdown() {
+  _buildStatusChipDropdown(): void {
     const drop = document.getElementById('tbl-flt-status-dropdown');
     if (!drop) return;
     const cur = Table._chipFilters.status;
-    const items = [
+    const items: Array<{ v: TableStatusFilter; k: string; d: string }> = [
       { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
@@ -1809,7 +1959,7 @@ export const Table = {
          </label>`;
   },
 
-  _buildDateChipDropdown() {
+  _buildDateChipDropdown(): void {
     const drop = document.getElementById('tbl-flt-date-dropdown');
     if (!drop) return;
     const today = Util.startOfDay(new Date())!;
@@ -1836,7 +1986,7 @@ export const Table = {
          </label>`;
   },
 
-  _onChipChange(kind: any, input: any) {
+  _onChipChange(kind: string, input: HTMLInputElement): void {
     const f = Table._chipFilters;
     if (kind === 'line') {
       if (input.checked) f.lines.add(input.value);
@@ -1845,7 +1995,7 @@ export const Table = {
       if (input.checked) f.colors.add(input.value.toUpperCase());
       else               f.colors.delete(input.value.toUpperCase());
     } else if (kind === 'status') {
-      f.status = input.value || null;
+      f.status = (input.value || null) as TableStatusFilter | null;
     } else if (kind === 'date') {
       f.dateKey = input.value || null;
     }
@@ -1858,13 +2008,13 @@ export const Table = {
     }
   },
 
-  _clearChipFilters() {
+  _clearChipFilters(): void {
     Table._chipFilters.lines.clear();
     Table._chipFilters.colors.clear();
     Table._chipFilters.status = null;
     Table._chipFilters.dateKey = null;
     Table._chipFilters.poMat.clear();
-    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
+    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (ta) ta.value = '';
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) cnt.textContent = '';
@@ -1877,8 +2027,8 @@ export const Table = {
     if (Table._api) Table._api.onFilterChanged();
   },
 
-  _onPoMatApply() {
-    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
+  _onPoMatApply(): void {
+    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
     Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
     const cnt = document.getElementById('tbl-flt-pomat-count');
@@ -1890,8 +2040,8 @@ export const Table = {
     if (Table._api) Table._api.onFilterChanged();
   },
 
-  _onPoMatPaste(e: any) {
-    const text = (e.clipboardData || (window as any).clipboardData).getData('text/plain');
+  _onPoMatPaste(e: ClipboardEvent): void {
+    const text = (e.clipboardData || (window as unknown as { clipboardData?: DataTransfer }).clipboardData)?.getData('text/plain');
     if (!text || !text.trim()) return;
     const known = new Set<string>();
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
@@ -1902,9 +2052,9 @@ export const Table = {
     if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
   },
 
-  _clearPoMat() {
+  _clearPoMat(): void {
     Table._chipFilters.poMat.clear();
-    const ta: any = document.getElementById('tbl-flt-pomat-textarea');
+    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (ta) ta.value = '';
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) cnt.textContent = '';
@@ -1913,7 +2063,7 @@ export const Table = {
   },
 
   /** Driven from KPI tile clicks on the dashboard. Sets state, refreshes UI, re-filters grid. */
-  _applyChipFilter(patch: any) {
+  _applyChipFilter(patch: { status?: TableStatusFilter | null; dateKey?: string | null; lines?: string[]; colors?: string[] }): void {
     const f = Table._chipFilters;
     if ('status' in patch)  f.status  = patch.status  || null;
     if ('dateKey' in patch) f.dateKey = patch.dateKey || null;
@@ -1924,12 +2074,12 @@ export const Table = {
     if (Table._api) Table._api.onFilterChanged();
   },
 
-  _refreshChipButtons() {
+  _refreshChipButtons(): void {
     const plant = !!Store.selectedPlant;
     const f = Table._chipFilters;
 
-    const set = (btnId: any, lblId: any, txt: any, active: any) => {
-      const b: any = document.getElementById(btnId);
+    const set = (btnId: string, lblId: string, txt: string, active: boolean) => {
+      const b = document.getElementById(btnId) as HTMLButtonElement | null;
       const l = document.getElementById(lblId);
       if (b) { b.disabled = !plant; b.classList.toggle('active', !!active); }
       if (l) l.textContent = txt;
@@ -1947,7 +2097,7 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL: any = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
+    const STATUS_LABEL: Record<TableStatusFilter, string> = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);
@@ -1983,7 +2133,7 @@ export const Table = {
     }
   },
 
-  _onStore(evt: any) {
+  _onStore(evt: StoreEvent): void {
     if (evt.source === 'table' && evt.type !== 'fixed:change') return;
     if (!Table._api) return;
     if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected'
@@ -1998,7 +2148,7 @@ export const Table = {
         Table._chipFilters.status = null;
         Table._chipFilters.dateKey = null;
         Table._chipFilters.poMat.clear();
-        const ta: any = document.getElementById('tbl-flt-pomat-textarea');
+        const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
         if (ta) ta.value = '';
         const cnt = document.getElementById('tbl-flt-pomat-count');
         if (cnt) cnt.textContent = '';
@@ -2010,30 +2160,33 @@ export const Table = {
         ErrorLog.info('table', `Rebuilt grid with ${rows.length} rows`);
       }
     } else if (evt.type === 'tasks:bulkUpdate') {
-      const updated = evt.ids
-        .map((id: any) => Store.tasks[id])
-        .filter((t: any) => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+      const ids = (evt.ids as Array<string | number> | undefined) ?? [];
+      const updated = ids
+        .map(id => Store.tasks[id])
+        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
-      const t = Store.tasks[evt.id];
+      const t = Store.tasks[String(evt.id)];
       if (t && Store.selectedPlant
           && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant) {
         Table._api.applyTransaction({ update: [t] });
       }
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'fixed:change') {
-      const updated = evt.ids
-        .map((id: any) => Store.tasks[id])
-        .filter((t: any) => t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+      const ids = (evt.ids as Array<string | number> | undefined) ?? [];
+      const updated = ids
+        .map(id => Store.tasks[id])
+        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
       // Incremental update: only refresh rows for task IDs that changed alert membership.
       // Fall back to full refresh if changedIds is absent (unscoped recompute).
-      if (evt.changedIds && evt.changedIds.length) {
+      const changedIds = evt.changedIds as Array<string | number> | undefined;
+      if (changedIds && changedIds.length) {
         const rowNodes = [];
-        for (const taskId of evt.changedIds) {
+        for (const taskId of changedIds) {
           const rowNode = Table._api.getRowNode(String(taskId));
           if (rowNode) rowNodes.push(rowNode);
         }
@@ -2051,8 +2204,8 @@ export const Table = {
     Table._refreshChipButtons();
   },
 
-  _renderEmptyState() {
-    const grid = document.getElementById('ag-grid');
+  _renderEmptyState(): void {
+    const grid = document.getElementById('ag-grid') as HTMLElement | null;
     let overlay = document.getElementById('table-empty-overlay');
     if (!Store.selectedPlant) {
       if (!overlay) {
@@ -2078,11 +2231,11 @@ export const Table = {
   // the app's own EmptyState component instead of AG Grid's raw default text,
   // and offers a one-click way out when filters are the cause.
   _NoRowsOverlay: class {
-    _eGui: any;
-    init() {
+    _eGui!: HTMLDivElement;
+    init(): void {
       const filtered = Table._hasChipFilters()
         || (Table._api && Table._api.isAnyFilterPresent())
-        || !!(document.getElementById('quick-filter') as any)?.value;
+        || !!(document.getElementById('quick-filter') as HTMLInputElement | null)?.value;
       this._eGui = document.createElement('div');
       NIMBUS!.EmptyState!.render!(this._eGui, filtered
         ? { title: Util.t('empty.no_orders_filtered_title'), msg: Util.t('empty.no_orders_filtered_msg'), icon: '⌕' }
@@ -2095,61 +2248,61 @@ export const Table = {
         btn.textContent = Util.t('btn.clear_filters');
         btn.onclick = () => {
           Table._clearChipFilters();
-          const qf: any = document.getElementById('quick-filter');
-          if (qf) { qf.value = ''; Table._api.setGridOption('quickFilterText', ''); }
+          const qf = document.getElementById('quick-filter') as HTMLInputElement | null;
+          if (qf) { qf.value = ''; Table._api!.setGridOption('quickFilterText', ''); }
         };
         this._eGui.querySelector('.nimbus-empty-state')?.appendChild(btn);
       }
     }
-    getGui() { return this._eGui; }
+    getGui(): HTMLDivElement { return this._eGui; }
   },
 
   /** Called when a grid cell is edited. Push the change through the store. */
-  _onCellChanged(p: any) {
+  _onCellChanged(p: TableCellValueChangedEvent): void {
     const field = p.colDef.field;
     const id = String(p.data.id);
-    const changes: any = {};
+    const changes: Partial<NimbusTask> = {};
 
     if (field === 'start_date') {
       const d = Util.parseDate(p.newValue);
-      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api.refreshCells({ rowNodes: [p.node] }); return; }
+      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
       changes.start_date = Util.snap(d);
       // recompute end based on RUN_TIME
       const dur = Util.runHours(p.data) * Config.MS_HOUR;
       if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
     } else if (field === 'RUN_TIME') {
-      const h = parseFloat(p.newValue) || 0;
+      const h = parseFloat(String(p.newValue)) || 0;
       changes.RUN_TIME = h;
       if (p.data.start_date) {
         changes.end_date = new Date(p.data.start_date.getTime() + h * Config.MS_HOUR);
       }
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
-      changes[field] = parseFloat(p.newValue) || 0;
+      changes[field] = parseFloat(String(p.newValue)) || 0;
     } else if (field === 'notes') {
-      const trimmed = (p.newValue || '').trim();
+      const trimmed = String(p.newValue ?? '').trim();
       Store.updateTask(id, { notes: trimmed }, 'table');
-      Table._api.applyTransaction({ update: [Store.tasks[id]] });
+      Table._api!.applyTransaction({ update: [Store.tasks[id]] });
       Inspector._persistNote(id, trimmed);
       Toast.show(Util.t('toast.row_updated'), 'success', 1200);
       return;
     } else {
-      changes[field] = p.newValue;
+      changes[field!] = p.newValue;
     }
 
     Store.updateTask(id, changes, 'table');
-    Table._api.applyTransaction({ update: [Store.tasks[id]] });
+    Table._api!.applyTransaction({ update: [Store.tasks[id]] });
     Engine.autoReflow(id);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
   },
 
-  _onSelectionChanged() {
+  _onSelectionChanged(): void {
     if (!Table._api) return;
-    const sel = Table._api.getSelectedRows();
+    const sel = Table._api.getSelectedRows() as NimbusTask[];
     Table._selectedId = sel.length === 1 ? String(sel[0].id) : null;
   },
 
-  _onRowClicked(event: any) {
+  _onRowClicked(event: { data?: NimbusTask }): void {
     if (!event.data) return;
     const task = Store.tasks[event.data.id];
     if (task) {
@@ -2161,14 +2314,15 @@ export const Table = {
       Inspector.show(task);
     }
   },
- _rowClass(data: any) {      if (!data) return '';
+  _rowClass(data: NimbusTask | null): string {
+    if (!data) return '';
     const ids = Store.alertsByTask().get(String(data.id)) || [];
     if (ids.some(a => a.sev === 'err')) return 'row-alert';
     if (ids.some(a => a.sev === 'warn')) return 'row-warn';
     return '';
   },
 
-  _getLineOptions() {
+  _getLineOptions(): string[] {
     if (Store.selectedPlant) return Store.linesForSelectedPlant();
     // No plant selected — fall back to the unscoped view rather than showing nothing.
     const set = new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'));
@@ -2176,36 +2330,36 @@ export const Table = {
     return [...set].sort();
   },
 
-  _wireQuickFilter() {
-    const inp: any = document.getElementById('quick-filter');
+  _wireQuickFilter(): void {
+    const inp = document.getElementById('quick-filter') as HTMLInputElement | null;
     if (!inp || !Table._api) return;
     inp.addEventListener('input', () => {
-      Table._api.setGridOption('quickFilterText', inp.value);
+      Table._api!.setGridOption('quickFilterText', inp.value);
     });
   },
 
   /* ---- public actions: fixing, override modal, export ------------------ */
-  fixSelected(fixed: any) {
+  fixSelected(fixed: boolean): void {
     if (!Table._api) return;
-    const sel = Table._api.getSelectedRows();
+    const sel = Table._api.getSelectedRows() as NimbusTask[];
     if (!sel.length) { Toast.show(Util.t('toast.select_rows_first'), 'warn'); return; }
-    const ids = sel.map((r: any) => String(r.id));
+    const ids = sel.map(r => String(r.id));
     Store.setFixed(ids, fixed, 'table');
     Alerts.scheduleRecompute();
   },
 
-  openOverrideModal() {
-    const sel = Table._api ? Table._api.getSelectedRows() : [];
+  openOverrideModal(): void {
+    const sel = (Table._api ? Table._api.getSelectedRows() : []) as NimbusTask[];
     if (sel.length !== 1) { Toast.show(Util.t('toast.select_one_row'), 'warn'); return; }
     Table._openOverrideModalForId(String(sel[0].id));
   },
 
-  _openOverrideModalForId(id: any) {
+  _openOverrideModalForId(id: string): void {
     const t = Store.tasks[id];
     if (!t) return;
     const orderEl = document.getElementById('ovr-order');
-    const lineEl: any = document.getElementById('ovr-line');
-    const fixEl: any = document.getElementById('ovr-fix');
+    const lineEl = document.getElementById('ovr-line') as HTMLSelectElement | null;
+    const fixEl = document.getElementById('ovr-fix') as HTMLInputElement | null;
     if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     Table._selectedId = id;
@@ -2213,27 +2367,27 @@ export const Table = {
     if (!Table._fpOvrStart) {
       Table._fpOvrStart = Util.fpDatetime('#ovr-start');
     }
-    Table._fpOvrStart.setDate(t.start_date, false);
+    Table._fpOvrStart.setDate(t.start_date!, false);
     const lines = Table._getLineOptions();
     lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('');
     fixEl.checked = !!t.fixed;
     Modal.open('modal-override');
   },
 
-  applyOverride() {
+  applyOverride(): void {
     const id = Table._selectedId;
     if (!id) return;
     const t = Store.tasks[id];
     if (!t) return;
-    const startEl: any = document.getElementById('ovr-start');
-    const lineEl: any = document.getElementById('ovr-line');
-    const fixEl: any = document.getElementById('ovr-fix');
+    const startEl = document.getElementById('ovr-start') as HTMLInputElement | null;
+    const lineEl = document.getElementById('ovr-line') as HTMLSelectElement | null;
+    const fixEl = document.getElementById('ovr-fix') as HTMLInputElement | null;
     if (!startEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     const newStart = Util.parseDate(startEl.value);
     const newLine  = lineEl.value;
     const alsoFix  = fixEl.checked;
-    if (!newStart) { Toast.show((window as any).t('toast.invalid_date'), 'error'); return; }
+    if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
 
     const dur = Util.runHours(t) * Config.MS_HOUR;
     const snapped = Util.snap(newStart);
@@ -2251,15 +2405,15 @@ export const Table = {
     // but we DO recompute alerts so conflicts become visible.
     Alerts.scheduleRecompute();
     Modal.close('modal-override');
-    Toast.show(alsoFix ? (window as any).t('toast.order_overridden_fixed') : (window as any).t('toast.order_overridden'), 'success');
+    Toast.show(alsoFix ? Util.t('toast.order_overridden_fixed') : Util.t('toast.order_overridden'), 'success');
   },
 
-  exportCsv() {
+  exportCsv(): void {
     if (!Table._api) return;
     Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv' });
   },
 
-  _toggleRangeMode() {
+  _toggleRangeMode(): void {
     const badge  = document.getElementById('orders-copy-badge');
     const gridEl = document.getElementById('ag-grid');
     if (Table._rangeMode) {
@@ -2271,19 +2425,19 @@ export const Table = {
     }
   },
 
-  _applyRangeHighlight() {
+  _applyRangeHighlight(): void {
     if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
     const gridEl = document.getElementById('ag-grid');
     if (!gridEl) return;
-    const cols   = Table._api.getAllDisplayedColumns();
-    const colIds = cols.map((c: any) => c.getColId());
+    const cols   = Table._api.getAllDisplayedColumns() as AgGridColumn[];
+    const colIds = cols.map(c => c.getColId());
     const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
     const bIdx   = colIds.indexOf(Table._rangeActive.colId);
     if (aIdx === -1 || bIdx === -1) return;
     const minCol = Math.min(aIdx, bIdx);
     const maxCol = Math.max(aIdx, bIdx);
-    const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
-    const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
+    const minRow = Math.min(Table._rangeAnchor.rowIndex ?? 0, Table._rangeActive.rowIndex ?? 0);
+    const maxRow = Math.max(Table._rangeAnchor.rowIndex ?? 0, Table._rangeActive.rowIndex ?? 0);
     const newSet = new Set<string>();
     for (let ri = minRow; ri <= maxRow; ri++) {
       for (let ci = minCol; ci <= maxCol; ci++) {
@@ -2307,7 +2461,7 @@ export const Table = {
     Table._rangeHighlighted = newSet;
   },
 
-  _clearRange() {
+  _clearRange(): void {
     const gridEl = document.getElementById('ag-grid');
     Table._rangeHighlighted.forEach(key => {
       const sep = key.indexOf('|');
@@ -2323,28 +2477,28 @@ export const Table = {
     gridEl?.classList.remove('nimbus-range-mode');
   },
 
-  _copyRange() {
+  _copyRange(): void {
     if (!Table._rangeAnchor || !Table._rangeActive || !Table._api) return;
-    const cols   = Table._api.getAllDisplayedColumns();
-    const colIds = cols.map((c: any) => c.getColId());
+    const cols   = Table._api.getAllDisplayedColumns() as AgGridColumn[];
+    const colIds = cols.map(c => c.getColId());
     const aIdx   = colIds.indexOf(Table._rangeAnchor.colId);
     const bIdx   = colIds.indexOf(Table._rangeActive.colId);
     if (aIdx === -1 || bIdx === -1) return;
     const minCol = Math.min(aIdx, bIdx);
     const maxCol = Math.max(aIdx, bIdx);
-    const minRow = Math.min(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
-    const maxRow = Math.max(Table._rangeAnchor.rowIndex, Table._rangeActive.rowIndex);
-    const rowStrs: any[] = [];
+    const minRow = Math.min(Table._rangeAnchor.rowIndex ?? 0, Table._rangeActive.rowIndex ?? 0);
+    const maxRow = Math.max(Table._rangeAnchor.rowIndex ?? 0, Table._rangeActive.rowIndex ?? 0);
+    const rowStrs: string[] = [];
     for (let ri = minRow; ri <= maxRow; ri++) {
-      const node = Table._api.getDisplayedRowAtIndex(ri);
+      const node = Table._api.getDisplayedRowAtIndex(ri) as AgGridRowNode | undefined;
       if (!node) continue;
-      const cells: any[] = [];
+      const cells: string[] = [];
       for (let ci = minCol; ci <= maxCol; ci++) {
         const colId  = colIds[ci];
         const col    = cols[ci];
         const raw    = Table._api.getValue(colId, node);
         const colDef = col.getColDef();
-        let text = raw;
+        let text: unknown = raw;
         if (colDef.valueFormatter) {
           const fmt = colDef.valueFormatter({ value: raw, data: node.data, node, column: col, api: Table._api, colDef });
           if (fmt != null) text = fmt;
@@ -2368,13 +2522,13 @@ export const Table = {
     Table._clearRange();
   },
 
-  _showAlertPopup(taskId: any) {
+  _showAlertPopup(taskId: string): void {
     const rel = Store.alertsByTask().get(String(taskId)) || [];
     if (!rel.length) return;
     const t = Store.tasks[taskId];
     const po = t?.PRODUCTION_ORDER || t?.ORDER || String(taskId).slice(0, 8);
-    const _esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
+    const _esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
 
     const rows = rel.map(a => {
       const icon  = a.sev === 'err' ? '🔴' : '🟡';
@@ -2404,19 +2558,20 @@ export const Table = {
     document.body.appendChild(dlg);
     try { dlg.showModal(); } catch { dlg.open = true; }
     dlg.addEventListener('close', () => dlg.remove());
-    dlg.addEventListener('click', (e: any) => {
-      if (e.target === dlg || e.target.closest('[data-alert-close]')) { dlg.close(); return; }
-      const btn = e.target.closest('[data-alert-id]');
-      if (btn) { dlg.close(); NIMBUS!.AlertsUIAdapter!.focus!(btn.dataset.alertId); }
+    dlg.addEventListener('click', (e: MouseEvent) => {
+      const target = e.target as Element | null;
+      if (target === dlg || target?.closest('[data-alert-close]')) { dlg.close(); return; }
+      const btn = target?.closest('[data-alert-id]') as HTMLElement | null;
+      if (btn) { dlg.close(); NIMBUS!.AlertsUIAdapter!.focus!(btn.dataset.alertId ?? ''); }
     });
   },
 
-  _showNotePopover(e: any, id: any) {
+  _showNotePopover(e: MouseEvent, id: string): void {
     Table._closeNotePopover();
     const task = Store.tasks[id];
     if (!task) return;
-    const _esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
+    const _esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
 
     const pop = document.createElement('div');
     pop.id = 'nb-note-popover';
@@ -2436,7 +2591,7 @@ export const Table = {
       </div>`;
     document.body.appendChild(pop);
 
-    const btn = e.target.closest('button') || e.target;
+    const btn = (e.target as Element | null)?.closest('button') as HTMLElement ?? (e.target as HTMLElement);
     const rect = btn.getBoundingClientRect();
     const popW = 284;
     let left = Math.max(4, Math.min(rect.left, window.innerWidth - popW - 4));
@@ -2452,7 +2607,7 @@ export const Table = {
       pop.style.top = top + 'px';
     });
 
-    const ta: any = document.getElementById('nb-note-ta');
+    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
     const cnt = document.getElementById('nb-note-cnt');
     if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
     ta.addEventListener('input', () => {
@@ -2462,15 +2617,15 @@ export const Table = {
     ta.setSelectionRange(ta.value.length, ta.value.length);
 
     setTimeout(() => {
-      Table._noteOutsideHandler = (ev: any) => { if (!pop.contains(ev.target)) Table._closeNotePopover(); };
+      Table._noteOutsideHandler = (ev: MouseEvent) => { if (!pop.contains(ev.target as Node)) Table._closeNotePopover(); };
       document.addEventListener('mousedown', Table._noteOutsideHandler);
     }, 0);
-    Table._noteKeyHandler = (ev: any) => { if (ev.key === 'Escape') Table._closeNotePopover(); };
+    Table._noteKeyHandler = (ev: KeyboardEvent) => { if (ev.key === 'Escape') Table._closeNotePopover(); };
     document.addEventListener('keydown', Table._noteKeyHandler);
   },
 
-  _saveNotePopover(id: any) {
-    const ta: any = document.getElementById('nb-note-ta');
+  _saveNotePopover(id: string): void {
+    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
     if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
     if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
     const val = ta.value.trim().slice(0, 500) || null;
@@ -2480,7 +2635,7 @@ export const Table = {
     Table._api.applyTransaction({ update: [Store.tasks[id]] });
   },
 
-  _closeNotePopover() {
+  _closeNotePopover(): void {
     const pop = document.getElementById('nb-note-popover');
     if (pop) pop.remove();
     if (Table._noteOutsideHandler) {
@@ -2495,8 +2650,8 @@ export const Table = {
 
   /** A minimal inline datetime-local editor for AG Grid. */
   _DateTimeEditor: class {
-    [k: string]: any;
-    init(params: any) {
+    _input!: HTMLInputElement;
+    init(params: { value: unknown }): void {
       this._input = document.createElement('input');
       this._input.type = 'datetime-local';
       this._input.style.width = '100%';
@@ -2506,10 +2661,10 @@ export const Table = {
       this._input.style.fontSize = '12px';
       this._input.value = Util.toLocalInput(params.value);
     }
-    getGui() { return this._input; }
-    afterGuiAttached() { this._input.focus(); this._input.select(); }
-    getValue() { return Util.parseDate(this._input.value); }
-    destroy() {}
+    getGui(): HTMLInputElement { return this._input; }
+    afterGuiAttached(): void { this._input.focus(); this._input.select(); }
+    getValue(): Date | null { return Util.parseDate(this._input.value); }
+    destroy(): void {}
   },
 
   // Scale mandate (CLAUDE.md Production Scale Roadmap): the line-reassignment
@@ -2518,8 +2673,16 @@ export const Table = {
   // no searchable select (that's Enterprise's agRichSelectCellEditor), so this
   // is a small hand-rolled popup editor: text input + filtered option list.
   _SearchableLineEditor: class {
-    [k: string]: any;
-    init(params: any) {
+    _params!: TableLineEditorParams;
+    _values!: string[];
+    _chosen: string | null = null;
+    _activeIdx = 0;
+    _eGui!: HTMLDivElement;
+    _input!: HTMLInputElement;
+    _list!: HTMLDivElement;
+    _filtered!: string[];
+
+    init(params: TableLineEditorParams): void {
       this._params = params;
       this._values = (typeof params.values === 'function' ? params.values() : params.values) || [];
       this._chosen = null;
@@ -2528,65 +2691,75 @@ export const Table = {
       this._eGui = document.createElement('div');
       this._eGui.className = 'nse-editor';
       this._eGui.innerHTML = `<input type="text" class="nse-input" autocomplete="off"><div class="nse-list"></div>`;
-      this._input = this._eGui.querySelector('.nse-input');
-      this._list  = this._eGui.querySelector('.nse-list');
+      this._input = this._eGui.querySelector('.nse-input')!;
+      this._list  = this._eGui.querySelector('.nse-list')!;
       this._input.value = params.value || '';
       this._input.addEventListener('input', () => this._renderList(this._input.value));
-      this._input.addEventListener('keydown', (e: any) => this._onKeyDown(e));
+      this._input.addEventListener('keydown', (e: KeyboardEvent) => this._onKeyDown(e));
       this._renderList('');
     }
-    _renderList(q: any) {
+    _renderList(q: string): void {
       const query = q.toLowerCase().trim();
-      this._filtered = query ? this._values.filter((v: any) => v.toLowerCase().includes(query)) : this._values;
+      this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
       this._activeIdx = 0;
-      const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+      const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((v: any, i: any) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
+        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
-      this._list.querySelectorAll('.nse-opt').forEach((el: any) => {
-        el.addEventListener('mousedown', (e: any) => { e.preventDefault(); this._choose(Number(el.dataset.i)); });
+      this._list.querySelectorAll('.nse-opt').forEach((el) => {
+        el.addEventListener('mousedown', (e: Event) => { e.preventDefault(); this._choose(Number((el as HTMLElement).dataset.i)); });
       });
     }
-    _choose(i: any) {
+    _choose(i: number): void {
       const v = this._filtered[i];
       if (v == null) return;
       this._chosen = v;
       this._input.value = v;
       this._params.api.stopEditing();
     }
-    _onKeyDown(e: any) {
+    _onKeyDown(e: KeyboardEvent): void {
       if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
       else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
       else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
     }
-    _move(delta: any) {
+    _move(delta: number): void {
       if (!this._filtered.length) return;
       this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
-      this._list.querySelectorAll('.nse-opt').forEach((el: any, i: any) => el.classList.toggle('active', i === this._activeIdx));
+      this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
     }
-    getGui() { return this._eGui; }
-    afterGuiAttached() { this._input.focus(); this._input.select(); }
-    getValue() {
+    getGui(): HTMLDivElement { return this._eGui; }
+    afterGuiAttached(): void { this._input.focus(); this._input.select(); }
+    getValue(): string | null {
       if (this._chosen != null) return this._chosen;
       const typed = this._input.value.trim();
-      const exact = this._values.find((v: any) => v.toLowerCase() === typed.toLowerCase());
+      const exact = this._values.find(v => v.toLowerCase() === typed.toLowerCase());
       return exact != null ? exact : this._params.value;
     }
-    isPopup() { return true; }
-    destroy() {}
+    isPopup(): boolean { return true; }
+    destroy(): void {}
   }
 };
+
+// -- Local type declarations (CQ-1 Phase 6 Task 3 conversion; scoped to
+//    Inspector) ---------------------------------------------------------------
+
+/** Inspector._onFieldChange's `[data-field]` inputs — Inspector._render() only
+ *  ever wires PRODUCTION_LINE (<select>), notes (<textarea>), start_date
+ *  (<input>, upgraded to Flatpickr) and RUN_TIME (<input type=number>), plus
+ *  the open SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name
+ *  arrives as a plain string read off the DOM, not a compile-time literal. */
+type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /* =============================================================================
    INSPECTOR — right-side detail panel shown on the Timeline tab.
    Edits here write through the Store (source: 'inspector').
    ========================================================================== */
 export const Inspector = {
-  _currentId: null as any,
-  _unsubStore: null as any,
+  _currentId: null as string | null,
+  _unsubStore: null as (() => void) | null,
 
-  init() {
+  init(): void {
     Inspector._unsubStore = Store.subscribe(evt => {
     // Allow fixed:change through even from 'inspector' so the Fix/Unfix
     // button re-renders after toggleFix() — otherwise it never flips.
@@ -2610,7 +2783,7 @@ export const Inspector = {
     }, 'Inspector');
   },
 
-  show(task: any) {
+  show(task: NimbusTask): void {
     // Refuse to inspect tasks that don't belong to the current plant scope.
     // Only block when the task's plant is positively known and wrong — if
     // getPlantForLine returns null (line unmapped), allow inspection rather
@@ -2623,19 +2796,19 @@ export const Inspector = {
     Inspector._currentId = String(task.id);
     Inspector._render(task);
   },
-  clear() {
+  clear(): void {
     Inspector._currentId = null;
     const body = document.getElementById('inspector-body');
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
 
-  _render(task: any) {
+  _render(task: NimbusTask): void {
     const body = document.getElementById('inspector-body');
     if (!body) return;
     if (!task) { Inspector.clear(); return; }
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
-    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
+    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const fixed = Store.isFixed(task.id);
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
@@ -2708,19 +2881,20 @@ export const Inspector = {
     `;
 
     // Wire inputs
-    body.querySelectorAll('[data-field]').forEach((el: any) => {
-      el.onchange = () => Inspector._onFieldChange(el.dataset.field, el.value);
+    body.querySelectorAll('[data-field]').forEach((el) => {
+      const fieldEl = el as InspectorFieldEl;
+      fieldEl.onchange = () => Inspector._onFieldChange(fieldEl.dataset.field!, fieldEl.value);
     });
     // Action buttons via listeners (id is never concatenated into an HTML attribute).
     const _id = String(task.id);
     body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS!.Table!._openOverrideModalForId!(_id));
     body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS!.Timeline!.focus!(_id));
     // Notes char counter (oninput fires on every keystroke)
-    const notesEl: any = body.querySelector('[data-field="notes"]');
+    const notesEl = body.querySelector('[data-field="notes"]') as HTMLTextAreaElement | null;
     const notesRemEl = body.querySelector('#insp-notes-rem');
     if (notesEl && notesRemEl) {
       notesEl.oninput = () => { notesRemEl.textContent = String(500 - notesEl.value.length); };
-      const _noteId = Inspector._currentId;
+      const _noteId = Inspector._currentId!;
       notesEl.onblur = () => {
         const trimmed = notesEl.value.trim() || null;
         Store.updateTask(_noteId, { notes: trimmed }, 'inspector');
@@ -2728,7 +2902,7 @@ export const Inspector = {
       };
     }
     // Upgrade start_date to Flatpickr datetime picker
-    const _dtEl: any = body.querySelector('[data-field="start_date"]');
+    const _dtEl = body.querySelector('[data-field="start_date"]') as HTMLInputElement | null;
     if (_dtEl) {
       Util.fpDatetime(_dtEl, {
         onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
@@ -2736,7 +2910,7 @@ export const Inspector = {
     }
   },
 
-  _varianceBadge(t: any) {
+  _varianceBadge(t: NimbusTask): string {
     // Compares against the derived Orig Start (due date minus RUN_TIME —
     // see Util.impliedOriginalStart), not the raw original_start_date, so
     // the badge stays consistent with what the Orig Start row now shows.
@@ -2751,18 +2925,18 @@ export const Inspector = {
       ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
       : `${days >= 0 ? '+' : ''}${(deltaMs / Config.MS_HOUR).toFixed(1)}h`;
     const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
-    return `<span class="insp-var ${cls}" title="${(window as any).t('ui.insp_variance_shifted')}">${txt}</span>`;
+    return `<span class="insp-var ${cls}" title="${Util.t('ui.insp_variance_shifted')}">${txt}</span>`;
   },
 
-  _onFieldChange(field: any, value: any) {
+  _onFieldChange(field: string, value: string): void {
     if (!Inspector._currentId) return;
     const id = Inspector._currentId;
     const t  = Store.tasks[id];
     if (!t) return;
-    const changes: any = {};
+    const changes: Partial<NimbusTask> = {};
     if (field === 'start_date') {
       const d = Util.parseDate(value);
-      if (!d) { Toast.show((window as any).t('toast.invalid_date'), 'error'); return; }
+      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
       changes.start_date = Util.snap(d);
       const dur = Util.runHours(t) * Config.MS_HOUR;
       if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
@@ -2775,7 +2949,7 @@ export const Inspector = {
     } else if (field === 'notes') {
       changes.notes = value.trim() || null;
       Store.updateTask(id, changes, 'inspector');
-      Inspector._persistNote(id, changes.notes);
+      Inspector._persistNote(id, changes.notes ?? null);
       return;
     } else {
       changes[field] = value;
@@ -2790,8 +2964,8 @@ export const Inspector = {
   // Per-id debounce timers. A single shared debounce timer (the old design) meant a
   // note on order B within 800ms cancelled order A's pending POST — silent data loss
   // (R5). Keying the timer by task id isolates each order's save.
-  _noteTimers: {} as any,
-  _persistNote(id: any, notes: any) {
+  _noteTimers: {} as Record<string, ReturnType<typeof setTimeout>>,
+  _persistNote(id: string, notes: string | null): void {
     clearTimeout(Inspector._noteTimers[id]);
     Inspector._noteTimers[id] = setTimeout(() => {
       delete Inspector._noteTimers[id];
@@ -2815,7 +2989,7 @@ export const Inspector = {
     }, 800);
   },
 
-  toggleFix(fixed: any) {
+  toggleFix(fixed: boolean): void {
     if (!Inspector._currentId) return;
     Store.setFixed([Inspector._currentId], fixed, 'inspector');
     Alerts.scheduleRecompute();
@@ -2826,9 +3000,9 @@ export const Inspector = {
    CONTEXT MENU — right-click on a timeline item.
    ========================================================================== */
 export const ContextMenu = {
-  _targetId: null as any,
+  _targetId: null as string | null,
 
-  init() {
+  init(): void {
     const menu = document.getElementById('ctx-menu');
     if (!menu) return;
     menu.querySelectorAll('button').forEach(btn => {
@@ -2848,9 +3022,10 @@ export const ContextMenu = {
     document.addEventListener('keydown', e => { if (e.key === 'Escape') ContextMenu.close(); });
   },
 
-  open(x: any, y: any, targetId: any) {
+  open(x: number, y: number, targetId: string): void {
     ContextMenu._targetId = targetId;
-    const menu: any = document.getElementById('ctx-menu');
+    const menu = document.getElementById('ctx-menu') as HTMLElement | null;
+    if (!menu) return;
     menu.hidden = false;
     menu.style.left = x + 'px';
     menu.style.top  = y + 'px';
@@ -2862,10 +3037,10 @@ export const ContextMenu = {
     });
     // Toggle fix/unfix visibility based on state
     const fixed = Store.isFixed(targetId);
-    menu.querySelector('[data-action="fix"]').style.display   = fixed ? 'none' : '';
-    menu.querySelector('[data-action="unfix"]').style.display = fixed ? '' : 'none';
+    (menu.querySelector('[data-action="fix"]') as HTMLElement | null)!.style.display   = fixed ? 'none' : '';
+    (menu.querySelector('[data-action="unfix"]') as HTMLElement | null)!.style.display = fixed ? '' : 'none';
   },
-  close() {
+  close(): void {
     ContextMenu._targetId = null;
     const menu = document.getElementById('ctx-menu');
     if (menu) menu.hidden = true;
@@ -5633,7 +5808,7 @@ export const Interaction = {
     if (Table && Table._api && typeof Table._api.addEventListener === 'function') {
       Table._api.addEventListener('selectionChanged', () => {
         if (Table._suppressSelectionEcho) return;
-        const rows = Table._api.getSelectedRows ? Table._api.getSelectedRows() : [];
+        const rows = Table._api!.getSelectedRows();
         const ids = rows.map((r: any) => String(r.id));
         const current = new Set(Selection.ids());
         const same = ids.length === current.size && ids.every((id: any) => current.has(id));

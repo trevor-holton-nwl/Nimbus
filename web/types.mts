@@ -59,7 +59,9 @@ export interface NimbusTask {
   /** Legacy alt of PRODUCTION_ORDER (brain.py aliases PRODUCTION_ORDER -> ORDER in /tasks). */
   ORDER?: string;
   ORDER_Y?: number;
-  notes?: string;
+  /** DB column is nullable (brain.py: `notes: str | None = None`) — Table/Inspector's
+   *  note editors write `null` (not `''`) to explicitly clear a note. */
+  notes?: string | null;
   user_scheduled?: boolean;
   /** Open SAP bag — real rows carry additional raw columns not modeled above. */
   [key: string]: unknown;
