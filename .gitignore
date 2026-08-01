@@ -15,6 +15,7 @@ web/nimbus-worker.js
 web/types.mjs
 web/application-foundation.mjs
 web/schedule-state.mjs
+web/schedule-services.mjs
 
 # Python
 __pycache__/
