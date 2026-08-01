@@ -220,7 +220,7 @@ export const Store = {
   updateTask(id: string, changes: Partial<NimbusTask>, source?: string): void {
     const prev = this._state.tasks[id];
     if (!prev) return;
-    const next = { ...prev, ...changes } as NimbusTask;
+    const next = { ...prev, ...changes };
     Store._normalizeDates(next);
     this._state.tasks[id] = next;
     // Keep the _tasksByPlant index coherent with this reference swap. That index caches
@@ -424,7 +424,7 @@ export const Store = {
     this.emit({ type: 'lineSettings:change', line, source });
   },
   getPlantForLine(line: string): string | null {
-    const fromSettings = (this._state.lineSettings[line] || ({} as NimbusLineSetting)).plant;
+    const fromSettings = (this._state.lineSettings[line] || {}).plant;
     if (fromSettings) return fromSettings;
     // O(1) cache (line → master-data plant), rebuilt alongside _tasksByPlant. Consulted
     // before the linear .find fallback so this stays O(1) on hot paths (tasksForSelectedPlant,
@@ -634,9 +634,9 @@ export const Store = {
      forward-compat; it is ignored today. */
   pref(key: string, opts: { plant?: string } = {}): unknown {
     try {
-      const us   = this._state.userSettings || ({} as Record<string, unknown>);
-      const rd   = this._state.roleDefaults || ({} as Record<string, unknown>);
-      const defs = _settingsDefaultsResolver() || ({} as Record<string, unknown>);
+      const us   = this._state.userSettings || {};
+      const rd   = this._state.roleDefaults || {};
+      const defs = _settingsDefaultsResolver() || {};
       // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
       // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
       // a per-plant regional default keyed on opts.plant would slot in between the
