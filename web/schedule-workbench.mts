@@ -3691,23 +3691,65 @@ GanttFilter._apply = Util.debounce(() => GanttFilter._doApply(), 60);
 // AlertsUIAdapter in Task 7).
 const VL_LS_ROW_H = 36;
 
+// -- Local type declarations (CQ-1 Phase 6 Task 5 conversion; scoped to
+//    Dashboard) --------------------------------------------------------------
+
+/** Utilization.computeMatrix's return shape, named locally since the real
+ *  interface (schedule-services.mts's UtilizationMatrixResolved) is module-
+ *  private to that file — see its own header comment on why it isn't exported.
+ *  Same pattern as Hierarchy's HierarchyUtilMatrix (Task 4). */
+type DashboardUtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
+
+/** _renderKPIs' `tiles` array — one action-oriented KPI strip tile. */
+type DashboardTileAction = 'orders-today' | 'alerts-today' | 'late' | 'headroom';
+interface DashboardKpiTile {
+  k: string;
+  v: string;
+  d: string;
+  cls?: string;
+  action?: DashboardTileAction;
+}
+
+/** _renderLineStatus's precomputed-then-virtualized row data. */
+interface DashboardLineStatusRow {
+  line: string;
+  color: string;
+  sched: string;
+  cap: string;
+  effCap: string;
+  pct: number;
+  sev: UtilSevBucket;
+  barW: number;
+  isOver: boolean;
+  nxtCO: string;
+}
+
+/** One line×day cell of the Projected-Lateness Risk Heatmap
+ *  (_renderLatenessHeatmap builds this, _renderLatenessDrill reads it). */
+interface DashboardLatenessCell {
+  lateHours: number;
+  lateCount: number;
+  tasks: NimbusTask[];
+}
+type DashboardLatenessMatrix = Record<string, Record<string, DashboardLatenessCell>>;
+
 /* =============================================================================
    DASHBOARD — KPIs, today-by-line chart, alert summary.
    ========================================================================== */
 export const Dashboard = {
-  _prevKpi:    {} as any,
+  _prevKpi:    {} as Record<string, string>,
 
   _filterLines:  new Set<string>(),
-  _allLines:     null as any,
-  _resizeDebounced: null as any,
-  _matrix7Cache: null as any,
-  _lsVL:         null as any,
+  _allLines:     null as string[] | null,
+  _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
+  _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
+  _lsVL:         null as VirtualList<DashboardLineStatusRow> | null,
 
   _latenessHorizon: 14,                  // days; toggled by 7/14/28 segment buttons
-  _latenessDrillKey: null as any,               // 'LINE|YYYY-MM-DD' for the currently-drilled cell
+  _latenessDrillKey: null as string | null,     // 'LINE|YYYY-MM-DD' for the currently-drilled cell
 
-  _renderDebounced: null as any,
-  init() {
+  _renderDebounced: null as ReturnType<typeof setTimeout> | null,
+  init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
         Dashboard._refreshLineDropdown();
@@ -3726,7 +3768,7 @@ export const Dashboard = {
           setTimeout(() => { Dashboard._buildFilterOptions(); Dashboard.render(); }, 350);
           return;
         }
-        clearTimeout(Dashboard._renderDebounced);
+        clearTimeout(Dashboard._renderDebounced ?? undefined);
         Dashboard._renderDebounced = setTimeout(() => Dashboard.render(), 300);
       }
     }, 'Dashboard');
@@ -3737,8 +3779,8 @@ export const Dashboard = {
       if (d) d.hidden = true;
       if (btn) btn.setAttribute('aria-expanded', 'false');
     };
-    document.addEventListener('click', (e: any) => {
-      if (!e.target.closest('#line-filter-group')) closeLineFilterDropdown();
+    document.addEventListener('click', (e: MouseEvent) => {
+      if (!(e.target as HTMLElement)?.closest('#line-filter-group')) closeLineFilterDropdown();
     });
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') closeLineFilterDropdown();
@@ -3746,10 +3788,10 @@ export const Dashboard = {
     // Wire lateness-horizon segment buttons.
     const horizonGroup = document.getElementById('lateness-horizon-group');
     if (horizonGroup) {
-      horizonGroup.addEventListener('click', (e: any) => {
-        const btn = e.target.closest('button[data-h]');
+      horizonGroup.addEventListener('click', (e: MouseEvent) => {
+        const btn = (e.target as HTMLElement).closest('button[data-h]') as HTMLButtonElement | null;
         if (!btn) return;
-        const h = parseInt(btn.dataset.h, 10);
+        const h = parseInt(btn.dataset.h || '', 10);
         if (!Number.isFinite(h) || h === Dashboard._latenessHorizon) return;
         Dashboard._latenessHorizon = h;
         horizonGroup.querySelectorAll('button').forEach(b =>
@@ -3763,13 +3805,13 @@ export const Dashboard = {
     // (_syncLineStatusHeight) — without a resize listener the two panels drift
     // out of sync until the next data-driven re-render.
     window.addEventListener('resize', () => {
-      clearTimeout(Dashboard._resizeDebounced);
+      clearTimeout(Dashboard._resizeDebounced ?? undefined);
       Dashboard._resizeDebounced = setTimeout(() => Dashboard._syncLineStatusHeight(), 150);
     });
     setTimeout(() => Dashboard._buildFilterOptions(), 0);
   },
 
-  _filteredTasks() {
+  _filteredTasks(): NimbusTask[] {
     let tasks = Store.tasksForSelectedPlant();
     if (Dashboard._filterLines.size > 0) {
       tasks = tasks.filter(t => Dashboard._filterLines.has(t.PRODUCTION_LINE));
@@ -3777,7 +3819,7 @@ export const Dashboard = {
     return tasks;
   },
 
-  _buildFilterOptions() {
+  _buildFilterOptions(): void {
     // Store.linesForSelectedPlant() is now an O(1) indexed read (Store._linesByPlant,
     // rebuilt in rebuildPlantIndex) — no need to hand-build a plant→lines map here.
     Dashboard._refreshLineDropdown();
@@ -3786,18 +3828,18 @@ export const Dashboard = {
 
   _lineSearch: '',
 
-  _filterLineSearch(q: any) {
+  _filterLineSearch(q: string): void {
     Dashboard._lineSearch = q || '';
     Dashboard._renderLineChecklist();
   },
 
-  _refreshLineDropdown() {
-    const btn: any  = document.getElementById('line-filter-btn');
+  _refreshLineDropdown(): void {
+    const btn  = document.getElementById('line-filter-btn') as HTMLButtonElement | null;
     const drop = document.getElementById('line-filter-dropdown');
     if (!btn || !drop) return;
 
     Dashboard._lineSearch = '';
-    const srch: any = document.getElementById('line-filter-search');
+    const srch = document.getElementById('line-filter-search') as HTMLInputElement | null;
     if (srch) srch.value = '';
 
     if (!Store.selectedPlant) {
@@ -3821,19 +3863,19 @@ export const Dashboard = {
   // Scale mandate (CLAUDE.md Production Scale Roadmap): every plant/line picker
   // must stay filterable, not a bare scrollable checkbox list — this is the
   // dashboard's line filter's share of that, matching the Gantt/Orders dropdowns.
-  _renderLineChecklist() {
+  _renderLineChecklist(): void {
     const list = document.getElementById('line-filter-checklist');
     if (!list) return;
     const all = Dashboard._allLines || [];
     const q = Dashboard._lineSearch.toLowerCase().trim();
-    const visible = q ? all.filter((l: any) => l.toLowerCase().includes(q)) : all;
-    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const visible = q ? all.filter(l => l.toLowerCase().includes(q)) : all;
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     list.innerHTML = visible.length
-      ? visible.map((l: any) => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
+      ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${all.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
   },
 
-  _refreshFilterBtns() {
+  _refreshFilterBtns(): void {
     const lineBtn   = document.getElementById('line-filter-btn');
     const lineLbl   = document.getElementById('line-filter-label');
     const clearBtn  = document.getElementById('dash-filter-clear');
@@ -3858,40 +3900,40 @@ export const Dashboard = {
     }
   },
 
-  _toggleDropdown(id: any, btnId: any) {
+  _toggleDropdown(id: string, btnId?: string): void {
     const drop = document.getElementById(id);
     if (!drop) return;
     drop.hidden = !drop.hidden;
-    const btn = btnId && document.getElementById(btnId);
+    const btn = btnId ? document.getElementById(btnId) : null;
     if (btn) btn.setAttribute('aria-expanded', String(!drop.hidden));
   },
 
-  _onLineChange(cb: any) {
+  _onLineChange(cb: HTMLInputElement): void {
     if (cb.checked) Dashboard._filterLines.add(cb.value);
     else Dashboard._filterLines.delete(cb.value);
     Dashboard._refreshFilterBtns();
     Dashboard.render();
   },
 
-  _clearFilters() {
+  _clearFilters(): void {
     Dashboard._filterLines.clear();
     Dashboard._refreshLineDropdown();
     Dashboard._refreshFilterBtns();
     Dashboard.render();
   },
-  _syncLineStatusHeight() {
+  _syncLineStatusHeight(): void {
     requestAnimationFrame(() => {
       const heatmapPanel = document.getElementById('util-heatmap-panel')?.closest('.panel');
       const lineStatusCard = document.getElementById('line-status-card');
       if (!heatmapPanel || !lineStatusCard) return;
-      const head: any = heatmapPanel.querySelector('.panel-head');
-      const body: any = heatmapPanel.querySelector('.panel-body');
+      const head = heatmapPanel.querySelector('.panel-head') as HTMLElement | null;
+      const body = heatmapPanel.querySelector('.panel-body') as HTMLElement | null;
       if (!head || !body) return;
-      (lineStatusCard as any).style.maxHeight = (head.offsetHeight + body.offsetHeight) + 'px';
+      lineStatusCard.style.maxHeight = (head.offsetHeight + body.offsetHeight) + 'px';
     });
   },
 
-  render() {
+  render(): void {
     // Only render heavy bits if the home tab is currently active — but still
     // update the alert bell badge on every change.
     NIMBUS!.AlertsUIAdapter!.renderBell!();
@@ -3914,7 +3956,7 @@ export const Dashboard = {
     // rebuilt the whole O(lines×days) matrix from scratch.
     const _scope = (Store.selectedPlant || '') + '|' + [...Dashboard._filterLines].sort().join(',');
     const _mkey  = `${Util.startOfDay(_now7)!.getTime()}|7|${Store.rev()}|${_scope}`;
-    let _matrix7;
+    let _matrix7: DashboardUtilMatrix;
     if (Dashboard._matrix7Cache && Dashboard._matrix7Cache.key === _mkey) {
       _matrix7 = Dashboard._matrix7Cache.matrix;
     } else {
@@ -3931,11 +3973,11 @@ export const Dashboard = {
     Dashboard._syncLineStatusHeight();
   },
 
-  _renderEmptyState() {
+  _renderEmptyState(): void {
     const homeContainer = document.querySelector('#home-tab .home-container');
     let overlay = document.getElementById('dashboard-empty-overlay');
     const situationEl = document.getElementById('wh-situation');
-    const dataPanels = document.querySelectorAll('#home-tab .home-container > .kpi-stack, #home-tab .home-container > .grid-2, #home-tab .home-container > .panel');
+    const dataPanels = document.querySelectorAll<HTMLElement>('#home-tab .home-container > .kpi-stack, #home-tab .home-container > .grid-2, #home-tab .home-container > .panel');
     if (!Store.selectedPlant) {
       if (!overlay && homeContainer) {
         overlay = document.createElement('div');
@@ -3953,28 +3995,28 @@ export const Dashboard = {
         });
       }
       if (situationEl) { situationEl.textContent = ''; situationEl.classList.remove('warn'); }
-      dataPanels.forEach((el: any) => el.style.display = 'none');
+      dataPanels.forEach(el => el.style.display = 'none');
     } else {
       if (overlay) overlay.remove();
-      dataPanels.forEach((el: any) => el.style.display = '');
+      dataPanels.forEach(el => el.style.display = '');
     }
   },
 
-  _renderKPIs(matrix7: any, tasksArg: any) {
+  _renderKPIs(matrix7?: DashboardUtilMatrix, tasksArg?: NimbusTask[]): void {
     const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
     const today = Util.startOfDay(new Date());
 
-    const todayOrders = tasks.filter((t: any) => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
+    const todayOrders = tasks.filter(t => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
 
     // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
-    const lateCount = tasks.filter((t: any) => Util.latenessHours(t) > 0).length;
+    const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
 
     // Alerts Today tile (kpi.conflicts_pending, action:'alerts-today') must count exactly
     // what its click-through shows -- Table._applyChipFilter({status:'conflict', dateKey:today})
     // -- i.e. today's orders carrying >=1 err alert.
     const alertsByTask = Store.alertsByTask();
-    const conflictsToday = todayOrders.filter((t: any) =>
-      (alertsByTask.get(String(t.id)) || []).some((a: any) => a.sev === 'err')).length;
+    const conflictsToday = todayOrders.filter(t =>
+      (alertsByTask.get(String(t.id)) || []).some(a => a.sev === 'err')).length;
     const conflictCls = conflictsToday > 0 ? 'err' : '';
 
     // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
@@ -3984,7 +4026,7 @@ export const Dashboard = {
     for (const ln of Object.keys(matrix7)) {
       for (const d of Object.keys(matrix7[ln])) {
         const cell = matrix7[ln][d];
-        if (cell && cell.capacity > 0) { pctSum += cell.pct; pctN++; }
+        if (cell && cell.capacity > 0) { pctSum += cell.pct ?? 0; pctN++; }
       }
     }
     const avgUtil = pctN > 0 ? pctSum / pctN : 0;
@@ -3994,7 +4036,7 @@ export const Dashboard = {
     // Four action-oriented tiles, one calm row. Open Alerts and Fixed Orders were
     // trimmed off this row — both counts still surface in their own panels below
     // (alert-summary-count, the fixed-orders list) so nothing is lost, just decluttered.
-    const tiles = [
+    const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
         d: Util.t('kpi.orders_total', { n: tasks.length }),
         action: 'orders-today' },
@@ -4020,8 +4062,8 @@ export const Dashboard = {
     if (!stack) return;
 
     // Build tiles, animating numeric values that changed since last render.
-    tiles.forEach((tile: any, idx: any) => {
-      let el: any = stack.children[idx];
+    tiles.forEach((tile, idx) => {
+      let el = stack.children[idx] as HTMLButtonElement | undefined;
       if (!el) {
         // Real <button> so keyboard/screen-reader users get focus + Enter/Space
         // activation natively — a div with a hand-rolled role/tabindex promised
@@ -4032,7 +4074,7 @@ export const Dashboard = {
       }
       el.className = 'kpi-tile ' + (tile.cls || '') + (tile.action ? ' is-actionable' : '');
       el.disabled = !tile.action;
-      el.onclick = tile.action ? () => Dashboard._tileClick(tile.action) : null;
+      el.onclick = tile.action ? () => Dashboard._tileClick(tile.action!) : null;
       if (tile.action) el.setAttribute('title', Dashboard._tileTooltip(tile.action));
       else el.removeAttribute('title');
       const kEl = el.querySelector('.k') || document.createElement('div');
@@ -4047,7 +4089,7 @@ export const Dashboard = {
       const prevVal = Dashboard._prevKpi[tile.k];
       const rawNum = parseFloat(tile.v);
       const isNum = !isNaN(rawNum) && tile.v === String(rawNum) + (tile.v.includes('h') ? 'h' : tile.v.includes('%') ? '%' : '');
-      const prevNum = parseFloat(prevVal);
+      const prevNum = parseFloat(String(prevVal));
       if (isNum && prevVal !== undefined && !isNaN(prevNum) && prevNum !== rawNum) {
         Dashboard._animateTicker(vEl, prevNum, rawNum, tile.v, 400);
       } else {
@@ -4059,7 +4101,7 @@ export const Dashboard = {
     while (stack.children.length > tiles.length) stack.removeChild(stack.lastChild!);
   },
 
-  _tileTooltip(action: any) {
+  _tileTooltip(action: DashboardTileAction): string {
     switch (action) {
       case 'orders-today': return 'Open Orders table filtered to today';
       case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
@@ -4069,7 +4111,7 @@ export const Dashboard = {
     }
   },
 
-  _tileClick(action: any) {
+  _tileClick(action: DashboardTileAction): void {
     switch (action) {
       case 'orders-today': {
         NIMBUS!.App!.goto!('table');
@@ -4112,7 +4154,7 @@ export const Dashboard = {
   // Work-header situation line: "3 need attention · 42 orders scheduled today" (or the
   // all-clear phrasing). Fed directly from _renderKPIs' own todayOrders/conflictsToday/
   // lateCount so the header always agrees with the tiles below it — no separate recompute.
-  _renderSituation({ todayCount, attention }: any) {
+  _renderSituation({ todayCount, attention }: { todayCount: number; attention: number }): void {
     const el = document.getElementById('wh-situation');
     if (!el) return;
     const totalPlural = todayCount === 1 ? '' : 's';
@@ -4127,10 +4169,10 @@ export const Dashboard = {
     el.classList.toggle('warn', attention > 0);
   },
 
-  _animateTicker(el: any, from: any, to: any, toStr: any, dur: any) {
+  _animateTicker(el: Element, from: number, to: number, toStr: string, dur: number): void {
     const suffix = toStr.replace(/[\d.]/g, '');
     const start = performance.now();
-    const step = (ts: any) => {
+    const step = (ts: number) => {
       const p = Math.min((ts - start) / dur, 1);
       const eased = p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
       const cur = from + (to - from) * eased;
@@ -4143,19 +4185,19 @@ export const Dashboard = {
 
   // Read a real CSS custom property so heatmap colors stay theme-correct and
   // in sync with DESIGN.md's tokens instead of hand-duplicated light/dark hex pairs.
-  _cssVar(name: any, fallback: any) {
+  _cssVar(name: string, fallback: string): string {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
   },
-  _lerpHex(a: any, b: any, frac: any) {
-    const p = (h: any) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  _lerpHex(a: string, b: string, frac: number): string {
+    const p = (h: string): number[] => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
     const ca = p(a), cb = p(b);
     const rgb = [0, 1, 2].map(i => Math.round(ca[i] + (cb[i] - ca[i]) * frac));
     return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
   },
   // WCAG relative luminance — picks readable text color from the actual resolved
   // background instead of a hand-tuned per-theme pct threshold.
-  _relLuminance(hex: any) {
+  _relLuminance(hex: string): number {
     const c = [1, 3, 5].map(i => {
       const v = parseInt(hex.slice(i, i + 2), 16) / 255;
       return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
@@ -4163,7 +4205,7 @@ export const Dashboard = {
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   },
 
-  _renderHeatmap(matrix: any) {
+  _renderHeatmap(matrix?: DashboardUtilMatrix): void {
     const container = document.getElementById('util-heatmap-panel');
     if (!container) return;
 
@@ -4185,13 +4227,13 @@ export const Dashboard = {
     const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
     const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
     const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
-    function heatBg(pct: any) {
+    function heatBg(pct: number): string {
       if (pct <= 0)    return idleBg;
       if (pct <= 0.5)  return Dashboard._lerpHex(idleBg, warnBg, pct / 0.5);
       if (pct <= 1.0)  return Dashboard._lerpHex(warnBg, vividBg, (pct - 0.5) / 0.5);
       return Dashboard._lerpHex(vividBg, errBg, Math.min((pct - 1.0) / 0.25, 1));
     }
-    function heatText(pct: any, bg: any) {
+    function heatText(pct: number, bg: string): string {
       if (pct <= 0) return muteTxt;
       return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
     }
@@ -4236,21 +4278,21 @@ export const Dashboard = {
   },
 
 
-  _nextChangeover(lineTasks: any, now: any) {
-    const activeIdx = lineTasks.findIndex((t: any) => t.start_date && t.end_date && t.start_date <= now && t.end_date > now);
+  _nextChangeover(lineTasks: NimbusTask[], now: Date): Date | null {
+    const activeIdx = lineTasks.findIndex(t => t.start_date && t.end_date && t.start_date <= now && t.end_date > now);
 
     let refIdx, scanFrom;
     if (activeIdx >= 0) {
       refIdx   = activeIdx;
       scanFrom = activeIdx + 1;
     } else {
-      const futureIdx = lineTasks.findIndex((t: any) => t.start_date && t.start_date > now);
+      const futureIdx = lineTasks.findIndex(t => t.start_date && t.start_date > now);
       if (futureIdx < 0) return null;
 
       // Idle: reference is whatever the line most recently finished running
       // (max end_date <= now), not the next future order itself — using the
       // future order as its own baseline would hide a changeover into it.
-      let lastDoneIdx = -1, lastDoneEnd = null;
+      let lastDoneIdx = -1, lastDoneEnd: Date | null = null;
       for (let i = 0; i < futureIdx; i++) {
         const t = lineTasks[i];
         if (t.start_date && t.end_date && t.end_date <= now && (!lastDoneEnd || t.end_date > lastDoneEnd)) {
@@ -4279,9 +4321,9 @@ export const Dashboard = {
     return null;
   },
 
-  _fmtNextCO(dt: any, now: any) {
+  _fmtNextCO(dt: Date | null, now: Date): string {
     if (!dt) return '—';
-    const ms = dt - now;
+    const ms = dt.getTime() - now.getTime();
     if (ms <= 0) return 'now';
     const mins = Math.round(ms / Config.MS_MIN);
     if (mins < 60) return `+${mins}m`;
@@ -4290,14 +4332,14 @@ export const Dashboard = {
     return `+${Math.round(hrs / 24)}d`;
   },
 
-  _renderLineStatus() {
+  _renderLineStatus(): void {
     const el = document.getElementById('line-status-panel');
     if (!el) return;
     const tasks = Dashboard._filteredTasks();
     const now   = new Date();
-    const esc   = (s: any) => String(s || '').replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const esc   = (s: unknown) => String(s || '').replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
 
-    const byLine: any = {};
+    const byLine: Record<string, NimbusTask[]> = {};
     for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
     for (const tk of tasks) { const l = tk.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
     const lines = Object.keys(byLine).sort();
@@ -4312,19 +4354,19 @@ export const Dashboard = {
     const todayKey = Util.dayKey(Util.startOfDay(now));
 
     // Pre-compute row data so renderFn is a pure template with no heavy closures.
-    const rowData = lines.map((line: any) => {
+    const rowData: DashboardLineStatusRow[] = lines.map((line): DashboardLineStatusRow => {
       const ci    = Timeline._colorIndex(line);
       const color = Config.COLORS[ci % Config.COLORS.length];
-      const u: any = matrix[line]?.[todayKey];
+      const u = matrix[line]?.[todayKey];
       const sched   = u ? u.scheduled.toFixed(2)                         : '0.00';
       const cap     = u ? u.capacity.toFixed(2)                          : '0.00';
       const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
-      const pct     = u ? Math.round(u.pct * 100)                        : 0;
+      const pct     = u ? Math.round((u.pct ?? 0) * 100)                 : 0;
       const overloadAt = u && u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD;
-      const sev     = u ? Utilization.sev(u.pct, overloadAt) : 'ok';
+      const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt) : 'ok';
       const barW    = Math.min(pct, 100);
       const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
-      const sorted  = byLine[line].slice().sort((a: any, b: any) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+      const sorted  = byLine[line].slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       const nxtCO   = Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now);
       return { line, color, sched, cap, effCap, pct, sev, barW, isOver, nxtCO };
     });
@@ -4338,9 +4380,9 @@ export const Dashboard = {
         `<div class="ls-pct">%</div><div class="ls-co">Next CO</div>`;
       hdr.className = 'ls-row ls-header';
       el.appendChild(hdr);
-      Dashboard._lsVL = new VirtualList(el, {
+      Dashboard._lsVL = new VirtualList<DashboardLineStatusRow>(el, {
         rowH: VL_LS_ROW_H,
-        renderFn: (d: any) =>
+        renderFn: (d: DashboardLineStatusRow) =>
           `<div class="ls-row">` +
           `<div class="ls-dot" style="background:${d.color}"></div>` +
           `<div class="ls-code">${esc(d.line)}</div>` +
@@ -4354,13 +4396,13 @@ export const Dashboard = {
     Dashboard._lsVL.update(rowData);
   },
 
-  _renderAlertSummary() {
+  _renderAlertSummary(): void {
     const list = document.getElementById('alert-summary-list');
     const count = document.getElementById('alert-summary-count');
     if (!list || !count) return;
 
     const plantLines = new Set(Store.linesForSelectedPlant());
-    const plantRow = Store.masterData?.plants?.find((p: any) => p.plant === Store.selectedPlant) ?? null;
+    const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
     const alerts = Store.alerts.filter(a => {
@@ -4371,7 +4413,7 @@ export const Dashboard = {
     });
 
     // Sort errors first, then warnings, then info — soonest within each severity.
-    const SEV_RANK: any = { err: 0, warn: 1, info: 2 };
+    const SEV_RANK: Record<string, number> = { err: 0, warn: 1, info: 2 };
     alerts.sort((a, b) => {
       const sa = SEV_RANK[a.sev] ?? 9, sb = SEV_RANK[b.sev] ?? 9;
       if (sa !== sb) return sa - sb;
@@ -4387,7 +4429,7 @@ export const Dashboard = {
       : `${alerts.length} open`;
 
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
-    const _esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const _esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     list.innerHTML = alerts.slice(0, 8).map(a => `
       <div class="alert-row sev-${a.sev}" onclick="if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}">          <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
         <div class="msg">${_esc(a.msg)}</div>
@@ -4401,7 +4443,7 @@ export const Dashboard = {
     }
   },
 
-  _renderFixedList() {
+  _renderFixedList(): void {
     const list = document.getElementById('fixed-list');
     if (!list) return;
     const fixed = Dashboard._filteredTasks().filter(t => Store.isFixed(t.id));
@@ -4416,11 +4458,11 @@ export const Dashboard = {
       </div>
     `).join('');
   },
-  _unfix(id: any) {
+  _unfix(id: string): void {
     Store.setFixed([id], false, 'dashboard');
     Alerts.scheduleRecompute();
   },
-  _gotoLine(line: any, dateStr: any) {
+  _gotoLine(line: string, dateStr: string): void {
     Timeline.gotoLineDay(line, dateStr);
   },
 
@@ -4430,7 +4472,7 @@ export const Dashboard = {
      for orders finishing in that line × day cell. Cells are clickable and
      reveal a drill-down list of the contributing late orders.
      --------------------------------------------------------------------- */
-  _renderLatenessHeatmap() {
+  _renderLatenessHeatmap(): void {
     const container = document.getElementById('lateness-heatmap-panel');
     if (!container) return;
 
@@ -4441,7 +4483,7 @@ export const Dashboard = {
     const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
     // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
-    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map((t: any) => t.PRODUCTION_LINE || 'Unknown')])].sort();
+    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.PRODUCTION_LINE || 'Unknown')])].sort();
     const days: string[]  = [];
     {
       const d = Util.startOfDay(new Date())!;
@@ -4450,7 +4492,7 @@ export const Dashboard = {
         d.setDate(d.getDate() + 1);
       }
     }
-    const cells: any = {};
+    const cells: DashboardLatenessMatrix = {};
     for (const ln of allLines) {
       cells[ln] = {};
       for (const dk of days) cells[ln][dk] = { lateHours: 0, lateCount: 0, tasks: [] };
@@ -4477,7 +4519,7 @@ export const Dashboard = {
 
     // Sort lines by cumulative late hours in horizon (desc), tiebreak alphabetical.
     // All lines are rendered; the scroll-wrap viewport shows ~9 at a time.
-    const lineTotals = allLines.map((ln: any) => {
+    const lineTotals = allLines.map(ln => {
       let total = 0;
       for (const dk of days) total += cells[ln][dk].lateHours;
       return { ln, total };
@@ -4492,13 +4534,13 @@ export const Dashboard = {
     const muteTxt = Dashboard._cssVar('--fg-mute', '#6b6c73');
     const inkTxt  = Dashboard._cssVar('--fg', '#1a1b1f');
     const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
-    function cellBg(h: any) {
+    function cellBg(h: number): string {
       if (h <= 0)  return idleBg;
       if (h <= 8)  return amber;
       if (h <= 24) return orange;
       return red;
     }
-    function cellText(h: any, bg: any) {
+    function cellText(h: number, bg: string): string {
       if (h <= 0) return muteTxt;
       return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
     }
@@ -4516,7 +4558,7 @@ export const Dashboard = {
     }
 
     // Data rows
-    const esc = (s: any) => String(s).replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
       html += `<div class="lh-line-label" title="${esc(line)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${esc(line)}</span></div>`;
@@ -4556,12 +4598,12 @@ export const Dashboard = {
     Dashboard._renderLatenessDrill(cells);
   },
 
-  _latenessDrill(line: any, dateStr: any) {
+  _latenessDrill(line: string, dateStr: string): void {
     Dashboard._latenessDrillKey = `${line}|${dateStr}`;
     Dashboard._renderLatenessHeatmap();   // re-render so drill stays in sync
   },
 
-  _renderLatenessDrill(cells: any) {
+  _renderLatenessDrill(cells: DashboardLatenessMatrix): void {
     const drill = document.getElementById('lateness-drill');
     if (!drill) return;
     const key = Dashboard._latenessDrillKey;
@@ -4572,12 +4614,12 @@ export const Dashboard = {
       drill.hidden = true; drill.innerHTML = '';
       return;
     }
-    const esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (c: any) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+    const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     const rows = cell.tasks
       .slice()
-      .sort((a: any, b: any) => Util.latenessHours(b) - Util.latenessHours(a))
+      .sort((a, b) => Util.latenessHours(b) - Util.latenessHours(a))
       .slice(0, 12)
-      .map((t: any) => {
+      .map(t => {
         const lh = Util.latenessHours(t);
         const days = lh / 24;
         const lateLbl = days >= 1 ? `+${days.toFixed(1)}d` : `+${lh.toFixed(1)}h`;
@@ -4602,13 +4644,13 @@ export const Dashboard = {
     drill.hidden = false;
   },
 
-  _latenessDrillClear() {
+  _latenessDrillClear(): void {
     Dashboard._latenessDrillKey = null;
     const drill = document.getElementById('lateness-drill');
     if (drill) { drill.hidden = true; drill.innerHTML = ''; }
   },
 
-  _jumpToOrder(id: any) {
+  _jumpToOrder(id: string): void {
     NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => { if (Timeline && Timeline.focus) Timeline.focus(id); }, 250);
   }
