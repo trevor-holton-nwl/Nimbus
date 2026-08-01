@@ -1314,16 +1314,16 @@ export const Engine = {
    *  Writes results through Store.
    *  opts.plant restricts to lines belonging to that plant.
    *  opts.colorMap pre-fetched color→order_y priority map from plant wheel. */
-  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, any> = {}): void {
+  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): void {
     const _pmT0e = performance.now();
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
-    const plant: string | null = opts.plant           ?? Store.selectedPlant;
+    const plant: string | null = (opts.plant as string | null | undefined) ?? Store.selectedPlant;
     if (!plant) {
       Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
       return;
     }
-    const colorMap        = opts.colorMap        ?? null;
+    const colorMap        = (opts.colorMap as Record<string, number> | null | undefined) ?? null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
@@ -1331,20 +1331,21 @@ export const Engine = {
     // null, so `?.checked` was always undefined and the `?? true` fallback
     // always applied. This plain default reproduces that real runtime
     // behavior exactly, while making Engine genuinely DOM-free.
-    const respectFixed    = opts.respectFixed    ?? true;
-    const respectCalendar = opts.respectCalendar ?? true;
+    const respectFixed    = (opts.respectFixed as boolean | undefined)    ?? true;
+    const respectCalendar = (opts.respectCalendar as boolean | undefined) ?? true;
     const sortTerms = Engine._sortTerms(mode, { plant, colorMap });
 
     const horizonStart = opts.startDate
-      ? new Date(opts.startDate)
+      ? new Date(opts.startDate as string | number | Date)
       : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
-    const horizonEnd   = opts.endDate   ? new Date(opts.endDate)          : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
+    const horizonEnd   = opts.endDate   ? new Date(opts.endDate as string | number | Date) : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
 
     // Optional caller-supplied line filter — when present, only these lines are optimized.
-    const allowed = Array.isArray(opts.lines) && opts.lines.length
-      ? new Set<string>(opts.lines)
+    const optsLines = opts.lines as string[] | undefined;
+    const allowed = Array.isArray(optsLines) && optsLines.length
+      ? new Set<string>(optsLines)
       : null;
 
     // Group tasks by line using the pre-built plant index (avoids a full tasksArr scan).
