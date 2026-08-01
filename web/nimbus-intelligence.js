@@ -231,7 +231,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-conf-badge:hover { border-color:var(--accent); }
 .ni-conf-label { font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--fg-mute); }
 .ni-conf-score { font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace; min-width:24px; text-align:right; }
-.ni-conf-spark { display:block; }
+.ni-conf-ring { display:inline-block; position:relative; width:16px; height:16px;
+  border-radius:50%; flex-shrink:0; }
+.ni-conf-ring::after { content:''; position:absolute; inset:3px; border-radius:50%; background:var(--bg-subtle); }
 .ni-conf-delta { position:absolute; top:-8px; right:4px; font-size:10px; font-weight:700;
   font-family:'JetBrains Mono',monospace; animation:ni-fade-up 1.8s ease forwards; pointer-events:none; }
 @keyframes ni-fade-up { 0%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-12px)} }
@@ -1356,8 +1358,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._lastRev = null;
           const scoreEl = document.getElementById('ni-conf-score');
           if (scoreEl) { scoreEl.textContent = '—'; scoreEl.style.color = ''; }
+          // Vestigial: #ni-conf-spark no longer exists (sparkline retired for the
+          // conic-gradient ring below) — this optional-chains to a no-op and is
+          // left as dead code rather than removed (see task-5-report.md).
           const sparkCtx = document.getElementById('ni-conf-spark')?.getContext('2d');
           if (sparkCtx) sparkCtx.clearRect(0, 0, 48, 20);
+          // Reset the ring to a neutral/empty state for the reset window — _score
+          // is already forced to 100 above, so calling _updateRing() here would
+          // briefly flash a full green ring before the debounced recompute below
+          // repaints it with the real score (mirrors the old blank-canvas reset).
+          const ring = document.getElementById('ni-conf-ring');
+          if (ring) ring.style.background = 'var(--chrome-border)';
           Confidence._recomputeDebounced();
           return;
         }
@@ -1380,9 +1391,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       badge.addEventListener('click', () => Confidence.showBreakdown());
       badge.innerHTML = `<span class="ni-conf-label">${t('ui.confidence_label')}</span>
         <span class="ni-conf-score" id="ni-conf-score">—</span>
-        <canvas class="ni-conf-spark" id="ni-conf-spark" width="48" height="20"></canvas>`;
+        <span class="ni-conf-ring" id="ni-conf-ring"></span>`;
       actions.insertBefore(badge, actions.firstChild);
       Confidence._badge = badge;
+      Confidence._updateRing();
     },
 
     async _recompute() {
@@ -1484,7 +1496,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         Confidence._badge.appendChild(flash);
         setTimeout(() => flash.remove(), 1900);
       }
-      Confidence._sparkline();
+      Confidence._updateRing();
     },
 
     // Pre-trial state for OptimizerPreview/Sandbox to roll back to on discard, so a
@@ -1502,25 +1514,39 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         scoreEl.textContent = snap.score;
         scoreEl.style.color = snap.score >= 70 ? 'var(--ok)' : snap.score >= 40 ? 'var(--warn)' : 'var(--err)';
       }
-      Confidence._sparkline();
+      Confidence._updateRing();
     },
 
-    _sparkline() {
-      const canvas = document.getElementById('ni-conf-spark');
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, 48, 20);
-      const h = Confidence._history;
-      if (h.length < 2) return;
-      const step = 47 / (h.length - 1);
-      ctx.beginPath();
-      const sparkColor = Confidence._score >= 70 ? '#22c55e' : Confidence._score >= 40 ? '#f59e0b' : '#ef4444';
-      ctx.strokeStyle = sparkColor;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = sparkColor; ctx.shadowBlur = 5;
-      h.forEach((v, i) => { const x = i * step, y = 19 - (v.score / 100) * 17; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+    // Conic-gradient ring — REPLACES the old canvas sparkline (_sparkline(),
+    // retired; it drew into a #ni-conf-spark canvas that no longer exists).
+    // Color thresholds are the exact mockup hex values, deliberately NOT the
+    // --ok/--warn/--err tokens: the ring is a distinct, fixed-hex color
+    // treatment from the breakdown popover's own chart (_drawChart below),
+    // which DOES read those tokens. Do not cross the two.
+    _updateRing() {
+      const ring = document.getElementById('ni-conf-ring');
+      if (!ring) return;
+      const score = Math.max(0, Math.min(100, Confidence._score));
+      const deg = (score / 100) * 360;
+      const color = score >= 80 ? '#4ddb9f' : score >= 60 ? '#f0c04a' : '#f08a6a';
+      ring.style.setProperty('--conf-color', color);
+      ring.style.background = `conic-gradient(var(--conf-color) 0 ${deg}deg, var(--chrome-border) ${deg}deg 360deg)`;
+    },
+
+    // Shared CSS-custom-property reader (mirrors the Dashboard module's own
+    // "_cssVar" helper over in schedule-workbench.mjs) so the breakdown
+    // chart's ok/warn/err triad reads the real theme tokens instead of
+    // duplicating hand-picked hex.
+    _cssVar(name, fallback) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    },
+    _rgbTriplet(hex) {
+      const h = String(hex).replace('#', '');
+      return `${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)}`;
+    },
+    _rgba(hex, alpha) {
+      return `rgba(${Confidence._rgbTriplet(hex)},${alpha})`;
     },
 
     async showBreakdown() {
@@ -1613,10 +1639,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const startLabel = firstTs ? new Date(firstTs).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
 
       const _sc = Confidence._score;
-      const _tier = _sc >= 80 ? { label:'EXCELLENT', color:'#22c55e', bg:'rgba(34,197,94,0.18)'   }
-                  : _sc >= 60 ? { label:'GOOD',      color:'#4ade80', bg:'rgba(74,222,128,0.15)'  }
-                  : _sc >= 40 ? { label:'AT RISK',   color:'#f59e0b', bg:'rgba(245,158,11,0.18)'  }
-                  :             { label:'CRITICAL',  color:'#ef4444', bg:'rgba(239,68,68,0.18)'    };
+      // Verdict/threshold text triad — theme-driven via --ok/--warn/--err tokens
+      // (read live via _cssVar) instead of the old hardcoded hex. This is a
+      // separate color decision from the header ring's fixed mockup hex above.
+      const _okC   = Confidence._cssVar('--ok',   '#1e7a4a');
+      const _warnC = Confidence._cssVar('--warn', '#93610a');
+      const _errC  = Confidence._cssVar('--err',  '#b02a20');
+      const _tier = _sc >= 80 ? { label:'EXCELLENT', color:_okC,   bg:Confidence._rgba(_okC, 0.18)   }
+                  : _sc >= 60 ? { label:'GOOD',      color:_okC,   bg:Confidence._rgba(_okC, 0.12)  }
+                  : _sc >= 40 ? { label:'AT RISK',   color:_warnC, bg:Confidence._rgba(_warnC, 0.18)  }
+                  :             { label:'CRITICAL',  color:_errC,  bg:Confidence._rgba(_errC, 0.18)    };
 
       const styleBlock = `
         <style>
@@ -1694,14 +1726,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const dpr = window.devicePixelRatio || 1;
       ctx.clearRect(0, 0, W, H);
 
+      // Theme-driven ok/warn/err triad (read live via _cssVar) replacing the old
+      // hardcoded #22c55e/#f59e0b/#ef4444 hex — same green/amber/red meaning,
+      // now sourced from the real CSS tokens so dark mode resolves correctly.
+      // Deliberately distinct from the header ring's fixed mockup hex (see
+      // _updateRing above) — do not conflate the two color treatments.
+      const okRgb   = Confidence._rgbTriplet(Confidence._cssVar('--ok',   '#1e7a4a'));
+      const warnRgb = Confidence._rgbTriplet(Confidence._cssVar('--warn', '#93610a'));
+      const errRgb  = Confidence._rgbTriplet(Confidence._cssVar('--err',  '#b02a20'));
+
       const yFor = v => H - (Math.max(0, Math.min(100, v)) / 100) * H;
       const xFor = i => history.length > 1 ? (i / (history.length - 1)) * W : W / 2;
-      const ptColor = s => s >= 70 ? '#22c55e' : s >= 40 ? '#f59e0b' : '#ef4444';
+      const ptColor = s => s >= 70 ? `rgb(${okRgb})` : s >= 40 ? `rgb(${warnRgb})` : `rgb(${errRgb})`;
 
       // Zone bands
-      [{ from:0, to:40, color:'rgba(239,68,68,0.13)' },
-       { from:40,to:70, color:'rgba(245,158,11,0.10)' },
-       { from:70,to:100,color:'rgba(34,197,94,0.10)' }
+      [{ from:0, to:40, color:`rgba(${errRgb},0.13)` },
+       { from:40,to:70, color:`rgba(${warnRgb},0.10)` },
+       { from:70,to:100,color:`rgba(${okRgb},0.10)` }
       ].forEach(b => {
         ctx.fillStyle = b.color;
         ctx.fillRect(0, yFor(b.to), W, yFor(b.from) - yFor(b.to));
@@ -1709,13 +1750,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Zone labels (right-aligned, faint)
       ctx.font = `bold ${Math.round(14/dpr)}px system-ui`; ctx.textAlign = 'right';
-      [{ y: yFor(20), label:'CRITICAL', color:'rgba(239,68,68,0.45)' },
-       { y: yFor(55), label:'AT RISK',  color:'rgba(245,158,11,0.4)' },
-       { y: yFor(85), label:'GOOD',     color:'rgba(34,197,94,0.4)'  }
+      [{ y: yFor(20), label:'CRITICAL', color:`rgba(${errRgb},0.45)` },
+       { y: yFor(55), label:'AT RISK',  color:`rgba(${warnRgb},0.4)` },
+       { y: yFor(85), label:'GOOD',     color:`rgba(${okRgb},0.4)`  }
       ].forEach(({ y, label, color }) => { ctx.fillStyle = color; ctx.fillText(label, W - 6, y + 5); });
 
       // Reference lines at 40 and 70
-      [[40,'rgba(239,68,68,0.55)'],[70,'rgba(34,197,94,0.55)']].forEach(([v,col]) => {
+      [[40,`rgba(${errRgb},0.55)`],[70,`rgba(${okRgb},0.55)`]].forEach(([v,col]) => {
         ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
         ctx.beginPath(); ctx.moveTo(0, yFor(v)); ctx.lineTo(W, yFor(v)); ctx.stroke();
       });
@@ -1723,7 +1764,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Y-axis score labels
       ctx.font = `${Math.round(18/dpr)}px system-ui`; ctx.textAlign = 'left';
-      [[40,'rgba(239,68,68,0.65)'],[70,'rgba(34,197,94,0.65)']].forEach(([v,col]) => {
+      [[40,`rgba(${errRgb},0.65)`],[70,`rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
         ctx.fillStyle = col; ctx.fillText(v, 4, yFor(v) - 3);
       });
 
@@ -1731,7 +1772,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const pts = history.map((p, i) => ({ x: xFor(i), y: yFor(p.score), score: p.score, ts: p.ts }));
       const last = history[history.length - 1].score;
       const lineColor = ptColor(last);
-      const fillColor = last >= 70 ? 'rgba(34,197,94,0.22)' : last >= 40 ? 'rgba(245,158,11,0.22)' : 'rgba(239,68,68,0.22)';
+      const fillColor = last >= 70 ? `rgba(${okRgb},0.22)` : last >= 40 ? `rgba(${warnRgb},0.22)` : `rgba(${errRgb},0.22)`;
 
       // Filled area under line
       ctx.beginPath();
