@@ -1497,20 +1497,20 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // score text must NOT follow the page-theme --ok/--warn-text/--err vars
       // — in light theme those resolve to colors tuned for contrast on a
       // WHITE page, which read as low-contrast against the dark chrome chip.
-      // Fixed hex below reuses this task's own dark-mode --ok/--warn-text/--err
-      // values (already confirmed high-contrast against --chrome-panel), so
-      // the badge reads correctly in both page themes.
+      // Fixed hex below are brightened tints (same hue/sat as the dark-mode
+      // --ok/--warn/--err triad) verified >=4.5:1 against #1f3a5c chrome-panel:
+      // ok #4dbd7a 4.88:1, warn #e0a018 5.07:1, err #e88f83 4.78:1.
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = score;
-        scoreEl.style.color = score >= 70 ? '#3d9962' : score >= 40 ? '#d09010' : '#d94a3a';
+        scoreEl.style.color = score >= 70 ? '#4dbd7a' : score >= 40 ? '#e0a018' : '#e88f83';
       }
       const delta = score - prev;
       if (Confidence._badge && Math.abs(delta) >= 5) {
         const flash = document.createElement('span');
         flash.className = 'ni-conf-delta';
         flash.textContent = delta > 0 ? `+${delta}` : `${delta}`;
-        flash.style.color = delta > 0 ? '#3d9962' : '#d94a3a';
+        flash.style.color = delta > 0 ? '#4dbd7a' : '#e88f83';
         Confidence._badge.appendChild(flash);
         setTimeout(() => flash.remove(), 1900);
       }
@@ -1531,7 +1531,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = snap.score;
-        scoreEl.style.color = snap.score >= 70 ? '#3d9962' : snap.score >= 40 ? '#d09010' : '#d94a3a';
+        scoreEl.style.color = snap.score >= 70 ? '#4dbd7a' : snap.score >= 40 ? '#e0a018' : '#e88f83';
       }
       Confidence._updateRing();
     },

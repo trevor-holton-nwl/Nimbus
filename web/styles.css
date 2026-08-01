@@ -4625,8 +4625,8 @@ body.dark {
      re-lit for a dark surface: navy bg, elevated slate-navy cards, cool
      blue-gray borders/text. */
   --bg:           #0a1420;          /* deep navy page */
-  --bg-elev:      #16212f;          /* cards / panels */
-  --bg-subtle:    #1c2a3c;          /* input / subtle fill */
+  --bg-elev:      #1c2a3c;          /* cards / panels — brightest of the elevated/subtle/strong trio, matching light mode's ordering */
+  --bg-subtle:    #16212f;          /* input / subtle fill */
   --bg-strong:    #101b28;          /* header rail */
   --line:         #263850;          /* hairline borders */
   --line-strong:  #344965;
@@ -4661,7 +4661,7 @@ body.dark {
   /* Undefined-token dark counterparts (Task 1 only defined these for light) */
   --border:          #263850;      /* same as --line */
   --border-subtle:   #101b28;      /* same as --bg-strong — faint dark divider */
-  --surface:         #16212f;      /* same as --bg-elev */
+  --surface:         #1c2a3c;      /* same as --bg-elev */
   --text-muted:      #90a2b8;      /* same as --fg-mute */
   --line-subtle:     #1f2e42;      /* dark-appropriate row hairline */
   --surface-2:       #182335;      /* subtle zebra-stripe tone, distinct from --bg-subtle */
