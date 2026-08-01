@@ -207,7 +207,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-cp-index-count { margin-left:auto; font-size:10px; color:var(--fg-faint); font-variant-numeric:tabular-nums; }
 
 /* ── Time Machine ──────────────────────────────────────── */
-.ni-tm-panel { position:fixed; top:60px; right:16px; width:340px; max-height:480px;
+.ni-tm-panel { position:fixed; top:calc(var(--chrome-h) + 8px); right:16px; width:340px; max-height:480px;
   background:var(--bg-elev); border:1.5px solid var(--line-strong); border-radius:var(--r-xl);
   box-shadow:var(--shadow-lg); z-index:500; display:flex; flex-direction:column; overflow:hidden; }
 .ni-tm-panel[hidden] { display:none !important; }

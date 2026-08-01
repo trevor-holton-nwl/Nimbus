@@ -112,6 +112,11 @@ h1, h2, h3, h4 {
   /* Transitions */
   --t-fast: 0.12s ease;
   --t-med:  0.18s ease;
+
+  /* Header/chrome heights — Command Band re-skin (Task 2 prep; Task 3 builds the markup) */
+  --band-h:    46px;
+  --context-h: 40px;
+  --chrome-h:  calc(var(--band-h) + var(--context-h));
 }
 
 /* --- SHELL LAYOUT --------------------------------------------------------- */
@@ -122,7 +127,7 @@ h1, h2, h3, h4 {
   flex-shrink: 0;
   display: flex; align-items: center; gap: 18px;
   padding: 0 16px;
-  height: 52px;
+  height: var(--chrome-h);
   background: var(--bg-elev);
   border-bottom: 1px solid var(--line);
   position: relative;
@@ -141,8 +146,8 @@ h1, h2, h3, h4 {
   font-family: 'Archivo', sans-serif;
   padding-right: 12px;
   border-right: 1px solid var(--line);
-  height: 52px;
-  line-height: 52px;
+  height: var(--chrome-h);
+  line-height: var(--chrome-h);
 }
 .brand-mark { color: var(--accent); font-size: 16px; line-height: 1; }
 .brand-name { font-weight: 800; letter-spacing: 0.01em; font-size: 14px; }
@@ -1524,7 +1529,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    ========================================================================== */
 .alert-drawer {
   position: fixed;
-  top: 52px; right: 0; bottom: 0;
+  top: var(--chrome-h); right: 0; bottom: 0;
   width: 380px;
   background: var(--bg-elev);
   border-left: 1px solid var(--line);
@@ -1810,7 +1815,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
    TOASTS
    ========================================================================== */
 #toast-stack {
-  position: fixed; top: 64px; right: 16px;
+  position: fixed; top: calc(var(--chrome-h) + 12px); right: 16px;
   z-index: 3000;
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;
@@ -2023,7 +2028,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 }
 #sandbox-banner {
   position: fixed;
-  top: 52px; left: 0; right: 0;
+  top: var(--chrome-h); left: 0; right: 0;
   z-index: 450;
   background: var(--warn-soft);
   border-bottom: 1px solid var(--warn);
@@ -5110,7 +5115,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
   box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
-.lp-card-scroll { overflow: auto; max-height: calc(100vh - 205px); width: 100%; }
+.lp-card-scroll { overflow: auto; max-height: calc(100vh - var(--chrome-h) - 153px); width: 100%; }
 .lp-meta { font-size: 12px; color: var(--fg-mute); margin: 0 0 10px; }
 .lp-hint { margin-top: 10px; font-size: 11px; color: var(--fg-faint); }
 
