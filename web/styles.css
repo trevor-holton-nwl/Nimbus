@@ -514,15 +514,15 @@ h1, h2, h3, h4 {
   background: var(--primary); color: var(--primary-fg); border-color: var(--primary);
 }
 .gantt-toolbar .seg-btn[data-gantt-sub].active {
-  background: var(--accent); border-color: var(--accent);
-  color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+  background: var(--primary); border-color: var(--primary);
+  color: var(--primary-fg); font-weight: 600;
+  box-shadow: 0 2px 8px rgba(12,28,48,0.28);
 }
 .btn-optimize {
   background: transparent;
   border-color: var(--line);
 }
-.btn-optimize:hover { background: var(--bg-subtle); border-color: var(--accent, #60a5fa); }
+.btn-optimize:hover { background: var(--bg-subtle); border-color: var(--accent, #1f5fbf); }
 
 /* --- INPUTS --------------------------------------------------------------- */
 .input, input[type="text"], input[type="search"], input[type="number"],
@@ -1123,7 +1123,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   pointer-events: none;
   z-index: 1000;
   border: 1px dashed var(--nimbus-amber, #d97706);
-  background: rgba(217, 119, 6, 0.10);
+  background: rgba(var(--accent-rgb), 0.10);
   border-radius: 2px;
 }
 
@@ -2339,7 +2339,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   border-left: 3px solid transparent;
 }
 .admin-log-row.admin-log-info  { border-left-color: var(--info); }
-.admin-log-row.admin-log-warn  { border-left-color: var(--warn); background: rgba(181,122,10,0.04); }
+.admin-log-row.admin-log-warn  { border-left-color: var(--warn); background: rgba(147,97,10,0.04); } /* --warn #93610a */
 .admin-log-row.admin-log-error { border-left-color: var(--err);  background: rgba(177,54,42,0.05); }
 .admin-log-head { display: flex; gap: 8px; align-items: baseline; }
 .admin-log-lvl {
@@ -2370,17 +2370,20 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 
 /* Error-code + request-id affordances in log rows (FE↔BE correlation) */
 .admin-log-code {
+  /* Error-code/request-id identifier chip, not a warning-severity indicator —
+     background/border now match the already-blue (--accent) text instead of
+     the old amber. */
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10.5px;
   color: var(--accent);
-  background: rgba(181,122,10,0.10);
-  border: 1px solid rgba(181,122,10,0.30);
+  background: rgba(var(--accent-rgb),0.10);
+  border: 1px solid rgba(var(--accent-rgb),0.30);
   border-radius: var(--r-sm);
   padding: 0 5px;
   cursor: pointer;
   white-space: nowrap;
 }
-.admin-log-code:hover { background: rgba(181,122,10,0.20); }
+.admin-log-code:hover { background: rgba(var(--accent-rgb),0.20); }
 .admin-log-reqid {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10.5px;
@@ -2523,20 +2526,22 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 .opt-header::before {
   content: '';
   position: absolute; inset: 0;
-  background: radial-gradient(ellipse 90% 60% at 20% 50%, rgba(184,121,26,0.12) 0%, transparent 65%);
+  background: radial-gradient(ellipse 90% 60% at 20% 50%, rgba(var(--accent-rgb),0.12) 0%, transparent 65%);
   pointer-events: none;
 }
 .opt-header::after {
   content: '';
   position: absolute; bottom: 0; left: 0; right: 0; height: 1.5px;
-  background: linear-gradient(90deg, var(--accent) 0%, rgba(184,121,26,0.25) 55%, transparent 100%);
+  /* Blue (--accent) blending into navy (--primary #12263f, rgb below) — a single
+     cool-tone family, replacing the old blue-into-amber seam. */
+  background: linear-gradient(90deg, var(--accent) 0%, rgba(18,38,63,0.35) 55%, transparent 100%);
 }
 
 .opt-header-icon {
   width: 44px; height: 44px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(184,121,26,0.14);
-  border: 1px solid rgba(184,121,26,0.28);
+  background: rgba(var(--accent-rgb),0.14);
+  border: 1px solid rgba(var(--accent-rgb),0.28);
   border-radius: 12px;
   font-size: 20px;
   position: relative; z-index: 1;
@@ -2544,11 +2549,11 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 .opt-header-text { flex: 1; position: relative; z-index: 1; min-width: 0; }
 .opt-header-title {
   font-size: 15px; font-weight: 700;
-  color: #f8f5ef; letter-spacing: 0.01em;
+  color: var(--chrome-fg); letter-spacing: 0.01em;
 }
 .opt-header-sub {
   font-size: 11.5px; margin-top: 2px;
-  color: rgba(248,245,239,0.48);
+  color: rgba(255,255,255,0.48);
 }
 .opt-close {
   width: 30px; height: 30px; flex-shrink: 0;
@@ -2556,14 +2561,14 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 7px;
-  color: rgba(248,245,239,0.55);
+  color: rgba(255,255,255,0.55);
   font-size: 11px;
   position: relative; z-index: 1;
   transition: background var(--t-fast), color var(--t-fast);
 }
 .opt-close:hover {
   background: rgba(255,255,255,0.16);
-  color: #f8f5ef;
+  color: var(--chrome-fg);
 }
 
 /* ── Body ── */
@@ -2597,7 +2602,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   background: var(--accent);
   border-color: var(--accent);
   color: #fff; font-weight: 600;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.32);
+  box-shadow: 0 2px 10px rgba(var(--accent-rgb),0.32);
 }
 
 /* ── Custom date row (collapsible) ── */
@@ -2728,7 +2733,7 @@ span.flatpickr-weekday {
   display: flex; align-items: center; gap: 4px;
   padding: 7px 12px;
   background: var(--accent-wash);
-  border: 1px solid rgba(184,121,26,0.18);
+  border: 1px solid rgba(var(--accent-rgb),0.18);
   border-left: 3px solid var(--accent);
   border-radius: var(--r-md);
   font-size: 12px; line-height: 1;
@@ -2753,7 +2758,7 @@ span.flatpickr-weekday {
 .opt-strategy-card.active {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10), inset 0 0 0 1px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10), inset 0 0 0 1px rgba(var(--accent-rgb),0.10);
 }
 .opt-card-icon  { font-size: 20px; margin-bottom: 7px; }
 .opt-card-title { font-size: 11.5px; font-weight: 700; color: var(--fg); margin-bottom: 4px; }
@@ -2788,20 +2793,22 @@ span.flatpickr-weekday {
   background: var(--bg-subtle);
 }
 .opt-run-btn {
+  /* Content-area primary CTA — navy --primary fill (Command Band CTA rule),
+     not the blue --accent used for links/outlines/focus. */
   height: 34px; padding: 0 20px;
   border: none; border-radius: var(--r-md);
-  background: linear-gradient(135deg, #c4831e 0%, #9d6210 100%);
-  color: #fff; font-size: 13px; font-weight: 600;
+  background: linear-gradient(135deg, var(--primary-hot) 0%, var(--primary) 100%);
+  color: var(--primary-fg); font-size: 13px; font-weight: 600;
   display: inline-flex; align-items: center; gap: 6px;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.38);
+  box-shadow: 0 2px 10px rgba(12,28,48,0.38);
   transition: background var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
 }
 .opt-run-btn:hover {
-  background: linear-gradient(135deg, #d08f26 0%, #ae6d14 100%);
-  box-shadow: 0 4px 18px rgba(184,121,26,0.50);
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hot) 100%);
+  box-shadow: 0 4px 18px rgba(12,28,48,0.50);
   transform: translateY(-1px);
 }
-.opt-run-btn:active { transform: none; box-shadow: 0 1px 6px rgba(184,121,26,0.28); }
+.opt-run-btn:active { transform: none; box-shadow: 0 1px 6px rgba(12,28,48,0.28); }
 .opt-run-icon { font-size: 13px; }
 
 /* =============================================================================
@@ -2850,8 +2857,8 @@ span.flatpickr-weekday {
   display: inline-block;
   margin-left: 6px;
   padding: 1px 7px;
-  background: rgba(184,121,26,0.14);
-  border: 1px solid rgba(184,121,26,0.28);
+  background: rgba(var(--accent-rgb),0.14);
+  border: 1px solid rgba(var(--accent-rgb),0.28);
   border-radius: 20px;
   font-size: 11px;
   color: var(--accent);
@@ -2920,7 +2927,7 @@ span.flatpickr-weekday {
 .cal-day-toggle-wrap input:checked ~ .cal-toggle-track {
   background: var(--accent);
   border-color: var(--accent);
-  box-shadow: 0 2px 8px rgba(184,121,26,0.36);
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.36);
 }
 .cal-toggle-thumb {
   position: absolute;
@@ -2960,7 +2967,7 @@ span.flatpickr-weekday {
 .cal-time-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.15);
 }
 .cal-time-sep {
   color: var(--fg-mute);
@@ -2983,8 +2990,8 @@ span.flatpickr-weekday {
 }
 .cal-day-row:not(.cal-day-off) .cal-day-badge-hrs {
   color: var(--accent);
-  border-color: rgba(184,121,26,0.28);
-  background: rgba(184,121,26,0.06);
+  border-color: rgba(var(--accent-rgb),0.28);
+  background: rgba(var(--accent-rgb),0.06);
 }
 
 /* ── Copy-from-plant link ── */
@@ -3001,7 +3008,7 @@ span.flatpickr-weekday {
 }
 .cal-copy-plant-btn:hover {
   color: var(--accent);
-  text-decoration-color: rgba(184,121,26,0.5);
+  text-decoration-color: rgba(var(--accent-rgb),0.5);
 }
 
 /* =============================================================================
@@ -3116,7 +3123,7 @@ input.lines-nav-input:focus {
   border-radius: 10px;
   transition: border-color var(--t-fast), opacity var(--t-fast);
 }
-.line-hours-pill.on  { border-color: rgba(184,121,26,0.3); }
+.line-hours-pill.on  { border-color: rgba(var(--accent-rgb),0.3); }
 .line-hours-pill.off { opacity: 0.38; }
 .lhp-day  {
   font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -3410,7 +3417,14 @@ input.lines-nav-input:focus {
 .admin-log-row.expanded .admin-log-ctx { display: block; }
 .admin-log-row:not(:has(.admin-log-ctx)) { cursor: default; }
 
-/* ── reqId / errorCode affordances — dark-mode tint counterparts ── */
+/* ── reqId / errorCode affordances — dark-mode tint counterparts ──
+   Left as-is (Task 8/Command Band re-skin): body.dark still globally
+   redefines --accent/--primary back to amber (a token-layer gap outside this
+   task's scope, not a special-case literal), so .admin-log-code's text
+   (var(--accent)) still renders amber in dark mode too. Repointing only this
+   background to blue would create a NEW mismatch (blue chip / amber text)
+   that doesn't exist today — leave both self-consistently amber until a
+   dedicated dark-mode token pass lands. */
 body.dark .admin-log-code {
   background: rgba(214,158,46,0.14);
   border-color: rgba(214,158,46,0.36);
@@ -3459,11 +3473,17 @@ body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
 .cw-active-card {
   display: flex; align-items: center; gap: 12px;
   padding: 14px 16px;
-  background: linear-gradient(135deg, var(--accent-wash) 0%, #fdf8ee 100%);
-  border: 1.5px solid rgba(184,121,26,0.28);
+  background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
+  border: 1.5px solid rgba(var(--accent-rgb),0.28);
   border-radius: var(--r-lg);
   margin-bottom: 14px;
 }
+/* Left as-is (Task 8/Command Band re-skin): body.dark still redefines
+   --accent-wash to an amber wash (#1e1505), so today this gradient is a
+   coherent amber-to-amber blend in dark mode with no seam. Repointing only
+   the #2a2010 end stop to a blue/neutral would introduce a NEW seam against
+   the still-amber --accent-wash start stop — leave both amber together until
+   a dedicated dark-mode token pass retunes --accent/--accent-wash. */
 body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-wash) 0%, #2a2010 100%); }
 .cw-active-icon { font-size: 24px; flex-shrink: 0; }
 .cw-active-info { flex: 1; min-width: 0; }
@@ -3497,7 +3517,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .cw-dropzone.drag-over {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10);
 }
 .cw-dropzone.uploading { opacity: 0.6; pointer-events: none; }
 .cw-replace-zone {
@@ -3529,7 +3549,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .ord-dropzone.drag-over {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10);
 }
 .ord-dropzone.uploading { opacity: 0.6; pointer-events: none; }
 .ord-drop-inner {
@@ -3645,7 +3665,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .opt-scope-btn:hover { color: var(--accent); }
 .opt-scope-btn.active {
   background: var(--accent); color: #fff;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.30);
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.30);
 }
 
 .opt-lines-panel {
@@ -3738,7 +3758,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   height: 32px; padding: 0 10px;
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.14);
-  color: #f8f5ef;
+  color: var(--chrome-fg);
   font-size: 12.5px;
 }
 .opt-header-plant .opt-plant-trigger:hover,
@@ -3746,7 +3766,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   background: rgba(255,255,255,0.14);
   border-color: rgba(255,255,255,0.24);
 }
-.opt-header-plant .opt-plant-trigger-arrow { color: rgba(248,245,239,0.55); }
+.opt-header-plant .opt-plant-trigger-arrow { color: rgba(255,255,255,0.55); }
 
 /* Compact wheel badge — icon-only chip for the header */
 .opt-wheel-badge.compact {
@@ -3804,7 +3824,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.32);
+  box-shadow: 0 2px 10px rgba(var(--accent-rgb),0.32);
 }
 .osp-icon { font-size: 14px; line-height: 1; }
 
@@ -5202,11 +5222,11 @@ body.dark .sub-subtab.active { color: #ffffff; }
   background: var(--accent); flex-shrink: 0;
 }
 
-/* Active seg-btn for labor sub-tabs — amber pill matching Gantt */
+/* Active seg-btn for labor sub-tabs — navy pill matching Gantt/every other .seg-btn */
 .labor-toolbar .seg-btn[data-labor-sub].active {
-  background: var(--accent); border-color: var(--accent);
-  color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+  background: var(--primary); border-color: var(--primary);
+  color: var(--primary-fg); font-weight: 600;
+  box-shadow: 0 2px 8px rgba(12,28,48,0.28);
 }
 
 /* Exception count badge inside the Exceptions button */
@@ -5424,7 +5444,7 @@ td.lp-selected-td {
 .admin-perf-table .perf-ago  { color: var(--fg-faint); font-size: 11px; }
 .admin-perf-table .admin-perf-empty { text-align: center; color: var(--fg-mute); padding: 24px; font-style: italic; }
 .perf-ok   { color: var(--ok,  #2f7a4d); }
-.perf-warn { color: var(--warn, #b8791a); font-weight: 600; }
+.perf-warn { color: var(--warn, #93610a); font-weight: 600; }
 .perf-hot  { color: var(--err,  #c0392b); font-weight: 700; }
 
 /* ════════════════════════════════════════════════════════════════════════════

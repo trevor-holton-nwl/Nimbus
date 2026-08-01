@@ -437,7 +437,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
 .lh-drill-head {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px;
-  background: rgba(184,121,26,0.08);
+  background: var(--bg-subtle);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--fg);
@@ -462,7 +462,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   transition: background 0.1s;
 }
 .lh-drill-row:last-child { border-bottom: 0; }
-.lh-drill-row:hover { background: rgba(184,121,26,0.06); }
+.lh-drill-row:hover { background: var(--bg-subtle); }
 .lh-drill-id {
   font-family: 'JetBrains Mono', monospace;
   color: var(--fg-mute);
@@ -477,8 +477,10 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   color: var(--err);
 }
 .lh-drill-more { padding: 6px 12px; font-size: 11px; color: var(--fg-mute); text-align: center; }
-body.dark .lh-drill-head { background: rgba(184,121,26,0.15); }
-body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
+/* No body.dark overrides needed — .lh-drill-head/.lh-drill-row:hover now use
+   var(--bg-subtle), which is already theme-aware (matches the Task 7
+   .lp-table convention of relying on the token rather than a manual dark
+   override). */
 
 /* ── Optimizer Impact Preview (C4) ────────────────────────────── */
 @keyframes optpv-card-in {
@@ -526,7 +528,7 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   text-transform: uppercase;
   font-family: 'JetBrains Mono', monospace;
   letter-spacing: 0.08em;
-  box-shadow: 0 1px 3px rgba(184,121,26,0.30);
+  box-shadow: 0 1px 3px rgba(var(--accent-rgb),0.30);
 }
 .opt-pv-chip-plant { color: var(--fg); }
 
@@ -550,15 +552,15 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   width: 4px;
 }
 .opt-pv-verdict-better {
-  background: linear-gradient(135deg, rgba(22,163,74,0.06) 0%, rgba(22,163,74,0.02) 100%);
-  border-color: rgba(22,163,74,0.25);
+  background: linear-gradient(135deg, rgba(30,122,74,0.06) 0%, rgba(30,122,74,0.02) 100%); /* --ok #1e7a4a */
+  border-color: rgba(30,122,74,0.25);
 }
-.opt-pv-verdict-better::before { background: #16a34a; }
+.opt-pv-verdict-better::before { background: var(--ok); }
 .opt-pv-verdict-worse {
-  background: linear-gradient(135deg, rgba(220,38,38,0.06) 0%, rgba(220,38,38,0.02) 100%);
-  border-color: rgba(220,38,38,0.25);
+  background: linear-gradient(135deg, rgba(176,42,32,0.06) 0%, rgba(176,42,32,0.02) 100%); /* --err #b02a20 */
+  border-color: rgba(176,42,32,0.25);
 }
-.opt-pv-verdict-worse::before { background: #dc2626; }
+.opt-pv-verdict-worse::before { background: var(--err); }
 .opt-pv-verdict-neutral {
   background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
   border-color: var(--line);
@@ -573,8 +575,8 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   background: #fff;
   flex-shrink: 0;
 }
-.opt-pv-verdict-better .opt-pv-verdict-icon { color: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,0.25); }
-.opt-pv-verdict-worse  .opt-pv-verdict-icon { color: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,0.25); }
+.opt-pv-verdict-better .opt-pv-verdict-icon { color: var(--ok); box-shadow: 0 0 0 1px rgba(30,122,74,0.25); }
+.opt-pv-verdict-worse  .opt-pv-verdict-icon { color: var(--err); box-shadow: 0 0 0 1px rgba(176,42,32,0.25); }
 .opt-pv-verdict-neutral .opt-pv-verdict-icon { color: var(--accent); box-shadow: 0 0 0 1px var(--line); }
 
 .opt-pv-verdict-text { min-width: 0; }
@@ -606,8 +608,8 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   line-height: 1;
   color: var(--fg);
 }
-.opt-pv-verdict-better .opt-pv-score-num { color: #16a34a; }
-.opt-pv-verdict-worse  .opt-pv-score-num { color: #dc2626; }
+.opt-pv-verdict-better .opt-pv-score-num { color: var(--ok); }
+.opt-pv-verdict-worse  .opt-pv-score-num { color: var(--err); }
 .opt-pv-score-of { color: var(--fg-faint); font-weight: 500; font-size: 14px; }
 .opt-pv-score-lbl {
   font-size: 9.5px;
@@ -643,9 +645,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   box-shadow: var(--shadow-md);
   border-color: var(--line-strong);
 }
-.opt-pv-card-better { border-top: 2px solid #16a34a; }
-.opt-pv-card-worse  { border-top: 2px solid #dc2626; }
-.opt-pv-card-warn   { border-top: 2px solid #ca8a04; }
+.opt-pv-card-better { border-top: 2px solid var(--ok); }
+.opt-pv-card-worse  { border-top: 2px solid var(--err); }
+.opt-pv-card-warn   { border-top: 2px solid var(--warn); }
 .opt-pv-card-neutral { border-top: 2px solid var(--line-strong); }
 
 .opt-pv-card-head {
@@ -701,7 +703,7 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   width: 230px;
   padding: 9px 11px;
   background: #1a1b1f;
-  color: #f5f4ef;
+  color: var(--chrome-fg);
   font-size: 11px;
   font-weight: 400;
   line-height: 1.45;
@@ -766,9 +768,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   font-weight: 300;
   padding: 0 2px;
 }
-.opt-pv-card-better .opt-pv-arrow { color: #16a34a; }
-.opt-pv-card-worse  .opt-pv-arrow { color: #dc2626; }
-.opt-pv-card-warn   .opt-pv-arrow { color: #ca8a04; }
+.opt-pv-card-better .opt-pv-arrow { color: var(--ok); }
+.opt-pv-card-worse  .opt-pv-arrow { color: var(--err); }
+.opt-pv-card-warn   .opt-pv-arrow { color: var(--warn); }
 
 /* Bars — visual scale of pre vs post */
 .opt-pv-bars {
@@ -801,9 +803,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   animation: optpv-bar-grow 0.55s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 .opt-pv-bar-fill.pre { background: var(--line-strong); animation-delay: 0.05s; }
-.opt-pv-bar-fill.post.better  { background: linear-gradient(90deg, #16a34a, #22c55e); animation-delay: 0.18s; }
-.opt-pv-bar-fill.post.worse   { background: linear-gradient(90deg, #dc2626, #ef4444); animation-delay: 0.18s; }
-.opt-pv-bar-fill.post.warn    { background: linear-gradient(90deg, #a16207, #ca8a04); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.better  { background: linear-gradient(90deg, var(--ok), color-mix(in srgb, var(--ok) 70%, white)); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.worse   { background: linear-gradient(90deg, var(--err), color-mix(in srgb, var(--err) 70%, white)); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.warn    { background: linear-gradient(90deg, var(--warn), color-mix(in srgb, var(--warn) 70%, white)); animation-delay: 0.18s; }
 .opt-pv-bar-fill.post.neutral { background: linear-gradient(90deg, var(--accent), var(--accent-hot)); animation-delay: 0.18s; }
 
 /* Delta pill */
@@ -818,9 +820,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   letter-spacing: 0.01em;
   animation: optpv-pill-pop 0.4s cubic-bezier(0.34, 1.52, 0.64, 1) 0.22s both;
 }
-.opt-pv-delta-pill.better  { background: rgba(22,163,74,0.10); color: #16a34a; }
-.opt-pv-delta-pill.worse   { background: rgba(220,38,38,0.10); color: #dc2626; }
-.opt-pv-delta-pill.warn    { background: rgba(202,138,4,0.12); color: #a16207; }
+.opt-pv-delta-pill.better  { background: rgba(30,122,74,0.10); color: var(--ok); }
+.opt-pv-delta-pill.worse   { background: rgba(176,42,32,0.10); color: var(--err); }
+.opt-pv-delta-pill.warn    { background: rgba(147,97,10,0.12); color: var(--warn); }
 .opt-pv-delta-pill.neutral { background: var(--bg-subtle); color: var(--fg-mute); }
 .opt-pv-pill-icon { font-size: 9px; }
 .opt-pv-pct { font-weight: 500; opacity: 0.80; margin-left: 2px; }
