@@ -1232,7 +1232,11 @@ const App = {
       });
     }
     document.getElementById('nav-drawer-scrim')?.addEventListener('click', () => App._closeDrawer());
-    document.getElementById('nav-drawer-close')?.addEventListener('click', () => App._closeDrawer());
+    const navDrawerClose = document.getElementById('nav-drawer-close');
+    if (navDrawerClose) {
+      navDrawerClose.setAttribute('aria-label', Util.t('aria.nav_drawer_close'));
+      navDrawerClose.addEventListener('click', () => App._closeDrawer());
+    }
 
     /* Drawer's PLANT row — secondary affordance per UI_FRONTEND_MIGRATION.md
        Step 5: closes the drawer, then focuses/opens the relocated

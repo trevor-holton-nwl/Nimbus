@@ -1101,6 +1101,7 @@ window.__NIMBUS_LOCALES.de = {
   'aria.open_command_palette':         'Open command palette',                      // MISSING TRANSLATION
   'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
   'aria.nav_drawer_toggle':            'Navigationsmenü umschalten',
+  'aria.nav_drawer_close':             'Navigationsmenü schließen',
 
   // Nav drawer (Command Band re-skin)
   'ui.nav_drawer_heading':             'NAVIGATION',
