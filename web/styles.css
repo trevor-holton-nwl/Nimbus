@@ -3484,7 +3484,19 @@ body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
    the #2a2010 end stop to a blue/neutral would introduce a NEW seam against
    the still-amber --accent-wash start stop — leave both amber together until
    a dedicated dark-mode token pass retunes --accent/--accent-wash. */
-body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-wash) 0%, #2a2010 100%); }
+/* border-color added here (Task 8 follow-up fix): the base .cw-active-card
+   rule's border was repointed to rgba(var(--accent-rgb),0.28) for the
+   light-mode blue re-skin, but --accent-rgb is NOT redefined by body.dark
+   (stays the light-mode blue triplet), so without this override dark mode
+   paired a blue border ring around the still-amber gradient above.
+   rgba(184,121,26,0.28) is the original pre-Command-Band amber literal —
+   internally consistent with this gradient's own amber tone — restoring
+   the coherent amber-border + amber-gradient card dark mode had before
+   the base rule's border was repointed. */
+body.dark .cw-active-card {
+  background: linear-gradient(135deg, var(--accent-wash) 0%, #2a2010 100%);
+  border-color: rgba(184,121,26,0.28);
+}
 .cw-active-icon { font-size: 24px; flex-shrink: 0; }
 .cw-active-info { flex: 1; min-width: 0; }
 .cw-active-name {
