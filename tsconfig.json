@@ -1,0 +1,31 @@
+{
+  // Config for real browser ESM modules (docs/typescript_migration.md Phase 1+ —
+  // web/*.mts). No real .mts files exist yet as of Phase 0; nimbus-worker.ts (a
+  // classic, non-module worker script) deliberately uses the separate
+  // tsconfig.worker.json instead — see that file's header comment for why a single
+  // shared config can't cleanly serve both execution contexts under "nodenext".
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "skipLibCheck": true,
+    "rootDir": "web",
+    "outDir": "web",
+    "allowJs": false,
+    "checkJs": false,
+    "declaration": false,
+    "noEmitOnError": true
+  },
+  "include": [
+    "web/**/*.mts",
+    "web/nimbus-compute-core.d.ts",
+    "web/types/vendor.d.ts"
+  ],
+  // Compiled output lands in place, in the same directory as its source
+  // (rootDir === outDir === "web" — see docs/typescript_migration.md). TS's default
+  // `exclude` is [outDir], which here would swallow the entire web/ tree, including
+  // every file in `include` above — so it must be explicitly overridden to empty.
+  "exclude": []
+}

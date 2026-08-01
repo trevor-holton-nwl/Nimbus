@@ -2,11 +2,15 @@
   "name": "nimbus",
   "version": "0.0.0",
   "private": true,
-  "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. No build step; static frontend. This package.json exists only for the ESLint static-analysis gate.",
+  "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. Static frontend with no runtime bundler; this package.json backs the ESLint static-analysis gate and a per-file (non-bundling) TypeScript build for modules that have been migrated — see docs/typescript_migration.md.",
   "scripts": {
-    "lint": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js web/locales \"web/**/*.mjs\" scripts tests/modules",
-    "lint:errors": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js web/locales --quiet",
-    "lint:ci": "eslint web/app.js web/nimbus-intelligence.js web/nimbus-worker.js web/nimbus-compute-core.js \"web/**/*.mjs\" scripts tests/modules --quiet",
+    "lint": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mjs\" \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts scripts tests/modules",
+    "lint:errors": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts --quiet",
+    "lint:ci": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js \"web/**/*.mjs\" \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts scripts tests/modules --quiet",
+    "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.worker.json && tsc -p tsconfig.json",
+    "build:watch": "tsc -p tsconfig.worker.json --watch",
+    "pretest": "npm run build",
     "test:legacy": "node --test \"tests/js/*.test.js\"",
     "test:modules": "node --test \"tests/modules/*.test.mjs\"",
     "test": "npm run test:legacy && npm run test:modules",
@@ -15,6 +19,8 @@
   },
   "devDependencies": {
     "eslint": "^9.0.0",
-    "globals": "^15.0.0"
+    "globals": "^15.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0"
   }
 }

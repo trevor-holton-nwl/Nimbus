@@ -20,10 +20,10 @@ __pycache__
 .ruff_cache
 *.egg-info
 
-# Node / lint tooling (frontend is plain static JS — no build step)
+# Node / lint tooling. NOTE: package.json + package-lock.json are NOT ignored —
+# the webbuild stage needs them for `npm ci` + the tsc build (see Dockerfile and
+# docs/typescript_migration.md). Only node_modules and dev-only configs are stripped.
 node_modules
-package.json
-package-lock.json
 eslint.config.js
 pyproject.toml
 

@@ -80,6 +80,43 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
   }
 });
 
+test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they stop being retried forever', async () => {
+  // Regression guard for a latent client↔server contract bug: the backend's
+  // /tasks/update forwards invalid_ids/not_found_ids (terminal rejections — inverted
+  // range or id-not-in-DB) and saveAll's R7 logic must add them to its `accounted`
+  // set and clear them from _dirtyIds. Before the fix the endpoint sent only counts,
+  // so these ids never cleared → they re-posted on every save and spammed a
+  // "Partial DB save" warning with no way to resolve.
+  Store.setTasks([
+    { id: 'ok1',       PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+    { id: 'bad-range', PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+    { id: 'gone',      PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+  ], 'unit-test');
+  Persistence._dirtyIds.add('ok1');
+  Persistence._dirtyIds.add('bad-range');
+  Persistence._dirtyIds.add('gone');
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({
+      versions: { ok1: '6' }, stale: [],
+      invalid_ids: ['bad-range'], not_found_ids: ['gone'],
+      persisted: 1, updated: 3,
+    }),
+  });
+  try {
+    Persistence.saveAll();
+    // Flush the fetch → r.json() → result-handler microtask chain (saveAll returns void).
+    await new Promise(res => setTimeout(res, 0));
+    assert.ok(!Persistence._dirtyIds.has('ok1'),       'persisted id must clear');
+    assert.ok(!Persistence._dirtyIds.has('bad-range'), 'invalid_ids id must clear (terminal — do not retry forever)');
+    assert.ok(!Persistence._dirtyIds.has('gone'),      'not_found_ids id must clear (terminal — row not in DB)');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('a load that needs to snap a task to working hours calls the injected calendar service, not a global', () => {
   const calls = [];
   Persistence.setCalendarService({

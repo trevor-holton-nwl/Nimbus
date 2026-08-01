@@ -664,11 +664,16 @@ brainstormed and approved 2026-07-07, alongside a Phase 0 render-perf fix (batch
 Full spec: **`docs/superpowers/specs/2026-07-07-multi-user-sync-design.md`**. This is a pointer/index
 entry only — see the spec for the full architecture.
 
-- **Phase 1 — write-through autosave.** The **TZ corruption hard blocker** is now **fixed** (see
-  "Timezone save corruption" below) — `saveAll` sends naive-local strings, so write-through no longer
-  corrupts on every drag. Still fixes the partial-save dirty-id-clearing bug (dirty ids are cleared before
-  the persisted-count check, so under-persisted rows are never retried) before adding a dirty-tasks-only
-  backend leg to the existing 1.2 s autosave debounce.
+- **Phase 1 — write-through autosave.** Both prerequisites are now **fixed**: (1) the **TZ corruption
+  hard blocker** (see "Timezone save corruption" below) — `saveAll` sends naive-local strings, so
+  write-through no longer corrupts on every drag; and (2) the **partial-save dirty-id-clearing bug** —
+  `saveAll` now clears only the ids the backend actually accounted for (persisted `versions`, `stale`,
+  and the terminally-rejected `invalid_ids`/`not_found_ids`), instead of `.clear()`-ing both sets
+  unconditionally, so genuinely-unpersisted rows stay dirty and retry. The final piece of (2) landed
+  2026-07-28: the `/tasks/update` + `/tasks/bulk_update` endpoints now actually forward
+  `invalid_ids`/`not_found_ids` (they previously sent only counts, so terminally-rejected ids never
+  cleared and re-warned every save). What remains for Phase 1 is the net-new work itself: adding a
+  dirty-tasks-only backend leg to the existing 1.2 s autosave debounce.
 - **Phase 2 — change feed.** A `schedule_events` table (append-only, cursor `id`, plant-scoped) written
   in the same transaction as task/order/calendar writes; `GET /changes?plant=&since=&client=` cursor-polled
   every ~3 s by a new frontend `Sync` module, applied via `Store.applyRemote` without dirty-marking

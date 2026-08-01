@@ -84,13 +84,19 @@ const FORBIDDEN_BASENAMES = new Set([
 ]);
 
 // ...and by extension, as defense-in-depth: the Dockerfile now ships everything
-// under web/ verbatim (COPY web/ /app/web/, no per-file allowlist), so a stray
-// non-frontend file that doesn't match FORBIDDEN_BASENAMES exactly — a renamed
-// backend copy (db_old.py), a scratch script, a data dump — would otherwise
-// ship to the public mount undetected. Extending this list is a deliberate,
-// visible change; that's the point.
+// under web/ verbatim (COPY --from=webbuild /build/web/ /app/web/, no per-file
+// allowlist), so a stray non-frontend file that doesn't match FORBIDDEN_BASENAMES
+// exactly — a renamed backend copy (db_old.py), a scratch script, a data dump —
+// would otherwise ship to the public mount undetected. Extending this list is a
+// deliberate, visible change; that's the point.
+//
+// .ts/.mts: TypeScript source (docs/typescript_migration.md) compiles in place next
+// to its own .js/.mjs output, so both the source and the compiled file legitimately
+// coexist under web/ and both ship in the image — this is an internal single-container
+// tool, not a public artifact, so shipping readable source alongside its own compiled
+// output is a non-issue.
 const ALLOWED_EXTENSIONS = new Set([
-  '.html', '.css', '.js', '.mjs',
+  '.html', '.css', '.js', '.mjs', '.ts', '.mts',
   '.png', '.jpg', '.jpeg', '.svg', '.ico', '.webp', '.gif',
   '.woff', '.woff2', '.ttf',
 ]);

@@ -1,18 +1,24 @@
 // ESLint flat config for NIMBUS.
 //
-// NIMBUS has NO build step: app.js / nimbus-intelligence.js / locales/*.js are plain
-// <script> files (sourceType: 'script', not modules) that attach to a single global
-// `window.NIMBUS`; all third-party libs come from CDN as globals. nimbus-worker.js is a
-// standalone Web Worker (worker globals, no DOM, no NIMBUS).
+// app.js / nimbus-intelligence.js / locales/*.js are plain <script> files
+// (sourceType: 'script', not modules) that attach to a single global `window.NIMBUS`;
+// all third-party libs come from CDN as globals. A per-file, non-bundling TypeScript
+// build now covers some modules (docs/typescript_migration.md) — nimbus-worker.ts is
+// the Phase 0 pilot (a TS "global script", same worker-only shape as its predecessor
+// nimbus-worker.js); .mts blocks below are ready for Phase 1+ browser modules.
 //
 // Purpose: a static-analysis gate for the bug classes hand-review can't reliably find in
 // a 15k-line file — undeclared/accidentally-global variables (no-undef), shadowing
-// (no-shadow), unused code (no-unused-vars), redeclarations, const reassignment.
+// (no-shadow), unused code (no-unused-vars), redeclarations, const reassignment. For
+// TypeScript sources, no-undef/no-unused-vars are disabled in favor of tsc's own
+// `npm run typecheck` (which has full ambient-type awareness) and the TS-aware
+// @typescript-eslint/no-unused-vars rule.
 //
 // Run:  npm run lint           (full report)
 //       npm run lint:undef     (just the undeclared-var / shadow gate)
 
 const globals = require('globals');
+const tseslint = require('typescript-eslint');
 
 // Third-party globals injected by the CDN <script> tags in index.html.
 // (chart.js's `Chart` global was removed here in CQ-1 Phase 3 Task 4, alongside
@@ -77,14 +83,46 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Standalone Web Worker: worker globals only (self/postMessage/onmessage), no DOM, no NIMBUS.
-    files: ['web/nimbus-worker.js'],
+    // Standalone Web Worker, now TypeScript (see docs/typescript_migration.md Phase 0):
+    // worker globals only (self/postMessage/onmessage), no DOM, no NIMBUS. Deliberately
+    // sourceType: 'script' — nimbus-worker.ts has no top-level import/export so tsc emits
+    // it unwrapped; ESLint needs to agree it isn't a module either.
+    //
+    // no-undef/no-unused-vars are swapped for TS-aware equivalents: base no-undef doesn't
+    // know about `declare global` ambient types (e.g. NimbusComputeCore from
+    // nimbus-compute-core.d.ts) and would false-positive on them — tsc's own `typecheck`
+    // script already covers undefined-variable detection with full ambient-type awareness.
+    files: ['web/nimbus-worker.ts'],
     languageOptions: {
+      parser: tseslint.parser,
       ecmaVersion: 2023,
       sourceType: 'script',
       globals: { ...globals.worker },
     },
-    rules: SHARED_RULES,
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...SHARED_RULES,
+      'no-undef': 'off',
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true }],
+    },
+  },
+  {
+    // TypeScript ambient declaration files (.d.ts) — pure type information, never emitted
+    // as JS. sourceType 'module' since they use `export {}` to allow `declare global`.
+    files: ['web/**/*.d.ts'],
+    languageOptions: {
+      parser: tseslint.parser,
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.browser },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...SHARED_RULES,
+      'no-undef': 'off',
+      'no-unused-vars': 'off',
+    },
   },
   {
     // Shared compute core (UMD): loaded in the worker (self/importScripts), the browser
@@ -127,5 +165,25 @@ module.exports = [
       globals: { ...globals.browser, ...CDN_GLOBALS },
     },
     rules: SHARED_RULES,
+  },
+  {
+    // Browser TypeScript modules under web/ (docs/typescript_migration.md Phase 1+ —
+    // no real files yet as of Phase 0; this block is ready for schedule-state.mts etc.
+    // as each phase converts a module). Same reasoning as the nimbus-worker.ts block
+    // above for the no-undef/no-unused-vars swap.
+    files: ['web/**/*.mts'],
+    languageOptions: {
+      parser: tseslint.parser,
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.browser, ...CDN_GLOBALS },
+    },
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      ...SHARED_RULES,
+      'no-undef': 'off',
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true }],
+    },
   },
 ];

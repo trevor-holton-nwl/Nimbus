@@ -1,0 +1,31 @@
+{
+  // Separate config for classic, non-module Web Worker scripts (currently just
+  // nimbus-worker.ts). Kept apart from tsconfig.json deliberately: under
+  // "module": "nodenext" (needed by tsconfig.json for real ESM .mts modules),
+  // TypeScript mirrors Node's actual loader semantics, where EVERY plain .ts/.js file
+  // is treated as a module (CJS, since package.json has no "type" field) regardless of
+  // whether it has import/export syntax — that's correct for Node/bundler-consumed
+  // files, but wrong for a script loaded via importScripts() in a real Worker, which
+  // needs zero module wrapper (Workers have no `exports`/`module` global; the
+  // CommonJS __esModule marker tsc would otherwise add throws at runtime). "module":
+  // "none" is the classic-script emit tsc needs for this file. See
+  // docs/typescript_migration.md.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "webworker"],
+    "module": "none",
+    "strict": true,
+    "skipLibCheck": true,
+    "rootDir": "web",
+    "outDir": "web",
+    "allowJs": false,
+    "checkJs": false,
+    "declaration": false,
+    "noEmitOnError": true
+  },
+  "include": [
+    "web/nimbus-worker.ts",
+    "web/nimbus-compute-core.d.ts"
+  ],
+  "exclude": []
+}

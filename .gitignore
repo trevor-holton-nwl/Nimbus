@@ -7,6 +7,12 @@
 node_modules/
 .eslintcache
 
+# TypeScript compiled output — compiled in place next to its .ts/.mts source
+# (see docs/typescript_migration.md). Listed by specific filename, not a blanket
+# *.js/*.mjs glob, so hand-written fixtures like web/_static-delivery-check.mjs
+# are never accidentally ignored.
+web/nimbus-worker.js
+
 # Python
 __pycache__/
 *.pyc

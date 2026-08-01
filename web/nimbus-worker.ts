@@ -1,4 +1,4 @@
-/* nimbus-worker.js — off-main-thread compute for Alerts and Utilization.
+/* nimbus-worker.ts — off-main-thread compute for Alerts and Utilization.
  * Receives serialised Store state via postMessage, returns computed results.
  * Zero DOM access; no NIMBUS namespace dependencies.
  *
@@ -6,6 +6,14 @@
  * matrix) now lives in nimbus-compute-core.js — the SINGLE source of truth,
  * shared with the Node test-suite. This file is just the message-protocol shim:
  * it importScripts the core and dispatches. Do NOT re-inline compute logic here.
+ *
+ * TypeScript note: this file has NO top-level import/export on purpose — that keeps
+ * it a "global script" to tsc, which emits plain unwrapped JS (importScripts(...)
+ * preserved verbatim). Adding one (even a type-only import) reclassifies it as a
+ * module and tsc adds CommonJS exports-object boilerplate that would throw at
+ * runtime (Web Workers have no `exports`/`module` global). The NimbusComputeCore
+ * ambient type (from nimbus-compute-core.d.ts) is a true global, so it's usable here
+ * without an import. See docs/typescript_migration.md for the full write-up.
  *
  * Message protocol
  * ----------------
@@ -28,9 +36,15 @@
 // falls back to synchronous main-thread compute for the session.
 importScripts('nimbus-compute-core.js' + (self.location && self.location.search ? self.location.search : ''));
 
-const Core = self.NimbusComputeCore;
+// Non-null assertion: if importScripts above failed, the whole worker script fails to
+// load and this line never runs — matches the original untyped behavior exactly.
+const Core = self.NimbusComputeCore!;
 
-self.onmessage = function ({ data }) {
+type IncomingMessage =
+  | { type: 'ALERTS'; id: unknown; payload: ComputeAlertsPayload }
+  | { type: 'UTILIZATION'; id: unknown; payload: ComputeUtilizationPayload };
+
+self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
   const { type, id, payload } = data;
   try {
     if (type === 'ALERTS') {
@@ -41,7 +55,8 @@ self.onmessage = function ({ data }) {
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
     }
   } catch (err) {
-    const out = { type: 'ERROR', id, error: err.message, stack: err.stack, failingType: type };
+    const e = err as Error;
+    const out: Record<string, unknown> = { type: 'ERROR', id, error: e.message, stack: e.stack, failingType: type };
     if (id != null) out.jobId = id;
     self.postMessage(out);
   }

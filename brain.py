@@ -1141,7 +1141,10 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     `base_version` no longer matches the row (a concurrent write landed first) are
     rejected and reported in `stale` unless `force` is set.
 
-    Returns { applied, persisted, failed, invalid, not_found, stale, versions }.
+    Returns { applied, persisted, failed, invalid, not_found, invalid_ids,
+              not_found_ids, stale, versions }. invalid_ids/not_found_ids carry
+    the actual rejected ids (from db.update_task_dates_bulk) so the client can
+    stop retrying terminal rejections while keeping transiently-lost rows dirty.
     """
     norm: list[dict] = []
     invalid = 0
@@ -1158,7 +1161,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
 
     if not norm:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
-                "not_found": 0, "stale": [], "versions": {}}
+                "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+                "stale": [], "versions": {}}
 
     try:
         res = db.update_task_dates_bulk(norm)
@@ -1171,7 +1175,9 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
         # contract), but flag the hard failure + a stable cause so the frontend
         # can tell a rolled-back persist apart from a partial success.
         return {"applied": 0, "persisted": 0, "failed": len(norm),
-                "invalid": invalid, "not_found": 0, "stale": [], "versions": {},
+                "invalid": invalid, "not_found": 0,
+                "invalid_ids": [], "not_found_ids": [],
+                "stale": [], "versions": {},
                 "status": "error", "error_code": error_code,
                 "cause": "Bulk task-date persist failed (transaction rolled back)"}
     res["invalid"] = res.get("invalid", 0) + invalid
@@ -1224,7 +1230,8 @@ def tasks_update(payload: TasksUpdatePayload):
     """
     Bulk-update task dates and persist to DB (one transaction).
     Payload: { tasks: [{ id, start_date?, end_date?, base_version?, force? }], blocks?, calendars? }
-    Response: { status, updated, persisted, failed, invalid, not_found, stale, versions }
+    Response: { status, updated, persisted, failed, invalid, not_found,
+                invalid_ids, not_found_ids, stale, versions }
     """
     res = _apply_task_date_updates(payload.tasks)
     total = len(payload.tasks)
@@ -1239,6 +1246,14 @@ def tasks_update(payload: TasksUpdatePayload):
     out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
            "failed": res["failed"], "invalid": res["invalid"],
            "not_found": res.get("not_found", 0),
+           # Forward the actual rejected ids (not just counts) so the client can
+           # tell terminal rejections (invalid range / not in DB — stop retrying)
+           # from transiently-lost rows (keep dirty, retry). db.update_task_dates_bulk
+           # produces these; without them the frontend's accounted-set logic
+           # (saveAll R7) never clears a terminally-rejected id → it stays dirty and
+           # re-warns "Partial DB save" on every subsequent save.
+           "invalid_ids": res.get("invalid_ids", []),
+           "not_found_ids": res.get("not_found_ids", []),
            "stale": stale, "versions": res.get("versions", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
@@ -1251,7 +1266,8 @@ def bulk_update(tasks: list[TaskDateUpdate]):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
     Payload: [{ id, start_date?, end_date?, base_version?, force? }]
-    Response: { status, updated, persisted, failed, invalid, not_found, stale, versions }
+    Response: { status, updated, persisted, failed, invalid, not_found,
+                invalid_ids, not_found_ids, stale, versions }
     """
     res = _apply_task_date_updates(tasks)
     total = len(tasks)
@@ -1264,6 +1280,14 @@ def bulk_update(tasks: list[TaskDateUpdate]):
     out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
            "failed": res["failed"], "invalid": res["invalid"],
            "not_found": res.get("not_found", 0),
+           # Forward the actual rejected ids (not just counts) so the client can
+           # tell terminal rejections (invalid range / not in DB — stop retrying)
+           # from transiently-lost rows (keep dirty, retry). db.update_task_dates_bulk
+           # produces these; without them the frontend's accounted-set logic
+           # (saveAll R7) never clears a terminally-rejected id → it stays dirty and
+           # re-warns "Partial DB save" on every subsequent save.
+           "invalid_ids": res.get("invalid_ids", []),
+           "not_found_ids": res.get("not_found_ids", []),
            "stale": stale, "versions": res.get("versions", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")

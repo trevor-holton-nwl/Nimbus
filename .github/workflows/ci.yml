@@ -19,6 +19,12 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci
+      - name: TypeScript typecheck
+        # Fast-fail, clearly-labeled gate for the modules migrated per
+        # docs/typescript_migration.md — distinct from the JS-focused ESLint/test
+        # steps below. `npm test`'s `pretest` hook also runs `npm run build`, but this
+        # runs first so a type error reads as a type error, not a buried test failure.
+        run: npm run typecheck
       - name: ESLint gate (JS source — errors block)
         # Blocking gate over the hand-written JS (app.js, intelligence, worker,
         # compute-core). Kept green.

@@ -39,8 +39,9 @@ From the repo root, bumping the image tag each time:
 az acr build --registry acrnimbusdev --image nimbus:v2 .
 az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:v2
 ```
-- Changed frontend JS/CSS? Bump `NIMBUS_BUILD_ID` in `index.html` (and `APP_VERSION` in `app.js`) so browsers don't serve stale assets.
-- Do **not** re-run `schema.sql` on a normal redeploy (it carries data migrations — see the warning below).
+- Changed frontend JS/CSS? Bump `NIMBUS_BUILD_ID` in `index.html` — it single-source-drives the `?v=` on every asset URL and the `app-entry.mjs` cache-bust guard, so browsers don't serve stale assets. (There is **no** separate `APP_VERSION` in `app.js` anymore — that constant moved into `app-entry.mjs`'s `runCacheBustGuard()`, which reads `NIMBUS_BUILD_ID` directly.)
+- Edited a `.ts`/`.mts` file? `az acr build` compiles it automatically in the cloud (the multi-stage `Dockerfile`'s `node:20-slim` builder runs `npm run build`), so a redeploy needs nothing extra. For **local** dev only, run `npm run build` before `uvicorn brain:api` serves the fresh output — see `docs/typescript_migration.md`.
+- Do **not** re-run `schema.sql` on a normal redeploy — it's idempotent and ledger-guarded now (safe if you do), but a redeploy never needs it since the schema already exists.
 
 ## First-time provisioning (already done — recorded for rebuilds / new environments)
 Replace `<DB_PASSWORD>` with the Postgres admin password; **never commit it**.
@@ -71,7 +72,11 @@ az containerapp create -g rg-nimbus-dev -n ca-nimbus-dev --environment cae-nimbu
   --secrets pg-pass=<DB_PASSWORD> `
   --env-vars PG_HOST=pgdb-nimbus-dev.postgres.database.azure.com PG_PORT=5432 PG_DB=nimbus PG_USER=TempAdmin PG_PASS=secretref:pg-pass PG_SSLMODE=require NIMBUS_ALLOWED_ORIGINS="*"
 ```
-> ⚠️ `schema.sql` is **run-once-ish**: it multiplies `plants` horizon columns ×1440 for values ≤365 on every run. Apply it once at provisioning; don't blindly re-run.
+> `schema.sql` is **idempotent and safe to re-apply** (fixed 2026-07-07). The former ×1440 horizon
+> landmine — an unguarded `UPDATE plants SET *_horizon = *_horizon * 1440 WHERE *_horizon <= 365` that
+> re-multiplied values on every run — is now recorded in a `schema_migrations` ledger and no longer
+> executes on apply. See `MIGRATION.md` → "Schema migration ledger". You still only *need* to run it
+> once (at provisioning); re-running just won't corrupt anything.
 
 ## Verify
 ```powershell
@@ -98,12 +103,14 @@ There's no automatic trigger for step 1 — the Add/Drop Column success toast in
 - **Permissions:** subscription-level actions (e.g. `az provider register`) fail for an RG-scoped account — harmless if the providers are already registered. You need **Contributor on `rg-nimbus-dev`** to create resources.
 - **`az containerapp logs show` fails behind a corporate proxy** (`SSL: CERTIFICATE_VERIFY_FAILED`, self-signed cert in chain). Read backend errors from the app's own endpoint instead: `GET https://<fqdn>/logs/backend` (PowerShell `Invoke-RestMethod` trusts the proxy CA via the Windows cert store).
 - **`az acr build` log streaming crashes on Windows** with `UnicodeEncodeError` (cp1252). Set `$env:PYTHONIOENCODING="utf-8"`. The remote build still **succeeds** regardless — confirm with `az acr task list-runs --registry acrnimbusdev`.
-- **`/data` is ephemeral:** uploaded color wheels + their audit log are wiped on restart/redeploy. Orders are safe (Postgres). Durability fix is Azure Files — see `MIGRATION.md` (Workstream 5).
+- **`/data` is ephemeral:** Orders are safe (Postgres), and **per-plant color wheels are now durable too** — they persist in the Postgres `color_wheel` table (shipped 2026-07-07 via WS5, superseding the originally-planned Azure Files mount). Still wiped on restart/redeploy: the **global** `COLOR_FILE` wheel (fix = bake `color_wheel.xlsx` into the image) and the shared `_audit_log.json`. See `MIGRATION.md` (Workstream 5).
 
 ## Deferred hardening
 See `MIGRATION.md`: Entra SSO (real login — the URL is currently open), Key Vault for secrets,
-managed-identity registry pull, Azure Files for color-wheel durability, VNet/Private Endpoint for
-Postgres. Also **rotate the `TempAdmin` password**, then update the secret and restart:
+managed-identity registry pull, VNet/Private Endpoint for Postgres, and the remaining color-wheel
+durability leftovers (per-plant wheels are already durable in Postgres; the **global** wheel +
+`_audit_log.json` are the open items). Also **rotate the `TempAdmin` password**, then update the
+secret and restart:
 ```powershell
 az containerapp secret set -g rg-nimbus-dev -n ca-nimbus-dev --secrets pg-pass=<NEW_PASSWORD>
 az containerapp revision restart -g rg-nimbus-dev -n ca-nimbus-dev   # (use the active revision name)
