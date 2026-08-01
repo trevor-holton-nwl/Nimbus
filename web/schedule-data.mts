@@ -783,7 +783,7 @@ export const Persistence = {
           // toLocalSeconds, not the raw Date: JSON.stringify would call
           // Date.toISOString() (UTC), which the backend's naive-datetime
           // parser mis-handles for any non-UTC client — see toLocalSeconds.
-          basic_finish_date: Util.toLocalSeconds(c.basic_finish_date),
+          basic_finish_date: Util.toLocalSeconds(c.basic_finish_date) as NaiveLocalTs,
           base_version: c.base_version,
         })),
       });
@@ -1006,8 +1006,8 @@ export const Persistence = {
       // strftime (no Z) which new Date() parses as LOCAL — so a raw Date here
       // round-trips shifted by the client's UTC offset for any non-UTC user.
       // Mirrors _relayDueDateCorrections; see Util.toLocalSeconds.
-      start_date:   Util.toLocalSeconds(t.start_date),
-      end_date:     Util.toLocalSeconds(t.end_date),
+      start_date:   Util.toLocalSeconds(t.start_date) as NaiveLocalTs,
+      end_date:     Util.toLocalSeconds(t.end_date) as NaiveLocalTs,
       base_version: t.row_version ?? null,
       force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
     }));
