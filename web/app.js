@@ -224,11 +224,14 @@
    file before this task (extended in Task 2), so there was no seam to
    close here.
    CQ-1 Phase 4 Task 4 moved SessionUIAdapter, showLoginScreen, EmptyState,
-   PlantSelector, WelcomeSplash, and App into a seventh and final real ES
-   module, bridged the same way (window.__NIMBUS_SHELL):
-     Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector,
-     WelcomeSplash, App
+   PlantSelector, and App into a seventh and final real ES module, bridged
+   the same way (window.__NIMBUS_SHELL):
+     Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App
                        — now defined in application-shell.mjs
+   (WelcomeSplash also moved here at the time, then was retired outright —
+   overlay, arrow SVG, and all — by the Command Band re-skin's chrome-wiring
+   task; App.registerPausable/_pausables stayed, since that's generic App
+   infrastructure, not WelcomeSplash-specific.)
    `Settings` (the per-user settings catalog) travels with this move too —
    see application-shell.mjs's header comment for why, since it was never
    one of CQ-1's 14 tracked modules. `_bootMain()` and `_domReadyGate()`
@@ -273,7 +276,7 @@ const NIMBUS = (function () {
   const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
   const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
   const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
-  const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, WelcomeSplash, App } = window.__NIMBUS_SHELL;
+  const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
   // statically import schedule-services.mjs — see that file's header). Arrow-function
   // wrappers, not bare method references: Calendar's methods read `this._runCache`/
@@ -306,8 +309,8 @@ const NIMBUS = (function () {
   Store.setSettingsDefaultsResolver(() => Settings.DEFAULTS);
 
   // SETTINGS — moved to application-shell.mjs (CQ-1 Phase 4 Task 4), alongside
-  // SessionUIAdapter/showLoginScreen/EmptyState/PlantSelector/WelcomeSplash/App
-  // — see application-shell.mjs's header comment for why this per-user
+  // SessionUIAdapter/showLoginScreen/EmptyState/PlantSelector/App — see
+  // application-shell.mjs's header comment for why this per-user
   // settings catalog travels with that move even though it isn't one of
   // CQ-1's 14 tracked modules. Imported via the __NIMBUS_SHELL bridge
   // destructure at the top of this IIFE.
@@ -356,9 +359,8 @@ const NIMBUS = (function () {
 
 
   // SESSION UI ADAPTER — moved to application-shell.mjs (CQ-1 Phase 4
-  // Task 4), alongside Settings/showLoginScreen/EmptyState/PlantSelector/
-  // WelcomeSplash/App. Imported via the __NIMBUS_SHELL bridge destructure
-  // at the top of this IIFE.
+  // Task 4), alongside Settings/showLoginScreen/EmptyState/PlantSelector/App.
+  // Imported via the __NIMBUS_SHELL bridge destructure at the top of this IIFE.
 
   // AUTH (LOGIN SCREEN) — showLoginScreen() moved to application-shell.mjs
   // (CQ-1 Phase 4 Task 4). Imported via the __NIMBUS_SHELL bridge
@@ -617,7 +619,6 @@ const NIMBUS = (function () {
     }, 'App.masterData');
     try { Plant.init();       } catch (e) { ErrorLog.error('boot', `Plant.init: ${e.message}`); }
     try { PlantSelector.init();  } catch (e) { ErrorLog.error('boot', `PlantSelector.init: ${e.message}`); }
-    try { WelcomeSplash.init();  } catch (e) { ErrorLog.error('boot', `WelcomeSplash.init: ${e.message}`); }
     try { App.init();            } catch (e) { ErrorLog.error('boot', `App.init: ${e.message}`); }
     // ProdLines has no async init — it renders on-demand when its tab is activated.
     // TimelineNav init deferred until after first Timeline render
@@ -655,12 +656,13 @@ const NIMBUS = (function () {
     // plants). This is what makes the defaultPlant SETTING actually impact the app:
     //   • an explicit defaultPlant (known + allowed) → auto-select it. An explicit,
     //     cross-device preference beats the per-browser "last-used" plant, so a
-    //     returning user lands on their default instead of re-picking at WelcomeSplash;
+    //     returning user lands on their default instead of re-picking manually;
     //   • else a valid remembered plant from a prior session → leave the existing
-    //     flow (selection stays null → WelcomeSplash prompts, as before);
+    //     flow (selection stays null → the user picks a plant manually via the
+    //     header plant selector, as before);
     //   • else, when the user can see exactly ONE plant → auto-select that one.
     // Setting the plant (source 'default-plant') triggers Persistence.loadForPlant
-    // and dismisses WelcomeSplash via the usual 'plant:selected' subscribers.
+    // via the usual 'plant:selected' subscribers.
     let _defaultPlantApplied = false;
     const _offDefaultPlant = Store.subscribe(evt => {
       if (evt.type !== 'master-data-changed') return;
@@ -671,11 +673,11 @@ const NIMBUS = (function () {
         if (Store.selectedPlant) return;                 // already selected — never override
         const known = Store.knownPlants();               // already allowedPlants()-scoped
         // An explicit default plant wins over the per-browser "last-used" plant so a
-        // returning user lands on their configured default rather than the splash.
+        // returning user lands on their configured default rather than picking manually.
         const dp = Store.pref('defaultPlant');
         if (dp && known.includes(dp)) { Store.setSelectedPlant(dp, 'default-plant'); return; }
         // No explicit default → preserve the existing flow: a valid remembered plant
-        // leaves selection null so WelcomeSplash prompts (unchanged behavior).
+        // leaves selection null so the user picks a plant manually (unchanged behavior).
         const cached = Persistence._rememberedPlant();
         if (cached && known.includes(cached)) return;
         // Neither a default nor a remembered plant, but the user can see exactly one.
@@ -685,8 +687,8 @@ const NIMBUS = (function () {
 
     // Stateless backend: scope the first load to the remembered plant so boot
     // doesn't pull every plant's order book. We intentionally do NOT set
-    // Store.selectedPlant here — that keeps selectedPlant null so WelcomeSplash
-    // still shows and the user still makes the explicit selection. When they pick
+    // Store.selectedPlant here — that keeps selectedPlant null so the user still
+    // makes the explicit selection via the header plant selector. When they pick
     // the same plant as last time, loadForPlant() no-ops (data already loaded);
     // if they pick a different one, it re-scopes. No remembered plant → unscoped.
     // (The defaultPlant one-shot above may set a selection after master data loads.)
@@ -724,7 +726,7 @@ const NIMBUS = (function () {
     ErrorLog, AdminCockpit,
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
-    PlantSelector, EmptyState, MasterData, WelcomeSplash,
+    PlantSelector, EmptyState, MasterData,
     LaborPlanning, Interface, Security, CalendarSync,
     Session, SessionUIAdapter, showLoginScreen
   };

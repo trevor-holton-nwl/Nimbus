@@ -38,93 +38,318 @@ h1, h2, h3, h4 {
 
 /* --- TOKENS --------------------------------------------------------------- */
 :root {
-  /* Base palette — slate → near-black with warm amber highlight */
-  --bg:           #f5f4ef;          /* warm off-white page */
+  /* Base palette — cool slate with navy/blue accent (Command Band re-skin) */
+  --bg:           #e9edf2;          /* light blue-gray page */
   --bg-elev:      #ffffff;          /* cards / panels */
-  --bg-subtle:    #ecebe4;          /* input / subtle fill */
-  --bg-strong:    #e0dfd6;          /* header rail */
-  --line:         #d9d8cf;          /* hairline borders */
-  --line-strong:  #c7c6bd;
-  --fg:           #1a1b1f;          /* body text */
-  --fg-mute:      #6b6c73;          /* secondary text */
-  --fg-faint:     #9a9ba1;          /* tertiary */
+  --bg-subtle:    #f4f7fa;          /* input / subtle fill */
+  --bg-strong:    #eef1f5;          /* header rail */
+  --line:         #d5dce4;          /* hairline borders */
+  --line-strong:  #c6d0db;
+  --fg:           #1c2b3a;          /* body text */
+  --fg-mute:      #5d7186;          /* secondary text */
+  --fg-faint:     #8fa1b3;          /* tertiary */
 
-  /* Accent — warm amber (production / foundry feel, avoids generic blue) */
-  --accent:        #b8791a;
-  --accent-hot:    #a26615;
-  --accent-soft:   #f0dcb4;
-  --accent-wash:   #faf3e3;
+  /* Accent — navy/blue (cool command aesthetic) */
+  --accent:        #1f5fbf;
+  --accent-hot:    #1a4fa0;
+  --accent-soft:   #c9ddf7;
+  --accent-wash:   #dde9f8;
+  --accent-rgb:    31, 95, 191;     /* RGB triplet for rgba() fallback */
 
   /* Secondary accent — deep slate for primary buttons */
-  --primary:       #1f2430;
-  --primary-hot:   #2a3040;
-  --primary-fg:    #fcfbf6;
+  --primary:       #12263f;
+  --primary-hot:   #1f3a5c;
+  --primary-fg:    #ffffff;
 
   /* Semantic */
-  --ok:       #2f7a4d;
-  --ok-soft:  #d8ecdf;
-  --warn:     #b57a0a;
+  --ok:       #1e7a4a;
+  --ok-soft:  #dff0e6;
+  --warn:     #93610a;
   --warn-text:#8a5c08;             /* AA-safe (5.8:1 on white) text/icon color — --warn itself is ~3.2:1, background-only */
-  --warn-soft:#f6e5bd;
+  --warn-soft:#f8ecd0;
   --warn-vivid:#f39c12;            /* vivid amber — distinct from the muted --warn */
   --tab-md-bg:          #f0fdf4;   /* Master Data tab tint (light) */
   --tab-md-bg-hover:    #dcfce7;
-  --err:      #b1362a;
-  --err-soft: #f4d5d0;
-  --info:     #2d5f8c;
-  --info-soft:#d7e5f2;
+  --err:      #b02a20;
+  --err-soft: #f7ddd9;
+  --info:     #1f5fbf;
+  --info-soft:#dde9f8;
+
+  /* Chrome (always-dark command band/drawer, fixed in both light/dark theme) */
+  --chrome-bg:        #12263f;
+  --chrome-bg-deep:   #0c1c30;
+  --chrome-panel:     #1f3a5c;
+  --chrome-border:    #2c4a6b;
+  --chrome-fg:        #ffffff;
+  --chrome-fg-mute:   #a7b8ca;
+  --chrome-fg-faint:  #7e93ab;
+  --chrome-accent:    #4d9fff;
+  --chrome-accent-fg: #0c1c30;
+
+  /* Undefined tokens — introduced in Command Band re-skin */
+  --border:          #d5dce4;      /* same as --line */
+  --border-subtle:   #eef1f5;      /* light neutral for row dividers */
+  --bg-hover:        #eef4fb;      /* subtle hover tint */
+  --font-mono:       'JetBrains Mono', ui-monospace, monospace;
+  --nimbus-amber:    var(--accent); /* points to navy accent now */
+  --amber:           var(--accent); /* points to navy accent now */
+  --bg-float:        var(--chrome-panel); /* dark float surface */
+  --surface:         #ffffff;       /* same as --bg-elev */
+  --text-muted:      #5d7186;       /* same as --fg-mute */
+  --line-subtle:     #e8eff3;       /* light neutral for row hairlines */
+  --surface-2:       #f9fafb;       /* very subtle off-white/blue-gray stripe */
 
   /* Production-line palette — 10 distinct, saturated but not neon */
   --l0: #89419f; --l1: #2d5f8c; --l2: #4f7a3c; --l3: #8b4c7e; --l4: #b14a3e;
   --l5: #3c6e7a; --l6: #7a5a2a; --l7: #5e498b; --l8: #ae4268; --l9: #4a7a5e;
 
   /* Radii + spacing */
-  --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --r-xl: 14px;
-  --shadow-sm: 0 1px 2px rgba(26,27,31,0.06);
-  --shadow-md: 0 2px 6px rgba(26,27,31,0.08), 0 1px 2px rgba(26,27,31,0.04);
-  --shadow-lg: 0 8px 24px rgba(26,27,31,0.12), 0 2px 6px rgba(26,27,31,0.06);
+  --r-sm: 4px; --r-md: 4px; --r-lg: 8px; --r-xl: 14px;
+  --shadow-sm: 0 1px 2px rgba(12,28,48,0.06);
+  --shadow-md: 0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04);
+  --shadow-lg: 0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28);
 
   /* Transitions */
   --t-fast: 0.12s ease;
   --t-med:  0.18s ease;
+
+  /* Header/chrome heights — Command Band re-skin (Task 2 prep; Task 3 builds the markup) */
+  --band-h:    46px;
+  --context-h: 40px;
+  --chrome-h:  calc(var(--band-h) + var(--context-h));
 }
 
 /* --- SHELL LAYOUT --------------------------------------------------------- */
 .app { display: flex; flex-direction: column; height: 100%; }
 
-/* --- TOP BAR -------------------------------------------------------------- */
-.topbar {
+/* --- COMMAND BAND (Command Band re-skin: Task 3 chrome) --------------------
+   Replaces the old single .topbar with two stacked bars: .cmd-band (dark
+   chrome masthead: hamburger, brand, active-section label, global actions)
+   and .context-bar (light, plant selector + Lines pill) below it. See
+   .nav-drawer further down for the left slide-in nav that replaced the old
+   horizontal nav.tabs strip. ------------------------------------------------ */
+.cmd-band {
   flex-shrink: 0;
-  display: flex; align-items: center; gap: 18px;
-  padding: 0 16px;
-  height: 52px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 14px;
+  height: var(--band-h);
+  background: var(--chrome-bg);
+  color: var(--chrome-fg);
   position: relative;
   z-index: 100;
 }
-.topbar::after {
-  content: ''; position: absolute;
-  left: 0; right: 0; bottom: -1px;
-  height: 1px;
-  background: var(--accent);
-  pointer-events: none;
+
+.cmd-hamburger {
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  width: 32px; height: 30px;
+  padding: 0 7px;
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-md);
+  transition: background var(--t-fast);
+}
+.cmd-hamburger:hover { background: var(--chrome-panel); }
+.cmd-hamburger-bar {
+  display: block; height: 2px; border-radius: 2px;
+  background: var(--chrome-fg-mute);
 }
 
+/* .brand is the shared brand wrapper — was sized for the old single .topbar
+   (height/line-height: var(--chrome-h), border-right: var(--line)); now it
+   lives inside the shorter, always-dark .cmd-band only, so both are repointed
+   to band-scoped tokens. */
 .brand {
   display: flex; align-items: baseline; gap: 7px;
   font-family: 'Archivo', sans-serif;
   padding-right: 12px;
-  border-right: 1px solid var(--line);
-  height: 52px;
-  line-height: 52px;
+  border-right: 1px solid var(--chrome-border);
+  height: var(--band-h);
+  line-height: var(--band-h);
 }
-.brand-mark { color: var(--accent); font-size: 16px; line-height: 1; }
-.brand-name { font-weight: 800; letter-spacing: 0.01em; font-size: 14px; }
-.brand-ver  { font-weight: 600; color: var(--fg-mute); font-size: 11px; letter-spacing: 0.08em; }
+.cmd-brand-name { font-weight: 800; letter-spacing: 0.02em; font-size: 15px; color: var(--chrome-fg); }
+.cmd-brand-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 500; font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--chrome-fg-faint);
+}
 
-/* Tabs */
-.tabs { display: flex; gap: 2px; flex: 1; }
+/* Active-section label — text is set on every nav by a later task (Task 4);
+   intentionally carries no data-i18n (see global-constraints.md i18n rules:
+   a dynamically-updated label must be set via inline Util.t(), not a static
+   sweep attribute). */
+.cmd-section-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px; font-weight: 600;
+  color: var(--chrome-fg-mute);
+  padding-left: 12px;
+  border-left: 1px solid var(--chrome-border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- CONTEXT BAR ------------------------------------------------------------
+   position:relative + z-index:90 (not auto) is deliberate: .hps-dropdown
+   (position:absolute; z-index:80) is anchored inside here via #hps-combobox,
+   which itself has no stacking context (position:relative, z-index:auto) — so
+   the dropdown's stacking context bubbles up to whichever ancestor first
+   establishes one. z-index:90 keeps that bubble-up point comfortably above
+   ordinary tab-panel content (nothing in the Gantt/Dashboard/AG-Grid body
+   exceeds z-index:20) without creating a LOW-ranked stacking context that
+   would cap/trap the dropdown below it — the failure mode this rule exists
+   to avoid. overflow:visible is explicit so the bar itself never clips the
+   dropdown that paints below it. -------------------------------------------- */
+.context-bar {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 18px;
+  height: var(--context-h);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 90;
+  overflow: visible;
+}
+.context-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 27px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+  color: var(--fg-mute);
+  font-size: 12px; font-weight: 500;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.context-pill:hover { background: var(--bg-subtle); color: var(--fg); }
+
+/* --- LEFT NAV DRAWER + SCRIM (Command Band re-skin) -------------------------
+   Replaces the old horizontal nav.tabs strip. Reuses the existing .tab-btn
+   class/data-tab contract untouched (see overrides below) so the tab-switch
+   JS (App.goto, the admin-gate in application-shell.mjs) needs zero query-
+   selector changes. Open/close is wired by a later task (Task 4) via the
+   .open class toggle below — inert until then. z-index is placed below
+   .modal-backdrop (2000) so modals still win, mirroring the existing
+   .alert-drawer (500) / #sandbox-banner (450) band. ------------------------- */
+.drawer-scrim {
+  position: fixed; inset: 0;
+  background: rgba(12, 28, 48, 0.4);
+  z-index: 1400;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-med);
+}
+.drawer-scrim.open { opacity: 1; pointer-events: all; }
+
+.nav-drawer {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  width: 264px;
+  background: var(--chrome-bg);
+  display: flex; flex-direction: column;
+  box-shadow: 2px 0 16px rgba(12,28,48,0.35);
+  transform: translateX(-100%);
+  transition: transform 0.22s cubic-bezier(0.4,0,0.2,1);
+  z-index: 1401;
+}
+.nav-drawer.open { transform: translateX(0); }
+
+.nav-drawer-head {
+  display: flex; align-items: center; gap: 10px;
+  height: var(--band-h);
+  padding: 0 16px;
+  background: var(--chrome-bg-deep);
+  color: var(--chrome-fg);
+  flex-shrink: 0;
+}
+.nav-drawer-brand { font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 14px; letter-spacing: 0.02em; }
+.nav-drawer-close {
+  margin-left: auto;
+  width: 26px; height: 26px;
+  background: transparent; border: 0;
+  border-radius: var(--r-sm);
+  color: var(--chrome-fg-faint);
+  font-size: 18px; line-height: 1;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.nav-drawer-close:hover { color: var(--chrome-fg); background: var(--chrome-panel); }
+
+.nav-drawer-section { padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.nav-drawer-nav { flex: 1; overflow-y: auto; }
+.nav-drawer-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em;
+  color: var(--chrome-fg-faint);
+  padding: 6px 12px 4px;
+}
+.nav-drawer-plant { border-top: 1px solid var(--chrome-border); }
+.nav-drawer-plant-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 9px 12px;
+  border: 0; border-radius: var(--r-md);
+  background: var(--chrome-panel);
+  color: var(--chrome-fg);
+  font-size: 12.5px; font-weight: 600;
+  transition: background var(--t-fast);
+}
+.nav-drawer-plant-row:hover { background: var(--chrome-border); }
+
+.nav-drawer-footer {
+  padding: 10px 20px;
+  border-top: 1px solid var(--chrome-border);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--chrome-fg-faint);
+  flex-shrink: 0;
+}
+
+/* R3-1 — drawer-scoped .tab-btn overrides (required, not optional).
+   .tab-btn is reused verbatim inside .nav-drawer (same class/data-tab the
+   tab-switch JS queries), but several existing .tab-btn rules were written
+   for the old light, horizontal, width-constrained topbar strip and bleed
+   into the new full-width vertical dark drawer unless scoped off. All
+   selectors below are #nav-drawer-prefixed (adds an ID to the specificity)
+   so they win over the originals regardless of source order — a plain
+   .nav-drawer-prefixed selector would tie on specificity with e.g. the
+   max-width:1200px media query's `.tab-btn span:not(.tab-ico)` rule and the
+   outcome would depend on declaration order instead of being deterministic.
+   Base idle/hover color is also repointed here (light --fg-mute/--bg-subtle
+   is unreadable on the dark drawer) — not called out by name in the task
+   brief, but the same category of bleed-in as the two rules it does name. */
+#nav-drawer .tab-btn {
+  width: 100%;
+  justify-content: flex-start;
+  height: auto;
+  padding: 9px 12px;
+  color: var(--chrome-fg-mute);
+}
+/* Counters the @media (max-width:1200px) truncation (max-width:90px + ellipsis)
+   meant for the narrow horizontal strip — wrong for a full-width drawer. */
+#nav-drawer .tab-btn span:not(.tab-ico) {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+#nav-drawer .tab-btn:hover { color: var(--chrome-fg); background: var(--chrome-panel); }
+/* Drawer's own active-rail treatment (inset accent bar) replaces the topbar's
+   outline-based active state. */
+#nav-drawer .tab-btn.active {
+  color: var(--chrome-fg);
+  background: var(--chrome-panel);
+  border-color: transparent;
+  outline: none;
+  box-shadow: inset 3px 0 0 var(--chrome-accent);
+}
+#nav-drawer .tab-btn .tab-ico { color: var(--chrome-fg-faint); }
+#nav-drawer .tab-btn.active .tab-ico { color: var(--chrome-accent); }
+/* Neutralizes the Master Data tab's light-theme green-chip idle/hover/active
+   treatment (base rules a few lines below), which would otherwise ride the
+   same .tab-btn[data-tab="masterdata"] selector into the dark drawer. */
+#nav-drawer .tab-btn[data-tab="masterdata"]:not(.active) { background: transparent; border-color: transparent; }
+#nav-drawer .tab-btn[data-tab="masterdata"]:not(.active):hover { background: var(--chrome-panel); border-color: transparent; }
+#nav-drawer .tab-btn[data-tab="masterdata"].active { background: var(--chrome-panel); }
 .tab-btn {
   display: flex; align-items: center; gap: 7px;
   padding: 6px 12px;
@@ -202,6 +427,16 @@ h1, h2, h3, h4 {
 .icon-btn.sm { width: 24px; height: 24px; }
 .icon-btn .bell { font-size: 15px; }
 .user-icon-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+/* Everything mounted on the command band (.topbar-actions) sits on a permanently
+   dark chrome surface regardless of light/dark theme — it must use the fixed-dark
+   --chrome-* group, not the light-page --bg-subtle/--line/--fg-mute tokens these
+   icon buttons use everywhere else (modal close buttons, sidebar toggles, etc). */
+.topbar-actions .icon-btn { color: var(--chrome-fg-mute); }
+.topbar-actions .icon-btn:hover {
+  color: var(--chrome-fg);
+  background: var(--chrome-panel);
+  border-color: transparent;
+}
 #user-settings-btn::before {
   content: '';
   position: absolute;
@@ -210,13 +445,21 @@ h1, h2, h3, h4 {
   transform: translateY(-50%);
   width: 1px;
   height: 20px;
-  background: var(--line);
+  background: var(--chrome-border);
 }
 /* Divider between the status/info widgets (Confidence badge, alert bell) and
    the action/account cluster (Save, user icon, admin log toggle) — same
    pattern as #user-settings-btn::before above. */
 .topbar-actions .btn-primary {
   position: relative;
+  background: var(--chrome-accent);
+  color: var(--chrome-accent-fg);
+  border-color: var(--chrome-accent);
+}
+.topbar-actions .btn-primary:hover {
+  background: var(--chrome-accent);
+  border-color: var(--chrome-accent);
+  filter: brightness(0.92);
 }
 .topbar-actions .btn-primary::before {
   content: '';
@@ -226,7 +469,7 @@ h1, h2, h3, h4 {
   transform: translateY(-50%);
   width: 1px;
   height: 20px;
-  background: var(--line);
+  background: var(--chrome-border);
 }
 
 /* Narrow-viewport fallback: brand + plant selector + utility widgets hold
@@ -271,15 +514,15 @@ h1, h2, h3, h4 {
   background: var(--primary); color: var(--primary-fg); border-color: var(--primary);
 }
 .gantt-toolbar .seg-btn[data-gantt-sub].active {
-  background: var(--accent); border-color: var(--accent);
-  color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+  background: var(--primary); border-color: var(--primary);
+  color: var(--primary-fg); font-weight: 600;
+  box-shadow: 0 2px 8px rgba(12,28,48,0.28);
 }
 .btn-optimize {
   background: transparent;
   border-color: var(--line);
 }
-.btn-optimize:hover { background: var(--bg-subtle); border-color: var(--accent, #60a5fa); }
+.btn-optimize:hover { background: var(--bg-subtle); border-color: var(--accent, #1f5fbf); }
 
 /* --- INPUTS --------------------------------------------------------------- */
 .input, input[type="text"], input[type="search"], input[type="number"],
@@ -378,6 +621,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
   display: block; width: 100%; text-align: left; margin: 0;
   background: var(--bg-elev);
   border: 1px solid var(--line);
+  border-top: 3px solid var(--fg-faint);
   border-radius: var(--r-lg);
   padding: 14px 16px;
   position: relative;
@@ -385,7 +629,8 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .kpi-tile:disabled { cursor: default; opacity: 1; }
 .kpi-tile .k {
   display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--fg-mute); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--fg-mute); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px;
 }
 .kpi-tile .k::before {
   content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
@@ -393,13 +638,15 @@ textarea { min-height: 60px; padding: 7px 10px; }
 }
 .kpi-tile .v {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 26px; font-weight: 600; color: var(--fg);
+  font-size: 24px; font-weight: 600; color: var(--fg);
   letter-spacing: -0.02em;
 }
 .kpi-tile .d { font-size: 11px; color: var(--fg-mute); margin-top: 2px; }
+.kpi-tile.warn { border-top-color: var(--warn); }
 .kpi-tile.warn .k { color: var(--warn); }
 .kpi-tile.warn .k::before { background: var(--warn); }
 .kpi-tile.warn .v { color: var(--warn); }
+.kpi-tile.err { border-top-color: var(--err); }
 .kpi-tile.err .k { color: var(--err); }
 .kpi-tile.err .k::before { background: var(--err); }
 .kpi-tile.err .v { color: var(--err); }
@@ -439,10 +686,14 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .panel-head {
   display: flex; align-items: baseline; justify-content: space-between;
   padding: 14px 18px 12px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elev);
 }
-.panel-head h3 { font-size: 13.5px; letter-spacing: -0.005em; }
+.panel-head h3 {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
 .panel-hint { font-size: 11px; color: var(--fg-mute); }
 .panel-body { padding: 16px 18px; }
 .panel-body-chart { height: 252px; }   /* Chart.js responsive mode needs explicit parent height */
@@ -455,7 +706,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
   padding: 10px 18px 9px;
 }
 .panel-quiet .panel-head h3 {
-  font-size: 12.5px; font-weight: 600;
+  font-size: 10.5px; font-weight: 600;
   color: var(--fg-mute);
 }
 .panel-quiet .panel-hint { font-size: 10.5px; }
@@ -791,6 +1042,12 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
 .vis-time-axis .vis-grid.vis-major { border-color: var(--line-strong); }
 .vis-panel.vis-left { background: transparent; border-right: 1px solid var(--line); }
+/* Explicit light-mode panel backgrounds — previously relied on the vis-timeline
+   vendor default (coincidentally white, same as --bg-elev today); made explicit
+   so the Gantt panel/time-axis stay token-driven rather than vendor-default. */
+.vis-panel.vis-center { background: var(--bg-elev); }
+.vis-panel.vis-top,
+.vis-panel.vis-bottom { background: var(--bg-subtle); }
 .vis-label { background: var(--bg-subtle); }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
@@ -826,20 +1083,26 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 
 /* Alert-cell background highlights — render inside .vis-background, beneath
-   foreground order bars. Solid translucent tint, no border, severity-colored. */
+   foreground order bars. Solid translucent tint, no border, severity-colored.
+   Rgba (not var(--err-soft) etc.) is deliberate: these overlay ON TOP of the
+   colored order blocks underneath, so they need true alpha transparency, not
+   an opaque soft-tint chip background — the rgb triplets below are simply the
+   new --err/--warn/--info hex values at the same alpha the old rule used.
+   Task 10: body.dark overrides for alertcell-err/warn now added below, next
+   to the pre-existing alertcell-calendar/blackout dark overrides. */
 .vis-item.alertcell-err {
-  background: rgba(176, 45, 45, 0.22) !important;
-  border: 1px solid rgba(140, 30, 30, 0.45) !important;
+  background: rgba(176, 42, 32, 0.22) !important;   /* --err #b02a20 */
+  border: 1px solid rgba(176, 42, 32, 0.45) !important;
 }
 .vis-item.alertcell-warn {
-  background: rgba(220, 165, 60, 0.14) !important;
+  background: rgba(147, 97, 10, 0.14) !important;   /* --warn #93610a */
   border-color: transparent !important;
 }
 /* Calendar-restriction alert cells — blue tint signals "zone unavailable",
    distinct from red scheduling-conflict cells. */
 .vis-item.alertcell-calendar {
-  background: rgba(45, 95, 140, 0.18) !important;
-  border: 1px solid rgba(45, 95, 140, 0.35) !important;
+  background: rgba(31, 95, 191, 0.18) !important;   /* --info #1f5fbf */
+  border: 1px solid rgba(31, 95, 191, 0.35) !important;
 }
 /* Past-time zone shading — light gray wash behind orders for elapsed time */
 .vis-item.past-zone {
@@ -860,7 +1123,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   pointer-events: none;
   z-index: 1000;
   border: 1px dashed var(--nimbus-amber, #d97706);
-  background: rgba(217, 119, 6, 0.10);
+  background: rgba(var(--accent-rgb), 0.10);
   border-radius: 2px;
 }
 
@@ -1024,10 +1287,11 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .ac-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; align-items: center; }
 .ac-chip {
   font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  letter-spacing: 0.02em;
   padding: 2px 7px; border-radius: 10px;
-  background: var(--bg-elev); border: 1px solid var(--line); color: var(--fg);
+  background: var(--bg-subtle); border: 1px solid transparent; color: var(--fg-mute);
 }
-.ac-chip.fixed { border-color: var(--accent); color: var(--accent); }
+.ac-chip.fixed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
 .ac-chip-sep { font-size: 11px; color: var(--fg-mute); padding: 0 2px; }
 
 .ac-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
@@ -1139,8 +1403,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   --ag-background-color:          var(--bg-elev);
   --ag-header-background-color:   var(--bg-subtle);
   --ag-odd-row-background-color:  var(--bg-elev);
-  --ag-border-color:              var(--line);
-  --ag-row-border-color:          var(--line);
+  --ag-border-color:              var(--border-subtle);
+  --ag-row-border-color:          var(--border-subtle);
   --ag-header-foreground-color:   var(--fg);
   --ag-foreground-color:          var(--fg);
   --ag-secondary-foreground-color:var(--fg-mute);
@@ -1157,7 +1421,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   --ag-input-focus-border-color:  var(--accent);
   --ag-input-focus-box-shadow:    0 0 0 3px var(--accent-wash);
 }
-.ag-theme-quartz .ag-header-cell-text { font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-mute); }
+.ag-theme-quartz .ag-header-cell-text { font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-mute); }
 .ag-theme-quartz .ag-cell-value { line-height: 32px; }
 .ag-theme-quartz .cell-num { font-family: 'JetBrains Mono', monospace; text-align: right; }
 .ag-theme-quartz .cell-date { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--fg-mute); }
@@ -1484,22 +1748,25 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border-radius: 0;
 }
 .line-badge {
-  font-size: 10.5px;
-  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   padding: 2px 7px;
   border-radius: 10px;
   white-space: nowrap;
 }
 .badge-warn { background: var(--warn-soft); color: var(--warn); }
 .badge-err  { background: var(--err-soft);  color: var(--err); }
-.badge-info { background: #ede9fe; color: #6366f1; }
+.badge-info { background: var(--info-soft); color: var(--info); }
 
 /* =============================================================================
    ALERT DRAWER
    ========================================================================== */
 .alert-drawer {
   position: fixed;
-  top: 52px; right: 0; bottom: 0;
+  top: var(--chrome-h); right: 0; bottom: 0;
   width: 380px;
   background: var(--bg-elev);
   border-left: 1px solid var(--line);
@@ -1554,134 +1821,13 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    ========================================================================== */
 .modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(26, 27, 31, 0.42);
+  background: rgba(12, 28, 48, 0.42);
   z-index: 2000;
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
   backdrop-filter: blur(3px);
 }
 .modal-backdrop[hidden] { display: none; }
-
-/* ============================================================
-   WELCOME SPLASH — one-time page-load overlay
-   ============================================================ */
-@keyframes ws-in {
-  from { opacity: 0; transform: scale(0.90) translateY(22px); }
-  to   { opacity: 1; transform: scale(1)    translateY(0); }
-}
-@keyframes ws-out {
-  from { opacity: 1; }
-  to   { opacity: 0; }
-}
-@keyframes ws-arrow-bounce {
-  from { transform: translateY(0); }
-  to   { transform: translateY(-6px); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ws-broom-flyby { display: none; }
-}
-
-/* Overlay — warm off-white frosted glass matching --bg */
-.welcome-splash {
-  position: fixed; inset: 0;
-  z-index: 1500;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(245, 244, 239, 0.82);
-  backdrop-filter: blur(14px) saturate(1.1);
-  pointer-events: all;
-}
-body.dark .welcome-splash { background: rgba(19, 20, 26, 0.82); }
-.welcome-splash.ws-dismissing {
-  animation: ws-out 0.38s ease-in forwards;
-  pointer-events: none;
-}
-
-/* Card — clean elevated white surface, shadow-only depth */
-.welcome-splash-card {
-  position: relative;
-  max-width: 440px;
-  width: calc(100% - 48px);
-  text-align: center;
-  padding: 48px 52px 44px;
-  background: var(--bg-elev);
-  border-radius: var(--r-xl);
-  box-shadow: 0 0 0 1px rgba(26,27,31,0.07),
-              0 4px 16px rgba(26,27,31,0.08),
-              0 20px 48px rgba(26,27,31,0.07);
-  animation: ws-in 0.5s cubic-bezier(0.34,1.52,0.64,1) both;
-}
-
-/* Orb icon — flat, no gradient, no shadows */
-.ws-orb {
-  width: 90px; height: 90px;
-  border-radius: 50%;
-  margin: 0 auto 20px;
-  background: var(--accent-wash);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 3rem;
-  line-height: 1;
-}
-body.dark .ws-orb { background: #ffffff; }
-
-/* Title — dark, strong, with amber highlight on key word */
-.ws-title {
-  font-family: 'Archivo', 'Public Sans', sans-serif;
-  font-size: 1.65rem;
-  font-weight: 750;
-  letter-spacing: -0.025em;
-  line-height: 1.2;
-  color: var(--fg);
-  margin-bottom: 11px;
-}
-.ws-title em {
-  font-style: normal;
-  color: var(--accent);
-}
-
-/* Subtitle — muted body text */
-.ws-subtitle {
-  font-size: 0.9rem;
-  color: var(--fg-mute);
-  line-height: 1.65;
-  margin: 16px 0 0;
-}
-.ws-subtitle strong {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-/* Arrow SVG — pointer-events off, floats above overlay */
-.ws-arrow-svg {
-  position: fixed;
-  inset: 0;
-  width: 100vw; height: 100vh;
-  pointer-events: none;
-  overflow: visible;
-  z-index: 1601;
-}
-.ws-arrow-tip {
-  animation: none;
-}
-
-/* Topbar floats above the overlay; only the plant selector stays interactive */
-.welcome-active .topbar {
-  position: relative;
-  z-index: 1600;
-}
-.welcome-active .topbar > *:not(#header-plant-selector) {
-  pointer-events: none;
-  opacity: 0.4;
-}
-/* Plant selector ring — amber glow to draw the eye */
-.welcome-active #header-plant-selector {
-  pointer-events: all;
-  opacity: 1;
-  padding-left: 6px;
-  border-radius: var(--r-md);
-  box-shadow: 0 0 0 2px rgba(184,121,26,0.50), 0 0 16px rgba(184,121,26,0.18);
-  transition: box-shadow 0.3s ease;
-}
 
 .modal {
   background: var(--bg-elev);
@@ -1737,7 +1883,7 @@ body.dark .ws-orb { background: #ffffff; }
 }
 body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 
-/* Card — same elevated-surface recipe as .welcome-splash-card / .modal */
+/* Card — same elevated-surface recipe as .modal */
 .login-card {
   position: relative;
   width: calc(100% - 48px);
@@ -1785,7 +1931,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
    TOASTS
    ========================================================================== */
 #toast-stack {
-  position: fixed; top: 64px; right: 16px;
+  position: fixed; top: calc(var(--chrome-h) + 12px); right: 16px;
   z-index: 3000;
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;
@@ -1993,12 +2139,12 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 /* =============================================================================
    P6: SANDBOX MODE
    ========================================================================== */
-.sandbox-mode .topbar {
+.sandbox-mode .cmd-band {
   border-top: 3px solid var(--warn);
 }
 #sandbox-banner {
   position: fixed;
-  top: 52px; left: 0; right: 0;
+  top: var(--chrome-h); left: 0; right: 0;
   z-index: 450;
   background: var(--warn-soft);
   border-bottom: 1px solid var(--warn);
@@ -2186,7 +2332,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   border-left: 3px solid transparent;
 }
 .admin-log-row.admin-log-info  { border-left-color: var(--info); }
-.admin-log-row.admin-log-warn  { border-left-color: var(--warn); background: rgba(181,122,10,0.04); }
+.admin-log-row.admin-log-warn  { border-left-color: var(--warn); background: rgba(147,97,10,0.04); } /* --warn #93610a */
 .admin-log-row.admin-log-error { border-left-color: var(--err);  background: rgba(177,54,42,0.05); }
 .admin-log-head { display: flex; gap: 8px; align-items: baseline; }
 .admin-log-lvl {
@@ -2217,17 +2363,20 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 
 /* Error-code + request-id affordances in log rows (FE↔BE correlation) */
 .admin-log-code {
+  /* Error-code/request-id identifier chip, not a warning-severity indicator —
+     background/border now match the already-blue (--accent) text instead of
+     the old amber. */
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10.5px;
   color: var(--accent);
-  background: rgba(181,122,10,0.10);
-  border: 1px solid rgba(181,122,10,0.30);
+  background: rgba(var(--accent-rgb),0.10);
+  border: 1px solid rgba(var(--accent-rgb),0.30);
   border-radius: var(--r-sm);
   padding: 0 5px;
   cursor: pointer;
   white-space: nowrap;
 }
-.admin-log-code:hover { background: rgba(181,122,10,0.20); }
+.admin-log-code:hover { background: rgba(var(--accent-rgb),0.20); }
 .admin-log-reqid {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10.5px;
@@ -2370,20 +2519,22 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 .opt-header::before {
   content: '';
   position: absolute; inset: 0;
-  background: radial-gradient(ellipse 90% 60% at 20% 50%, rgba(184,121,26,0.12) 0%, transparent 65%);
+  background: radial-gradient(ellipse 90% 60% at 20% 50%, rgba(var(--accent-rgb),0.12) 0%, transparent 65%);
   pointer-events: none;
 }
 .opt-header::after {
   content: '';
   position: absolute; bottom: 0; left: 0; right: 0; height: 1.5px;
-  background: linear-gradient(90deg, var(--accent) 0%, rgba(184,121,26,0.25) 55%, transparent 100%);
+  /* Blue (--accent) blending into navy (--primary #12263f, rgb below) — a single
+     cool-tone family, replacing the old blue-into-amber seam. */
+  background: linear-gradient(90deg, var(--accent) 0%, rgba(18,38,63,0.35) 55%, transparent 100%);
 }
 
 .opt-header-icon {
   width: 44px; height: 44px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(184,121,26,0.14);
-  border: 1px solid rgba(184,121,26,0.28);
+  background: rgba(var(--accent-rgb),0.14);
+  border: 1px solid rgba(var(--accent-rgb),0.28);
   border-radius: 12px;
   font-size: 20px;
   position: relative; z-index: 1;
@@ -2391,11 +2542,11 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 .opt-header-text { flex: 1; position: relative; z-index: 1; min-width: 0; }
 .opt-header-title {
   font-size: 15px; font-weight: 700;
-  color: #f8f5ef; letter-spacing: 0.01em;
+  color: var(--chrome-fg); letter-spacing: 0.01em;
 }
 .opt-header-sub {
   font-size: 11.5px; margin-top: 2px;
-  color: rgba(248,245,239,0.48);
+  color: rgba(255,255,255,0.48);
 }
 .opt-close {
   width: 30px; height: 30px; flex-shrink: 0;
@@ -2403,14 +2554,14 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 7px;
-  color: rgba(248,245,239,0.55);
+  color: rgba(255,255,255,0.55);
   font-size: 11px;
   position: relative; z-index: 1;
   transition: background var(--t-fast), color var(--t-fast);
 }
 .opt-close:hover {
   background: rgba(255,255,255,0.16);
-  color: #f8f5ef;
+  color: var(--chrome-fg);
 }
 
 /* ── Body ── */
@@ -2444,7 +2595,7 @@ body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
   background: var(--accent);
   border-color: var(--accent);
   color: #fff; font-weight: 600;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.32);
+  box-shadow: 0 2px 10px rgba(var(--accent-rgb),0.32);
 }
 
 /* ── Custom date row (collapsible) ── */
@@ -2575,7 +2726,7 @@ span.flatpickr-weekday {
   display: flex; align-items: center; gap: 4px;
   padding: 7px 12px;
   background: var(--accent-wash);
-  border: 1px solid rgba(184,121,26,0.18);
+  border: 1px solid rgba(var(--accent-rgb),0.18);
   border-left: 3px solid var(--accent);
   border-radius: var(--r-md);
   font-size: 12px; line-height: 1;
@@ -2600,7 +2751,7 @@ span.flatpickr-weekday {
 .opt-strategy-card.active {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10), inset 0 0 0 1px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10), inset 0 0 0 1px rgba(var(--accent-rgb),0.10);
 }
 .opt-card-icon  { font-size: 20px; margin-bottom: 7px; }
 .opt-card-title { font-size: 11.5px; font-weight: 700; color: var(--fg); margin-bottom: 4px; }
@@ -2635,20 +2786,22 @@ span.flatpickr-weekday {
   background: var(--bg-subtle);
 }
 .opt-run-btn {
+  /* Content-area primary CTA — navy --primary fill (Command Band CTA rule),
+     not the blue --accent used for links/outlines/focus. */
   height: 34px; padding: 0 20px;
   border: none; border-radius: var(--r-md);
-  background: linear-gradient(135deg, #c4831e 0%, #9d6210 100%);
-  color: #fff; font-size: 13px; font-weight: 600;
+  background: linear-gradient(135deg, var(--primary-hot) 0%, var(--primary) 100%);
+  color: var(--primary-fg); font-size: 13px; font-weight: 600;
   display: inline-flex; align-items: center; gap: 6px;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.38);
+  box-shadow: 0 2px 10px rgba(12,28,48,0.38);
   transition: background var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
 }
 .opt-run-btn:hover {
-  background: linear-gradient(135deg, #d08f26 0%, #ae6d14 100%);
-  box-shadow: 0 4px 18px rgba(184,121,26,0.50);
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hot) 100%);
+  box-shadow: 0 4px 18px rgba(12,28,48,0.50);
   transform: translateY(-1px);
 }
-.opt-run-btn:active { transform: none; box-shadow: 0 1px 6px rgba(184,121,26,0.28); }
+.opt-run-btn:active { transform: none; box-shadow: 0 1px 6px rgba(12,28,48,0.28); }
 .opt-run-icon { font-size: 13px; }
 
 /* =============================================================================
@@ -2697,8 +2850,8 @@ span.flatpickr-weekday {
   display: inline-block;
   margin-left: 6px;
   padding: 1px 7px;
-  background: rgba(184,121,26,0.14);
-  border: 1px solid rgba(184,121,26,0.28);
+  background: rgba(var(--accent-rgb),0.14);
+  border: 1px solid rgba(var(--accent-rgb),0.28);
   border-radius: 20px;
   font-size: 11px;
   color: var(--accent);
@@ -2767,7 +2920,7 @@ span.flatpickr-weekday {
 .cal-day-toggle-wrap input:checked ~ .cal-toggle-track {
   background: var(--accent);
   border-color: var(--accent);
-  box-shadow: 0 2px 8px rgba(184,121,26,0.36);
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.36);
 }
 .cal-toggle-thumb {
   position: absolute;
@@ -2807,7 +2960,7 @@ span.flatpickr-weekday {
 .cal-time-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.15);
 }
 .cal-time-sep {
   color: var(--fg-mute);
@@ -2830,8 +2983,8 @@ span.flatpickr-weekday {
 }
 .cal-day-row:not(.cal-day-off) .cal-day-badge-hrs {
   color: var(--accent);
-  border-color: rgba(184,121,26,0.28);
-  background: rgba(184,121,26,0.06);
+  border-color: rgba(var(--accent-rgb),0.28);
+  background: rgba(var(--accent-rgb),0.06);
 }
 
 /* ── Copy-from-plant link ── */
@@ -2848,7 +3001,7 @@ span.flatpickr-weekday {
 }
 .cal-copy-plant-btn:hover {
   color: var(--accent);
-  text-decoration-color: rgba(184,121,26,0.5);
+  text-decoration-color: rgba(var(--accent-rgb),0.5);
 }
 
 /* =============================================================================
@@ -2963,7 +3116,7 @@ input.lines-nav-input:focus {
   border-radius: 10px;
   transition: border-color var(--t-fast), opacity var(--t-fast);
 }
-.line-hours-pill.on  { border-color: rgba(184,121,26,0.3); }
+.line-hours-pill.on  { border-color: rgba(var(--accent-rgb),0.3); }
 .line-hours-pill.off { opacity: 0.38; }
 .lhp-day  {
   font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -3001,8 +3154,14 @@ input.lines-nav-input:focus {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  padding: 0 12px;
+  padding: 3px 12px;
+  border-radius: 10px;
 }
+/* Soft-tint the chip pill from its own dot's state — no JS change needed to
+   tag the chip itself, :has() reads the state already set on the child dot. */
+.admin-health-chip:has(.admin-health-dot.ok)   { background: var(--ok-soft); }
+.admin-health-chip:has(.admin-health-dot.warn) { background: var(--warn-soft); }
+.admin-health-chip:has(.admin-health-dot.err)  { background: var(--err-soft); }
 .admin-health-sep {
   width: 1px;
   height: 16px;
@@ -3017,9 +3176,9 @@ input.lines-nav-input:focus {
   background: var(--fg-faint);
   transition: background 0.3s;
 }
-.admin-health-dot.ok   { background: #27ae60; box-shadow: 0 0 4px rgba(39,174,96,0.5); }
+.admin-health-dot.ok   { background: var(--ok);   box-shadow: 0 0 4px rgba(30,122,74,0.5); }
 .admin-health-dot.warn { background: var(--warn-vivid); box-shadow: 0 0 4px rgba(243,156,18,0.5); }
-.admin-health-dot.err  { background: #c0392b; box-shadow: 0 0 4px rgba(192,57,43,0.5); }
+.admin-health-dot.err  { background: var(--err);  box-shadow: 0 0 4px rgba(176,42,32,0.5); }
 .admin-health-label { color: var(--fg); }
 
 /* ── Pipeline ── */
@@ -3064,7 +3223,7 @@ input.lines-nav-input:focus {
   color: #c0392b;
   margin-top: 3px;
 }
-.admin-pipeline-step.warn .admin-pipeline-delta { color: #b57a0a; }
+.admin-pipeline-step.warn .admin-pipeline-delta { color: var(--warn); }
 .admin-pipeline-arrow {
   font-size: 18px;
   color: var(--fg-faint);
@@ -3202,7 +3361,7 @@ input.lines-nav-input:focus {
   letter-spacing: 0.06em;
 }
 .admin-bwarn-row.admin-bwarn-error .admin-bwarn-lvl { color: #c0392b; }
-.admin-bwarn-row.admin-bwarn-warn  .admin-bwarn-lvl { color: #b57a0a; }
+.admin-bwarn-row.admin-bwarn-warn  .admin-bwarn-lvl { color: var(--warn); }
 .admin-bwarn-ts { font-size: 10.5px; color: var(--fg-mute); font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
 .admin-bwarn-msg { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
 .admin-bwarn-ctx {
@@ -3251,12 +3410,17 @@ input.lines-nav-input:focus {
 .admin-log-row.expanded .admin-log-ctx { display: block; }
 .admin-log-row:not(:has(.admin-log-ctx)) { cursor: default; }
 
-/* ── reqId / errorCode affordances — dark-mode tint counterparts ── */
+/* ── reqId / errorCode affordances — dark-mode tint counterparts ──
+   Task 10: the dedicated dark-mode token pass promised by the old comment
+   here has landed — body.dark now defines a proper (bright) --accent-rgb,
+   so this override just repoints the same alpha values from the old amber
+   triplet (214,158,46) to rgba(var(--accent-rgb)), keeping the chip's text
+   (var(--accent), already blue) and its background/border self-consistent. */
 body.dark .admin-log-code {
-  background: rgba(214,158,46,0.14);
-  border-color: rgba(214,158,46,0.36);
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: rgba(var(--accent-rgb), 0.36);
 }
-body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
+body.dark .admin-log-code:hover { background: rgba(var(--accent-rgb), 0.26); }
 
 /* ── Audit table enhancements ── */
 .admin-audit-has-warn { background: rgba(243,156,18,0.06) !important; }
@@ -3300,12 +3464,20 @@ body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
 .cw-active-card {
   display: flex; align-items: center; gap: 12px;
   padding: 14px 16px;
-  background: linear-gradient(135deg, var(--accent-wash) 0%, #fdf8ee 100%);
-  border: 1.5px solid rgba(184,121,26,0.28);
+  background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
+  border: 1.5px solid rgba(var(--accent-rgb),0.28);
   border-radius: var(--r-lg);
   margin-bottom: 14px;
 }
-body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-wash) 0%, #2a2010 100%); }
+/* Task 10 real fix (supersedes the Task 8 amber stopgap): --accent-wash,
+   --bg-elev, and --accent-rgb all now have proper dark-navy/blue-family
+   values, so this override is technically redundant with the base rule
+   above — kept explicit for readability/documentation of dark-mode intent.
+   Zero amber literals remain. */
+body.dark .cw-active-card {
+  background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
+  border-color: rgba(var(--accent-rgb), 0.28);
+}
 .cw-active-icon { font-size: 24px; flex-shrink: 0; }
 .cw-active-info { flex: 1; min-width: 0; }
 .cw-active-name {
@@ -3338,7 +3510,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .cw-dropzone.drag-over {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10);
 }
 .cw-dropzone.uploading { opacity: 0.6; pointer-events: none; }
 .cw-replace-zone {
@@ -3370,7 +3542,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .ord-dropzone.drag-over {
   border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: 0 0 0 3px rgba(184,121,26,0.10);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.10);
 }
 .ord-dropzone.uploading { opacity: 0.6; pointer-events: none; }
 .ord-drop-inner {
@@ -3486,7 +3658,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 .opt-scope-btn:hover { color: var(--accent); }
 .opt-scope-btn.active {
   background: var(--accent); color: #fff;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.30);
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.30);
 }
 
 .opt-lines-panel {
@@ -3579,7 +3751,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   height: 32px; padding: 0 10px;
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.14);
-  color: #f8f5ef;
+  color: var(--chrome-fg);
   font-size: 12.5px;
 }
 .opt-header-plant .opt-plant-trigger:hover,
@@ -3587,7 +3759,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   background: rgba(255,255,255,0.14);
   border-color: rgba(255,255,255,0.24);
 }
-.opt-header-plant .opt-plant-trigger-arrow { color: rgba(248,245,239,0.55); }
+.opt-header-plant .opt-plant-trigger-arrow { color: rgba(255,255,255,0.55); }
 
 /* Compact wheel badge — icon-only chip for the header */
 .opt-wheel-badge.compact {
@@ -3645,7 +3817,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  box-shadow: 0 2px 10px rgba(184,121,26,0.32);
+  box-shadow: 0 2px 10px rgba(var(--accent-rgb),0.32);
 }
 .osp-icon { font-size: 14px; line-height: 1; }
 
@@ -4114,7 +4286,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   font-weight: 600;
   color: var(--accent);
   background: var(--accent-wash);
-  border: 1px solid rgba(184,121,26,.25);
+  border: 1px solid rgba(var(--accent-rgb), .25);
   border-radius: 12px;
   padding: 2px 10px;
 }
@@ -4138,6 +4310,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   border-bottom: 1px solid var(--line);
   padding: 8px 12px;
   text-align: left;
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
@@ -4170,6 +4343,19 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   vertical-align: middle;
   color: var(--fg);
 }
+/* Locked key/code columns (plant, line, material, etc.) render as plain text
+   directly in the <td> — no wrapping .md-cell/<select> — so this is the only
+   selector available to target "code cells" without a JS change to tag them
+   explicitly. Excludes the delete/undo action column.
+   Scoped to #md-host (the generic MasterData CRUD grid's dedicated container,
+   see index.html) — NOT the bare .md-td class — because Security's "Manage
+   Users" table (#security-host) reuses .md-table-wrap/.md-table/.md-td for
+   its username and password-status cells, which must not get this styling. */
+#md-host .md-td:not(.md-td-action):not(:has(.md-cell, select)) {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent);
+  font-weight: 600;
+}
 .md-td-action { width: 38px; text-align: center; }
 .md-del-btn { color: var(--fg-mute); transition: color var(--t-fast); }
 .md-del-btn:hover { color: var(--err); }
@@ -4194,7 +4380,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 }
 
 /* Row states */
-.md-row-new td { background: rgba(184,121,26,.04); }
+.md-row-new td { background: rgba(var(--accent-rgb), .04); }
 .md-row-new td:first-child { border-left: 3px solid var(--accent); }
 .md-row-dirty td:first-child { border-left: 3px solid var(--accent-hot); }
 .md-row-deleted td {
@@ -4427,29 +4613,36 @@ tr:last-child .md-td { border-bottom: none; }
    Preference persisted in localStorage under key "nimbus.theme".
    ============================================================================= */
 body.dark {
-  /* Base palette */
-  --bg:           #13141a;
-  --bg-elev:      #1c1d26;
-  --bg-subtle:    #252730;
-  --bg-strong:    #191a22;
-  --line:         #2c2e3d;
-  --line-strong:  #383a50;
-  --fg:           #edebe3;
-  --fg-mute:      #8f909d;
-  --fg-faint:     #55566a;
+  /* Base palette — deep navy re-derivation of the Task 1 light-mode blue
+     system (Command Band re-skin, Task 10). Same hue family as :root, just
+     re-lit for a dark surface: navy bg, elevated slate-navy cards, cool
+     blue-gray borders/text. */
+  --bg:           #0a1420;          /* deep navy page */
+  --bg-elev:      #1c2a3c;          /* cards / panels — brightest of the elevated/subtle/strong trio, matching light mode's ordering */
+  --bg-subtle:    #16212f;          /* input / subtle fill */
+  --bg-strong:    #101b28;          /* header rail */
+  --line:         #263850;          /* hairline borders */
+  --line-strong:  #344965;
+  --fg:           #e8edf3;          /* body text */
+  --fg-mute:      #90a2b8;          /* secondary text */
+  --fg-faint:     #56677c;          /* tertiary */
 
-  /* Accent — slightly brighter amber for visibility on dark */
-  --accent:        #d4920f;
-  --accent-hot:    #b87d0d;
-  --accent-soft:   #3a2808;
-  --accent-wash:   #1e1505;
+  /* Accent — brighter navy/blue for visibility on dark (same value family as
+     --chrome-accent, which was already tuned for legibility on dark navy). */
+  --accent:        #4d9fff;
+  --accent-hot:    #7ab8ff;         /* lighter on hover/active (dark-mode convention) */
+  --accent-soft:   #1e3a5c;
+  --accent-wash:   #16273c;
+  --accent-rgb:    77, 159, 255;    /* RGB triplet for rgba() fallback — MUST track --accent above */
 
-  /* Primary — amber CTA on dark */
-  --primary:       #d4920f;
-  --primary-hot:   #e0a018;
+  /* Secondary accent — deep slate on light mode reads as near-black on dark
+     bg, so brighten to a mid steel-blue that still contrasts with white CTA text. */
+  --primary:       #2b4f78;
+  --primary-hot:   #35618f;
   --primary-fg:    #ffffff;
 
-  /* Semantic */
+  /* Semantic — already blue/green/amber/red hued (never amber-accent), so
+     lightness/saturation here were already dark-appropriate; left unchanged. */
   --ok:       #3d9962;  --ok-soft:   #0e2e1d;
   --warn:     #d09010;  --warn-soft: #2e2008;
   --warn-text: #d09010;           /* already AA-safe (5.7:1) as text on dark bg — no darkening needed here */
@@ -4457,6 +4650,15 @@ body.dark {
   --tab-md-bg: #1c3d28;  --tab-md-bg-hover: #224830;  /* Master Data tab — dark green in dark mode */
   --err:      #d94a3a;  --err-soft:  #2e1210;
   --info:     #4a88c8;  --info-soft: #10203c;
+
+  /* Undefined-token dark counterparts (Task 1 only defined these for light) */
+  --border:          #263850;      /* same as --line */
+  --border-subtle:   #101b28;      /* same as --bg-strong — faint dark divider */
+  --bg-hover:        #213146;      /* subtle hover tint — a touch lighter than --bg-elev, dark counterpart of light's #eef4fb */
+  --surface:         #1c2a3c;      /* same as --bg-elev */
+  --text-muted:      #90a2b8;      /* same as --fg-mute */
+  --line-subtle:     #1f2e42;      /* dark-appropriate row hairline */
+  --surface-2:       #182335;      /* subtle zebra-stripe tone, distinct from --bg-subtle */
 
   /* Shadows (stronger on dark to create depth) */
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.35);
@@ -4487,6 +4689,17 @@ body.dark .vis-item.blackout {
 body.dark .vis-item.alertcell-calendar {
   background: rgba(74, 136, 200, 0.22) !important;
   border: 1px solid rgba(74, 136, 200, 0.40) !important;
+}
+/* Task 10: dark counterparts for alertcell-err/warn, added to match the
+   calendar/blackout siblings above (same pattern: dark --err/--warn hex,
+   alpha nudged up slightly from the light-mode rule for dark visibility). */
+body.dark .vis-item.alertcell-err {
+  background: rgba(217, 74, 58, 0.26) !important;   /* dark --err #d94a3a */
+  border: 1px solid rgba(217, 74, 58, 0.50) !important;
+}
+body.dark .vis-item.alertcell-warn {
+  background: rgba(208, 144, 16, 0.18) !important;   /* dark --warn #d09010 */
+  border-color: transparent !important;
 }
 
 /* Flatpickr calendar dark overrides */
@@ -5029,11 +5242,11 @@ body.dark .sub-subtab.active { color: #ffffff; }
   background: var(--accent); flex-shrink: 0;
 }
 
-/* Active seg-btn for labor sub-tabs — amber pill matching Gantt */
+/* Active seg-btn for labor sub-tabs — navy pill matching Gantt/every other .seg-btn */
 .labor-toolbar .seg-btn[data-labor-sub].active {
-  background: var(--accent); border-color: var(--accent);
-  color: #fff; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(184,121,26,0.28);
+  background: var(--primary); border-color: var(--primary);
+  color: var(--primary-fg); font-weight: 600;
+  box-shadow: 0 2px 8px rgba(12,28,48,0.28);
 }
 
 /* Exception count badge inside the Exceptions button */
@@ -5085,7 +5298,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
   box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
-.lp-card-scroll { overflow: auto; max-height: calc(100vh - 205px); width: 100%; }
+.lp-card-scroll { overflow: auto; max-height: calc(100vh - var(--chrome-h) - 153px); width: 100%; }
 .lp-meta { font-size: 12px; color: var(--fg-mute); margin: 0 0 10px; }
 .lp-hint { margin-top: 10px; font-size: 11px; color: var(--fg-faint); }
 
@@ -5101,6 +5314,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
   position: sticky; top: 0; z-index: 3;
   min-width: 72px;
   background: var(--bg-subtle);
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; color: var(--fg-mute);
   padding: 7px 6px; white-space: nowrap; text-align: center;
@@ -5185,6 +5399,11 @@ td.lp-selected-td {
 .lp-hm-cell  { padding: 6px 4px; text-align: center; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
 .lp-hm-legend { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 11px; color: var(--fg-mute); }
 .lp-hm-grad  { flex: 1; max-width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(to right, #ede8de, #c8a95a, #c96a1a, #991b1b); }
+/* Task 10: no dark override existed at all — idle stop hand-picked dark-cool
+   neutral (no token maps to "idle"), middle stops use --warn/hand-picked
+   orange, overload end uses --err (mirrors the light rule's idle→overload
+   heat progression, just re-lit for a dark legend strip). */
+body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--warn), #d1651f, var(--err)); }
 
 /* Exceptions list */
 .lp-exc-summary { font-size: 13px; font-weight: 600; color: var(--fg-mute); margin-bottom: 12px; }
@@ -5250,7 +5469,7 @@ td.lp-selected-td {
 .admin-perf-table .perf-ago  { color: var(--fg-faint); font-size: 11px; }
 .admin-perf-table .admin-perf-empty { text-align: center; color: var(--fg-mute); padding: 24px; font-style: italic; }
 .perf-ok   { color: var(--ok,  #2f7a4d); }
-.perf-warn { color: var(--warn, #b8791a); font-weight: 600; }
+.perf-warn { color: var(--warn, #93610a); font-weight: 600; }
 .perf-hot  { color: var(--err,  #c0392b); font-weight: 700; }
 
 /* ════════════════════════════════════════════════════════════════════════════

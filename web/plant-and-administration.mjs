@@ -579,7 +579,7 @@ export const Plant = {
           const color = Config.COLORS[li % Config.COLORS.length];
           const ls = Store.lineSettings[line] || {};
           const botBadge = ls.bottleneck
-            ? `<span style="background:#f59e0b;color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;">${Util.t('ui.bottleneck')}</span>`
+            ? `<span style="background:var(--warn,#93610a);color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;">${Util.t('ui.bottleneck')}</span>`
             : '';
           const exclBadge = ls.excludeFromOpt
             ? `<span style="background:#6366f1;color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;">${Util.t('ui.excl_optimizer')}</span>`
@@ -1246,9 +1246,9 @@ export const ProdLines = {
 
     const plantRows = plantBlocks.map(b => `
       <div class="block-row" style="opacity:0.75;padding-left:6px;padding-right:6px;">
-        <span class="ico" style="color:#d97706;">■</span>
+        <span class="ico" style="color:var(--warn,#93610a);">■</span>
         <span class="reason">${b.reason || Util.t('ui.plant_blackout_default')}</span>
-        <span class="line-tag" style="background:#fef3c7;color:#d97706;">Plant</span>
+        <span class="line-tag" style="background:var(--warn-soft,#f8ecd0);color:var(--warn,#93610a);">Plant</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
       </div>`).join('');
 
@@ -1879,8 +1879,11 @@ export const LaborPlanning = (() => {
       const ca = p(a), cb = p(b);
       return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
     }
-    const idle = isDark ? '#252730' : '#ede8de', low = isDark ? '#7a5a18' : '#c8a95a',
-          mid  = isDark ? '#a8520f' : '#c96a1a', hot = isDark ? '#b32a1f' : '#991b1b';
+    // Command Band re-skin (Task 6): idle -> --bg-subtle neutral, low -> info-blue,
+    // mid -> --warn, hot -> --err (dark branch uses deeper variants, kept dark
+    // enough for the white overlay text used above ratio 0 in dark mode).
+    const idle = isDark ? '#252730' : '#f4f7fa', low = isDark ? '#1d4a80' : '#1a4fa0',
+          mid  = isDark ? '#8a5a0d' : '#93610a', hot = isDark ? '#8f241c' : '#b02a20';
     function heatBg(ratio) {
       if (ratio <= 0)   return idle;
       if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
@@ -2015,15 +2018,17 @@ export const LaborPlanning = (() => {
       const ca = p(a), cb = p(b);
       return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
     }
-    const idle = isDark ? '#252730' : '#ede8de', low = isDark ? '#7a5a18' : '#c8a95a',
-          mid  = isDark ? '#a8520f' : '#c96a1a', hot = isDark ? '#b32a1f' : '#991b1b';
+    // Command Band re-skin (Task 6): same repointed ramp as _renderLinePlan above
+    // (idle -> --bg-subtle, low -> info-blue, mid -> --warn, hot -> --err).
+    const idle = isDark ? '#252730' : '#f4f7fa', low = isDark ? '#1d4a80' : '#1a4fa0',
+          mid  = isDark ? '#8a5a0d' : '#93610a', hot = isDark ? '#8f241c' : '#b02a20';
     function heatBg(ratio) {
       if (ratio <= 0)   return idle;
       if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
       if (ratio <= 1.0) return lerpRGB(low, mid, (ratio - 0.5) / 0.5);
       return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
     }
-    function heatText(ratio) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#3d3628' : '#fff'); }
+    function heatText(ratio) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#1c2b3a' : '#fff'); }
 
     const cols = `100px repeat(${days.length}, 1fr)`;
     let html = `<div class="lp-card" style="padding:14px 16px;">

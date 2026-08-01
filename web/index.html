@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-08-01-a';</script>
-<link rel="stylesheet" href="styles.css?v=2026-08-01-a">
+<script>window.NIMBUS_BUILD_ID = '2026-08-01-b';</script>
+<link rel="stylesheet" href="styles.css?v=2026-08-01-b">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -309,9 +309,14 @@
   flex: 1;
   height: 6px;
   border-radius: 3px;
-  /* Mirrors the actual heatBg() ramp in Dashboard._renderHeatmap (app.js) —
-     var() here means one rule covers both themes, no separate dark override. */
-  background: linear-gradient(to right, var(--bg-subtle), var(--warn), var(--warn-vivid), var(--err));
+  /* Command Band re-skin (Task 7): 5-stop legend — neutral -> info-blue -> warn
+     -> vivid-warn -> err. NOTE: this legend swatch is a hand-authored visual
+     approximation of Dashboard._renderHeatmap's heatBg() ramp (schedule-workbench.mjs),
+     which is still a 4-stop JS interpolation (idle/warn/warn-vivid/err) with no
+     info-blue step — adding that step to the real per-cell colors would require
+     editing that JS function, out of scope for this CSS-only task. Flagged in the
+     Task 7 report as a legend/actual-cell mismatch for a follow-up. */
+  background: linear-gradient(to right, var(--bg-subtle), var(--info), var(--warn), var(--warn-vivid), var(--err));
 }
 /* Heatmap dark-mode overrides */
 body.dark .hm-dow { color: var(--fg); }
@@ -432,7 +437,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
 .lh-drill-head {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px;
-  background: rgba(184,121,26,0.08);
+  background: var(--bg-subtle);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--fg);
@@ -457,7 +462,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   transition: background 0.1s;
 }
 .lh-drill-row:last-child { border-bottom: 0; }
-.lh-drill-row:hover { background: rgba(184,121,26,0.06); }
+.lh-drill-row:hover { background: var(--bg-subtle); }
 .lh-drill-id {
   font-family: 'JetBrains Mono', monospace;
   color: var(--fg-mute);
@@ -472,8 +477,10 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   color: var(--err);
 }
 .lh-drill-more { padding: 6px 12px; font-size: 11px; color: var(--fg-mute); text-align: center; }
-body.dark .lh-drill-head { background: rgba(184,121,26,0.15); }
-body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
+/* No body.dark overrides needed — .lh-drill-head/.lh-drill-row:hover now use
+   var(--bg-subtle), which is already theme-aware (matches the Task 7
+   .lp-table convention of relying on the token rather than a manual dark
+   override). */
 
 /* ── Optimizer Impact Preview (C4) ────────────────────────────── */
 @keyframes optpv-card-in {
@@ -521,7 +528,7 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   text-transform: uppercase;
   font-family: 'JetBrains Mono', monospace;
   letter-spacing: 0.08em;
-  box-shadow: 0 1px 3px rgba(184,121,26,0.30);
+  box-shadow: 0 1px 3px rgba(var(--accent-rgb),0.30);
 }
 .opt-pv-chip-plant { color: var(--fg); }
 
@@ -545,15 +552,15 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   width: 4px;
 }
 .opt-pv-verdict-better {
-  background: linear-gradient(135deg, rgba(22,163,74,0.06) 0%, rgba(22,163,74,0.02) 100%);
-  border-color: rgba(22,163,74,0.25);
+  background: linear-gradient(135deg, rgba(30,122,74,0.06) 0%, rgba(30,122,74,0.02) 100%); /* --ok #1e7a4a */
+  border-color: rgba(30,122,74,0.25);
 }
-.opt-pv-verdict-better::before { background: #16a34a; }
+.opt-pv-verdict-better::before { background: var(--ok); }
 .opt-pv-verdict-worse {
-  background: linear-gradient(135deg, rgba(220,38,38,0.06) 0%, rgba(220,38,38,0.02) 100%);
-  border-color: rgba(220,38,38,0.25);
+  background: linear-gradient(135deg, rgba(176,42,32,0.06) 0%, rgba(176,42,32,0.02) 100%); /* --err #b02a20 */
+  border-color: rgba(176,42,32,0.25);
 }
-.opt-pv-verdict-worse::before { background: #dc2626; }
+.opt-pv-verdict-worse::before { background: var(--err); }
 .opt-pv-verdict-neutral {
   background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
   border-color: var(--line);
@@ -568,8 +575,8 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   background: #fff;
   flex-shrink: 0;
 }
-.opt-pv-verdict-better .opt-pv-verdict-icon { color: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,0.25); }
-.opt-pv-verdict-worse  .opt-pv-verdict-icon { color: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,0.25); }
+.opt-pv-verdict-better .opt-pv-verdict-icon { color: var(--ok); box-shadow: 0 0 0 1px rgba(30,122,74,0.25); }
+.opt-pv-verdict-worse  .opt-pv-verdict-icon { color: var(--err); box-shadow: 0 0 0 1px rgba(176,42,32,0.25); }
 .opt-pv-verdict-neutral .opt-pv-verdict-icon { color: var(--accent); box-shadow: 0 0 0 1px var(--line); }
 
 .opt-pv-verdict-text { min-width: 0; }
@@ -601,8 +608,8 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   line-height: 1;
   color: var(--fg);
 }
-.opt-pv-verdict-better .opt-pv-score-num { color: #16a34a; }
-.opt-pv-verdict-worse  .opt-pv-score-num { color: #dc2626; }
+.opt-pv-verdict-better .opt-pv-score-num { color: var(--ok); }
+.opt-pv-verdict-worse  .opt-pv-score-num { color: var(--err); }
 .opt-pv-score-of { color: var(--fg-faint); font-weight: 500; font-size: 14px; }
 .opt-pv-score-lbl {
   font-size: 9.5px;
@@ -638,9 +645,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   box-shadow: var(--shadow-md);
   border-color: var(--line-strong);
 }
-.opt-pv-card-better { border-top: 2px solid #16a34a; }
-.opt-pv-card-worse  { border-top: 2px solid #dc2626; }
-.opt-pv-card-warn   { border-top: 2px solid #ca8a04; }
+.opt-pv-card-better { border-top: 2px solid var(--ok); }
+.opt-pv-card-worse  { border-top: 2px solid var(--err); }
+.opt-pv-card-warn   { border-top: 2px solid var(--warn); }
 .opt-pv-card-neutral { border-top: 2px solid var(--line-strong); }
 
 .opt-pv-card-head {
@@ -696,7 +703,7 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   width: 230px;
   padding: 9px 11px;
   background: #1a1b1f;
-  color: #f5f4ef;
+  color: var(--chrome-fg);
   font-size: 11px;
   font-weight: 400;
   line-height: 1.45;
@@ -761,9 +768,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   font-weight: 300;
   padding: 0 2px;
 }
-.opt-pv-card-better .opt-pv-arrow { color: #16a34a; }
-.opt-pv-card-worse  .opt-pv-arrow { color: #dc2626; }
-.opt-pv-card-warn   .opt-pv-arrow { color: #ca8a04; }
+.opt-pv-card-better .opt-pv-arrow { color: var(--ok); }
+.opt-pv-card-worse  .opt-pv-arrow { color: var(--err); }
+.opt-pv-card-warn   .opt-pv-arrow { color: var(--warn); }
 
 /* Bars — visual scale of pre vs post */
 .opt-pv-bars {
@@ -796,9 +803,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   animation: optpv-bar-grow 0.55s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 .opt-pv-bar-fill.pre { background: var(--line-strong); animation-delay: 0.05s; }
-.opt-pv-bar-fill.post.better  { background: linear-gradient(90deg, #16a34a, #22c55e); animation-delay: 0.18s; }
-.opt-pv-bar-fill.post.worse   { background: linear-gradient(90deg, #dc2626, #ef4444); animation-delay: 0.18s; }
-.opt-pv-bar-fill.post.warn    { background: linear-gradient(90deg, #a16207, #ca8a04); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.better  { background: linear-gradient(90deg, var(--ok), color-mix(in srgb, var(--ok) 70%, white)); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.worse   { background: linear-gradient(90deg, var(--err), color-mix(in srgb, var(--err) 70%, white)); animation-delay: 0.18s; }
+.opt-pv-bar-fill.post.warn    { background: linear-gradient(90deg, var(--warn), color-mix(in srgb, var(--warn) 70%, white)); animation-delay: 0.18s; }
 .opt-pv-bar-fill.post.neutral { background: linear-gradient(90deg, var(--accent), var(--accent-hot)); animation-delay: 0.18s; }
 
 /* Delta pill */
@@ -813,9 +820,9 @@ body.dark .lh-drill-row:hover { background: rgba(184,121,26,0.10); }
   letter-spacing: 0.01em;
   animation: optpv-pill-pop 0.4s cubic-bezier(0.34, 1.52, 0.64, 1) 0.22s both;
 }
-.opt-pv-delta-pill.better  { background: rgba(22,163,74,0.10); color: #16a34a; }
-.opt-pv-delta-pill.worse   { background: rgba(220,38,38,0.10); color: #dc2626; }
-.opt-pv-delta-pill.warn    { background: rgba(202,138,4,0.12); color: #a16207; }
+.opt-pv-delta-pill.better  { background: rgba(30,122,74,0.10); color: var(--ok); }
+.opt-pv-delta-pill.worse   { background: rgba(176,42,32,0.10); color: var(--err); }
+.opt-pv-delta-pill.warn    { background: rgba(147,97,10,0.12); color: var(--warn); }
 .opt-pv-delta-pill.neutral { background: var(--bg-subtle); color: var(--fg-mute); }
 .opt-pv-pill-icon { font-size: 9px; }
 .opt-pv-pct { font-weight: 500; opacity: 0.80; margin-left: 2px; }
@@ -916,14 +923,14 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
 .ls-hours {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: var(--fg-mute);
+  color: var(--fg-faint);
   min-width: 74px;
   white-space: nowrap;
 }
 .ls-bar-wrap {
   flex: 1;
   height: 8px;
-  background: rgba(0,0,0,0.08);
+  background: var(--bg);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -1094,39 +1101,22 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="app">
 
   <!-- =========================================================
-       TOP BAR — brand + primary tabs + global actions
+       COMMAND BAND — hamburger, brand, active-section label, global actions
+       (JS wiring for hamburger/section-label/confidence ring is a later task)
        ========================================================= -->
-  <header class="topbar">
+  <header class="cmd-band">
+    <button type="button" id="nav-drawer-toggle" class="cmd-hamburger" aria-label="Menu" aria-expanded="false" aria-controls="nav-drawer">
+      <span class="cmd-hamburger-bar"></span>
+      <span class="cmd-hamburger-bar"></span>
+      <span class="cmd-hamburger-bar"></span>
+    </button>
+
     <div class="brand">
-      <span class="brand-mark"></span>
-      <span class="brand-name">NIMBUS 🧹</span>
-      <span class="brand-ver"></span>
+      <span class="cmd-brand-name">NIMBUS</span>
+      <span class="cmd-brand-tag">SCHEDULING</span>
     </div>
 
-    <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
-      <label class="hps-label" for="hps-input" data-i18n="ui.plant_label">Plant</label>
-      <div class="hps-combobox" id="hps-combobox">
-        <input type="text" id="hps-input" class="hps-input" placeholder="Select" data-i18n-placeholder="ph.select_plant"
-               autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false">
-        <button type="button" class="hps-clear" id="hps-clear" title="Clear plant filter" data-i18n-title="tip.clear_plant_filter" hidden>×</button>
-        <div class="hps-dropdown" id="hps-dropdown" role="listbox" hidden></div>
-      </div>
-    </div>
-
-    <nav class="tabs" role="tablist">
-      <button class="tab-btn active" data-tab="home" role="tab">
-        <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
-      </button>
-      <button class="tab-btn" data-tab="gantt" role="tab">
-        <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
-      </button>
-      <button class="tab-btn" data-tab="labor" role="tab">
-        <span class="tab-ico">☖</span><span data-i18n="tab.labor">Labor Plan</span>
-      </button>
-      <button class="tab-btn" data-tab="masterdata" role="tab">
-        <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
-      </button>
-    </nav>
+    <span class="cmd-section-label" id="cmd-band-section-label"></span>
 
     <div class="topbar-actions">
       <button id="alert-bell" class="icon-btn" data-i18n-title="tip.click_view_alerts" title="Alerts">
@@ -1137,6 +1127,26 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button id="user-settings-btn" class="icon-btn" hidden data-i18n-title="tip.user_settings" title="User Settings"><img src="/Images/user.png" alt="" class="user-icon-avatar"></button>
     </div>
   </header>
+
+  <!-- =========================================================
+       CONTEXT BAR — relocated plant selector + Lines pill
+       (Lines-pill click dispatch is a later task)
+       ========================================================= -->
+  <div class="context-bar">
+    <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
+      <label class="hps-label" for="hps-input" data-i18n="ui.plant_label">Plant</label>
+      <div class="hps-combobox" id="hps-combobox">
+        <input type="text" id="hps-input" class="hps-input" placeholder="Select" data-i18n-placeholder="ph.select_plant"
+               autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false">
+        <button type="button" class="hps-clear" id="hps-clear" title="Clear plant filter" data-i18n-title="tip.clear_plant_filter" hidden>×</button>
+        <div class="hps-dropdown" id="hps-dropdown" role="listbox" hidden></div>
+      </div>
+    </div>
+
+    <button type="button" class="context-pill" id="context-lines-pill">
+      <span data-i18n="ui.lines_section">Lines</span>
+    </button>
+  </div>
 
   <!-- =========================================================
        TAB: DASHBOARD
@@ -1953,6 +1963,54 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </section>
 
 </div><!-- /.app -->
+
+<!-- =========================================================
+     NAV DRAWER (slide-in) + scrim — replaces the old horizontal nav.tabs.
+     Open/close wiring (hamburger, scrim click, PLANT row, admin-gate hidden
+     toggle already exists in application-shell.mjs) is a later task; the
+     markup here is inert (no .open class, hamburger/close/plant buttons have
+     no handlers yet).
+     ========================================================= -->
+<div class="drawer-scrim" id="nav-drawer-scrim"></div>
+<nav class="nav-drawer" id="nav-drawer" aria-label="Primary">
+  <div class="nav-drawer-head">
+    <span class="nav-drawer-brand">NIMBUS</span>
+    <button type="button" class="nav-drawer-close" id="nav-drawer-close" aria-label="Close menu">×</button>
+  </div>
+
+  <div class="nav-drawer-section nav-drawer-nav" role="tablist">
+    <div class="nav-drawer-eyebrow" data-i18n="ui.nav_drawer_heading">NAVIGATE</div>
+    <button class="tab-btn active" data-tab="home" role="tab">
+      <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
+    </button>
+    <button class="tab-btn" data-tab="gantt" role="tab">
+      <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
+    </button>
+    <button class="tab-btn" data-tab="labor" role="tab">
+      <span class="tab-ico">☖</span><span data-i18n="tab.labor">Labor Plan</span>
+    </button>
+    <button class="tab-btn" data-tab="masterdata" role="tab">
+      <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
+    </button>
+    <!-- Activates the dormant admin-gate in application-shell.mjs
+         (`adminBtn.hidden = !Session.isAdmin()`), which previously targeted
+         a non-existent node. Defaults hidden (matches the #user-settings-btn
+         precedent of hidden-until-resolved) — the gate corrects this on init
+         for whichever way Session.isAdmin() resolves. -->
+    <button class="tab-btn" data-tab="admin" role="tab" hidden>
+      <span class="tab-ico">⚙</span><span data-i18n="tab.admin">Admin Cockpit</span>
+    </button>
+  </div>
+
+  <div class="nav-drawer-section nav-drawer-plant">
+    <div class="nav-drawer-eyebrow">PLANT</div>
+    <button type="button" class="nav-drawer-plant-row" id="nav-drawer-plant-btn">
+      <span class="nav-drawer-plant-label">Change Plant</span>
+    </button>
+  </div>
+
+  <div class="nav-drawer-footer" data-i18n="ui.nav_drawer_footer">NIMBUS Production Scheduling</div>
+</nav>
 
 <!-- =========================================================
      ALERT DRAWER (slide-in)

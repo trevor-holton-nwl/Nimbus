@@ -1103,4 +1103,10 @@ window.__NIMBUS_LOCALES.es = {
   'aria.welcome_dialog':               'Welcome to NIMBUS — select a plant to begin', // MISSING TRANSLATION
   'aria.open_command_palette':         'Open command palette',                      // MISSING TRANSLATION
   'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
+  'aria.nav_drawer_toggle':            'Alternar menú de navegación',
+  'aria.nav_drawer_close':             'Cerrar menú de navegación',
+
+  // Nav drawer (Command Band re-skin)
+  'ui.nav_drawer_heading':             'NAVEGACIÓN',
+  'ui.nav_drawer_footer':              'NIMBUS Programación de Producción',
 };
