@@ -20,8 +20,11 @@ interface StoreEventInput {
   [key: string]: unknown;
 }
 
-/** What a subscriber actually receives — StoreEventInput plus the two fields emit() always adds. */
-interface StoreEvent extends StoreEventInput {
+/** What a subscriber actually receives — StoreEventInput plus the two fields emit() always adds.
+ *  Exported (CQ-1 Phase 6 Task 1) so a module that keeps a named `Store.subscribe` callback as a
+ *  real method (rather than an inline arrow relying on contextual inference, e.g. Timeline._onStore
+ *  in schedule-workbench.mts) can name this type explicitly instead of redeclaring a shadow copy. */
+export interface StoreEvent extends StoreEventInput {
   revision: number;
   mode: StoreMode;
 }

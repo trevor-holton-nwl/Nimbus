@@ -142,8 +142,58 @@
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
+import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev } from './types.mjs';
+
+// -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
+//    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
+//    module-scoped types further down this same file as they convert
+//    Table/Inspector/ContextMenu/Hierarchy/GanttFilter/etc.) ---------------
+
+/** A vis-timeline item — an order (Timeline._itemForTask) or a blackout/
+ *  past-zone/alert-horizon/alert-cell background band (Timeline._itemForBlock
+ *  and the synthetic literals built inline in Timeline.rebuild()). Not every
+ *  field applies to every kind of item — see the two builder methods and the
+ *  synthetic-item call sites for which subset each produces. */
+interface TimelineVisItem {
+  id: string;
+  group: string;
+  /** Absent on the synthetic background bands (past-zone, alert-horizon-zone,
+   *  alertcell) built inline in Timeline.rebuild() — only order/blackout items
+   *  (built by _itemForTask/_itemForBlock) set this. */
+  content?: string;
+  start: Date;
+  end: Date;
+  className?: string;
+  editable?: boolean;
+  type?: 'background';
+  title?: string;
+}
+
+/** A vis-timeline group — one row per production line. */
+interface TimelineGroupData {
+  id: string;
+  order: number;
+  content: string;
+}
+
+/** Timeline._viewWindow / TimelineNav's drag-start range — epoch-ms bounds of
+ *  the currently-visible (or drag-anchored) viewport. */
+interface TimelineWindowMs {
+  start: number;
+  end: number;
+}
+
+/** Timeline.rebuild()'s per-{line, day} alert-cell aggregation (built once from
+ *  Store.alerts, then rendered as one background item per cell). */
+interface TimelineAlertCellInfo {
+  line: string;
+  dayKey: string;
+  sev: AlertSev;
+  hasConflictErr: boolean;
+}
 
 /* =============================================================================
    TIMELINE — vis-timeline integration.
@@ -154,36 +204,39 @@ import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
      • double-click → open in Inspector
    ========================================================================== */
 export const Timeline = {
-  _tl: null,
-  _items:     null,
-  _visItems:  null,             // DataView filter layer — vis-timeline sees only items near the viewport
-  _groups:    null,
-  _viewWindow: null,            // { start: ms, end: ms } — current viewport, kept in sync via rangechanged
-  _pastZoneIds:     [],         // cached IDs for ticker updates (avoids getIds() scan every second)
-  _alertHorizonIds: [],
-  _lineColorIdx: {},            // stable line → colour index mapping
+  _tl: null as NimbusVendor.VisTimelineInstance | null,
+  _items:     null as NimbusVendor.VisDataSet<TimelineVisItem> | null,
+  _visItems:  null as NimbusVendor.VisDataView<TimelineVisItem> | null,             // DataView filter layer — vis-timeline sees only items near the viewport
+  _groups:    null as NimbusVendor.VisDataSet<TimelineGroupData> | null,
+  _viewWindow: null as TimelineWindowMs | null,            // { start: ms, end: ms } — current viewport, kept in sync via rangechanged
+  _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
+  _alertHorizonIds: [] as string[],
+  _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
   _nextColorIdx: 0,
-  _unsubStore:   null,
+  _unsubStore:   null as (() => void) | null,
   _suppressEvents: false,       // guard to prevent self-triggered loops
-  _conflictSrc: null,           // alerts array reference — invalidates cache when it changes
-  _conflictSet: null,           // Set<String(taskId)> built once per alerts array identity
-  _visEl:       null,           // cached #vis-timeline element (set in init)
-  _ganttTab:    null,           // cached #gantt-tab element (see _ganttActive)
+  _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
+  _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
+  _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
+  _ganttTab:    null as HTMLElement | null,           // cached #gantt-tab element (see _ganttActive)
+  _cachedRowH:  null as number | null,
+  _cachedAxisH: null as number | null,
+  _rebuildRaf:  null as number | null,
 
-  init() {
+  init(): void {
     const container = document.getElementById('vis-timeline');
     if (!container) return;
     Timeline._visEl = container;
 
-    Timeline._items  = new vis.DataSet([]);
-    Timeline._groups = new vis.DataSet([]);
+    Timeline._items  = new vis.DataSet<TimelineVisItem>([]);
+    Timeline._groups = new vis.DataSet<TimelineGroupData>([]);
 
     // Sliding-window DataView: vis-timeline only processes items within ±90 days of
     // the current viewport, regardless of how far the full schedule extends.
     // Internal code continues to read/write Timeline._items unchanged.
     const _WIN_BUF_MS = 90 * 24 * 3600 * 1000;
-    Timeline._visItems = new vis.DataView(Timeline._items, {
-      filter: item => {
+    Timeline._visItems = new vis.DataView<TimelineVisItem>(Timeline._items, {
+      filter: (item: TimelineVisItem) => {
         const w = Timeline._viewWindow;
         if (!w) return true;
         const s = item.start instanceof Date ? item.start.getTime() : +item.start;
@@ -192,7 +245,7 @@ export const Timeline = {
       }
     });
 
-    const options = {
+    const options: NimbusVendor.VisTimelineOptions = {
       stack: false,
       editable: { updateTime: true, updateGroup: true, remove: false, add: false },
       // Let an order be dragged directly, without first selecting it with a plain click.
@@ -200,8 +253,8 @@ export const Timeline = {
       // DataView refresh, which visually reverted single drags ("spring back"). Blackout /
       // background items stay put because they are created with editable:false.
       itemsAlwaysDraggable: { item: true },
-      snap: d => Util.snap(d),
-      groupOrder: (a, b) => (a.order ?? 0) - (b.order ?? 0),
+      snap: (d: Date) => Util.snap(d),
+      groupOrder: (a: TimelineGroupData, b: TimelineGroupData) => (a.order ?? 0) - (b.order ?? 0),
       orientation: { axis: 'top' },
       zoomMin: 15 * 60 * 1000,           // 15 min
       zoomMax: 30 * 24 * 3600 * 1000,    // 30 days
@@ -223,10 +276,10 @@ export const Timeline = {
     // never fires per-frame during active drag — items already in the window stay
     // rendered; fringe items outside the buffer are evicted/loaded once pan settles.
     const _refreshView = Util.debounce(() => {
-      const w = Timeline._tl.getWindow();
+      const w = Timeline._tl!.getWindow();
       Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
-      Timeline._visItems.refresh();
-      Timeline._tl.redraw();
+      Timeline._visItems!.refresh();
+      Timeline._tl!.redraw();
     }, 120);
     Timeline._tl.on('rangechanged', _refreshView);
 
@@ -236,7 +289,7 @@ export const Timeline = {
     // .vis-time-axis for both the label row (top panel, ~30px) AND a
     // full-height grid overlay inside .vis-content. Matching the wrong one
     // would inflate axisH to container height and poison the cache.
-    const _calibrate = () => {
+    const _calibrate = (): void => {
       const c = Timeline._visEl;
       if (!c) return;
       const sampleItem = c.querySelector('.vis-panel.vis-center .vis-foreground .vis-item');
@@ -252,7 +305,7 @@ export const Timeline = {
       const MARGIN_V = 4; // matches options.margin.item.vertical
       Timeline._cachedRowH = itemH + MARGIN_V * 2;
       Timeline._cachedAxisH = axisH;
-      Timeline._tl.off('changed', _calibrate);
+      Timeline._tl!.off('changed', _calibrate);
     };
     Timeline._tl.on('changed', _calibrate);
 
@@ -270,8 +323,8 @@ export const Timeline = {
       if (document.hidden) return; // skip ticker work while the tab is backgrounded
       if (!Timeline._items || !Timeline._pastZoneIds.length) return;
       const now  = new Date();
-      const updates = Timeline._pastZoneIds
-        .filter(id => Timeline._items.get(id))
+      const updates: Array<{ id: string; start?: Date; end?: Date }> = Timeline._pastZoneIds
+        .filter(id => Timeline._items!.get(id))
         .map(id => ({ id, end: now }));
       if (Timeline._alertHorizonIds.length) {
         const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
@@ -279,11 +332,11 @@ export const Timeline = {
         if (typeof hz === 'number') {
           const hzEnd = new Date(now.getTime() + hz * Config.MS_MIN);
           for (const id of Timeline._alertHorizonIds) {
-            if (Timeline._items.get(id)) updates.push({ id, start: now, end: hzEnd });
+            if (Timeline._items!.get(id)) updates.push({ id, start: now, end: hzEnd });
           }
         }
       }
-      if (updates.length) Timeline._items.update(updates);
+      if (updates.length) Timeline._items!.update(updates);
     }, 1000);
 
     /* ----- subscribe to store changes ----------------------------------- */
@@ -292,13 +345,13 @@ export const Timeline = {
 
   // Cached lookup for the (static) #gantt-tab; lazily caches on first call so
   // init order can't leave it null. Replaces 4 inline getElementById checks.
-  _ganttActive() {
+  _ganttActive(): boolean {
     if (!Timeline._ganttTab) Timeline._ganttTab = document.getElementById('gantt-tab');
     return Timeline._ganttTab ? Timeline._ganttTab.classList.contains('active') : false;
   },
 
   /** Handle store updates: refresh vis-timeline WITHOUT echoing back. */
-  _onStore(evt) {
+  _onStore(evt: StoreEvent): void {
     // Ignore our own mutations — we already applied them visually.
     if (evt.source === 'timeline') return;
 
@@ -327,15 +380,16 @@ export const Timeline = {
       // call (vis-timeline DataSet.update() upserts by id) instead of one DataSet
       // write per task — a per-task loop here previously dominated optimize-run cost.
       if (Timeline._ganttActive()) {
-        const sel = NIMBUS.GanttFilter ? NIMBUS.GanttFilter._selectedLines : null;
+        const sel = NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null;
         const filtered = sel && sel.size > 0;
         const _pmT0patch = performance.now();
-        const patches = [];
-        for (const id of (evt.ids || [])) {
+        const patches: TimelineVisItem[] = [];
+        const ids = (evt.ids as Array<string | number> | undefined) ?? [];
+        for (const id of ids) {
           const sid = String(id);
           if (filtered) {
             const t = Store.tasks[sid];
-            if (!t || !sel.has(t.PRODUCTION_LINE || 'Unknown')) continue;
+            if (!t || !sel!.has(t.PRODUCTION_LINE || 'Unknown')) continue;
           }
           const patch = Timeline._itemPatchFor(sid);
           if (patch) patches.push(patch);
@@ -343,7 +397,7 @@ export const Timeline = {
         if (patches.length) {
           Timeline._suppressEvents = true;
           try {
-            Timeline._items.update(patches);
+            Timeline._items!.update(patches);
           } finally {
             Timeline._suppressEvents = false;
           }
@@ -354,7 +408,7 @@ export const Timeline = {
       Timeline._applyTaskPatch(String(evt.id));
     } else if (evt.type === 'fixed:change') {
       // just re-render those items' className
-      for (const id of evt.ids) Timeline._applyTaskPatch(String(id));
+      for (const id of (evt.ids as Array<string | number>)) Timeline._applyTaskPatch(String(id));
     } else if (evt.type === 'alerts:change') {
       Timeline._conflictSrc = null; // invalidate conflict-set cache; rebuild() will repopulate
       if (Timeline._ganttActive()) {
@@ -370,38 +424,38 @@ export const Timeline = {
   // Builds a vis-timeline item patch for a single task id, or returns null/undefined
   // if the task is missing or undated. Pure — does not touch the DataSet. Shared by
   // _applyTaskPatch (single-id callers) and the tasks:bulkUpdate batch path above.
-  _itemPatchFor(id) {
+  _itemPatchFor(id: string): TimelineVisItem | null {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date) return null;
     return Timeline._itemForTask(t);
   },
 
-  _applyTaskPatch(id) {
+  _applyTaskPatch(id: string): void {
     const patch = Timeline._itemPatchFor(id);
     if (!patch) return;
     Timeline._suppressEvents = true;
     try {
       // DataSet.update() upserts by id (adds if not present) — see the batched
       // tasks:bulkUpdate path above for the multi-id equivalent.
-      Timeline._items.update(patch);
+      Timeline._items!.update(patch);
     } finally { Timeline._suppressEvents = false; }
   },
 
   // Returns a Set of String task IDs that have an active alert. Memoized on the
   // Store.alerts array identity — rebuilt O(alerts) once, then O(1) per task lookup.
-  _conflictIds() {
+  _conflictIds(): Set<string> {
     const src = Store.alerts;
     if (Timeline._conflictSrc !== src) {
-      const s = new Set();
+      const s = new Set<string>();
       for (const a of src) if (a.taskId != null) s.add(String(a.taskId));
       Timeline._conflictSrc = src;
       Timeline._conflictSet = s;
     }
-    return Timeline._conflictSet;
+    return Timeline._conflictSet!;
   },
 
   /** Build an item object for a task. */
-  _itemForTask(t) {
+  _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.PRODUCTION_LINE || 'Unknown';
     const ci = Timeline._colorIndex(line);
     const fixed = Store.isFixed(t.id);
@@ -415,24 +469,28 @@ export const Timeline = {
       id:      String(t.id),
       group:   line,
       content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}</span>`,
-      start:   t.start_date,
-      end:     t.end_date,
+      start:   t.start_date!,
+      end:     t.end_date!,
       className: cls.join(' ')
     };
   },
 
-  /** Build an item object for a blackout block (non-editable, greyed out). */
-  _itemForBlock(b, overrideLine) {
+  /** Build an item object for a blackout block (non-editable, greyed out). Also called
+   *  (with a NimbusPlantBlock — no `line` field) from rebuild()'s plant-blackout loop,
+   *  which always passes overrideLine, so the missing `line` field is never actually
+   *  reached at runtime — see the `'line' in b` guard below. */
+  _itemForBlock(b: NimbusBlock | NimbusPlantBlock, overrideLine?: string): TimelineVisItem {
     // b.id already carries a 'blk-' prefix from Store.addBlock — don't double it.
     // When cloning for a specific line, append the line so IDs stay unique.
-    const line = overrideLine || b.line || '__all__';
+    const bLine = 'line' in b ? b.line : null;
+    const line = overrideLine || bLine || '__all__';
     const id   = overrideLine ? `${b.id}-${overrideLine}` : b.id;
     return {
       id,
       group:   line,
       content: `<span style="font-style:italic;">✕ ${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>`,
       title:   `${Util.t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
-      start:   b.start, end: b.end,
+      start:   b.start as Date, end: b.end as Date,
       editable: false,
       className: 'blackout',
       type: 'background'
@@ -443,7 +501,7 @@ export const Timeline = {
    *  the same operation) don't each run the full diff synchronously inside Store.emit.
    *  User-initiated rebuilds (goto-gantt, drag-end, plant switch) still call rebuild()
    *  directly for immediate feedback. */
-  _scheduleRebuild() {
+  _scheduleRebuild(): void {
     if (Timeline._rebuildRaf) return;
     Timeline._rebuildRaf = requestAnimationFrame(() => {
       Timeline._rebuildRaf = null;
@@ -454,7 +512,7 @@ export const Timeline = {
   /** Diff-based rebuild: compare desired item set to current DataSet contents
    *  and emit minimal add/update/remove operations. Preserves selection and
    *  avoids the clear/add flicker of a wholesale replacement.               */
-  rebuild() {
+  rebuild(): void {
     if (!Timeline._items || !Timeline._groups) return;
     const _pmT0t = performance.now();
     Timeline._renderEmptyOverlay();
@@ -474,9 +532,9 @@ export const Timeline = {
     const plant = Store.selectedPlant;
     // Scope to GanttFilter line multi-select — without this, vis-timeline reserves
     // row height for every plant line and leaves ghost rows above the visible ones.
-    const lineFilterActive = !!NIMBUS.GanttFilter
-      && NIMBUS.GanttFilter._selectedLines
-      && NIMBUS.GanttFilter._selectedLines.size > 0;
+    const lineFilterActive = !!NIMBUS!.GanttFilter
+      && NIMBUS!.GanttFilter!._selectedLines
+      && NIMBUS!.GanttFilter!._selectedLines!.size > 0;
     // Single source of truth for "what lines are rendered, and in what
     // order" — see Timeline._visibleLines(). Also reused by
     // Dashboard._gotoLine and AlertsUIAdapter.focus's line+day fallback via
@@ -488,11 +546,11 @@ export const Timeline = {
       ? tasks.filter(t => visibleSet.has(t.PRODUCTION_LINE || 'Unknown'))
       : tasks;
     // Compute alert-per-task set ONCE (fixes snapshot inconsistency during rebuild).
-    const conflictIds = new Set();
+    const conflictIds = new Set<string>();
     for (const a of Store.alerts) if (a.taskId != null) conflictIds.add(String(a.taskId));
 
     /* ---- groups ------------------------------------------------------------ */
-    const groupData = visibleLines.map((line, idx) => {
+    const groupData: TimelineGroupData[] = visibleLines.map((line, idx) => {
       const ci = Timeline._colorIndex(line);
       return {
         id: line,
@@ -506,7 +564,7 @@ export const Timeline = {
 
     /* ---- desired items ---------------------------------------------------- */
     const _pmT0desired = performance.now();
-    const desired = new Map();
+    const desired = new Map<string, TimelineVisItem>();
     for (const t of scopedTasks) {
       const item = Timeline._itemForTask(t);
       // Apply the pre-computed conflict flag without walking alerts again.
@@ -526,7 +584,7 @@ export const Timeline = {
         desired.set(String(item.id), item);
       } else {
         for (const line of visibleLines) {
-          const item = { ...Timeline._itemForBlock(b), id: `${b.id}__${line}`, group: line };
+          const item: TimelineVisItem = { ...Timeline._itemForBlock(b), id: `${b.id}__${line}`, group: line };
           desired.set(String(item.id), item);
         }
       }
@@ -537,7 +595,7 @@ export const Timeline = {
       if (!plant) continue;
       for (const line of visibleLines) {
         if (Store.getPlantForLine(line) !== plant) continue;
-        const item = { ...Timeline._itemForBlock(b, line), id: `${b.id}__plant__${line}` };
+        const item: TimelineVisItem = { ...Timeline._itemForBlock(b, line), id: `${b.id}__plant__${line}` };
         desired.set(String(item.id), item);
       }
     }
@@ -548,7 +606,7 @@ export const Timeline = {
     const pastEnd = new Date();
     const pastStart = new Date('2000-01-01T00:00:00');
     for (const line of visibleLines) {
-      const item = {
+      const item: TimelineVisItem = {
         id:       `past-zone-${line}`,
         group:    line,
         start:    pastStart,
@@ -590,7 +648,7 @@ export const Timeline = {
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
     const CALENDAR_ALERT_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
-    const alertCellMap = {};
+    const alertCellMap: Record<string, TimelineAlertCellInfo> = {};
     for (const a of Store.alerts) {
       if (!a.line || !a.time) continue;
       if (lineFilterActive && !visibleSet.has(a.line)) continue;
@@ -607,7 +665,7 @@ export const Timeline = {
       const cls  = cell.sev !== 'err'  ? 'alertcell-warn'
                  : cell.hasConflictErr ? 'alertcell-err'
                  :                       'alertcell-calendar';
-      const item = {
+      const item: TimelineVisItem = {
         id:    `alertcell-${cell.line}-${cell.dayKey}`,
         group: cell.line,
         start: new Date(cell.dayKey + 'T00:00:00'),
@@ -622,8 +680,8 @@ export const Timeline = {
     PerfMonitor.record('Timeline.rebuild.desiredMap', performance.now() - _pmT0desired);
 
     const _pmT0diff = performance.now();
-    const existingIds = new Set(Timeline._items.getIds().map(String));
-    const toAdd = [], toUpdate = [], toRemove = [];
+    const existingIds = new Set<string>(Timeline._items.getIds().map(String));
+    const toAdd: TimelineVisItem[] = [], toUpdate: TimelineVisItem[] = [], toRemove: string[] = [];
     for (const [id, data] of desired) {
       if (existingIds.has(id)) toUpdate.push(data);
       else                     toAdd.push(data);
@@ -635,7 +693,7 @@ export const Timeline = {
     // Diff groups incrementally — never call groups.clear() because that drops
     // all rows from the DOM momentarily, which causes the browser to clamp
     // scrollTop to 0 and reset the vertical scroll position.
-    const existingGroupIds = new Set(Timeline._groups.getIds().map(String));
+    const existingGroupIds = new Set<string>(Timeline._groups.getIds().map(String));
     const newGroupIds      = new Set(groupData.map(g => String(g.id)));
     const groupsToRemove   = [...existingGroupIds].filter(id => !newGroupIds.has(id));
     const groupsToAdd      = groupData.filter(g => !existingGroupIds.has(String(g.id)));
@@ -661,8 +719,8 @@ export const Timeline = {
     if (typeof Selection !== 'undefined') {
       const keep = Selection.ids().filter(id => desired.has(id));
       if (keep.length !== Selection.size()) Selection.set(keep);
-      Timeline._tl.setSelection(keep);
-      if (NIMBUS.Interaction && NIMBUS.Interaction.DEBUG) {
+      Timeline._tl!.setSelection(keep);
+      if (NIMBUS!.Interaction && NIMBUS!.Interaction!.DEBUG) {
         ErrorLog.info('timeline',
           `diff-rebuild: +${toAdd.length} ~${toUpdate.length} -${toRemove.length} (kept sel: ${keep.length})`);
       }
@@ -681,7 +739,7 @@ export const Timeline = {
     PerfMonitor.record('Timeline.rebuild', performance.now() - _pmT0t);
   },
 
-  _fitHeight(groupCount) {
+  _fitHeight(groupCount: number): void {
     if (!Timeline._tl) return;
     const container = Timeline._visEl;
     if (!container) return;
@@ -700,7 +758,7 @@ export const Timeline = {
     });
   },
 
-  focus(id) {
+  focus(id: string): void {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date || !Timeline._tl) return;
     // Force the target into the sliding DataView window first — see
@@ -710,7 +768,7 @@ export const Timeline = {
     // vis-timeline's focus() scrolls both horizontally (time) and vertically (line row).
     Timeline._tl.focus(String(id), { animation: { duration: 300 } });
     Timeline._tl.setSelection([String(id)]);
-    NIMBUS.Inspector.show(t);
+    NIMBUS!.Inspector!.show!(t);
   },
 
   // Force Timeline._visItems (the ±90-day sliding DataView, see init()) to
@@ -733,7 +791,7 @@ export const Timeline = {
   // a temporary superset. Call immediately before focus()/setSelection()/
   // setWindow() whenever the target might be outside the window the
   // timeline was last showing.
-  _syncViewWindow(startMs, endMs) {
+  _syncViewWindow(startMs: number, endMs: number): void {
     const cur = Timeline._viewWindow;
     Timeline._viewWindow = {
       start: cur ? Math.min(cur.start, startMs) : startMs,
@@ -742,34 +800,34 @@ export const Timeline = {
     if (Timeline._visItems) Timeline._visItems.refresh();
   },
 
-  setView(mode) {
+  setView(mode: string): void {
     if (!Timeline._tl) return;
     const now = new Date();
-    let start, end;
+    let start: Date, end: Date;
     if (mode === 'hour') {
-      start = Util.startOfDay(now);
+      start = Util.startOfDay(now)!;
       end   = new Date(start.getTime() + 24 * Config.MS_HOUR);
     } else if (mode === 'day') {
-      start = Util.startOfDay(now);
+      start = Util.startOfDay(now)!;
       end   = new Date(start.getTime() + 3 * 24 * Config.MS_HOUR);
     } else {
-      start = Util.startOfDay(now);
+      start = Util.startOfDay(now)!;
       end   = new Date(start.getTime() + 7 * 24 * Config.MS_HOUR);
     }
     Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
-    document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
       b.classList.toggle('active', b.dataset.view === mode);
     });
   },
 
-  redraw() { if (Timeline._tl) Timeline._tl.redraw(); },
+  redraw(): void { if (Timeline._tl) Timeline._tl.redraw(); },
 
   /** Show or hide the "select a plant" overlay above the vis-timeline. */
-  _renderEmptyOverlay() {
+  _renderEmptyOverlay(): void {
     const overlay = document.getElementById('timeline-empty-overlay');
     if (!overlay) return;
     if (!Store.selectedPlant) {
-      NIMBUS.EmptyState.render(overlay, {
+      NIMBUS!.EmptyState!.render!(overlay, {
         title: Util.t('empty.select_plant_timeline'),
         msg:   Util.t('ui.select_plant_orders_msg')
       });
@@ -780,7 +838,7 @@ export const Timeline = {
     }
   },
 
-  zoomToFit() {
+  zoomToFit(): void {
     if (!Timeline._tl) return;
     // Scope to the selected plant like rebuild() (R4) — otherwise the window spans
     // every plant's orders and zooms far wider than the visible rows. Also avoids the
@@ -788,14 +846,14 @@ export const Timeline = {
     const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
       .filter(t => t.start_date && t.end_date);
     if (!tasks.length) return;
-    const minT = Math.min(...tasks.map(t => t.start_date.getTime()));
-    const maxT = Math.max(...tasks.map(t => t.end_date.getTime()));
+    const minT = Math.min(...tasks.map(t => t.start_date!.getTime()));
+    const maxT = Math.max(...tasks.map(t => t.end_date!.getTime()));
     const span = maxT - minT;
     const pad  = span * 0.05 || Config.MS_HOUR;
     Timeline._tl.setWindow(new Date(minT - pad), new Date(maxT + pad), { animation: { duration: 400 } });
   },
 
-  gotoNow() {
+  gotoNow(): void {
     if (!Timeline._tl) return;
     const now = new Date();
     Timeline._tl.setWindow(
@@ -805,7 +863,7 @@ export const Timeline = {
     );
   },
 
-  _colorIndex(line) {
+  _colorIndex(line: string): number {
     if (Timeline._lineColorIdx[line] === undefined) {
       Timeline._lineColorIdx[line] = Timeline._nextColorIdx++ % Config.COLORS.length;
     }
@@ -816,7 +874,7 @@ export const Timeline = {
   // order." Mirrors rebuild()'s plant-scoping + numeric-aware sort +
   // GanttFilter line-filter exactly, so any code computing a row index for
   // a line always matches the actual rendered .vis-group DOM order.
-  _visibleLines() {
+  _visibleLines(): string[] {
     const plant = Store.selectedPlant;
     const tasks = Store.tasksForSelectedPlant().filter(t => t.start_date && t.end_date);
     const plantLines = new Set(Store.linesForSelectedPlant());
@@ -826,11 +884,11 @@ export const Timeline = {
     }
     const sortedLines = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-    const lineFilterActive = !!NIMBUS.GanttFilter
-      && NIMBUS.GanttFilter._selectedLines
-      && NIMBUS.GanttFilter._selectedLines.size > 0;
+    const lineFilterActive = !!NIMBUS!.GanttFilter
+      && NIMBUS!.GanttFilter!._selectedLines
+      && NIMBUS!.GanttFilter!._selectedLines!.size > 0;
     return lineFilterActive
-      ? sortedLines.filter(l => NIMBUS.GanttFilter._selectedLines.has(l))
+      ? sortedLines.filter(l => NIMBUS!.GanttFilter!._selectedLines!.has(l))
       : sortedLines;
   },
 
@@ -838,7 +896,7 @@ export const Timeline = {
   // is at the top of the visible viewport. Returns false (no-op, no crash)
   // if the line isn't currently rendered — e.g. hidden by an active
   // GanttFilter line filter, or the Gantt hasn't rendered any groups yet.
-  scrollToLine(line) {
+  scrollToLine(line: string): boolean {
     const visibleLines = Timeline._visibleLines();
     const lineIdx = visibleLines.indexOf(line);
     if (lineIdx < 0) return false;
@@ -861,15 +919,15 @@ export const Timeline = {
   // App.goto('gantt') alone preserves whatever Gantt sub-tab was last
   // active, so without this the pan/scroll below can happen invisibly
   // behind a hidden #gantt-sub-timeline pane.
-  gotoLineDay(line, dateStr) {
-    NIMBUS.App.gotoGanttTimeline();
+  gotoLineDay(line: string, dateStr: string): void {
+    NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => {
       if (Timeline._tl) {
         const dayStart    = new Date(dateStr + 'T00:00:00');
         const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
         Timeline._syncViewWindow(dayStart.getTime(), dayLevelEnd.getTime());
         Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
-        document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+        document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
           b.classList.toggle('active', b.dataset.view === 'day');
         });
       }
@@ -883,14 +941,14 @@ export const Timeline = {
    utilization heat bands. Draggable viewport rect pans the main timeline.
    ========================================================================== */
 export const TimelineNav = {
-  _canvas: null,
-  _ctx:    null,
+  _canvas: null as HTMLCanvasElement | null,
+  _ctx:    null as CanvasRenderingContext2D | null,
   _dragging: false,
   _dragStartX: 0,
-  _dragStartRange: null,
-  _unsubStore: null,
+  _dragStartRange: null as TimelineWindowMs | null,
+  _unsubStore: null as (() => void) | null,
 
-  init() {
+  init(): void {
     const el = document.getElementById('timeline-nav');
     if (!el) return;
     const canvas = document.createElement('canvas');
@@ -912,11 +970,11 @@ export const TimelineNav = {
       if (!TimelineNav._dragging || !Timeline._tl) return;
       const { scheduleMin, scheduleMax, pixelW } = TimelineNav._scheduleRange();
       if (!scheduleMin) return;
-      const totalMs = scheduleMax - scheduleMin;
-      const msPerPx = totalMs / pixelW;
+      const totalMs = scheduleMax! - scheduleMin;
+      const msPerPx = totalMs / pixelW!;
       const dx = e.clientX - canvas.getBoundingClientRect().left - TimelineNav._dragStartX;
       const shift = dx * msPerPx;
-      const r = TimelineNav._dragStartRange;
+      const r = TimelineNav._dragStartRange!;
       Timeline._tl.setWindow(new Date(r.start + shift), new Date(r.end + shift));
     });
     window.addEventListener('mouseup', () => { TimelineNav._dragging = false; });
@@ -926,10 +984,10 @@ export const TimelineNav = {
       if (!Timeline._tl) return;
       const { scheduleMin, scheduleMax, pixelW } = TimelineNav._scheduleRange();
       if (!scheduleMin) return;
-      const totalMs = scheduleMax - scheduleMin;
-      const clickMs = scheduleMin + (e.offsetX / pixelW) * totalMs;
+      const totalMs = scheduleMax! - scheduleMin;
+      const clickMs = scheduleMin + (e.offsetX / pixelW!) * totalMs;
       const w = Timeline._tl.getWindow();
-      const halfSpan = (w.end - w.start) / 2;
+      const halfSpan = (w.end.getTime() - w.start.getTime()) / 2;
       Timeline._tl.setWindow(new Date(clickMs - halfSpan), new Date(clickMs + halfSpan),
         { animation: { duration: 200 } });
     });
@@ -953,7 +1011,7 @@ export const TimelineNav = {
     setTimeout(() => TimelineNav.render(), 200);
   },
 
-  _scheduleRange() {
+  _scheduleRange(): { scheduleMin?: number; scheduleMax?: number; pixelW?: number } {
     const el = TimelineNav._canvas;
     if (!el) return {};
     const rect = el.getBoundingClientRect();
@@ -964,7 +1022,7 @@ export const TimelineNav = {
     return { scheduleMin, scheduleMax, pixelW };
   },
 
-  render() {
+  render(): void {
     const canvas = TimelineNav._canvas;
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -972,7 +1030,7 @@ export const TimelineNav = {
     const cssH = canvas.offsetHeight || 42;
     canvas.width  = cssW * dpr;
     canvas.height = cssH * dpr;
-    const ctx = TimelineNav._ctx;
+    const ctx = TimelineNav._ctx!;
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, cssW, cssH);
 
@@ -988,7 +1046,7 @@ export const TimelineNav = {
     const scheduleMax = scheduleMin + 42 * Config.MS_DAY;
     const totalMs = scheduleMax - scheduleMin;
 
-    const toX = ms => ((ms - scheduleMin) / totalMs) * cssW;
+    const toX = (ms: number): number => ((ms - scheduleMin) / totalMs) * cssW;
 
     const isDark = document.body.classList.contains('dark');
     // Command Band re-skin (Task 6): this minimap renders in the content area
@@ -1008,7 +1066,7 @@ export const TimelineNav = {
 
     // Draw per-day utilization heat bands
     const matrix = Utilization.computeMatrix(new Date(scheduleMin), Math.ceil(totalMs / Config.MS_DAY) + 2);
-    const SEV_COLORS = { ok: 'rgba(30,122,74,0.25)', warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
+    const SEV_COLORS: Record<'ok' | 'warn' | 'err', string> = { ok: 'rgba(30,122,74,0.25)', warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
     for (const line of Object.keys(matrix)) {
       for (const [dayKey, row] of Object.entries(matrix[line])) {
         if (!row.pct) continue;
@@ -1036,7 +1094,7 @@ export const TimelineNav = {
     }
 
     // Order blocks (tiny)
-    const lineColors = {};
+    const lineColors: Record<string, string> = {};
     tasks.forEach(t => {
       const line = t.PRODUCTION_LINE || 'Unknown';
       if (!lineColors[line]) {
@@ -1048,8 +1106,8 @@ export const TimelineNav = {
     const lineH = Math.max(2, Math.floor(cssH / (lineArr.length || 1)));
     tasks.forEach(t => {
       const li = lineArr.indexOf(t.PRODUCTION_LINE || 'Unknown');
-      const x1 = toX(t.start_date.getTime());
-      const x2 = toX(t.end_date.getTime());
+      const x1 = toX(t.start_date!.getTime());
+      const x2 = toX(t.end_date!.getTime());
       const y  = li * lineH;
       ctx.fillStyle = lineColors[t.PRODUCTION_LINE || 'Unknown'] + 'cc';
       ctx.fillRect(x1, y, Math.max(1, x2 - x1), lineH);
@@ -1090,18 +1148,18 @@ export const TimelineNav = {
    Critical path gets a thicker stroke.
    ========================================================================== */
 export const DependencyOverlay = {
-  _svg:      null,
+  _svg:      null as HTMLElement | null,
   _enabled:  false,
-  _highlighted: null,   // id of chain to highlight
-  _unsubStore: null,
-  _unsubRange: null,
+  _highlighted: null as string | null,   // id of chain to highlight
+  _unsubStore: null as (() => void) | null,
+  _unsubRange: null as (() => void) | null,
 
-  init() {
+  init(): void {
     const svg = document.getElementById('dep-overlay');
     if (!svg) return;
     DependencyOverlay._svg = svg;
 
-    const chk = document.getElementById('chk-show-deps');
+    const chk = document.getElementById('chk-show-deps') as HTMLInputElement | null;
     if (chk) {
       chk.onchange = () => {
         DependencyOverlay._enabled = chk.checked;
@@ -1129,12 +1187,12 @@ export const DependencyOverlay = {
     }, 'DependencyOverlay');
   },
 
-  highlightChain(taskId) {
+  highlightChain(taskId: string | number): void {
     DependencyOverlay._highlighted = String(taskId);
     if (DependencyOverlay._enabled) DependencyOverlay.render();
   },
 
-  render() {
+  render(): void {
     const svg = DependencyOverlay._svg;
     if (!svg || !Timeline._tl || !Timeline._items) return;
     svg.innerHTML = '';
@@ -1142,14 +1200,14 @@ export const DependencyOverlay = {
     const deps = Store.dependencies;
     if (!deps || !Object.keys(deps).length) return;
 
-    const tl  = Timeline._tl;
+    const tl  = Timeline._tl!;
     const dom = document.getElementById('vis-timeline');
     if (!dom) return;
 
     // Compute critical path lengths for each task (longest chain to it)
-    const chainLen = {};
+    const chainLen: Record<string, number> = {};
     const allIds = Store.tasksForSelectedPlant().map(t => String(t.id));
-    const getLen = (id) => {
+    const getLen = (id: string): number => {
       if (chainLen[id] !== undefined) return chainLen[id];
       const sources = deps[id] || [];
       if (!sources.length) { chainLen[id] = 0; return 0; }
@@ -1160,7 +1218,7 @@ export const DependencyOverlay = {
 
     // Arrow head marker
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    ['ok','tight','gap','critical','highlight'].forEach(cls => {
+    (['ok', 'tight', 'gap', 'critical', 'highlight'] as const).forEach(cls => {
       // Command Band re-skin (Task 6): 'tight' (getting-tight warning) -> --warn,
       // 'highlight' (active/selected chain) -> --accent. ok/gap/critical verified
       // NOT amber (green/red already) — left unchanged per guardrails.
@@ -1194,7 +1252,7 @@ export const DependencyOverlay = {
 
     // Group row heights from DOM
     const groupEls = dom.querySelectorAll('.vis-foreground .vis-group');
-    const lineToY = {};
+    const lineToY: Record<string, number> = {};
     // Scope to the selected plant (mirrors the TimelineNav R17 fix) so this ordering
     // matches the visible plant-scoped group rows built by Timeline.rebuild.
     const lines = [...new Set((Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr)
@@ -1217,7 +1275,7 @@ export const DependencyOverlay = {
 
     const sw     = tl.getWindow();
     const totalMs = sw.end.getTime() - sw.start.getTime();
-    const timeToX = (ms) => foreOffX + ((ms - sw.start.getTime()) / totalMs) * foreRect.width;
+    const timeToX = (ms: number): number => foreOffX + ((ms - sw.start.getTime()) / totalMs) * foreRect.width;
 
     for (const [targetId, sourceIds] of Object.entries(deps)) {
       const tTask = Store.tasks[targetId];
@@ -1227,7 +1285,7 @@ export const DependencyOverlay = {
         const sTask = Store.tasks[sourceId];
         if (!sTask || !sTask.start_date || !sTask.end_date) continue;
 
-        let sx, sy, tx, ty;
+        let sx: number, sy: number, tx: number, ty: number;
         try {
           sx = timeToX(sTask.end_date.getTime());
           tx = timeToX(tTask.start_date.getTime());
@@ -1238,7 +1296,7 @@ export const DependencyOverlay = {
           if (tx < -50 || sx > foreOffX + foreRect.width + 50) continue;
         } catch { continue; }
 
-        const gapMs = tTask.start_date - sTask.end_date;
+        const gapMs = tTask.start_date!.getTime() - sTask.end_date!.getTime();
         const isHighlighted = (String(sourceId) === highlighted || String(targetId) === highlighted);
         const isCritical = maxLen > 0 && (getLen(targetId) || 0) >= maxLen - 1;
 

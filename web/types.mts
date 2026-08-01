@@ -117,6 +117,13 @@ export interface NimbusMasterPlant {
   subnetwork: string;
   plant: string;
   constraints?: ConstraintConfig[];
+  /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
+   *  Timeline alert-horizon shading band (falls back to
+   *  Store.userSettings.alertHorizonMinutes when absent client-side). */
+  alt_flag_horizon?: number;
+  /** Minutes; schema.sql: NOT NULL DEFAULT 20160. Confidence-score horizon
+   *  (nimbus-intelligence.js's Confidence module — not read by this file). */
+  conf_score_horizon?: number;
 }
 
 export interface NimbusMasterData {
