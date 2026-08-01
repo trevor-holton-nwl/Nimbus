@@ -1491,17 +1491,26 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._history.push({ ts: Date.now(), score });
       if (Confidence._history.length > 500) Confidence._history.shift();
 
+      // Task 10 (Command Band dark-mode pass): the badge always sits on the
+      // fixed-dark --chrome-panel background regardless of the page's own
+      // light/dark theme (see the CSS comment above .ni-conf-badge), so its
+      // score text must NOT follow the page-theme --ok/--warn-text/--err vars
+      // — in light theme those resolve to colors tuned for contrast on a
+      // WHITE page, which read as low-contrast against the dark chrome chip.
+      // Fixed hex below reuses this task's own dark-mode --ok/--warn-text/--err
+      // values (already confirmed high-contrast against --chrome-panel), so
+      // the badge reads correctly in both page themes.
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = score;
-        scoreEl.style.color = score >= 70 ? 'var(--ok)' : score >= 40 ? 'var(--warn-text)' : 'var(--err)';
+        scoreEl.style.color = score >= 70 ? '#3d9962' : score >= 40 ? '#d09010' : '#d94a3a';
       }
       const delta = score - prev;
       if (Confidence._badge && Math.abs(delta) >= 5) {
         const flash = document.createElement('span');
         flash.className = 'ni-conf-delta';
         flash.textContent = delta > 0 ? `+${delta}` : `${delta}`;
-        flash.style.color = delta > 0 ? 'var(--ok)' : 'var(--err)';
+        flash.style.color = delta > 0 ? '#3d9962' : '#d94a3a';
         Confidence._badge.appendChild(flash);
         setTimeout(() => flash.remove(), 1900);
       }
@@ -1518,10 +1527,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!snap) return;
       Confidence._score   = snap.score;
       Confidence._history = snap.history;
+      // Fixed dark-safe triad — see the matching comment in _apply() above.
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = snap.score;
-        scoreEl.style.color = snap.score >= 70 ? 'var(--ok)' : snap.score >= 40 ? 'var(--warn)' : 'var(--err)';
+        scoreEl.style.color = snap.score >= 70 ? '#3d9962' : snap.score >= 40 ? '#d09010' : '#d94a3a';
       }
       Confidence._updateRing();
     },

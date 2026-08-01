@@ -1088,8 +1088,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    colored order blocks underneath, so they need true alpha transparency, not
    an opaque soft-tint chip background — the rgb triplets below are simply the
    new --err/--warn/--info hex values at the same alpha the old rule used.
-   NOTE (Task 7 report): no body.dark override exists for alertcell-err/warn
-   (unlike alertcell-calendar/blackout below, which do) — flagged for Task 10. */
+   Task 10: body.dark overrides for alertcell-err/warn now added below, next
+   to the pre-existing alertcell-calendar/blackout dark overrides. */
 .vis-item.alertcell-err {
   background: rgba(176, 42, 32, 0.22) !important;   /* --err #b02a20 */
   border: 1px solid rgba(176, 42, 32, 0.45) !important;
@@ -3418,18 +3418,16 @@ input.lines-nav-input:focus {
 .admin-log-row:not(:has(.admin-log-ctx)) { cursor: default; }
 
 /* ── reqId / errorCode affordances — dark-mode tint counterparts ──
-   Left as-is (Task 8/Command Band re-skin): body.dark still globally
-   redefines --accent/--primary back to amber (a token-layer gap outside this
-   task's scope, not a special-case literal), so .admin-log-code's text
-   (var(--accent)) still renders amber in dark mode too. Repointing only this
-   background to blue would create a NEW mismatch (blue chip / amber text)
-   that doesn't exist today — leave both self-consistently amber until a
-   dedicated dark-mode token pass lands. */
+   Task 10: the dedicated dark-mode token pass promised by the old comment
+   here has landed — body.dark now defines a proper (bright) --accent-rgb,
+   so this override just repoints the same alpha values from the old amber
+   triplet (214,158,46) to rgba(var(--accent-rgb)), keeping the chip's text
+   (var(--accent), already blue) and its background/border self-consistent. */
 body.dark .admin-log-code {
-  background: rgba(214,158,46,0.14);
-  border-color: rgba(214,158,46,0.36);
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: rgba(var(--accent-rgb), 0.36);
 }
-body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
+body.dark .admin-log-code:hover { background: rgba(var(--accent-rgb), 0.26); }
 
 /* ── Audit table enhancements ── */
 .admin-audit-has-warn { background: rgba(243,156,18,0.06) !important; }
@@ -3478,24 +3476,14 @@ body.dark .admin-log-code:hover { background: rgba(214,158,46,0.26); }
   border-radius: var(--r-lg);
   margin-bottom: 14px;
 }
-/* Left as-is (Task 8/Command Band re-skin): body.dark still redefines
-   --accent-wash to an amber wash (#1e1505), so today this gradient is a
-   coherent amber-to-amber blend in dark mode with no seam. Repointing only
-   the #2a2010 end stop to a blue/neutral would introduce a NEW seam against
-   the still-amber --accent-wash start stop — leave both amber together until
-   a dedicated dark-mode token pass retunes --accent/--accent-wash. */
-/* border-color added here (Task 8 follow-up fix): the base .cw-active-card
-   rule's border was repointed to rgba(var(--accent-rgb),0.28) for the
-   light-mode blue re-skin, but --accent-rgb is NOT redefined by body.dark
-   (stays the light-mode blue triplet), so without this override dark mode
-   paired a blue border ring around the still-amber gradient above.
-   rgba(184,121,26,0.28) is the original pre-Command-Band amber literal —
-   internally consistent with this gradient's own amber tone — restoring
-   the coherent amber-border + amber-gradient card dark mode had before
-   the base rule's border was repointed. */
+/* Task 10 real fix (supersedes the Task 8 amber stopgap): --accent-wash,
+   --bg-elev, and --accent-rgb all now have proper dark-navy/blue-family
+   values, so this override is technically redundant with the base rule
+   above — kept explicit for readability/documentation of dark-mode intent.
+   Zero amber literals remain. */
 body.dark .cw-active-card {
-  background: linear-gradient(135deg, var(--accent-wash) 0%, #2a2010 100%);
-  border-color: rgba(184,121,26,0.28);
+  background: linear-gradient(135deg, var(--accent-wash) 0%, var(--bg-elev) 100%);
+  border-color: rgba(var(--accent-rgb), 0.28);
 }
 .cw-active-icon { font-size: 24px; flex-shrink: 0; }
 .cw-active-info { flex: 1; min-width: 0; }
@@ -4632,29 +4620,36 @@ tr:last-child .md-td { border-bottom: none; }
    Preference persisted in localStorage under key "nimbus.theme".
    ============================================================================= */
 body.dark {
-  /* Base palette */
-  --bg:           #13141a;
-  --bg-elev:      #1c1d26;
-  --bg-subtle:    #252730;
-  --bg-strong:    #191a22;
-  --line:         #2c2e3d;
-  --line-strong:  #383a50;
-  --fg:           #edebe3;
-  --fg-mute:      #8f909d;
-  --fg-faint:     #55566a;
+  /* Base palette — deep navy re-derivation of the Task 1 light-mode blue
+     system (Command Band re-skin, Task 10). Same hue family as :root, just
+     re-lit for a dark surface: navy bg, elevated slate-navy cards, cool
+     blue-gray borders/text. */
+  --bg:           #0a1420;          /* deep navy page */
+  --bg-elev:      #16212f;          /* cards / panels */
+  --bg-subtle:    #1c2a3c;          /* input / subtle fill */
+  --bg-strong:    #101b28;          /* header rail */
+  --line:         #263850;          /* hairline borders */
+  --line-strong:  #344965;
+  --fg:           #e8edf3;          /* body text */
+  --fg-mute:      #90a2b8;          /* secondary text */
+  --fg-faint:     #56677c;          /* tertiary */
 
-  /* Accent — slightly brighter amber for visibility on dark */
-  --accent:        #d4920f;
-  --accent-hot:    #b87d0d;
-  --accent-soft:   #3a2808;
-  --accent-wash:   #1e1505;
+  /* Accent — brighter navy/blue for visibility on dark (same value family as
+     --chrome-accent, which was already tuned for legibility on dark navy). */
+  --accent:        #4d9fff;
+  --accent-hot:    #7ab8ff;         /* lighter on hover/active (dark-mode convention) */
+  --accent-soft:   #1e3a5c;
+  --accent-wash:   #16273c;
+  --accent-rgb:    77, 159, 255;    /* RGB triplet for rgba() fallback — MUST track --accent above */
 
-  /* Primary — amber CTA on dark */
-  --primary:       #d4920f;
-  --primary-hot:   #e0a018;
+  /* Secondary accent — deep slate on light mode reads as near-black on dark
+     bg, so brighten to a mid steel-blue that still contrasts with white CTA text. */
+  --primary:       #2b4f78;
+  --primary-hot:   #35618f;
   --primary-fg:    #ffffff;
 
-  /* Semantic */
+  /* Semantic — already blue/green/amber/red hued (never amber-accent), so
+     lightness/saturation here were already dark-appropriate; left unchanged. */
   --ok:       #3d9962;  --ok-soft:   #0e2e1d;
   --warn:     #d09010;  --warn-soft: #2e2008;
   --warn-text: #d09010;           /* already AA-safe (5.7:1) as text on dark bg — no darkening needed here */
@@ -4662,6 +4657,14 @@ body.dark {
   --tab-md-bg: #1c3d28;  --tab-md-bg-hover: #224830;  /* Master Data tab — dark green in dark mode */
   --err:      #d94a3a;  --err-soft:  #2e1210;
   --info:     #4a88c8;  --info-soft: #10203c;
+
+  /* Undefined-token dark counterparts (Task 1 only defined these for light) */
+  --border:          #263850;      /* same as --line */
+  --border-subtle:   #101b28;      /* same as --bg-strong — faint dark divider */
+  --surface:         #16212f;      /* same as --bg-elev */
+  --text-muted:      #90a2b8;      /* same as --fg-mute */
+  --line-subtle:     #1f2e42;      /* dark-appropriate row hairline */
+  --surface-2:       #182335;      /* subtle zebra-stripe tone, distinct from --bg-subtle */
 
   /* Shadows (stronger on dark to create depth) */
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.35);
@@ -4692,6 +4695,17 @@ body.dark .vis-item.blackout {
 body.dark .vis-item.alertcell-calendar {
   background: rgba(74, 136, 200, 0.22) !important;
   border: 1px solid rgba(74, 136, 200, 0.40) !important;
+}
+/* Task 10: dark counterparts for alertcell-err/warn, added to match the
+   calendar/blackout siblings above (same pattern: dark --err/--warn hex,
+   alpha nudged up slightly from the light-mode rule for dark visibility). */
+body.dark .vis-item.alertcell-err {
+  background: rgba(217, 74, 58, 0.26) !important;   /* dark --err #d94a3a */
+  border: 1px solid rgba(217, 74, 58, 0.50) !important;
+}
+body.dark .vis-item.alertcell-warn {
+  background: rgba(208, 144, 16, 0.18) !important;   /* dark --warn #d09010 */
+  border-color: transparent !important;
 }
 
 /* Flatpickr calendar dark overrides */
@@ -5391,6 +5405,11 @@ td.lp-selected-td {
 .lp-hm-cell  { padding: 6px 4px; text-align: center; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
 .lp-hm-legend { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 11px; color: var(--fg-mute); }
 .lp-hm-grad  { flex: 1; max-width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(to right, #ede8de, #c8a95a, #c96a1a, #991b1b); }
+/* Task 10: no dark override existed at all — idle stop hand-picked dark-cool
+   neutral (no token maps to "idle"), middle stops use --warn/hand-picked
+   orange, overload end uses --err (mirrors the light rule's idle→overload
+   heat progression, just re-lit for a dark legend strip). */
+body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--warn), #d1651f, var(--err)); }
 
 /* Exceptions list */
 .lp-exc-summary { font-size: 13px; font-weight: 600; color: var(--fg-mute); margin-bottom: 12px; }
