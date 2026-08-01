@@ -44,7 +44,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from pydantic import BaseModel
+from typing import Any
+from pydantic import BaseModel, ConfigDict, Field
 
 import auth
 import db
@@ -845,6 +846,119 @@ def _to_pydt(val):
 
 
 # =========================
+# Response models (Phase 4 Task 1 — response_model= additions)
+# =========================
+class LinkDTO(BaseModel):
+    """One finish-to-start link in GET /tasks's `links` array."""
+    id: int
+    source: str
+    target: str
+    type: str
+
+
+class TaskDTO(BaseModel):
+    """One row of GET /tasks's `data` array. Field set mirrors the dict literal
+    built in get_tasks (brain.py, the `data.append({...})` block) verbatim —
+    see docs/typescript_migration.md §F/§C. Optional fields are exactly the
+    ones read via `row.get(...)` with no coercing default (i.e. can be None
+    from a NaN source row); non-optional fields either have a code-level
+    default (e.g. `text`, `firmed`, `user_scheduled`) or come from a groupby
+    key that can't be null."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    text: str
+    start_date: str
+    end_date: str
+    original_start_date: str | None = None
+    original_end_date: str | None = None
+    user_scheduled: bool
+    PRODUCTION_LINE: str
+    MATERIAL_DESCRIPTION: str
+    MATERIAL_NUMBER: str | None = None
+    order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
+    COLOR: str | None = None
+    PLANT: str | None = None
+    ORDER: str | None = None
+    ORDER_Y: float | None = None
+    RUN_TIME: float | None = None
+    FORM_SIZE: str | None = None
+    notes: str | None = None
+    firmed: bool
+    row_version: int | None = None
+
+
+class TasksResponse(BaseModel):
+    """GET /tasks's full envelope. `meta` stays a loose dict: it's `DIAGNOSTICS`
+    merged with per-request color-merge stats (brain.py's `meta = dict(DIAGNOSTICS, **cm_stats)`),
+    a large, evolving diagnostics bag with no single fixed schema — modeling every
+    key precisely is out of scope for this phase and would need to track
+    DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
+    smaller `meta` subset (see get_tasks's `empty_meta`), which a strict schema
+    would reject."""
+    data: list[TaskDTO]
+    links: list[LinkDTO]
+    meta: dict[str, Any]
+
+
+class TaskUpdateResult(BaseModel):
+    """Response for POST /task/update (singular). Narrower than the bulk
+    shape — this endpoint also raises 404/400 (response_model only applies
+    to the 200 path)."""
+    status: str
+    persisted: int
+    failed: int
+    stale: list[str]
+    versions: dict[str, int]
+
+
+class BulkUpdateResult(BaseModel):
+    """Shared response shape for POST /tasks/update and POST /tasks/bulk_update.
+    Never 4xx — a version conflict or a rolled-back transaction is reported here,
+    not as an HTTP error status. error_code/cause are only populated when status
+    == 'error' (a whole-transaction rollback)."""
+    status: str
+    updated: int
+    persisted: int
+    failed: int
+    invalid: int
+    not_found: int
+    invalid_ids: list[str]
+    not_found_ids: list[str]
+    stale: list[str]
+    versions: dict[str, int]
+    error_code: str | None = None
+    cause: str | None = None
+
+
+class TaskVersionRow(BaseModel):
+    """One row of GET-equivalent /tasks/refresh's `data` array — db.get_task_versions'
+    shape exactly (db.py:437-445)."""
+    id: str
+    start_date: str | None = None
+    end_date: str | None = None
+    row_version: int | None = None
+
+
+class TasksRefreshResponse(BaseModel):
+    data: list[TaskVersionRow]
+
+
+class BaselineCorrectResult(BaseModel):
+    """Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
+    shape (db.py:604+) plus the same status/error_code/cause failure fields as
+    BulkUpdateResult."""
+    status: str
+    applied: int
+    persisted: int
+    skipped: int
+    not_matched: int
+    versions: dict[str, int]
+    error_code: str | None = None
+    cause: str | None = None
+
+
+# =========================
 # ROUTES
 # =========================
 @api.get("/diagnostics", dependencies=[Depends(require_admin)])
@@ -978,7 +1092,7 @@ def _clean_id(v):
     return s
 
 
-@api.get("/tasks")
+@api.get("/tasks", response_model=TasksResponse)
 def get_tasks(plant: str | None = None, line: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
                   description="Max rows to return. Omit for the full plant-scoped list."),
@@ -1184,7 +1298,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     return res
 
 
-@api.post("/task/update")
+@api.post("/task/update", response_model=TaskUpdateResult)
 def update_task(task: TaskDateUpdate):
     """
     Update a single task's start/end and persist to DB.
@@ -1225,7 +1339,7 @@ def update_task_note(payload: dict):
 # Frontend calls /tasks/update (plural) with {tasks, blocks, calendars}; keep
 # /tasks/bulk_update as a flat-list alias for external tooling. Both are
 # best-effort and report per-row counts in the body (no whole-batch 4xx).
-@api.post("/tasks/update")
+@api.post("/tasks/update", response_model=BulkUpdateResult)
 def tasks_update(payload: TasksUpdatePayload):
     """
     Bulk-update task dates and persist to DB (one transaction).
@@ -1261,7 +1375,7 @@ def tasks_update(payload: TasksUpdatePayload):
     return out
 
 
-@api.post("/tasks/bulk_update")
+@api.post("/tasks/bulk_update", response_model=BulkUpdateResult)
 def bulk_update(tasks: list[TaskDateUpdate]):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
@@ -1300,7 +1414,7 @@ class TaskRefreshPayload(BaseModel):
     ids: list[str] = []
 
 
-@api.post("/tasks/refresh")
+@api.post("/tasks/refresh", response_model=TasksRefreshResponse)
 def tasks_refresh(payload: TaskRefreshPayload):
     """
     Lean refetch of specific orders' current dates + row_version, for optimistic-
@@ -1331,7 +1445,7 @@ class DueDateCorrectionPayload(BaseModel):
     corrections: list[DueDateCorrection] = []
 
 
-@api.post("/tasks/baseline-correct")
+@api.post("/tasks/baseline-correct", response_model=BaselineCorrectResult)
 def baseline_correct(payload: DueDateCorrectionPayload):
     """
     Persist due-date-baseline (basic_finish_date) corrections found by the
