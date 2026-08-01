@@ -746,6 +746,7 @@ export class VirtualList<T = unknown> {
         if (this._offsets![m + 1] <= scrollTop) l = m + 1; else r = m;
       }
       lo = Math.max(0, l - buf);
+      // Walk forward until item top exceeds viewport bottom
       let e = lo;
       while (e < n && this._offsets![e] < scrollTop + viewH) e++;
       hi = Math.min(n, e + buf);

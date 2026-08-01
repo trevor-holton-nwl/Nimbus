@@ -91,7 +91,7 @@ export type WorkHours = Record<number, [number, number] | null>;
 export interface NimbusLineSetting {
   plant: string | null;
   /** Wire/DB alias: buffer_type ('%'|'hrs'). */
-  bufferUnit: 'pct' | 'hours';
+  bufferUnit: BufferUnit;
   bufferPct: number;
   bufferHours: number;
   bottleneck: boolean;
