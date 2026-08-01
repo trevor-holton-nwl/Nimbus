@@ -12,6 +12,7 @@ node_modules/
 # *.js/*.mjs glob, so hand-written fixtures like web/_static-delivery-check.mjs
 # are never accidentally ignored.
 web/nimbus-worker.js
+web/types.mjs
 
 # Python
 __pycache__/
