@@ -309,9 +309,14 @@
   flex: 1;
   height: 6px;
   border-radius: 3px;
-  /* Mirrors the actual heatBg() ramp in Dashboard._renderHeatmap (app.js) —
-     var() here means one rule covers both themes, no separate dark override. */
-  background: linear-gradient(to right, var(--bg-subtle), var(--warn), var(--warn-vivid), var(--err));
+  /* Command Band re-skin (Task 7): 5-stop legend — neutral -> info-blue -> warn
+     -> vivid-warn -> err. NOTE: this legend swatch is a hand-authored visual
+     approximation of Dashboard._renderHeatmap's heatBg() ramp (schedule-workbench.mjs),
+     which is still a 4-stop JS interpolation (idle/warn/warn-vivid/err) with no
+     info-blue step — adding that step to the real per-cell colors would require
+     editing that JS function, out of scope for this CSS-only task. Flagged in the
+     Task 7 report as a legend/actual-cell mismatch for a follow-up. */
+  background: linear-gradient(to right, var(--bg-subtle), var(--info), var(--warn), var(--warn-vivid), var(--err));
 }
 /* Heatmap dark-mode overrides */
 body.dark .hm-dow { color: var(--fg); }
@@ -916,14 +921,14 @@ body.dark .opt-pv-tip::after { border-top-color: #0d0e10; }
 .ls-hours {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: var(--fg-mute);
+  color: var(--fg-faint);
   min-width: 74px;
   white-space: nowrap;
 }
 .ls-bar-wrap {
   flex: 1;
   height: 8px;
-  background: rgba(0,0,0,0.08);
+  background: var(--bg);
   border-radius: 4px;
   overflow: hidden;
 }

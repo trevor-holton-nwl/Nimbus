@@ -427,6 +427,16 @@ h1, h2, h3, h4 {
 .icon-btn.sm { width: 24px; height: 24px; }
 .icon-btn .bell { font-size: 15px; }
 .user-icon-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+/* Everything mounted on the command band (.topbar-actions) sits on a permanently
+   dark chrome surface regardless of light/dark theme — it must use the fixed-dark
+   --chrome-* group, not the light-page --bg-subtle/--line/--fg-mute tokens these
+   icon buttons use everywhere else (modal close buttons, sidebar toggles, etc). */
+.topbar-actions .icon-btn { color: var(--chrome-fg-mute); }
+.topbar-actions .icon-btn:hover {
+  color: var(--chrome-fg);
+  background: var(--chrome-panel);
+  border-color: transparent;
+}
 #user-settings-btn::before {
   content: '';
   position: absolute;
@@ -435,13 +445,21 @@ h1, h2, h3, h4 {
   transform: translateY(-50%);
   width: 1px;
   height: 20px;
-  background: var(--line);
+  background: var(--chrome-border);
 }
 /* Divider between the status/info widgets (Confidence badge, alert bell) and
    the action/account cluster (Save, user icon, admin log toggle) — same
    pattern as #user-settings-btn::before above. */
 .topbar-actions .btn-primary {
   position: relative;
+  background: var(--chrome-accent);
+  color: var(--chrome-accent-fg);
+  border-color: var(--chrome-accent);
+}
+.topbar-actions .btn-primary:hover {
+  background: var(--chrome-accent);
+  border-color: var(--chrome-accent);
+  filter: brightness(0.92);
 }
 .topbar-actions .btn-primary::before {
   content: '';
@@ -451,7 +469,7 @@ h1, h2, h3, h4 {
   transform: translateY(-50%);
   width: 1px;
   height: 20px;
-  background: var(--line);
+  background: var(--chrome-border);
 }
 
 /* Narrow-viewport fallback: brand + plant selector + utility widgets hold
@@ -603,6 +621,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
   display: block; width: 100%; text-align: left; margin: 0;
   background: var(--bg-elev);
   border: 1px solid var(--line);
+  border-top: 3px solid var(--fg-faint);
   border-radius: var(--r-lg);
   padding: 14px 16px;
   position: relative;
@@ -610,7 +629,8 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .kpi-tile:disabled { cursor: default; opacity: 1; }
 .kpi-tile .k {
   display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--fg-mute); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--fg-mute); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px;
 }
 .kpi-tile .k::before {
   content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
@@ -618,13 +638,15 @@ textarea { min-height: 60px; padding: 7px 10px; }
 }
 .kpi-tile .v {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 26px; font-weight: 600; color: var(--fg);
+  font-size: 24px; font-weight: 600; color: var(--fg);
   letter-spacing: -0.02em;
 }
 .kpi-tile .d { font-size: 11px; color: var(--fg-mute); margin-top: 2px; }
+.kpi-tile.warn { border-top-color: var(--warn); }
 .kpi-tile.warn .k { color: var(--warn); }
 .kpi-tile.warn .k::before { background: var(--warn); }
 .kpi-tile.warn .v { color: var(--warn); }
+.kpi-tile.err { border-top-color: var(--err); }
 .kpi-tile.err .k { color: var(--err); }
 .kpi-tile.err .k::before { background: var(--err); }
 .kpi-tile.err .v { color: var(--err); }
@@ -664,10 +686,14 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .panel-head {
   display: flex; align-items: baseline; justify-content: space-between;
   padding: 14px 18px 12px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elev);
 }
-.panel-head h3 { font-size: 13.5px; letter-spacing: -0.005em; }
+.panel-head h3 {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
 .panel-hint { font-size: 11px; color: var(--fg-mute); }
 .panel-body { padding: 16px 18px; }
 .panel-body-chart { height: 252px; }   /* Chart.js responsive mode needs explicit parent height */
@@ -680,7 +706,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
   padding: 10px 18px 9px;
 }
 .panel-quiet .panel-head h3 {
-  font-size: 12.5px; font-weight: 600;
+  font-size: 10.5px; font-weight: 600;
   color: var(--fg-mute);
 }
 .panel-quiet .panel-hint { font-size: 10.5px; }
@@ -1016,6 +1042,12 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
 .vis-time-axis .vis-grid.vis-major { border-color: var(--line-strong); }
 .vis-panel.vis-left { background: transparent; border-right: 1px solid var(--line); }
+/* Explicit light-mode panel backgrounds — previously relied on the vis-timeline
+   vendor default (coincidentally white, same as --bg-elev today); made explicit
+   so the Gantt panel/time-axis stay token-driven rather than vendor-default. */
+.vis-panel.vis-center { background: var(--bg-elev); }
+.vis-panel.vis-top,
+.vis-panel.vis-bottom { background: var(--bg-subtle); }
 .vis-label { background: var(--bg-subtle); }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
@@ -1051,20 +1083,26 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 
 /* Alert-cell background highlights — render inside .vis-background, beneath
-   foreground order bars. Solid translucent tint, no border, severity-colored. */
+   foreground order bars. Solid translucent tint, no border, severity-colored.
+   Rgba (not var(--err-soft) etc.) is deliberate: these overlay ON TOP of the
+   colored order blocks underneath, so they need true alpha transparency, not
+   an opaque soft-tint chip background — the rgb triplets below are simply the
+   new --err/--warn/--info hex values at the same alpha the old rule used.
+   NOTE (Task 7 report): no body.dark override exists for alertcell-err/warn
+   (unlike alertcell-calendar/blackout below, which do) — flagged for Task 10. */
 .vis-item.alertcell-err {
-  background: rgba(176, 45, 45, 0.22) !important;
-  border: 1px solid rgba(140, 30, 30, 0.45) !important;
+  background: rgba(176, 42, 32, 0.22) !important;   /* --err #b02a20 */
+  border: 1px solid rgba(176, 42, 32, 0.45) !important;
 }
 .vis-item.alertcell-warn {
-  background: rgba(220, 165, 60, 0.14) !important;
+  background: rgba(147, 97, 10, 0.14) !important;   /* --warn #93610a */
   border-color: transparent !important;
 }
 /* Calendar-restriction alert cells — blue tint signals "zone unavailable",
    distinct from red scheduling-conflict cells. */
 .vis-item.alertcell-calendar {
-  background: rgba(45, 95, 140, 0.18) !important;
-  border: 1px solid rgba(45, 95, 140, 0.35) !important;
+  background: rgba(31, 95, 191, 0.18) !important;   /* --info #1f5fbf */
+  border: 1px solid rgba(31, 95, 191, 0.35) !important;
 }
 /* Past-time zone shading — light gray wash behind orders for elapsed time */
 .vis-item.past-zone {
@@ -1249,10 +1287,11 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .ac-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; align-items: center; }
 .ac-chip {
   font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  letter-spacing: 0.02em;
   padding: 2px 7px; border-radius: 10px;
-  background: var(--bg-elev); border: 1px solid var(--line); color: var(--fg);
+  background: var(--bg-subtle); border: 1px solid transparent; color: var(--fg-mute);
 }
-.ac-chip.fixed { border-color: var(--accent); color: var(--accent); }
+.ac-chip.fixed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
 .ac-chip-sep { font-size: 11px; color: var(--fg-mute); padding: 0 2px; }
 
 .ac-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
@@ -1364,8 +1403,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   --ag-background-color:          var(--bg-elev);
   --ag-header-background-color:   var(--bg-subtle);
   --ag-odd-row-background-color:  var(--bg-elev);
-  --ag-border-color:              var(--line);
-  --ag-row-border-color:          var(--line);
+  --ag-border-color:              var(--border-subtle);
+  --ag-row-border-color:          var(--border-subtle);
   --ag-header-foreground-color:   var(--fg);
   --ag-foreground-color:          var(--fg);
   --ag-secondary-foreground-color:var(--fg-mute);
@@ -1382,7 +1421,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   --ag-input-focus-border-color:  var(--accent);
   --ag-input-focus-box-shadow:    0 0 0 3px var(--accent-wash);
 }
-.ag-theme-quartz .ag-header-cell-text { font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-mute); }
+.ag-theme-quartz .ag-header-cell-text { font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-mute); }
 .ag-theme-quartz .ag-cell-value { line-height: 32px; }
 .ag-theme-quartz .cell-num { font-family: 'JetBrains Mono', monospace; text-align: right; }
 .ag-theme-quartz .cell-date { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--fg-mute); }
@@ -1709,15 +1748,18 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border-radius: 0;
 }
 .line-badge {
-  font-size: 10.5px;
-  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   padding: 2px 7px;
   border-radius: 10px;
   white-space: nowrap;
 }
 .badge-warn { background: var(--warn-soft); color: var(--warn); }
 .badge-err  { background: var(--err-soft);  color: var(--err); }
-.badge-info { background: #ede9fe; color: #6366f1; }
+.badge-info { background: var(--info-soft); color: var(--info); }
 
 /* =============================================================================
    ALERT DRAWER
@@ -1779,7 +1821,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    ========================================================================== */
 .modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(26, 27, 31, 0.42);
+  background: rgba(12, 28, 48, 0.42);
   z-index: 2000;
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
@@ -3112,8 +3154,14 @@ input.lines-nav-input:focus {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  padding: 0 12px;
+  padding: 3px 12px;
+  border-radius: 10px;
 }
+/* Soft-tint the chip pill from its own dot's state — no JS change needed to
+   tag the chip itself, :has() reads the state already set on the child dot. */
+.admin-health-chip:has(.admin-health-dot.ok)   { background: var(--ok-soft); }
+.admin-health-chip:has(.admin-health-dot.warn) { background: var(--warn-soft); }
+.admin-health-chip:has(.admin-health-dot.err)  { background: var(--err-soft); }
 .admin-health-sep {
   width: 1px;
   height: 16px;
@@ -3128,9 +3176,9 @@ input.lines-nav-input:focus {
   background: var(--fg-faint);
   transition: background 0.3s;
 }
-.admin-health-dot.ok   { background: #27ae60; box-shadow: 0 0 4px rgba(39,174,96,0.5); }
+.admin-health-dot.ok   { background: var(--ok);   box-shadow: 0 0 4px rgba(30,122,74,0.5); }
 .admin-health-dot.warn { background: var(--warn-vivid); box-shadow: 0 0 4px rgba(243,156,18,0.5); }
-.admin-health-dot.err  { background: #c0392b; box-shadow: 0 0 4px rgba(192,57,43,0.5); }
+.admin-health-dot.err  { background: var(--err);  box-shadow: 0 0 4px rgba(176,42,32,0.5); }
 .admin-health-label { color: var(--fg); }
 
 /* ── Pipeline ── */
@@ -4225,7 +4273,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   font-weight: 600;
   color: var(--accent);
   background: var(--accent-wash);
-  border: 1px solid rgba(184,121,26,.25);
+  border: 1px solid rgba(var(--accent-rgb), .25);
   border-radius: 12px;
   padding: 2px 10px;
 }
@@ -4249,6 +4297,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   border-bottom: 1px solid var(--line);
   padding: 8px 12px;
   text-align: left;
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
@@ -4281,6 +4330,15 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
   vertical-align: middle;
   color: var(--fg);
 }
+/* Locked key/code columns (plant, line, material, etc.) render as plain text
+   directly in the <td> — no wrapping .md-cell/<select> — so this is the only
+   selector available to target "code cells" without a JS change to tag them
+   explicitly. Excludes the delete/undo action column. */
+.md-td:not(.md-td-action):not(:has(.md-cell, select)) {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent);
+  font-weight: 600;
+}
 .md-td-action { width: 38px; text-align: center; }
 .md-del-btn { color: var(--fg-mute); transition: color var(--t-fast); }
 .md-del-btn:hover { color: var(--err); }
@@ -4305,7 +4363,7 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 }
 
 /* Row states */
-.md-row-new td { background: rgba(184,121,26,.04); }
+.md-row-new td { background: rgba(var(--accent-rgb), .04); }
 .md-row-new td:first-child { border-left: 3px solid var(--accent); }
 .md-row-dirty td:first-child { border-left: 3px solid var(--accent-hot); }
 .md-row-deleted td {
@@ -5212,6 +5270,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
   position: sticky; top: 0; z-index: 3;
   min-width: 72px;
   background: var(--bg-subtle);
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; color: var(--fg-mute);
   padding: 7px 6px; white-space: nowrap; text-align: center;

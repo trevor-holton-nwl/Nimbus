@@ -229,15 +229,20 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-tm-restore-btn:hover { border-color:var(--accent); color:var(--accent); }
 
 /* ── Confidence badge ──────────────────────────────────── */
+/* This badge mounts into .topbar-actions on the permanently-dark command band
+   (Command Band re-skin, Task 7) — it must use the fixed-dark --chrome-* group,
+   not the light-page --bg-subtle/--line/--fg-mute tokens it previously used
+   (those read as a mismatched light chip floating on the navy band). Colour
+   values only; no markup/behavior change. */
 .ni-conf-badge { display:flex; align-items:center; gap:6px; padding:3px 10px;
-  background:var(--bg-subtle); border:1.5px solid var(--line); border-radius:20px;
+  background:var(--chrome-panel); border:1.5px solid var(--chrome-border); border-radius:20px;
   cursor:pointer; transition:border-color 0.15s; position:relative; }
-.ni-conf-badge:hover { border-color:var(--accent); }
-.ni-conf-label { font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--fg-mute); }
+.ni-conf-badge:hover { border-color:var(--chrome-accent); }
+.ni-conf-label { font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--chrome-fg-mute); }
 .ni-conf-score { font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace; min-width:24px; text-align:right; }
 .ni-conf-ring { display:inline-block; position:relative; width:16px; height:16px;
   border-radius:50%; flex-shrink:0; }
-.ni-conf-ring::after { content:''; position:absolute; inset:3px; border-radius:50%; background:var(--bg-subtle); }
+.ni-conf-ring::after { content:''; position:absolute; inset:3px; border-radius:50%; background:var(--chrome-panel); }
 .ni-conf-delta { position:absolute; top:-8px; right:4px; font-size:10px; font-weight:700;
   font-family:'JetBrains Mono',monospace; animation:ni-fade-up 1.8s ease forwards; pointer-events:none; }
 @keyframes ni-fade-up { 0%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-12px)} }
