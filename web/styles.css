@@ -4333,8 +4333,12 @@ body.dark .cw-active-card { background: linear-gradient(135deg, var(--accent-was
 /* Locked key/code columns (plant, line, material, etc.) render as plain text
    directly in the <td> — no wrapping .md-cell/<select> — so this is the only
    selector available to target "code cells" without a JS change to tag them
-   explicitly. Excludes the delete/undo action column. */
-.md-td:not(.md-td-action):not(:has(.md-cell, select)) {
+   explicitly. Excludes the delete/undo action column.
+   Scoped to #md-host (the generic MasterData CRUD grid's dedicated container,
+   see index.html) — NOT the bare .md-td class — because Security's "Manage
+   Users" table (#security-host) reuses .md-table-wrap/.md-table/.md-td for
+   its username and password-status cells, which must not get this styling. */
+#md-host .md-td:not(.md-td-action):not(:has(.md-cell, select)) {
   font-family: 'JetBrains Mono', monospace;
   color: var(--accent);
   font-weight: 600;
