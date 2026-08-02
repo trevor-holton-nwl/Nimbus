@@ -26,7 +26,6 @@ declare global {
         App?: {
           goto?(tab: string): void;
           gotoGanttTimeline?(): void;
-          _currentTab?: string;
         };
         Inspector?: {
           show?(task: NimbusTask): void;
@@ -94,7 +93,7 @@ declare global {
           renderDrawer?(): void;
         };
         Plant?: {
-          _persistPlantHours?(plantName: any, changed: any): void;
+          _persistPlantHours?(pName: string | null, changedLines?: Set<string> | string[]): void;
           render?(): void;
         };
         ProdLines?: {
