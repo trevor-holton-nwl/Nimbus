@@ -1088,7 +1088,7 @@ export const Plant = {
    PRODLINES — per-line settings: capacity buffer, bottleneck, working hours,
    and line-scoped blackout blocks.
    ========================================================================== */
-export const ProdLines = {
+export const ProdLines: any = {
   _lineFilter: '',
   _activeNavLine: null,
 
@@ -1131,7 +1131,7 @@ export const ProdLines = {
     ProdLines._renderDetail(ProdLines._activeNavLine);
   },
 
-  _renderDetail(line) {
+  _renderDetail(line: any) {
     const body = document.getElementById('lines-body');
     if (!body || !line) {
       if (body) body.innerHTML = `<div class="lines-detail-empty">${Util.t('empty.select_line_configure')}</div>`;
@@ -1207,10 +1207,10 @@ export const ProdLines = {
     ProdLines._ensureDelegated();
   },
 
-  _renderNav(allLines, shownLines) {
+  _renderNav(allLines: any, shownLines: any) {
     const nav = document.getElementById('lines-nav');
     if (!nav) return;
-    const items = shownLines.map(line => {
+    const items = shownLines.map((line: any) => {
       const gi = allLines.indexOf(line);
       const color = Config.COLORS[gi % Config.COLORS.length];
       const ls = Store.lineSettings[line] || {};
@@ -1232,7 +1232,7 @@ export const ProdLines = {
     } else {
       const t = document.getElementById('lines-nav-title');
       if (t) t.textContent = `Lines · ${allLines.length}`;
-      const inp = document.getElementById('lines-nav-input');
+      const inp = document.getElementById('lines-nav-input') as any;
       if (inp) inp.value = ProdLines._lineFilter;
     }
     const listEl = document.getElementById('lines-nav-list');
@@ -1240,37 +1240,37 @@ export const ProdLines = {
   },
 
   _wireNav() {
-    const input = document.getElementById('lines-nav-input');
+    const input = document.getElementById('lines-nav-input') as any;
     if (input && !input._wired) {
       input._wired = true;
-      input.oninput = function() {
+      input.oninput = function(this: any) {
         ProdLines._lineFilter = this.value;
         ProdLines.render();
       };
     }
-    const list = document.getElementById('lines-nav-list');
+    const list = document.getElementById('lines-nav-list') as any;
     if (list) {
-      list.onclick = function(e) {
+      list.onclick = function(e: any) {
         const item = e.target.closest('.lines-nav-item');
         if (!item) return;
         const line = item.dataset.line;
         ProdLines._activeNavLine = line;
-        list.querySelectorAll('.lines-nav-item').forEach(i =>
+        list.querySelectorAll('.lines-nav-item').forEach((i: any) =>
           i.classList.toggle('active', i.dataset.line === line));
         ProdLines._renderDetail(line);
       };
     }
   },
 
-  _renderLineBlocks(line) {
+  _renderLineBlocks(line: any) {
     const plant = Store.getPlantForLine(line);
     const lineBlocks = (Store.blocks || [])
       .filter(b => b.line === line && (!b.plant || b.plant === plant))
-      .slice().sort((a, b) => Util.parseDate(a.start) - Util.parseDate(b.start));
+      .slice().sort((a, b) => (Util.parseDate(a.start) as any) - (Util.parseDate(b.start) as any));
 
     const plantBlocks = (Store.plantBlocks || [])
       .filter(b => !b.plant || b.plant === plant)
-      .slice().sort((a, b) => Util.parseDate(a.start) - Util.parseDate(b.start));
+      .slice().sort((a, b) => (Util.parseDate(a.start) as any) - (Util.parseDate(b.start) as any));
 
     if (!lineBlocks.length && !plantBlocks.length) {
       return `<div style="font-size:12px;color:var(--text-muted,#888);padding:4px 0;">${Util.t('empty.no_blackouts_this_line')}</div>`;
@@ -1305,47 +1305,47 @@ export const ProdLines = {
     if (!body) return;
     ProdLines._delegated = true;
 
-    body.addEventListener('change', (e) => {
+    body.addEventListener('change', (e: any) => {
       const el = e.target;
       const line = el.dataset && el.dataset.line;
       if (!line) return;
       if (el.classList.contains('line-bottleneck-chk')) {
         Store.setLineSetting(line, { bottleneck: el.checked }, 'prodlines');
-        NIMBUS.MasterData.syncLineSettings(line, { bottleneck: el.checked });
+        NIMBUS!.MasterData!.syncLineSettings!(line, { bottleneck: el.checked });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       } else if (el.classList.contains('line-excl-opt-chk')) {
         Store.setLineSetting(line, { excludeFromOpt: el.checked }, 'prodlines');
-        NIMBUS.MasterData.syncLineSettings(line, { excludeFromOpt: el.checked });
+        NIMBUS!.MasterData!.syncLineSettings!(line, { excludeFromOpt: el.checked });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       } else if (el.classList.contains('buf-pct-input')) {
         const val = Math.max(0, Math.min(100, +el.value || 0));
         Store.setLineSetting(line, { bufferPct: val }, 'prodlines');
-        NIMBUS.MasterData.syncLineSettings(line, { bufferPct: val });
+        NIMBUS!.MasterData!.syncLineSettings!(line, { bufferPct: val });
         Toast.show(Util.t('toast.buffer_updated'), 'success');
       } else if (el.classList.contains('buf-hrs-input')) {
         const val = Math.max(0, +el.value || 0);
         Store.setLineSetting(line, { bufferHours: val }, 'prodlines');
-        NIMBUS.MasterData.syncLineSettings(line, { bufferHours: val });
+        NIMBUS!.MasterData!.syncLineSettings!(line, { bufferHours: val });
         Toast.show(Util.t('toast.buffer_updated'), 'success');
       } else if (el.classList.contains('plgroup-input')) {
         const val = el.value.trim();
         Store.setLineSetting(line, { plGroup: val }, 'prodlines');
-        NIMBUS.MasterData.syncLineSettings(line, { plGroup: val });
+        NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       }
     });
 
-    body.addEventListener('click', (e) => {
+    body.addEventListener('click', (e: any) => {
       const btn = e.target.closest('.buf-unit-btn');
       if (!btn) return;
       const line = btn.dataset.line;
       Store.setLineSetting(line, { bufferUnit: btn.dataset.unit }, 'prodlines');
-      NIMBUS.MasterData.syncLineSettings(line, { bufferUnit: btn.dataset.unit });
+      NIMBUS!.MasterData!.syncLineSettings!(line, { bufferUnit: btn.dataset.unit });
       ProdLines._renderDetail(ProdLines._activeNavLine);
     });
   },
 
-  _fmtHour(h) {
+  _fmtHour(h: any) {
     const hh = Math.floor(h);
     const mm = Math.round((h - hh) * 60);
     const ampm = hh < 12 ? 'am' : 'pm';
@@ -1353,10 +1353,10 @@ export const ProdLines = {
     return mm === 0 ? `${h12}${ampm}` : `${h12}:${String(mm).padStart(2, '0')}${ampm}`;
   },
 
-  openBlockModal(line) {
-    const lineSel = document.getElementById('lines-blk-line');
+  openBlockModal(line: any) {
+    const lineSel = document.getElementById('lines-blk-line') as any;
     if (!lineSel) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-line'); return; }
-    const reasonEl = document.getElementById('lines-blk-reason');
+    const reasonEl = document.getElementById('lines-blk-reason') as any;
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-reason'); return; }
 
     lineSel.innerHTML = CalendarUI._getLines()
@@ -1376,10 +1376,10 @@ export const ProdLines = {
   },
 
   saveBlockFromModal() {
-    const lineEl = document.getElementById('lines-blk-line');
-    const startEl = document.getElementById('lines-blk-start');
-    const endEl = document.getElementById('lines-blk-end');
-    const reasonEl = document.getElementById('lines-blk-reason');
+    const lineEl = document.getElementById('lines-blk-line') as any;
+    const startEl = document.getElementById('lines-blk-start') as any;
+    const endEl = document.getElementById('lines-blk-end') as any;
+    const reasonEl = document.getElementById('lines-blk-reason') as any;
     if (!lineEl || !startEl || !endEl || !reasonEl) { ErrorLog.error('ui', 'required DOM elements missing for production lines blackout modal'); return; }
 
     const line   = lineEl.value;
@@ -1392,7 +1392,7 @@ export const ProdLines = {
     const plant = Store.getPlantForLine(line) || Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_first'), 'warn'); return; }
     const before = Store.blocks.length;
-    Store.addBlock({ line, plant, start, end, reason }, 'prodlines');
+    Store.addBlock({ line, plant, start, end, reason } as NimbusBlock, 'prodlines');
     if (Store.blocks.length > before) CalendarSync.saveLineBlackoutUpsert(Store.blocks[Store.blocks.length - 1]);
     Modal.close('modal-lines-block');
     Toast.show(Util.t('toast.blackout_added'), 'success');
@@ -1417,30 +1417,30 @@ export const LaborPlanning = (() => {
   // ── State ────────────────────────────────────────────────────────────────
   let _horizonOffset  = 0;         // weeks offset from today's Monday
   let _horizonSpan    = 12;        // number of weeks in view
-  let _selectedGroups = new Set(); // empty = all groups; used to scope all sub-tabs
-  let _aggrData       = {};        // { [plant]: { [grp]: { [period]: avail_hours } } }
-  let _lineData       = {};        // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
-  let _groups         = [];        // sorted unique pl_group values for current plant
-  let _displayGroups  = [];        // currently rendered subset (respects _selectedGroups filter)
-  let _weeks         = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
-  let _selRange      = null; // { r0,c0,r1,c1 } lasso rectangle, or null
+  let _selectedGroups: any = new Set(); // empty = all groups; used to scope all sub-tabs
+  let _aggrData: any       = {};        // { [plant]: { [grp]: { [period]: avail_hours } } }
+  let _lineData: any       = {};        // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
+  let _groups: any[]       = [];        // sorted unique pl_group values for current plant
+  let _displayGroups: any[] = [];        // currently rendered subset (respects _selectedGroups filter)
+  let _weeks: any[]        = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
+  let _selRange: any       = null; // { r0,c0,r1,c1 } lasso rectangle, or null
   let _dragging      = false;
-  let _dragAnchor    = null;
-  let _fpHorizon     = null; // Flatpickr instance for the date-jump input
-  let _cellGrid      = null; // [r][c] -> <td> cache for the Aggregate grid (built per render)
-  let _selTds        = new Set(); // currently-highlighted <td>s, for incremental lasso diffing
+  let _dragAnchor: any     = null;
+  let _fpHorizon: any      = null; // Flatpickr instance for the date-jump input
+  let _cellGrid: any       = null; // [r][c] -> <td> cache for the Aggregate grid (built per render)
+  let _selTds: any        = new Set(); // currently-highlighted <td>s, for incremental lasso diffing
 
   // ── Date helpers ─────────────────────────────────────────────────────────
-  function _isoWeek(date) {
+  function _isoWeek(date: any) {
     const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
     const dayNum = d.getUTCDay() || 7;
     d.setUTCDate(d.getUTCDate() + 4 - dayNum);
     const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-    const weekNo = Math.ceil((((d - yearStart) / Config.MS_DAY) + 1) / 7);
+    const weekNo = Math.ceil((((d as any) - (yearStart as any)) / Config.MS_DAY + 1) / 7);
     return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
   }
 
-  function _weekLabel(monday) {
+  function _weekLabel(monday: any) {
     const m = String(monday.getMonth() + 1).padStart(2, '0');
     const d = String(monday.getDate()).padStart(2, '0');
     const y = String(monday.getFullYear()).slice(-2);
@@ -1459,7 +1459,7 @@ export const LaborPlanning = (() => {
     return weeks;
   }
 
-  function _isoWeekToMonday(isoKey) {
+  function _isoWeekToMonday(isoKey: any) {
     const [year, week] = isoKey.split('-W');
     const y = parseInt(year, 10), w = parseInt(week, 10);
     const jan4 = new Date(y, 0, 4);
@@ -1470,11 +1470,11 @@ export const LaborPlanning = (() => {
   }
 
   // ── Backend helpers ───────────────────────────────────────────────────────
-  function _subnetwork(plant) {
-    return (Store._state.masterData?.plants || []).find(p => p.plant === plant)?.subnetwork || '';
+  function _subnetwork(plant: any) {
+    return (Store._state.masterData?.plants || []).find((p: any) => p.plant === plant)?.subnetwork || '';
   }
 
-  async function _saveAggregate(subnetwork, plant, cells) {
+  async function _saveAggregate(subnetwork: any, plant: any, cells: any) {
     try {
       const r = await fetch(`${Config.API_BASE}/labor-plan`, {
         method: 'POST',
@@ -1482,13 +1482,13 @@ export const LaborPlanning = (() => {
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(`Labor plan save failed: ${e.message}`, 'error');
       ErrorLog.error('labor', `Save aggregate failed: ${e.message}`);
     }
   }
 
-  async function _saveLines(subnetwork, plant, cells) {
+  async function _saveLines(subnetwork: any, plant: any, cells: any) {
     if (!cells.length) return;
     try {
       const r = await fetch(`${Config.API_BASE}/labor-plan/line`, {
@@ -1497,32 +1497,32 @@ export const LaborPlanning = (() => {
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(`Line plan save failed: ${e.message}`, 'error');
       ErrorLog.error('labor', `Save lines failed: ${e.message}`);
     }
   }
 
-  async function _fetchAggregate(plant) {
+  async function _fetchAggregate(plant: any) {
     if (_aggrData[plant]) return _aggrData[plant];
     try {
       const res = await fetch(`${Config.API_BASE}/labor-plan?plant=${encodeURIComponent(plant)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      const map = {};
-      (json.rows || []).forEach(r => {
+      const map: any = {};
+      (json.rows || []).forEach((r: any) => {
         if (!map[r.pl_group]) map[r.pl_group] = {};
         map[r.pl_group][r.period] = r.avail_hours;
       });
       _aggrData[plant] = map;
       return map;
-    } catch (e) {
+    } catch (e: any) {
       ErrorLog.warn('labor', `Fetch aggregate failed for ${plant}: ${e.message}`);
       return {};
     }
   }
 
-  async function _fetchLines(plant, group) {
+  async function _fetchLines(plant: any, group: any) {
     const w0 = _weeks[0], wN = _weeks[_weeks.length - 1];
     const from_date = Util.dayKey(w0.monday);
     const toDate    = new Date(wN.monday); toDate.setDate(wN.monday.getDate() + 6);
@@ -1534,25 +1534,25 @@ export const LaborPlanning = (() => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       if (!_lineData[plant]) _lineData[plant] = {};
-      (json.rows || []).forEach(r => {
+      (json.rows || []).forEach((r: any) => {
         if (!_lineData[plant][r.production_line]) _lineData[plant][r.production_line] = {};
         _lineData[plant][r.production_line][r.day] = { avail_hours: r.avail_hours, source: r.source };
       });
-    } catch (e) {
+    } catch (e: any) {
       ErrorLog.warn('labor', `Fetch lines failed: ${e.message}`);
     }
   }
 
   // ── Disaggregation ───────────────────────────────────────────────────────
-  function _disaggregate(plant, group, periodKey, groupHours) {
+  function _disaggregate(plant: any, group: any, periodKey: any, groupHours: any) {
     const lines = (Store._state.masterData?.lines || [])
-      .filter(l => l.plant === plant && l.pl_group === group)
-      .map(l => l.production_line);
+      .filter((l: any) => l.plant === plant && l.pl_group === group)
+      .map((l: any) => l.production_line);
     if (!lines.length) return [];
 
     const monday = _isoWeekToMonday(periodKey);
-    const openSlots = [];
-    lines.forEach(line => {
+    const openSlots: any[] = [];
+    lines.forEach((line: any) => {
       for (let d = 0; d < 7; d++) {
         const date = new Date(monday); date.setDate(monday.getDate() + d);
         if (Calendar.effectiveCapacityHours(line, date) > 0)
@@ -1567,24 +1567,24 @@ export const LaborPlanning = (() => {
   }
 
   // ── KPI strip ────────────────────────────────────────────────────────────
-  function _renderKPIs(plant) {
+  function _renderKPIs(plant: any) {
     const strip = document.getElementById('labor-kpi-strip');
     if (!strip || !plant) { if (strip) strip.innerHTML = ''; return; }
 
     const planMap = _aggrData[plant] || {};
     let totalAvail = 0;
-    _groups.forEach(g => _weeks.forEach(w => {
+    _groups.forEach((g: any) => _weeks.forEach((w: any) => {
       const v = planMap[g]?.[w.key]; if (v != null) totalAvail += v;
     }));
 
     const horizonStart = _weeks[0]?.monday || new Date();
     const horizonDays  = Math.min(_horizonSpan * 7, 90);
-    const matrix = Utilization.computeMatrix(horizonStart, horizonDays);
-    const plantLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant).map(r => r.production_line);
+    const matrix: any = Utilization.computeMatrix(horizonStart, horizonDays);
+    const plantLines = (Store._state.masterData?.lines || []).filter((r: any) => r.plant === plant).map((r: any) => r.production_line);
     let totalRequired = 0;
-    plantLines.forEach(line => {
+    plantLines.forEach((line: any) => {
       const lm = matrix[line]; if (!lm) return;
-      Object.values(lm).forEach(cell => { totalRequired += cell.scheduled || 0; });
+      Object.values(lm).forEach((cell: any) => { totalRequired += cell.scheduled || 0; });
     });
 
     const diff     = totalAvail - totalRequired;
@@ -1592,9 +1592,9 @@ export const LaborPlanning = (() => {
     const hSev     = headroom < 0 ? 'err' : headroom < 15 ? 'warn' : '';
 
     let shortfalls = 0;
-    plantLines.forEach(line => {
+    plantLines.forEach((line: any) => {
       const lm = matrix[line]; if (!lm) return;
-      Object.entries(lm).forEach(([dayKey, cell]) => {
+      Object.entries(lm).forEach(([dayKey, cell]: [string, any]) => {
         if (!cell.scheduled) return;
         const ld   = _lineData[plant]?.[line]?.[dayKey];
         const avail = ld?.avail_hours != null ? ld.avail_hours : (cell.effectiveCapacity || 0);
@@ -1602,7 +1602,7 @@ export const LaborPlanning = (() => {
       });
     });
 
-    const fmtH = h => h >= 1000 ? `${(h / 1000).toFixed(1)}k` : h.toFixed(0);
+    const fmtH = (h: any) => h >= 1000 ? `${(h / 1000).toFixed(1)}k` : h.toFixed(0);
     strip.innerHTML = `
       <div class="lp-kpi-tile">
         <span class="lp-kpi-label">Available</span>
@@ -1634,7 +1634,7 @@ export const LaborPlanning = (() => {
   // ── Aggregate sub-tab ────────────────────────────────────────────────────
   function _clearSelection() {
     _selRange = null; _dragging = false; _dragAnchor = null;
-    _selTds.forEach(td => td.classList.remove('lp-selected-td'));
+    _selTds.forEach((td: any) => td.classList.remove('lp-selected-td'));
     _selTds.clear();
   }
 
@@ -1642,7 +1642,7 @@ export const LaborPlanning = (() => {
   // highlighted set so each mousemove only touches cells whose membership
   // changed (O(changed)), instead of clearing + re-querying the whole grid.
   function _renderSelection() {
-    const next = new Set();
+    const next: any = new Set();
     if (_selRange && _cellGrid) {
       const { r0, c0, r1, c1 } = _selRange;
       for (let r = r0; r <= r1; r++) {
@@ -1650,16 +1650,16 @@ export const LaborPlanning = (() => {
         for (let c = c0; c <= c1; c++) { const td = row[c]; if (td) next.add(td); }
       }
     }
-    _selTds.forEach(td => { if (!next.has(td)) td.classList.remove('lp-selected-td'); });
-    next.forEach(td => { if (!_selTds.has(td)) td.classList.add('lp-selected-td'); });
+    _selTds.forEach((td: any) => { if (!next.has(td)) td.classList.remove('lp-selected-td'); });
+    next.forEach((td: any) => { if (!_selTds.has(td)) td.classList.add('lp-selected-td'); });
     _selTds = next;
   }
 
-  function _updateAggrTotals(grid) {
+  function _updateAggrTotals(grid: any) {
     const plant = Store.selectedPlant; if (!plant || !_aggrData[plant]) return;
     const tds = grid.querySelectorAll('tbody tr:last-child td');
-    _weeks.forEach((w, i) => {
-      const total = Object.values(_aggrData[plant]).reduce((sum, p) => sum + (p[w.key] ?? 0), 0);
+    _weeks.forEach((w: any, i: any) => {
+      const total: any = Object.values(_aggrData[plant]).reduce((sum: any, p: any) => sum + (p[w.key] ?? 0), 0);
       if (tds[i + 1]) tds[i + 1].textContent = total > 0 ? total.toFixed(1) : '—';
     });
   }
@@ -1669,7 +1669,7 @@ export const LaborPlanning = (() => {
     const plant = Store.selectedPlant; if (!plant) return;
     if (!_aggrData[plant]) _aggrData[plant] = {};
     const { r0, c0, r1, c1 } = _selRange;
-    const cleared = [], prev = [];
+    const cleared: any[] = [], prev: any[] = [];
     const g = document.getElementById('labor-grid');
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
       const grp = _displayGroups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
@@ -1677,7 +1677,7 @@ export const LaborPlanning = (() => {
       if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
       delete _aggrData[plant][grp][period];
       cleared.push({ pl_group: grp, period, avail_hours: null });
-      const inp = g?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+      const inp = g?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as any;
       if (inp) inp.value = '';
     }
     if (!cleared.length) return;
@@ -1692,8 +1692,8 @@ export const LaborPlanning = (() => {
       });
       const g2 = document.getElementById('labor-grid');
       if (g2) {
-        prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
-          const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+        prev.forEach(({ pl_group: grp, period, avail_hours: old }: any) => {
+          const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as any;
           if (el) el.value = old != null ? old : '';
         });
         _updateAggrTotals(g2);
@@ -1707,12 +1707,12 @@ export const LaborPlanning = (() => {
     if (!_selRange) return;
     const plant = Store.selectedPlant;
     const { r0, c0, r1, c1 } = _selRange;
-    const rows = [];
+    const rows: any[] = [];
     for (let r = r0; r <= r1; r++) {
-      const cols = [];
+      const cols: any[] = [];
       for (let c = c0; c <= c1; c++) {
         const grp = _displayGroups[r]; const period = _weeks[c]?.key;
-        const ah = grp && period ? (_aggrData[plant]?.[grp]?.[period] ?? null) : null;
+        const ah = grp && period ? (_aggrData[plant as any]?.[grp]?.[period] ?? null) : null;
         cols.push(ah != null ? String(ah) : '');
       }
       rows.push(cols.join('\t'));
@@ -1723,13 +1723,13 @@ export const LaborPlanning = (() => {
       .catch(() => Toast.show('Copy failed — check clipboard permissions', 'error'));
   }
 
-  async function _renderAggregate(plant) {
-    const grid = document.getElementById('labor-grid'); if (!grid) return;
+  async function _renderAggregate(plant: any) {
+    const grid = document.getElementById('labor-grid') as any; if (!grid) return;
     const planMap = await _fetchAggregate(plant);
-    _displayGroups = _selectedGroups.size ? _groups.filter(g => _selectedGroups.has(g)) : _groups;
-    const totals = {}; _weeks.forEach(w => { totals[w.key] = 0; });
-    const groupRows = _displayGroups.map(grp => {
-      const cells = _weeks.map(w => {
+    _displayGroups = _selectedGroups.size ? _groups.filter((g: any) => _selectedGroups.has(g)) : _groups;
+    const totals: any = {}; _weeks.forEach((w: any) => { totals[w.key] = 0; });
+    const groupRows = _displayGroups.map((grp: any) => {
+      const cells = _weeks.map((w: any) => {
         const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
         return `<td>
           <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
@@ -1737,7 +1737,7 @@ export const LaborPlanning = (() => {
       }).join('');
       return `<tr><td>${grp}</td>${cells}</tr>`;
     }).join('');
-    const totalCells = _weeks.map(w => {
+    const totalCells = _weeks.map((w: any) => {
       const v = totals[w.key];
       return `<td>${v > 0 ? v.toFixed(1) : '—'}</td>`;
     }).join('');
@@ -1746,7 +1746,7 @@ export const LaborPlanning = (() => {
         <table class="lp-table">
           <thead><tr>
             <th>Group</th>
-            ${_weeks.map(w => `<th>${w.label}</th>`).join('')}
+            ${_weeks.map((w: any) => `<th>${w.label}</th>`).join('')}
           </tr></thead>
           <tbody>
             ${groupRows}
@@ -1759,8 +1759,8 @@ export const LaborPlanning = (() => {
       <p class="lp-hint">Ctrl+drag to select · Delete to clear · Ctrl+C to copy · Paste from Excel · Values in hours</p>`;
 
     // Build [row][col] -> <td> cache so the lasso paint never queries the DOM.
-    _cellGrid = _displayGroups.map(grp =>
-      _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)?.closest('td') || null));
+    _cellGrid = _displayGroups.map((grp: any) =>
+      _weeks.map((w: any) => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)?.closest('td') || null));
     _selTds = new Set();
 
     const sn = _subnetwork(plant);
@@ -1769,28 +1769,28 @@ export const LaborPlanning = (() => {
     // (innerHTML is replaced on every render but the container is not).
     if (!grid._lpDragWired) {
       grid._lpDragWired = true;
-      grid.addEventListener('mousedown', e => {
+      grid.addEventListener('mousedown', (e: any) => {
         if (!e.ctrlKey && !e.metaKey) { if (!e.target.closest('.lp-selected-td')) _clearSelection(); return; }
         const inp = e.target.closest('.lp-cell'); if (!inp) return;
         e.preventDefault();
-        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex((w: any) => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
         _dragging = true; _dragAnchor = { row: ri, col: ci };
         _selRange = { r0: ri, c0: ci, r1: ri, c1: ci }; _renderSelection();
       });
-      grid.addEventListener('mousemove', e => {
+      grid.addEventListener('mousemove', (e: any) => {
         if (!_dragging) return;
         const td = e.target.closest('td'); if (!td) return;
         const inp = td.querySelector('.lp-cell'); if (!inp) return;
-        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex(w => w.key === inp.dataset.period);
+        const ri = _displayGroups.indexOf(inp.dataset.group), ci = _weeks.findIndex((w: any) => w.key === inp.dataset.period);
         if (ri < 0 || ci < 0) return;
         _selRange = { r0: Math.min(_dragAnchor.row, ri), c0: Math.min(_dragAnchor.col, ci), r1: Math.max(_dragAnchor.row, ri), c1: Math.max(_dragAnchor.col, ci) };
         _renderSelection();
       });
     }
 
-    grid.querySelectorAll('.lp-cell').forEach(inp => {
-      inp.onchange = async function() {
+    grid.querySelectorAll('.lp-cell').forEach((inp: any) => {
+      inp.onchange = async function(this: any) {
         const grp = this.dataset.group, period = this.dataset.period;
         const raw = this.value.trim();
         const ah  = raw === '' ? null : Math.max(0, parseFloat(raw) || 0);
@@ -1805,7 +1805,7 @@ export const LaborPlanning = (() => {
           const splits = _disaggregate(plant, grp, period, ah);
           if (splits.length) {
             if (!_lineData[plant]) _lineData[plant] = {};
-            splits.forEach(c => {
+            splits.forEach((c: any) => {
               if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
               _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
             });
@@ -1815,7 +1815,7 @@ export const LaborPlanning = (() => {
         UndoStack.push(`Labor: ${grp} / ${period}`, () => {
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (oldAh == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = oldAh;
-          const el = document.getElementById('labor-grid')?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+          const el = document.getElementById('labor-grid')?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as any;
           if (el) el.value = oldAh != null ? oldAh : '';
           _updateAggrTotals(document.getElementById('labor-grid'));
           _saveAggregate(sn, plant, [{ pl_group: grp, period, avail_hours: oldAh }]);
@@ -1825,21 +1825,21 @@ export const LaborPlanning = (() => {
     });
 
     const table = grid.querySelector('table');
-    if (table) table.addEventListener('paste', async e => {
-      const anchor = document.activeElement?.classList.contains('lp-cell') ? document.activeElement : null;
+    if (table) table.addEventListener('paste', async (e: any) => {
+      const anchor = document.activeElement?.classList.contains('lp-cell') ? document.activeElement as any : null;
       e.preventDefault();
       const text = e.clipboardData.getData('text/plain'); if (!text) return;
-      const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
-      const cellMatrix = _displayGroups.map(grp => _weeks.map(w => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)));
+      const clipRows = text.replace(/\r/g, '').split('\n').filter((r: any) => r !== '').map((r: any) => r.split('\t'));
+      const cellMatrix = _displayGroups.map((grp: any) => _weeks.map((w: any) => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`) as any));
       let anchorRow = 0, anchorCol = 0;
       if (anchor) {
         anchorRow = Math.max(0, _displayGroups.indexOf(anchor.dataset.group));
-        anchorCol = Math.max(0, _weeks.findIndex(w => w.key === anchor.dataset.period));
+        anchorCol = Math.max(0, _weeks.findIndex((w: any) => w.key === anchor.dataset.period));
       }
       if (!_aggrData[plant]) _aggrData[plant] = {};
-      const changed = [], prev = [], allSplits = [];
-      clipRows.forEach((clipCols, r) => {
-        clipCols.forEach((val, c) => {
+      const changed: any[] = [], prev: any[] = [], allSplits: any[] = [];
+      clipRows.forEach((clipCols: any, r: any) => {
+        clipCols.forEach((val: any, c: any) => {
           const ri = anchorRow + r, ci = anchorCol + c;
           if (ri >= _displayGroups.length || ci >= _weeks.length) return;
           const inp = cellMatrix[ri]?.[ci]; if (!inp) return;
@@ -1859,7 +1859,7 @@ export const LaborPlanning = (() => {
       _updateAggrTotals(grid); _renderKPIsDebounced(plant);
       if (allSplits.length) {
         if (!_lineData[plant]) _lineData[plant] = {};
-        allSplits.forEach(c => {
+        allSplits.forEach((c: any) => {
           if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
           _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
         });
@@ -1867,14 +1867,14 @@ export const LaborPlanning = (() => {
       }
       UndoStack.push(`Undo paste (${changed.length} labor value${changed.length !== 1 ? 's' : ''})`, () => {
         if (!_aggrData[plant]) _aggrData[plant] = {};
-        prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+        prev.forEach(({ pl_group: grp, period, avail_hours: old }: any) => {
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (old == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = old;
         });
         const g = document.getElementById('labor-grid');
         if (g) {
-          prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
-            const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`);
+          prev.forEach(({ pl_group: grp, period, avail_hours: old }: any) => {
+            const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as any;
             if (el) el.value = old != null ? old : '';
           });
           _updateAggrTotals(g);
@@ -1887,22 +1887,22 @@ export const LaborPlanning = (() => {
   }
 
   // ── Line Plan sub-tab ────────────────────────────────────────────────────
-  async function _renderLinePlan(plant) {
-    const grid = document.getElementById('labor-line-grid'); if (!grid) return;
+  async function _renderLinePlan(plant: any) {
+    const grid = document.getElementById('labor-line-grid') as any; if (!grid) return;
     // Show all groups unless user has filtered to specific ones
     const visibleGroups = _displayGroups.length ? _displayGroups : _groups;
     const fetchGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
     const allLinesMeta = Store.masterLinesForPlant(plant)
-      .filter(l => visibleGroups.includes(l.pl_group))
-      .sort((a, b) => visibleGroups.indexOf(a.pl_group) - visibleGroups.indexOf(b.pl_group) || a.production_line.localeCompare(b.production_line));
+      .filter((l: any) => visibleGroups.includes(l.pl_group))
+      .sort((a: any, b: any) => visibleGroups.indexOf(a.pl_group) - visibleGroups.indexOf(b.pl_group) || a.production_line.localeCompare(b.production_line));
     if (!allLinesMeta.length) {
       grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return;
     }
     await _fetchLines(plant, fetchGroup);
 
     // Build day columns
-    const days = [];
-    _weeks.forEach(w => {
+    const days: any[] = [];
+    _weeks.forEach((w: any) => {
       for (let d = 0; d < 7; d++) {
         const date = new Date(w.monday); date.setDate(w.monday.getDate() + d);
         days.push({ date, dayKey: Util.dayKey(date), weekKey: w.key });
@@ -1914,8 +1914,8 @@ export const LaborPlanning = (() => {
     const sn = _subnetwork(plant);
 
     const isDark = document.body.classList.contains('dark');
-    function lerpRGB(a, b, t) {
-      const p = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+    function lerpRGB(a: any, b: any, t: any) {
+      const p = (h: any) => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
       const ca = p(a), cb = p(b);
       return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
     }
@@ -1924,39 +1924,39 @@ export const LaborPlanning = (() => {
     // enough for the white overlay text used above ratio 0 in dark mode).
     const idle = isDark ? '#252730' : '#f4f7fa', low = isDark ? '#1d4a80' : '#1a4fa0',
           mid  = isDark ? '#8a5a0d' : '#93610a', hot = isDark ? '#8f241c' : '#b02a20';
-    function heatBg(ratio) {
+    function heatBg(ratio: any) {
       if (ratio <= 0)   return idle;
       if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
       if (ratio <= 1.0) return lerpRGB(low, mid, (ratio - 0.5) / 0.5);
       return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
     }
 
-    const weekStarts = new Set(_weeks.map(w => Util.dayKey(w.monday)));
+    const weekStarts = new Set(_weeks.map((w: any) => Util.dayKey(w.monday)));
 
-    const dayHeaders = days.map(d => {
+    const dayHeaders = days.map((d: any) => {
       const wb = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
       return `<th style="width:52px;min-width:52px;${wb}">${d.date.getMonth()+1}/${d.date.getDate()}</th>`;
     }).join('');
 
     const showGroupHeaders = visibleGroups.length > 1;
-    let lastGroup = null;
+    let lastGroup: any = null;
     // Memoize calendar capacity per (line|dayKey) for this render pass — the same
     // line/date pair is otherwise recomputed across every row build.
-    const _capMemo = new Map();
-    const _capFor = (line, date, dayKey) => {
+    const _capMemo: any = new Map();
+    const _capFor = (line: any, date: any, dayKey: any) => {
       const k = line + '|' + dayKey;
       let v = _capMemo.get(k);
       if (v === undefined) { v = Calendar.effectiveCapacityHours(line, date); _capMemo.set(k, v); }
       return v;
     };
-    const lineRows = allLinesMeta.map(lm => {
+    const lineRows = allLinesMeta.map((lm: any) => {
       const line = lm.production_line;
       let groupRow = '';
       if (showGroupHeaders && lm.pl_group !== lastGroup) {
         lastGroup = lm.pl_group;
         groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${lm.pl_group}</td></tr>`;
       }
-      const cells = days.map(d => {
+      const cells = days.map((d: any) => {
         const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
         const ld   = _lineData[plant]?.[line]?.[d.dayKey];
         const calCap = _capFor(line, d.date, d.dayKey);
@@ -1983,11 +1983,11 @@ export const LaborPlanning = (() => {
 
     // Sticky group headers: offset by actual thead height so they dock below column headers
     const theadH = grid.querySelector('thead tr')?.offsetHeight || 27;
-    grid.querySelectorAll('.lp-group-hdr').forEach(td => { td.style.top = theadH + 'px'; });
+    grid.querySelectorAll('.lp-group-hdr').forEach((td: any) => { td.style.top = theadH + 'px'; });
 
     // Delegated handlers on the grid container — one 'change' + one 'contextmenu'
     // listener instead of two per cell (scales to thousands of line-day cells).
-    grid.onchange = async function(e) {
+    grid.onchange = async function(e: any) {
       const inp = e.target.closest('.lp-line-cell'); if (!inp) return;
       const line = inp.dataset.line, day = inp.dataset.day;
       const raw  = inp.value.trim();
@@ -2011,20 +2011,20 @@ export const LaborPlanning = (() => {
       await _saveLines(sn, plant, [{ production_line: line, day, avail_hours: ah, source: newSrc }]);
     };
 
-    grid.oncontextmenu = function(e) {
+    grid.oncontextmenu = function(e: any) {
       const inp = e.target.closest('.lp-line-cell'); if (!inp) return;
       e.preventDefault();
       const line = inp.dataset.line, day = inp.dataset.day;
       if (_lineData[plant]?.[line]?.[day]?.source !== 'override') return;
-      const grp = (Store._state.masterData?.lines || []).find(l => l.production_line === line && l.plant === plant)?.pl_group;
+      const grp = (Store._state.masterData?.lines || []).find((l: any) => l.production_line === line && l.plant === plant)?.pl_group;
       if (!grp) return;
-      const periodKey = _weeks.find(w => {
+      const periodKey = _weeks.find((w: any) => {
         for (let d = 0; d < 7; d++) { const dd = new Date(w.monday); dd.setDate(w.monday.getDate() + d); if (Util.dayKey(dd) === day) return true; }
       })?.key;
       if (!periodKey) return;
       const groupHours = _aggrData[plant]?.[grp]?.[periodKey]; if (groupHours == null) return;
       const splits = _disaggregate(plant, grp, periodKey, groupHours);
-      const resetCell = splits.find(c => c.production_line === line && c.day === day); if (!resetCell) return;
+      const resetCell = splits.find((c: any) => c.production_line === line && c.day === day); if (!resetCell) return;
       _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
       inp.value = resetCell.avail_hours || '';
       inp.closest('td')?.classList.remove('lp-ovr');
@@ -2034,27 +2034,27 @@ export const LaborPlanning = (() => {
   }
 
   // ── Capacity sub-tab ─────────────────────────────────────────────────────
-  async function _renderCapacity(plant) {
+  async function _renderCapacity(plant: any) {
     const container = document.getElementById('labor-capacity-grid'); if (!container) return;
     const scopeGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
     await _fetchLines(plant, scopeGroup);
     const lines = Store.masterLinesForPlant(plant)
-      .filter(l => !scopeGroup || l.pl_group === scopeGroup)
-      .map(l => l.production_line).sort();
+      .filter((l: any) => !scopeGroup || l.pl_group === scopeGroup)
+      .map((l: any) => l.production_line).sort();
     if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return; }
 
     const horizonStart = _weeks[0].monday;
     const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
     const displayDays  = Math.min(14, _horizonSpan * 7);
-    const days = [];
+    const days: any[] = [];
     for (let i = 0; i < displayDays; i++) {
       const d = new Date(horizonStart); d.setDate(horizonStart.getDate() + i);
       days.push({ date: d, dayKey: Util.dayKey(d) });
     }
 
     const isDark = document.body.classList.contains('dark');
-    function lerpRGB(a, b, t) {
-      const p = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+    function lerpRGB(a: any, b: any, t: any) {
+      const p = (h: any) => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
       const ca = p(a), cb = p(b);
       return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*t)},${Math.round(ca[1]+(cb[1]-ca[1])*t)},${Math.round(ca[2]+(cb[2]-ca[2])*t)})`;
     }
@@ -2062,27 +2062,27 @@ export const LaborPlanning = (() => {
     // (idle -> --bg-subtle, low -> info-blue, mid -> --warn, hot -> --err).
     const idle = isDark ? '#252730' : '#f4f7fa', low = isDark ? '#1d4a80' : '#1a4fa0',
           mid  = isDark ? '#8a5a0d' : '#93610a', hot = isDark ? '#8f241c' : '#b02a20';
-    function heatBg(ratio) {
+    function heatBg(ratio: any) {
       if (ratio <= 0)   return idle;
       if (ratio <= 0.5) return lerpRGB(idle, low, ratio / 0.5);
       if (ratio <= 1.0) return lerpRGB(low, mid, (ratio - 0.5) / 0.5);
       return lerpRGB(mid, hot, Math.min((ratio - 1.0) / 0.25, 1));
     }
-    function heatText(ratio) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#1c2b3a' : '#fff'); }
+    function heatText(ratio: any) { return isDark ? (ratio <= 0 ? '#8f909d' : '#fff') : (ratio < 0.45 ? '#1c2b3a' : '#fff'); }
 
     const cols = `100px repeat(${days.length}, 1fr)`;
     let html = `<div class="lp-card" style="padding:14px 16px;">
       <p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + scopeGroup : ''}</p>
       <div class="lp-hm-wrap"><div class="lp-hm-grid" style="grid-template-columns:${cols}">`;
     html += `<div class="lp-hm-corner"></div>`;
-    days.forEach(d => {
+    days.forEach((d: any) => {
       const dow = d.date.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
       html += `<div class="lp-hm-head"><span class="lp-hm-dow">${dow}</span><span class="lp-hm-date">${d.date.getMonth()+1}/${d.date.getDate()}</span></div>`;
     });
-    lines.forEach((line, li) => {
+    lines.forEach((line: any, li: any) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
       html += `<div class="lp-hm-label"><span class="lp-hm-dot" style="background:${dot}"></span>${line}</div>`;
-      days.forEach(d => {
+      days.forEach((d: any) => {
         const req    = utilMatrix[line]?.[d.dayKey]?.scheduled || 0;
         const ld     = _lineData[plant]?.[line]?.[d.dayKey];
         const calCap = utilMatrix[line]?.[d.dayKey]?.effectiveCapacity || 0;
@@ -2098,16 +2098,16 @@ export const LaborPlanning = (() => {
   }
 
   // ── Exceptions sub-tab ───────────────────────────────────────────────────
-  async function _renderExceptions(plant) {
+  async function _renderExceptions(plant: any) {
     const container = document.getElementById('labor-exceptions-list'); if (!container) return;
     await _fetchLines(plant, null);
-    const lines = (Store._state.masterData?.lines || []).filter(l => l.plant === plant).map(l => l.production_line);
+    const lines = (Store._state.masterData?.lines || []).filter((l: any) => l.plant === plant).map((l: any) => l.production_line);
     const horizonStart = _weeks[0].monday;
     const utilMatrix   = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
-    const exceptions = [];
-    lines.forEach(line => {
+    const exceptions: any[] = [];
+    lines.forEach((line: any) => {
       const lm = utilMatrix[line]; if (!lm) return;
-      Object.entries(lm).forEach(([dayKey, cell]) => {
+      Object.entries(lm).forEach(([dayKey, cell]: [string, any]) => {
         if (!cell.scheduled && !cell.capacity) return;
         const ld    = _lineData[plant]?.[line]?.[dayKey];
         const avail = ld?.avail_hours != null ? ld.avail_hours : (cell.effectiveCapacity || 0);
@@ -2118,15 +2118,15 @@ export const LaborPlanning = (() => {
           exceptions.push({ sev: 'warn', line, day: dayKey, msg: `${avail.toFixed(1)}h planned exceeds ${calCap.toFixed(1)}h calendar capacity` });
       });
     });
-    exceptions.sort((a, b) => (a.sev === 'err' ? -1 : 1) - (b.sev === 'err' ? -1 : 1) || a.day.localeCompare(b.day));
+    exceptions.sort((a: any, b: any) => (a.sev === 'err' ? -1 : 1) - (b.sev === 'err' ? -1 : 1) || a.day.localeCompare(b.day));
 
-    const badge = document.getElementById('labor-exc-badge');
+    const badge = document.getElementById('labor-exc-badge') as any;
     if (badge) { badge.textContent = exceptions.length; badge.hidden = exceptions.length === 0; }
 
     if (!exceptions.length) {
       container.innerHTML = `<div class="empty-state" style="padding:40px 0;">✓ No exceptions in the current horizon.</div>`; return;
     }
-    const rows = exceptions.map(ex => `
+    const rows = exceptions.map((ex: any) => `
       <div class="lp-exc-row lp-exc-${ex.sev}">
         <span class="lp-exc-sev">${ex.sev === 'err' ? '▲' : '⚠'}</span>
         <span class="lp-exc-line">${ex.line}</span>
@@ -2168,7 +2168,7 @@ export const LaborPlanning = (() => {
   }
 
   // ── Toolbar update ───────────────────────────────────────────────────────
-  function _renderToolbar(plant) {
+  function _renderToolbar(plant: any) {
     // Group multi-select button label
     const lbl = document.getElementById('lp-group-label');
     if (lbl) {
@@ -2181,7 +2181,7 @@ export const LaborPlanning = (() => {
     if (drop) {
       drop.innerHTML =
         `<div class="lp-group-scroll">` +
-        _groups.map(g => `
+        _groups.map((g: any) => `
           <label class="lp-group-chk-row">
             <input type="checkbox" value="${g.replace(/"/g,'&quot;')}"${_selectedGroups.has(g) ? ' checked' : ''}
               onchange="NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)">
@@ -2197,12 +2197,12 @@ export const LaborPlanning = (() => {
       if (!_fpHorizon) {
         _fpHorizon = flatpickr('#labor-horizon-input', {
           dateFormat: 'M j, Y',
-          onChange(dates) {
+          onChange(dates: any) {
             if (!dates[0]) return;
             const now = new Date();
             const todayMon = new Date(now);
             todayMon.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-            _horizonOffset = Math.round((dates[0] - todayMon) / (7 * Config.MS_DAY));
+            _horizonOffset = Math.round(((dates[0] as any) - (todayMon as any)) / (7 * Config.MS_DAY));
             render();
           },
         });
@@ -2223,12 +2223,12 @@ export const LaborPlanning = (() => {
       });
       const grid = document.getElementById('labor-grid');
       if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('ui.select_plant_labor')}</div>`;
-      document.getElementById('labor-plant-badge')?.setAttribute && (document.getElementById('labor-plant-badge').textContent = '—');
-      document.getElementById('labor-kpi-strip') && (document.getElementById('labor-kpi-strip').innerHTML = '');
+      document.getElementById('labor-plant-badge')?.setAttribute && ((document.getElementById('labor-plant-badge') as any).textContent = '—');
+      document.getElementById('labor-kpi-strip') && ((document.getElementById('labor-kpi-strip') as any).innerHTML = '');
       return;
     }
-    const mdLines = (Store._state.masterData?.lines || []).filter(r => r.plant === plant);
-    _groups = [...new Set(mdLines.map(r => r.pl_group).filter(Boolean))].sort();
+    const mdLines = (Store._state.masterData?.lines || []).filter((r: any) => r.plant === plant);
+    _groups = [...new Set(mdLines.map((r: any) => r.pl_group).filter(Boolean))].sort();
     if (!_groups.length) {
       const grid = document.getElementById('labor-grid');
       if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_line_groups_plant')}</div>`;
@@ -2244,7 +2244,7 @@ export const LaborPlanning = (() => {
     else if (sub === 'inputs')     _renderInputs();
   }
 
-  function _onLPKeyDown(e) {
+  function _onLPKeyDown(e: any) {
     if (!_selRange || _activeTabResolvers.currentTab() !== 'labor') return;
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); _clearSelection(); return; }
@@ -2257,7 +2257,7 @@ export const LaborPlanning = (() => {
   function init() {
     document.addEventListener('keydown', _onLPKeyDown, { capture: true });
     document.addEventListener('mouseup', () => { _dragging = false; });
-    Store.subscribe(evt => {
+    Store.subscribe((evt: any) => {
       if ((evt.type === 'plant:selected' || evt.type === 'master-data-changed') && _activeTabResolvers.currentTab() === 'labor') {
         if (evt.type === 'plant:selected') { delete _aggrData[evt.plant]; delete _lineData[evt.plant]; }
         render();
@@ -2267,7 +2267,7 @@ export const LaborPlanning = (() => {
 
   return {
     init, render,
-    onGroupToggle(group, checked) {
+    onGroupToggle(group: any, checked: any) {
       if (checked) _selectedGroups.add(group); else _selectedGroups.delete(group);
       _renderToolbar(Store.selectedPlant || '');
       const plant = Store.selectedPlant; if (!plant) return;
@@ -2287,24 +2287,24 @@ export const LaborPlanning = (() => {
       else if (sub === 'capacity')   _renderCapacity(plant);
       else if (sub === 'exceptions') _renderExceptions(plant);
     },
-    toggleGroupDropdown(e) {
+    toggleGroupDropdown(e: any) {
       e?.stopPropagation();
       const drop = document.getElementById('lp-group-dropdown');
       if (!drop) return;
       drop.hidden = !drop.hidden;
       if (!drop.hidden) {
-        const close = ev => { if (!drop.contains(ev.target) && ev.target.id !== 'lp-group-btn') { drop.hidden = true; document.removeEventListener('click', close); } };
+        const close = (ev: any) => { if (!drop.contains(ev.target) && ev.target.id !== 'lp-group-btn') { drop.hidden = true; document.removeEventListener('click', close); } };
         setTimeout(() => document.addEventListener('click', close), 0);
       }
     },
     prevHorizon() { _horizonOffset -= _horizonSpan; render(); },
     nextHorizon() { _horizonOffset += _horizonSpan; render(); },
-    setSpan(n) {
+    setSpan(n: any) {
       _horizonSpan = n;
-      const sel = document.getElementById('labor-span-sel'); if (sel) sel.value = n;
+      const sel = document.getElementById('labor-span-sel') as any; if (sel) sel.value = n;
       render();
     },
-  };
+  } as any;
 })();
 
 /* =============================================================================
@@ -2314,9 +2314,9 @@ export const MasterData = (() => {
   const API = Config.API_BASE;
   let _activeTable = 'subnetworks';
   // Per-table state: { columns, rows, dirty: Map(rowKey→patch), deleted: Set(rowKey), added: [] }
-  const _cache = {};
+  const _cache: any = {};
 
-  const TABLE_LABELS = {
+  const TABLE_LABELS: any = {
     subnetworks:      'Subnetworks',
     plants:           'Plants',
     production_lines: 'Production Lines',
@@ -2326,7 +2326,7 @@ export const MasterData = (() => {
   };
 
   // KEY_COLS drives primary-key identification per table.
-  const KEY_COLS = {
+  const KEY_COLS: any = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
     production_lines: ['subnetwork', 'plant', 'production_line'],
@@ -2336,7 +2336,7 @@ export const MasterData = (() => {
   };
 
   // Tables that need a parent-dropdown for FK columns.
-  const FK_SOURCE = {
+  const FK_SOURCE: any = {
     plants:           { subnetwork: 'subnetworks' },
     production_lines: { subnetwork: 'subnetworks', plant: 'plants' },
     material_plants:  { material_id: 'materials' },
@@ -2349,22 +2349,22 @@ export const MasterData = (() => {
   // bom_items requires a plant + material pick before the grid loads (its
   // table is expected to be huge — one row per component per level per
   // material — unlike every other MasterData table, which loads in full).
-  let _bomFilter = { plant: null, material_id: null };
+  let _bomFilter: any = { plant: null, material_id: null };
 
-  function _rowKey(table, row) {
-    return KEY_COLS[table].map(k => String(row[k] ?? '')).join('|');
+  function _rowKey(table: any, row: any) {
+    return (KEY_COLS as any)[table].map((k: any) => String(row[k] ?? '')).join('|');
   }
 
-  function _parsePaste(rawText, columns) {
-    const lines = rawText.replace(/\r/g, '').split('\n').filter(l => l.trim());
+  function _parsePaste(rawText: any, columns: any) {
+    const lines = rawText.replace(/\r/g, '').split('\n').filter((l: any) => l.trim());
     if (!lines.length) return { rows: [] };
-    const colNames  = columns.map(c => c.column_name.toLowerCase());
-    const colLabels = columns.map(c => (c.display_label || c.column_name).toLowerCase());
-    const first     = lines[0].split('\t').map(h => h.trim().toLowerCase());
-    const hasHeader = first.some(h => colNames.includes(h) || colLabels.includes(h));
-    let headers, dataLines;
+    const colNames  = columns.map((c: any) => c.column_name.toLowerCase());
+    const colLabels = columns.map((c: any) => (c.display_label || c.column_name).toLowerCase());
+    const first     = lines[0].split('\t').map((h: any) => h.trim().toLowerCase());
+    const hasHeader = first.some((h: any) => colNames.includes(h) || colLabels.includes(h));
+    let headers: any, dataLines: any;
     if (hasHeader) {
-      headers   = first.map(h => {
+      headers   = first.map((h: any) => {
         const ni = colNames.indexOf(h);
         if (ni >= 0) return columns[ni].column_name;
         const li = colLabels.indexOf(h);
@@ -2372,13 +2372,13 @@ export const MasterData = (() => {
       });
       dataLines = lines.slice(1);
     } else {
-      headers   = columns.map(c => c.column_name);
+      headers   = columns.map((c: any) => c.column_name);
       dataLines = lines;
     }
-    const rows = dataLines.map(line => {
+    const rows = dataLines.map((line: any) => {
       const vals = line.split('\t');
-      const row  = {};
-      headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+      const row: any  = {};
+      headers.forEach((h: any, i: any) => { row[h] = (vals[i] ?? '').trim(); });
       return row;
     });
     return { rows };
@@ -2389,7 +2389,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   function render() {
     // Wire inner tabs on first call.
-    document.querySelectorAll('.md-tab').forEach(b => {
+    document.querySelectorAll('.md-tab').forEach((b: any) => {
       b.onclick = () => _setTab(b.dataset.mdTab);
     });
     const exportBtn = document.getElementById('md-export-schema-btn');
@@ -2398,14 +2398,14 @@ export const MasterData = (() => {
     _renderActiveTable();
   }
 
-  function _setTab(table) {
+  function _setTab(table: any) {
     _activeTable = table;
     _syncTabUI();
     _renderActiveTable();
   }
 
   function _syncTabUI() {
-    document.querySelectorAll('.md-tab').forEach(b =>
+    document.querySelectorAll('.md-tab').forEach((b: any) =>
       b.classList.toggle('active', b.dataset.mdTab === _activeTable));
   }
 
@@ -2442,7 +2442,7 @@ export const MasterData = (() => {
     _mkCombobox(document.getElementById('md-bom-plant-picker'), plants, {
       value: _bomFilter.plant || '',
       placeholder: Util.t('ph.select_plant'),
-      onSelect: (p) => {
+      onSelect: (p: any) => {
         _bomFilter = { plant: p || null, material_id: null };
         _renderBomGate();
       },
@@ -2450,24 +2450,24 @@ export const MasterData = (() => {
     if (_bomFilter.plant) _loadBomMaterialsForPlant(_bomFilter.plant);
   }
 
-  async function _loadBomMaterialsForPlant(plant) {
+  async function _loadBomMaterialsForPlant(plant: any) {
     const matHost = document.getElementById('md-bom-material-picker');
     if (matHost) matHost.innerHTML = `<div class="md-loading-inline">${Util.t('ui.loading')}</div>`;
     try {
       const data = await Util.fetchTraced(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
-        .then(r => r.json());
-      const materials = (data.rows || []).map(r => r.material_id).sort();
+        .then((r: any) => r.json());
+      const materials = (data.rows || []).map((r: any) => r.material_id).sort();
       const host2 = document.getElementById('md-bom-material-picker');
       if (!host2) return; // tab/plant changed again while this was in flight
       _mkCombobox(host2, materials, {
         value: _bomFilter.material_id || '',
         placeholder: Util.t('ph.select_material'),
-        onSelect: (m) => {
+        onSelect: (m: any) => {
           _bomFilter.material_id = m || null;
           if (m) _loadAndRender('bom_items');
         },
       });
-    } catch (e) {
+    } catch (e: any) {
       if (matHost) matHost.innerHTML = `<div class="md-empty">${Util.t('err.load_materials_failed')}</div>`;
       ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${e.message}`);
     }
@@ -2479,7 +2479,7 @@ export const MasterData = (() => {
   // options array with no Store dependency, so it fits BOM's plant AND
   // material pickers (PlantSelector itself is wired one-to-one to
   // Store.selectedPlant and the global topbar DOM).
-  function _mkCombobox(containerEl, options, { value = '', placeholder = '', onSelect } = {}) {
+  function _mkCombobox(containerEl: any, options: any, { value = '', placeholder = '', onSelect }: any = {}) {
     if (!containerEl) return;
     containerEl.innerHTML = `
       <div class="hps-combobox md-bom-combobox">
@@ -2492,7 +2492,7 @@ export const MasterData = (() => {
     const input     = root.querySelector('.hps-input');
     const clearBtn  = root.querySelector('.hps-clear');
     const dropdown  = root.querySelector('.hps-dropdown');
-    let filtered  = [];
+    let filtered: any[]  = [];
     let activeIdx = -1;
     let open      = false;
     let selected  = value;
@@ -2502,33 +2502,33 @@ export const MasterData = (() => {
       root.classList.toggle('has-value', !!selected);
       clearBtn.hidden = !selected;
     }
-    function renderDropdown(query) {
+    function renderDropdown(query: any) {
       const q = (query || '').trim().toLowerCase();
       const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
       const filterQ = looksLikeLabel ? '' : q;
-      filtered = filterQ ? options.filter(o => String(o).toLowerCase().includes(filterQ)) : options.slice();
+      filtered = filterQ ? options.filter((o: any) => String(o).toLowerCase().includes(filterQ)) : options.slice();
       if (!filtered.length) {
         dropdown.innerHTML = `<div class="hps-empty">${options.length ? Util.t('ui.no_matches') : Util.t('ui.no_options')}</div>`;
         activeIdx = -1;
         return;
       }
-      dropdown.innerHTML = filtered.map((o, i) =>
+      dropdown.innerHTML = filtered.map((o: any, i: any) =>
         `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
       ).join('');
       activeIdx = Math.max(0, filtered.indexOf(selected));
       highlight();
-      dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
-        el.addEventListener('mousedown', e => { e.preventDefault(); pick(filtered[i]); });
+      dropdown.querySelectorAll('.hps-option').forEach((el: any, i: any) => {
+        el.addEventListener('mousedown', (e: any) => { e.preventDefault(); pick(filtered[i]); });
       });
     }
     function highlight() {
       const items = dropdown.querySelectorAll('.hps-option');
-      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+      items.forEach((el: any, i: any) => el.classList.toggle('active', i === activeIdx));
       if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
     }
     function openDd()  { dropdown.hidden = false; open = true;  input.setAttribute('aria-expanded', 'true'); }
     function closeDd() { dropdown.hidden = true;  open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
-    function pick(o) {
+    function pick(o: any) {
       selected = o;
       reflect();
       closeDd();
@@ -2538,7 +2538,7 @@ export const MasterData = (() => {
 
     input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
     input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
-    input.addEventListener('keydown', e => {
+    input.addEventListener('keydown', (e: any) => {
       if (!open) {
         if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
         return;
@@ -2549,9 +2549,9 @@ export const MasterData = (() => {
       else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
     });
     input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
-    clearBtn.addEventListener('mousedown', e => e.preventDefault());
+    clearBtn.addEventListener('mousedown', (e: any) => e.preventDefault());
     clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', e => { if (!root.contains(e.target)) closeDd(); });
+    document.addEventListener('click', (e: any) => { if (!root.contains(e.target)) closeDd(); });
 
     reflect();
   }
@@ -2559,7 +2559,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Data loading
   // -----------------------------------------------------------------------
-  async function _loadAndRender(table) {
+  async function _loadAndRender(table: any) {
     const host = document.getElementById('md-host');
     if (!host) return;
     host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
@@ -2572,16 +2572,16 @@ export const MasterData = (() => {
       ? `?${new URLSearchParams({ plant: _bomFilter.plant, material_id: _bomFilter.material_id }).toString()}`
       : '';
     try {
-      const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async r => {
+      const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r: any) => {
         if (!r.ok) {
           // Surface the backend body instead of discarding it.
           const parsed = await Util.parseBackendError(r);
-          const err = new Error(parsed.message); err.errorCode = parsed.errorCode; err.httpStatus = r.status;
+          const err: any = new Error(parsed.message); err.errorCode = parsed.errorCode; err.httpStatus = r.status;
           throw err;
         }
         return r.json();
       });
-      _cache[table] = {
+      (_cache as any)[table] = {
         columns: data.columns,
         rows:    data.rows,
         dirty:   new Map(),
@@ -2589,8 +2589,8 @@ export const MasterData = (() => {
         added:   [],
       };
       _renderTable(table);
-    } catch (e) {
-      host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${e.message}</div>`;
+    } catch (e: any) {
+      host.innerHTML = `<div class="md-empty">Failed to load ${(TABLE_LABELS as any)[table]}: ${e.message}</div>`;
       ErrorLog.error('master-data', `Load failed for ${table}: ${e.message}`,
         { reqId, table, status: e.httpStatus }, { reqId, errorCode: e.errorCode || 'http.network' });
     }
@@ -2599,7 +2599,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Table rendering
   // -----------------------------------------------------------------------
-  function _renderTable(table) {
+  function _renderTable(table: any) {
     const host = document.getElementById('md-host');
     if (!host) return;
     const state = _cache[table];
@@ -2705,7 +2705,7 @@ export const MasterData = (() => {
     // Header
     const thead = document.createElement('thead');
     const hRow = document.createElement('tr');
-    columns.forEach(col => {
+    columns.forEach((col: any) => {
       const th = document.createElement('th');
       th.className = 'md-th';
       const lbl = document.createElement('span');
@@ -2740,17 +2740,17 @@ export const MasterData = (() => {
       tr.appendChild(td);
       tbody.appendChild(tr);
     } else {
-      allRows.forEach(row => _appendRow(tbody, table, columns, row));
+      allRows.forEach((row: any) => _appendRow(tbody, table, columns, row));
     }
     tbl.appendChild(tbody);
     wrap.appendChild(tbl);
     host.appendChild(wrap);
   }
 
-  function _appendRow(tbody, table, columns, row) {
+  function _appendRow(tbody: any, table: any, columns: any, row: any) {
     const state = _cache[table];
     const key = _rowKey(table, row);
-    const isNew = state.added.some(r => _rowKey(table, r) === key);
+    const isNew = state.added.some((r: any) => _rowKey(table, r) === key);
     const isDeleted = state.deleted.has(key);
     const isDirty = state.dirty.has(key);
     // Render pending (dirty) values over the saved baseline so an in-progress edit
@@ -2767,7 +2767,7 @@ export const MasterData = (() => {
       isDirty   ? 'md-row-dirty'   : '',
     ].filter(Boolean).join(' ');
 
-    columns.forEach(col => {
+    columns.forEach((col: any) => {
       const td = document.createElement('td');
       td.className = 'md-td';
 
@@ -2829,7 +2829,7 @@ export const MasterData = (() => {
     tbody.appendChild(tr);
   }
 
-  function _fkSelect(table, colName, value, sourceTable, rowKey) {
+  function _fkSelect(table: any, colName: any, value: any, sourceTable: any, rowKey: any) {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
     // Populate from cache or fetch.
@@ -2844,8 +2844,8 @@ export const MasterData = (() => {
     blank.value = '';
     blank.textContent = Util.t('ui.select_placeholder');
     sel.appendChild(blank);
-    const _optLabel = r => (r[labelCol] && labelCol !== valCol) ? `${r[valCol]} — ${r[labelCol]}` : r[valCol];
-    sourceRows.forEach(r => {
+    const _optLabel = (r: any) => (r[labelCol] && labelCol !== valCol) ? `${r[valCol]} — ${r[labelCol]}` : r[valCol];
+    sourceRows.forEach((r: any) => {
       const opt = document.createElement('option');
       opt.value = r[valCol];
       opt.textContent = _optLabel(r);
@@ -2856,11 +2856,11 @@ export const MasterData = (() => {
 
     // If source not loaded yet, fetch it.
     if (!sourceState) {
-      fetch(`${API}/master-data/${sourceTable}`).then(r => r.json()).then(data => {
+      fetch(`${API}/master-data/${sourceTable}`).then((r: any) => r.json()).then((data: any) => {
         _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Set(), added: [] };
         // Rebuild select options.
         while (sel.options.length > 1) sel.remove(1);
-        data.rows.forEach(r => {
+        data.rows.forEach((r: any) => {
           const opt = document.createElement('option');
           opt.value = r[valCol];
           opt.textContent = _optLabel(r);
@@ -2877,9 +2877,9 @@ export const MasterData = (() => {
   // _cache['material_plants'] (which may be absent, or scoped to a
   // different plant if that tab was visited) rather than risking either
   // table's cached view corrupting the other's.
-  const _bomComponentOptionsCache = {};
+  const _bomComponentOptionsCache: any = {};
 
-  function _bomComponentSelect(plant, value, rowKey) {
+  function _bomComponentSelect(plant: any, value: any, rowKey: any) {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
     const blank = document.createElement('option');
@@ -2887,9 +2887,9 @@ export const MasterData = (() => {
     blank.textContent = Util.t('ui.select_placeholder');
     sel.appendChild(blank);
 
-    const fill = (materials) => {
+    const fill = (materials: any) => {
       while (sel.options.length > 1) sel.remove(1);
-      materials.forEach(m => {
+      materials.forEach((m: any) => {
         const opt = document.createElement('option');
         opt.value = m;
         opt.textContent = m;
@@ -2903,9 +2903,9 @@ export const MasterData = (() => {
       fill(_bomComponentOptionsCache[plant]);
     } else if (plant) {
       fetch(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
-        .then(r => r.json())
-        .then(data => {
-          const materials = (data.rows || []).map(r => r.material_id).sort();
+        .then((r: any) => r.json())
+        .then((data: any) => {
+          const materials = (data.rows || []).map((r: any) => r.material_id).sort();
           _bomComponentOptionsCache[plant] = materials;
           fill(materials);
         }).catch(() => {});
@@ -2913,7 +2913,7 @@ export const MasterData = (() => {
     return sel;
   }
 
-  function _markDirty(table, rowKey, colName, value) {
+  function _markDirty(table: any, rowKey: any, colName: any, value: any) {
     const state = _cache[table];
     if (!state) return;
     // An existing dirty entry accumulates further edits. For a row's FIRST edit start
@@ -2924,7 +2924,7 @@ export const MasterData = (() => {
     // trip the "missing key columns" guard in _save).
     let patch = state.dirty.get(rowKey);
     if (!patch) {
-      const addedRow = (state.added || []).find(r => _rowKey(table, r) === rowKey);
+      const addedRow = (state.added || []).find((r: any) => _rowKey(table, r) === rowKey);
       patch = addedRow ? addedRow : { ..._getRowByKey(table, rowKey) };
     }
     patch[colName] = value;
@@ -2935,23 +2935,23 @@ export const MasterData = (() => {
     _updateSaveBtn(table);
   }
 
-  function _getRowByKey(table, key) {
+  function _getRowByKey(table: any, key: any) {
     const state = _cache[table];
     const all = [...(state?.rows ?? []), ...(state?.added ?? [])];
-    return all.find(r => _rowKey(table, r) === key) ?? {};
+    return all.find((r: any) => _rowKey(table, r) === key) ?? {};
   }
 
-  function _updateSaveBtn(table) {
+  function _updateSaveBtn(table: any) {
     const state = _cache[table];
     if (!state) return;
     const isDirty = state.dirty.size > 0 || state.deleted.size > 0 || state.added.length > 0;
-    const saveBtn = document.querySelector('#md-host .btn-primary.sm');
+    const saveBtn = document.querySelector('#md-host .btn-primary.sm') as any;
     if (saveBtn) {
       saveBtn.disabled = !isDirty;
       saveBtn.classList.toggle('md-save-idle', !isDirty);
     }
     // Update dirty badge.
-    const badge = document.querySelector('#md-host .md-dirty-badge');
+    const badge = document.querySelector('#md-host .md-dirty-badge') as any;
     if (badge) {
       const n = state.dirty.size + state.deleted.size + state.added.length;
       badge.textContent = `${n} unsaved`;
@@ -2959,11 +2959,11 @@ export const MasterData = (() => {
     }
   }
 
-  function _addRow(table) {
+  function _addRow(table: any) {
     const state = _cache[table];
     if (!state) return;
-    const newRow = {};
-    state.columns.forEach(c => { newRow[c.column_name] = ''; });
+    const newRow: any = {};
+    state.columns.forEach((c: any) => { newRow[c.column_name] = ''; });
     if (table === 'bom_items') {
       // A new row is always within the currently scoped material+plant —
       // pre-fill so the user isn't retyping the scope on every row.
@@ -2977,7 +2977,7 @@ export const MasterData = (() => {
     setTimeout(() => {
       const tbody = document.getElementById(`md-tbody-${table}`);
       const lastRow = tbody?.lastElementChild;
-      const firstCell = lastRow?.querySelector('.md-cell');
+      const firstCell = lastRow?.querySelector('.md-cell') as any;
       if (firstCell) firstCell.focus();
     }, 50);
   }
@@ -3002,13 +3002,13 @@ export const MasterData = (() => {
           result.rejected ? 'warn' : 'success',
         );
         if (result.warnings && result.warnings.length) {
-          result.warnings.slice(0, 10).forEach(w => ErrorLog.warn('master-data', w.msg));
+          result.warnings.slice(0, 10).forEach((w: any) => ErrorLog.warn('master-data', w.msg));
         }
         // Refresh the currently-scoped view so newly uploaded rows for this
         // material+plant show up immediately.
         delete _cache.bom_items;
         if (_activeTable === 'bom_items') _renderActiveTable();
-      } catch (e) {
+      } catch (e: any) {
         Toast.show(`${Util.t('toast.bom_upload_failed')}: ${e.message}`, 'error');
         ErrorLog.error('master-data', `BOM upload failed: ${e.message}`);
       }
@@ -3016,8 +3016,8 @@ export const MasterData = (() => {
     input.click();
   }
 
-  async function _pasteRows(table) {
-    let raw;
+  async function _pasteRows(table: any) {
+    let raw: any;
     try {
       raw = await navigator.clipboard.readText();
     } catch {
@@ -3033,17 +3033,17 @@ export const MasterData = (() => {
     if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
 
     const keys    = KEY_COLS[table];
-    const toAdd   = [];
-    const toUpdate = [];
-    const invalid  = [];
+    const toAdd: any[]   = [];
+    const toUpdate: any[] = [];
+    const invalid: any[]  = [];
 
-    rows.forEach(row => {
-      if (keys.find(k => !row[k])) { invalid.push(row); return; }
+    rows.forEach((row: any) => {
+      if (keys.find((k: any) => !row[k])) { invalid.push(row); return; }
       const key = _rowKey(table, row);
-      const inSaved    = state.rows.some(r => _rowKey(table, r) === key);
-      const inAdded    = state.added.some(r => _rowKey(table, r) === key);
-      const batchAddIdx = toAdd.findIndex(r => _rowKey(table, r) === key);
-      const batchUpdIdx = toUpdate.findIndex(r => _rowKey(table, r) === key);
+      const inSaved    = state.rows.some((r: any) => _rowKey(table, r) === key);
+      const inAdded    = state.added.some((r: any) => _rowKey(table, r) === key);
+      const batchAddIdx = toAdd.findIndex((r: any) => _rowKey(table, r) === key);
+      const batchUpdIdx = toUpdate.findIndex((r: any) => _rowKey(table, r) === key);
       if      (batchAddIdx >= 0)  toAdd[batchAddIdx]    = row; // last write wins within batch
       else if (batchUpdIdx >= 0)  toUpdate[batchUpdIdx] = row;
       else if (inSaved || inAdded) toUpdate.push(row);
@@ -3057,7 +3057,7 @@ export const MasterData = (() => {
       return;
     }
 
-    const parts = [];
+    const parts: any[] = [];
     if (toAdd.length)    parts.push(`add ${toAdd.length} new`);
     if (toUpdate.length) parts.push(`update ${toUpdate.length} existing`);
     if (invalid.length)  parts.push(`skip ${invalid.length} invalid`);
@@ -3067,24 +3067,24 @@ export const MasterData = (() => {
       message: `This will ${parts.join(', ')} row(s).`,
       detail:  `Changes appear in the table but won't be saved until you click Save.` +
                (invalid.length ? ` Skipped rows are missing key column(s): ${keys.join(', ')}.` : ''),
-      tone:    'info',
+      tone:    'info' as any,
     });
     if (!ok) return;
 
-    toAdd.forEach(row => {
-      const full = {};
-      state.columns.forEach(c => { full[c.column_name] = row[c.column_name] ?? ''; });
+    toAdd.forEach((row: any) => {
+      const full: any = {};
+      state.columns.forEach((c: any) => { full[c.column_name] = row[c.column_name] ?? ''; });
       state.added.push(full);
     });
 
-    toUpdate.forEach(row => {
+    toUpdate.forEach((row: any) => {
       const key = _rowKey(table, row);
-      const idx = state.rows.findIndex(r => _rowKey(table, r) === key);
+      const idx = state.rows.findIndex((r: any) => _rowKey(table, r) === key);
       if (idx >= 0) {
         Object.assign(state.rows[idx], row);
         state.dirty.set(key, { ...state.rows[idx] });
       } else {
-        const ai = state.added.findIndex(r => _rowKey(table, r) === key);
+        const ai = state.added.findIndex((r: any) => _rowKey(table, r) === key);
         if (ai >= 0) Object.assign(state.added[ai], row);
       }
     });
@@ -3095,18 +3095,18 @@ export const MasterData = (() => {
       : Util.t('toast.paste_result', { added: toAdd.length, updated: toUpdate.length }), 'success');
   }
 
-  async function _deleteRow(table, rowKey, tr) {
+  async function _deleteRow(table: any, rowKey: any, tr: any) {
     const state = _cache[table];
     if (!state) return;
 
     // Build delete payload from the key.
     const keys = KEY_COLS[table];
     const row = _getRowByKey(table, rowKey);
-    const deletePayload = {};
-    keys.forEach(k => { deletePayload[k] = row[k]; });
+    const deletePayload: any = {};
+    keys.forEach((k: any) => { deletePayload[k] = row[k]; });
 
     // Get cascade preview for saved rows (not for newly-added rows).
-    const isNew = state.added.some(r => _rowKey(table, r) === rowKey);
+    const isNew = state.added.some((r: any) => _rowKey(table, r) === rowKey);
     let cascadeDetail = '';
 
     if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
@@ -3115,9 +3115,9 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes: [deletePayload] }),
-        }).then(r => r.json());
+        }).then((r: any) => r.json());
 
-        const parts = [];
+        const parts: any[] = [];
         if (preview.plants > 0)           parts.push(`<strong>${preview.plants}</strong> plant${preview.plants !== 1 ? 's' : ''}`);
         if (preview.production_lines > 0)  parts.push(`<strong>${preview.production_lines}</strong> production line${preview.production_lines !== 1 ? 's' : ''}`);
         if (preview.bom_items > 0)          parts.push(`<strong>${preview.bom_items}</strong> BOM item${preview.bom_items !== 1 ? 's' : ''}`);
@@ -3129,7 +3129,7 @@ export const MasterData = (() => {
       } catch {}
     }
 
-    const keyDisplay = keys.map(k => row[k]).join(' / ');
+    const keyDisplay = keys.map((k: any) => row[k]).join(' / ');
     const confirmed = await Modal.confirm({
       title:         `Delete "${keyDisplay}"?`,
       message:       `Are you sure you want to delete this ${TABLE_LABELS[table].replace(/s$/, '').toLowerCase()} from the database?`,
@@ -3141,7 +3141,7 @@ export const MasterData = (() => {
 
     if (isNew) {
       // Just remove from added array.
-      const idx = state.added.findIndex(r => _rowKey(table, r) === rowKey);
+      const idx = state.added.findIndex((r: any) => _rowKey(table, r) === rowKey);
       if (idx >= 0) state.added.splice(idx, 1);
       _renderTable(table);
     } else {
@@ -3155,17 +3155,17 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Save
   // -----------------------------------------------------------------------
-  async function _save(table) {
+  async function _save(table: any) {
     const state = _cache[table];
     if (!state) return;
     const keys = KEY_COLS[table];
 
     // Build upserts from dirty + added.
-    const upserts = [];
-    state.dirty.forEach((patch, _key) => { if (!state.deleted.has(_key)) upserts.push(patch); });
-    state.added.forEach(row => {
+    const upserts: any[] = [];
+    state.dirty.forEach((patch: any, _key: any) => { if (!state.deleted.has(_key)) upserts.push(patch); });
+    state.added.forEach((row: any) => {
       // Validate that key columns are filled.
-      const missing = keys.filter(k => !row[k]);
+      const missing = keys.filter((k: any) => !row[k]);
       if (missing.length) {
         Toast.show(Util.t('toast.no_plant_selected') + ': ' + missing.join(', '), 'error');
         return;
@@ -3174,11 +3174,11 @@ export const MasterData = (() => {
     });
 
     // Build deletes.
-    const deletes = [];
-    state.deleted.forEach(rowKey => {
+    const deletes: any[] = [];
+    state.deleted.forEach((rowKey: any) => {
       const row = _getRowByKey(table, rowKey);
-      const d = {};
-      keys.forEach(k => { d[k] = row[k]; });
+      const d: any = {};
+      keys.forEach((k: any) => { d[k] = row[k]; });
       deletes.push(d);
     });
 
@@ -3191,10 +3191,10 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
-        }).then(r => r.json());
+        }).then((r: any) => r.json());
         const total = (preview.plants || 0) + (preview.production_lines || 0) + (preview.bom_items || 0);
         if (total > 0) {
-          const parts = [];
+          const parts: any[] = [];
           if (preview.plants > 0)          parts.push(`${preview.plants} plant${preview.plants !== 1 ? 's' : ''}`);
           if (preview.production_lines > 0) parts.push(`${preview.production_lines} production line${preview.production_lines !== 1 ? 's' : ''}`);
           if (preview.bom_items > 0)         parts.push(`${preview.bom_items} BOM item${preview.bom_items !== 1 ? 's' : ''}`);
@@ -3222,8 +3222,8 @@ export const MasterData = (() => {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ upserts, deletes }),
-      }).then(r => {
-        if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      }).then((r: any) => {
+        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
 
@@ -3236,9 +3236,9 @@ export const MasterData = (() => {
 
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
-        fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
-        fetch(`${API}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : null),
-      ]).then(([pData, lData]) => {
+        fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r: any) => r.ok ? r.json() : null),
+        fetch(`${API}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then((r: any) => r.ok ? r.json() : null),
+      ]).then(([pData, lData]: [any, any]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
           // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -3258,7 +3258,7 @@ export const MasterData = (() => {
       }).catch(() => {
         Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
       });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('master-data', `Save failed for ${table}: ${e.message}`);
     }
@@ -3267,10 +3267,10 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Filter / search
   // -----------------------------------------------------------------------
-  function _applyFilter(table, query) {
+  function _applyFilter(table: any, query: any) {
     const tbody = document.getElementById(`md-tbody-${table}`);
     if (!tbody) return;
-    tbody.querySelectorAll('tr').forEach(tr => {
+    tbody.querySelectorAll('tr').forEach((tr: any) => {
       const text = tr.textContent.toLowerCase();
       tr.hidden = query ? !text.includes(query) : false;
     });
@@ -3279,7 +3279,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Column management
   // -----------------------------------------------------------------------
-  function _openColMenu(table, col, anchor) {
+  function _openColMenu(table: any, col: any, anchor: any) {
     // Close any existing menu.
     document.querySelectorAll('.md-col-menu').forEach(m => m.remove());
 
@@ -3305,33 +3305,33 @@ export const MasterData = (() => {
     menu.style.top  = `${rect.bottom + 4}px`;
     menu.style.left = `${rect.left}px`;
 
-    const close = e => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); } };
+    const close = (e: any) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); } };
     setTimeout(() => document.addEventListener('click', close), 0);
   }
 
-  function _openAddColumn(table) {
-    document.getElementById('md-col-name').value  = '';
-    document.getElementById('md-col-label').value = '';
-    document.getElementById('md-col-type').value  = 'TEXT';
-    document.getElementById('md-col-length').value = '';
-    document.getElementById('md-col-default').value = '';
-    document.getElementById('md-col-nullable').checked = true;
-    document.getElementById('md-addcol-error').textContent = '';
-    document.getElementById('md-col-length-row').hidden = true;
+  function _openAddColumn(table: any) {
+    (document.getElementById('md-col-name') as any).value  = '';
+    (document.getElementById('md-col-label') as any).value = '';
+    (document.getElementById('md-col-type') as any).value  = 'TEXT';
+    (document.getElementById('md-col-length') as any).value = '';
+    (document.getElementById('md-col-default') as any).value = '';
+    (document.getElementById('md-col-nullable') as any).checked = true;
+    (document.getElementById('md-addcol-error') as any).textContent = '';
+    (document.getElementById('md-col-length-row') as any).hidden = true;
 
-    const typeSelect = document.getElementById('md-col-type');
+    const typeSelect = document.getElementById('md-col-type') as any;
     typeSelect.onchange = () => {
-      document.getElementById('md-col-length-row').hidden = typeSelect.value !== 'NUMERIC';
+      (document.getElementById('md-col-length-row') as any).hidden = typeSelect.value !== 'NUMERIC';
     };
 
-    document.getElementById('md-addcol-confirm-btn').onclick = async () => {
-      const colName  = document.getElementById('md-col-name').value.trim();
-      const label    = document.getElementById('md-col-label').value.trim() || colName;
-      const sqlType  = document.getElementById('md-col-type').value;
-      const length   = document.getElementById('md-col-length').value.trim() || null;
-      const nullable = document.getElementById('md-col-nullable').checked;
-      const def      = document.getElementById('md-col-default').value.trim() || null;
-      const errEl    = document.getElementById('md-addcol-error');
+    (document.getElementById('md-addcol-confirm-btn') as any).onclick = async () => {
+      const colName  = (document.getElementById('md-col-name') as any).value.trim();
+      const label    = (document.getElementById('md-col-label') as any).value.trim() || colName;
+      const sqlType  = (document.getElementById('md-col-type') as any).value;
+      const length   = (document.getElementById('md-col-length') as any).value.trim() || null;
+      const nullable = (document.getElementById('md-col-nullable') as any).checked;
+      const def      = (document.getElementById('md-col-default') as any).value.trim() || null;
+      const errEl    = document.getElementById('md-addcol-error') as any;
 
       if (!colName) { errEl.textContent = Util.t('ui.column_id_required'); return; }
       if (!/^[a-z][a-z0-9_]{0,62}$/.test(colName)) {
@@ -3350,14 +3350,14 @@ export const MasterData = (() => {
           method:  'POST',
           headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        }).then((r: any) => {
+          if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.col_added', { label }), 'success');
         delete _cache[table];
         _loadAndRender(table);
-      } catch (e) {
+      } catch (e: any) {
         Toast.show(Util.t('toast.failed_add_col', { msg: e.message }), 'error');
       }
     };
@@ -3365,7 +3365,7 @@ export const MasterData = (() => {
     Modal.open('md-addcol-modal');
   }
 
-  async function _dropColumn(table, col) {
+  async function _dropColumn(table: any, col: any) {
     const confirmed = await Modal.confirm({
       title:         Util.t('modal.drop_column_title', { label: col.display_label }),
       message:       Util.t('modal.drop_column_msg', { name: col.column_name, table: TABLE_LABELS[table] }),
@@ -3379,25 +3379,25 @@ export const MasterData = (() => {
       await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
         method:  'DELETE',
         headers: { 'x-user-email': Session.actor() },
-      }).then(r => {
-        if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      }).then((r: any) => {
+        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
       Toast.show(Util.t('toast.column_dropped', { col: col.column_name }), 'success');
       delete _cache[table];
       _loadAndRender(table);
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.failed_drop_column', { msg: e.message }), 'error');
     }
   }
 
-  function _openRenameLabel(table, col) {
+  function _openRenameLabel(table: any, col: any) {
     const noteEl  = document.getElementById('md-rename-note');
-    const inputEl = document.getElementById('md-rename-label-input');
+    const inputEl = document.getElementById('md-rename-label-input') as any;
     if (noteEl)  noteEl.textContent = `Column ID: "${col.column_name}" (unchanged) · Table: ${TABLE_LABELS[table]}`;
     if (inputEl) inputEl.value = col.display_label;
 
-    document.getElementById('md-rename-confirm-btn').onclick = async () => {
+    (document.getElementById('md-rename-confirm-btn') as any).onclick = async () => {
       const newLabel = inputEl.value.trim();
       if (!newLabel) return;
       Modal.close('md-renamelabel-modal');
@@ -3406,14 +3406,14 @@ export const MasterData = (() => {
           method:  'PATCH',
           headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ display_label: newLabel }),
-        }).then(r => {
-          if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        }).then((r: any) => {
+          if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.column_label_updated', { label: newLabel }), 'success');
         delete _cache[table];
         _loadAndRender(table);
-      } catch (e) {
+      } catch (e: any) {
         Toast.show(Util.t('toast.failed_rename_label', { msg: e.message }), 'error');
       }
     };
@@ -3425,17 +3425,17 @@ export const MasterData = (() => {
   // Column wizard (which mutates the live DB directly, with no git record)
   // can be folded back into schema.sql after the fact.
   async function _exportSchema() {
-    const textEl  = document.getElementById('md-schema-export-text');
-    const copyBtn = document.getElementById('md-schema-export-copy-btn');
+    const textEl  = document.getElementById('md-schema-export-text') as any;
+    const copyBtn = document.getElementById('md-schema-export-copy-btn') as any;
     textEl.value = '…';
     Modal.open('md-schema-export-modal');
     try {
-      const data = await fetch(`${API}/master-data/_schema-export`).then(r => {
-        if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      const data = await fetch(`${API}/master-data/_schema-export`).then((r: any) => {
+        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
       textEl.value = data.sql || '';
-    } catch (e) {
+    } catch (e: any) {
       textEl.value = '';
       Toast.show(Util.t('toast.failed_schema_export', { msg: e.message }), 'error');
     }
@@ -3446,10 +3446,10 @@ export const MasterData = (() => {
     };
   }
 
-  async function syncLineSettings(line, patch) {
+  async function syncLineSettings(line: any, patch: any) {
     if (!_cache['production_lines']) {
       try {
-        const data = await fetch(`${API}/master-data/production_lines`).then(r => {
+        const data = await fetch(`${API}/master-data/production_lines`).then((r: any) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
@@ -3461,7 +3461,7 @@ export const MasterData = (() => {
     }
 
     const state = _cache['production_lines'];
-    const rowIdx = state.rows.findIndex(r => r.production_line === line);
+    const rowIdx = state.rows.findIndex((r: any) => r.production_line === line);
     if (rowIdx < 0) return;
 
     const updatedRow = { ...state.rows[rowIdx] };
@@ -3481,24 +3481,24 @@ export const MasterData = (() => {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
-      }).then(r => {
-        if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      }).then((r: any) => {
+        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
       if (_activeTable === 'production_lines') _renderTable('production_lines');
-    } catch (e) {
+    } catch (e: any) {
       ErrorLog.error('prod-lines', `Failed to save line setting: ${e.message}`);
     }
   }
 
-  return { render, syncLineSettings };
+  return { render, syncLineSettings } as any;
 })();
 
 /* =============================================================================
    ADMIN COCKPIT — health bar, pipeline inspector, backend warnings,
    filterable logs, upload, purge, and upload history.
    ========================================================================== */
-export const AdminCockpit = {
+export const AdminCockpit: any = {
   _initialized: false,
   _pendingFile: null,
   _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '' },
@@ -3512,9 +3512,9 @@ export const AdminCockpit = {
   _dbDeepAbort: null,
   _backendLogAbort: null,
 
-  gotoOvTab(tab) {
+  gotoOvTab(tab: any) {
     AdminCockpit._activeOvTab = tab;
-    document.querySelectorAll('.admin-ov-tabs .sub-subtab').forEach(b =>
+    document.querySelectorAll('.admin-ov-tabs .sub-subtab').forEach((b: any) =>
       b.classList.toggle('active', b.dataset.ovTab === tab));
     ['diagnostics', 'data-ops', 'logs', 'thread'].forEach(t => {
       const el = document.getElementById(`admin-ov-${t}`);
@@ -3523,9 +3523,9 @@ export const AdminCockpit = {
     if (tab === 'thread') AdminCockpit._refreshThreadPane();
   },
 
-  _setSub(sub) {
+  _setSub(sub: any) {
     AdminCockpit._activeSub = sub;
-    document.querySelectorAll('.admin-subtab').forEach(b =>
+    document.querySelectorAll('.admin-subtab').forEach((b: any) =>
       b.classList.toggle('active', b.dataset.sub === sub));
     const ov = document.getElementById('admin-overview-pane');
     const mg = document.getElementById('admin-manage-pane');
@@ -3545,19 +3545,19 @@ export const AdminCockpit = {
     if (AdminCockpit._initialized) return;
     AdminCockpit._initialized = true;
 
-    document.querySelectorAll('.admin-subtab').forEach(b =>
+    document.querySelectorAll('.admin-subtab').forEach((b: any) =>
       b.addEventListener('click', () => AdminCockpit._setSub(b.dataset.sub)));
 
     // Upload zone — drag-drop + click-browse
-    const _uploadZone = document.getElementById('admin-upload-zone');
-    const _uploadFile = document.getElementById('admin-upload-file');
+    const _uploadZone = document.getElementById('admin-upload-zone') as any;
+    const _uploadFile = document.getElementById('admin-upload-file') as any;
     if (_uploadZone && _uploadFile) {
-      _uploadZone.onclick    = e => { if (e.target !== _uploadFile) _uploadFile.click(); };
-      _uploadZone.onkeydown  = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _uploadFile.click(); } };
+      _uploadZone.onclick    = (e: any) => { if (e.target !== _uploadFile) _uploadFile.click(); };
+      _uploadZone.onkeydown  = (e: any) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _uploadFile.click(); } };
       _uploadFile.onchange   = () => { if (_uploadFile.files[0]) AdminCockpit._pickFile(_uploadFile.files[0]); };
-      _uploadZone.ondragover = e => { e.preventDefault(); _uploadZone.classList.add('drag-over'); };
+      _uploadZone.ondragover = (e: any) => { e.preventDefault(); _uploadZone.classList.add('drag-over'); };
       _uploadZone.ondragleave= () => _uploadZone.classList.remove('drag-over');
-      _uploadZone.ondrop     = e => {
+      _uploadZone.ondrop     = (e: any) => {
         e.preventDefault();
         _uploadZone.classList.remove('drag-over');
         const f = e.dataTransfer.files[0];
@@ -3584,7 +3584,7 @@ export const AdminCockpit = {
     document.getElementById('admin-health-refresh')?.addEventListener('click', AdminCockpit._renderHealth);
     document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
     document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
-    document.getElementById('admin-db-deep')?.addEventListener('click', async e => {
+    document.getElementById('admin-db-deep')?.addEventListener('click', async (e: any) => {
       const btn = e.target.closest('[data-maint-action]');
       if (!btn) return;
       const action = btn.dataset.maintAction;
@@ -3597,21 +3597,21 @@ export const AdminCockpit = {
     });
     document.getElementById('admin-backend-log-refresh')?.addEventListener('click', AdminCockpit._renderBackendLog);
     document.getElementById('admin-backend-log-clear')?.addEventListener('click', AdminCockpit._clearBackendLog);
-    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', e => {
+    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', (e: any) => {
       AdminCockpit._backendLogFilter.level = e.target.value;
       AdminCockpit._renderBackendLog();
     });
 
     // Filter controls
-    document.getElementById('admin-log-filter-level')?.addEventListener('change', e => {
+    document.getElementById('admin-log-filter-level')?.addEventListener('change', (e: any) => {
       AdminCockpit._logFilter.level = e.target.value;
       AdminCockpit._renderLogs();
     });
-    document.getElementById('admin-log-filter-scope')?.addEventListener('change', e => {
+    document.getElementById('admin-log-filter-scope')?.addEventListener('change', (e: any) => {
       AdminCockpit._logFilter.scope = e.target.value;
       AdminCockpit._renderLogs();
     });
-    document.getElementById('admin-log-search')?.addEventListener('input', e => {
+    document.getElementById('admin-log-search')?.addEventListener('input', (e: any) => {
       AdminCockpit._logFilter.search = e.target.value.toLowerCase();
       AdminCockpit._renderLogs();
     });
@@ -3632,7 +3632,7 @@ export const AdminCockpit = {
       if (AdminCockpit._activeOvTab === 'thread') AdminCockpit._refreshThreadPane();
     });
 
-    Store.subscribe(evt => {
+    Store.subscribe((evt: any) => {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
         const panel = document.getElementById('admin-tab');
         if (panel?.classList.contains('active')) {
@@ -3642,7 +3642,7 @@ export const AdminCockpit = {
       }
     }, 'AdminCockpit');
 
-    document.addEventListener('mouseover', e => {
+    document.addEventListener('mouseover', (e: any) => {
       const el = e.target.closest?.('.adm-help');
       if (!el) return;
       const r = el.getBoundingClientRect();
@@ -3692,8 +3692,8 @@ export const AdminCockpit = {
       ? AbortSignal.any([AdminCockpit._healthAbort.signal, AbortSignal.timeout(6000)])
       : AdminCockpit._healthAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/health`, { signal: sig })
-      .then(r => r.json())
-      .then(data => {
+      .then((r: any) => r.json())
+      .then((data: any) => {
         AdminCockpit._healthData = data;
         const db = data.db || {};
         const mem = data.memory || {};
@@ -3701,8 +3701,8 @@ export const AdminCockpit = {
 
         const dbEl = document.getElementById('admin-health-db');
         if (dbEl) {
-          const dot = dbEl.querySelector('.admin-health-dot');
-          const lbl = dbEl.querySelector('.admin-health-label');
+          const dot = dbEl.querySelector('.admin-health-dot') as any;
+          const lbl = dbEl.querySelector('.admin-health-label') as any;
           const cls = !db.connected ? 'err' : db.ping_ms > 500 ? 'warn' : 'ok';
           dot.className = `admin-health-dot ${cls}`;
           lbl.textContent = db.connected
@@ -3712,20 +3712,20 @@ export const AdminCockpit = {
 
         const ordEl = document.getElementById('admin-health-orders');
         if (ordEl) {
-          ordEl.querySelector('.admin-health-label').textContent =
+          (ordEl.querySelector('.admin-health-label') as any).textContent =
             `${(db.total_orders ?? 0).toLocaleString()} orders`;
         }
 
         const ovEl = document.getElementById('admin-health-overrides');
         if (ovEl) {
-          ovEl.querySelector('.admin-health-label').textContent =
+          (ovEl.querySelector('.admin-health-label') as any).textContent =
             `${(db.user_overrides ?? 0).toLocaleString()} user overrides`;
         }
 
         const cwEl = document.getElementById('admin-health-color');
         if (cwEl) {
-          const dot = cwEl.querySelector('.admin-health-dot');
-          const lbl = cwEl.querySelector('.admin-health-label');
+          const dot = cwEl.querySelector('.admin-health-dot') as any;
+          const lbl = cwEl.querySelector('.admin-health-label') as any;
           const misses = cw.misses ?? 0;
           dot.className = `admin-health-dot ${misses > 0 ? 'warn' : 'ok'}`;
           lbl.textContent = misses > 0
@@ -3736,8 +3736,8 @@ export const AdminCockpit = {
         const poolChip = document.getElementById('admin-health-pool');
         if (poolChip) {
           const pPool = data.pool || {};
-          const dot  = poolChip.querySelector('.admin-health-dot');
-          const plbl = poolChip.querySelector('.admin-health-label');
+          const dot  = poolChip.querySelector('.admin-health-dot') as any;
+          const plbl = poolChip.querySelector('.admin-health-label') as any;
           if (pPool.error) {
             if (dot) dot.className = 'admin-health-dot warn';
             if (plbl) plbl.textContent = Util.t('ui.pool_unavailable');
@@ -3753,18 +3753,18 @@ export const AdminCockpit = {
 
         const ldEl = document.getElementById('admin-health-loaded');
         if (ldEl) {
-          const lbl = ldEl.querySelector('.admin-health-label');
+          const lbl = ldEl.querySelector('.admin-health-label') as any;
           const loadedAt = mem.loaded_at ? new Date(mem.loaded_at) : null;
           lbl.textContent = loadedAt
             ? `Loaded ${AdminCockpit._relTime(loadedAt)}${mem.load_ms != null ? ' · ' + mem.load_ms + 'ms' : ''}`
             : Util.t('ui.not_loaded');
         }
       })
-      .catch(e => {
+      .catch((e: any) => {
         const dbEl = document.getElementById('admin-health-db');
         if (dbEl) {
-          const dot = dbEl.querySelector('.admin-health-dot');
-          const lbl = dbEl.querySelector('.admin-health-label');
+          const dot = dbEl.querySelector('.admin-health-dot') as any;
+          const lbl = dbEl.querySelector('.admin-health-label') as any;
           dot.className = 'admin-health-dot err';
           lbl.textContent = Util.t('ui.backend_unreachable');
         }
@@ -3782,13 +3782,13 @@ export const AdminCockpit = {
       ? AbortSignal.any([AdminCockpit._pipelineAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._pipelineAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep`, { signal: sig })
-      .then(r => r.json())
-      .then(data => {
+      .then((r: any) => r.json())
+      .then((data: any) => {
         AdminCockpit._deepData = data;
         const p = data.pipeline || {};
         const dbSt = data.db_stats || {};
         const cw = data.color_wheel || {};
-        const st = Persistence.stats ? Persistence.stats() : {};
+        const st: any = Persistence.stats ? Persistence.stats() : {};
 
         const rendered   = st.rendered ?? 0;
         const rawDb      = p.raw_row_count ?? dbSt.total ?? 0;
@@ -3851,7 +3851,7 @@ export const AdminCockpit = {
         ];
 
         wrap.textContent = '';
-        steps.forEach((s, i) => {
+        steps.forEach((s: any, i: any) => {
           if (i > 0) {
             const arrow = document.createElement('span');
             arrow.className = 'admin-pipeline-arrow';
@@ -3900,14 +3900,14 @@ export const AdminCockpit = {
         // Backend warnings
         AdminCockpit._renderBackendWarnings(p.warnings || []);
       })
-      .catch(e => {
+      .catch((e: any) => {
         if (e.name === 'AbortError') return;
         wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${e.message}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
       });
   },
 
-  _pipelineDetailDB(p, dbSt) {
+  _pipelineDetailDB(p: any, dbSt: any) {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -3942,7 +3942,7 @@ export const AdminCockpit = {
     return frag;
   },
 
-  _pipelineDetailColor(p, cw, st) {
+  _pipelineDetailColor(p: any, cw: any, st: any) {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -3988,7 +3988,7 @@ export const AdminCockpit = {
     return frag;
   },
 
-  _pipelineDetailEmitted(p, st) {
+  _pipelineDetailEmitted(p: any, st: any) {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4019,7 +4019,7 @@ export const AdminCockpit = {
     return frag;
   },
 
-  _pipelineDetailPlantFilter(st, plantFiltered, rawDb) {
+  _pipelineDetailPlantFilter(st: any, plantFiltered: any, rawDb: any) {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4040,7 +4040,7 @@ export const AdminCockpit = {
     return frag;
   },
 
-  _pipelineDetailRendered(st, p) {
+  _pipelineDetailRendered(st: any, p: any) {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4072,7 +4072,7 @@ export const AdminCockpit = {
     return frag;
   },
 
-  _kvTable(rows) {
+  _kvTable(rows: any) {
     const tbl = document.createElement('table');
     tbl.className = 'admin-pdtl-tbl';
     for (const [k, v] of rows) {
@@ -4090,11 +4090,11 @@ export const AdminCockpit = {
     return tbl;
   },
 
-  _lineBar(byLine) {
+  _lineBar(byLine: any) {
     const wrap = document.createElement('div');
     wrap.className = 'admin-pdtl-linebars';
-    const max = Math.max(...Object.values(byLine));
-    for (const [line, cnt] of Object.entries(byLine)) {
+    const max = Math.max(...(Object.values(byLine) as any[]));
+    for (const [line, cnt] of Object.entries(byLine) as [string, any][]) {
       const row = document.createElement('div');
       row.className = 'admin-pdtl-linebar-row';
       const lbl = document.createElement('span');
@@ -4117,7 +4117,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _warningList(warnings) {
+  _warningList(warnings: any) {
     const ul = document.createElement('div');
     ul.className = 'admin-bwarn-list';
     for (const w of warnings) {
@@ -4136,7 +4136,7 @@ export const AdminCockpit = {
     return ul;
   },
 
-  _renderBackendWarnings(warnings) {
+  _renderBackendWarnings(warnings: any) {
     const host = document.getElementById('admin-backend-warnings');
     const countEl = document.getElementById('admin-bwarn-count');
     if (!host) return;
@@ -4220,19 +4220,19 @@ export const AdminCockpit = {
     AdminCockpit._updatePurgeCount();
   },
 
-  _setStatus(el, text, kind) {
+  _setStatus(el: any, text: any, kind: any) {
     if (!el) return;
     el.textContent = text;
     el.className = 'admin-status' + (kind ? ' ' + kind : '');
   },
 
-  _pickFile(file) {
+  _pickFile(file: any) {
     if (!file) return;
     AdminCockpit._pendingFile = file;
-    document.getElementById('admin-upload-info').hidden = false;
-    document.getElementById('admin-upload-actions').hidden = false;
-    document.getElementById('admin-upload-fname').textContent = file.name;
-    document.getElementById('admin-upload-fsize').textContent =
+    (document.getElementById('admin-upload-info') as any).hidden = false;
+    (document.getElementById('admin-upload-actions') as any).hidden = false;
+    (document.getElementById('admin-upload-fname') as any).textContent = file.name;
+    (document.getElementById('admin-upload-fsize') as any).textContent =
       file.size < 1_048_576
         ? `${(file.size / 1024).toFixed(1)} KB`
         : `${(file.size / 1_048_576).toFixed(1)} MB`;
@@ -4242,7 +4242,7 @@ export const AdminCockpit = {
 
   _clearUpload() {
     AdminCockpit._pendingFile = null;
-    const fi = document.getElementById('admin-upload-file');
+    const fi = document.getElementById('admin-upload-file') as any;
     if (fi) fi.value = '';
     const info    = document.getElementById('admin-upload-info');
     const actions = document.getElementById('admin-upload-actions');
@@ -4256,7 +4256,7 @@ export const AdminCockpit = {
     const f      = AdminCockpit._pendingFile;
     const status = document.getElementById('admin-upload-status');
     const zone   = document.getElementById('admin-upload-zone');
-    const btn    = document.getElementById('admin-upload-btn');
+    const btn    = document.getElementById('admin-upload-btn') as any;
     if (!f) {
       AdminCockpit._setStatus(status, Util.t('toast.pick_xlsx_first'), 'warn');
       return;
@@ -4270,8 +4270,8 @@ export const AdminCockpit = {
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     Util.fetchTraced(`${Config.API_BASE}/upload`, { method: 'POST', body: fd, headers: { 'x-request-id': reqId } })
-      .then(r => r.json().catch(() => ({})).then(j => ({ ok: r.ok, body: j })))
-      .then(({ ok, body }) => {
+      .then((r: any) => r.json().catch(() => ({})).then((j: any) => ({ ok: r.ok, body: j })))
+      .then(({ ok, body }: any) => {
         if (zone) zone.classList.remove('uploading');
         if (btn)  btn.disabled = false;
         if (!ok || body.status !== 'ok') {
@@ -4314,8 +4314,8 @@ export const AdminCockpit = {
     const startEl = document.getElementById('admin-purge-start');
     const endEl   = document.getElementById('admin-purge-end');
     const status  = document.getElementById('admin-purge-status');
-    const start = startEl?.value;
-    const end   = endEl?.value;
+    const start = (startEl as any)?.value;
+    const end   = (endEl as any)?.value;
     if (!start || !end) {
       AdminCockpit._setStatus(status, Util.t('toast.pick_purge_dates'), 'warn');
       return;
@@ -4336,8 +4336,8 @@ export const AdminCockpit = {
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
       body: JSON.stringify({ start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
     })
-      .then(r => r.json().catch(() => ({})))
-      .then(body => {
+      .then((r: any) => r.json().catch(() => ({})))
+      .then((body: any) => {
         if (body.status !== 'ok') {
           AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: body.message || body.detail || 'unknown' }), 'error');
           ErrorLog.error('admin', `Purge failed: ${body.message || body.detail || 'unknown'}`, body,
@@ -4352,14 +4352,14 @@ export const AdminCockpit = {
           AdminCockpit._renderPipeline();
         });
       })
-      .catch(e => {
+      .catch((e: any) => {
         AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: e.message }), 'error');
         ErrorLog.error('admin', `Purge network error: ${e.message}`,
           { reqId }, { reqId, errorCode: 'http.network' });
       });
   },
 
-  async _runMaintenance(action, table, triggerBtn) {
+  async _runMaintenance(action: any, table: any, triggerBtn: any) {
     const label = triggerBtn ? triggerBtn.textContent : action;
     if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = Util.t('ui.maint_running'); }
     const body = table ? { table } : {};
@@ -4368,12 +4368,12 @@ export const AdminCockpit = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }).then(res => res.json());
+      }).then((res: any) => res.json());
       if (!r.ok) throw new Error(r.error || 'maintenance failed');
       Toast.show(Util.t('ui.maint_done', { label }), 'success');
       ErrorLog.info('admin', `Maintenance: ${action} ${table || '(all)'} ok`);
       AdminCockpit._renderDbDeep();
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('ui.maint_failed', { label, msg: e.message }), 'error');
       ErrorLog.error('admin', `Maintenance: ${action} ${table || '(all)'} failed: ${e.message}`);
       if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = label; }
@@ -4382,7 +4382,7 @@ export const AdminCockpit = {
 
   /* FE↔BE correlation: clicking a reqId pins it as a filter on BOTH panes and
      refreshes them so the operator sees the matching frontend + backend events. */
-  _correlateReqId(reqId) {
+  _correlateReqId(reqId: any) {
     if (!reqId) return;
     AdminCockpit._logFilter.reqId        = reqId;
     AdminCockpit._backendLogFilter.reqId = reqId;
@@ -4393,7 +4393,7 @@ export const AdminCockpit = {
   /* Render (or clear) a small "filtering by request <id>" chip at the top of a
      log list. `onClear` removes the filter. Self-contained: builds the chip if
      a reqId is set, removes any prior chip otherwise. */
-  _renderReqIdChip(listId, reqId, onClear) {
+  _renderReqIdChip(listId: any, reqId: any, onClear: any) {
     const list = document.getElementById(listId);
     if (!list || !list.parentElement) return;
     const chipId = `${listId}-reqid-chip`;
@@ -4463,7 +4463,7 @@ export const AdminCockpit = {
           wrap.appendChild(tsEl);
         }
 
-        const mkSection = (title, statusCls, buildFn, openByDefault, helpText) => {
+        const mkSection = (title: any, statusCls: any, buildFn: any, openByDefault: any, helpText: any) => {
           const det = document.createElement('details');
           det.className = 'admin-db-section';
           if (openByDefault) det.open = true;
@@ -4481,7 +4481,7 @@ export const AdminCockpit = {
             hEl.className = 'adm-help';
             hEl.tabIndex = 0;
             hEl.setAttribute('aria-label', Util.t('aria.help'));
-            hEl.addEventListener('click', e => e.stopPropagation());
+            hEl.addEventListener('click', (e: any) => e.stopPropagation());
             const hDot = document.createElement('span');
             hDot.className = 'adm-help-dot';
             hDot.textContent = '?';
@@ -4505,7 +4505,7 @@ export const AdminCockpit = {
         const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
         const poolMax  = pool.pool_max || 1;
         const poolSt   = pool.error ? 'err' : (pool.requests_waiting > 0 || pool.requests_errors > 0 ? 'warn' : 'ok');
-        mkSection(Util.t('ui.diag_section_pool'), poolSt, body => {
+        mkSection(Util.t('ui.diag_section_pool'), poolSt, (body: any) => {
           if (pool.error) { body.textContent = pool.error; return; }
           body.appendChild(AdminCockpit._dbFillBar(poolUsed, poolMax, Util.t('ui.diag_pool_utilization')));
           body.appendChild(AdminCockpit._kvTable([
@@ -4524,7 +4524,7 @@ export const AdminCockpit = {
 
         // ── 2. Server Info
         const srv = d.server || {};
-        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', body => {
+        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', (body: any) => {
           if (srv.error) { body.textContent = srv.error; return; }
           body.appendChild(AdminCockpit._kvTable([
             [Util.t('ui.diag_database'),        srv.database ?? '—'],
@@ -4538,9 +4538,9 @@ export const AdminCockpit = {
         // ── 3. Table Health
         const tables = Array.isArray(d.tables) ? d.tables : [];
         const hasTableErr = tables[0]?.error;
-        const tablesNeedWork = !hasTableErr && tables.some(t => t.needs_vacuum || t.needs_analyze);
+        const tablesNeedWork = !hasTableErr && tables.some((t: any) => t.needs_vacuum || t.needs_analyze);
         mkSection(Util.t('ui.diag_section_table_health', { count: hasTableErr ? '?' : tables.length }),
-            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), body => {
+            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body: any) => {
           if (hasTableErr) { body.textContent = tables[0].error; return; }
           if (!tables.length) { body.textContent = Util.t('empty.no_user_tables'); return; }
           const strip = document.createElement('div');
@@ -4559,7 +4559,7 @@ export const AdminCockpit = {
         const conn = d.connections || {};
         const hasLong = (conn.long_running || []).length > 0;
         mkSection(Util.t('ui.diag_section_connections', { count: conn.total ?? '?' }),
-            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), body => {
+            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), (body: any) => {
           if (conn.error) { body.textContent = conn.error; return; }
           body.appendChild(AdminCockpit._dbStackBar(conn.by_state || {}));
           if (hasLong) {
@@ -4569,7 +4569,7 @@ export const AdminCockpit = {
             body.appendChild(sub);
             body.appendChild(AdminCockpit._dbTable(
               ['PID', 'State', 'Dur (s)', 'Wait event', 'Query'],
-              (conn.long_running || []).map(q => ({
+              (conn.long_running || []).map((q: any) => ({
                 cells: [q.pid, q.state || '—', q.duration_s ?? '—', q.wait_event || '—', (q.query || '').slice(0, 120)],
                 rowWarn: (q.duration_s || 0) > 30,
                 cellWarn: [],
@@ -4583,7 +4583,7 @@ export const AdminCockpit = {
         const hasLockErr = locks[0]?.error;
         const activeLocks = !hasLockErr && locks.length > 0;
         mkSection(Util.t('ui.diag_section_lock_waits', { count: hasLockErr ? '?' : locks.length }),
-            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), body => {
+            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body: any) => {
           if (hasLockErr) { body.textContent = locks[0].error; return; }
           if (!activeLocks) {
             const ok = document.createElement('div');
@@ -4599,11 +4599,11 @@ export const AdminCockpit = {
         // ── 6. Index Usage
         const indexes = Array.isArray(d.indexes) ? d.indexes : [];
         const hasIdxErr = indexes[0]?.error;
-        const unusedCount = !hasIdxErr ? indexes.filter(ix => ix.unused).length : 0;
+        const unusedCount = !hasIdxErr ? indexes.filter((ix: any) => ix.unused).length : 0;
         mkSection(unusedCount
             ? Util.t('ui.diag_section_index_unused', { count: hasIdxErr ? '?' : indexes.length, unused: unusedCount })
             : Util.t('ui.diag_section_index_usage', { count: hasIdxErr ? '?' : indexes.length }),
-            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), body => {
+            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body: any) => {
           if (hasIdxErr) { body.textContent = indexes[0].error; return; }
           if (!indexes.length) { body.textContent = Util.t('empty.no_indexes'); return; }
           if (unusedCount > 0)
@@ -4614,7 +4614,7 @@ export const AdminCockpit = {
         // ── 7. Slow Queries
         const sq = d.slow_queries || {};
         mkSection(Util.t('ui.diag_section_slow_queries'),
-            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), body => {
+            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), (body: any) => {
           if (!sq.available) {
             const msg = document.createElement('div');
             msg.className = 'admin-db-na-msg';
@@ -4637,15 +4637,15 @@ export const AdminCockpit = {
         // ── 8. Sequences
         const seqs = Array.isArray(d.sequences) ? d.sequences : [];
         const hasSeqErr = seqs[0]?.error;
-        const seqIssues = !hasSeqErr ? seqs.filter(s => s.status !== 'ok').length : 0;
+        const seqIssues = !hasSeqErr ? seqs.filter((s: any) => s.status !== 'ok').length : 0;
         mkSection(Util.t('ui.diag_section_sequences', { count: hasSeqErr ? '?' : seqs.length }),
-            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), body => {
+            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body: any) => {
           if (hasSeqErr) { body.textContent = seqs[0].error; return; }
           if (!seqs.length) { body.textContent = Util.t('empty.no_sequences'); return; }
           body.appendChild(AdminCockpit._dbProgressBars(seqs));
         }, false, Util.t('ui.diag_desc_sequences'));
       })
-      .catch(e => {
+      .catch((e: any) => {
         if (e.name === 'AbortError') return;
         wrap.textContent = '';
         const err = document.createElement('div');
@@ -4660,10 +4660,10 @@ export const AdminCockpit = {
      DB visual helpers
      ----------------------------------------------------------------------- */
 
-  _dbSummaryStrip(d, wrap) {
+  _dbSummaryStrip(d: any, wrap: any) {
     const strip = document.createElement('div');
     strip.className = 'admin-db-summary';
-    const mkTile = (label, num, sub, status, extra) => {
+    const mkTile = (label: any, num: any, sub: any, status: any, extra: any) => {
       const tile = document.createElement('div');
       tile.className = `admin-db-stat-tile ${status}`;
       const top = document.createElement('div');
@@ -4707,7 +4707,7 @@ export const AdminCockpit = {
       locks.length > 0 ? Util.t('ui.diag_tile_contention') : Util.t('ui.diag_tile_clear'),
       locks.length > 0 ? 'err' : 'ok', null));
     const tables = Array.isArray(d.tables) && !d.tables[0]?.error ? d.tables : [];
-    const tblIssues = tables.filter(t => t.needs_vacuum || t.needs_analyze).length;
+    const tblIssues = tables.filter((t: any) => t.needs_vacuum || t.needs_analyze).length;
     strip.appendChild(mkTile(Util.t('ui.diag_tile_table_issues'),
       tblIssues > 0 ? `<span style="color:var(--warn)">${tblIssues}</span>` : '0',
       tblIssues > 0 ? Util.t('ui.diag_tables_need_work', {total: tables.length, issues: tblIssues}) : Util.t('ui.diag_tables_healthy', {count: tables.length}),
@@ -4726,7 +4726,7 @@ export const AdminCockpit = {
     wrap.appendChild(strip);
   },
 
-  _dbFillBar(used, max, label) {
+  _dbFillBar(used: any, max: any, label: any) {
     const pct = max > 0 ? Math.min(100, Math.round(100 * used / max)) : 0;
     const cls = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
     const wrap = document.createElement('div');
@@ -4748,15 +4748,15 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbStackBar(byState) {
-    const STATE_CLS = { 'active': 'state-active', 'idle in transaction': 'state-xit',
+  _dbStackBar(byState: any) {
+    const STATE_CLS: any = { 'active': 'state-active', 'idle in transaction': 'state-xit',
       'idle in transaction (aborted)': 'state-xit', 'idle': 'state-idle' };
-    const total = Math.max(Object.values(byState).reduce((a, b) => a + b, 0), 1);
+    const total = Math.max((Object.values(byState) as any[]).reduce((a: any, b: any) => a + b, 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-stackbar-wrap';
     const bar = document.createElement('div');
     bar.className = 'admin-db-stackbar';
-    for (const [state, count] of Object.entries(byState)) {
+    for (const [state, count] of Object.entries(byState) as [string, any][]) {
       if (!count) continue;
       const pct = Math.max(1, Math.round(100 * count / total));
       const seg = document.createElement('div');
@@ -4768,7 +4768,7 @@ export const AdminCockpit = {
     wrap.appendChild(bar);
     const legend = document.createElement('div');
     legend.className = 'admin-db-stackbar-legend';
-    for (const [state, count] of Object.entries(byState)) {
+    for (const [state, count] of Object.entries(byState) as [string, any][]) {
       if (!count) continue;
       const chip = document.createElement('span');
       chip.className = `admin-db-stackbar-chip ${STATE_CLS[state] || 'state-other'}`;
@@ -4779,7 +4779,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbTableCards(tables) {
+  _dbTableCards(tables: any) {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-tbl-cards';
     for (const tbl of tables) {
@@ -4850,8 +4850,8 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbHBarChart(indexes) {
-    const maxScans = Math.max(...indexes.map(ix => ix.scans ?? 0), 1);
+  _dbHBarChart(indexes: any) {
+    const maxScans = Math.max(...indexes.map((ix: any) => ix.scans ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
     for (const ix of indexes) {
@@ -4885,8 +4885,8 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbSlowQueryBars(queries) {
-    const maxMs = Math.max(...queries.map(q => q.mean_ms ?? 0), 1);
+  _dbSlowQueryBars(queries: any) {
+    const maxMs = Math.max(...queries.map((q: any) => q.mean_ms ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
     for (const q of queries) {
@@ -4920,7 +4920,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbProgressBars(seqs) {
+  _dbProgressBars(seqs: any) {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-progress-list';
     for (const s of seqs) {
@@ -4945,13 +4945,13 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbLockChain(locks) {
+  _dbLockChain(locks: any) {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-lock-chains';
     for (const lk of locks) {
       const chain = document.createElement('div');
       chain.className = 'admin-db-lock-chain';
-      const mkNode = (pid, role, query, cls) => {
+      const mkNode = (pid: any, role: any, query: any, cls: any) => {
         const node = document.createElement('div');
         node.className = `admin-db-lock-node ${cls}`;
         node.innerHTML = `<span class="admin-db-lock-pid">PID ${pid}</span>`
@@ -4970,29 +4970,29 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbWarnBanner(parent, text, isError) {
+  _dbWarnBanner(parent: any, text: any, isError: any) {
     const d = document.createElement('div');
     d.className = `admin-db-banner ${isError ? 'admin-db-banner-err' : 'admin-db-banner-warn'}`;
     d.textContent = text;
     parent.appendChild(d);
   },
 
-  _dbTable(headers, rowDefs) {
+  _dbTable(headers: any, rowDefs: any) {
     const tbl = document.createElement('table');
     tbl.className = 'admin-db-tbl';
     const thead = tbl.createTHead();
     const hrow = thead.insertRow();
-    headers.forEach(h => {
+    headers.forEach((h: any) => {
       const th = document.createElement('th');
       th.textContent = h;
       hrow.appendChild(th);
     });
     const tbody = tbl.createTBody();
-    for (const { cells, rowWarn, rowErr, cellWarn } of rowDefs) {
+    for (const { cells, rowWarn, rowErr, cellWarn } of rowDefs as any[]) {
       const tr = tbody.insertRow();
       if (rowErr)  tr.style.background = 'rgba(192,57,43,0.07)';
       else if (rowWarn) tr.style.background = 'rgba(243,156,18,0.06)';
-      cells.forEach((c, i) => {
+      cells.forEach((c: any, i: any) => {
         const td = tr.insertCell();
         td.textContent = (c === null || c === undefined) ? '—' : c;
         if (cellWarn.includes(i)) td.style.color = 'var(--warn)';
@@ -5027,7 +5027,7 @@ export const AdminCockpit = {
       qIn.className = 'input';
       qIn.placeholder = 'Filter backend (msg / code / category)';
       qIn.title = 'Server-side free-text filter';
-      qIn.addEventListener('input', Util.debounce(ev => {
+      qIn.addEventListener('input', Util.debounce((ev: any) => {
         AdminCockpit._backendLogFilter.q = ev.target.value.trim();
         AdminCockpit._renderBackendLog();
       }, 350));
@@ -5049,12 +5049,12 @@ export const AdminCockpit = {
     });
 
     Util.fetchTraced(`${Config.API_BASE}/logs/backend${params}`, { signal: sig })
-      .then(r => r.json())
-      .then(({ entries: rawEntries, total, dropped }) => {
+      .then((r: any) => r.json())
+      .then(({ entries: rawEntries, total, dropped }: any) => {
         host.textContent = '';
         // Client-side reqId correlation filter (server filters category/since/q/level).
         let entries = rawEntries || [];
-        if (reqIdFilter) entries = entries.filter(e => e.rid === reqIdFilter || e.reqId === reqIdFilter);
+        if (reqIdFilter) entries = entries.filter((e: any) => e.rid === reqIdFilter || e.reqId === reqIdFilter);
         if (countEl) countEl.textContent = Util.t('ui.backend_log_count', { total, shown: entries.length });
 
         // Overflow marker if the backend reports a dropped count.
@@ -5165,7 +5165,7 @@ export const AdminCockpit = {
 
   _copyFiltered() {
     const entries = AdminCockpit._getFilteredEntries();
-    const txt = entries.map(e =>
+    const txt = entries.map((e: any) =>
       `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
     ).join('\n');
     navigator.clipboard?.writeText(txt).then(
@@ -5204,7 +5204,7 @@ export const AdminCockpit = {
         codeEl.id = 'admin-log-filter-code';
         codeEl.className = scopeEl.className || '';
         codeEl.title = 'Filter by error code';
-        codeEl.addEventListener('change', ev => {
+        codeEl.addEventListener('change', (ev: any) => {
           AdminCockpit._logFilter.errorCode = ev.target.value;
           AdminCockpit._renderLogs();
         });
@@ -5219,7 +5219,7 @@ export const AdminCockpit = {
         codeEl.appendChild(cAll);
         for (const c of codes) {
           const opt = document.createElement('option');
-          opt.value = c; opt.textContent = c;
+          opt.value = c as any; opt.textContent = c as any;
           if (c === curCode) opt.selected = true;
           codeEl.appendChild(opt);
         }
@@ -5255,7 +5255,7 @@ export const AdminCockpit = {
       list.appendChild(empty);
     }
 
-    const SCOPE_COLORS = {
+    const SCOPE_COLORS: any = {
       persistence: 'var(--info,#3498db)',
       engine:      '#9b59b6',
       admin:       'var(--accent,#b8791a)',
@@ -5346,7 +5346,7 @@ export const AdminCockpit = {
     }
   },
 
-  _relTime(d) {
+  _relTime(d: any) {
     const diffMs = Date.now() - (d instanceof Date ? d : new Date(d)).getTime();
     const s = Math.round(diffMs / 1000);
     if (s < 60)    return Util.t('ui.time_s_ago', { n: s });
@@ -5504,13 +5504,13 @@ export const AdminCockpit = {
         thead.appendChild(htr);
         tbl.appendChild(thead);
 
-        const ACTION_ICONS = {
+        const ACTION_ICONS: any = {
           color_wheel_upload:  '⬆',
           color_wheel_replace: '↻',
           color_wheel_delete:  '⌫',
           optimization_run:    '📈',
         };
-        const ACTION_COLORS = {
+        const ACTION_COLORS: any = {
           color_wheel_upload:  'var(--ok,#2f7a4d)',
           color_wheel_replace: 'var(--info,#2d5f8c)',
           color_wheel_delete:  'var(--err,#c0392b)',
@@ -5579,9 +5579,9 @@ export const AdminCockpit = {
       return;
     }
     rows.sort((a, b) => b.last - a.last);
-    const fmt = ms => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
-    const cls = ms => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
-    const ago = ts => {
+    const fmt = (ms: any) => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
+    const cls = (ms: any) => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
+    const ago = (ts: any) => {
       if (!ts) return '—';
       const s = Math.round((Date.now() - ts) / 1000);
       if (s < 2)  return 'just now';
@@ -5618,8 +5618,8 @@ export const AdminCockpit = {
     const warnCount = ErrorLog.countBy('warn');
     const errRate   = ErrorLog.errorRatePerMin();
     const warnRate  = ErrorLog.warnRatePerMin();
-    const heap = (performance && performance.memory)
-      ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} / ${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
+    const heap = (performance && (performance as any).memory)
+      ? `${((performance as any).memory.usedJSHeapSize / 1048576).toFixed(0)} / ${((performance as any).memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
       : 'n/a';
     const stats = (Persistence.stats && Persistence.stats()) || {};
 
@@ -5660,10 +5660,10 @@ export const AdminCockpit = {
         </div>
       </div>`;
 
-    document.getElementById('admin-diag-refresh').onclick = () => AdminCockpit._renderDiagnostics();
-    document.getElementById('admin-diag-storage').onclick = () => AdminCockpit._showStorageInventory(inv);
-    document.getElementById('admin-diag-export' ).onclick = () => AdminCockpit._exportDiagnostics();
-    document.getElementById('admin-diag-reset'  ).onclick = () => AdminCockpit._resetClientState();
+    (document.getElementById('admin-diag-refresh') as any).onclick = () => AdminCockpit._renderDiagnostics();
+    (document.getElementById('admin-diag-storage') as any).onclick = () => AdminCockpit._showStorageInventory(inv);
+    (document.getElementById('admin-diag-export' ) as any).onclick = () => AdminCockpit._exportDiagnostics();
+    (document.getElementById('admin-diag-reset'  ) as any).onclick = () => AdminCockpit._resetClientState();
   },
 
   async _resetClientState() {
@@ -5691,10 +5691,10 @@ export const AdminCockpit = {
     setTimeout(() => location.reload(), 50);
   },
 
-  _showStorageInventory(inv) {
+  _showStorageInventory(inv: any) {
     if (!inv) inv = Persistence.storageInventory();
     const top = inv.items.slice(0, 12)
-      .map(i => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
+      .map((i: any) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
       .join('\n') || Util.t('ui.ls_empty');
     const lsStatus = inv.degraded ? Util.t('ui.ls_evicted_tier') : inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : Util.t('ui.ls_healthy');
     const detail =
@@ -5720,9 +5720,9 @@ export const AdminCockpit = {
       userAgent:   navigator.userAgent,
       location:    location.href,
       storage:     Persistence.storageInventory(),
-      heap: (performance && performance.memory) ? {
-        usedMB:  +(performance.memory.usedJSHeapSize / 1048576).toFixed(1),
-        limitMB: +(performance.memory.jsHeapSizeLimit / 1048576).toFixed(1),
+      heap: (performance && (performance as any).memory) ? {
+        usedMB:  +((performance as any).memory.usedJSHeapSize / 1048576).toFixed(1),
+        limitMB: +((performance as any).memory.jsHeapSizeLimit / 1048576).toFixed(1),
       } : null,
       persistence: (Persistence.stats && Persistence.stats()) || null,
       health:      AdminCockpit._healthData || null,
@@ -5777,18 +5777,18 @@ export const Interface = (() => {
   const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
   const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
 
-  let _objects = [];               // last GET /objects payload — drives ribbon + rail
-  let _selected = null;            // selected object_key (master selection)
+  let _objects: any[] = [];               // last GET /objects payload — drives ribbon + rail
+  let _selected: any = null;            // selected object_key (master selection)
   let _tab = 'overview';           // active detail tab: 'overview' | 'mapping' | 'history'
-  let _testResult = null;          // last {cls,dot,msg} from a Test-connection click
-  let _lastNewestKey = null;       // object_key of the most-recent run (ribbon deep-link)
-  const _config = {};              // object_key -> GET /config payload (transport/params/has_secret)
+  let _testResult: any = null;          // last {cls,dot,msg} from a Test-connection click
+  let _lastNewestKey: any = null;       // object_key of the most-recent run (ribbon deep-link)
+  const _config: any = {};              // object_key -> GET /config payload (transport/params/has_secret)
   // Per-object mapping editor state: { rows:[{sap_field,nimbus_column,transform,active}], dirty:bool }
-  const _mapState = {};
+  const _mapState: any = {};
 
   // Master upsert keys — MUST mirror sap_sync._MASTER_KEY_COLUMNS. A master object whose
   // active mapping omits any of these hits a NOT-NULL on upsert, so the editor blocks Save.
-  const MASTER_KEYS = {
+  const MASTER_KEYS: any = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
     production_lines: ['subnetwork', 'plant', 'production_line'],
@@ -5796,24 +5796,24 @@ export const Interface = (() => {
     material_plants:  ['material_id', 'plant'],
   };
   // One-line transform descriptions (keys mirror sap_sync.TRANSFORMS).
-  const XHINT = {
+  const XHINT: any = {
     none: 'pass through unchanged',    alpha: 'ALPHA-pad — e.g. MATNR',
     strip_zeros: 'drop leading zeros', dats: 'SAP YYYYMMDD → ISO date',
     tims: 'SAP HHMMSS → time',         decimal: 'packed decimal, trailing sign',
     uom: 'unit of measure → ISO',      bool_x: "SAP 'X' flag → boolean",
   };
   // Transport-specific connection fields (label + example only — scaffolds the params editor).
-  const TRANSPORT_FIELDS = {
+  const TRANSPORT_FIELDS: any = {
     file_drop: [['path', 'Share / Blob path', '/data/sap_drop'], ['glob', 'File glob', 'plants_*.xlsx']],
     odata:     [['base_url', 'Service base URL', 'https://sap-gw/odata/ZNIMBUS_SRV'], ['entity_set', 'Entity set', 'PlantSet'], ['filter', '$filter (delta)', 'LAEDA gt {watermark}'], ['page_size', 'Page size', '1000']],
     rfc:       [['dest', 'RFC destination', 'SAP_PRD'], ['function', 'Function module', 'Z_NIMBUS_GET_PLANTS'], ['batch', 'Batch size', '2000']],
   };
 
-  const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const _esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
 
   function _writeHeaders(json = true) {
-    const h = { 'x-user-email': Session.actor() };
+    const h: any = { 'x-user-email': Session.actor() };
     if (json) h['content-type'] = 'application/json';
     return h;
   }
@@ -5832,16 +5832,16 @@ export const Interface = (() => {
     const host = document.getElementById('sap-interface-host');
     if (!host) return;
     try {
-      const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then(r => {
+      const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then((r: any) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
       _objects = data.objects || [];
-      if (!_selected || !_objects.some(o => o.object_key === _selected)) {
+      if (!_selected || !_objects.some((o: any) => o.object_key === _selected)) {
         _selected = _objects.length ? _objects[0].object_key : null;
       }
       _paint();
-    } catch (e) {
+    } catch (e: any) {
       host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">⚠</div>`
         + `<div class="sap-empty-t">${_esc(Util.t('ui.sap_load_failed'))}</div>`
         + `<div class="sap-empty-d">${_esc(e.message)}</div></div>`;
@@ -5867,9 +5867,9 @@ export const Interface = (() => {
         <div id="sap-rail"></div>
         <div id="sap-detail"></div>
       </div>`;
-    host.querySelectorAll('[data-jump]').forEach(tile => tile.addEventListener('click', () => {
+    host.querySelectorAll('[data-jump]').forEach((tile: any) => tile.addEventListener('click', () => {
       const j = tile.dataset.jump;
-      if (j === 'errors') { const eo = _objects.find(o => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
+      if (j === 'errors') { const eo = _objects.find((o: any) => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
       else if (j === 'last' && _lastNewestKey) { _selected = _lastNewestKey; }
       _tab = 'history'; _renderRail(); _renderDetail();
     }));
@@ -5878,15 +5878,15 @@ export const Interface = (() => {
   }
 
   function _renderRibbon() {
-    const enabled = _objects.filter(o => o.enabled).length;
-    let newest = null, newestObj = null;
-    _objects.forEach(o => {
+    const enabled = _objects.filter((o: any) => o.enabled).length;
+    let newest: any = null, newestObj: any = null;
+    _objects.forEach((o: any) => {
       const lr = o.last_run;
       if (lr && lr.started_at && (!newest || new Date(lr.started_at) > new Date(newest.started_at))) { newest = lr; newestObj = o; }
     });
     _lastNewestKey = newestObj ? newestObj.object_key : null;
-    const errs = _objects.filter(o => o.last_run && o.last_run.status === 'error').length;
-    const tile = (k, v, d, cls, act) =>
+    const errs = _objects.filter((o: any) => o.last_run && o.last_run.status === 'error').length;
+    const tile = (k: any, v: any, d: any, cls: any, act: any) =>
       `<div class="kpi-tile${cls ? ' ' + cls : ''}${act ? ' is-actionable' : ''}"${act ? ` data-jump="${act}"` : ''}>`
       + `<div class="k">${_esc(k)}</div><div class="v">${v}</div><div class="d">${_esc(d)}</div></div>`;
     const lastV = newest ? `<span class="sap-v-sm">${_esc(_relTime(newest.started_at))}</span>` : '—';
@@ -5908,7 +5908,7 @@ export const Interface = (() => {
   function _renderRail() {
     const el = document.getElementById('sap-rail');
     if (!el) return;
-    const rows = _objects.map(o => {
+    const rows = _objects.map((o: any) => {
       const sel = o.object_key === _selected ? ' sap-rail-row-sel' : '';
       const lr = o.last_run;
       const dotCls = !lr ? '' : (lr.status === 'ok' ? 'ok' : (lr.status === 'error' ? 'err' : (lr.status === 'running' ? 'warn' : '')));
@@ -5931,12 +5931,12 @@ export const Interface = (() => {
     }).join('');
     el.innerHTML = `<div class="panel">
       <div class="panel-head"><span class="sap-section-label">${_esc(Util.t('ui.sap_objects'))}</span>
-        <span class="sap-hint">${_objects.filter(o => o.enabled).length} / ${_objects.length}</span></div>
+        <span class="sap-hint">${_objects.filter((o: any) => o.enabled).length} / ${_objects.length}</span></div>
       <div class="sap-rail">${rows}</div></div>`;
-    el.querySelectorAll('[data-obj]').forEach(r =>
+    el.querySelectorAll('[data-obj]').forEach((r: any) =>
       r.addEventListener('click', () => { _selected = r.dataset.obj; _testResult = null; _renderRail(); _renderDetail(); }));
-    el.querySelectorAll('[data-enable]').forEach(cb => {
-      cb.addEventListener('click', e => e.stopPropagation());
+    el.querySelectorAll('[data-enable]').forEach((cb: any) => {
+      cb.addEventListener('click', (e: any) => e.stopPropagation());
       cb.addEventListener('change', () => _saveConfig(cb.dataset.enable, { enabled: cb.checked }, cb.checked ? Util.t('toast.sap_enable_note') : null));
     });
   }
@@ -5944,10 +5944,10 @@ export const Interface = (() => {
   function _renderDetail() {
     const el = document.getElementById('sap-detail');
     if (!el) return;
-    const o = _objects.find(x => x.object_key === _selected);
+    const o = _objects.find((x: any) => x.object_key === _selected);
     if (!o) { el.innerHTML = ''; return; }
     const kind = o.kind || 'master';
-    const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    const tabBtn = (id: any, label: any) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
     el.innerHTML = `<div class="panel">
       <div class="sap-detail-head">
         <span class="sap-detail-name">${_esc(o.label || o.object_key)}</span>
@@ -5961,16 +5961,16 @@ export const Interface = (() => {
       <div class="sap-tabs">${tabBtn('overview', Util.t('ui.sap_overview'))}${tabBtn('mapping', Util.t('ui.sap_mapping'))}${tabBtn('history', Util.t('ui.sap_history'))}</div>
       <div class="sap-tabbody" id="sap-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>
     </div>`;
-    el.querySelectorAll('[data-tab]').forEach(b =>
+    el.querySelectorAll('[data-tab]').forEach((b: any) =>
       b.addEventListener('click', () => { _tab = b.dataset.tab; _renderDetail(); }));
-    el.querySelectorAll('[data-act]').forEach(b =>
+    el.querySelectorAll('[data-act]').forEach((b: any) =>
       b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b)));
     if (_tab === 'overview') _renderOverview(o);
     else if (_tab === 'mapping') _renderMapping(o);
     else _renderHistory(o);
   }
 
-  function _relTime(ts) {
+  function _relTime(ts: any) {
     if (!ts) return '—';
     const d = new Date(ts); if (isNaN(d.getTime())) return String(ts);
     let s = Math.floor((Date.now() - d.getTime()) / 1000); if (s < 0) s = 0;
@@ -5980,11 +5980,11 @@ export const Interface = (() => {
     return `${Math.floor(h / 24)}d ago`;
   }
 
-  function _cronProse(c) {
+  function _cronProse(c: any) {
     if (!c) return null;
     const p = c.trim().split(/\s+/); if (p.length !== 5) return null;
     const mi = p[0], ho = p[1], dom = p[2], mon = p[3];
-    const pad = x => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
+    const pad = (x: any) => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
     if (dom === '*' && mon === '*' && p[4] === '*' && ho !== '*' && mi !== '*') return `Every day at ${pad(ho)}:${pad(mi)}`;
     if (mi.indexOf('*/') === 0) return `Every ${mi.slice(2)} minutes`;
     if (ho.indexOf('*/') === 0 && dom === '*') return `Every ${ho.slice(2)} hours`;
@@ -5994,13 +5994,13 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Overview tab — transport config, secret indicator, schedule, checklist
   // -----------------------------------------------------------------------
-  async function _renderOverview(o) {
+  async function _renderOverview(o: any) {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
-    let cfg = _config[o.object_key];
+    let cfg: any = _config[o.object_key];
     if (!cfg) {
       try {
-        cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then(r => {
+        cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then((r: any) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
@@ -6022,8 +6022,8 @@ export const Interface = (() => {
     const secret = cfg.has_secret
       ? `<div class="sap-chipline"><span class="admin-health-dot ok"></span> ${_esc(Util.t('ui.sap_credential_present'))}</div>`
       : `<div class="sap-chipline"><span class="admin-health-dot warn"></span> ${_esc(Util.t('ui.sap_no_credential'))}</div>`;
-    const activeMaps = (_mapState[o.object_key]?.rows || []).filter(m => m.active && m.sap_field && m.nimbus_column).length;
-    const steps = [
+    const activeMaps = (_mapState[o.object_key]?.rows || []).filter((m: any) => m.active && m.sap_field && m.nimbus_column).length;
+    const steps: any[] = [
       ['01', Util.t('ui.sap_step_transport'), true],
       ['02', Util.t('ui.sap_step_map'), activeMaps > 0],
       ['03', Util.t('ui.sap_step_enable'), o.enabled && !!cron],
@@ -6031,7 +6031,7 @@ export const Interface = (() => {
       ['05', Util.t('ui.sap_step_dryrun'), !!(lr && lr.triggered_by === 'dry-run')],
       ['06', Util.t('ui.sap_step_first'), !!(lr && lr.status === 'ok' && (lr.rows_inserted || 0) > 0)],
     ];
-    const checklist = steps.map(s =>
+    const checklist = steps.map((s: any) =>
       `<div class="sap-check-step${s[2] ? ' done' : ''}"><span class="sap-check-n">${s[0]}</span><span class="sap-check-mark">${s[2] ? '✓' : ''}</span><span class="sap-check-t">${_esc(s[1])}</span></div>`).join('');
     const tr = _testResult;
     const testStrip = tr
@@ -6064,26 +6064,26 @@ export const Interface = (() => {
         </div>
       </div>`;
 
-    document.getElementById('sap-transport-sel')?.addEventListener('change', e => {
+    document.getElementById('sap-transport-sel')?.addEventListener('change', (e: any) => {
       _config[o.object_key] = { ...(_config[o.object_key] || {}), transport: e.target.value };
       _testResult = null;
       _saveConfig(o.object_key, { transport: e.target.value }, null);
     });
-    document.getElementById('sap-cron-input')?.addEventListener('change', e =>
+    document.getElementById('sap-cron-input')?.addEventListener('change', (e: any) =>
       _saveConfig(o.object_key, { schedule_cron: e.target.value.trim() || null }, null));
     document.getElementById('sap-test-btn')?.addEventListener('click', () => _testConnection(o.object_key, transport));
   }
 
-  function _transportFieldsHTML(transport, params) {
+  function _transportFieldsHTML(transport: any, params: any) {
     const fields = TRANSPORT_FIELDS[transport] || [];
     if (!fields.length) return '';
-    return fields.map(f =>
+    return fields.map((f: any) =>
       `<div class="sap-field"><label>${_esc(f[1])}</label><input class="sap-mono" data-param="${_esc(f[0])}" value="${_esc(params[f[0]] != null ? params[f[0]] : '')}" placeholder="${_esc(f[2])}" spellcheck="false"></div>`).join('');
   }
 
-  async function _testConnection(object, transport) {
-    const params = {};
-    document.querySelectorAll('#sap-transport-fields [data-param]').forEach(inp => {
+  async function _testConnection(object: any, transport: any) {
+    const params: any = {};
+    document.querySelectorAll('#sap-transport-fields [data-param]').forEach((inp: any) => {
       if (inp.value.trim()) params[inp.dataset.param] = inp.value.trim();
     });
     _testResult = { cls: 'info', dot: '', msg: Util.t('ui.sap_testing') };
@@ -6092,45 +6092,45 @@ export const Interface = (() => {
       const res = await fetch(`${API}/sap/interface/test-connection`, {
         method: 'POST', headers: _writeHeaders(),
         body: JSON.stringify({ transport, source_params: params }),
-      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       _testResult = res.ok
         ? { cls: 'ok', dot: 'ok', msg: `${Util.t('toast.sap_conn_ok')} — ${res.detail || ''}`.trim() }
         : { cls: 'info', dot: '', msg: res.detail || Util.t('toast.sap_conn_fail') };
-    } catch (e) {
+    } catch (e: any) {
       _testResult = { cls: 'err', dot: 'err', msg: `${Util.t('toast.sap_conn_fail')} — ${e.message}` };
       ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
     }
     if (_tab === 'overview' && _selected === object) _renderDetail();
   }
 
-  async function _saveConfig(object, patch, confirmMsg) {
+  async function _saveConfig(object: any, patch: any, confirmMsg: any) {
     try {
       await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
-      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
       if (confirmMsg) Toast.show(confirmMsg, 'info');
       await _reload();
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('sap-interface', `Config save failed for ${object}: ${e.message}`);
       await _reload();
     }
   }
 
-  async function _runNow(object, dryRun, btn) {
+  async function _runNow(object: any, dryRun: any, btn: any) {
     if (btn) btn.disabled = true;
     try {
       const res = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
-      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (res.status === 'ok') {
         Toast.show(`${dryRun ? Util.t('toast.sap_dryrun_done') : Util.t('toast.sap_sync_done')} (read ${res.rows_read ?? 0} · +${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
       } else {
         Toast.show(`${Util.t('toast.sap_sync_failed')}: ${res.error || ''}`.trim(), 'error', 6000);
       }
       await _reload();
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(`${Util.t('toast.sap_sync_failed')}: ${e.message}`, 'error');
       ErrorLog.error('sap-interface', `Sync failed for ${object}: ${e.message}`);
     } finally {
@@ -6141,24 +6141,24 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Mapping tab — SAP field ━▶ transform ━▶ NIMBUS column flow editor
   // -----------------------------------------------------------------------
-  async function _renderMapping(o) {
+  async function _renderMapping(o: any) {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
     if (!_mapState[o.object_key]) {
       body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
       try {
-        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then(r => {
+        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then((r: any) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
         _mapState[o.object_key] = {
-          rows: (data.mappings || []).map(m => ({
+          rows: (data.mappings || []).map((m: any) => ({
             sap_field: m.sap_field || '', nimbus_column: m.nimbus_column || '',
             transform: m.transform || 'none', active: m.active !== false,
           })),
           dirty: false,
         };
-      } catch (e) {
+      } catch (e: any) {
         body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_map_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
         ErrorLog.error('sap-interface', `Load mappings failed for ${o.object_key}: ${e.message}`);
         return;
@@ -6168,9 +6168,9 @@ export const Interface = (() => {
     _drawMapping(o);
   }
 
-  function _drawMapping(o) {
+  function _drawMapping(o: any) {
     const body = document.getElementById('sap-tabbody');
-    const st = _mapState[o.object_key];
+    const st: any = _mapState[o.object_key];
     if (!body || !st) return;
     const isMaster = (o.kind || 'master') === 'master';
     const keys = MASTER_KEYS[o.object_key] || [];
@@ -6186,9 +6186,9 @@ export const Interface = (() => {
       return;
     }
 
-    const rows = st.rows.map((m, i) => {
+    const rows = st.rows.map((m: any, i: any) => {
       const isKey = isMaster && keys.indexOf(m.nimbus_column) > -1;
-      const opts = TRANSFORMS.map(tr => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
+      const opts = TRANSFORMS.map((tr: any) => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
       return `<div class="sap-map-row${m.active ? '' : ' inactive'}" style="animation-delay:${i * 55}ms">
         <input class="sap-node sap-node-sap" data-idx="${i}" data-f="sap_field" value="${_esc(m.sap_field)}" placeholder="SAP field" spellcheck="false">
         <span class="sap-wire"><span class="sap-wire-fill" style="animation-delay:${i * 55}ms"></span></span>
@@ -6200,7 +6200,7 @@ export const Interface = (() => {
 
     let guard = '', blocked = false;
     if (isMaster && keys.length) {
-      const missing = keys.filter(k => !st.rows.some(m => m.nimbus_column === k && m.active));
+      const missing = keys.filter((k: any) => !st.rows.some((m: any) => m.nimbus_column === k && m.active));
       blocked = missing.length > 0;
       guard = _keystrip(o, st);
       if (blocked) {
@@ -6218,7 +6218,7 @@ export const Interface = (() => {
         <button class="btn btn-sm btn-primary" id="sap-save-map"${blocked ? ` disabled title="${_esc(Util.t('ui.sap_resolve_keys'))}"` : ''}>${_esc(Util.t('ui.sap_save_mappings'))}</button>
       </div>`;
 
-    body.querySelectorAll('[data-f]').forEach(inp => {
+    body.querySelectorAll('[data-f]').forEach((inp: any) => {
       const isText = inp.tagName === 'INPUT' && inp.type === 'text';
       const update = () => {
         const row = st.rows[+inp.dataset.idx]; if (!row) return;
@@ -6228,36 +6228,36 @@ export const Interface = (() => {
       if (isText) { inp.addEventListener('input', update); inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
       else { inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
     });
-    body.querySelectorAll('[data-del]').forEach(b =>
+    body.querySelectorAll('[data-del]').forEach((b: any) =>
       b.addEventListener('click', () => { st.rows.splice(+b.dataset.del, 1); st.dirty = true; _drawMapping(o); }));
     document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
     document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(o.object_key));
   }
 
-  function _keystrip(o, st) {
+  function _keystrip(o: any, st: any) {
     const keys = MASTER_KEYS[o.object_key] || [];
     if (!keys.length) return '';
-    const chips = keys.map(k => {
-      const ok = st.rows.some(m => m.nimbus_column === k && m.active);
+    const chips = keys.map((k: any) => {
+      const ok = st.rows.some((m: any) => m.nimbus_column === k && m.active);
       return `<span class="sap-keychip${ok ? '' : ' miss'}"><span class="admin-health-dot ${ok ? 'ok' : 'err'}"></span>${_esc(k)}${ok ? '' : ` <span class="sap-req">${_esc(Util.t('ui.sap_required'))}</span>`}</span>`;
     }).join('');
     return `<div class="sap-keystrip"><span class="sap-ks-label">${_esc(Util.t('ui.sap_key_columns'))}</span>${chips}</div>`;
   }
 
-  async function _saveMappings(object) {
-    const st = _mapState[object];
+  async function _saveMappings(object: any) {
+    const st: any = _mapState[object];
     if (!st) return;
     const mappings = st.rows
-      .filter(m => m.sap_field.trim() && m.nimbus_column.trim())
-      .map((m, i) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
+      .filter((m: any) => m.sap_field.trim() && m.nimbus_column.trim())
+      .map((m: any, i: any) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
     try {
       await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
-      }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       delete _mapState[object];
       Toast.show(Util.t('toast.sap_mappings_saved'), 'success');
       await _reload();
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${e.message}`);
     }
@@ -6266,13 +6266,13 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // History tab — run timeline (status, counts, duration, watermark, errors)
   // -----------------------------------------------------------------------
-  async function _renderHistory(o) {
+  async function _renderHistory(o: any) {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
     body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
     try {
       const params = new URLSearchParams({ limit: '50', object: o.object_key });
-      const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then(r => {
+      const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then((r: any) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
@@ -6283,16 +6283,16 @@ export const Interface = (() => {
         body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
         return;
       }
-      body.innerHTML = `<div class="sap-feed">${runs.map((rn, i) => _runRow(rn, i)).join('')}</div>`;
-      body.querySelectorAll('[data-exp]').forEach(b =>
+      body.innerHTML = `<div class="sap-feed">${runs.map((rn: any, i: any) => _runRow(rn, i)).join('')}</div>`;
+      body.querySelectorAll('[data-exp]').forEach((b: any) =>
         b.addEventListener('click', () => b.closest('.sap-run').classList.toggle('open')));
-    } catch (e) {
+    } catch (e: any) {
       body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
       ErrorLog.error('sap-interface', `Load runs failed: ${e.message}`);
     }
   }
 
-  function _runRow(rn, i) {
+  function _runRow(rn: any, i: any) {
     const status = rn.status || 'unknown';
     const cls = status === 'ok' ? 'ok' : (status === 'error' ? 'err' : 'info');
     const pill = status === 'ok' ? '<span class="sap-pill ok">ok</span>'
@@ -6306,7 +6306,7 @@ export const Interface = (() => {
     return `<div class="sap-run ${cls}"><div class="sap-run-head">${pill}<span class="sap-run-t">${_esc(_fmtTs(rn.started_at))}</span><span class="sap-run-by">${_esc(rn.triggered_by || 'manual')}</span>${dur ? `<span class="sap-run-dur">${_esc(dur)}</span>` : ''}</div><div class="sap-run-counts">${counts}</div>${wm}${err}</div>`;
   }
 
-  function _dur(a, b) {
+  function _dur(a: any, b: any) {
     if (!a || !b) return '';
     const d = (new Date(b).getTime() - new Date(a).getTime()) / 1000;
     if (isNaN(d) || d < 0) return '';
@@ -6315,7 +6315,7 @@ export const Interface = (() => {
     return `${Math.floor(d / 60)}m ${Math.round(d % 60)}s`;
   }
 
-  function _fmtTs(ts) {
+  function _fmtTs(ts: any) {
     if (!ts) return '—';
     try {
       const d = new Date(ts);
@@ -6324,7 +6324,7 @@ export const Interface = (() => {
     } catch { return String(ts); }
   }
 
-  return { render };
+  return { render } as any;
 })();
 
 /* =============================================================================
@@ -6346,38 +6346,38 @@ export const Security = (() => {
   let _tab = 'users';              // active top-level tab: 'users' | 'roles'
 
   // ---- Users tab state ----
-  let _users = [];                 // last GET /security/users .users: [{username,role,has_password}]
+  let _users: any[] = [];                 // last GET /security/users .users: [{username,role,has_password}]
   let _usersSearch = '';           // current server-side search query
-  let _roleOptions = [];           // role names for the Role <select> (from GET /master-data/roles)
-  let _staged = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
-  const _pwOpen = new Set();       // usernames with an open inline password-reveal row
-  const _nameSaveTimers = new Map(); // username -> pending debounce timeout id
+  let _roleOptions: any[] = [];           // role names for the Role <select> (from GET /master-data/roles)
+  let _staged: any[] = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
+  const _pwOpen: any = new Set();       // usernames with an open inline password-reveal row
+  const _nameSaveTimers: any = new Map(); // username -> pending debounce timeout id
 
   // ---- Roles tab state ----
-  let _roles = [];                 // GET /master-data/roles rows: [{role, description}]
-  let _rolePlants = [];            // GET /master-data/role_plants rows: [{role, plant}]
-  let _rolesInUse = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
-  let _selectedRole = null;
+  let _roles: any[] = [];                 // GET /master-data/roles rows: [{role, description}]
+  let _rolePlants: any[] = [];            // GET /master-data/role_plants rows: [{role, plant}]
+  let _rolesInUse: any = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
+  let _selectedRole: any = null;
 
-  const _esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const _esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
 
   function _writeHeaders(json = true) {
-    const h = { 'x-user-email': Session.actor() };
+    const h: any = { 'x-user-email': Session.actor() };
     if (json) h['content-type'] = 'application/json';
     return h;
   }
 
-  function _postJSON(url, body) {
+  function _postJSON(url: any, body: any) {
     return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
-      .then(r => {
+      .then((r: any) => {
         if (!r.ok) {
           // A 403 here means the backend admin gate rejected us though the UI
           // believed we were admin (stale cached role). Reconcile + prompt
           // re-auth instead of only bubbling a raw error to the caller.
           if (r.status === 403) { try { Session.onAuthDenied(); } catch {} }
-          return r.json().catch(() => ({})).then(e => {
-            const err = new Error(e.detail || `HTTP ${r.status}`);
+          return r.json().catch(() => ({})).then((e: any) => {
+            const err: any = new Error(e.detail || `HTTP ${r.status}`);
             err.status = r.status;
             throw err;
           });
@@ -6401,14 +6401,14 @@ export const Security = (() => {
   function _paintShell() {
     const host = document.getElementById('security-host');
     if (!host) return;
-    const tabBtn = (id, label) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    const tabBtn = (id: any, label: any) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
     host.innerHTML = `
       <div class="sap-pagehead">
         <div><div class="sap-pagehead-title"><h2>${_esc(Util.t('tab.security'))}</h2></div></div>
       </div>
       <div class="sap-tabs">${tabBtn('users', Util.t('tab.security_users'))}${tabBtn('roles', Util.t('tab.security_roles'))}</div>
       <div id="security-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>`;
-    host.querySelectorAll('[data-tab]').forEach(b =>
+    host.querySelectorAll('[data-tab]').forEach((b: any) =>
       b.addEventListener('click', () => { _tab = b.dataset.tab; _paintShell(); _loadActiveTab(); }));
   }
 
@@ -6424,15 +6424,15 @@ export const Security = (() => {
     try {
       const q = _usersSearch.trim();
       const usersUrl = `${API}/security/users` + (q ? `?search=${encodeURIComponent(q)}` : '');
-      const [usersData, rolesData] = await Promise.all([
-        Util.fetchTraced(usersUrl).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-        Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      const [usersData, rolesData]: any = await Promise.all([
+        Util.fetchTraced(usersUrl).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/roles`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
       ]);
       _users = usersData.users || [];
-      _roleOptions = [...new Set((rolesData.rows || []).map(r => r.role).filter(Boolean))].sort();
+      _roleOptions = [...new Set((rolesData.rows || []).map((r: any) => r.role).filter(Boolean))].sort();
       if (_tab !== 'users') return; // bail if the admin switched tabs while awaiting
       _renderUsersTab();
-    } catch (e) {
+    } catch (e: any) {
       const is403 = e.status === 403 || /\b403\b/.test(e.message || '');
       // Stale-admin 403 (the /master-data/roles half of the Promise.all is
       // ungated, so a 403 here is from /security/users): reconcile + re-auth.
@@ -6449,13 +6449,13 @@ export const Security = (() => {
     // keystroke-driven reload causes (captured synchronously, not via
     // focus/blur listeners, since replacing innerHTML can race those).
     const hadFocus = document.activeElement && document.activeElement.id === 'sec-user-search';
-    const caret = hadFocus ? document.activeElement.selectionStart : null;
+    const caret = hadFocus ? (document.activeElement as any).selectionStart : null;
     body.innerHTML = _usersShellHtml();
     _wireUsersShell();
     _renderUsersRows();
     _renderUsersActions();
     if (hadFocus) {
-      const search = document.getElementById('sec-user-search');
+      const search = document.getElementById('sec-user-search') as any;
       if (search) {
         search.focus();
         const pos = caret ?? search.value.length;
@@ -6498,7 +6498,7 @@ export const Security = (() => {
   }
 
   function _wireUsersShell() {
-    const search = document.getElementById('sec-user-search');
+    const search = document.getElementById('sec-user-search') as any;
     if (search) {
       search.addEventListener('input', () => { _usersSearch = search.value; _debouncedUserSearch(); });
     }
@@ -6517,14 +6517,14 @@ export const Security = (() => {
   }
 
   // extraAttrs is a caller-built, already-escaped attribute string (id="..." or data-x="...").
-  function _roleSelectHtml(value, extraAttrs) {
+  function _roleSelectHtml(value: any, extraAttrs: any) {
     const opts = [`<option value=""${!value ? ' selected' : ''}>${_esc(Util.t('ui.select_placeholder'))}</option>`]
-      .concat(_roleOptions.map(r => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
+      .concat(_roleOptions.map((r: any) => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
       .join('');
     return `<select class="input" ${extraAttrs}>${opts}</select>`;
   }
 
-  function _userRowHtml(u) {
+  function _userRowHtml(u: any) {
     const pwOpen = _pwOpen.has(u.username);
     const pwCell = pwOpen
       ? `<div style="display:flex;gap:6px;align-items:center">
@@ -6547,7 +6547,7 @@ export const Security = (() => {
     </tr>`;
   }
 
-  function _stagedRowHtml(r, i) {
+  function _stagedRowHtml(r: any, i: any) {
     return `<tr class="md-row-new">
       <td class="md-td">${_esc(r.username)}</td>
       <td class="md-td"><input type="text" class="input" data-first-name-staged="${i}" value="${_esc(r.first_name || '')}" maxlength="100"></td>
@@ -6566,34 +6566,34 @@ export const Security = (() => {
     } else {
       tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
     }
-    tbody.querySelectorAll('[data-role-select-user]').forEach(sel =>
+    tbody.querySelectorAll('[data-role-select-user]').forEach((sel: any) =>
       sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser, sel.value)));
-    tbody.querySelectorAll('[data-role-select-staged]').forEach(sel =>
+    tbody.querySelectorAll('[data-role-select-staged]').forEach((sel: any) =>
       sel.addEventListener('change', () => { _staged[+sel.dataset.roleSelectStaged].role = sel.value; }));
-    tbody.querySelectorAll('[data-first-name-user]').forEach(inp =>
+    tbody.querySelectorAll('[data-first-name-user]').forEach((inp: any) =>
       inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.firstNameUser)));
-    tbody.querySelectorAll('[data-last-name-user]').forEach(inp =>
+    tbody.querySelectorAll('[data-last-name-user]').forEach((inp: any) =>
       inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.lastNameUser)));
-    tbody.querySelectorAll('[data-first-name-staged]').forEach(inp =>
+    tbody.querySelectorAll('[data-first-name-staged]').forEach((inp: any) =>
       inp.addEventListener('blur', () => { _staged[+inp.dataset.firstNameStaged].first_name = inp.value; }));
-    tbody.querySelectorAll('[data-last-name-staged]').forEach(inp =>
+    tbody.querySelectorAll('[data-last-name-staged]').forEach((inp: any) =>
       inp.addEventListener('blur', () => { _staged[+inp.dataset.lastNameStaged].last_name = inp.value; }));
-    tbody.querySelectorAll('[data-pw-toggle]').forEach(b =>
+    tbody.querySelectorAll('[data-pw-toggle]').forEach((b: any) =>
       b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle); _renderUsersRows(); }));
-    tbody.querySelectorAll('[data-pw-cancel]').forEach(b =>
+    tbody.querySelectorAll('[data-pw-cancel]').forEach((b: any) =>
       b.addEventListener('click', () => { _pwOpen.delete(b.dataset.pwCancel); _renderUsersRows(); }));
-    tbody.querySelectorAll('[data-pw-save]').forEach(b =>
+    tbody.querySelectorAll('[data-pw-save]').forEach((b: any) =>
       b.addEventListener('click', () => _savePassword(b.dataset.pwSave)));
-    tbody.querySelectorAll('[data-del-user]').forEach(b =>
+    tbody.querySelectorAll('[data-del-user]').forEach((b: any) =>
       b.addEventListener('click', () => _deleteUser(b.dataset.delUser)));
-    tbody.querySelectorAll('[data-del-staged]').forEach(b =>
+    tbody.querySelectorAll('[data-del-staged]').forEach((b: any) =>
       b.addEventListener('click', () => { _staged.splice(+b.dataset.delStaged, 1); _renderUsersRows(); _renderUsersActions(); }));
   }
 
-  async function _setUserRole(username, role) {
+  async function _setUserRole(username: any, role: any) {
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role: role || null }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Set role failed for ${username}: ${e.message}`);
     }
@@ -6604,7 +6604,7 @@ export const Security = (() => {
   // in the same row coalesces into one save (reading both fields' live
   // values) instead of firing mid-edit and losing the second field's
   // keystrokes to the unconditional reload/re-render below.
-  function _scheduleSetUserName(username) {
+  function _scheduleSetUserName(username: any) {
     clearTimeout(_nameSaveTimers.get(username));
     _nameSaveTimers.set(username, setTimeout(() => {
       _nameSaveTimers.delete(username);
@@ -6612,12 +6612,12 @@ export const Security = (() => {
     }, 200));
   }
 
-  async function _setUserName(username) {
+  async function _setUserName(username: any) {
     const row = document.querySelector(`tr[data-username="${CSS.escape(username)}"]`);
     if (!row) return;
-    const roleSelect = row.querySelector('[data-role-select-user]');
-    const firstInput = row.querySelector('[data-first-name-user]');
-    const lastInput = row.querySelector('[data-last-name-user]');
+    const roleSelect = row.querySelector('[data-role-select-user]') as any;
+    const firstInput = row.querySelector('[data-first-name-user]') as any;
+    const lastInput = row.querySelector('[data-last-name-user]') as any;
     try {
       await _postJSON(`${API}/security/users/bulk`, {
         upserts: [{
@@ -6627,28 +6627,28 @@ export const Security = (() => {
           last_name: lastInput ? lastInput.value.trim() : '',
         }],
       });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Set name failed for ${username}: ${e.message}`);
     }
     await _reloadUsers();
   }
 
-  async function _savePassword(username) {
-    const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`);
+  async function _savePassword(username: any) {
+    const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`) as any;
     const pw = input ? input.value : '';
     if (!pw || pw.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
     try {
       await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
       _pwOpen.delete(username);
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Set password failed for ${username}: ${e.message}`);
     }
     await _reloadUsers();
   }
 
-  async function _deleteUser(username) {
+  async function _deleteUser(username: any) {
     const ok = await Modal.confirm({
       title: Util.t('sec.confirm_delete_user_title'),
       message: Util.t('sec.confirm_delete_user_msg', { username }),
@@ -6658,7 +6658,7 @@ export const Security = (() => {
     if (!ok) return;
     try {
       await _postJSON(`${API}/security/users/bulk`, { deletes: [{ username }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Delete user failed for ${username}: ${e.message}`);
     }
@@ -6666,11 +6666,11 @@ export const Security = (() => {
   }
 
   async function _addUser() {
-    const uInput = document.getElementById('sec-new-username');
-    const fInput = document.getElementById('sec-new-firstname');
-    const lInput = document.getElementById('sec-new-lastname');
-    const rSelect = document.getElementById('sec-new-role-select');
-    const pInput = document.getElementById('sec-new-password');
+    const uInput = document.getElementById('sec-new-username') as any;
+    const fInput = document.getElementById('sec-new-firstname') as any;
+    const lInput = document.getElementById('sec-new-lastname') as any;
+    const rSelect = document.getElementById('sec-new-role-select') as any;
+    const pInput = document.getElementById('sec-new-password') as any;
     const username = (uInput?.value || '').trim();
     if (!username) { Toast.show(Util.t('sec.username_required'), 'error'); return; }
     const password = pInput?.value || '';
@@ -6681,7 +6681,7 @@ export const Security = (() => {
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role, first_name, last_name }] });
       if (password) await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Add user failed: ${e.message}`);
     }
@@ -6690,19 +6690,19 @@ export const Security = (() => {
 
   // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
   // username/role 2-column shape (no password column — passwords are never pasted).
-  function _parseUserPaste(rawText) {
-    const lines = rawText.replace(/\r/g, '').split('\n').filter(l => l.trim());
+  function _parseUserPaste(rawText: any) {
+    const lines = rawText.replace(/\r/g, '').split('\n').filter((l: any) => l.trim());
     if (!lines.length) return [];
-    const first = lines[0].split('\t').map(h => h.trim().toLowerCase());
+    const first = lines[0].split('\t').map((h: any) => h.trim().toLowerCase());
     const nameHdrs = ['username', Util.t('sec.username').toLowerCase()];
     const roleHdrs = ['role', Util.t('sec.role').toLowerCase()];
     const firstNameHdrs = ['first name', 'firstname', Util.t('sec.first_name').toLowerCase()];
     const lastNameHdrs = ['last name', 'lastname', Util.t('sec.last_name').toLowerCase()];
-    const hasHeader = first.some(h =>
+    const hasHeader = first.some((h: any) =>
       nameHdrs.includes(h) || roleHdrs.includes(h) || firstNameHdrs.includes(h) || lastNameHdrs.includes(h));
-    let headers, dataLines;
+    let headers: any, dataLines: any;
     if (hasHeader) {
-      headers = first.map(h => {
+      headers = first.map((h: any) => {
         if (nameHdrs.includes(h)) return 'username';
         if (roleHdrs.includes(h)) return 'role';
         if (firstNameHdrs.includes(h)) return 'first_name';
@@ -6714,22 +6714,22 @@ export const Security = (() => {
       headers = ['username', 'role'];
       dataLines = lines;
     }
-    return dataLines.map(line => {
+    return dataLines.map((line: any) => {
       const vals = line.split('\t');
-      const row = {};
-      headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+      const row: any = {};
+      headers.forEach((h: any, i: any) => { row[h] = (vals[i] ?? '').trim(); });
       return row;
-    }).filter(r => r.username);
+    }).filter((r: any) => r.username);
   }
 
   async function _pasteUsers() {
-    let raw;
+    let raw: any;
     try { raw = await navigator.clipboard.readText(); }
     catch { Toast.show(Util.t('toast.clipboard_denied'), 'error'); return; }
     if (!raw.trim()) { Toast.show(Util.t('toast.clipboard_empty'), 'error'); return; }
     const rows = _parseUserPaste(raw);
     if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
-    rows.forEach(r => _staged.push({
+    rows.forEach((r: any) => _staged.push({
       username: r.username, role: r.role || '',
       first_name: r.first_name || '', last_name: r.last_name || '',
     }));
@@ -6739,14 +6739,14 @@ export const Security = (() => {
 
   async function _saveStaged() {
     if (!_staged.length) return;
-    const upserts = _staged.map(r => ({
+    const upserts = _staged.map((r: any) => ({
       username: r.username, role: r.role || null,
       first_name: r.first_name || '', last_name: r.last_name || '',
     }));
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts });
       _staged = [];
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Save staged users failed: ${e.message}`);
     }
@@ -6759,23 +6759,23 @@ export const Security = (() => {
   async function _reloadRoles() {
     const body = document.getElementById('security-tabbody');
     try {
-      const [rolesData, rpData] = await Promise.all([
-        Util.fetchTraced(`${API}/master-data/roles`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-        Util.fetchTraced(`${API}/master-data/role_plants`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      const [rolesData, rpData]: any = await Promise.all([
+        Util.fetchTraced(`${API}/master-data/roles`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/role_plants`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
       ]);
       _roles = rolesData.rows || [];
       _rolePlants = rpData.rows || [];
-      if (_selectedRole && !_roles.some(r => r.role === _selectedRole)) _selectedRole = null;
+      if (_selectedRole && !_roles.some((r: any) => r.role === _selectedRole)) _selectedRole = null;
       // Best-effort: knowing which roles have >=1 user lets the delete button be
       // disabled pre-emptively. Non-fatal if this fetch fails — bulk_apply's FK
       // hardening (ForeignKeyViolation -> clean 400) remains the authoritative guard.
       try {
-        const usersData = await Util.fetchTraced(`${API}/security/users`).then(r => { if (!r.ok) throw new Error(); return r.json(); });
-        _rolesInUse = new Set((usersData.users || []).map(u => u.role).filter(Boolean));
+        const usersData: any = await Util.fetchTraced(`${API}/security/users`).then((r: any) => { if (!r.ok) throw new Error(); return r.json(); });
+        _rolesInUse = new Set((usersData.users || []).map((u: any) => u.role).filter(Boolean));
       } catch { _rolesInUse = new Set(); }
       if (_tab !== 'roles') return; // bail if the admin switched tabs while awaiting
       _renderRolesTab();
-    } catch (e) {
+    } catch (e: any) {
       if (body) body.innerHTML = `<div class="md-empty">Failed to load roles: ${_esc(e.message)}</div>`;
       ErrorLog.error('security', `Load roles failed: ${e.message}`);
     }
@@ -6789,7 +6789,7 @@ export const Security = (() => {
     _renderRolesDetail();
   }
 
-  function _roleRowHtml(r) {
+  function _roleRowHtml(r: any) {
     const sel = r.role === _selectedRole ? ' sap-rail-row-sel' : '';
     const inUse = _rolesInUse.has(r.role);
     const delAttrs = inUse
@@ -6823,19 +6823,19 @@ export const Security = (() => {
       <div class="sap-rail" id="sec-roles-list">${rows}</div>
     </div>`;
     document.getElementById('sec-add-role-btn')?.addEventListener('click', _addRole);
-    el.querySelectorAll('[data-role-select]').forEach(nameEl =>
+    el.querySelectorAll('[data-role-select]').forEach((nameEl: any) =>
       nameEl.addEventListener('click', () => _selectRole(nameEl.dataset.roleSelect)));
-    el.querySelectorAll('[data-role-desc-save]').forEach(b =>
+    el.querySelectorAll('[data-role-desc-save]').forEach((b: any) =>
       b.addEventListener('click', () => _saveRoleDescription(b.dataset.roleDescSave)));
-    el.querySelectorAll('[data-role-del]').forEach(b =>
+    el.querySelectorAll('[data-role-del]').forEach((b: any) =>
       b.addEventListener('click', () => _deleteRole(b.dataset.roleDel)));
   }
 
-  function _selectRole(role) {
+  function _selectRole(role: any) {
     _selectedRole = role;
     // Local-only: toggle the selected highlight instead of rebuilding the rail,
     // so an in-progress "add role" draft elsewhere in the rail isn't wiped.
-    document.querySelectorAll('#sec-roles-list .sap-rail-row').forEach(el =>
+    document.querySelectorAll('#sec-roles-list .sap-rail-row').forEach((el: any) =>
       el.classList.toggle('sap-rail-row-sel', el.dataset.role === role));
     _renderRolesDetail();
   }
@@ -6845,7 +6845,7 @@ export const Security = (() => {
     if (!el) return;
     const role = _selectedRole;
     const header = role ? Util.t('sec.plants_for_role', { role }) : Util.t('sec.no_role_selected');
-    const plants = role ? _rolePlants.filter(rp => rp.role === role).map(rp => rp.plant).sort() : [];
+    const plants = role ? _rolePlants.filter((rp: any) => rp.role === role).map((rp: any) => rp.plant).sort() : [];
     const addHtml = !role ? '' : `
       <div class="sap-section-label">${_esc(Util.t('sec.add_plant'))}</div>
       <div class="hps-combobox" id="sec-plant-combobox" style="max-width:280px">
@@ -6854,7 +6854,7 @@ export const Security = (() => {
       </div>`;
     const listHtml = !role ? '' : !plants.length
       ? `<div class="sap-help" style="margin-top:12px">${_esc(Util.t('sec.no_plants_yet'))}</div>`
-      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map(p =>
+      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map((p: any) =>
           `<span class="sap-keychip">${_esc(p)}<button data-remove-plant="${_esc(p)}" title="${_esc(Util.t('tip.delete_row'))}"
              style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
         ).join('')}</div>`;
@@ -6863,50 +6863,50 @@ export const Security = (() => {
       <div class="panel-body">${addHtml}${listHtml}</div>
     </div>`;
     if (role) {
-      const srch = document.getElementById('sec-plant-search');
-      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
-      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); document.getElementById('sec-plant-dropdown').hidden = false; });
+      const srch = document.getElementById('sec-plant-search') as any;
+      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as any).hidden = false; });
+      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as any).hidden = false; });
       srch?.addEventListener('blur', () => { setTimeout(() => { const dd = document.getElementById('sec-plant-dropdown'); if (dd) dd.hidden = true; }, 150); });
     }
-    el.querySelectorAll('[data-remove-plant]').forEach(b =>
+    el.querySelectorAll('[data-remove-plant]').forEach((b: any) =>
       b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant)));
   }
 
   // Type-to-filter Store.knownPlants() down to matches, click one to add it —
   // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
   // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
-  function _renderPlantDropdown(query) {
+  function _renderPlantDropdown(query: any) {
     const dd = document.getElementById('sec-plant-dropdown');
     if (!dd || !_selectedRole) return;
-    const assigned = new Set(_rolePlants.filter(rp => rp.role === _selectedRole).map(rp => rp.plant));
-    const all = Store.knownPlants().filter(p => !assigned.has(p));
+    const assigned = new Set(_rolePlants.filter((rp: any) => rp.role === _selectedRole).map((rp: any) => rp.plant));
+    const all = Store.knownPlants().filter((p: any) => !assigned.has(p));
     const q = (query || '').trim().toLowerCase();
-    const filtered = q ? all.filter(p => p.toLowerCase().includes(q)) : all;
+    const filtered = q ? all.filter((p: any) => p.toLowerCase().includes(q)) : all;
     if (!filtered.length) {
       dd.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plants available'}</div>`;
       return;
     }
-    dd.innerHTML = filtered.map(p => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
-    dd.querySelectorAll('[data-plant]').forEach(optEl =>
-      optEl.addEventListener('mousedown', e => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant); }));
+    dd.innerHTML = filtered.map((p: any) => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
+    dd.querySelectorAll('[data-plant]').forEach((optEl: any) =>
+      optEl.addEventListener('mousedown', (e: any) => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant); }));
   }
 
-  async function _addPlantToRole(plant) {
+  async function _addPlantToRole(plant: any) {
     if (!_selectedRole) return;
     try {
       await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role: _selectedRole, plant }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Add plant to role failed: ${e.message}`);
     }
     await _reloadRoles();
   }
 
-  async function _removePlantFromRole(plant) {
+  async function _removePlantFromRole(plant: any) {
     if (!_selectedRole) return;
     try {
       await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role: _selectedRole, plant }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Remove plant from role failed: ${e.message}`);
     }
@@ -6914,32 +6914,32 @@ export const Security = (() => {
   }
 
   async function _addRole() {
-    const nameInput = document.getElementById('sec-new-role');
-    const descInput = document.getElementById('sec-new-role-desc');
+    const nameInput = document.getElementById('sec-new-role') as any;
+    const descInput = document.getElementById('sec-new-role-desc') as any;
     const role = (nameInput?.value || '').trim();
     if (!role) return;
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: (descInput?.value || '').trim() }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Add role failed: ${e.message}`);
     }
     await _reloadRoles();
   }
 
-  async function _saveRoleDescription(role) {
-    const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`);
+  async function _saveRoleDescription(role: any) {
+    const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`) as any;
     if (!input) return;
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: input.value }] });
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Save role description failed: ${e.message}`);
     }
     await _reloadRoles();
   }
 
-  async function _deleteRole(role) {
+  async function _deleteRole(role: any) {
     const ok = await Modal.confirm({
       title: Util.t('sec.confirm_delete_role_title'),
       message: Util.t('sec.confirm_delete_role_msg', { role }),
@@ -6950,12 +6950,12 @@ export const Security = (() => {
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { deletes: [{ role }] });
       if (_selectedRole === role) _selectedRole = null;
-    } catch (e) {
+    } catch (e: any) {
       Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
       ErrorLog.error('security', `Delete role failed: ${e.message}`);
     }
     await _reloadRoles();
   }
 
-  return { render };
+  return { render } as any;
 })();
