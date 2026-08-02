@@ -284,16 +284,29 @@ h1, h2, h3, h4 {
 }
 .nav-drawer-plant { border-top: 1px solid var(--chrome-border); }
 .nav-drawer-plant-row {
-  display: flex; align-items: center; gap: 10px;
-  width: 100%; text-align: left;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%;
   padding: 9px 12px;
-  border: 0; border-radius: var(--r-md);
+  border-radius: var(--r-md);
   background: var(--chrome-panel);
   color: var(--chrome-fg);
   font-size: 12.5px; font-weight: 600;
-  transition: background var(--t-fast);
 }
-.nav-drawer-plant-row:hover { background: var(--chrome-border); }
+.nav-drawer-plant-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.nav-drawer-plant-change-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--chrome-accent);
+  font-size: 11px; font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.nav-drawer-plant-change-btn:hover { background: var(--chrome-panel); border-color: var(--chrome-accent); }
 
 .nav-drawer-footer {
   padding: 10px 20px;
@@ -341,9 +354,20 @@ h1, h2, h3, h4 {
   border-color: transparent;
   outline: none;
   box-shadow: inset 3px 0 0 var(--chrome-accent);
+  position: relative;
+  padding-left: 22px;
 }
-#nav-drawer .tab-btn .tab-ico { color: var(--chrome-fg-faint); }
-#nav-drawer .tab-btn.active .tab-ico { color: var(--chrome-accent); }
+#nav-drawer .tab-btn.active::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chrome-accent);
+}
 /* Neutralizes the Master Data tab's light-theme green-chip idle/hover/active
    treatment (base rules a few lines below), which would otherwise ride the
    same .tab-btn[data-tab="masterdata"] selector into the dark drawer. */
@@ -1869,62 +1893,163 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .form-row.chk-row { background: var(--accent-wash); padding: 10px; border-radius: var(--r-md); }
 .hint { font-size: 11.5px; color: var(--fg-mute); padding: 8px 0 0; border-top: 1px dashed var(--line); }
 
+/* Change Plant modal — reuses .hps-option/.hps-section/.hps-empty/
+   .hps-pin-ico verbatim (pure typography, no absolute positioning baked
+   in) for the option rows; only this scroll container is new, since the
+   header's .hps-dropdown is an absolute-positioned popover unsuitable for
+   a modal-body-embedded static list. */
+#cpm-search { width: 100%; margin-bottom: 8px; }
+.cpm-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 4px 0;
+}
+
 /* =============================================================================
    AUTH — LOGIN SCREEN
    ========================================================================== */
-/* Full-viewport overlay — blocks the whole app until authenticated. Sits above
-   every other overlay/toast/tooltip z-index in this file by design. */
+/* Full-viewport split layout — blocks the whole app until authenticated. Sits
+   above every other overlay/toast/tooltip z-index in this file by design.
+   Ported from the "NIMBUS Login" mockup — see
+   docs/superpowers/specs/2026-08-02-login-screen-redesign-design.md. The
+   panel is fixed-dark chrome (--chrome-* tokens) in BOTH themes — do not
+   theme it under body.dark. */
 .login-screen {
   position: fixed; inset: 0;
   z-index: 100000;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(245, 244, 239, 0.92);
-  backdrop-filter: blur(14px) saturate(1.1);
+  display: flex;
+  background: var(--chrome-bg-deep);
+  font-family: 'Public Sans', system-ui, sans-serif;
+  overflow: hidden;
 }
-body.dark .login-screen { background: rgba(19, 20, 26, 0.92); }
 
-/* Card — same elevated-surface recipe as .modal */
-.login-card {
+.login-scene {
+  flex: 1 1 auto;
   position: relative;
-  width: calc(100% - 48px);
-  max-width: 360px;
-  padding: 32px 30px 28px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xl);
-  box-shadow: var(--shadow-lg);
+  min-width: 0;
+  border-right: 1px solid var(--chrome-border);
 }
-.login-card .login-title {
+.login-scene-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+.login-panel {
+  width: 34%;
+  min-width: 400px;
+  max-width: 520px;
+  flex: 0 0 auto;
+  background: var(--chrome-bg);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 56px;
+  box-sizing: border-box;
+  position: relative;
+}
+.login-panel-brand {
+  position: absolute; top: 0; left: 0; right: 0; height: 56px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 56px;
+  border-bottom: 1px solid var(--chrome-border);
+  box-sizing: border-box;
+}
+.login-brand-badge {
+  width: 26px; height: 26px; border-radius: 4px;
+  background: var(--chrome-accent);
+  display: grid; place-items: center;
+  font-family: 'Archivo', sans-serif; font-weight: 700; font-size: 14px;
+  color: var(--chrome-bg-deep);
+}
+.login-brand-name {
   font-family: 'Archivo', 'Public Sans', sans-serif;
-  font-size: 1.25rem; font-weight: 750;
-  letter-spacing: -0.02em;
-  color: var(--fg);
-  margin: 0 0 20px;
-  text-align: center;
+  font-weight: 700; font-size: 15px; letter-spacing: -0.015em;
+  color: var(--chrome-fg);
 }
-.login-card input[type="text"],
-.login-card input[type="password"] {
-  width: 100%;
-  height: 34px;
-  padding: 6px 11px;
-  background: var(--bg-elev);
+.login-brand-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--chrome-fg-faint);
+  text-transform: uppercase;
+  margin-left: auto;
+}
+
+#login-form { display: flex; flex-direction: column; gap: 0; }
+.login-heading {
+  font-family: 'Archivo', 'Public Sans', sans-serif;
+  font-weight: 700; font-size: 26px; letter-spacing: -0.015em;
+  color: var(--chrome-fg);
+  margin: 0 0 28px;
+}
+.login-field-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--chrome-fg-mute);
+  margin: 0 0 6px;
+}
+.login-input {
+  height: 30px;
+  background: #ffffff;
+  color: #1c2b3a;
   border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  font-size: 13px;
-  color: var(--fg);
-}
-.login-card input:focus {
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-family: 'Public Sans', system-ui, sans-serif;
+  font-size: 12.5px;
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-wash);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  margin: 0 0 18px;
 }
-.login-card .btn-primary { width: 100%; justify-content: center; height: 36px; }
-.login-card .login-error {
-  min-height: 16px;
-  margin-top: 12px;
-  font-size: 12px;
-  color: var(--err);
-  text-align: center;
+.login-input:focus {
+  border-color: var(--chrome-accent);
+  box-shadow: 0 0 0 3px rgba(77, 159, 255, 0.25);
+}
+.login-submit-btn {
+  height: 38px;
+  background: var(--chrome-accent);
+  color: var(--chrome-accent-fg);
+  border: 1px solid var(--chrome-accent);
+  border-radius: 4px;
+  font-family: 'Public Sans', system-ui, sans-serif;
+  font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  outline: none;
+  margin-top: 6px;
+}
+.login-submit-btn:hover:not(:disabled) { background: #7db8ff; border-color: #7db8ff; }
+.login-submit-btn:focus-visible { box-shadow: 0 0 0 3px rgba(77, 159, 255, 0.35); }
+.login-submit-btn:disabled { cursor: default; opacity: 0.75; }
+
+.login-error {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(176, 42, 32, 0.18);
+  border: 1px solid var(--err);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0 0 18px;
+  font-size: 12.5px;
+  color: #f7ddd9;
+}
+.login-error[hidden] { display: none; }
+
+.login-panel-footer {
+  position: absolute; bottom: 0; left: 0; right: 0; height: 46px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 56px;
+  border-top: 1px solid var(--chrome-border);
+  box-sizing: border-box;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 0.05em;
+  color: #56677c; /* one step fainter than --chrome-fg-faint; single-use footer caption, not worth a token */
+}
+
+@media (max-width: 860px) {
+  .login-scene { display: none !important; }
+  /* The mockup's own media query omitted max-width, leaving the panel capped
+     at 520px with a dead gutter beside it — overridden here so "full width"
+     (per Login INTEGRATION.md's layout contract) actually happens. */
+  .login-panel { width: 100% !important; min-width: 0 !important; max-width: none !important; }
 }
 
 /* =============================================================================
