@@ -29,13 +29,21 @@
 // module bodies, and `SessionUIAdapter`'s Personalization/Workflow panes are
 // its only real reader. Exported back to app.js via the bridge, same as
 // `App`/`Timeline`/etc.
-import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
-import { Store } from './schedule-state.mjs';
-import { Alerts } from './schedule-services.mjs';
-import { Persistence, Session } from './schedule-data.mjs';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from './schedule-workbench.mjs';
-import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-administration.mjs';
-
+//
+// TypeScript migration Phase 5 Task 1 converts this file to real TypeScript —
+// the last of the seven CQ-1 modules (see docs/typescript_migration.md). Two
+// real (not `NIMBUS`-ambient) findings surfaced during conversion:
+//   - `Dashboard._chartToday` (the resize handler's home-tab branch) was dead
+//     code — grep + `git log -S` across the whole repo's history confirm no
+//     commit ever assigned `Dashboard._chartToday` anything, predating even
+//     the CQ-1 split. Dashboard (schedule-workbench.mts, out of this task's
+//     scope) has no such property, so the reference doesn't compile against
+//     its real type. Removed — it was always a no-op at runtime.
+//   - `Table._api.sizeColumnsToFit()` (Orders sub-tab activation) needed a
+//     real method added to `NimbusVendor.AgGridApi` in web/types/vendor.d.ts
+//     (not just this file's own three declared files) — see that interface's
+//     own doc comment for the established "add exactly what a real call site
+//     uses" convention this follows.
 /* global NIMBUS */
 // NIMBUS is the classic-script global app.js's IIFE assigns its return value
 // to (`const NIMBUS = (function () {...})()`) — a bare reference to it
@@ -50,6 +58,81 @@ import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-admin
 // were even though Timeline/TimelineNav/Table are now also directly imported
 // above (the same "no further change needed" idiom Phase 3/4 used for every
 // other now-same-file forward reference).
+import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
+import { Store } from './schedule-state.mjs';
+import { Alerts } from './schedule-services.mjs';
+import { Persistence, Session } from './schedule-data.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from './schedule-workbench.mjs';
+import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-administration.mjs';
+import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab } from './types.mjs';
+
+// -- Local type declarations (Phase 5 conversion; scoped to this file) ------
+
+/** Settings.CATALOG entry shape — see the header comment above the CATALOG
+ *  array below for the meaning of each field. */
+interface SettingsCatalogEntry {
+  key: string;
+  category: 'personalization' | 'workflow' | 'profile';
+  type: string;
+  default: unknown;
+  tier: 'user' | 'role' | 'system';
+  region: boolean;
+}
+
+/** The subset of Session.currentUser()'s cached-session-blob shape this file
+ *  reads. schedule-data.mts's own CachedSessionUser (the full shape) is not
+ *  exported — every consumer scopes its own local view onto it, the same
+ *  "local interface per file" convention that file's own SessionUserBlob
+ *  already follows. Structurally compatible with (a subset of) the real
+ *  return type, so no import/cast is needed at call sites. */
+interface SessionUserView {
+  username: string;
+  role: string | null;
+  first_name: string | null;
+  last_name: string | null;
+}
+
+/** Session.pref('landingView') shape — the user's saved default landing tab
+ *  + (tab-dependent) sub-view. */
+interface LandingViewPref {
+  tab?: string;
+  sub?: string;
+}
+
+/** Session.pref('optimizerDefaults') shape. Duplicated (not imported) from
+ *  schedule-workbench.mts's own non-exported OptimizerDefaults local
+ *  interface of the same shape — that type isn't part of that module's
+ *  public surface, so each file scopes its own view, same as
+ *  SessionUserView above. */
+interface OptimizerDefaultsPref {
+  mode?: string;
+  preset?: string;
+  respectFixed?: boolean;
+  respectCalendar?: boolean;
+}
+
+/** _initPinnedCombo's options bag (pinned-plants / pinned-lines comboboxes). */
+interface PinnedComboOptions {
+  inputId: string;
+  dropdownId: string;
+  listId: string;
+  key: string;
+  optionsFn(): string[];
+  noneMsg: string;
+  afterChange?(): void;
+}
+
+/** PATCH /security/me (brain.py) success response — only the fields this
+ *  file reads (no response_model= yet on this endpoint — see Phase 4's own
+ *  local-interface precedent in schedule-data.mts for non-modeled endpoints). */
+interface SecurityMeResponse {
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+/** Marks a DOM node this file has already wired a listener onto — guards
+ *  against double-binding on repeated calls (modal reopen, pane rebuild). */
+type WiredElement = HTMLElement & { _wired?: boolean };
 
 /* =============================================================================
    SETTINGS — per-user settings catalog + system defaults (single source of
@@ -70,7 +153,7 @@ import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-admin
    render, never the stored data).
    ========================================================================== */
 const Settings = (() => {
-  const CATALOG = [
+  const CATALOG: SettingsCatalogEntry[] = [
     // ── Personalization ────────────────────────────────────────────────
     // (category MUST match the modal pane the control renders in — see
     //  _renderPersonalizationPane / _renderWorkflowPane below.)
@@ -92,17 +175,17 @@ const Settings = (() => {
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).
-  const DEFAULTS = {};
+  const DEFAULTS: Record<string, unknown> = {};
   for (const e of CATALOG) DEFAULTS[e.key] = e.default;
 
-  const _byKey = {};
+  const _byKey: Record<string, SettingsCatalogEntry> = {};
   for (const e of CATALOG) _byKey[e.key] = e;
 
   return {
     CATALOG,
     DEFAULTS,
-    isRegion(key)   { return !!(_byKey[key] && _byKey[key].region); },
-    byCategory(cat) { return CATALOG.filter(e => e.category === cat); },
+    isRegion(key: string): boolean   { return !!(_byKey[key] && _byKey[key].region); },
+    byCategory(cat: string): SettingsCatalogEntry[] { return CATALOG.filter(e => e.category === cat); },
   };
 })();
 
@@ -129,7 +212,7 @@ const Settings = (() => {
                                        signIn(), so never emits) re-gates too.
    ========================================================================== */
 const SessionUIAdapter = {
-  init() {
+  init(): void {
     Store.subscribe(evt => {
       if (evt.type !== 'session:changed') return;
       SessionUIAdapter._applyGates();
@@ -150,8 +233,8 @@ const SessionUIAdapter = {
     }, 'SessionUIAdapter');
   },
 
-  _applyGates() {
-    const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+  _applyGates(): void {
+    const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]') as HTMLElement | null;
     if (adminBtn) adminBtn.hidden = !Session.isAdmin();
     SessionUIAdapter._renderUserButton();
     try { ErrorLog.renderBadge(); } catch {}
@@ -161,7 +244,7 @@ const SessionUIAdapter = {
   // the primary source; falls back to username-derived initials, then to
   // null (caller renders the static /Images/user.png icon) if there is no
   // name or username to derive anything from at all.
-  _initialsFor(u) {
+  _initialsFor(u: SessionUserView): string | null {
     const first = (u.first_name || '').trim();
     const last  = (u.last_name  || '').trim();
     if (first && last) return (first[0] + last[0]).toUpperCase();
@@ -179,7 +262,7 @@ const SessionUIAdapter = {
   // rule, out of scope for this task) sized to match the existing
   // .user-icon-avatar 22px circle, colored with the same --chrome-* tokens
   // the dark command band already uses elsewhere (not a new hardcoded color).
-  _renderAvatar(btn, u) {
+  _renderAvatar(btn: HTMLElement, u: SessionUserView): void {
     const initials = SessionUIAdapter._initialsFor(u);
     if (!initials) {
       if (!btn.querySelector('img.user-icon-avatar')) {
@@ -197,8 +280,8 @@ const SessionUIAdapter = {
 
   // Populates/hides the header user-settings icon button (#user-settings-btn, static
   // markup in index.html) and wires its click (once) to open the User Settings modal.
-  _renderUserButton() {
-    const btn = document.getElementById('user-settings-btn');
+  _renderUserButton(): void {
+    const btn = document.getElementById('user-settings-btn') as WiredElement | null;
     if (!btn) return;
     const u = Session.currentUser();
     btn.hidden = !u;
@@ -211,29 +294,29 @@ const SessionUIAdapter = {
         if (!current) return;
         const signedInEl = document.getElementById('us-signed-in-as');
         const roleEl = document.getElementById('us-role');
-        const firstEl = document.getElementById('us-first-name');
-        const lastEl = document.getElementById('us-last-name');
+        const firstEl = document.getElementById('us-first-name') as HTMLInputElement | null;
+        const lastEl = document.getElementById('us-last-name') as HTMLInputElement | null;
         if (signedInEl) signedInEl.textContent = Util.t('sec.signed_in_as', { username: current.username });
         if (roleEl) roleEl.textContent = current.role;
         if (firstEl) firstEl.value = current.first_name || '';
         if (lastEl) lastEl.value = current.last_name || '';
         // Build the Personalization / Workflow controls fresh so they reflect
         // the current resolved prefs each time the modal opens.
-        try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${e.message}`); }
+        try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${(e as Error).message}`); }
         Modal.open('modal-user-settings');
       });
     }
-    const signOutBtn = document.getElementById('us-signout-btn');
+    const signOutBtn = document.getElementById('us-signout-btn') as WiredElement | null;
     if (signOutBtn && !signOutBtn._wired) {
       signOutBtn._wired = true;
       signOutBtn.addEventListener('click', Session.signOut);
     }
-    const saveBtn = document.getElementById('us-save-btn');
+    const saveBtn = document.getElementById('us-save-btn') as WiredElement | null;
     if (saveBtn && !saveBtn._wired) {
       saveBtn._wired = true;
       saveBtn.addEventListener('click', SessionUIAdapter.saveProfile);
     }
-    const changePwBtn = document.getElementById('us-change-password-btn');
+    const changePwBtn = document.getElementById('us-change-password-btn') as WiredElement | null;
     if (changePwBtn && !changePwBtn._wired) {
       changePwBtn._wired = true;
       changePwBtn.addEventListener('click', SessionUIAdapter.changePassword);
@@ -241,17 +324,17 @@ const SessionUIAdapter = {
     // Wire the User Settings tab bar (Personalization / Workflow / Profile).
     // _renderSettingsPanes() populates the Personalization/Workflow panes on
     // modal open; this only toggles which pane + button is active. Wired once.
-    document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(tabBtn => {
+    document.querySelectorAll<WiredElement>('#modal-user-settings [data-us-tab]').forEach(tabBtn => {
       if (tabBtn._wired) return;
       tabBtn._wired = true;
-      tabBtn.addEventListener('click', () => SessionUIAdapter._showUserTab(tabBtn.getAttribute('data-us-tab')));
+      tabBtn.addEventListener('click', () => SessionUIAdapter._showUserTab(tabBtn.getAttribute('data-us-tab') as string));
     });
   },
 
   // Toggle the active User Settings tab: highlight the button and reveal only
   // the matching pane (#us-tab-<name>). Names mirror Settings category ids.
-  _showUserTab(name) {
-    document.querySelectorAll('#modal-user-settings [data-us-tab]').forEach(b => {
+  _showUserTab(name: string): void {
+    document.querySelectorAll<HTMLElement>('#modal-user-settings [data-us-tab]').forEach(b => {
       b.classList.toggle('active', b.getAttribute('data-us-tab') === name);
     });
     ['personalization', 'workflow', 'profile'].forEach(n => {
@@ -266,7 +349,7 @@ const SessionUIAdapter = {
      Util.t() inline — App.init()'s one-shot [data-i18n] sweep never runs over these
      dynamically-inserted nodes. Each control persists via Session.setPref()
      and, where it changes the running app, applies the effect immediately. */
-  _optTag(value, label, selected) {
+  _optTag(value: string | number, label: string, selected: unknown): string {
     const v = String(value);
     return `<option value="${v}"${v === String(selected) ? ' selected' : ''}>${label}</option>`;
   },
@@ -274,7 +357,7 @@ const SessionUIAdapter = {
   // Repaint the display surfaces whose datetime labels are baked at render time,
   // so a timeFormat/dateFormat change is reflected without waiting for the next
   // natural re-render. Best-effort — never throws into the change handler.
-  _repaintDisplayFormat() {
+  _repaintDisplayFormat(): void {
     if (typeof NIMBUS === 'undefined') return;
     // Timeline bar tooltips + blackout titles are baked at build time.
     try { if (NIMBUS.Timeline?.rebuild) NIMBUS.Timeline.rebuild(); } catch {}
@@ -293,14 +376,14 @@ const SessionUIAdapter = {
     } catch {}
   },
 
-  _htmlEsc(s) {
+  _htmlEsc(s: string): string {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   },
 
   // Landing-view tab choices (admin tab only for admins) and their sub-views.
-  _landingTabDefs() {
-    const defs = [
+  _landingTabDefs(): Array<[string, string]> {
+    const defs: Array<[string, string]> = [
       ['home',       Util.t('tab.home')],
       ['gantt',      Util.t('tab.gantt')],
       ['labor',      Util.t('us.tab_labor')],
@@ -309,16 +392,16 @@ const SessionUIAdapter = {
     if (Session.isAdmin()) defs.push(['admin', Util.t('tab.admin')]);
     return defs;
   },
-  _landingSubDefs(tab) {
+  _landingSubDefs(tab: string): Array<[string, string]> | null {
     if (tab === 'gantt')      return [['timeline', Util.t('us.landing_timeline')], ['orders', Util.t('tab.table')]];
     if (tab === 'masterdata') return [['lines', Util.t('tab.production_lines')], ['plant', Util.t('tab.plant')]];
     return null;   // home / labor / admin land on the tab with no sub-view here
   },
 
   // Render the small removable list of pinned values below a pinned combobox.
-  _renderPinnedList(listEl, key) {
+  _renderPinnedList(listEl: HTMLElement | null, key: string): void {
     if (!listEl) return;
-    const items = (Session.pref(key) || []).slice();
+    const items = ((Session.pref(key) as string[] | undefined) ?? []).slice();
     if (!items.length) {
       listEl.innerHTML = `<div class="us-pinned-empty">${Util.t('us.pinned_none')}</div>`;
       return;
@@ -335,12 +418,12 @@ const SessionUIAdapter = {
      Choosing appends to Session.pref(key) via setPref; the removable list
      handles unpin. afterChange() lets the caller refresh the affected surface
      immediately. */
-  _initPinnedCombo({ inputId, dropdownId, listId, key, optionsFn, noneMsg, afterChange }) {
-    const input    = document.getElementById(inputId);
-    const dropdown = document.getElementById(dropdownId);
-    const listEl   = document.getElementById(listId);
+  _initPinnedCombo({ inputId, dropdownId, listId, key, optionsFn, noneMsg, afterChange }: PinnedComboOptions): void {
+    const input    = document.getElementById(inputId) as HTMLInputElement | null;
+    const dropdown = document.getElementById(dropdownId) as HTMLElement | null;
+    const listEl   = document.getElementById(listId) as HTMLElement | null;
     if (!input || !dropdown || !listEl) return;
-    let filtered = [];
+    let filtered: string[] = [];
     let activeIdx = -1;
 
     const open  = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
@@ -350,17 +433,17 @@ const SessionUIAdapter = {
       els.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
       const a = els[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
     };
-    const add = (val) => {
+    const add = (val: string | null) => {
       if (val == null) return;
-      const cur = Session.pref(key) || [];
+      const cur = (Session.pref(key) as string[] | undefined) ?? [];
       if (!cur.includes(val)) Session.setPref(key, [...cur, val]);
       input.value = '';
       SessionUIAdapter._renderPinnedList(listEl, key);
       close();
-      try { afterChange && afterChange(); } catch {}
+      try { afterChange?.(); } catch {}
     };
-    const renderList = (query) => {
-      const already = new Set(Session.pref(key) || []);
+    const renderList = (query: string) => {
+      const already = new Set((Session.pref(key) as string[] | undefined) ?? []);
       const all = (optionsFn() || []).filter(o => !already.has(o));
       const q = (query || '').trim().toLowerCase();
       filtered = q ? all.filter(o => o.toLowerCase().includes(q)) : all.slice();
@@ -375,8 +458,8 @@ const SessionUIAdapter = {
       }).join('');
       activeIdx = 0;
       highlight();
-      dropdown.querySelectorAll('.us-combo-option').forEach(el => {
-        el.addEventListener('mousedown', e => { e.preventDefault(); add(el.dataset.val); });
+      dropdown.querySelectorAll<HTMLElement>('.us-combo-option').forEach(el => {
+        el.addEventListener('mousedown', e => { e.preventDefault(); add(el.dataset.val ?? null); });
       });
     };
 
@@ -396,34 +479,35 @@ const SessionUIAdapter = {
 
     SessionUIAdapter._renderPinnedList(listEl, key);
     listEl.addEventListener('click', e => {
-      const btn = e.target.closest('.us-pin-remove');
+      const btn = (e.target as HTMLElement | null)?.closest('.us-pin-remove') as HTMLElement | null;
       if (!btn) return;
       const val = btn.dataset.val;
-      Session.setPref(key, (Session.pref(key) || []).filter(x => x !== val));
+      Session.setPref(key, ((Session.pref(key) as string[] | undefined) ?? []).filter(x => x !== val));
       SessionUIAdapter._renderPinnedList(listEl, key);
-      try { afterChange && afterChange(); } catch {}
+      try { afterChange?.(); } catch {}
     });
   },
 
-  _renderSettingsPanes() {
+  _renderSettingsPanes(): void {
     SessionUIAdapter._renderPersonalizationPane();
     SessionUIAdapter._renderWorkflowPane();
   },
 
-  _renderPersonalizationPane() {
+  _renderPersonalizationPane(): void {
     const pane = document.getElementById('us-tab-personalization');
     if (!pane) return;
     // Seed from the ACTUALLY-applied theme (body.dark) so the control matches what
     // the user sees: DarkMode may have applied 'dark' from the legacy nimbus.theme
     // cache even when no user_settings.theme pref exists yet (pref() → 'light').
-    const theme = document.body.classList.contains('dark') ? 'dark' : (Session.pref('theme') || 'light');
-    const lang  = Session.pref('language');
+    const theme = document.body.classList.contains('dark') ? 'dark' : ((Session.pref('theme') as string | undefined) || 'light');
+    const lang  = Session.pref('language') as string | undefined;
     const langOpts = [
       ['en', 'English'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'],
     ].map(([c, n]) => SessionUIAdapter._optTag(c, n, lang)).join('');
     // Landing view — tab select + (dependent) sub-view select.
-    const lv       = Session.pref('landingView') || {};
-    const lvTab    = SessionUIAdapter._landingTabDefs().some(([v]) => v === lv.tab) ? lv.tab : 'home';
+    const lv       = (Session.pref('landingView') as LandingViewPref | undefined) || {};
+    const validLvTab = SessionUIAdapter._landingTabDefs().some(([v]) => v === lv.tab);
+    const lvTab    = (validLvTab && lv.tab) ? lv.tab : 'home';
     const landingTabOpts = SessionUIAdapter._landingTabDefs().map(([v, n]) => SessionUIAdapter._optTag(v, n, lvTab)).join('');
     const lvSubDefs = SessionUIAdapter._landingSubDefs(lvTab);
     const landingSubOpts = lvSubDefs
@@ -491,7 +575,7 @@ const SessionUIAdapter = {
         <p class="us-field-hint">${Util.t('us.pinned_lines_hint')}</p>
       </div>`;
 
-    const themeSel = pane.querySelector('#us-pref-theme');
+    const themeSel = pane.querySelector<HTMLSelectElement>('#us-pref-theme')!;
     themeSel.addEventListener('change', () => {
       const isDark = themeSel.value === 'dark';
       // DarkMode.set() does the write-through (Session.setPref + nimbus.theme cache
@@ -502,7 +586,7 @@ const SessionUIAdapter = {
       } catch { Session.setPref('theme', isDark ? 'dark' : 'light'); }
     });
 
-    const langSel = pane.querySelector('#us-pref-language');
+    const langSel = pane.querySelector<HTMLSelectElement>('#us-pref-language')!;
     langSel.addEventListener('change', () => {
       // LangSwitcher.set() persists via Session.setPref, keeps nimbus.locale in
       // sync, and reloads so the whole UI re-renders in the chosen locale.
@@ -515,10 +599,10 @@ const SessionUIAdapter = {
     SessionUIAdapter._initDefaultPlantCombo(pane);
 
     // ── Default landing view (tab + dependent sub-view) ──────────────────
-    const landingTabSel = pane.querySelector('#us-landing-tab');
-    const landingSubSel = pane.querySelector('#us-landing-sub');
+    const landingTabSel = pane.querySelector<HTMLSelectElement>('#us-landing-tab');
+    const landingSubSel = pane.querySelector<HTMLSelectElement>('#us-landing-sub');
     const _persistLanding = () => {
-      const tab = landingTabSel.value;
+      const tab = landingTabSel!.value;
       const subs = SessionUIAdapter._landingSubDefs(tab);
       const sub  = (subs && landingSubSel && !landingSubSel.hidden) ? landingSubSel.value : null;
       Session.setPref('landingView', { tab, sub });
@@ -541,13 +625,13 @@ const SessionUIAdapter = {
     if (landingSubSel) landingSubSel.addEventListener('change', _persistLanding);
 
     // ── Saved grid layout (toggle + reset) ───────────────────────────────
-    const gridToggle = pane.querySelector('#us-grid-layout-toggle');
+    const gridToggle = pane.querySelector<HTMLInputElement>('#us-grid-layout-toggle');
     if (gridToggle) {
       gridToggle.addEventListener('change', () => {
         try { Table._setLayoutEnabled(gridToggle.checked); } catch {}
       });
     }
-    const gridReset = pane.querySelector('#us-grid-layout-reset');
+    const gridReset = pane.querySelector<HTMLButtonElement>('#us-grid-layout-reset');
     if (gridReset) {
       gridReset.addEventListener('click', () => {
         let ok = false;
@@ -573,17 +657,17 @@ const SessionUIAdapter = {
   // Searchable plant combobox (scale-safe — never a chip list). Bound to
   // Session.pref('defaultPlant'); writes via Session.setPref('defaultPlant',
   // code|null). Modeled on the header PlantSelector, scoped to this modal instance.
-  _initDefaultPlantCombo(pane) {
-    const input    = pane.querySelector('#us-plant-input');
-    const dropdown = pane.querySelector('#us-plant-dropdown');
-    const clearBtn = pane.querySelector('#us-plant-clear');
-    const combo    = pane.querySelector('#us-plant-combo');
-    if (!input || !dropdown || !combo) return;
-    let filtered = [];
+  _initDefaultPlantCombo(pane: HTMLElement): void {
+    const input    = pane.querySelector<HTMLInputElement>('#us-plant-input');
+    const dropdown = pane.querySelector<HTMLElement>('#us-plant-dropdown');
+    const clearBtn = pane.querySelector<HTMLElement>('#us-plant-clear');
+    const combo    = pane.querySelector<HTMLElement>('#us-plant-combo');
+    if (!input || !dropdown || !combo || !clearBtn) return;
+    let filtered: string[] = [];
     let activeIdx = -1;
 
     const options = () => Store.knownPlants();          // already allowedPlants()-scoped
-    const current = () => Session.pref('defaultPlant') || null;
+    const current = (): string | null => (Session.pref('defaultPlant') as string | null | undefined) || null;
 
     const reflect = () => {
       const dp = current();
@@ -598,9 +682,9 @@ const SessionUIAdapter = {
       items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
       const a = items[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
     };
-    const choose = (plant) => { Session.setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
+    const choose = (plant: string | null) => { Session.setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
 
-    const renderList = (query) => {
+    const renderList = (query: string) => {
       const all = options();
       const q = (query || '').trim().toLowerCase();
       const looksLikeLabel = current() && q === `${current()}`.toLowerCase();
@@ -616,10 +700,10 @@ const SessionUIAdapter = {
         `<div class="us-combo-option${p === sel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
            <span class="us-combo-option-prefix">${Util.t('ui.plant_label')}</span><span>${p}</span>
          </div>`).join('');
-      activeIdx = Math.max(0, filtered.indexOf(sel));
+      activeIdx = Math.max(0, filtered.indexOf(sel ?? ''));
       highlight();
-      dropdown.querySelectorAll('.us-combo-option').forEach(el => {
-        el.addEventListener('mousedown', e => { e.preventDefault(); choose(el.dataset.plant); });
+      dropdown.querySelectorAll<HTMLElement>('.us-combo-option').forEach(el => {
+        el.addEventListener('mousedown', e => { e.preventDefault(); choose(el.dataset.plant ?? null); });
       });
     };
 
@@ -641,13 +725,13 @@ const SessionUIAdapter = {
     reflect();
   },
 
-  _renderWorkflowPane() {
+  _renderWorkflowPane(): void {
     const pane = document.getElementById('us-tab-workflow');
     if (!pane) return;
-    const tf = Session.pref('timeFormat');
-    const df = Session.pref('dateFormat');
+    const tf = Session.pref('timeFormat') as string | undefined;
+    const df = Session.pref('dateFormat') as string | undefined;
     const now = new Date();
-    const sample = (tok) => {
+    const sample = (tok: string): string => {
       try { if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(now, tok); } catch {}
       return tok;
     };
@@ -657,8 +741,8 @@ const SessionUIAdapter = {
     const fdow = Number(Session.pref('firstDayOfWeek'));
     const fdowSel = (fdow === 1) ? 1 : 0;
     // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
-    const od      = Session.pref('optimizerDefaults');
-    const odMode  = (od && ['spt', 'changeover', 'combined'].includes(od.mode)) ? od.mode : 'changeover';
+    const od      = Session.pref('optimizerDefaults') as OptimizerDefaultsPref | null | undefined;
+    const odMode: string = (od && od.mode && ['spt', 'changeover', 'combined'].includes(od.mode)) ? od.mode : 'changeover';
     const odFixed = od ? od.respectFixed !== false : true;
     const odCal   = od ? od.respectCalendar !== false : true;
     pane.innerHTML = `
@@ -701,12 +785,12 @@ const SessionUIAdapter = {
         <p class="us-field-hint">${Util.t('us.opt_defaults_hint')}</p>
       </div>`;
 
-    const tfSel = pane.querySelector('#us-pref-timeformat');
+    const tfSel = pane.querySelector<HTMLSelectElement>('#us-pref-timeformat')!;
     tfSel.addEventListener('change', () => { Session.setPref('timeFormat', tfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
-    const dfSel = pane.querySelector('#us-pref-dateformat');
+    const dfSel = pane.querySelector<HTMLSelectElement>('#us-pref-dateformat')!;
     dfSel.addEventListener('change', () => { Session.setPref('dateFormat', dfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
 
-    const fdSel = pane.querySelector('#us-pref-firstday');
+    const fdSel = pane.querySelector<HTMLSelectElement>('#us-pref-firstday');
     if (fdSel) fdSel.addEventListener('change', () => {
       const v = fdSel.value === '1' ? 1 : 0;
       Session.setPref('firstDayOfWeek', v);
@@ -715,24 +799,24 @@ const SessionUIAdapter = {
 
     // Optimizer defaults — preserve any stored preset; the dialog's run() keeps
     // it fresh from the user's last actual run.
-    const modeSel  = pane.querySelector('#us-opt-mode');
-    const fixedChk = pane.querySelector('#us-opt-fixed');
-    const calChk   = pane.querySelector('#us-opt-calendar');
+    const modeSel  = pane.querySelector<HTMLSelectElement>('#us-opt-mode');
+    const fixedChk = pane.querySelector<HTMLInputElement>('#us-opt-fixed');
+    const calChk   = pane.querySelector<HTMLInputElement>('#us-opt-calendar');
     const writeOpt = () => {
-      const existing = Session.pref('optimizerDefaults') || {};
+      const existing = (Session.pref('optimizerDefaults') as OptimizerDefaultsPref | undefined) || {};
       Session.setPref('optimizerDefaults', {
-        mode: modeSel.value,
-        preset: ['horizon', '2w'].includes(existing.preset) ? existing.preset : 'horizon',
-        respectFixed: fixedChk.checked,
-        respectCalendar: calChk.checked,
+        mode: modeSel!.value,
+        preset: ['horizon', '2w'].includes(existing.preset ?? '') ? existing.preset : 'horizon',
+        respectFixed: fixedChk!.checked,
+        respectCalendar: calChk!.checked,
       });
-      const clr = pane.querySelector('#us-opt-clear');
+      const clr = pane.querySelector<HTMLElement>('#us-opt-clear');
       if (clr) clr.hidden = false;
     };
     if (modeSel)  modeSel.addEventListener('change', writeOpt);
     if (fixedChk) fixedChk.addEventListener('change', writeOpt);
     if (calChk)   calChk.addEventListener('change', writeOpt);
-    const optClear = pane.querySelector('#us-opt-clear');
+    const optClear = pane.querySelector<HTMLElement>('#us-opt-clear');
     if (optClear) optClear.addEventListener('click', () => {
       Session.setPref('optimizerDefaults', null);
       SessionUIAdapter._renderWorkflowPane();
@@ -744,9 +828,9 @@ const SessionUIAdapter = {
   // retry; on success, updates the local cache (via Session.updateCachedUser —
   // the private nimbus.session KEY constant lives only in schedule-data.mjs)
   // and closes.
-  async saveProfile() {
-    const firstEl = document.getElementById('us-first-name');
-    const lastEl = document.getElementById('us-last-name');
+  async saveProfile(): Promise<void> {
+    const firstEl = document.getElementById('us-first-name') as HTMLInputElement | null;
+    const lastEl = document.getElementById('us-last-name') as HTMLInputElement | null;
     const first_name = firstEl ? firstEl.value.trim() : '';
     const last_name = lastEl ? lastEl.value.trim() : '';
     try {
@@ -759,7 +843,7 @@ const SessionUIAdapter = {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.detail || `HTTP ${r.status}`);
       }
-      const updated = await r.json();
+      const updated = await r.json() as SecurityMeResponse;
       Session.updateCachedUser({ first_name: updated.first_name || null, last_name: updated.last_name || null });
       // Refresh the header avatar immediately — updateCachedUser() doesn't emit an
       // event, and the next natural _renderUserButton() call is a future
@@ -767,8 +851,8 @@ const SessionUIAdapter = {
       SessionUIAdapter._renderUserButton();
       Modal.close('modal-user-settings');
     } catch (e) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Save profile failed: ${e.message}`);
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Save profile failed: ${(e as Error).message}`);
     }
   },
 
@@ -777,10 +861,10 @@ const SessionUIAdapter = {
   // current_password (auth.change_own_password) since there's no session token
   // binding the header to a prior login. Fields are cleared on success but the
   // modal stays open (mirrors the admin panel's non-closing _savePassword).
-  async changePassword() {
-    const curEl = document.getElementById('us-current-password');
-    const newEl = document.getElementById('us-new-password');
-    const confEl = document.getElementById('us-confirm-password');
+  async changePassword(): Promise<void> {
+    const curEl = document.getElementById('us-current-password') as HTMLInputElement | null;
+    const newEl = document.getElementById('us-new-password') as HTMLInputElement | null;
+    const confEl = document.getElementById('us-confirm-password') as HTMLInputElement | null;
     const current_password = curEl ? curEl.value : '';
     const new_password = newEl ? newEl.value : '';
     const confirm_password = confEl ? confEl.value : '';
@@ -807,8 +891,8 @@ const SessionUIAdapter = {
       if (confEl) confEl.value = '';
       Toast.show(Util.t('sec.password_updated'), 'success');
     } catch (e) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Change password failed: ${e.message}`);
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Change password failed: ${(e as Error).message}`);
     }
   },
 };
@@ -823,7 +907,7 @@ const SessionUIAdapter = {
    app.js) when no session is cached; on successful sign-in it tears itself down
    and calls App._bootMain() — the same boot path a resumed session takes.
    ========================================================================== */
-function showLoginScreen() {
+function showLoginScreen(): void {
   const root = document.createElement('div');
   root.className = 'login-screen';
   root.setAttribute('role', 'dialog');
@@ -846,24 +930,24 @@ function showLoginScreen() {
   root.appendChild(card);
   document.body.appendChild(root);
 
-  const userInp   = card.querySelector('#login-username');
-  const passInp   = card.querySelector('#login-password');
-  const errEl     = card.querySelector('#login-error');
-  const submitBtn = card.querySelector('#login-submit-btn');
+  const userInp   = card.querySelector<HTMLInputElement>('#login-username')!;
+  const passInp   = card.querySelector<HTMLInputElement>('#login-password')!;
+  const errEl     = card.querySelector<HTMLElement>('#login-error')!;
+  const submitBtn = card.querySelector<HTMLButtonElement>('#login-submit-btn')!;
 
   userInp.addEventListener('input', () => {
     const pos = userInp.selectionStart;
     userInp.value = userInp.value.toLowerCase();
-    userInp.setSelectionRange(pos, pos);
+    userInp.setSelectionRange(pos!, pos!);
   });
 
-  async function _submit() {
+  async function _submit(): Promise<void> {
     errEl.textContent = '';
     submitBtn.disabled = true;
     try {
       await Session.signIn(userInp.value.trim().toLowerCase(), passInp.value);
       root.remove();
-      App._bootMain();
+      App._bootMain!();
     } catch (e) {
       // Deliberately generic — never reveal whether the username itself was wrong.
       errEl.textContent = Util.t('sec.login_invalid');
@@ -871,7 +955,7 @@ function showLoginScreen() {
     }
   }
 
-  card.querySelector('#login-form').addEventListener('submit', e => { e.preventDefault(); _submit(); });
+  card.querySelector('#login-form')!.addEventListener('submit', e => { e.preventDefault(); _submit(); });
 
   userInp.focus();
 }
@@ -882,7 +966,7 @@ function showLoginScreen() {
    calls EmptyState.render(el, opts) instead of its normal render path.
    ========================================================================== */
 const EmptyState = {
-  render(container, opts = {}) {
+  render(container: HTMLElement | null, opts: { title?: string; msg?: string; icon?: string } = {}): void {
     if (!container) return;
     const title = opts.title || Util.t('empty.select_plant_title');
     const msg = opts.msg || Util.t('empty.select_plant_msg');
@@ -902,17 +986,17 @@ const EmptyState = {
    'plant:selected' so external mutations (e.g. OptimizeDialog) stay in sync.
    ========================================================================== */
 const PlantSelector = {
-  _root:     null,
-  _input:    null,
-  _dropdown: null,
-  _clearBtn: null,
-  _combobox: null,
-  _options:  [],
-  _filtered: [],
+  _root:     null as HTMLElement | null,
+  _input:    null as HTMLElement | null,
+  _dropdown: null as HTMLElement | null,
+  _clearBtn: null as HTMLElement | null,
+  _combobox: null as HTMLElement | null,
+  _options:  [] as string[],
+  _filtered: [] as string[],
   _activeIdx: -1,
   _open:     false,
 
-  init() {
+  init(): void {
     PlantSelector._root     = document.getElementById('header-plant-selector');
     PlantSelector._input    = document.getElementById('hps-input');
     PlantSelector._dropdown = document.getElementById('hps-dropdown');
@@ -920,33 +1004,33 @@ const PlantSelector = {
     PlantSelector._combobox = document.getElementById('hps-combobox');
     if (!PlantSelector._root) return;
 
-    PlantSelector._input.addEventListener('focus', () => {
+    PlantSelector._input!.addEventListener('focus', () => {
       PlantSelector._refreshOptions();
-      PlantSelector._renderDropdown(PlantSelector._input.value);
+      PlantSelector._renderDropdown((PlantSelector._input as HTMLInputElement).value);
       PlantSelector._openDropdown();
     });
-    PlantSelector._input.addEventListener('input', () => {
-      PlantSelector._renderDropdown(PlantSelector._input.value);
+    PlantSelector._input!.addEventListener('input', () => {
+      PlantSelector._renderDropdown((PlantSelector._input as HTMLInputElement).value);
       PlantSelector._openDropdown();
     });
-    PlantSelector._input.addEventListener('keydown', PlantSelector._onKeydown);
-    PlantSelector._input.addEventListener('blur', () => {
+    PlantSelector._input!.addEventListener('keydown', PlantSelector._onKeydown);
+    PlantSelector._input!.addEventListener('blur', () => {
       // Defer close so clicks on dropdown items can fire first.
       setTimeout(() => {
         PlantSelector._closeDropdown();
         PlantSelector._restoreLabel();
       }, 120);
     });
-    PlantSelector._clearBtn.addEventListener('mousedown', e => e.preventDefault());
-    PlantSelector._clearBtn.addEventListener('click', () => {
+    PlantSelector._clearBtn!.addEventListener('mousedown', e => e.preventDefault());
+    PlantSelector._clearBtn!.addEventListener('click', () => {
       Store.setSelectedPlant(null, 'header');
-      PlantSelector._input.value = '';
+      (PlantSelector._input as HTMLInputElement).value = '';
       PlantSelector._reflectSelection();
-      PlantSelector._input.focus();
+      PlantSelector._input!.focus();
     });
 
     document.addEventListener('click', e => {
-      if (!PlantSelector._root.contains(e.target)) PlantSelector._closeDropdown();
+      if (!PlantSelector._root!.contains(e.target as Node)) PlantSelector._closeDropdown();
     });
 
     Store.subscribe(evt => {
@@ -962,36 +1046,36 @@ const PlantSelector = {
     PlantSelector._reflectSelection();
   },
 
-  _refreshOptions() {
+  _refreshOptions(): void {
     PlantSelector._options = Store.knownPlants();
   },
 
-  _reflectSelection() {
+  _reflectSelection(): void {
     const plant = Store.selectedPlant;
     const isSet = !!plant;
-    PlantSelector._input.value = isSet ? `${plant}` : '';
-    PlantSelector._combobox.classList.toggle('has-value', isSet);
-    PlantSelector._clearBtn.hidden = !isSet;
+    (PlantSelector._input as HTMLInputElement).value = isSet ? `${plant}` : '';
+    PlantSelector._combobox!.classList.toggle('has-value', isSet);
+    PlantSelector._clearBtn!.hidden = !isSet;
   },
 
-  _restoreLabel() {
+  _restoreLabel(): void {
     // After blur, reset the typed query back to the canonical "Plant <id>" label.
     PlantSelector._reflectSelection();
   },
 
-  _openDropdown() {
-    PlantSelector._dropdown.hidden = false;
+  _openDropdown(): void {
+    PlantSelector._dropdown!.hidden = false;
     PlantSelector._open = true;
-    PlantSelector._input.setAttribute('aria-expanded', 'true');
+    PlantSelector._input!.setAttribute('aria-expanded', 'true');
   },
-  _closeDropdown() {
-    PlantSelector._dropdown.hidden = true;
+  _closeDropdown(): void {
+    PlantSelector._dropdown!.hidden = true;
     PlantSelector._open = false;
     PlantSelector._activeIdx = -1;
-    PlantSelector._input.setAttribute('aria-expanded', 'false');
+    PlantSelector._input!.setAttribute('aria-expanded', 'false');
   },
 
-  _renderDropdown(query) {
+  _renderDropdown(query: string): void {
     const q = (query || '').trim().toLowerCase();
     // If the input still holds the canonical plant label, do not use
     // it as a filter — show the full list.
@@ -1005,20 +1089,20 @@ const PlantSelector = {
     // Surface the user's pinned plants at the top (scale-safe quick access at
     // 50+ plants). _filtered order MUST match the rendered option order so
     // keyboard nav (data-idx) stays correct.
-    let pinnedSet;
-    try { pinnedSet = new Set(Store.pref('pinnedPlants') || []); } catch { pinnedSet = new Set(); }
+    let pinnedSet: Set<string>;
+    try { pinnedSet = new Set((Store.pref('pinnedPlants') as string[] | undefined) ?? []); } catch { pinnedSet = new Set(); }
     const pinned = base.filter(p => pinnedSet.has(p));
     const rest   = base.filter(p => !pinnedSet.has(p));
     PlantSelector._filtered = [...pinned, ...rest];
 
     if (!PlantSelector._filtered.length) {
-      PlantSelector._dropdown.innerHTML =
+      PlantSelector._dropdown!.innerHTML =
         `<div class="hps-empty">${PlantSelector._options.length ? 'No matches' : 'No plant data loaded'}</div>`;
       PlantSelector._activeIdx = -1;
       return;
     }
     const sel = Store.selectedPlant;
-    const optHtml = (p, i) => {
+    const optHtml = (p: string, i: number): string => {
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
       return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
@@ -1032,28 +1116,28 @@ const PlantSelector = {
       if (pinned.length && rest.length && i === pinned.length) ddHtml += `<div class="hps-section">${Util.t('us.all_plants_section')}</div>`;
       ddHtml += optHtml(p, i);
     });
-    PlantSelector._dropdown.innerHTML = ddHtml;
-    PlantSelector._activeIdx = Math.max(0, PlantSelector._filtered.indexOf(sel));
+    PlantSelector._dropdown!.innerHTML = ddHtml;
+    PlantSelector._activeIdx = Math.max(0, PlantSelector._filtered.indexOf(sel ?? ''));
     PlantSelector._highlightActive();
-    PlantSelector._dropdown.querySelectorAll('.hps-option').forEach(el => {
+    PlantSelector._dropdown!.querySelectorAll<HTMLElement>('.hps-option').forEach(el => {
       el.addEventListener('mousedown', e => {
         e.preventDefault();
-        PlantSelector._select(el.dataset.plant);
+        PlantSelector._select(el.dataset.plant as string);
       });
     });
   },
 
-  _highlightActive() {
-    const items = PlantSelector._dropdown.querySelectorAll('.hps-option');
+  _highlightActive(): void {
+    const items = PlantSelector._dropdown!.querySelectorAll('.hps-option');
     items.forEach((el, i) => el.classList.toggle('active', i === PlantSelector._activeIdx));
     const active = items[PlantSelector._activeIdx];
     if (active) active.scrollIntoView({ block: 'nearest' });
   },
 
-  _onKeydown(e) {
+  _onKeydown(e: KeyboardEvent): void {
     if (!PlantSelector._open) {
       if (e.key === 'ArrowDown' || e.key === 'Enter') {
-        PlantSelector._renderDropdown(PlantSelector._input.value);
+        PlantSelector._renderDropdown((PlantSelector._input as HTMLInputElement).value);
         PlantSelector._openDropdown();
         e.preventDefault();
       }
@@ -1074,15 +1158,15 @@ const PlantSelector = {
     } else if (e.key === 'Escape') {
       PlantSelector._closeDropdown();
       PlantSelector._restoreLabel();
-      PlantSelector._input.blur();
+      PlantSelector._input!.blur();
     }
   },
 
-  _select(plant) {
+  _select(plant: string): void {
     Store.setSelectedPlant(plant, 'header');
     PlantSelector._reflectSelection();
     PlantSelector._closeDropdown();
-    PlantSelector._input.blur();
+    PlantSelector._input!.blur();
   }
 };
 
@@ -1090,15 +1174,20 @@ const PlantSelector = {
    APP — bootstrap, tab switching, side-panel + resize handles.
    ========================================================================== */
 const App = {
-  _currentTab: 'home',
-  _currentMasterSub: 'lines',
-  _ganttSub: 'timeline',
-  _laborSub: 'aggregate',
-  _pausables: new Set(),
+  _currentTab: 'home' as TopLevelTab,
+  _currentMasterSub: 'lines' as MasterSubTab,
+  _ganttSub: 'timeline' as GanttSubTab,
+  _laborSub: 'aggregate' as LaborSubTab,
+  _pausables: new Set<{ pause?(): void; resume?(): void }>(),
   _drawerOpen: false,
+  _prevTab: null as TopLevelTab | null,
+  // Assigned externally from app.js once this module loads (see this file's
+  // header comment) — showLoginScreen's sign-in success handler and the
+  // DOMContentLoaded gate both call it. Never set from within this file.
+  _bootMain: undefined as (() => void) | undefined,
 
   // Register any object with pause()/resume() to be auto-paused on tab hide.
-  registerPausable(obj) {
+  registerPausable(obj: { pause?(): void; resume?(): void } | null | undefined): void {
     if (obj && (typeof obj.pause === 'function' || typeof obj.resume === 'function')) {
       App._pausables.add(obj);
     }
@@ -1113,7 +1202,7 @@ const App = {
      .remove('open')`) and close the command palette via its own real
      NIMBUS.CommandPalette.close() (idempotent — safe even if already closed;
      no new close mechanism invented here). */
-  _openDrawer() {
+  _openDrawer(): void {
     const drawer = document.getElementById('nav-drawer');
     const scrim  = document.getElementById('nav-drawer-scrim');
     const toggle = document.getElementById('nav-drawer-toggle');
@@ -1130,7 +1219,7 @@ const App = {
     (closeBtn || drawer).focus();
   },
 
-  _closeDrawer() {
+  _closeDrawer(): void {
     const drawer = document.getElementById('nav-drawer');
     const scrim  = document.getElementById('nav-drawer-scrim');
     const toggle = document.getElementById('nav-drawer-toggle');
@@ -1147,15 +1236,15 @@ const App = {
   // ESC closes the drawer; Tab/Shift+Tab is a simple focus trap scoped to the
   // drawer's own interactive elements while it is open. Kept deliberately
   // simple per the brief — this is a slide-in nav drawer, not a complex widget.
-  _onDrawerKeydown(e) {
+  _onDrawerKeydown(e: KeyboardEvent): void {
     if (!App._drawerOpen) return;
     if (e.key === 'Escape') { e.preventDefault(); App._closeDrawer(); return; }
     if (e.key !== 'Tab') return;
     const drawer = document.getElementById('nav-drawer');
     if (!drawer) return;
-    const focusables = [...drawer.querySelectorAll(
+    const focusables = Array.from(drawer.querySelectorAll<HTMLElement>(
       'button:not([hidden]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    )].filter(el => !el.disabled);
+    )).filter(el => !(el as HTMLButtonElement).disabled);
     if (!focusables.length) return;
     const first = focusables[0];
     const last  = focusables[focusables.length - 1];
@@ -1168,17 +1257,17 @@ const App = {
   // [data-i18n] sweep is one-shot and never re-runs on this dynamically-
   // updated node (see global-constraints.md's i18n note + the CSS comment
   // on .cmd-section-label in styles.css).
-  _updateSectionLabel(tab) {
+  _updateSectionLabel(tab: TopLevelTab): void {
     const el = document.getElementById('cmd-band-section-label');
     if (!el) return;
-    const KEY = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
+    const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
     el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
   },
 
   // Lines pill (context bar) — dispatcher only, no new line-filter UI or data
   // path. Routes to whichever tab/sub-tab's EXISTING line filter is active;
   // see the task report for the full tab → target dispatch table.
-  _dispatchLinesPill(e) {
+  _dispatchLinesPill(e: MouseEvent): void {
     const tab = App._currentTab;
     if (tab === 'home') {
       Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn');
@@ -1194,27 +1283,27 @@ const App = {
 
   // Hidden entirely on tabs with no equivalent line filter (masterdata/admin);
   // visible (and dispatched per-tab by _dispatchLinesPill) everywhere else.
-  _updateLinesPillVisibility(tab) {
+  _updateLinesPillVisibility(tab: TopLevelTab): void {
     const pill = document.getElementById('context-lines-pill');
     if (!pill) return;
     pill.hidden = (tab === 'masterdata' || tab === 'admin');
   },
 
-  init() {
+  init(): void {
     /* Apply locale translations to static HTML elements */
-    document.querySelectorAll('[data-i18n]').forEach(el => {
-      el.textContent = Util.t(el.dataset.i18n);
+    document.querySelectorAll<HTMLElement>('[data-i18n]').forEach(el => {
+      el.textContent = Util.t(el.dataset.i18n as string);
     });
-    document.querySelectorAll('[data-i18n-title]').forEach(el => {
-      el.title = Util.t(el.dataset.i18nTitle);
+    document.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach(el => {
+      el.title = Util.t(el.dataset.i18nTitle as string);
     });
-    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-      el.placeholder = Util.t(el.dataset.i18nPlaceholder);
+    document.querySelectorAll<HTMLElement>('[data-i18n-placeholder]').forEach(el => {
+      (el as HTMLInputElement).placeholder = Util.t(el.dataset.i18nPlaceholder as string);
     });
 
     /* Tab buttons */
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-      btn.onclick = () => App.goto(btn.dataset.tab);
+    document.querySelectorAll<HTMLElement>('.tab-btn').forEach(btn => {
+      btn.onclick = () => App.goto(btn.dataset.tab as TopLevelTab | 'table');
     });
 
     /* Nav drawer (Command Band re-skin) — hamburger open, scrim/close-button
@@ -1255,46 +1344,46 @@ const App = {
     App._updateLinesPillVisibility(App._currentTab);
 
     /* Manage Master Data sub-tabs (Production Lines / Plant) */
-    document.querySelectorAll('.md-master-subtabs .admin-subtab').forEach(btn => {
-      btn.onclick = () => App.gotoMasterSub(btn.dataset.mdMaster);
+    document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(btn => {
+      btn.onclick = () => App.gotoMasterSub(btn.dataset.mdMaster as MasterSubTab);
     });
 
     /* Timeline toolbar view buttons */
-    document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach(btn => {
-      btn.onclick = () => Timeline.setView(btn.dataset.view);
+    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(btn => {
+      btn.onclick = () => Timeline.setView(btn.dataset.view as string);
     });
 
     /* Gantt sub-tab toggle (Timeline vs Orders) — was a static onclick=
        attribute in index.html; converted to a real listener here (this
        task's own module, per this phase's inline-handler-migration mandate). */
-    document.querySelectorAll('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(btn => {
-      btn.onclick = () => App.gotoGanttSub(btn.dataset.ganttSub);
+    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(btn => {
+      btn.onclick = () => App.gotoGanttSub(btn.dataset.ganttSub as GanttSubTab);
     });
 
     /* Labor Planning sub-tab toggle — same conversion as above. */
-    document.querySelectorAll('.labor-toolbar .seg-btn[data-labor-sub]').forEach(btn => {
-      btn.onclick = () => App.gotoLaborSub(btn.dataset.laborSub);
+    document.querySelectorAll<HTMLElement>('.labor-toolbar .seg-btn[data-labor-sub]').forEach(btn => {
+      btn.onclick = () => App.gotoLaborSub(btn.dataset.laborSub as LaborSubTab);
     });
 
     /* Work-header "Open schedule" CTA — same conversion as above. */
     document.getElementById('wh-cta-btn')?.addEventListener('click', () => App.gotoGanttTimeline());
 
     /* Alert bell */
-    document.getElementById('alert-bell').onclick = () => AlertsUIAdapter.toggleDrawer();
+    document.getElementById('alert-bell')!.onclick = () => AlertsUIAdapter.toggleDrawer();
 
     /* Resize handles for side panels */
-    App._wireResize('left',  document.getElementById('left-sidebar'));
-    App._wireResize('right', document.getElementById('right-sidebar'));
+    App._wireResize('left',  document.getElementById('left-sidebar')!);
+    App._wireResize('right', document.getElementById('right-sidebar')!);
 
     /* Sidebar collapse toggles — same conversion as above. */
     document.getElementById('left-sidebar-toggle-btn')?.addEventListener('click', () => App.toggleSide('left'));
     document.getElementById('right-sidebar-toggle-btn')?.addEventListener('click', () => App.toggleSide('right'));
 
     /* Right inspector collapsed on load — reopens automatically when an order is clicked */
-    document.getElementById('right-sidebar').classList.add('collapsed');
+    document.getElementById('right-sidebar')!.classList.add('collapsed');
 
     /* Modal backdrop click = close */
-    document.querySelectorAll('.modal-backdrop').forEach(b => {
+    document.querySelectorAll<HTMLElement>('.modal-backdrop').forEach(b => {
       b.addEventListener('click', e => { if (e.target === b) Modal.close(b.id); });
     });
 
@@ -1312,7 +1401,7 @@ const App = {
         Persistence._dirtyIds.add(String(evt.id));
         if (force) Persistence._forceIds.add(String(evt.id));
       }
-      if (evt.type === 'tasks:bulkUpdate') evt.ids.forEach(id => {
+      if (evt.type === 'tasks:bulkUpdate') (evt.ids as Array<string | number>).forEach(id => {
         Persistence._dirtyIds.add(String(id));
         if (force) Persistence._forceIds.add(String(id));
       });
@@ -1322,7 +1411,7 @@ const App = {
     /* Reload tasks when the user switches to a different plant */
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected' && evt.plant && evt.source !== 'restore') {
-        Persistence.loadForPlant(evt.plant);
+        Persistence.loadForPlant(evt.plant as string);
       }
     }, 'Persistence.plantLoad');
 
@@ -1342,7 +1431,7 @@ const App = {
         AlertsUIAdapter.renderBell();
       }
       // Blocks / calendar changes → re-render whichever sub-tab is active
-      const onMaster = (sub) => App._currentTab === 'masterdata' && App._currentMasterSub === sub;
+      const onMaster = (sub: MasterSubTab) => App._currentTab === 'masterdata' && App._currentMasterSub === sub;
       if (evt.type === 'blocks:change' || evt.type === 'calendar:change') {
         if (onMaster('plant')) Plant.render();
         if (onMaster('lines')) ProdLines.render();
@@ -1364,9 +1453,6 @@ const App = {
     /* Redraw on window resize */
     window.addEventListener('resize', Util.debounce(() => {
       if (App._currentTab === 'gantt') Timeline.redraw();
-      if (App._currentTab === 'home') {
-        if (Dashboard._chartToday) Dashboard._chartToday.resize();
-      }
     }, 120));
 
     /* Pause rAF loops and admin polling when the tab is hidden — saves CPU
@@ -1375,7 +1461,7 @@ const App = {
       const hidden = document.hidden;
       App._pausables.forEach(p => {
         try { hidden ? p.pause?.() : p.resume?.(); }
-        catch (e) { ErrorLog.warn('visibility', `Pausable threw: ${e.message}`); }
+        catch (e) { ErrorLog.warn('visibility', `Pausable threw: ${(e as Error).message}`); }
       });
       if (hidden) {
         try { AdminCockpit._stopHealthPolling?.(); } catch {}
@@ -1385,7 +1471,7 @@ const App = {
     });
   },
 
-  goto(tab) {
+  goto(tab: TopLevelTab | 'table'): void {
     // Admin Cockpit is admin-only — blocks the tab button, the Log button's click
     // handler, and the Ctrl+Alt+L shortcut simultaneously (all three route through here).
     if (tab === 'admin' && !Session.isAdmin()) return;
@@ -1408,8 +1494,8 @@ const App = {
     App._updateSectionLabel(tab);
     App._updateLinesPillVisibility(tab);
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    document.getElementById(tab + '-tab').classList.add('active');
-    document.querySelectorAll('.tab-btn').forEach(b => {
+    document.getElementById(tab + '-tab')!.classList.add('active');
+    document.querySelectorAll<HTMLElement>('.tab-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.tab === tab);
     });
     if (tab === 'gantt') {
@@ -1428,10 +1514,10 @@ const App = {
     }
   },
 
-  gotoGanttSub(sub) {
+  gotoGanttSub(sub: GanttSubTab): void {
     if (!['timeline', 'orders'].includes(sub)) return;
     App._ganttSub = sub;
-    document.querySelectorAll('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(b => {
+    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(b => {
       b.classList.toggle('active', b.dataset.ganttSub === sub);
     });
     const timelinePane = document.getElementById('gantt-sub-timeline');
@@ -1444,11 +1530,11 @@ const App = {
       if (el) el.style.display = show ? '' : 'none';
     });
     if (sub === 'orders') {
-      setTimeout(() => Table._api && Table._api.sizeColumnsToFit(), 30);
+      setTimeout(() => { if (Table._api) Table._api.sizeColumnsToFit(); }, 30);
     } else {
       setTimeout(() => {
         Timeline.redraw(); Timeline.rebuild(); Hierarchy.render();
-        GanttFilter._apply();
+        GanttFilter._apply!();
         TimelineNav.render();
         if (DependencyOverlay._enabled) DependencyOverlay.render();
       }, 30);
@@ -1464,7 +1550,7 @@ const App = {
   // happens invisibly behind it. Force 'timeline' explicitly instead. Do NOT
   // change App.goto('gantt') itself — that preservation behavior is correct
   // for plain top-nav tab switches.
-  gotoGanttTimeline() {
+  gotoGanttTimeline(): void {
     App.goto('gantt');
     App.gotoGanttSub('timeline');
   },
@@ -1473,13 +1559,12 @@ const App = {
   // start the week on the user's chosen day. Flatpickr reads firstDayOfWeek at
   // construction time, so this affects pickers created AFTER the call (all NIMBUS
   // pickers are lazily built on first open). Safe no-op if Flatpickr isn't loaded.
-  _applyFirstDayOfWeek() {
+  _applyFirstDayOfWeek(): void {
     try {
-      let fdow = Store.pref('firstDayOfWeek');
-      fdow = Number(fdow);
+      let fdow = Number(Store.pref('firstDayOfWeek'));
       if (fdow !== 0 && fdow !== 1) fdow = 0;
       if (typeof flatpickr !== 'undefined' && flatpickr.l10ns && flatpickr.l10ns.default) {
-        flatpickr.l10ns.default.firstDayOfWeek = fdow;
+        (flatpickr.l10ns.default as { firstDayOfWeek?: number }).firstDayOfWeek = fdow;
       }
     } catch {}
   },
@@ -1488,28 +1573,28 @@ const App = {
   // { tab, sub }), falling back to the Dashboard. Called once on boot after the
   // first task payload arrives. Guards the admin tab against non-admins and only
   // applies a sub-view for tabs that have one.
-  _gotoLanding() {
-    let lv = null;
-    try { lv = Store.pref('landingView'); } catch {}
-    const validTabs = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
-    let tab = (lv && validTabs.includes(lv.tab)) ? lv.tab : 'home';
+  _gotoLanding(): void {
+    let lv: LandingViewPref | null = null;
+    try { lv = (Store.pref('landingView') as LandingViewPref | undefined) ?? null; } catch {}
+    const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
+    let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
     if (tab === 'admin' && !Session.isAdmin()) tab = 'home';
     App.goto(tab);
     const sub = lv && lv.sub;
     if (sub) {
       try {
-        if (tab === 'gantt')           App.gotoGanttSub(sub);
-        else if (tab === 'masterdata') App.gotoMasterSub(sub);
-        else if (tab === 'labor')      App.gotoLaborSub(sub);
+        if (tab === 'gantt')           App.gotoGanttSub(sub as GanttSubTab);
+        else if (tab === 'masterdata') App.gotoMasterSub(sub as MasterSubTab);
+        else if (tab === 'labor')      App.gotoLaborSub(sub as LaborSubTab);
       } catch {}
     }
   },
 
-  gotoLaborSub(sub) {
-    const valid = ['aggregate','line-plan','capacity','exceptions','inputs'];
+  gotoLaborSub(sub: LaborSubTab): void {
+    const valid: LaborSubTab[] = ['aggregate','line-plan','capacity','exceptions','inputs'];
     if (!valid.includes(sub)) return;
     App._laborSub = sub;
-    document.querySelectorAll('.labor-toolbar .seg-btn[data-labor-sub]').forEach(b => {
+    document.querySelectorAll<HTMLElement>('.labor-toolbar .seg-btn[data-labor-sub]').forEach(b => {
       b.classList.toggle('active', b.dataset.laborSub === sub);
     });
     valid.forEach(s => {
@@ -1522,14 +1607,14 @@ const App = {
     }
   },
 
-  gotoMasterSub(sub) {
+  gotoMasterSub(sub: MasterSubTab): void {
     if (!['lines', 'plant'].includes(sub)) return;
     // Collapse line accordions when switching away from the lines sub-tab
     if (App._currentMasterSub === 'lines' && sub !== 'lines') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
     }
     App._currentMasterSub = sub;
-    document.querySelectorAll('.md-master-subtabs .admin-subtab').forEach(b => {
+    document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(b => {
       b.classList.toggle('active', b.dataset.mdMaster === sub);
     });
     const linesPane = document.getElementById('md-master-lines-pane');
@@ -1548,20 +1633,20 @@ const App = {
     }
   },
 
-  toggleSide(which) {
+  toggleSide(which: 'left' | 'right'): void {
     const el = document.getElementById(which === 'left' ? 'left-sidebar' : 'right-sidebar');
     if (el) {
       el.classList.toggle('collapsed');
       if (which === 'left') {
-        const btn = el.querySelector('.side-head .icon-btn');
+        const btn = el.querySelector<HTMLElement>('.side-head .icon-btn');
         if (btn) btn.textContent = el.classList.contains('collapsed') ? '▶' : '◀';
       }
     }
     setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
   },
 
-  _wireResize(side, el) {
-    const handle = el.querySelector('.resize-handle');
+  _wireResize(side: 'left' | 'right', el: HTMLElement): void {
+    const handle = el.querySelector<HTMLElement>('.resize-handle');
     if (!handle) return;
     let dragging = false;
     handle.addEventListener('mousedown', e => {

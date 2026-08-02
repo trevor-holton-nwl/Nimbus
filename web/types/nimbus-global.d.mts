@@ -58,7 +58,9 @@ declare global {
           _openOverrideModalForId?(id: string): void;
           _applyChipFilter?(patch: any): void;
         };
-        Store?: unknown;
+        Store?: {
+          tasks?: Record<string, NimbusTask>;
+        };
         DarkMode?: {
           set?(isDark: boolean): void;
         };

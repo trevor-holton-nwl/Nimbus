@@ -143,6 +143,11 @@ declare global {
       deselectAll(): void;
       addEventListener(eventType: string, listener: (...args: unknown[]) => void): void;
       stopEditing(cancel?: boolean): void;
+      /** Auto-sizes all columns to fit the available grid width — added by the
+       *  TypeScript migration's application-shell.mts conversion (Phase 5 Task 1;
+       *  App.gotoGanttSub's Orders-sub-tab activation calls it) as the real
+       *  AG Grid v31 Grid API surface that call site uses. */
+      sizeColumnsToFit(): void;
       [method: string]: unknown;
     }
 
