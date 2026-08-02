@@ -145,7 +145,7 @@ import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, OptimizerMode } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -6009,23 +6009,73 @@ export const Interaction = {
 /* =============================================================================
    OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
    ========================================================================== */
+// -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
+//    OptimizeDialog/OptimizerPreview) ----------------------------------------
+
+/** OptimizeDialog's per-plant color-wheel cache — populated by _updatePlantBadge,
+ *  consumed by run() to skip a second round-trip fetch on submit. */
+interface OptimizeWheelCache {
+  plant: string;
+  colorMap: Record<string, number> | null;
+  wheelUsed: boolean;
+}
+
+/** One entry / the overall shape of the `GET /color-wheel/{plant}` response body. */
+interface ColorWheelEntry {
+  color: string;
+  order_y?: number;
+}
+interface ColorWheelResponse {
+  entries?: ColorWheelEntry[];
+}
+
+/** Store.pref('optimizerDefaults') shape — the user's last-used optimizer
+ *  settings, seeded back into the dialog on open(). Store.pref() itself
+ *  returns `unknown` (an open per-user prefs bag), so this is read via an `as`
+ *  cast and defensively validated at each call site (typeof / array-includes
+ *  checks) — same precedent as Table's TableGridLayout / _pinnedLines casts
+ *  elsewhere in this file. */
+interface OptimizerDefaults {
+  mode?: string;
+  preset?: string;
+  respectFixed?: boolean;
+  respectCalendar?: boolean;
+}
+
+/** Mirrors Engine.runAndApply's opts contract (schedule-services.mts) — built by
+ *  run() below and threaded through OptimizerPreview.runWithPreview. Engine.
+ *  runAndApply itself takes `opts: Record<string, unknown>` (an open bag it
+ *  reads defensively via individual `as` casts), so this needs the same index
+ *  signature to stay assignable at that call site — same "known fields + open
+ *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
+interface OptimizerRunOptions {
+  plant?: string | null;
+  colorMap?: Record<string, number> | null;
+  lines?: string[] | null;
+  startDate?: Date;
+  endDate?: Date;
+  respectFixed?: boolean;
+  respectCalendar?: boolean;
+  [key: string]: unknown;
+}
+
 export const OptimizeDialog = (() => {
-  let _mode    = 'changeover';
+  let _mode: OptimizerMode = 'changeover';
   let _preset  = '2w';
-  let _start: any   = null;
-  let _end: any     = null;
-  let _fpStart: any = null;
-  let _fpEnd: any   = null;
-  let _plant: any   = null;
-  let _allPlants: any[] = [];
+  let _start: Date | null   = null;
+  let _end: Date | null     = null;
+  let _fpStart: NimbusVendor.FlatpickrInstance | null = null;
+  let _fpEnd: NimbusVendor.FlatpickrInstance | null   = null;
+  let _plant: string | null   = null;
+  let _allPlants: string[] = [];
   let _dropdownListenerSet = false;
-  let _scope   = 'plant';            // 'plant' | 'lines'
+  let _scope: 'plant' | 'lines' = 'plant';
   let _selectedLines = new Set<string>();    // line names when _scope === 'lines'
   let _lineSearch = '';              // current line-list filter text
-  let _wheelCache: any = null;            // { plant, colorMap, wheelUsed } — populated by _updatePlantBadge
+  let _wheelCache: OptimizeWheelCache | null = null; // populated by _updatePlantBadge
   let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
 
-  const PRESET_DAYS = { '2w': 14 }; // UI only exposes '2w' and 'custom'
+  const PRESET_DAYS: Record<string, number> = { '2w': 14 }; // UI only exposes '2w' and 'custom'
 
   function _initPickers() {
     if (_fpStart) return;
@@ -6040,7 +6090,7 @@ export const OptimizeDialog = (() => {
   }
 
   function _buildPlantSelect() {
-    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.PRODUCTION_LINE)).filter(Boolean);
+    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.PRODUCTION_LINE)).filter(Boolean) as string[];
     _allPlants = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
     const list = document.getElementById('opt-plant-list');
     if (!list) return;
@@ -6059,14 +6109,14 @@ export const OptimizeDialog = (() => {
     _initDropdownListener();
   }
 
-  function _renderPlantList(plants: any) {
+  function _renderPlantList(plants: string[]) {
     const list = document.getElementById('opt-plant-list');
     if (!list) return;
     if (!plants.length) {
       list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_matches')}</li>`;
       return;
     }
-    list.innerHTML = plants.map((p: any) => {
+    list.innerHTML = plants.map((p) => {
       const safe = p.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `<li class="opt-plant-item${_plant === p ? ' selected' : ''}" role="option"
            aria-selected="${_plant === p}"
@@ -6082,9 +6132,9 @@ export const OptimizeDialog = (() => {
   function _initDropdownListener() {
     if (_dropdownListenerSet) return;
     _dropdownListenerSet = true;
-    document.addEventListener('click', (e: any) => {
+    document.addEventListener('click', (e: MouseEvent) => {
       const sel = document.getElementById('opt-plant-select');
-      if (sel && !sel.contains(e.target)) _closeDropdown();
+      if (sel && !sel.contains(e.target as Node | null)) _closeDropdown();
     }, true);
   }
 
@@ -6103,7 +6153,7 @@ export const OptimizeDialog = (() => {
     dd.hidden = !opening;
     sel?.classList.toggle('open', opening);
     if (opening) {
-      const srch: any = document.getElementById('opt-plant-search');
+      const srch = document.getElementById('opt-plant-search') as HTMLInputElement | null;
       if (srch) { srch.value = ''; srch.focus(); }
       _renderPlantList(_allPlants);
     }
@@ -6116,12 +6166,12 @@ export const OptimizeDialog = (() => {
     sel?.classList.remove('open');
   }
 
-  function filterPlants(query: any) {
+  function filterPlants(query: string) {
     const q = query.toLowerCase().trim();
-    _renderPlantList(q ? _allPlants.filter((p: any) => p.toLowerCase().includes(q)) : _allPlants);
+    _renderPlantList(q ? _allPlants.filter((p) => p.toLowerCase().includes(q)) : _allPlants);
   }
 
-  function selectPlant(plant: any) {
+  function selectPlant(plant: string) {
     _plant = plant;
     Store.setSelectedPlant(plant, 'optimize-dialog');
     _renderPlantList(_allPlants);
@@ -6130,15 +6180,15 @@ export const OptimizeDialog = (() => {
     _updatePlantBadge();
     _selectedLines.clear();
     _lineSearch = '';
-    const srch: any = document.getElementById('opt-line-search');
+    const srch = document.getElementById('opt-line-search') as HTMLInputElement | null;
     if (srch) srch.value = '';
     if (_scope === 'lines') _renderLines();
     if (_preset === 'horizon') applyPreset('horizon');
   }
 
-  function setScope(scope: any) {
+  function setScope(scope: string) {
     _scope = scope === 'lines' ? 'lines' : 'plant';
-    document.querySelectorAll('.opt-scope-btn').forEach((b: any) =>
+    document.querySelectorAll<HTMLElement>('.opt-scope-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.scope === _scope)
     );
     const panel = document.getElementById('opt-lines-panel');
@@ -6169,7 +6219,7 @@ export const OptimizeDialog = (() => {
     }
 
     // Count orders per line (scoped to selected plant)
-    const orderCounts: any = {};
+    const orderCounts: Record<string, number> = {};
     for (const t of Store.tasksByPlant(_plant)) {
       const l = t.PRODUCTION_LINE || 'Unknown';
       orderCounts[l] = (orderCounts[l] || 0) + 1;
@@ -6181,7 +6231,7 @@ export const OptimizeDialog = (() => {
     if (!visible.length) {
       list.innerHTML = `<li class="opt-lines-empty">${Util.t('ui.no_matches')}</li>`;
     } else {
-      list.innerHTML = visible.map((line: any) => {
+      list.innerHTML = visible.map((line) => {
         const safe = line.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const checked = _selectedLines.has(line) ? 'checked' : '';
         const oc = orderCounts[line] || 0;
@@ -6201,12 +6251,12 @@ export const OptimizeDialog = (() => {
     if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
   }
 
-  function filterLines(q: any) {
+  function filterLines(q: string) {
     _lineSearch = q || '';
     _renderLines();
   }
 
-  function selectAllLines(checked: any) {
+  function selectAllLines(checked: boolean) {
     const allLines = _linesForPlant();
     const q = _lineSearch.toLowerCase().trim();
     const visible = q ? allLines.filter(l => l.toLowerCase().includes(q)) : allLines;
@@ -6217,7 +6267,7 @@ export const OptimizeDialog = (() => {
     _renderLines();
   }
 
-  function _onLineToggle(line: any, checked: any) {
+  function _onLineToggle(line: string, checked: boolean) {
     if (checked) _selectedLines.add(line);
     else _selectedLines.delete(line);
     const count = document.getElementById('opt-lines-count');
@@ -6225,7 +6275,7 @@ export const OptimizeDialog = (() => {
     if (count) count.textContent = `${_selectedLines.size} of ${total} selected`;
   }
 
-  function _displayDate(d: any) {
+  function _displayDate(d: Date) {
     return d.toLocaleString('en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
       hour: 'numeric', minute: '2-digit'
@@ -6235,28 +6285,30 @@ export const OptimizeDialog = (() => {
   function _updateSummary() {
     const el = document.getElementById('opt-date-summary');
     if (!el || !_start || !_end) return;
-    const days = Math.round((_end - _start) / Config.MS_DAY);
+    const days = Math.round((_end.getTime() - _start.getTime()) / Config.MS_DAY);
     el.innerHTML =
       `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayDate(_end)}</span>` +
       `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
   }
 
-  function applyPreset(key: any) {
+  function applyPreset(key: string) {
     _preset = key;
-    document.querySelectorAll('.opt-preset-chip').forEach((c: any) =>
+    document.querySelectorAll<HTMLElement>('.opt-preset-chip').forEach((c) =>
       c.classList.toggle('active', c.dataset.preset === key)
     );
     const row = document.getElementById('opt-date-row');
     if (row) row.classList.toggle('visible', key === 'custom');
 
     if (key !== 'custom') {
-      let days;
+      let days: number;
       if (key === 'horizon') {
-        const plantRow = Store._state.masterData?.plants?.find((p: any) => p.plant === Store.selectedPlant) ?? null;
+        // Store._state.masterData direct touch — deliberate, out of scope for this
+        // task (see the file header comment above OptimizeDialog).
+        const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
         const horizonMinutes = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? 20160;
         days = Math.max(1, Math.ceil(horizonMinutes / 1440));
       } else {
-        days = (PRESET_DAYS as any)[key];
+        days = PRESET_DAYS[key];
       }
       const now = new Date();
       now.setSeconds(0, 0);
@@ -6272,9 +6324,9 @@ export const OptimizeDialog = (() => {
     _updateSummary();
   }
 
-  function selectMode(mode: any) {
+  function selectMode(mode: OptimizerMode) {
     _mode = mode;
-    document.querySelectorAll('.opt-strategy-pill').forEach((c: any) =>
+    document.querySelectorAll<HTMLElement>('.opt-strategy-pill').forEach((c) =>
       c.classList.toggle('active', c.dataset.mode === mode)
     );
   }
@@ -6282,12 +6334,12 @@ export const OptimizeDialog = (() => {
   function _updatePlantBadge() {
     const plant   = _plant;
     const badgeEl = document.getElementById('opt-wheel-badge');
-    const runBtn: any = document.getElementById('opt-run-btn');
+    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
 
     if (runBtn) runBtn.disabled = !plant;
 
     if (!badgeEl) return;
-    const setBadge = (state: any, icon: any, tip: any) => {
+    const setBadge = (state: 'none' | 'loading' | 'active' | 'warn', icon: string, tip: string) => {
       badgeEl.className = `opt-wheel-badge compact ${state}`;
       badgeEl.title = tip;
       badgeEl.innerHTML = `<span class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
@@ -6305,12 +6357,12 @@ export const OptimizeDialog = (() => {
     // Fetch the per-plant wheel directly so we can cache the colorMap and
     // skip a second round-trip when the user clicks Run.
     fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
-      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(r => r.ok ? r.json() as Promise<ColorWheelResponse> : Promise.reject())
       .then(body => {
         if (token !== _wheelFetchToken) return; // stale response — ignore
         const entries = (body && body.entries) || [];
         if (entries.length) {
-          const colorMap: any = {};
+          const colorMap: Record<string, number> = {};
           for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
           _wheelCache = { plant, colorMap, wheelUsed: true };
           setBadge('active', '✓', 'Color wheel is loaded');
@@ -6340,13 +6392,13 @@ export const OptimizeDialog = (() => {
     // when present, so the dialog opens pre-filled with their preferred strategy,
     // time window, and option toggles. Falls back to the historical defaults
     // (horizon preset / changeover / toolbar checkbox state) otherwise.
-    let _od: any = null;
-    try { _od = Store.pref('optimizerDefaults'); } catch {}
+    let _od: OptimizerDefaults | null = null;
+    try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch {}
     // Sync option checkboxes from the Gantt toolbar's existing chk- elements
-    const rfEl: any = document.getElementById('chk-respect-fixed');
-    const rcEl: any = document.getElementById('chk-respect-calendar');
-    const ofEl: any = document.getElementById('opt-chk-fixed');
-    const ocEl: any = document.getElementById('opt-chk-calendar');
+    const rfEl = document.getElementById('chk-respect-fixed') as HTMLInputElement | null;
+    const rcEl = document.getElementById('chk-respect-calendar') as HTMLInputElement | null;
+    const ofEl = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const ocEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
     if (rfEl && ofEl) ofEl.checked = rfEl.checked;
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
     // Saved defaults override the toolbar mirror when present.
@@ -6357,9 +6409,11 @@ export const OptimizeDialog = (() => {
     _initPickers();
     _buildPlantSelect();
     // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
-    const _seedPreset = (_od && ['horizon', '2w'].includes(_od.preset)) ? _od.preset : 'horizon';
+    const savedPreset = _od?.preset;
+    const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
     applyPreset(_seedPreset);
-    const _seedMode = (_od && ['spt', 'changeover', 'combined'].includes(_od.mode)) ? _od.mode : 'changeover';
+    const savedMode = _od?.mode;
+    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'combined'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
     selectMode(_seedMode);
     // Reset the Run button HTML in case a previous session left it in the
     // "Optimizing…" state (e.g., Cancel mid-fetch).
@@ -6369,7 +6423,7 @@ export const OptimizeDialog = (() => {
     // Default scope to whole-plant on each open; clear stale line selection.
     _selectedLines.clear();
     _lineSearch = '';
-    const lineSrch: any = document.getElementById('opt-line-search');
+    const lineSrch = document.getElementById('opt-line-search') as HTMLInputElement | null;
     if (lineSrch) lineSrch.value = '';
     setScope('plant');
     requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
@@ -6400,8 +6454,8 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
       return;
     }
-    const sfEl: any = document.getElementById('opt-chk-fixed');
-    const scEl: any = document.getElementById('opt-chk-calendar');
+    const sfEl = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
@@ -6415,7 +6469,7 @@ export const OptimizeDialog = (() => {
     } catch {}
 
     // Immediate visual feedback so the click feels responsive.
-    const runBtn: any = document.getElementById('opt-run-btn');
+    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
     const origRunHTML = runBtn ? runBtn.innerHTML : null;
     const restoreRunBtn = () => {
       if (!runBtn) return;
@@ -6441,7 +6495,7 @@ export const OptimizeDialog = (() => {
     // Use the cached per-plant wheel populated by _updatePlantBadge.
     // Fall back to a quick fetch only if the cache hasn't filled yet (race
     // on first open) — tighter timeout so a slow backend can't dominate UX.
-    let colorMap: any = null;
+    let colorMap: Record<string, number> | null = null;
     let wheelUsed = false;
     if (_wheelCache && _wheelCache.plant === plant) {
       colorMap  = _wheelCache.colorMap;
@@ -6450,7 +6504,7 @@ export const OptimizeDialog = (() => {
       try {
         const resp = await fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(1500) });
         if (resp.ok) {
-          const body = await resp.json();
+          const body = await resp.json() as ColorWheelResponse;
           const entries = body.entries || [];
           if (entries.length) {
             colorMap = {};
@@ -6473,7 +6527,7 @@ export const OptimizeDialog = (() => {
     }
 
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
-    const optsForEngine = {
+    const optsForEngine: OptimizerRunOptions = {
       plant,
       colorMap,
       lines:           linesScope,
@@ -6510,7 +6564,7 @@ export const OptimizeDialog = (() => {
 
   function openFromPicker() {
     _initPickers();
-    if (_start) _fpStart.setDate(_start, false);
+    if (_start) _fpStart!.setDate(_start, false);
     Modal.open('modal-opt-from');
   }
   function cancelFromPicker() {
@@ -6530,7 +6584,7 @@ export const OptimizeDialog = (() => {
   }
   function openToPicker() {
     _initPickers();
-    if (_end) _fpEnd.setDate(_end, false);
+    if (_end) _fpEnd!.setDate(_end, false);
     Modal.open('modal-opt-to');
   }
   function cancelToPicker() {
@@ -6551,26 +6605,49 @@ export const OptimizeDialog = (() => {
   return { open, close, run, applyPreset, selectMode, selectPlant, toggleDropdown, filterPlants, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
 })();
 
+/** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as
+ *  Hierarchy's HierarchyUtilMatrix / Dashboard's DashboardUtilMatrix (Task 4). */
+type OptimizerKpis = ReturnType<typeof Util.scheduleKpis>;
+
+/** Zero-filled fallback so pre/post KPI reads never need an intermediate
+ *  `{}` — every OptimizerKpis field is a required number. */
+const EMPTY_OPTIMIZER_KPIS: OptimizerKpis = { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 };
+
+/** lowerIsBetter's four states — see the comment inside _render() for the full
+ *  semantics of each (true/false/'soft'/null). */
+type LowerIsBetter = boolean | 'soft' | null;
+
+/** One KPI comparison card in the preview grid. */
+interface OptimizerPreviewCard {
+  label: string;
+  k: keyof OptimizerKpis;
+  ico: string;
+  fmt: (v: number) => string;
+  unit: string;
+  lowerIsBetter: LowerIsBetter;
+  tip: string;
+}
+
 /* =============================================================================
    OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
-  _snapshot: null as any,   // [ deep-cloned task ] taken before the run
-  _preKpis:  null as any,
-  _postKpis: null as any,
-  _mode:     null as any,
-  _plant:    null as any,
+  _snapshot: null as NimbusTask[] | null,   // deep-cloned tasks taken before the run
+  _preKpis:  null as OptimizerKpis | null,
+  _postKpis: null as OptimizerKpis | null,
+  _mode:     null as OptimizerMode | null,
+  _plant:    null as string | null,
   active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
-  _confSnapshot: null as any,       // Confidence.snapshot() taken just before the trial mutation
+  _confSnapshot: null as unknown,   // Confidence.snapshot() taken just before the trial mutation
   _abandonGuardInstalled: false,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
    *  the user clicks Run, before any await/fetch — gives instant feedback so
    *  the user doesn't stare at a blurry frozen page during the wheel fetch
    *  + config-close transition + engine run. */
-  showLoading(mode: any, plant: any) {
+  showLoading(mode: OptimizerMode, plant: string) {
     OptimizerPreview._installAbandonGuard();
     const body = document.getElementById('opt-preview-body');
     if (body) {
@@ -6584,7 +6661,7 @@ export const OptimizerPreview = {
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
-    if (root) root.querySelectorAll('.modal-foot button').forEach((b: any) => { b.disabled = true; });
+    if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = true; });
     Modal.open('modal-opt-preview');
   },
 
@@ -6593,7 +6670,7 @@ export const OptimizerPreview = {
   hideLoading() {
     Modal.close('modal-opt-preview');
     const root = document.getElementById('modal-opt-preview');
-    if (root) root.querySelectorAll('.modal-foot button').forEach((b: any) => { b.disabled = false; });
+    if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = false; });
   },
 
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
@@ -6613,7 +6690,7 @@ export const OptimizerPreview = {
 
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
-  runWithPreview(mode: any = 'combined', opts: any = {}) {
+  runWithPreview(mode: OptimizerMode = 'combined', opts: OptimizerRunOptions = {}) {
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
@@ -6623,13 +6700,15 @@ export const OptimizerPreview = {
     // again is a no-op cheap refresh, fine.
     OptimizerPreview.showLoading(mode, plant);
     const previewRoot = document.getElementById('modal-opt-preview');
-    const footBtns = previewRoot ? previewRoot.querySelectorAll('.modal-foot button') : [];
+    const footBtns: HTMLButtonElement[] = previewRoot
+      ? Array.from(previewRoot.querySelectorAll<HTMLButtonElement>('.modal-foot button'))
+      : [];
     const body = document.getElementById('opt-preview-body');
 
     // Double rAF to ensure the loading skeleton actually paints before we
     // block the main thread with the optimizer. Single rAF schedules a frame
     // but synchronous work afterward can still preempt the paint.
-    let snapshot: any = null;
+    let snapshot: NimbusTask[] | null = null;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const _optTotalT0 = performance.now();
       try {
@@ -6655,12 +6734,12 @@ export const OptimizerPreview = {
         const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
         const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
         const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
-        const inScope = (t: any) => {
+        const inScope = (t: NimbusTask): boolean => {
           if (lineSet && !lineSet.has(t.PRODUCTION_LINE)) return false;
           const s = t.start_date ? t.start_date.getTime() : null;
+          if (s == null) return false;
           const e = Util.scheduledEnd(t);
           const eMs = e ? e.getTime() : s;
-          if (s == null) return false;
           return eMs >= winStart && s <= winEnd;
         };
 
@@ -6683,10 +6762,11 @@ export const OptimizerPreview = {
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
 
-        footBtns.forEach((b: any) => { b.disabled = false; });
+        footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._render();
-      } catch (err: any) {
-        ErrorLog.error('optimize-preview', err?.message || String(err));
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : undefined;
+        ErrorLog.error('optimize-preview', errMsg || String(err));
         // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
         // the schedule partially mutated otherwise, with no undo path.
         if (snapshot) {
@@ -6702,10 +6782,10 @@ export const OptimizerPreview = {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
           + '  <div style="font-size:14px;margin-bottom:8px;">Optimization failed</div>'
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${(err?.message || 'Unknown error').replace(/[<>&]/g, (c: any) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as any)[c]))}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${(errMsg || 'Unknown error').replace(/[<>&]/g, (c: string) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as Record<string, string>)[c]))}</div>`
           + '</div>';
         }
-        footBtns.forEach((b: any) => { b.disabled = false; });
+        footBtns.forEach((b) => { b.disabled = false; });
       } finally {
         PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
       }
@@ -6715,8 +6795,8 @@ export const OptimizerPreview = {
   _render() {
     const body = document.getElementById('opt-preview-body');
     if (!body) return;
-    const pre  = OptimizerPreview._preKpis  || {};
-    const post = OptimizerPreview._postKpis || {};
+    const pre  = OptimizerPreview._preKpis  || EMPTY_OPTIMIZER_KPIS;
+    const post = OptimizerPreview._postKpis || EMPTY_OPTIMIZER_KPIS;
 
     // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
     // lowerIsBetter: true → decrease=better (green), increase=worse (red).
@@ -6726,30 +6806,30 @@ export const OptimizerPreview = {
     //                         span and peak utilization where shrinking is desirable
     //                         but growing shouldn't be flagged as a regression.
     //                null → neutral in both directions.
-    const cards = [
+    const cards: OptimizerPreviewCard[] = [
       {
         label: 'Changeovers', k: 'changeovers', ico: '🔁',
-        fmt: (v: any) => String(v), unit: '', lowerIsBetter: true,
+        fmt: (v) => String(v), unit: '', lowerIsBetter: true,
         tip: 'Adjacent orders on the same line that differ in COLOR or FORM_SIZE. Each one costs cleanout/setup time, so fewer is better.',
       },
       {
         label: 'Schedule span', k: 'span_h', ico: '↔',
-        fmt: (v: any) => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
+        fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
         tip: 'Total clock time from the earliest order start to the latest order finish, across the selected window and lines.',
       },
       {
         label: 'Late orders', k: 'late_count', ico: '⏰',
-        fmt: (v: any) => String(v), unit: '', lowerIsBetter: true,
+        fmt: (v) => String(v), unit: '', lowerIsBetter: true,
         tip: 'Count of orders whose scheduled finish lands AFTER the SAP planning date. Equal-weight headcount — a 1-hour slip and a 40-hour slip each count as one.',
       },
       {
         label: 'Cumulative lateness', k: 'late_h', ico: '⛌',
-        fmt: (v: any) => v.toFixed(1), unit: 'h', lowerIsBetter: true,
+        fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: true,
         tip: 'Sum of due-date slip across every late order, in hours. Captures severity, not just count: ten orders slipping 1 h = 10 h; one order slipping 40 h = 40 h. Lower is better.',
       },
       {
         label: 'Peak line utilization', k: 'peak_util_pct', ico: '▲',
-        fmt: (v: any) => String(v), unit: '%', lowerIsBetter: 'soft',
+        fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
         tip: 'Highest single-line single-day utilization in the 14-day horizon. High is good for throughput; over 100% means overbooked vs Calendar capacity.',
       },
     ];
@@ -6767,7 +6847,7 @@ export const OptimizerPreview = {
       } else if (d < 0) better++;
       else worse++;
     }
-    let verdictTone, verdictTitle, verdictSub;
+    let verdictTone: string, verdictTitle: string, verdictSub: string;
     if (better === 0 && worse === 0) {
       verdictTone = 'neutral';
       verdictTitle = 'No measurable change';
@@ -6790,8 +6870,8 @@ export const OptimizerPreview = {
       verdictSub = `${worse} KPI${worse===1?'':'s'} got worse, ${better} improved. Discard recommended.`;
     }
 
-    const esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
-      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as any))[c]);
+    const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
+      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
     const plant = OptimizerPreview._plant || '';
@@ -6891,16 +6971,16 @@ export const OptimizerPreview = {
 
     // Counter animation on the "After" numbers — runs once on mount.
     requestAnimationFrame(() => {
-      body.querySelectorAll('.opt-pv-num-post').forEach((el: any) => {
-        const target = parseFloat(el.dataset.target);
+      body.querySelectorAll<HTMLElement>('.opt-pv-num-post').forEach((el) => {
+        const target = parseFloat(el.dataset.target || '');
         if (!Number.isFinite(target)) return;
         const fmt   = el.dataset.fmt;
         const unit  = el.dataset.unit || '';
-        const valEl: any = el.querySelector('.opt-pv-num-val');
+        const valEl = el.querySelector<HTMLElement>('.opt-pv-num-val')!;
         const dur   = 520;
         const t0    = performance.now();
-        const easeOutCubic = (x: any) => 1 - Math.pow(1 - x, 3);
-        const tick = (now: any) => {
+        const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3);
+        const tick = (now: number) => {
           const t = Math.min(1, (now - t0) / dur);
           const v = target * easeOutCubic(t);
           const disp = fmt === 'int' ? String(Math.round(v)) : v.toFixed(1);

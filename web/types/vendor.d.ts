@@ -154,6 +154,12 @@ declare global {
       setDate(date: Date | string | number, triggerChange?: boolean): void;
       destroy(): void;
       clear(): void;
+      /** Sets a single config option after instantiation — added by CQ-1 Phase 6
+       *  Task 7 (schedule-workbench.mts's OptimizeDialog module, which calls
+       *  `_fpEnd.set('minDate', _start)` to constrain the end-date picker once a
+       *  start date is chosen) as the real flatpickr v4.6.13 API surface that
+       *  module uses. */
+      set(option: string, value: unknown): void;
       selectedDates: Date[];
       [method: string]: unknown;
     }
