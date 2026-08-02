@@ -17,7 +17,7 @@
  * add it to this same object — do not create a second ambient declaration
  * or inline `as any` at the call site.
  */
-import type { NimbusTask } from '../types.mjs';
+import type { NimbusTask, NimbusLineSetting } from '../types.mjs';
 
 declare global {
   const NIMBUS:
@@ -103,11 +103,14 @@ declare global {
         };
         /** Reached by Plant._renderRoster's plant-group-input onchange handler
          *  (plant-and-administration.mts Task 1) to keep MasterData's lines
-         *  table row in sync after a same-plant roster edit — MasterData
-         *  itself doesn't move into this file until CQ-1 Phase 4 Task 2 /
-         *  this migration's later task, so the reach stays ambient for now. */
+         *  table row in sync after a same-plant roster edit. Tightened by
+         *  Task 4 (MasterData's real conversion) to `syncLineSettings`'s
+         *  actual signature — the reach stays ambient (not a same-module bare
+         *  reference) because Plant/ProdLines' call sites were left going
+         *  through the shared `NIMBUS` binding rather than simplified once
+         *  MasterData landed in this same file (see the file header comment). */
         MasterData?: {
-          syncLineSettings?(line: string, patch: Record<string, unknown>): void;
+          syncLineSettings?(line: string, patch: Partial<NimbusLineSetting>): Promise<void>;
         };
       };
 }

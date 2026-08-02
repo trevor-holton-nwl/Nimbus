@@ -42,7 +42,7 @@ import { Store, UndoStack } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, ConstraintConfig, BufferUnit } from './types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -2427,16 +2427,193 @@ export const LaborPlanning = (() => {
   };
 })();
 
+// -- Local type declarations (this task's MasterData conversion; scoped to
+//    this closure-returning IIFE) -------------------------------------------
+
+/** The six tables MasterData's "Manage Data Tables" grid actually renders.
+ *  `roles`/`role_plants` are two of `master_data.py`'s eight ALLOWED_TABLES
+ *  but are owned by the `Security` module's dedicated roles UI instead (its
+ *  own `/master-data/roles`(+`/role_plants`) fetches, not this generic grid
+ *  engine) — `Security` stays container-`any`-typed until its own task. */
+type MasterDataTable =
+  | 'subnetworks' | 'plants' | 'production_lines'
+  | 'materials' | 'material_plants' | 'bom_items';
+
+/** `column_metadata` row shape returned alongside every `GET
+ *  /master-data/{table}` (master_data.py `_column_meta`/get_table_data). */
+interface MasterDataColumn {
+  column_name: string;
+  display_label: string;
+  is_locked: boolean;
+  column_order?: number;
+}
+
+/** A row in any Manage Data Tables grid. The DDL wizard (`_openAddColumn`)
+ *  can add an arbitrary new column to any of the six tables at runtime, and
+ *  every table also carries `created_at`/`updated_at` the grid never reads
+ *  by name — hence the open index signature, same convention as `NimbusTask`
+ *  in types.mts. The generic grid-engine functions below (`_rowKey`,
+ *  `_parsePaste`, `_appendRow`, `_markDirty`, …) operate on this base shape
+ *  since they read/write columns purely by the dynamic `column_name` string
+ *  the table's own `columns` metadata supplies, never by a table-specific
+ *  field name. */
+interface MasterDataRow {
+  [key: string]: unknown;
+}
+
+/** `GET /master-data/{table}` response envelope (master_data.py
+ *  get_table_data) — not part of the backend's `response_model=` scope (only
+ *  the task-date-update endpoint family is, per Phase 4's landed note), so
+ *  hand-written locally following that phase's precedent. Not constrained to
+ *  `T extends MasterDataRow`: `_save`'s post-write Store refresh reuses this
+ *  same envelope typed over `NimbusMasterPlant`/`NimbusMasterLine`
+ *  (types.mts) instead of the local `PlantRow`/`ProductionLineRow`, since
+ *  that fetch feeds `Store.setMasterData` directly and those domain
+ *  interfaces carry no index signature. */
+interface MasterDataResponse<T = MasterDataRow> {
+  columns: MasterDataColumn[];
+  rows: T[];
+  meta?: { total: number };
+}
+
+/** Per-table client-side edit buffer (`_cache[table]`): the last-loaded
+ *  baseline rows plus in-progress edits not yet POSTed to `/bulk`. */
+interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
+  columns: MasterDataColumn[];
+  rows: T[];
+  /** rowKey -> patch (a shallow-copied-and-mutated row carrying only the edited baseline + changed fields). */
+  dirty: Map<string, T>;
+  deleted: Set<string>;
+  added: T[];
+}
+
+/** `production_lines` row — the one table `MasterData.syncLineSettings`
+ *  reads/writes specific named fields on (the rest of the grid engine never
+ *  needs more than the base `MasterDataRow` bag). Column names/types per
+ *  schema.sql; `bottleneck`/`excl_optimizer` are DB `TEXT` flag columns
+ *  ('X' or null), not real booleans. */
+interface ProductionLineRow extends MasterDataRow {
+  subnetwork: string;
+  plant: string;
+  production_line: string;
+  line_key?: string;
+  pl_group?: string | null;
+  bottleneck?: string | null;
+  excl_optimizer?: string | null;
+  buffer_type?: string | null;
+  buffer_percent?: number | null;
+  buffer_hours?: number | null;
+}
+
+// Per-table row shapes for the other five tables MasterData's grid renders,
+// per schema.sql (not part of the backend's `response_model=` scope — only
+// the task-date-update endpoint family is, per Phase 4's landed note — so
+// hand-written locally, same as ProductionLineRow above). Not every field
+// below is read by name anywhere in this generic grid engine (which mostly
+// operates on the base `MasterDataRow` bag via each table's own dynamic
+// `columns` metadata) — these exist so a future consumer that DOES need a
+// specific table's shape (the way `syncLineSettings` needs
+// `ProductionLineRow`, or the BOM component picker below needs
+// `MaterialPlantRow`) has one ready instead of re-deriving it from schema.sql.
+
+interface SubnetworkRow extends MasterDataRow {
+  code: string;
+  name: string;
+}
+
+interface PlantRow extends MasterDataRow {
+  subnetwork: string;
+  plant: string;
+  alt_flag_horizon?: number;
+  conf_score_horizon?: number;
+  /** Attached by master_data.py's get_table_data for the 'plants' table only. */
+  constraints?: ConstraintConfig[] | null;
+}
+
+interface MaterialRow extends MasterDataRow {
+  material_id: string;
+  material_description?: string;
+  material_type?: string;
+  base_uom?: string;
+}
+
+/** Also the shape of the BOM component-picker's `material_plants` fetches
+ *  (`_loadBomMaterialsForPlant`, `_bomComponentSelect`) — both only read
+ *  `material_id`, but the row carries the rest of the columns below too. */
+interface MaterialPlantRow extends MasterDataRow {
+  material_id: string;
+  plant: string;
+  subnetwork?: string;
+  status_pl?: string;
+  default_production_version?: string;
+  min_lot_size?: number;
+  incremental_lot_size?: number;
+}
+
+interface BomItemRow extends MasterDataRow {
+  material_id: string;
+  plant: string;
+  alternative_bom: string;
+  level: number;
+  item_number: string;
+  component_id: string;
+  base_quantity?: number | null;
+  item_category?: string;
+  assembly?: string;
+  component_quantity?: number | null;
+  base_unit_of_measure?: string;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  changed_on?: string | null;
+  change_number?: string;
+}
+
+/** `POST /master-data/{table}/cascade-preview` response (master_data.py) —
+ *  counts of dependent rows a delete would also remove (or, for
+ *  `material_plants`, rows that block the delete). */
+interface MasterDataCascadePreview {
+  plants?: number;
+  production_lines?: number;
+  bom_items?: number;
+}
+
+/** `POST /master-data/{table}/bulk` response (master_data.py bulk_apply). */
+interface MasterDataBulkResult {
+  inserted: number;
+  updated: number;
+  deleted: number;
+}
+
+/** bom_items' plant+material scope gate (`_renderBomGate`). */
+interface BomFilter {
+  plant: string | null;
+  material_id: string | null;
+}
+
+/** Shape `_loadAndRender` stamps onto a plain `Error` after
+ *  `Util.parseBackendError` parses a non-OK response — mirrors
+ *  schedule-data.mts's `SaveError` idiom. */
+interface MasterDataFetchError extends Error {
+  errorCode?: string;
+  httpStatus?: number;
+}
+
+interface ComboboxOpts {
+  value?: string;
+  placeholder?: string;
+  onSelect?: (value: string) => void;
+}
+
 /* =============================================================================
    MASTER DATA — Manage Data Tables admin sub-tab UI (Subnetwork / Plant / Production Line)
    ========================================================================== */
 export const MasterData = (() => {
   const API = Config.API_BASE;
-  let _activeTable = 'subnetworks';
+  let _activeTable: MasterDataTable = 'subnetworks';
   // Per-table state: { columns, rows, dirty: Map(rowKey→patch), deleted: Set(rowKey), added: [] }
-  const _cache: any = {};
+  const _cache: Partial<Record<MasterDataTable, MasterDataTableState>> = {};
 
-  const TABLE_LABELS: any = {
+  const TABLE_LABELS: Record<MasterDataTable, string> = {
     subnetworks:      'Subnetworks',
     plants:           'Plants',
     production_lines: 'Production Lines',
@@ -2446,7 +2623,7 @@ export const MasterData = (() => {
   };
 
   // KEY_COLS drives primary-key identification per table.
-  const KEY_COLS: any = {
+  const KEY_COLS: Record<MasterDataTable, string[]> = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
     production_lines: ['subnetwork', 'plant', 'production_line'],
@@ -2456,7 +2633,7 @@ export const MasterData = (() => {
   };
 
   // Tables that need a parent-dropdown for FK columns.
-  const FK_SOURCE: any = {
+  const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
     production_lines: { subnetwork: 'subnetworks', plant: 'plants' },
     material_plants:  { material_id: 'materials' },
@@ -2469,22 +2646,22 @@ export const MasterData = (() => {
   // bom_items requires a plant + material pick before the grid loads (its
   // table is expected to be huge — one row per component per level per
   // material — unlike every other MasterData table, which loads in full).
-  let _bomFilter: any = { plant: null, material_id: null };
+  let _bomFilter: BomFilter = { plant: null, material_id: null };
 
-  function _rowKey(table: any, row: any) {
-    return (KEY_COLS as any)[table].map((k: any) => String(row[k] ?? '')).join('|');
+  function _rowKey(table: MasterDataTable, row: MasterDataRow): string {
+    return KEY_COLS[table].map((k) => String(row[k] ?? '')).join('|');
   }
 
-  function _parsePaste(rawText: any, columns: any) {
-    const lines = rawText.replace(/\r/g, '').split('\n').filter((l: any) => l.trim());
+  function _parsePaste(rawText: string, columns: MasterDataColumn[]): { rows: MasterDataRow[] } {
+    const lines = rawText.replace(/\r/g, '').split('\n').filter((l) => l.trim());
     if (!lines.length) return { rows: [] };
-    const colNames  = columns.map((c: any) => c.column_name.toLowerCase());
-    const colLabels = columns.map((c: any) => (c.display_label || c.column_name).toLowerCase());
-    const first     = lines[0].split('\t').map((h: any) => h.trim().toLowerCase());
-    const hasHeader = first.some((h: any) => colNames.includes(h) || colLabels.includes(h));
-    let headers: any, dataLines: any;
+    const colNames  = columns.map((c) => c.column_name.toLowerCase());
+    const colLabels = columns.map((c) => (c.display_label || c.column_name).toLowerCase());
+    const first     = lines[0].split('\t').map((h) => h.trim().toLowerCase());
+    const hasHeader = first.some((h) => colNames.includes(h) || colLabels.includes(h));
+    let headers: string[], dataLines: string[];
     if (hasHeader) {
-      headers   = first.map((h: any) => {
+      headers   = first.map((h) => {
         const ni = colNames.indexOf(h);
         if (ni >= 0) return columns[ni].column_name;
         const li = colLabels.indexOf(h);
@@ -2492,13 +2669,13 @@ export const MasterData = (() => {
       });
       dataLines = lines.slice(1);
     } else {
-      headers   = columns.map((c: any) => c.column_name);
+      headers   = columns.map((c) => c.column_name);
       dataLines = lines;
     }
-    const rows = dataLines.map((line: any) => {
+    const rows = dataLines.map((line) => {
       const vals = line.split('\t');
-      const row: any  = {};
-      headers.forEach((h: any, i: any) => { row[h] = (vals[i] ?? '').trim(); });
+      const row: MasterDataRow = {};
+      headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
       return row;
     });
     return { rows };
@@ -2507,10 +2684,10 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Public entry point
   // -----------------------------------------------------------------------
-  function render() {
+  function render(): void {
     // Wire inner tabs on first call.
-    document.querySelectorAll('.md-tab').forEach((b: any) => {
-      b.onclick = () => _setTab(b.dataset.mdTab);
+    document.querySelectorAll<HTMLElement>('.md-tab').forEach((b) => {
+      b.onclick = () => _setTab(b.dataset.mdTab as MasterDataTable);
     });
     const exportBtn = document.getElementById('md-export-schema-btn');
     if (exportBtn) exportBtn.onclick = _exportSchema;
@@ -2518,21 +2695,21 @@ export const MasterData = (() => {
     _renderActiveTable();
   }
 
-  function _setTab(table: any) {
+  function _setTab(table: MasterDataTable): void {
     _activeTable = table;
     _syncTabUI();
     _renderActiveTable();
   }
 
-  function _syncTabUI() {
-    document.querySelectorAll('.md-tab').forEach((b: any) =>
+  function _syncTabUI(): void {
+    document.querySelectorAll<HTMLElement>('.md-tab').forEach((b) =>
       b.classList.toggle('active', b.dataset.mdTab === _activeTable));
   }
 
   // bom_items never loads unscoped (its table is expected to be huge) — show
   // the plant+material picker gate until both are chosen, same as every
   // other tab shows its grid immediately.
-  function _renderActiveTable() {
+  function _renderActiveTable(): void {
     if (_activeTable === 'bom_items' && !(_bomFilter.plant && _bomFilter.material_id)) {
       _renderBomGate();
     } else {
@@ -2543,7 +2720,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // BOM plant + material scope gate
   // -----------------------------------------------------------------------
-  function _renderBomGate() {
+  function _renderBomGate(): void {
     const host = document.getElementById('md-host');
     if (!host) return;
     host.innerHTML = `
@@ -2562,7 +2739,7 @@ export const MasterData = (() => {
     _mkCombobox(document.getElementById('md-bom-plant-picker'), plants, {
       value: _bomFilter.plant || '',
       placeholder: Util.t('ph.select_plant'),
-      onSelect: (p: any) => {
+      onSelect: (p) => {
         _bomFilter = { plant: p || null, material_id: null };
         _renderBomGate();
       },
@@ -2570,26 +2747,26 @@ export const MasterData = (() => {
     if (_bomFilter.plant) _loadBomMaterialsForPlant(_bomFilter.plant);
   }
 
-  async function _loadBomMaterialsForPlant(plant: any) {
+  async function _loadBomMaterialsForPlant(plant: string): Promise<void> {
     const matHost = document.getElementById('md-bom-material-picker');
     if (matHost) matHost.innerHTML = `<div class="md-loading-inline">${Util.t('ui.loading')}</div>`;
     try {
       const data = await Util.fetchTraced(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
-        .then((r: any) => r.json());
-      const materials = (data.rows || []).map((r: any) => r.material_id).sort();
+        .then((r) => r.json()) as MasterDataResponse<MaterialPlantRow>;
+      const materials = (data.rows || []).map((r) => r.material_id).sort();
       const host2 = document.getElementById('md-bom-material-picker');
       if (!host2) return; // tab/plant changed again while this was in flight
       _mkCombobox(host2, materials, {
         value: _bomFilter.material_id || '',
         placeholder: Util.t('ph.select_material'),
-        onSelect: (m: any) => {
+        onSelect: (m) => {
           _bomFilter.material_id = m || null;
           if (m) _loadAndRender('bom_items');
         },
       });
-    } catch (e: any) {
+    } catch (e) {
       if (matHost) matHost.innerHTML = `<div class="md-empty">${Util.t('err.load_materials_failed')}</div>`;
-      ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${e.message}`);
+      ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${(e as Error).message}`);
     }
   }
 
@@ -2599,7 +2776,7 @@ export const MasterData = (() => {
   // options array with no Store dependency, so it fits BOM's plant AND
   // material pickers (PlantSelector itself is wired one-to-one to
   // Store.selectedPlant and the global topbar DOM).
-  function _mkCombobox(containerEl: any, options: any, { value = '', placeholder = '', onSelect }: any = {}) {
+  function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
     if (!containerEl) return;
     containerEl.innerHTML = `
       <div class="hps-combobox md-bom-combobox">
@@ -2608,47 +2785,47 @@ export const MasterData = (() => {
         <button type="button" class="hps-clear" hidden>&times;</button>
         <div class="hps-dropdown" role="listbox" hidden></div>
       </div>`;
-    const root      = containerEl.querySelector('.hps-combobox');
-    const input     = root.querySelector('.hps-input');
-    const clearBtn  = root.querySelector('.hps-clear');
-    const dropdown  = root.querySelector('.hps-dropdown');
-    let filtered: any[]  = [];
+    const root      = containerEl.querySelector('.hps-combobox') as HTMLElement;
+    const input     = root.querySelector('.hps-input') as HTMLInputElement;
+    const clearBtn  = root.querySelector('.hps-clear') as HTMLButtonElement;
+    const dropdown  = root.querySelector('.hps-dropdown') as HTMLElement;
+    let filtered: string[]  = [];
     let activeIdx = -1;
     let open      = false;
     let selected  = value;
 
-    function reflect() {
+    function reflect(): void {
       input.value = selected || '';
       root.classList.toggle('has-value', !!selected);
       clearBtn.hidden = !selected;
     }
-    function renderDropdown(query: any) {
+    function renderDropdown(query: string): void {
       const q = (query || '').trim().toLowerCase();
       const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
       const filterQ = looksLikeLabel ? '' : q;
-      filtered = filterQ ? options.filter((o: any) => String(o).toLowerCase().includes(filterQ)) : options.slice();
+      filtered = filterQ ? options.filter((o) => String(o).toLowerCase().includes(filterQ)) : options.slice();
       if (!filtered.length) {
         dropdown.innerHTML = `<div class="hps-empty">${options.length ? Util.t('ui.no_matches') : Util.t('ui.no_options')}</div>`;
         activeIdx = -1;
         return;
       }
-      dropdown.innerHTML = filtered.map((o: any, i: any) =>
+      dropdown.innerHTML = filtered.map((o, i) =>
         `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
       ).join('');
       activeIdx = Math.max(0, filtered.indexOf(selected));
       highlight();
-      dropdown.querySelectorAll('.hps-option').forEach((el: any, i: any) => {
-        el.addEventListener('mousedown', (e: any) => { e.preventDefault(); pick(filtered[i]); });
+      dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
+        el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(filtered[i]); });
       });
     }
-    function highlight() {
+    function highlight(): void {
       const items = dropdown.querySelectorAll('.hps-option');
-      items.forEach((el: any, i: any) => el.classList.toggle('active', i === activeIdx));
+      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
       if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
     }
     function openDd()  { dropdown.hidden = false; open = true;  input.setAttribute('aria-expanded', 'true'); }
     function closeDd() { dropdown.hidden = true;  open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
-    function pick(o: any) {
+    function pick(o: string): void {
       selected = o;
       reflect();
       closeDd();
@@ -2658,7 +2835,7 @@ export const MasterData = (() => {
 
     input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
     input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
-    input.addEventListener('keydown', (e: any) => {
+    input.addEventListener('keydown', (e) => {
       if (!open) {
         if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
         return;
@@ -2669,9 +2846,9 @@ export const MasterData = (() => {
       else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
     });
     input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
-    clearBtn.addEventListener('mousedown', (e: any) => e.preventDefault());
+    clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
     clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', (e: any) => { if (!root.contains(e.target)) closeDd(); });
+    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
 
     reflect();
   }
@@ -2679,7 +2856,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Data loading
   // -----------------------------------------------------------------------
-  async function _loadAndRender(table: any) {
+  async function _loadAndRender(table: MasterDataTable): Promise<void> {
     const host = document.getElementById('md-host');
     if (!host) return;
     host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
@@ -2688,20 +2865,23 @@ export const MasterData = (() => {
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     // bom_items is the one table that must never load in full — always scope
     // the request to the plant + material the user picked via the gate.
+    // Non-null assertions: only reached via _renderActiveTable, which already
+    // gated on both being set before calling _loadAndRender('bom_items').
     const qs = table === 'bom_items'
-      ? `?${new URLSearchParams({ plant: _bomFilter.plant, material_id: _bomFilter.material_id }).toString()}`
+      ? `?${new URLSearchParams({ plant: _bomFilter.plant!, material_id: _bomFilter.material_id! }).toString()}`
       : '';
     try {
-      const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r: any) => {
+      const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r) => {
         if (!r.ok) {
           // Surface the backend body instead of discarding it.
           const parsed = await Util.parseBackendError(r);
-          const err: any = new Error(parsed.message); err.errorCode = parsed.errorCode; err.httpStatus = r.status;
+          const err = new Error(parsed.message) as MasterDataFetchError;
+          err.errorCode = parsed.errorCode; err.httpStatus = r.status;
           throw err;
         }
-        return r.json();
+        return r.json() as Promise<MasterDataResponse>;
       });
-      (_cache as any)[table] = {
+      _cache[table] = {
         columns: data.columns,
         rows:    data.rows,
         dirty:   new Map(),
@@ -2709,17 +2889,18 @@ export const MasterData = (() => {
         added:   [],
       };
       _renderTable(table);
-    } catch (e: any) {
-      host.innerHTML = `<div class="md-empty">Failed to load ${(TABLE_LABELS as any)[table]}: ${e.message}</div>`;
-      ErrorLog.error('master-data', `Load failed for ${table}: ${e.message}`,
-        { reqId, table, status: e.httpStatus }, { reqId, errorCode: e.errorCode || 'http.network' });
+    } catch (e) {
+      const err = e as MasterDataFetchError;
+      host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${err.message}</div>`;
+      ErrorLog.error('master-data', `Load failed for ${table}: ${err.message}`,
+        { reqId, table, status: err.httpStatus }, { reqId, errorCode: err.errorCode || 'http.network' });
     }
   }
 
   // -----------------------------------------------------------------------
   // Table rendering
   // -----------------------------------------------------------------------
-  function _renderTable(table: any) {
+  function _renderTable(table: MasterDataTable): void {
     const host = document.getElementById('md-host');
     if (!host) return;
     const state = _cache[table];
@@ -2825,7 +3006,7 @@ export const MasterData = (() => {
     // Header
     const thead = document.createElement('thead');
     const hRow = document.createElement('tr');
-    columns.forEach((col: any) => {
+    columns.forEach((col) => {
       const th = document.createElement('th');
       th.className = 'md-th';
       const lbl = document.createElement('span');
@@ -2860,24 +3041,24 @@ export const MasterData = (() => {
       tr.appendChild(td);
       tbody.appendChild(tr);
     } else {
-      allRows.forEach((row: any) => _appendRow(tbody, table, columns, row));
+      allRows.forEach((row) => _appendRow(tbody, table, columns, row));
     }
     tbl.appendChild(tbody);
     wrap.appendChild(tbl);
     host.appendChild(wrap);
   }
 
-  function _appendRow(tbody: any, table: any, columns: any, row: any) {
-    const state = _cache[table];
+  function _appendRow(tbody: HTMLTableSectionElement, table: MasterDataTable, columns: MasterDataColumn[], row: MasterDataRow): void {
+    const state = _cache[table]!;
     const key = _rowKey(table, row);
-    const isNew = state.added.some((r: any) => _rowKey(table, r) === key);
+    const isNew = state.added.some((r) => _rowKey(table, r) === key);
     const isDeleted = state.deleted.has(key);
     const isDirty = state.dirty.has(key);
     // Render pending (dirty) values over the saved baseline so an in-progress edit
     // survives a re-render (add/paste/delete all call _renderTable). For added rows
     // the dirty entry IS the added row object, so rowView resolves to the same values.
     const _dirtyPatch = state.dirty.get(key);
-    const rowView = _dirtyPatch ? { ...row, ..._dirtyPatch } : row;
+    const rowView: MasterDataRow = _dirtyPatch ? { ...row, ..._dirtyPatch } : row;
 
     const tr = document.createElement('tr');
     tr.dataset.rowKey = key;
@@ -2887,7 +3068,7 @@ export const MasterData = (() => {
       isDirty   ? 'md-row-dirty'   : '',
     ].filter(Boolean).join(' ');
 
-    columns.forEach((col: any) => {
+    columns.forEach((col) => {
       const td = document.createElement('td');
       td.className = 'md-td';
 
@@ -2896,30 +3077,32 @@ export const MasterData = (() => {
       // that assumes the source table's LAST key column is the value column
       // (true for material_plants -> 'plant', wrong for what we need: 'material_id').
       if (table === 'bom_items' && col.column_name === 'component_id' && isNew) {
-        td.appendChild(_bomComponentSelect(rowView.plant || _bomFilter.plant, rowView.component_id, key));
+        const rowPlant = rowView.plant != null ? String(rowView.plant) : '';
+        td.appendChild(_bomComponentSelect(rowPlant || _bomFilter.plant, rowView.component_id, key));
         tr.appendChild(td);
         return;
       }
 
       // FK columns get a <select> populated from parent table.
       const fkSources = FK_SOURCE[table] || {};
-      if (fkSources[col.column_name] && !isNew) {
+      const srcTable = fkSources[col.column_name];
+      if (srcTable && !isNew) {
         // For existing rows, key columns are read-only.
         if (col.is_locked) {
-          td.textContent = rowView[col.column_name] ?? '';
+          td.textContent = String(rowView[col.column_name] ?? '');
         } else {
-          td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], fkSources[col.column_name], key));
+          td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], srcTable, key));
         }
-      } else if (fkSources[col.column_name] && isNew) {
-        td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], fkSources[col.column_name], key));
+      } else if (srcTable && isNew) {
+        td.appendChild(_fkSelect(table, col.column_name, rowView[col.column_name], srcTable, key));
       } else if (col.is_locked && !isNew) {
         // Key columns on saved rows are read-only.
-        td.textContent = rowView[col.column_name] ?? '';
+        td.textContent = String(rowView[col.column_name] ?? '');
       } else {
         const cell = document.createElement('div');
         cell.contentEditable = isDeleted ? 'false' : 'true';
         cell.className = 'md-cell';
-        cell.textContent = rowView[col.column_name] ?? '';
+        cell.textContent = String(rowView[col.column_name] ?? '');
         cell.dataset.col = col.column_name;
         cell.dataset.rowKey = key;
         cell.oninput = () => _markDirty(table, key, col.column_name, cell.textContent);
@@ -2949,7 +3132,7 @@ export const MasterData = (() => {
     tbody.appendChild(tr);
   }
 
-  function _fkSelect(table: any, colName: any, value: any, sourceTable: any, rowKey: any) {
+  function _fkSelect(table: MasterDataTable, colName: string, value: unknown, sourceTable: MasterDataTable, rowKey: string): HTMLSelectElement {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
     // Populate from cache or fetch.
@@ -2964,10 +3147,11 @@ export const MasterData = (() => {
     blank.value = '';
     blank.textContent = Util.t('ui.select_placeholder');
     sel.appendChild(blank);
-    const _optLabel = (r: any) => (r[labelCol] && labelCol !== valCol) ? `${r[valCol]} — ${r[labelCol]}` : r[valCol];
-    sourceRows.forEach((r: any) => {
+    const _optLabel = (r: MasterDataRow): string =>
+      (r[labelCol] && labelCol !== valCol) ? `${String(r[valCol])} — ${String(r[labelCol])}` : String(r[valCol] ?? '');
+    sourceRows.forEach((r) => {
       const opt = document.createElement('option');
-      opt.value = r[valCol];
+      opt.value = String(r[valCol] ?? '');
       opt.textContent = _optLabel(r);
       if (r[valCol] === value) opt.selected = true;
       sel.appendChild(opt);
@@ -2976,13 +3160,13 @@ export const MasterData = (() => {
 
     // If source not loaded yet, fetch it.
     if (!sourceState) {
-      fetch(`${API}/master-data/${sourceTable}`).then((r: any) => r.json()).then((data: any) => {
+      fetch(`${API}/master-data/${sourceTable}`).then((r) => r.json()).then((data: MasterDataResponse) => {
         _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Set(), added: [] };
         // Rebuild select options.
         while (sel.options.length > 1) sel.remove(1);
-        data.rows.forEach((r: any) => {
+        data.rows.forEach((r) => {
           const opt = document.createElement('option');
-          opt.value = r[valCol];
+          opt.value = String(r[valCol] ?? '');
           opt.textContent = _optLabel(r);
           if (r[valCol] === value) opt.selected = true;
           sel.appendChild(opt);
@@ -2997,9 +3181,9 @@ export const MasterData = (() => {
   // _cache['material_plants'] (which may be absent, or scoped to a
   // different plant if that tab was visited) rather than risking either
   // table's cached view corrupting the other's.
-  const _bomComponentOptionsCache: any = {};
+  const _bomComponentOptionsCache: Record<string, string[]> = {};
 
-  function _bomComponentSelect(plant: any, value: any, rowKey: any) {
+  function _bomComponentSelect(plant: string | null, value: unknown, rowKey: string): HTMLSelectElement {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
     const blank = document.createElement('option');
@@ -3007,9 +3191,9 @@ export const MasterData = (() => {
     blank.textContent = Util.t('ui.select_placeholder');
     sel.appendChild(blank);
 
-    const fill = (materials: any) => {
+    const fill = (materials: string[]): void => {
       while (sel.options.length > 1) sel.remove(1);
-      materials.forEach((m: any) => {
+      materials.forEach((m) => {
         const opt = document.createElement('option');
         opt.value = m;
         opt.textContent = m;
@@ -3019,13 +3203,13 @@ export const MasterData = (() => {
     };
     sel.onchange = () => _markDirty('bom_items', rowKey, 'component_id', sel.value);
 
-    if (_bomComponentOptionsCache[plant]) {
+    if (plant && _bomComponentOptionsCache[plant]) {
       fill(_bomComponentOptionsCache[plant]);
     } else if (plant) {
       fetch(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
-        .then((r: any) => r.json())
-        .then((data: any) => {
-          const materials = (data.rows || []).map((r: any) => r.material_id).sort();
+        .then((r) => r.json())
+        .then((data: MasterDataResponse<MaterialPlantRow>) => {
+          const materials = (data.rows || []).map((r) => r.material_id).sort();
           _bomComponentOptionsCache[plant] = materials;
           fill(materials);
         }).catch(() => {});
@@ -3033,7 +3217,7 @@ export const MasterData = (() => {
     return sel;
   }
 
-  function _markDirty(table: any, rowKey: any, colName: any, value: any) {
+  function _markDirty(table: MasterDataTable, rowKey: string, colName: string, value: unknown): void {
     const state = _cache[table];
     if (!state) return;
     // An existing dirty entry accumulates further edits. For a row's FIRST edit start
@@ -3044,7 +3228,7 @@ export const MasterData = (() => {
     // trip the "missing key columns" guard in _save).
     let patch = state.dirty.get(rowKey);
     if (!patch) {
-      const addedRow = (state.added || []).find((r: any) => _rowKey(table, r) === rowKey);
+      const addedRow = (state.added || []).find((r) => _rowKey(table, r) === rowKey);
       patch = addedRow ? addedRow : { ..._getRowByKey(table, rowKey) };
     }
     patch[colName] = value;
@@ -3055,23 +3239,23 @@ export const MasterData = (() => {
     _updateSaveBtn(table);
   }
 
-  function _getRowByKey(table: any, key: any) {
+  function _getRowByKey(table: MasterDataTable, key: string): MasterDataRow {
     const state = _cache[table];
     const all = [...(state?.rows ?? []), ...(state?.added ?? [])];
-    return all.find((r: any) => _rowKey(table, r) === key) ?? {};
+    return all.find((r) => _rowKey(table, r) === key) ?? {};
   }
 
-  function _updateSaveBtn(table: any) {
+  function _updateSaveBtn(table: MasterDataTable): void {
     const state = _cache[table];
     if (!state) return;
     const isDirty = state.dirty.size > 0 || state.deleted.size > 0 || state.added.length > 0;
-    const saveBtn = document.querySelector('#md-host .btn-primary.sm') as any;
+    const saveBtn = document.querySelector('#md-host .btn-primary.sm') as HTMLButtonElement | null;
     if (saveBtn) {
       saveBtn.disabled = !isDirty;
       saveBtn.classList.toggle('md-save-idle', !isDirty);
     }
     // Update dirty badge.
-    const badge = document.querySelector('#md-host .md-dirty-badge') as any;
+    const badge = document.querySelector('#md-host .md-dirty-badge') as HTMLElement | null;
     if (badge) {
       const n = state.dirty.size + state.deleted.size + state.added.length;
       badge.textContent = `${n} unsaved`;
@@ -3079,11 +3263,11 @@ export const MasterData = (() => {
     }
   }
 
-  function _addRow(table: any) {
+  function _addRow(table: MasterDataTable): void {
     const state = _cache[table];
     if (!state) return;
-    const newRow: any = {};
-    state.columns.forEach((c: any) => { newRow[c.column_name] = ''; });
+    const newRow: MasterDataRow = {};
+    state.columns.forEach((c) => { newRow[c.column_name] = ''; });
     if (table === 'bom_items') {
       // A new row is always within the currently scoped material+plant —
       // pre-fill so the user isn't retyping the scope on every row.
@@ -3097,12 +3281,12 @@ export const MasterData = (() => {
     setTimeout(() => {
       const tbody = document.getElementById(`md-tbody-${table}`);
       const lastRow = tbody?.lastElementChild;
-      const firstCell = lastRow?.querySelector('.md-cell') as any;
+      const firstCell = lastRow?.querySelector('.md-cell') as HTMLElement | null;
       if (firstCell) firstCell.focus();
     }, 50);
   }
 
-  async function _uploadBom() {
+  async function _uploadBom(): Promise<void> {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.xlsx';
@@ -3122,22 +3306,22 @@ export const MasterData = (() => {
           result.rejected ? 'warn' : 'success',
         );
         if (result.warnings && result.warnings.length) {
-          result.warnings.slice(0, 10).forEach((w: any) => ErrorLog.warn('master-data', w.msg));
+          result.warnings.slice(0, 10).forEach((w: { msg: string }) => ErrorLog.warn('master-data', w.msg));
         }
         // Refresh the currently-scoped view so newly uploaded rows for this
         // material+plant show up immediately.
         delete _cache.bom_items;
         if (_activeTable === 'bom_items') _renderActiveTable();
-      } catch (e: any) {
-        Toast.show(`${Util.t('toast.bom_upload_failed')}: ${e.message}`, 'error');
-        ErrorLog.error('master-data', `BOM upload failed: ${e.message}`);
+      } catch (e) {
+        Toast.show(`${Util.t('toast.bom_upload_failed')}: ${(e as Error).message}`, 'error');
+        ErrorLog.error('master-data', `BOM upload failed: ${(e as Error).message}`);
       }
     };
     input.click();
   }
 
-  async function _pasteRows(table: any) {
-    let raw: any;
+  async function _pasteRows(table: MasterDataTable): Promise<void> {
+    let raw: string;
     try {
       raw = await navigator.clipboard.readText();
     } catch {
@@ -3153,17 +3337,17 @@ export const MasterData = (() => {
     if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
 
     const keys    = KEY_COLS[table];
-    const toAdd: any[]   = [];
-    const toUpdate: any[] = [];
-    const invalid: any[]  = [];
+    const toAdd: MasterDataRow[]    = [];
+    const toUpdate: MasterDataRow[] = [];
+    const invalid: MasterDataRow[]  = [];
 
-    rows.forEach((row: any) => {
-      if (keys.find((k: any) => !row[k])) { invalid.push(row); return; }
+    rows.forEach((row) => {
+      if (keys.find((k) => !row[k])) { invalid.push(row); return; }
       const key = _rowKey(table, row);
-      const inSaved    = state.rows.some((r: any) => _rowKey(table, r) === key);
-      const inAdded    = state.added.some((r: any) => _rowKey(table, r) === key);
-      const batchAddIdx = toAdd.findIndex((r: any) => _rowKey(table, r) === key);
-      const batchUpdIdx = toUpdate.findIndex((r: any) => _rowKey(table, r) === key);
+      const inSaved    = state.rows.some((r) => _rowKey(table, r) === key);
+      const inAdded    = state.added.some((r) => _rowKey(table, r) === key);
+      const batchAddIdx = toAdd.findIndex((r) => _rowKey(table, r) === key);
+      const batchUpdIdx = toUpdate.findIndex((r) => _rowKey(table, r) === key);
       if      (batchAddIdx >= 0)  toAdd[batchAddIdx]    = row; // last write wins within batch
       else if (batchUpdIdx >= 0)  toUpdate[batchUpdIdx] = row;
       else if (inSaved || inAdded) toUpdate.push(row);
@@ -3177,34 +3361,38 @@ export const MasterData = (() => {
       return;
     }
 
-    const parts: any[] = [];
+    const parts: string[] = [];
     if (toAdd.length)    parts.push(`add ${toAdd.length} new`);
     if (toUpdate.length) parts.push(`update ${toUpdate.length} existing`);
     if (invalid.length)  parts.push(`skip ${invalid.length} invalid`);
 
+    // NOTE: the original call passed `tone: 'info' as any` — ModalConfirmOpts.tone
+    // (application-foundation.mts) only ever accepted 'danger'|'warn', so 'info' was
+    // never a real option; Modal.confirm's own tone check (`tone === 'warn' ? warn :
+    // danger`) already fell through to the same 'danger' button styling for any other
+    // value including 'info', so omitting it here changes no runtime behavior.
     const ok = await Modal.confirm({
       title:   'Paste Rows',
       message: `This will ${parts.join(', ')} row(s).`,
       detail:  `Changes appear in the table but won't be saved until you click Save.` +
                (invalid.length ? ` Skipped rows are missing key column(s): ${keys.join(', ')}.` : ''),
-      tone:    'info' as any,
     });
     if (!ok) return;
 
-    toAdd.forEach((row: any) => {
-      const full: any = {};
-      state.columns.forEach((c: any) => { full[c.column_name] = row[c.column_name] ?? ''; });
+    toAdd.forEach((row) => {
+      const full: MasterDataRow = {};
+      state.columns.forEach((c) => { full[c.column_name] = row[c.column_name] ?? ''; });
       state.added.push(full);
     });
 
-    toUpdate.forEach((row: any) => {
+    toUpdate.forEach((row) => {
       const key = _rowKey(table, row);
-      const idx = state.rows.findIndex((r: any) => _rowKey(table, r) === key);
+      const idx = state.rows.findIndex((r) => _rowKey(table, r) === key);
       if (idx >= 0) {
         Object.assign(state.rows[idx], row);
         state.dirty.set(key, { ...state.rows[idx] });
       } else {
-        const ai = state.added.findIndex((r: any) => _rowKey(table, r) === key);
+        const ai = state.added.findIndex((r) => _rowKey(table, r) === key);
         if (ai >= 0) Object.assign(state.added[ai], row);
       }
     });
@@ -3215,18 +3403,18 @@ export const MasterData = (() => {
       : Util.t('toast.paste_result', { added: toAdd.length, updated: toUpdate.length }), 'success');
   }
 
-  async function _deleteRow(table: any, rowKey: any, tr: any) {
+  async function _deleteRow(table: MasterDataTable, rowKey: string, tr: HTMLTableRowElement): Promise<void> {
     const state = _cache[table];
     if (!state) return;
 
     // Build delete payload from the key.
     const keys = KEY_COLS[table];
     const row = _getRowByKey(table, rowKey);
-    const deletePayload: any = {};
-    keys.forEach((k: any) => { deletePayload[k] = row[k]; });
+    const deletePayload: MasterDataRow = {};
+    keys.forEach((k) => { deletePayload[k] = row[k]; });
 
     // Get cascade preview for saved rows (not for newly-added rows).
-    const isNew = state.added.some((r: any) => _rowKey(table, r) === rowKey);
+    const isNew = state.added.some((r) => _rowKey(table, r) === rowKey);
     let cascadeDetail = '';
 
     if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
@@ -3235,12 +3423,13 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes: [deletePayload] }),
-        }).then((r: any) => r.json());
+        }).then((r) => r.json()) as MasterDataCascadePreview;
 
-        const parts: any[] = [];
-        if (preview.plants > 0)           parts.push(`<strong>${preview.plants}</strong> plant${preview.plants !== 1 ? 's' : ''}`);
-        if (preview.production_lines > 0)  parts.push(`<strong>${preview.production_lines}</strong> production line${preview.production_lines !== 1 ? 's' : ''}`);
-        if (preview.bom_items > 0)          parts.push(`<strong>${preview.bom_items}</strong> BOM item${preview.bom_items !== 1 ? 's' : ''}`);
+        const parts: string[] = [];
+        const nPlants = preview.plants ?? 0, nLines = preview.production_lines ?? 0, nBom = preview.bom_items ?? 0;
+        if (nPlants > 0)  parts.push(`<strong>${nPlants}</strong> plant${nPlants !== 1 ? 's' : ''}`);
+        if (nLines > 0)   parts.push(`<strong>${nLines}</strong> production line${nLines !== 1 ? 's' : ''}`);
+        if (nBom > 0)     parts.push(`<strong>${nBom}</strong> BOM item${nBom !== 1 ? 's' : ''}`);
         if (parts.length) {
           cascadeDetail = table === 'material_plants'
             ? `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — delete those first.</div>`
@@ -3249,7 +3438,7 @@ export const MasterData = (() => {
       } catch {}
     }
 
-    const keyDisplay = keys.map((k: any) => row[k]).join(' / ');
+    const keyDisplay = keys.map((k) => row[k]).join(' / ');
     const confirmed = await Modal.confirm({
       title:         `Delete "${keyDisplay}"?`,
       message:       `Are you sure you want to delete this ${TABLE_LABELS[table].replace(/s$/, '').toLowerCase()} from the database?`,
@@ -3261,7 +3450,7 @@ export const MasterData = (() => {
 
     if (isNew) {
       // Just remove from added array.
-      const idx = state.added.findIndex((r: any) => _rowKey(table, r) === rowKey);
+      const idx = state.added.findIndex((r) => _rowKey(table, r) === rowKey);
       if (idx >= 0) state.added.splice(idx, 1);
       _renderTable(table);
     } else {
@@ -3275,17 +3464,17 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Save
   // -----------------------------------------------------------------------
-  async function _save(table: any) {
+  async function _save(table: MasterDataTable): Promise<void> {
     const state = _cache[table];
     if (!state) return;
     const keys = KEY_COLS[table];
 
     // Build upserts from dirty + added.
-    const upserts: any[] = [];
-    state.dirty.forEach((patch: any, _key: any) => { if (!state.deleted.has(_key)) upserts.push(patch); });
-    state.added.forEach((row: any) => {
+    const upserts: MasterDataRow[] = [];
+    state.dirty.forEach((patch, _key) => { if (!state.deleted.has(_key)) upserts.push(patch); });
+    state.added.forEach((row) => {
       // Validate that key columns are filled.
-      const missing = keys.filter((k: any) => !row[k]);
+      const missing = keys.filter((k) => !row[k]);
       if (missing.length) {
         Toast.show(Util.t('toast.no_plant_selected') + ': ' + missing.join(', '), 'error');
         return;
@@ -3294,11 +3483,11 @@ export const MasterData = (() => {
     });
 
     // Build deletes.
-    const deletes: any[] = [];
-    state.deleted.forEach((rowKey: any) => {
+    const deletes: MasterDataRow[] = [];
+    state.deleted.forEach((rowKey) => {
       const row = _getRowByKey(table, rowKey);
-      const d: any = {};
-      keys.forEach((k: any) => { d[k] = row[k]; });
+      const d: MasterDataRow = {};
+      keys.forEach((k) => { d[k] = row[k]; });
       deletes.push(d);
     });
 
@@ -3311,13 +3500,14 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
-        }).then((r: any) => r.json());
-        const total = (preview.plants || 0) + (preview.production_lines || 0) + (preview.bom_items || 0);
+        }).then((r) => r.json()) as MasterDataCascadePreview;
+        const nPlants = preview.plants ?? 0, nLines = preview.production_lines ?? 0, nBom = preview.bom_items ?? 0;
+        const total = nPlants + nLines + nBom;
         if (total > 0) {
-          const parts: any[] = [];
-          if (preview.plants > 0)          parts.push(`${preview.plants} plant${preview.plants !== 1 ? 's' : ''}`);
-          if (preview.production_lines > 0) parts.push(`${preview.production_lines} production line${preview.production_lines !== 1 ? 's' : ''}`);
-          if (preview.bom_items > 0)         parts.push(`${preview.bom_items} BOM item${preview.bom_items !== 1 ? 's' : ''}`);
+          const parts: string[] = [];
+          if (nPlants > 0) parts.push(`${nPlants} plant${nPlants !== 1 ? 's' : ''}`);
+          if (nLines > 0)  parts.push(`${nLines} production line${nLines !== 1 ? 's' : ''}`);
+          if (nBom > 0)    parts.push(`${nBom} BOM item${nBom !== 1 ? 's' : ''}`);
           const ok = table === 'material_plants'
             ? await Modal.confirm({
                 title:         `Cannot delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}`,
@@ -3342,9 +3532,9 @@ export const MasterData = (() => {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ upserts, deletes }),
-      }).then((r: any) => {
-        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
-        return r.json();
+      }).then((r) => {
+        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        return r.json() as Promise<MasterDataBulkResult>;
       });
 
       Toast.show(
@@ -3356,9 +3546,9 @@ export const MasterData = (() => {
 
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
-        fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r: any) => r.ok ? r.json() : null),
-        fetch(`${API}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then((r: any) => r.ok ? r.json() : null),
-      ]).then(([pData, lData]: [any, any]) => {
+        fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
+        fetch(`${API}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
+      ]).then(([pData, lData]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
           // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -3378,20 +3568,20 @@ export const MasterData = (() => {
       }).catch(() => {
         Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
       });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('master-data', `Save failed for ${table}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('master-data', `Save failed for ${table}: ${(e as Error).message}`);
     }
   }
 
   // -----------------------------------------------------------------------
   // Filter / search
   // -----------------------------------------------------------------------
-  function _applyFilter(table: any, query: any) {
+  function _applyFilter(table: MasterDataTable, query: string): void {
     const tbody = document.getElementById(`md-tbody-${table}`);
     if (!tbody) return;
-    tbody.querySelectorAll('tr').forEach((tr: any) => {
-      const text = tr.textContent.toLowerCase();
+    tbody.querySelectorAll('tr').forEach((tr) => {
+      const text = (tr.textContent || '').toLowerCase();
       tr.hidden = query ? !text.includes(query) : false;
     });
   }
@@ -3399,7 +3589,7 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Column management
   // -----------------------------------------------------------------------
-  function _openColMenu(table: any, col: any, anchor: any) {
+  function _openColMenu(table: MasterDataTable, col: MasterDataColumn, anchor: HTMLElement): void {
     // Close any existing menu.
     document.querySelectorAll('.md-col-menu').forEach(m => m.remove());
 
@@ -3425,33 +3615,33 @@ export const MasterData = (() => {
     menu.style.top  = `${rect.bottom + 4}px`;
     menu.style.left = `${rect.left}px`;
 
-    const close = (e: any) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); } };
+    const close = (e: MouseEvent): void => { if (!menu.contains(e.target as Node)) { menu.remove(); document.removeEventListener('click', close); } };
     setTimeout(() => document.addEventListener('click', close), 0);
   }
 
-  function _openAddColumn(table: any) {
-    (document.getElementById('md-col-name') as any).value  = '';
-    (document.getElementById('md-col-label') as any).value = '';
-    (document.getElementById('md-col-type') as any).value  = 'TEXT';
-    (document.getElementById('md-col-length') as any).value = '';
-    (document.getElementById('md-col-default') as any).value = '';
-    (document.getElementById('md-col-nullable') as any).checked = true;
-    (document.getElementById('md-addcol-error') as any).textContent = '';
-    (document.getElementById('md-col-length-row') as any).hidden = true;
+  function _openAddColumn(table: MasterDataTable): void {
+    (document.getElementById('md-col-name') as HTMLInputElement).value  = '';
+    (document.getElementById('md-col-label') as HTMLInputElement).value = '';
+    (document.getElementById('md-col-type') as HTMLSelectElement).value  = 'TEXT';
+    (document.getElementById('md-col-length') as HTMLInputElement).value = '';
+    (document.getElementById('md-col-default') as HTMLInputElement).value = '';
+    (document.getElementById('md-col-nullable') as HTMLInputElement).checked = true;
+    (document.getElementById('md-addcol-error') as HTMLElement).textContent = '';
+    (document.getElementById('md-col-length-row') as HTMLElement).hidden = true;
 
-    const typeSelect = document.getElementById('md-col-type') as any;
+    const typeSelect = document.getElementById('md-col-type') as HTMLSelectElement;
     typeSelect.onchange = () => {
-      (document.getElementById('md-col-length-row') as any).hidden = typeSelect.value !== 'NUMERIC';
+      (document.getElementById('md-col-length-row') as HTMLElement).hidden = typeSelect.value !== 'NUMERIC';
     };
 
-    (document.getElementById('md-addcol-confirm-btn') as any).onclick = async () => {
-      const colName  = (document.getElementById('md-col-name') as any).value.trim();
-      const label    = (document.getElementById('md-col-label') as any).value.trim() || colName;
-      const sqlType  = (document.getElementById('md-col-type') as any).value;
-      const length   = (document.getElementById('md-col-length') as any).value.trim() || null;
-      const nullable = (document.getElementById('md-col-nullable') as any).checked;
-      const def      = (document.getElementById('md-col-default') as any).value.trim() || null;
-      const errEl    = document.getElementById('md-addcol-error') as any;
+    (document.getElementById('md-addcol-confirm-btn') as HTMLButtonElement).onclick = async () => {
+      const colName  = (document.getElementById('md-col-name') as HTMLInputElement).value.trim();
+      const label    = (document.getElementById('md-col-label') as HTMLInputElement).value.trim() || colName;
+      const sqlType  = (document.getElementById('md-col-type') as HTMLSelectElement).value;
+      const length   = (document.getElementById('md-col-length') as HTMLInputElement).value.trim() || null;
+      const nullable = (document.getElementById('md-col-nullable') as HTMLInputElement).checked;
+      const def      = (document.getElementById('md-col-default') as HTMLInputElement).value.trim() || null;
+      const errEl    = document.getElementById('md-addcol-error') as HTMLElement;
 
       if (!colName) { errEl.textContent = Util.t('ui.column_id_required'); return; }
       if (!/^[a-z][a-z0-9_]{0,62}$/.test(colName)) {
@@ -3470,22 +3660,22 @@ export const MasterData = (() => {
           method:  'POST',
           headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
-        }).then((r: any) => {
-          if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        }).then((r) => {
+          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.col_added', { label }), 'success');
         delete _cache[table];
         _loadAndRender(table);
-      } catch (e: any) {
-        Toast.show(Util.t('toast.failed_add_col', { msg: e.message }), 'error');
+      } catch (e) {
+        Toast.show(Util.t('toast.failed_add_col', { msg: (e as Error).message }), 'error');
       }
     };
 
     Modal.open('md-addcol-modal');
   }
 
-  async function _dropColumn(table: any, col: any) {
+  async function _dropColumn(table: MasterDataTable, col: MasterDataColumn): Promise<void> {
     const confirmed = await Modal.confirm({
       title:         Util.t('modal.drop_column_title', { label: col.display_label }),
       message:       Util.t('modal.drop_column_msg', { name: col.column_name, table: TABLE_LABELS[table] }),
@@ -3499,25 +3689,25 @@ export const MasterData = (() => {
       await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
         method:  'DELETE',
         headers: { 'x-user-email': Session.actor() },
-      }).then((r: any) => {
-        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      }).then((r) => {
+        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
       Toast.show(Util.t('toast.column_dropped', { col: col.column_name }), 'success');
       delete _cache[table];
       _loadAndRender(table);
-    } catch (e: any) {
-      Toast.show(Util.t('toast.failed_drop_column', { msg: e.message }), 'error');
+    } catch (e) {
+      Toast.show(Util.t('toast.failed_drop_column', { msg: (e as Error).message }), 'error');
     }
   }
 
-  function _openRenameLabel(table: any, col: any) {
+  function _openRenameLabel(table: MasterDataTable, col: MasterDataColumn): void {
     const noteEl  = document.getElementById('md-rename-note');
-    const inputEl = document.getElementById('md-rename-label-input') as any;
+    const inputEl = document.getElementById('md-rename-label-input') as HTMLInputElement;
     if (noteEl)  noteEl.textContent = `Column ID: "${col.column_name}" (unchanged) · Table: ${TABLE_LABELS[table]}`;
     if (inputEl) inputEl.value = col.display_label;
 
-    (document.getElementById('md-rename-confirm-btn') as any).onclick = async () => {
+    (document.getElementById('md-rename-confirm-btn') as HTMLButtonElement).onclick = async () => {
       const newLabel = inputEl.value.trim();
       if (!newLabel) return;
       Modal.close('md-renamelabel-modal');
@@ -3526,15 +3716,15 @@ export const MasterData = (() => {
           method:  'PATCH',
           headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ display_label: newLabel }),
-        }).then((r: any) => {
-          if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        }).then((r) => {
+          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.column_label_updated', { label: newLabel }), 'success');
         delete _cache[table];
         _loadAndRender(table);
-      } catch (e: any) {
-        Toast.show(Util.t('toast.failed_rename_label', { msg: e.message }), 'error');
+      } catch (e) {
+        Toast.show(Util.t('toast.failed_rename_label', { msg: (e as Error).message }), 'error');
       }
     };
     Modal.open('md-renamelabel-modal');
@@ -3544,20 +3734,20 @@ export const MasterData = (() => {
   // local or Azure) back out as idempotent SQL, so drift from the Add/Drop
   // Column wizard (which mutates the live DB directly, with no git record)
   // can be folded back into schema.sql after the fact.
-  async function _exportSchema() {
-    const textEl  = document.getElementById('md-schema-export-text') as any;
-    const copyBtn = document.getElementById('md-schema-export-copy-btn') as any;
+  async function _exportSchema(): Promise<void> {
+    const textEl  = document.getElementById('md-schema-export-text') as HTMLTextAreaElement;
+    const copyBtn = document.getElementById('md-schema-export-copy-btn') as HTMLButtonElement;
     textEl.value = '…';
     Modal.open('md-schema-export-modal');
     try {
-      const data = await fetch(`${API}/master-data/_schema-export`).then((r: any) => {
-        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
-        return r.json();
+      const data = await fetch(`${API}/master-data/_schema-export`).then((r) => {
+        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        return r.json() as Promise<{ sql?: string }>;
       });
       textEl.value = data.sql || '';
-    } catch (e: any) {
+    } catch (e) {
       textEl.value = '';
-      Toast.show(Util.t('toast.failed_schema_export', { msg: e.message }), 'error');
+      Toast.show(Util.t('toast.failed_schema_export', { msg: (e as Error).message }), 'error');
     }
     copyBtn.onclick = () => {
       navigator.clipboard.writeText(textEl.value)
@@ -3566,12 +3756,12 @@ export const MasterData = (() => {
     };
   }
 
-  async function syncLineSettings(line: any, patch: any) {
+  async function syncLineSettings(line: string, patch: Partial<NimbusLineSetting>): Promise<void> {
     if (!_cache['production_lines']) {
       try {
-        const data = await fetch(`${API}/master-data/production_lines`).then((r: any) => {
+        const data = await fetch(`${API}/master-data/production_lines`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
+          return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
         });
         _cache['production_lines'] = {
           columns: data.columns, rows: data.rows,
@@ -3580,8 +3770,8 @@ export const MasterData = (() => {
       } catch { return; }
     }
 
-    const state = _cache['production_lines'];
-    const rowIdx = state.rows.findIndex((r: any) => r.production_line === line);
+    const state = _cache['production_lines']! as MasterDataTableState<ProductionLineRow>;
+    const rowIdx = state.rows.findIndex((r) => r.production_line === line);
     if (rowIdx < 0) return;
 
     const updatedRow = { ...state.rows[rowIdx] };
@@ -3601,17 +3791,17 @@ export const MasterData = (() => {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
-      }).then((r: any) => {
-        if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+      }).then((r) => {
+        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
       if (_activeTable === 'production_lines') _renderTable('production_lines');
-    } catch (e: any) {
-      ErrorLog.error('prod-lines', `Failed to save line setting: ${e.message}`);
+    } catch (e) {
+      ErrorLog.error('prod-lines', `Failed to save line setting: ${(e as Error).message}`);
     }
   }
 
-  return { render, syncLineSettings } as any;
+  return { render, syncLineSettings };
 })();
 
 /* =============================================================================
