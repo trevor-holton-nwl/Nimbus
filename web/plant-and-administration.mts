@@ -42,6 +42,7 @@ import { Store, UndoStack } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter } from './schedule-workbench.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, ConstraintConfig } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -49,9 +50,15 @@ import { AlertsUIAdapter } from './schedule-workbench.mjs';
 // section, seam #2). Wired once from app.js boot glue immediately after the
 // Task 1 bridge destructure. Defaults are no-ops so a call before wiring
 // (e.g. in a unit test that imports this module directly) never throws.
-let _activeTabResolvers = { currentTab: () => null, currentMasterSub: () => null, laborSub: () => null };
+interface ActiveTabResolvers {
+  currentTab(): string | null;
+  currentMasterSub(): string | null;
+  laborSub(): string | null;
+}
 
-export function setActiveTabResolvers(resolvers) {
+let _activeTabResolvers: ActiveTabResolvers = { currentTab: () => null, currentMasterSub: () => null, laborSub: () => null };
+
+export function setActiveTabResolvers(resolvers: Partial<ActiveTabResolvers>): void {
   _activeTabResolvers = { ..._activeTabResolvers, ...resolvers };
 }
 
@@ -70,8 +77,10 @@ export function setActiveTabResolvers(resolvers) {
 export const CalendarUI = {
   _lineFilter: 'all',
   _blockFilter: 'all',
+  _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
+  _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
-  render() {
+  render(): void {
     const body = document.getElementById('cal-hours-body');
     if (!body) return;
     const lines = CalendarUI._getLines();
@@ -108,9 +117,9 @@ export const CalendarUI = {
         const wh = cal[d];
         const off = !wh;
         html += `<td><div class="hours-cell ${off ? 'off':''}" data-line="${line}" data-day="${d}">
-          <input type="text" class="hours-start" value="${off ? '' : Util.hoursToTimeString(wh[0])}">
+          <input type="text" class="hours-start" value="${off ? '' : Util.hoursToTimeString(wh![0])}">
           <span class="dash">–</span>
-          <input type="text" class="hours-end" value="${off ? '' : Util.hoursToTimeString(wh[1])}">
+          <input type="text" class="hours-end" value="${off ? '' : Util.hoursToTimeString(wh![1])}">
         </div></td>`;
       }
       html += `</tr>`;
@@ -120,17 +129,18 @@ export const CalendarUI = {
     body.innerHTML = html;
 
     // Wire line selector
-    document.getElementById('cal-line-select').onchange = function() {
-      CalendarUI._lineFilter = this.value;
+    const lineSelectEl = document.getElementById('cal-line-select') as HTMLSelectElement;
+    lineSelectEl.onchange = () => {
+      CalendarUI._lineFilter = lineSelectEl.value;
       CalendarUI.render();
     };
 
     // Wire up inputs
-    body.querySelectorAll('.hours-cell').forEach(cell => {
-      const line = cell.dataset.line;
-      const day  = +cell.dataset.day;
-      const inS  = cell.querySelector('.hours-start');
-      const inE  = cell.querySelector('.hours-end');
+    body.querySelectorAll<HTMLElement>('.hours-cell').forEach(cell => {
+      const line = cell.dataset.line!;
+      const day  = +cell.dataset.day!;
+      const inS  = cell.querySelector<HTMLInputElement>('.hours-start')!;
+      const inE  = cell.querySelector<HTMLInputElement>('.hours-end')!;
       const upd = () => {
         const vs = inS.value, ve = inE.value;
         const cal = Store.calendars[line].workHours;
@@ -149,17 +159,17 @@ export const CalendarUI = {
     CalendarUI._renderBlocks();
   },
 
-  _clearLineFilter() {
+  _clearLineFilter(): void {
     CalendarUI._lineFilter = 'all';
     CalendarUI.render();
   },
 
-  _renderBlocks() {
+  _renderBlocks(): void {
     const list = document.getElementById('cal-blocks-list');
     if (!list) return;
     const lines     = CalendarUI._getLines();
     const bFilter   = CalendarUI._blockFilter || 'all';
-    const allBlocks = Store.blocks.slice().sort((a,b) => Util.parseDate(a.start) - Util.parseDate(b.start));
+    const allBlocks = Store.blocks.slice().sort((a,b) => (Util.parseDate(a.start)?.getTime() || 0) - (Util.parseDate(b.start)?.getTime() || 0));
     const blocks    = bFilter === 'all' ? allBlocks : allBlocks.filter(b => !b.line || b.line === bFilter);
 
     let html = `<div class="cal-filter-bar">
@@ -187,14 +197,14 @@ export const CalendarUI = {
 
     list.innerHTML = html;
 
-    const blockSelect = document.getElementById('cal-block-filter');
-    if (blockSelect) blockSelect.onchange = function() {
-      CalendarUI._blockFilter = this.value;
+    const blockSelect = document.getElementById('cal-block-filter') as HTMLSelectElement | null;
+    if (blockSelect) blockSelect.onchange = () => {
+      CalendarUI._blockFilter = blockSelect.value;
       CalendarUI._renderBlocks();
     };
   },
 
-  removeBlock(id) {
+  removeBlock(id: string): void {
     const blk = Store.blocks.find(b => b.id === id);
     const plant = blk?.plant || Store.selectedPlant;
     Store.removeBlock(id, 'calendar');
@@ -202,10 +212,10 @@ export const CalendarUI = {
     Toast.show(Util.t('toast.block_removed'), 'success');
   },
 
-  openBlockModal() {
-    const lineSel = document.getElementById('blk-line');
+  openBlockModal(): void {
+    const lineSel = document.getElementById('blk-line') as HTMLSelectElement | null;
     if (!lineSel) { ErrorLog.error('ui', 'required DOM element missing: blk-line'); return; }
-    const reasonEl = document.getElementById('blk-reason');
+    const reasonEl = document.getElementById('blk-reason') as HTMLInputElement | null;
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: blk-reason'); return; }
 
     lineSel.innerHTML = `<option value="">${Util.t('ui.all_lines_filter')}</option>` +
@@ -217,17 +227,17 @@ export const CalendarUI = {
       CalendarUI._fpBlkStart = Util.fpDatetime('#blk-start');
       CalendarUI._fpBlkEnd   = Util.fpDatetime('#blk-end');
     }
-    CalendarUI._fpBlkStart.setDate(now, false);
-    CalendarUI._fpBlkEnd.setDate(plus1, false);
+    CalendarUI._fpBlkStart!.setDate(now, false);
+    CalendarUI._fpBlkEnd!.setDate(plus1, false);
     reasonEl.value = '';
     Modal.open('modal-block');
   },
 
-  saveBlockFromModal() {
-    const line   = document.getElementById('blk-line').value || null;
-    const start  = Util.parseDate(document.getElementById('blk-start').value);
-    const end    = Util.parseDate(document.getElementById('blk-end').value);
-    const reason = document.getElementById('blk-reason').value.trim() || Util.t('ui.blackouts_label', {plural: ''});
+  saveBlockFromModal(): void {
+    const line   = (document.getElementById('blk-line') as HTMLSelectElement).value || null;
+    const start  = Util.parseDate((document.getElementById('blk-start') as HTMLInputElement).value);
+    const end    = Util.parseDate((document.getElementById('blk-end') as HTMLInputElement).value);
+    const reason = (document.getElementById('blk-reason') as HTMLInputElement).value.trim() || Util.t('ui.blackouts_label', {plural: ''});
     if (!start || !end) { Toast.show(Util.t('toast.please_set_start_end'), 'error'); return; }
     if (end <= start)   { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
     // Stamp the block's plant so it persists/scopes per-plant (line:null = all
@@ -235,17 +245,17 @@ export const CalendarUI = {
     const plant = (line ? Store.getPlantForLine(line) : null) || Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_first'), 'warn'); return; }
     const before = Store.blocks.length;
-    Store.addBlock({ line, plant, start, end, reason }, 'calendar');
+    Store.addBlock({ line, plant, start, end, reason } as NimbusBlock, 'calendar');
     if (Store.blocks.length > before) CalendarSync.saveLineBlackoutUpsert(Store.blocks[Store.blocks.length - 1]);
     Modal.close('modal-block');
     Toast.show(Util.t('toast.block_added'), 'success');
   },
 
-  _getLines() {
+  _getLines(): string[] {
     if (Store.selectedPlant) return Store.linesForSelectedPlant();
     // No plant selected yet (e.g. blackout modal opened before plant pick) —
     // fall back to the unscoped view rather than showing nothing.
-    const set = new Set();
+    const set = new Set<string>();
     Store.tasksArr.forEach(t => set.add(t.PRODUCTION_LINE || 'Unknown'));
     Object.keys(Store.calendars).forEach(l => set.add(l));
     return [...set].sort();
@@ -255,14 +265,42 @@ export const CalendarUI = {
 /* =============================================================================
    PLANT — plant-level calendar UI (working hours, blackouts, lines roster).
    ========================================================================== */
+/** Cached color-wheel metadata for the Optimization tab's active-wheel card,
+ *  keyed by plant name — the `GET /color-wheels` response shape. */
+interface ColorWheelMeta {
+  filename?: string;
+  row_count?: number;
+  uploaded_at?: string;
+  uploaded_by?: string;
+}
+
+/** One `Plant._pillFps` entry — the two Flatpickr instances backing a single
+ *  day's start/end time inputs in the plant working-hours pill row. */
+interface PillFpPair {
+  start: NimbusVendor.FlatpickrInstance | null;
+  end: NimbusVendor.FlatpickrInstance | null;
+}
+
+/** `Plant._renderSettingsPane`'s in-memory working copy of a plant's ordered
+ *  constraint list (`ConstraintConfig`, but with `order` always resolved —
+ *  never left absent — since the catalog default fills in any missing key). */
+interface ConstraintState {
+  key: string;
+  enabled: boolean;
+  order: number;
+}
+
 export const Plant = {
   _blocksCollapsed: true,
   _rosterCollapsed: true,
-  _cwMeta: {},           // cached color wheel metadata: { [plant]: {filename, row_count, uploaded_at} }
+  _cwMeta: {} as Record<string, ColorWheelMeta>,           // cached color wheel metadata: { [plant]: {filename, row_count, uploaded_at} }
   _cwLoading: false,     // prevent concurrent fetches
   _currentPlantTab: 'general',
+  _pillFps: null as PillFpPair[] | null,
+  _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
+  _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
-  init() {
+  init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
         const onPlantSub = _activeTabResolvers.currentTab() === 'masterdata'
@@ -289,8 +327,8 @@ export const Plant = {
   // this whole family's static markup. The modals' "Cancel" buttons
   // (`NIMBUS.Modal.close(...)`) are out of this task's scope — `Modal` is not
   // a module this task moves — and stay as inline onclick attributes.
-  _wireStaticHandlers() {
-    document.querySelectorAll('.plant-inner-tabs .sub-subtab[data-plant-tab]').forEach(btn => {
+  _wireStaticHandlers(): void {
+    document.querySelectorAll<HTMLElement>('.plant-inner-tabs .sub-subtab[data-plant-tab]').forEach(btn => {
       btn.addEventListener('click', () => Plant.gotoTab(btn.dataset.plantTab));
     });
     document.getElementById('plant-add-block-btn')?.addEventListener('click', () => Plant.openBlockModal());
@@ -300,7 +338,7 @@ export const Plant = {
     document.getElementById('modal-lines-block-save-btn')?.addEventListener('click', () => ProdLines.saveBlockFromModal());
   },
 
-  render() {
+  render(): void {
     const plantName = Store.selectedPlant;
     const badge = document.querySelector('#md-master-plant-pane .plant-badge');
     if (badge) badge.textContent = plantName || '—';
@@ -310,21 +348,22 @@ export const Plant = {
     Plant._renderRoster();
   },
 
-  gotoTab(tab) {
-    if (!['general', 'optimization', 'settings'].includes(tab)) return;
-    Plant._currentPlantTab = tab;
-    document.querySelectorAll('.plant-inner-tabs .sub-subtab').forEach(b => {
-      b.classList.toggle('active', b.dataset.plantTab === tab);
+  gotoTab(tab: string | undefined): void {
+    if (!['general', 'optimization', 'settings'].includes(tab!)) return;
+    const t = tab!;
+    Plant._currentPlantTab = t;
+    document.querySelectorAll<HTMLElement>('.plant-inner-tabs .sub-subtab').forEach(b => {
+      b.classList.toggle('active', b.dataset.plantTab === t);
     });
-    ['general', 'optimization', 'settings'].forEach(t => {
-      const el = document.getElementById(`plant-tab-${t}`);
-      if (el) el.hidden = (t !== tab);
+    ['general', 'optimization', 'settings'].forEach(tt => {
+      const el = document.getElementById(`plant-tab-${tt}`);
+      if (el) el.hidden = (tt !== t);
     });
-    if (tab === 'settings') Plant._renderSettingsPane();
-    else if (tab === 'optimization') Plant._fetchAndRenderOptimization(Store.selectedPlant);
+    if (t === 'settings') Plant._renderSettingsPane();
+    else if (t === 'optimization') Plant._fetchAndRenderOptimization(Store.selectedPlant);
   },
 
-  toggleBlocksList() {
+  toggleBlocksList(): void {
     Plant._blocksCollapsed = !Plant._blocksCollapsed;
     const list = document.getElementById('plant-blocks-list');
     const btn  = document.getElementById('plant-blk-toggle');
@@ -332,7 +371,7 @@ export const Plant = {
     if (btn)  btn.textContent = Plant._blocksCollapsed ? '▼' : '▲';
   },
 
-  toggleRosterList() {
+  toggleRosterList(): void {
     Plant._rosterCollapsed = !Plant._rosterCollapsed;
     const wrap = document.getElementById('plant-roster-wrap');
     const btn  = document.getElementById('plant-roster-toggle');
@@ -340,7 +379,7 @@ export const Plant = {
     if (btn)  btn.textContent = Plant._rosterCollapsed ? '▼' : '▲';
   },
 
-  _renderHours() {
+  _renderHours(): void {
     const body = document.getElementById('plant-hours-body');
     if (!body) return;
     const plantName = Store.selectedPlant;
@@ -351,7 +390,7 @@ export const Plant = {
     if (Plant._pillFps) {
       Plant._pillFps.forEach(p => { p.start?.destroy(); p.end?.destroy(); });
     }
-    Plant._pillFps = Array(7).fill(null).map(() => ({ start: null, end: null }));
+    Plant._pillFps = Array(7).fill(null).map(() => ({ start: null, end: null })) as PillFpPair[];
     const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k));
 
     const pillsHtml = [0,1,2,3,4,5,6].map(d => {
@@ -372,17 +411,17 @@ export const Plant = {
     body.innerHTML = `<div class="line-hours-pills">${pillsHtml}</div>`;
 
     requestAnimationFrame(() => {
-      const p = Store.plants[Store.selectedPlant];
+      const p = Store.plants[Store.selectedPlant!];
       for (let d = 0; d < 7; d++) {
         const wh = p.workHours[d];
         const onClose = () => Plant._pillSave(d);
-        Plant._pillFps[d].start = flatpickr(`#plant-pill-start-${d}`, {
+        Plant._pillFps![d].start = flatpickr(`#plant-pill-start-${d}`, {
           enableTime: true, noCalendar: true, dateFormat: 'H:i',
           minuteIncrement: 30,
           defaultDate: wh ? Util.hoursToTimeString(wh[0]) : '08:00',
           onClose,
         });
-        Plant._pillFps[d].end = flatpickr(`#plant-pill-end-${d}`, {
+        Plant._pillFps![d].end = flatpickr(`#plant-pill-end-${d}`, {
           enableTime: true, noCalendar: true, dateFormat: 'H:i',
           minuteIncrement: 30,
           defaultDate: wh ? Util.hoursToTimeString(wh[1]) : '17:00',
@@ -392,14 +431,14 @@ export const Plant = {
     });
   },
 
-  _pillClick(d) {
+  _pillClick(d: number): void {
     const pName = Store.selectedPlant;
     if (!pName) return;
     const plant = Store.plants[pName];
     const wh = plant.workHours[d];
     if (!wh) {
       Store.setPlantWorkHours(pName, d, [8, 17], 'pill');
-      const changed = new Set();
+      const changed = new Set<string>();
       for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(pName, i)) changed.add(l);
       Plant._persistPlantHours(pName, changed);
       Plant._renderHours();
@@ -408,13 +447,13 @@ export const Plant = {
     }
     const pill = document.querySelector(`.line-hours-pill[data-day="${d}"]`);
     if (pill) pill.classList.add('editing');
-    Plant._pillFps[d]?.start?.open();
+    Plant._pillFps?.[d]?.start?.open();
   },
 
-  _pillSave(d) {
+  _pillSave(d: number): void {
     const pName = Store.selectedPlant;
     if (!pName) return;
-    const pair = Plant._pillFps[d];
+    const pair = Plant._pillFps?.[d];
     if (!pair?.start || !pair?.end) return;
     const sv = pair.start.element.value;
     const ev = pair.end.element.value;
@@ -425,7 +464,7 @@ export const Plant = {
       if (eh <= sh) { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
       Store.setPlantWorkHours(pName, d, [sh, eh], 'pill');
     }
-    const changed = new Set();
+    const changed = new Set<string>();
     for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(pName, i)) changed.add(l);
     Plant._persistPlantHours(pName, changed);
     Plant._renderHours();
@@ -437,7 +476,7 @@ export const Plant = {
    *  single-line edit that still fits the new plant window is NOT re-POSTed and so not
    *  clobbered by the plant-hours batch. (F9) Per-line saves are batched into one
    *  /line-hours POST by CalendarSync. Falls back to all in-plant lines if no set given. */
-  _persistPlantHours(pName, changedLines) {
+  _persistPlantHours(pName: string | null, changedLines?: Set<string> | string[]): void {
     if (!pName) return;
     CalendarSync.savePlantHours(pName, Store.plants[pName]?.workHours);
     const lines = changedLines
@@ -448,7 +487,7 @@ export const Plant = {
     }
   },
 
-  _pillRightClick(d, e) {
+  _pillRightClick(d: number, e: MouseEvent): void {
     e.preventDefault();
     document.querySelector('.pill-ctx-menu')?.remove();
 
@@ -464,8 +503,8 @@ export const Plant = {
       ? `<button data-action="off">${Util.t('day.set_off', { day: dayName })}</button>`
       : `<button data-action="on">${Util.t('day.reset_on', { day: dayName })}</button>`;
 
-    menu.querySelector('button').onclick = () => {
-      const _pName = Store.selectedPlant;
+    menu.querySelector('button')!.onclick = () => {
+      const _pName = Store.selectedPlant!;
       menu.remove();
       if (wh) {
         Store.setPlantWorkHours(_pName, d, null, 'pill');
@@ -474,7 +513,7 @@ export const Plant = {
         Store.setPlantWorkHours(_pName, d, [8, 17], 'pill');
         Toast.show(Util.t('day.sun_enabled', { day: dayName }), 'success');
       }
-      const changed = new Set();
+      const changed = new Set<string>();
       for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(_pName, i)) changed.add(l);
       Plant._persistPlantHours(_pName, changed);
       Plant._renderHours();
@@ -490,10 +529,10 @@ export const Plant = {
       if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
     });
 
-    const dismiss = ev => {
-      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', dismiss); }
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', dismiss); }
     };
-    const dismissKey = ev => {
+    const dismissKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') { menu.remove(); document.removeEventListener('keydown', dismissKey); }
     };
     setTimeout(() => {
@@ -502,18 +541,18 @@ export const Plant = {
     }, 0);
   },
 
-  _renderBlocks() {
+  _renderBlocks(): void {
     const list    = document.getElementById('plant-blocks-list');
     const statsEl = document.getElementById('plant-blocks-stats');
     if (!list) return;
 
     const blocks = (Store.plantBlocks || []).slice()
-      .sort((a, b) => Util.parseDate(a.start) - Util.parseDate(b.start));
+      .sort((a, b) => (Util.parseDate(a.start)?.getTime() || 0) - (Util.parseDate(b.start)?.getTime() || 0));
 
     if (statsEl) {
       if (blocks.length) {
         const totalDays = blocks.reduce((acc, b) =>
-          acc + Math.ceil((Util.parseDate(b.end) - Util.parseDate(b.start)) / Config.MS_DAY), 0);
+          acc + Math.ceil(((Util.parseDate(b.end)?.getTime() || 0) - (Util.parseDate(b.start)?.getTime() || 0)) / Config.MS_DAY), 0);
         const chevron = Plant._blocksCollapsed ? '▼' : '▲';
         statsEl.innerHTML = `<div class="plant-blk-stats" style="display:flex;align-items:center;justify-content:space-between;">
           <div style="display:flex;align-items:center;gap:16px;">
@@ -550,7 +589,7 @@ export const Plant = {
     list.style.display = Plant._blocksCollapsed ? 'none' : '';
   },
 
-  _renderRoster() {
+  _renderRoster(): void {
     const roster = document.getElementById('plant-lines-roster');
     if (!roster) return;
     const lines = Store.linesForSelectedPlant();
@@ -613,11 +652,12 @@ export const Plant = {
       </tbody>
     </table>`;
 
-    roster.querySelectorAll('.roster-plgroup-input').forEach(inp => {
-      inp.onchange = function() {
-        const val = this.value.trim();
-        Store.setLineSetting(this.dataset.line, { plGroup: val }, 'plant-roster');
-        NIMBUS.MasterData.syncLineSettings(this.dataset.line, { plGroup: val });
+    roster.querySelectorAll<HTMLInputElement>('.roster-plgroup-input').forEach(inp => {
+      inp.onchange = () => {
+        const val = inp.value.trim();
+        const line = inp.dataset.line!;
+        Store.setLineSetting(line, { plGroup: val }, 'plant-roster');
+        NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       };
     });
@@ -628,8 +668,8 @@ export const Plant = {
     if (btn)  btn.textContent = Plant._rosterCollapsed ? '▼' : '▲';
   },
 
-  openBlockModal() {
-    const reasonEl = document.getElementById('plant-blk-reason');
+  openBlockModal(): void {
+    const reasonEl = document.getElementById('plant-blk-reason') as HTMLInputElement | null;
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: plant-blk-reason'); return; }
 
     const now = new Date(); now.setMinutes(0, 0, 0);
@@ -638,16 +678,16 @@ export const Plant = {
       Plant._fpBlkStart = Util.fpDatetime('#plant-blk-start');
       Plant._fpBlkEnd   = Util.fpDatetime('#plant-blk-end');
     }
-    Plant._fpBlkStart.setDate(now, false);
-    Plant._fpBlkEnd.setDate(plus1, false);
+    Plant._fpBlkStart!.setDate(now, false);
+    Plant._fpBlkEnd!.setDate(plus1, false);
     reasonEl.value = '';
     Modal.open('modal-plant-block');
   },
 
-  savePlantBlockFromModal() {
-    const startEl = document.getElementById('plant-blk-start');
-    const endEl = document.getElementById('plant-blk-end');
-    const reasonEl = document.getElementById('plant-blk-reason');
+  savePlantBlockFromModal(): void {
+    const startEl = document.getElementById('plant-blk-start') as HTMLInputElement | null;
+    const endEl = document.getElementById('plant-blk-end') as HTMLInputElement | null;
+    const reasonEl = document.getElementById('plant-blk-reason') as HTMLInputElement | null;
     if (!startEl || !endEl || !reasonEl) { ErrorLog.error('ui', 'required DOM elements missing for plant blackout modal'); return; }
 
     const start  = Util.parseDate(startEl.value);
@@ -657,13 +697,13 @@ export const Plant = {
     if (end <= start)   { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
     if (!Store.selectedPlant) { Toast.show(Util.t('toast.select_plant_first'), 'warn'); return; }
     const before = Store.plantBlocks.length;
-    Store.addPlantBlock({ plant: Store.selectedPlant, start, end, reason }, 'plant');
+    Store.addPlantBlock({ plant: Store.selectedPlant, start, end, reason } as NimbusPlantBlock, 'plant');
     if (Store.plantBlocks.length > before) CalendarSync.savePlantBlackoutUpsert(Store.plantBlocks[Store.plantBlocks.length - 1]);
     Modal.close('modal-plant-block');
     Toast.show(Util.t('toast.plant_blackout_added'), 'success');
   },
 
-  removePlantBlock(id) {
+  removePlantBlock(id: string): void {
     const blk = Store.plantBlocks.find(b => b.id === id);
     const plant = blk?.plant || Store.selectedPlant;
     Store.removePlantBlock(id, 'plant');
@@ -673,7 +713,7 @@ export const Plant = {
 
   /* ── Optimization Options section ── */
 
-  _fetchAndRenderOptimization(plantName) {
+  _fetchAndRenderOptimization(plantName: string | null): void {
     const panel = document.getElementById('plant-opt-panel');
     if (!panel) return;
     // Show spinner while fetching metadata
@@ -692,22 +732,22 @@ export const Plant = {
       });
   },
 
-  _renderOptimization(plantName) {
+  _renderOptimization(plantName: string | null): void {
     const body = document.getElementById('plant-opt-body');
     if (!body) return;
-    const wheelInfo = Plant._cwMeta[plantName];
-    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const wheelInfo = Plant._cwMeta[plantName!];
+    const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
 
-    const _relTime = ts => {
+    const _relTime = (ts: string | undefined): string => {
       if (!ts) return 'unknown';
-      const diff = Math.round((Date.now() - new Date(ts)) / 1000);
+      const diff = Math.round((Date.now() - new Date(ts).getTime()) / 1000);
       if (diff < 120)   return 'just now';
       if (diff < 3600)  return `${Math.floor(diff/60)}m ago`;
       if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
       return `${Math.floor(diff/86400)}d ago`;
     };
 
-    let html;
+    let html: string;
     if (wheelInfo) {
       html = `
         <div class="cw-active-card">
@@ -748,22 +788,22 @@ export const Plant = {
 
     // Wire drag-drop + click
     const zone = document.getElementById('plant-cw-dropzone');
-    const fileInput = document.getElementById('plant-cw-file');
+    const fileInput = document.getElementById('plant-cw-file') as HTMLInputElement | null;
     if (zone && fileInput) {
       zone.onclick = e => { if (e.target !== fileInput) fileInput.click(); };
-      fileInput.onchange = () => { if (fileInput.files[0]) Plant._uploadWheel(plantName, fileInput.files[0]); };
+      fileInput.onchange = () => { if (fileInput.files![0]) Plant._uploadWheel(plantName, fileInput.files![0]); };
       zone.ondragover  = e => { e.preventDefault(); zone.classList.add('drag-over'); };
       zone.ondragleave = () => zone.classList.remove('drag-over');
       zone.ondrop = e => {
         e.preventDefault();
         zone.classList.remove('drag-over');
-        const f = e.dataTransfer.files[0];
+        const f = e.dataTransfer!.files[0];
         if (f) Plant._uploadWheel(plantName, f);
       };
     }
   },
 
-  _uploadWheel(plantName, file) {
+  _uploadWheel(plantName: string | null, file: File): void {
     const status = document.getElementById('plant-cw-status');
     const zone   = document.getElementById('plant-cw-dropzone');
     if (status) { status.textContent = Util.t('toast.uploading_file', { name: file.name }); status.className = 'admin-status info'; }
@@ -771,7 +811,7 @@ export const Plant = {
 
     const fd = new FormData();
     fd.append('file', file);
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, {
+    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName!)}`, {
       method: 'POST', body: fd,
       headers: { 'X-User': Session.actor() },
     })
@@ -785,7 +825,7 @@ export const Plant = {
         }
         const verb = body.replaced ? 'replaced' : 'uploaded';
         if (status) { status.textContent = Util.t('ui.color_wheel_status', { verb, count: body.row_count }); status.className = 'admin-status success'; }
-        Toast.show(Util.t('toast.color_wheel_verb', { verb, plant: plantName }), 'success');
+        Toast.show(Util.t('toast.color_wheel_verb', { verb, plant: plantName! }), 'success');
         ErrorLog.info('plant', `Color wheel ${verb} for ${plantName}: ${body.row_count} colors`);
         Plant._fetchAndRenderOptimization(plantName);
       })
@@ -796,7 +836,7 @@ export const Plant = {
       });
   },
 
-  async _confirmDeleteWheel(plantName) {
+  async _confirmDeleteWheel(plantName: string): Promise<void> {
     const ok = await Modal.confirm({ title: Util.t('modal.remove_color_wheel', { plant: plantName }), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
     fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, {
@@ -824,11 +864,11 @@ export const Plant = {
   // Its one `Store._state.masterData` direct touch is untouched, verbatim —
   // closing that §6 exception is not this task's job (see the compatibility
   // inventory).
-  _renderSettingsPane() {
+  _renderSettingsPane(): void {
     const pane = document.getElementById('plant-tab-settings');
     if (!pane) return;
     const plantName = Store.selectedPlant;
-    const plantRow  = Store._state.masterData?.plants?.find(p => p.plant === plantName) ?? null;
+    const plantRow: NimbusMasterPlant | null = Store._state.masterData?.plants?.find(p => p.plant === plantName) ?? null;
     // Values stored as total minutes in DB
     const alertHz = plantRow?.alt_flag_horizon   ?? Store.userSettings.alertHorizonMinutes   ?? 43200;
     const confHz  = plantRow?.conf_score_horizon ?? Store.userSettings.confidenceHorizonMinutes ?? 20160;
@@ -880,13 +920,13 @@ export const Plant = {
         </div>
       </div></div>`;
 
-    const alertDaysInp = pane.querySelector('#sys-alert-horizon-days');
-    const confDaysInp  = pane.querySelector('#sys-conf-horizon-days');
+    const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
+    const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
 
-    alertDaysInp.value = Math.max(1, Math.round(alertHz / 1440));
-    confDaysInp.value  = Math.max(1, Math.round(confHz  / 1440));
+    alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
+    confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
 
-    async function _savePlantHorizon(patch) {
+    async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
       try {
         const r = await fetch(`${Config.API_BASE}/master-data/plants/bulk`, {
@@ -898,42 +938,42 @@ export const Plant = {
         Object.assign(plantRow, patch); // commit to Store only once the write is confirmed
         return true;
       } catch (e) {
-        Toast.show(Util.t('toast.horizon_save_failed', { msg: e.message }), 'error');
+        Toast.show(Util.t('toast.horizon_save_failed', { msg: (e as Error).message }), 'error');
         return false;
       }
     }
 
-    function readAlertMinutes() {
+    function readAlertMinutes(): number {
       const days = Math.max(1, parseInt(alertDaysInp.value, 10) || 1);
       return days * 1440;
     }
 
-    function readConfMinutes() {
+    function readConfMinutes(): number {
       const days = Math.max(1, parseInt(confDaysInp.value, 10) || 1);
       return days * 1440;
     }
 
-    async function saveAlert() {
+    async function saveAlert(): Promise<void> {
       const prevMin = plantRow?.alt_flag_horizon ?? Store.userSettings.alertHorizonMinutes ?? 43200;
       const totalMin = readAlertMinutes();
       Store.setUserSettings({ alertHorizonMinutes: totalMin }, 'system-settings');
       const ok = await _savePlantHorizon({ alt_flag_horizon: totalMin });
       if (!ok) {
         Store.setUserSettings({ alertHorizonMinutes: prevMin }, 'system-settings');
-        alertDaysInp.value = Math.max(1, Math.round(prevMin / 1440));
+        alertDaysInp.value = String(Math.max(1, Math.round(prevMin / 1440)));
       }
       AlertsUIAdapter.renderBell();
       if (document.getElementById('alert-drawer')?.classList.contains('open')) AlertsUIAdapter.renderDrawer();
     }
 
-    async function saveConf() {
+    async function saveConf(): Promise<void> {
       const prevMin = plantRow?.conf_score_horizon ?? Store.userSettings.confidenceHorizonMinutes ?? 20160;
       const totalMin = readConfMinutes();
       Store.setUserSettings({ confidenceHorizonMinutes: totalMin }, 'system-settings');
       const ok = await _savePlantHorizon({ conf_score_horizon: totalMin });
       if (!ok) {
         Store.setUserSettings({ confidenceHorizonMinutes: prevMin }, 'system-settings');
-        confDaysInp.value = Math.max(1, Math.round(prevMin / 1440));
+        confDaysInp.value = String(Math.max(1, Math.round(prevMin / 1440)));
       }
       if (typeof NIMBUS !== 'undefined' && NIMBUS.Confidence?._recomputeDebounced)
         NIMBUS.Confidence._recomputeDebounced();
@@ -946,11 +986,11 @@ export const Plant = {
     // Ordered list [{key, enabled, order}] backed by plants.constraints JSONB.
     // Only colorWheel is wired into the optimizer today; the catalog/order/UI
     // are the first step toward a general per-plant constraint registry.
-    const consListEl = pane.querySelector('#sys-constraints-list');
-    let consState = [];
-    let _wheelPresent = null;  // null = unknown until the wheel probe returns
+    const consListEl = pane.querySelector('#sys-constraints-list') as HTMLElement | null;
+    let consState: ConstraintState[] = [];
+    let _wheelPresent: boolean | null = null;  // null = unknown until the wheel probe returns
 
-    function renderConstraints() {
+    function renderConstraints(): void {
       if (!consListEl) return;
       consListEl.innerHTML = consState.map((c, i) => {
         const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === c.key) || { label: c.key, desc: '' };
@@ -972,20 +1012,20 @@ export const Plant = {
           </div>`;
       }).join('');
 
-      consListEl.querySelectorAll('.constraint-row').forEach(rowEl => {
-        const key = rowEl.dataset.key;
-        rowEl.querySelector('.cons-toggle input').addEventListener('change', e => {
+      consListEl.querySelectorAll<HTMLElement>('.constraint-row').forEach(rowEl => {
+        const key = rowEl.dataset.key!;
+        rowEl.querySelector<HTMLInputElement>('.cons-toggle input')!.addEventListener('change', e => {
           const c = consState.find(x => x.key === key);
-          if (c) c.enabled = e.target.checked;
+          if (c) c.enabled = (e.target as HTMLInputElement).checked;
           renderConstraints();
           saveConstraints();
         });
-        rowEl.querySelector('.cons-up').addEventListener('click', () => moveConstraint(key, -1));
-        rowEl.querySelector('.cons-dn').addEventListener('click', () => moveConstraint(key, +1));
+        rowEl.querySelector('.cons-up')!.addEventListener('click', () => moveConstraint(key, -1));
+        rowEl.querySelector('.cons-dn')!.addEventListener('click', () => moveConstraint(key, +1));
       });
     }
 
-    function moveConstraint(key, dir) {
+    function moveConstraint(key: string, dir: number): void {
       const i = consState.findIndex(x => x.key === key);
       const j = i + dir;
       if (i < 0 || j < 0 || j >= consState.length) return;
@@ -998,19 +1038,19 @@ export const Plant = {
     // (the catalog default fills in any key absent from that persisted list).
     // Shared by init and by saveConstraints' failure path, since plantRow.constraints
     // is only mutated once a write is confirmed — it is always the source of truth to revert to.
-    function rebuildConsStateFromPersisted() {
-      const stored = Array.isArray(plantRow?.constraints) ? plantRow.constraints : null;
+    function rebuildConsStateFromPersisted(): void {
+      const stored: ConstraintConfig[] | null = Array.isArray(plantRow?.constraints) ? plantRow!.constraints! : null;
       consState = Engine.CONSTRAINT_CATALOG.map((cat, i) => {
         const s = stored?.find(x => x.key === cat.key);
         return {
           key:     cat.key,
           enabled: s ? !!s.enabled : Engine.constraintEnabled(plantName, cat.key),
-          order:   (s && Number.isFinite(s.order)) ? s.order : i + 1,
+          order:   (s && Number.isFinite(s.order)) ? s.order! : i + 1,
         };
       }).sort((a, b) => a.order - b.order);
     }
 
-    async function saveConstraints() {
+    async function saveConstraints(): Promise<void> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
       consState.forEach((c, idx) => { c.order = idx + 1; });
       const payload = consState.map(c => ({ key: c.key, enabled: c.enabled, order: c.order }));
@@ -1023,7 +1063,7 @@ export const Plant = {
         if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
         plantRow.constraints = payload;  // commit to Store only once the write is confirmed
       } catch (e) {
-        Toast.show(Util.t('toast.constraints_save_failed', { msg: e.message }), 'error');
+        Toast.show(Util.t('toast.constraints_save_failed', { msg: (e as Error).message }), 'error');
         rebuildConsStateFromPersisted();
         renderConstraints();
       }

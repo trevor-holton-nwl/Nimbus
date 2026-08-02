@@ -72,6 +72,7 @@ declare global {
           snapshot?(): any;
           restore?(snap?: any): void;
           _recompute?(): void;
+          _recomputeDebounced?(): void;
         };
         /* Task 2 stopgap additions (schedule-workbench.mts Table-onward region)
            — these members are reached but not precisely typed here; args/return
@@ -99,6 +100,14 @@ declare global {
         };
         Persistence?: {
           saveAll?(): void;
+        };
+        /** Reached by Plant._renderRoster's plant-group-input onchange handler
+         *  (plant-and-administration.mts Task 1) to keep MasterData's lines
+         *  table row in sync after a same-plant roster edit — MasterData
+         *  itself doesn't move into this file until CQ-1 Phase 4 Task 2 /
+         *  this migration's later task, so the reach stays ambient for now. */
+        MasterData?: {
+          syncLineSettings?(line: string, patch: Record<string, unknown>): void;
         };
       };
 }
