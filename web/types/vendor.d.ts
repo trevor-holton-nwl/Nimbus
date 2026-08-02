@@ -161,6 +161,14 @@ declare global {
        *  module uses. */
       set(option: string, value: unknown): void;
       selectedDates: Date[];
+      /** The original `<input>` flatpickr was attached to — added by CQ-1 Phase 6
+       *  Task 8 (schedule-workbench.mts's EditCalendar module, which reads
+       *  `.element.value` on its 14 working-hours time pickers to compute badge
+       *  hours/save payloads) as the real flatpickr v4.6.13 API surface that
+       *  module uses. Every NIMBUS call site attaches flatpickr to a plain
+       *  `<input>` (never a `<select>`/custom element), so `HTMLInputElement`
+       *  is accurate, not just convenient. */
+      element: HTMLInputElement;
       [method: string]: unknown;
     }
 

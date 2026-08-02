@@ -145,7 +145,7 @@ import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, OptimizerMode } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -6020,13 +6020,16 @@ interface OptimizeWheelCache {
   wheelUsed: boolean;
 }
 
-/** One entry / the overall shape of the `GET /color-wheel/{plant}` response body. */
+/** One entry / the overall shape of the `GET /color-wheel/{plant}` response body.
+ *  `meta` (CQ-1 Phase 6 Task 8) is read by ColorWheelViewer's `_load()` — the only
+ *  caller that reads the upload-metadata half of this same response body. */
 interface ColorWheelEntry {
   color: string;
   order_y?: number;
 }
 interface ColorWheelResponse {
   entries?: ColorWheelEntry[];
+  meta?: { filename?: string; row_count?: number };
 }
 
 /** Store.pref('optimizerDefaults') shape — the user's last-used optimizer
@@ -7033,6 +7036,25 @@ export const OptimizerPreview = {
   },
 };
 
+// -- Local type declarations (CQ-1 Phase 6 Task 8 conversion; scoped to
+//    EditCalendar/ColorWheelViewer/AlertsUIAdapter/SandboxAdapter/Printer —
+//    the last region of this file's stopgap-`any` cleanup) ------------------
+
+/** EditCalendar.applyPreset's three named quick-pick presets (Weekdays,
+ *  Mon-Sat, All 7 Days). */
+interface CalendarPreset {
+  days: number[];
+  s: string;
+  e: string;
+}
+
+/** The `sandbox:exited` event's `snapshot` payload (schedule-state.mts's
+ *  `Sandbox.exit()` return value) — that module keeps `SandboxSnapshot`
+ *  un-exported, so this derives the same shape via `ReturnType` instead of
+ *  redeclaring a shadow copy, per this phase's own "no un-exported interface,
+ *  use ReturnType<typeof …>" precedent. */
+type SandboxExitSnapshot = NonNullable<ReturnType<typeof Sandbox.exit>>;
+
 /* =============================================================================
    EDIT CALENDAR — per-line working hours modal.
    Opens from the "Edit Calendar" button in each ProdLines accordion.
@@ -7041,12 +7063,12 @@ export const OptimizerPreview = {
    maps to: line_calendar(line_code, day_of_week, is_open, start_hour, end_hour)
    ========================================================================== */
 export const EditCalendar = (() => {
-  let _line: any = null;
-  let _fp: any[]   = []; // 14 flatpickr instances: [start0, end0, start1, end1, ..., start6, end6]
+  let _line: string | null = null;
+  let _fp: NimbusVendor.FlatpickrInstance[] = []; // 14 flatpickr instances: [start0, end0, start1, end1, ..., start6, end6]
   let _plantMode = false;
-  let _plantName: any = null;
+  let _plantName: string | null = null;
 
-  function open(line: any) {
+  function open(line: string) {
     _plantMode = false;
     _plantName = null;
     _line = line;
@@ -7056,13 +7078,13 @@ export const EditCalendar = (() => {
     _populate();
     const el = document.getElementById('modal-edit-calendar');
     if (!el) return;
-    const copyBtn: any = el.querySelector('.cal-copy-plant-btn');
+    const copyBtn = el.querySelector<HTMLElement>('.cal-copy-plant-btn');
     if (copyBtn) copyBtn.style.display = '';
     el.hidden = false;
     requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
   }
 
-  function openPlant(name: any) {
+  function openPlant(name: string) {
     _plantMode = true;
     _plantName = name;
     _line = null;
@@ -7072,7 +7094,7 @@ export const EditCalendar = (() => {
     _populate();
     const el = document.getElementById('modal-edit-calendar');
     if (!el) return;
-    const copyBtn: any = el.querySelector('.cal-copy-plant-btn');
+    const copyBtn = el.querySelector<HTMLElement>('.cal-copy-plant-btn');
     if (copyBtn) copyBtn.style.display = 'none';
     el.hidden = false;
     requestAnimationFrame(() => el.querySelector('.cal-edit-modal')?.classList.add('visible'));
@@ -7091,7 +7113,7 @@ export const EditCalendar = (() => {
       if (nameEl)  nameEl.textContent  = `Plant ${_plantName}`;
       if (plantEl) plantEl.textContent = '';
     } else {
-      const plant = Store.getPlantForLine(_line);
+      const plant = Store.getPlantForLine(_line!);
       if (nameEl)  nameEl.textContent  = _line;
       if (plantEl) plantEl.textContent = `Plant ${plant}`;
     }
@@ -7099,12 +7121,12 @@ export const EditCalendar = (() => {
 
   function _populate() {
     const wh = _plantMode
-      ? Store.plants[_plantName].workHours
-      : Store.calendars[_line].workHours;
+      ? Store.plants[_plantName!].workHours
+      : Store.calendars[_line!].workHours;
     document.querySelectorAll('.cal-preset-chip').forEach(c => c.classList.remove('active'));
     for (let d = 0; d < 7; d++) {
       const enabled = !!wh[d];
-      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
       if (tog) tog.checked = enabled;
       _setRowEnabled(d, enabled);
       if (enabled && _fp.length === 14) {
@@ -7132,19 +7154,19 @@ export const EditCalendar = (() => {
     }
   }
 
-  function _setRowEnabled(d: any, enabled: any) {
+  function _setRowEnabled(d: number, enabled: boolean) {
     const row = document.getElementById(`cal-edit-row-${d}`);
     row?.classList.toggle('cal-day-off', !enabled);
     // Disable the altInput flatpickr renders (the visible element)
-    const startAlt = document.querySelector(`#cal-edit-start-${d} ~ input.flatpickr-input`);
-    const endAlt   = document.querySelector(`#cal-edit-end-${d} ~ input.flatpickr-input`);
-    [startAlt, endAlt].forEach((inp: any) => { if (inp) inp.disabled = !enabled; });
+    const startAlt = document.querySelector(`#cal-edit-start-${d} ~ input.flatpickr-input`) as HTMLInputElement | null;
+    const endAlt   = document.querySelector(`#cal-edit-end-${d} ~ input.flatpickr-input`) as HTMLInputElement | null;
+    [startAlt, endAlt].forEach((inp) => { if (inp) inp.disabled = !enabled; });
   }
 
-  function _refreshBadge(d: any) {
+  function _refreshBadge(d: number) {
     const badge = document.getElementById(`cal-edit-badge-${d}`);
     if (!badge) return;
-    const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
+    const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
     if (!tog?.checked) { badge.textContent = '—'; return; }
     const s = _fp[d * 2]?.element?.value;
     const e = _fp[d * 2 + 1]?.element?.value;
@@ -7158,7 +7180,7 @@ export const EditCalendar = (() => {
     }
   }
 
-  function onToggle(d: any, checked: any) {
+  function onToggle(d: number, checked: boolean) {
     _setRowEnabled(d, checked);
     if (checked && _fp.length === 14) {
       if (!_fp[d * 2]?.element?.value)     _fp[d * 2]?.setDate('08:00', false);
@@ -7167,19 +7189,19 @@ export const EditCalendar = (() => {
     _refreshBadge(d);
   }
 
-  function applyPreset(preset: any) {
-    const PRESETS: any = {
+  function applyPreset(preset: string) {
+    const PRESETS: Record<string, CalendarPreset> = {
       mf:  { days: [1,2,3,4,5],     s: '08:00', e: '17:00' },
       ms:  { days: [1,2,3,4,5,6],   s: '08:00', e: '17:00' },
       all: { days: [0,1,2,3,4,5,6], s: '08:00', e: '17:00' },
     };
     const p = PRESETS[preset];
     if (!p) return;
-    document.querySelectorAll('.cal-preset-chip')
-      .forEach((c: any) => c.classList.toggle('active', c.dataset.preset === preset));
+    document.querySelectorAll<HTMLElement>('.cal-preset-chip')
+      .forEach((c) => c.classList.toggle('active', c.dataset.preset === preset));
     for (let d = 0; d < 7; d++) {
       const enabled = p.days.includes(d);
-      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
       if (tog) tog.checked = enabled;
       if (enabled && _fp.length === 14) {
         _fp[d * 2]?.setDate(p.s, false);
@@ -7191,13 +7213,13 @@ export const EditCalendar = (() => {
   }
 
   function copyFromPlant() {
-    const plant = Store.getPlantForLine(_line);
+    const plant = Store.getPlantForLine(_line!);
     if (!plant) { Toast.show(Util.t('toast.no_plant_assigned_line'), 'warn'); return; }
     Store.ensurePlant(plant);
     const ph = Store.plants[plant].workHours;
     for (let d = 0; d < 7; d++) {
       const enabled = !!ph[d];
-      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
       if (tog) tog.checked = enabled;
       if (enabled && _fp.length === 14) {
         _fp[d * 2]?.setDate(Util.hoursToTimeString(ph[d]![0]), false);
@@ -7212,9 +7234,9 @@ export const EditCalendar = (() => {
 
   function save() {
     if (!_plantMode && !_line) return;
-    const newWh: any = {};
+    const newWh: WorkHours = {};
     for (let d = 0; d < 7; d++) {
-      const tog: any = document.getElementById(`cal-edit-toggle-${d}`);
+      const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
       if (!tog?.checked) { newWh[d] = null; continue; }
       const s = _fp[d * 2]?.element?.value;
       const e = _fp[d * 2 + 1]?.element?.value;
@@ -7229,20 +7251,20 @@ export const EditCalendar = (() => {
       }
     }
     if (_plantMode) {
-      Store.plants[_plantName].workHours = newWh;
+      Store.plants[_plantName!].workHours = newWh;
       const changed = new Set<string>();
-      for (let d = 0; d < 7; d++) for (const l of Store.clampLinesToPlant(_plantName, d)) changed.add(l);
+      for (let d = 0; d < 7; d++) for (const l of Store.clampLinesToPlant(_plantName!, d)) changed.add(l);
       NIMBUS!.Plant!._persistPlantHours!(_plantName, changed);
       NIMBUS!.Plant!.render!();
       close();
       Toast.show(Util.t('toast.plant_calendar_clamped'), 'success');
     } else {
-      Store.setCalendar(_line, newWh, 'edit-calendar');
-      const plant = Store.getPlantForLine(_line) || Store.selectedPlant;
-      if (plant) CalendarSync.saveLineHours(plant, _line, newWh);
+      Store.setCalendar(_line!, newWh, 'edit-calendar');
+      const plant = Store.getPlantForLine(_line!) || Store.selectedPlant;
+      if (plant) CalendarSync.saveLineHours(plant, _line!, newWh);
       NIMBUS!.ProdLines!.render!();
       close();
-      Toast.show(Util.t('toast.line_calendar_updated', { line: _line }), 'success');
+      Toast.show(Util.t('toast.line_calendar_updated', { line: _line! }), 'success');
     }
   }
 
@@ -7254,16 +7276,16 @@ export const EditCalendar = (() => {
    Supports search, sort, expandable rows with task counts per color.
    ========================================================================== */
 export const ColorWheelViewer = (() => {
-  let _plant: any   = null;
-  let _entries: any[] = [];
+  let _plant: string | null = null;
+  let _entries: ColorWheelEntry[] = [];
   let _search  = '';
-  let _sort    = 'priority'; // 'priority' | 'name'
+  let _sort: 'priority' | 'name' = 'priority';
 
-  const _esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (c: any) =>
-    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as any)[c]));
+  const _esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) =>
+    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
 
   // Map common color name fragments → hex for the swatch tiles
-  const COLOR_MAP = {
+  const COLOR_MAP: Record<string, string> = {
     RED:'#e74c3c', BLUE:'#3498db', GREEN:'#2ecc71', YELLOW:'#f1c40f',
     ORANGE:'#e67e22', PURPLE:'#9b59b6', PINK:'#e91e8c', WHITE:'#f0ede8',
     BLACK:'#2c3e50', BROWN:'#7a5a2a', GREY:'#95a5a6', GRAY:'#95a5a6',
@@ -7273,16 +7295,16 @@ export const ColorWheelViewer = (() => {
     SAGE:'#87a96b', SLATE:'#708090', IVORY:'#fffff0', CREAM:'#fffdd0',
   };
 
-  function _resolveColor(name: any) {
+  function _resolveColor(name: string): string | null {
     const u = String(name).toUpperCase().trim();
-    if ((COLOR_MAP as any)[u]) return (COLOR_MAP as any)[u];
+    if (COLOR_MAP[u]) return COLOR_MAP[u];
     for (const [k, v] of Object.entries(COLOR_MAP)) {
       if (u.includes(k)) return v;
     }
     return null;
   }
 
-  function open(plant: any) {
+  function open(plant: string) {
     _plant  = plant;
     _search = '';
     _sort   = 'priority';
@@ -7290,10 +7312,10 @@ export const ColorWheelViewer = (() => {
     if (!el) return;
     el.hidden = false;
     // Reset search UI
-    const srch: any = document.getElementById('cw-viewer-search');
+    const srch = document.getElementById('cw-viewer-search') as HTMLInputElement | null;
     if (srch) srch.value = '';
-    const sortBtns = document.querySelectorAll('.cw-sort-btn');
-    sortBtns.forEach((b: any) => b.classList.toggle('active', b.dataset.sort === 'priority'));
+    const sortBtns = document.querySelectorAll<HTMLElement>('.cw-sort-btn');
+    sortBtns.forEach((b) => b.classList.toggle('active', b.dataset.sort === 'priority'));
     requestAnimationFrame(() => el.querySelector('.cw-viewer-modal')?.classList.add('visible'));
     _load();
   }
@@ -7313,8 +7335,8 @@ export const ColorWheelViewer = (() => {
     if (countEl) countEl.textContent = '';
     if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading_wheel')}</div>`;
 
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant)}`, { signal: AbortSignal.timeout(8000) })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant!)}`, { signal: AbortSignal.timeout(8000) })
+      .then(r => r.ok ? r.json() as Promise<ColorWheelResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {
         _entries = body.entries || [];
         // Populate file meta below title
@@ -7325,7 +7347,7 @@ export const ColorWheelViewer = (() => {
           : `${_entries.length} colors`;
         _render();
       })
-      .catch(err => {
+      .catch((err: Error) => {
         _entries = [];
         if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.cw_no_wheel_for_plant', { plant: _esc(_plant) })}</div>`;
         const metaEl = document.getElementById('cw-viewer-meta');
@@ -7339,7 +7361,7 @@ export const ColorWheelViewer = (() => {
     if (!listEl) return;
 
     // Task counts per color for this plant
-    const taskCounts: any = {};
+    const taskCounts: Record<string, number> = {};
     for (const t of Store.tasksArr) {
       if (_plant && Store.getPlantForLine(t.PRODUCTION_LINE) !== _plant) continue;
       const c = Util.norm(t.COLOR);
@@ -7391,7 +7413,7 @@ export const ColorWheelViewer = (() => {
     }).join('');
   }
 
-  function _toggleExpand(btn: any) {
+  function _toggleExpand(btn: HTMLElement) {
     const row    = btn.closest('.cw-viewer-row');
     const detail = row?.querySelector('.cw-row-detail');
     if (!detail) return;
@@ -7399,14 +7421,14 @@ export const ColorWheelViewer = (() => {
     btn.textContent = open ? '▴' : '▾';
   }
 
-  function search(val: any) {
+  function search(val: string) {
     _search = String(val || '').toLowerCase();
     _render();
   }
 
-  function sort(mode: any) {
+  function sort(mode: 'priority' | 'name') {
     _sort = mode;
-    document.querySelectorAll('.cw-sort-btn').forEach((b: any) =>
+    document.querySelectorAll<HTMLElement>('.cw-sort-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.sort === mode)
     );
     _render();
@@ -7435,10 +7457,10 @@ const VL_ALERT_ROW_H = 72;
    App._renderSettingsPane, and App's `alerts:change` subscriber).
    ========================================================================== */
 export const AlertsUIAdapter = {
-  _drawerVL: null as any,
+  _drawerVL: null as VirtualList<NimbusAlert> | null,
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
-  focus(alertId: any) {
+  focus(alertId: string) {
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return;
 
@@ -7465,7 +7487,7 @@ export const AlertsUIAdapter = {
       }
       Timeline._tl.setSelection([String(a.taskId)]);
       Inspector.show(t);
-      document.querySelectorAll('.gantt-toolbar .seg-btn[data-view]').forEach((b: any) => {
+      document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach((b) => {
         b.classList.toggle('active', b.dataset.view === 'day');
       });
     }, 250);
@@ -7474,7 +7496,7 @@ export const AlertsUIAdapter = {
   // Open a categorized, scrollable cell-briefing modal listing the alerts for
   // a single (line, day) cell. Triggered by clicking a red/amber alert-cell
   // highlight on the Gantt.
-  showForCell(line: any, dayKey: any) {
+  showForCell(line: string, dayKey: string) {
     const matches = Store.alerts.filter(a =>
       a.line === line && a.time && Util.dayKey(a.time) === dayKey);
     if (!matches.length) return;
@@ -7483,14 +7505,14 @@ export const AlertsUIAdapter = {
     const dateLabel = day.toLocaleDateString('en-US',
       { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
 
-    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
-      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as any)[c]));
+    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
+      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
 
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
     const cellTasks = Store.tasksArr
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
                 && t.start_date && Util.dayKey(t.start_date) === dayKey)
-      .sort((a: any, b: any) => a.start_date - b.start_date);
+      .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
     const scheduledH = cellTasks.reduce((s, t) => s + Util.runHours(t), 0);
     const effCap   = Calendar.effectiveCapacityHours(line, day) || 0;
     const utilPct  = effCap > 0 ? scheduledH / effCap : 0;
@@ -7502,7 +7524,7 @@ export const AlertsUIAdapter = {
 
     // -------- Categorize alerts
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
-    const CAT_MAP = {
+    const CAT_MAP: Record<AlertType, string> = {
       overload:             'capacity',
       'near-capacity':      'capacity',
       overlap:              'conflicts',
@@ -7511,8 +7533,8 @@ export const AlertsUIAdapter = {
       'fixed-closed':       'calendar',
       'fixed-out-of-hours': 'calendar',
     };
-    const byCat: any = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    for (const a of matches) (byCat[(CAT_MAP as any)[a.type] || 'exceptions']).push(a);
+    const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
+    for (const a of matches) byCat[CAT_MAP[a.type] || 'exceptions'].push(a);
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;
@@ -7522,17 +7544,17 @@ export const AlertsUIAdapter = {
     const verdictSev = errCt > 0 ? 'err' : 'warn';
 
     // -------- Per-card renderers
-    const sevIcon: any = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const taskPO = (id: any) => {
+    const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const taskPO = (id: string) => {
       const t = Store.tasks?.[id];
       return t ? (t.PRODUCTION_ORDER || t.text || String(id).slice(0, 8)) : String(id).slice(0, 8);
     };
-    const taskFixed = (id: any) => !!Store.tasks?.[id]?.fixed;
+    const taskFixed = (id: string) => !!Store.tasks?.[id]?.fixed;
 
-    const renderChip = (id: any) => `
+    const renderChip = (id: string) => `
       <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(id)}">${esc(taskPO(id))}</span>`;
 
-    const renderCard = (a: any) => {
+    const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
       let headline = esc(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
       let num = '';
@@ -7587,7 +7609,7 @@ export const AlertsUIAdapter = {
         </div>`;
     };
 
-    const renderCategory = (key: any, label: any, alerts: any) => {
+    const renderCategory = (key: string, label: string, alerts: NimbusAlert[]) => {
       if (!alerts.length) return '';
       return `
         <section class="ac-cat" data-cat="${key}">
@@ -7652,10 +7674,10 @@ export const AlertsUIAdapter = {
       });
     };
 
-    dlg.addEventListener('click', (e: any) => {
-      const btn = e.target.closest('[data-act]');
+    dlg.addEventListener('click', (e: MouseEvent) => {
+      const btn = (e.target as Element | null)?.closest('[data-act]') as HTMLElement | null;
       if (!btn) { if (e.target === dlg) dlg.close(); return; }
-      const act = btn.dataset.act, aid = btn.dataset.id;
+      const act = btn.dataset.act, aid = btn.dataset.id ?? '';
       if (act === 'close')   { dlg.close(); return; }
       if (act === 'goto')    { dlg.close(); AlertsUIAdapter.focus(aid); return; }
       if (act === 'dismiss') {
@@ -7680,11 +7702,11 @@ export const AlertsUIAdapter = {
     if (isOpen) AlertsUIAdapter.renderDrawer();
   },
 
-  _renderAlertRow(a: any) {
+  _renderAlertRow(a: NimbusAlert): string {
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
-    const sevIcon: any = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const esc = (s: any) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: any) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as any)[c]));
+    const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
+    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
+      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const isCalendar = CALENDAR_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
     const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
@@ -7703,6 +7725,8 @@ export const AlertsUIAdapter = {
   renderDrawer() {
     const body = document.getElementById('alert-drawer-body');
     if (!body) return;
+    // Store._state.masterData direct touch — deliberate, out of scope for this
+    // task (see the file header comment above OptimizeDialog's own identical read).
     const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
@@ -7723,16 +7747,16 @@ export const AlertsUIAdapter = {
 
     if (!AlertsUIAdapter._drawerVL) {
       body.innerHTML = '';
-      AlertsUIAdapter._drawerVL = new VirtualList(body, {
+      AlertsUIAdapter._drawerVL = new VirtualList<NimbusAlert>(body, {
         rowH: VL_ALERT_ROW_H,
-        renderFn: (a: any) => AlertsUIAdapter._renderAlertRow(a),
+        renderFn: (a) => AlertsUIAdapter._renderAlertRow(a),
         mountEl: body,
       });
     }
     AlertsUIAdapter._drawerVL.update(alerts);
 
     if (hiddenCount > 0) {
-      const hzDays = Math.max(1, Math.round((hz as any) / 1440));
+      const hzDays = Math.max(1, Math.round((hz as number) / 1440));
       body.insertAdjacentHTML('beforeend',
         `<div style="padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);">` +
         `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.</div>`);
@@ -7742,6 +7766,8 @@ export const AlertsUIAdapter = {
   renderBell() {
     const badge = document.getElementById('alert-badge');
     const bell  = document.getElementById('alert-bell');
+    // Store._state.masterData direct touch — same deliberate out-of-scope carve-out
+    // as renderDrawer() above.
     const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
@@ -7772,7 +7798,7 @@ export const AlertsUIAdapter = {
    here as a boot-wired adapter.
    ========================================================================== */
 export const SandboxAdapter = {
-  _confSnapshot: null as any,
+  _confSnapshot: null as unknown,
 
   init() {
     const banner = document.getElementById('sandbox-banner');
@@ -7811,7 +7837,7 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (banner) banner.hidden = false;
 
-    document.querySelectorAll('.sandbox-btn').forEach((btn: any) => {
+    document.querySelectorAll<HTMLElement>('.sandbox-btn').forEach((btn) => {
       btn.textContent = Util.t('ui.sandbox_on');
       btn.style.color = 'var(--warn)';
       btn.onclick = null;
@@ -7820,11 +7846,12 @@ export const SandboxAdapter = {
     Toast.show(Util.t('toast.what_if_mode'), 'info', 1500);
   },
 
-  _onExited(evt: any) {
-    const { applied, snapshot: snap } = evt;
+  _onExited(evt: StoreEvent) {
+    const applied = !!evt.applied;
+    const snap = evt.snapshot as SandboxExitSnapshot | undefined;
 
     if (applied) {
-      const scenarioName = (document.getElementById('sb-scenario-name') as any)?.value || 'What-If';
+      const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
       Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
     } else {
       if (NIMBUS!.Confidence && SandboxAdapter._confSnapshot) NIMBUS!.Confidence!.restore!(SandboxAdapter._confSnapshot);
@@ -7837,7 +7864,7 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (banner) banner.hidden = true;
 
-    document.querySelectorAll('.sandbox-btn').forEach((btn: any) => {
+    document.querySelectorAll<HTMLElement>('.sandbox-btn').forEach((btn) => {
       btn.textContent = Util.t('ui.sandbox_off');
       btn.style.color = '';
       btn.onclick = () => SandboxAdapter.enter();
@@ -7856,11 +7883,13 @@ export const SandboxAdapter = {
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
       if (Store.selectedPlant) {
         const plant = Store.selectedPlant;
-        const curLine  = new Set(Store._state.blocks.filter((b: any) => b.plant === plant).map((b: any) => b.id));
-        const curPlant = new Set(Store._state.plantBlocks.filter((b: any) => b.plant === plant).map((b: any) => b.id));
+        // Store._state.blocks/.plantBlocks direct touch — deliberate, out of scope
+        // for this task (see the file header comment above OptimizeDialog).
+        const curLine  = new Set(Store._state.blocks.filter((b) => b.plant === plant).map((b) => b.id));
+        const curPlant = new Set(Store._state.plantBlocks.filter((b) => b.plant === plant).map((b) => b.id));
         const removed = {
-          line:  (snap?.blocks || []).filter((b: any) => b.plant === plant && !curLine.has(b.id)).map((b: any) => b.id),
-          plant: (snap?.plantBlocks || []).filter((b: any) => b.plant === plant && !curPlant.has(b.id)).map((b: any) => b.id),
+          line:  (snap?.blocks || []).filter((b) => b.plant === plant && !curLine.has(b.id)).map((b) => b.id),
+          plant: (snap?.plantBlocks || []).filter((b) => b.plant === plant && !curPlant.has(b.id)).map((b) => b.id),
         };
         CalendarSync.flushPlant(plant, removed);
       }
@@ -7894,9 +7923,9 @@ export const SandboxAdapter = {
    and browser print.
    ========================================================================== */
 export const Printer = {
-  _rows: [] as any[], // last previewed rows, used by exportCsv()
-  _fpStart: null as any,
-  _fpEnd: null as any,
+  _rows: [] as NimbusTask[], // last previewed rows, used by exportCsv()
+  _fpStart: null as NimbusVendor.FlatpickrInstance | null,
+  _fpEnd: null as NimbusVendor.FlatpickrInstance | null,
 
   open() {
     const scheduled = Store.tasksArr.filter(t => t.start_date && t.end_date);
@@ -7917,15 +7946,15 @@ export const Printer = {
         altInputClass: 'input', onChange() { Printer.preview(); }
       });
     }
-    Printer._fpStart.setDate(defStart, false);
-    Printer._fpEnd.setDate(defEnd, false);
+    Printer._fpStart?.setDate(defStart, false);
+    Printer._fpEnd?.setDate(defEnd, false);
     Modal.open('modal-print');
     Printer.preview();
   },
 
   preview() {
-    const startVal = (document.getElementById('print-start') as any)?.value;
-    const endVal   = (document.getElementById('print-end') as any)?.value;
+    const startVal = (document.getElementById('print-start') as HTMLInputElement | null)?.value;
+    const endVal   = (document.getElementById('print-end') as HTMLInputElement | null)?.value;
     const host     = document.getElementById('print-results');
     if (!host) return;
 
@@ -7952,8 +7981,8 @@ export const Printer = {
       return;
     }
 
-    const pad2 = (n: any) => String(n).padStart(2, '0');
-    const fmtDt = (d: any) => {
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const fmtDt = (d: Date | null) => {
       if (!d) return '—';
       return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     };
@@ -8019,7 +8048,7 @@ export const Printer = {
 
   exportCsv() {
     if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
-    const fmtDt = (d: any) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
+    const fmtDt = (d: Date | null) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
     const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
     const lines = [
       headers.join(','),
