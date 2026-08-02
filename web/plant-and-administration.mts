@@ -39,6 +39,7 @@
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
+import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter } from './schedule-workbench.mjs';
@@ -3805,37 +3806,397 @@ export const MasterData = (() => {
 })();
 
 /* =============================================================================
+   AdminCockpit backend response shapes — local interfaces for endpoints
+   outside the backend's response_model= scope (GET /health, /diagnostics*,
+   /logs/backend, POST /maintenance/*, /upload, /purge, /upload/audit,
+   /audit/log), following schedule-data.mts's precedent for hand-written
+   response interfaces (Phase 4). Fields are typed to what this module reads
+   (cross-checked against brain.py/db.py), not the full backend shape.
+   ========================================================================== */
+
+/** DIAGNOSTICS.warnings entries (brain.py) — read by the pipeline "Emitted"
+ *  step and rendered by _renderBackendWarnings / _warningList. */
+interface AdminPipelineWarning {
+  level?: 'info' | 'warn' | 'error';
+  msg?: string;
+  ts?: string;
+  context?: Record<string, unknown>;
+}
+
+/** db.get_pool_stats() — shared by GET /health and GET /diagnostics/db. */
+interface AdminPoolStats {
+  pool_min?: number;
+  pool_max?: number;
+  pool_size?: number;
+  pool_available?: number;
+  requests_waiting?: number;
+  requests_completed?: number;
+  requests_errors?: number;
+  returns_bad?: number;
+  error?: string;
+}
+
+/** GET /health (brain.py get_health) — polled every 30s by the health bar. */
+interface AdminHealthResponse {
+  db: {
+    connected: boolean;
+    ping_ms: number;
+    total_orders?: number;
+    user_overrides?: number;
+    last_upload_file?: string | null;
+    last_upload_at?: string | null;
+    error?: string;
+  };
+  pool: AdminPoolStats;
+  memory: {
+    stateless: boolean;
+    loaded: boolean;
+    task_count: number;
+    loaded_at: string | null;
+    load_ms?: number | null;
+  };
+  color_wheel: {
+    path: string;
+    reachable: boolean;
+    misses: number;
+    missed_colors: string[];
+  };
+}
+
+/** brain.py's module-level DIAGNOSTICS dict, as returned by the `pipeline`
+ *  key of GET /diagnostics/deep. */
+interface AdminPipelineSnapshot {
+  loaded_at: string | null;
+  load_ms: number | null;
+  source_file: string | null;
+  raw_row_count: number;
+  dropped_no_start_date: number;
+  dropped_no_finish_date_filled: number;
+  duplicate_ids_suffixed: number;
+  color_merge_misses: number;
+  color_merge_ms: number | null;
+  missed_colors: string[];
+  emitted_task_count: number;
+  unique_id_count: number;
+  lines: Record<string, number>;
+  warnings: AdminPipelineWarning[];
+  color_merge_is_per_request?: boolean;
+}
+
+/** db.get_db_deep_stats() — the `db_stats` key of GET /diagnostics/deep
+ *  (distinct from GET /diagnostics/db's per-table `tables`/AdminTableStat). */
+interface AdminDbStatsDeep {
+  total: number;
+  null_start: number;
+  null_end: number;
+  null_color: number;
+  null_line: number;
+  null_desc: number;
+  null_runtime: number;
+  date_range: { min: string | null; max: string | null };
+  by_line: Record<string, number>;
+  error?: string;
+}
+
+interface AdminColorWheelStats {
+  error: string | null;
+  total_in_orders: number;
+  matched: number;
+  missed: number;
+  missed_colors: string[];
+  wheel_total?: number;
+  missed_order_count?: number;
+  missed_behavior?: string;
+}
+
+/** GET /diagnostics/deep. */
+interface AdminDiagnosticsDeepResponse {
+  pipeline: AdminPipelineSnapshot;
+  db_stats: AdminDbStatsDeep;
+  color_wheel: AdminColorWheelStats;
+}
+
+interface AdminServerInfo {
+  version?: string | null;
+  started_at?: string | null;
+  database?: string | null;
+  db_size?: string | null;
+  max_connections?: string | number | null;
+  error?: string;
+}
+
+interface AdminTableStat {
+  table: string;
+  live_rows: number;
+  dead_rows: number;
+  dead_pct: number;
+  last_vacuum: string | null;
+  last_autovacuum: string | null;
+  last_analyze: string | null;
+  last_autoanalyze: string | null;
+  total_size: string;
+  mods_since_analyze: number;
+  needs_vacuum: boolean;
+  needs_analyze: boolean;
+  error?: string;
+}
+
+interface AdminLongRunningQuery {
+  pid: number;
+  state: string | null;
+  duration_s: number | null;
+  query: string | null;
+  wait_event_type?: string | null;
+  wait_event?: string | null;
+  application?: string | null;
+}
+
+interface AdminConnectionActivity {
+  total: number;
+  by_state: Record<string, number>;
+  long_running: AdminLongRunningQuery[];
+  error?: string;
+}
+
+interface AdminLockWait {
+  blocked_pid: number;
+  blocked_query: string | null;
+  blocking_pid: number;
+  blocking_query: string | null;
+  lock_type: string | null;
+  blocked_for_s: number | null;
+  error?: string;
+}
+
+interface AdminIndexUsage {
+  table: string;
+  index: string;
+  scans: number;
+  tuples_read: number;
+  tuples_fetched: number;
+  index_size: string;
+  unused: boolean;
+  error?: string;
+}
+
+interface AdminSlowQuery {
+  query: string;
+  calls: number;
+  total_ms: number;
+  mean_ms: number;
+  stddev_ms: number;
+  rows: number;
+}
+
+interface AdminSlowQueriesResult {
+  available: boolean;
+  queries: AdminSlowQuery[];
+  error?: string;
+}
+
+interface AdminSequenceHealth {
+  schema: string;
+  name: string;
+  data_type: string;
+  last_value: number;
+  max_value: number | null;
+  used_pct: number;
+  cycles: boolean;
+  status: 'ok' | 'warn' | 'err';
+  error?: string;
+}
+
+/** GET /diagnostics/db — the Admin Cockpit DB Deep Dive panel. */
+interface AdminDbDeepResponse {
+  pool: AdminPoolStats;
+  server: AdminServerInfo;
+  tables: AdminTableStat[];
+  connections: AdminConnectionActivity;
+  locks: AdminLockWait[];
+  indexes: AdminIndexUsage[];
+  slow_queries: AdminSlowQueriesResult;
+  sequences: AdminSequenceHealth[];
+  fetched_at: string;
+}
+
+/** One row of the in-memory backend event ring buffer (brain.py _log_event /
+ *  ingest_frontend_logs) — GET /logs/backend returns these, newest first. */
+interface BackendLogEntry {
+  ts: string;
+  level: 'info' | 'warn' | 'error';
+  category: string;
+  msg: string;
+  rid?: string;
+  reqId?: string;
+  event?: string;
+  outcome?: string;
+  error_code?: string;
+  errorCode?: string;
+  error_type?: string;
+  exc?: string;
+  ctx?: Record<string, unknown>;
+  source?: 'frontend';
+}
+
+/** GET /logs/backend. `dropped` is read by _renderBackendLog but the backend
+ *  does not actually return it — always undefined; kept optional so the type
+ *  matches that pre-existing (unchanged) runtime behavior exactly. */
+interface BackendLogResponse {
+  entries: BackendLogEntry[];
+  total: number;
+  dropped?: number;
+}
+
+/** POST /maintenance/vacuum-analyze | /maintenance/analyze. */
+interface AdminMaintenanceResult {
+  ok: boolean;
+  status?: string;
+  error?: string;
+  error_code?: string;
+  table?: string;
+  results?: Record<string, string>;
+}
+
+interface AdminUploadWarning {
+  level?: 'info' | 'warn' | 'error';
+  msg?: string;
+  status?: string;
+}
+
+/** POST /upload response (db.ingest_orders_from_excel). */
+interface AdminUploadResult {
+  status: 'ok' | 'error';
+  message?: string;
+  detail?: string;
+  batch_id: string;
+  raw_row_count: number;
+  inserted: number;
+  updated: number;
+  warnings: AdminUploadWarning[];
+  lines?: string[];
+  error_code?: string;
+}
+
+/** POST /purge response (db.purge_orders_by_date). */
+interface AdminPurgeResult {
+  status: string;
+  deleted: number;
+  message?: string;
+  detail?: string;
+  error_code?: string;
+}
+
+/** One row of GET /upload/audit (db.upload_audit_log). */
+interface AdminUploadAuditItem {
+  batch_id: string;
+  filename: string | null;
+  row_count: number;
+  inserted: number;
+  updated: number;
+  uploaded_at: string | null;
+  warnings: AdminUploadWarning[];
+}
+
+interface AdminUploadAuditResponse {
+  audit: AdminUploadAuditItem[];
+}
+
+/** One row of GET /audit/log (JSONL-backed color-wheel/optimizer audit trail). */
+interface AdminAuditLogItem {
+  ts: string;
+  user?: string;
+  action?: string;
+  plant?: string;
+  details?: Record<string, unknown>;
+}
+
+interface AdminAuditLogResponse {
+  entries: AdminAuditLogItem[];
+}
+
+/** Frontend ErrorLog entry, named via the ReturnType<typeof ...> precedent
+ *  (see e.g. schedule-workbench.mts's OptimizerKpis) rather than duplicating
+ *  application-foundation.mts's unexported LogEntry shape. */
+type AdminFrontendLogEntry = ReturnType<typeof ErrorLog.entries>[number];
+
+/** Persistence._lastLoad snapshot (schedule-data.mts's unexported LoadStats),
+ *  named the same ReturnType<typeof ...> way. */
+type AdminPersistenceStats = ReturnType<typeof Persistence.stats>;
+
+/** Persistence.storageInventory()'s unexported inline return shape, named the
+ *  same ReturnType<typeof ...> way. */
+type AdminStorageInventory = ReturnType<typeof Persistence.storageInventory>;
+
+/** Chrome/V8-only `performance.memory` — not part of the standard DOM lib
+ *  typings, so there is no ambient declaration to reuse; scoped locally since
+ *  no other module in this migration reads it. */
+interface ChromePerformanceMemory {
+  usedJSHeapSize: number;
+  jsHeapSizeLimit: number;
+  totalJSHeapSize?: number;
+}
+
+/** A [label, value] pair rendered by _kvTable. */
+type AdminKvRow = [string, string | number | null | undefined];
+
+/** One row rendered by _dbTable (generic ad-hoc table builder — currently
+ *  only fed the "non-idle queries" list under Active Connections). */
+interface AdminDbTableRow {
+  cells: Array<string | number | null>;
+  rowWarn?: boolean;
+  rowErr?: boolean;
+  cellWarn: number[];
+}
+
+/** One box in the DB→Plant filter→Color merge→Emitted→Rendered pipeline strip
+ *  built by _renderPipeline. */
+interface AdminPipelineStep {
+  key: string;
+  label: string;
+  count: number;
+  delta: string | null;
+  status: 'ok' | 'warn' | 'err';
+  detail: () => DocumentFragment;
+}
+
+/* =============================================================================
    ADMIN COCKPIT — health bar, pipeline inspector, backend warnings,
    filterable logs, upload, purge, and upload history.
    ========================================================================== */
-export const AdminCockpit: any = {
+export const AdminCockpit = {
   _initialized: false,
-  _pendingFile: null,
+  _pendingFile: null as File | null,
   _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '' },
   _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '' },
-  _healthData: null,
-  _deepData: null,
-  _healthTimer: null,
-  _pipelineOpen: null,
+  _healthData: null as AdminHealthResponse | null,
+  _deepData: null as AdminDiagnosticsDeepResponse | null,
+  _healthTimer: null as ReturnType<typeof setInterval> | null,
+  _pipelineOpen: null as string | null,
   _activeSub: 'overview',
-  _activeOvTab: 'diagnostics',
-  _dbDeepAbort: null,
-  _backendLogAbort: null,
+  _activeOvTab: 'diagnostics' as 'diagnostics' | 'data-ops' | 'logs' | 'thread',
+  _dbDeepAbort: null as AbortController | null,
+  _backendLogAbort: null as AbortController | null,
+  _healthAbort: null as AbortController | null,
+  _pipelineAbort: null as AbortController | null,
+  _auditAbort: null as AbortController | null,
+  _auditLogAbort: null as AbortController | null,
+  _fpPurgeStart: null as NimbusVendor.FlatpickrInstance | null,
+  _fpPurgeEnd: null as NimbusVendor.FlatpickrInstance | null,
 
-  gotoOvTab(tab: any) {
+  gotoOvTab(tab: 'diagnostics' | 'data-ops' | 'logs' | 'thread'): void {
     AdminCockpit._activeOvTab = tab;
-    document.querySelectorAll('.admin-ov-tabs .sub-subtab').forEach((b: any) =>
+    document.querySelectorAll<HTMLElement>('.admin-ov-tabs .sub-subtab').forEach((b) =>
       b.classList.toggle('active', b.dataset.ovTab === tab));
-    ['diagnostics', 'data-ops', 'logs', 'thread'].forEach(t => {
+    (['diagnostics', 'data-ops', 'logs', 'thread'] as const).forEach(t => {
       const el = document.getElementById(`admin-ov-${t}`);
       if (el) el.hidden = (t !== tab);
     });
     if (tab === 'thread') AdminCockpit._refreshThreadPane();
   },
 
-  _setSub(sub: any) {
-    AdminCockpit._activeSub = sub;
-    document.querySelectorAll('.admin-subtab').forEach((b: any) =>
+  _setSub(sub: string | undefined): void {
+    AdminCockpit._activeSub = sub ?? 'overview';
+    document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) =>
       b.classList.toggle('active', b.dataset.sub === sub));
     const ov = document.getElementById('admin-overview-pane');
     const mg = document.getElementById('admin-manage-pane');
@@ -3851,26 +4212,26 @@ export const AdminCockpit: any = {
     else AdminCockpit._renderOverview();
   },
 
-  init() {
+  init(): void {
     if (AdminCockpit._initialized) return;
     AdminCockpit._initialized = true;
 
-    document.querySelectorAll('.admin-subtab').forEach((b: any) =>
+    document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) =>
       b.addEventListener('click', () => AdminCockpit._setSub(b.dataset.sub)));
 
     // Upload zone — drag-drop + click-browse
-    const _uploadZone = document.getElementById('admin-upload-zone') as any;
-    const _uploadFile = document.getElementById('admin-upload-file') as any;
+    const _uploadZone = document.getElementById('admin-upload-zone');
+    const _uploadFile = document.getElementById('admin-upload-file') as HTMLInputElement | null;
     if (_uploadZone && _uploadFile) {
-      _uploadZone.onclick    = (e: any) => { if (e.target !== _uploadFile) _uploadFile.click(); };
-      _uploadZone.onkeydown  = (e: any) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _uploadFile.click(); } };
-      _uploadFile.onchange   = () => { if (_uploadFile.files[0]) AdminCockpit._pickFile(_uploadFile.files[0]); };
-      _uploadZone.ondragover = (e: any) => { e.preventDefault(); _uploadZone.classList.add('drag-over'); };
+      _uploadZone.onclick    = (e: MouseEvent) => { if (e.target !== _uploadFile) _uploadFile.click(); };
+      _uploadZone.onkeydown  = (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _uploadFile.click(); } };
+      _uploadFile.onchange   = () => { if (_uploadFile.files?.[0]) AdminCockpit._pickFile(_uploadFile.files[0]); };
+      _uploadZone.ondragover = (e: DragEvent) => { e.preventDefault(); _uploadZone.classList.add('drag-over'); };
       _uploadZone.ondragleave= () => _uploadZone.classList.remove('drag-over');
-      _uploadZone.ondrop     = (e: any) => {
+      _uploadZone.ondrop     = (e: DragEvent) => {
         e.preventDefault();
         _uploadZone.classList.remove('drag-over');
-        const f = e.dataTransfer.files[0];
+        const f = e.dataTransfer?.files[0];
         if (f) AdminCockpit._pickFile(f);
       };
     }
@@ -3894,10 +4255,10 @@ export const AdminCockpit: any = {
     document.getElementById('admin-health-refresh')?.addEventListener('click', AdminCockpit._renderHealth);
     document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
     document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
-    document.getElementById('admin-db-deep')?.addEventListener('click', async (e: any) => {
-      const btn = e.target.closest('[data-maint-action]');
+    document.getElementById('admin-db-deep')?.addEventListener('click', async (e: MouseEvent) => {
+      const btn = (e.target as HTMLElement).closest('[data-maint-action]') as HTMLButtonElement | null;
       if (!btn) return;
-      const action = btn.dataset.maintAction;
+      const action = btn.dataset.maintAction as 'vacuum-analyze' | 'analyze';
       const table  = btn.dataset.maintTable || null;
       if (action === 'vacuum-analyze' && !table) {
         const ok = await Modal.confirm({ title: Util.t('ui.maint_vacuum_all_confirm'), confirmLabel: Util.t('btn.run') });
@@ -3907,22 +4268,22 @@ export const AdminCockpit: any = {
     });
     document.getElementById('admin-backend-log-refresh')?.addEventListener('click', AdminCockpit._renderBackendLog);
     document.getElementById('admin-backend-log-clear')?.addEventListener('click', AdminCockpit._clearBackendLog);
-    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', (e: any) => {
-      AdminCockpit._backendLogFilter.level = e.target.value;
+    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', (e: Event) => {
+      AdminCockpit._backendLogFilter.level = (e.target as HTMLSelectElement).value;
       AdminCockpit._renderBackendLog();
     });
 
     // Filter controls
-    document.getElementById('admin-log-filter-level')?.addEventListener('change', (e: any) => {
-      AdminCockpit._logFilter.level = e.target.value;
+    document.getElementById('admin-log-filter-level')?.addEventListener('change', (e: Event) => {
+      AdminCockpit._logFilter.level = (e.target as HTMLSelectElement).value;
       AdminCockpit._renderLogs();
     });
-    document.getElementById('admin-log-filter-scope')?.addEventListener('change', (e: any) => {
-      AdminCockpit._logFilter.scope = e.target.value;
+    document.getElementById('admin-log-filter-scope')?.addEventListener('change', (e: Event) => {
+      AdminCockpit._logFilter.scope = (e.target as HTMLSelectElement).value;
       AdminCockpit._renderLogs();
     });
-    document.getElementById('admin-log-search')?.addEventListener('input', (e: any) => {
-      AdminCockpit._logFilter.search = e.target.value.toLowerCase();
+    document.getElementById('admin-log-search')?.addEventListener('input', (e: Event) => {
+      AdminCockpit._logFilter.search = (e.target as HTMLInputElement).value.toLowerCase();
       AdminCockpit._renderLogs();
     });
 
@@ -3942,7 +4303,7 @@ export const AdminCockpit: any = {
       if (AdminCockpit._activeOvTab === 'thread') AdminCockpit._refreshThreadPane();
     });
 
-    Store.subscribe((evt: any) => {
+    Store.subscribe((evt: StoreEvent) => {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
         const panel = document.getElementById('admin-tab');
         if (panel?.classList.contains('active')) {
@@ -3952,8 +4313,8 @@ export const AdminCockpit: any = {
       }
     }, 'AdminCockpit');
 
-    document.addEventListener('mouseover', (e: any) => {
-      const el = e.target.closest?.('.adm-help');
+    document.addEventListener('mouseover', (e: MouseEvent) => {
+      const el = (e.target as HTMLElement).closest?.('.adm-help') as HTMLElement | null;
       if (!el) return;
       const r = el.getBoundingClientRect();
       el.style.setProperty('--tip-x', `${r.left + r.width / 2}px`);
@@ -3961,12 +4322,12 @@ export const AdminCockpit: any = {
     });
   },
 
-  render() {
+  render(): void {
     AdminCockpit._setSub('overview');
     AdminCockpit._renderOverview();
   },
 
-  _renderOverview() {
+  _renderOverview(): void {
     AdminCockpit._renderPurgeMeta();
     AdminCockpit._renderHealth();
     AdminCockpit._renderDiagnostics();
@@ -3979,7 +4340,10 @@ export const AdminCockpit: any = {
     AdminCockpit._startHealthPolling();
   },
 
-  _startHealthPolling() {
+  /** Started by _renderOverview; called from application-shell.mjs's
+   *  visibility-change handler once that file is converted (Phase 5) so this
+   *  public start/stop pair's signature is load-bearing beyond this module. */
+  _startHealthPolling(): void {
     if (AdminCockpit._healthTimer) return;
     AdminCockpit._healthTimer = setInterval(() => {
       if (document.getElementById('admin-tab')?.classList.contains('active')) {
@@ -3988,22 +4352,22 @@ export const AdminCockpit: any = {
     }, 30_000);
   },
 
-  _stopHealthPolling() {
+  _stopHealthPolling(): void {
     if (AdminCockpit._healthTimer) {
       clearInterval(AdminCockpit._healthTimer);
       AdminCockpit._healthTimer = null;
     }
   },
 
-  _renderHealth() {
+  _renderHealth(): void {
     AdminCockpit._healthAbort?.abort();
     AdminCockpit._healthAbort = new AbortController();
     const sig = AbortSignal.any
       ? AbortSignal.any([AdminCockpit._healthAbort.signal, AbortSignal.timeout(6000)])
       : AdminCockpit._healthAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/health`, { signal: sig })
-      .then((r: any) => r.json())
-      .then((data: any) => {
+      .then((r) => r.json() as Promise<AdminHealthResponse>)
+      .then((data) => {
         AdminCockpit._healthData = data;
         const db = data.db || {};
         const mem = data.memory || {};
@@ -4011,9 +4375,9 @@ export const AdminCockpit: any = {
 
         const dbEl = document.getElementById('admin-health-db');
         if (dbEl) {
-          const dot = dbEl.querySelector('.admin-health-dot') as any;
-          const lbl = dbEl.querySelector('.admin-health-label') as any;
-          const cls = !db.connected ? 'err' : db.ping_ms > 500 ? 'warn' : 'ok';
+          const dot = dbEl.querySelector<HTMLElement>('.admin-health-dot')!;
+          const lbl = dbEl.querySelector<HTMLElement>('.admin-health-label')!;
+          const cls = !db.connected ? 'err' : (db.ping_ms ?? 0) > 500 ? 'warn' : 'ok';
           dot.className = `admin-health-dot ${cls}`;
           lbl.textContent = db.connected
             ? `DB ${db.ping_ms}ms`
@@ -4022,20 +4386,20 @@ export const AdminCockpit: any = {
 
         const ordEl = document.getElementById('admin-health-orders');
         if (ordEl) {
-          (ordEl.querySelector('.admin-health-label') as any).textContent =
+          ordEl.querySelector<HTMLElement>('.admin-health-label')!.textContent =
             `${(db.total_orders ?? 0).toLocaleString()} orders`;
         }
 
         const ovEl = document.getElementById('admin-health-overrides');
         if (ovEl) {
-          (ovEl.querySelector('.admin-health-label') as any).textContent =
+          ovEl.querySelector<HTMLElement>('.admin-health-label')!.textContent =
             `${(db.user_overrides ?? 0).toLocaleString()} user overrides`;
         }
 
         const cwEl = document.getElementById('admin-health-color');
         if (cwEl) {
-          const dot = cwEl.querySelector('.admin-health-dot') as any;
-          const lbl = cwEl.querySelector('.admin-health-label') as any;
+          const dot = cwEl.querySelector<HTMLElement>('.admin-health-dot')!;
+          const lbl = cwEl.querySelector<HTMLElement>('.admin-health-label')!;
           const misses = cw.misses ?? 0;
           dot.className = `admin-health-dot ${misses > 0 ? 'warn' : 'ok'}`;
           lbl.textContent = misses > 0
@@ -4046,8 +4410,8 @@ export const AdminCockpit: any = {
         const poolChip = document.getElementById('admin-health-pool');
         if (poolChip) {
           const pPool = data.pool || {};
-          const dot  = poolChip.querySelector('.admin-health-dot') as any;
-          const plbl = poolChip.querySelector('.admin-health-label') as any;
+          const dot  = poolChip.querySelector<HTMLElement>('.admin-health-dot');
+          const plbl = poolChip.querySelector<HTMLElement>('.admin-health-label');
           if (pPool.error) {
             if (dot) dot.className = 'admin-health-dot warn';
             if (plbl) plbl.textContent = Util.t('ui.pool_unavailable');
@@ -4063,18 +4427,18 @@ export const AdminCockpit: any = {
 
         const ldEl = document.getElementById('admin-health-loaded');
         if (ldEl) {
-          const lbl = ldEl.querySelector('.admin-health-label') as any;
+          const lbl = ldEl.querySelector<HTMLElement>('.admin-health-label')!;
           const loadedAt = mem.loaded_at ? new Date(mem.loaded_at) : null;
           lbl.textContent = loadedAt
             ? `Loaded ${AdminCockpit._relTime(loadedAt)}${mem.load_ms != null ? ' · ' + mem.load_ms + 'ms' : ''}`
             : Util.t('ui.not_loaded');
         }
       })
-      .catch((e: any) => {
+      .catch((e: Error) => {
         const dbEl = document.getElementById('admin-health-db');
         if (dbEl) {
-          const dot = dbEl.querySelector('.admin-health-dot') as any;
-          const lbl = dbEl.querySelector('.admin-health-label') as any;
+          const dot = dbEl.querySelector<HTMLElement>('.admin-health-dot')!;
+          const lbl = dbEl.querySelector<HTMLElement>('.admin-health-label')!;
           dot.className = 'admin-health-dot err';
           lbl.textContent = Util.t('ui.backend_unreachable');
         }
@@ -4082,7 +4446,7 @@ export const AdminCockpit: any = {
       });
   },
 
-  _renderPipeline() {
+  _renderPipeline(): void {
     const wrap = document.getElementById('admin-pipeline');
     if (!wrap) return;
 
@@ -4092,13 +4456,13 @@ export const AdminCockpit: any = {
       ? AbortSignal.any([AdminCockpit._pipelineAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._pipelineAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep`, { signal: sig })
-      .then((r: any) => r.json())
-      .then((data: any) => {
+      .then((r) => r.json() as Promise<AdminDiagnosticsDeepResponse>)
+      .then((data) => {
         AdminCockpit._deepData = data;
-        const p = data.pipeline || {};
-        const dbSt = data.db_stats || {};
-        const cw = data.color_wheel || {};
-        const st: any = Persistence.stats ? Persistence.stats() : {};
+        const p = (data.pipeline || {}) as AdminPipelineSnapshot;
+        const dbSt = (data.db_stats || {}) as AdminDbStatsDeep;
+        const cw = (data.color_wheel || {}) as AdminColorWheelStats;
+        const st: AdminPersistenceStats = Persistence.stats ? Persistence.stats() : ({} as AdminPersistenceStats);
 
         const rendered   = st.rendered ?? 0;
         const rawDb      = p.raw_row_count ?? dbSt.total ?? 0;
@@ -4117,7 +4481,7 @@ export const AdminCockpit: any = {
         // Pipeline order: DB → [Plant filter if active] → Color Merge → Emitted → Rendered.
         // Reordered (May 2026) so color-miss counts are plant-scoped — the merge
         // now runs *after* the plant filter, against only the rows the user will see.
-        const steps = [
+        const steps: AdminPipelineStep[] = [
           {
             key: 'db',
             label: 'DB Load',
@@ -4131,7 +4495,7 @@ export const AdminCockpit: any = {
             label: `Plant ${activePlant}`,
             count: preMerge,
             delta: plantFiltered > 0 ? `-${plantFiltered} (other plants)` : null,
-            status: 'ok',
+            status: 'ok' as const,
             detail: () => AdminCockpit._pipelineDetailPlantFilter(st, plantFiltered, rawDb),
           }] : []),
           {
@@ -4147,7 +4511,7 @@ export const AdminCockpit: any = {
             label: 'Emitted',
             count: received,
             delta: null,
-            status: p.warnings?.length > 0 ? 'warn' : 'ok',
+            status: (p.warnings?.length ?? 0) > 0 ? 'warn' : 'ok',
             detail: () => AdminCockpit._pipelineDetailEmitted(p, st),
           },
           {
@@ -4161,7 +4525,7 @@ export const AdminCockpit: any = {
         ];
 
         wrap.textContent = '';
-        steps.forEach((s: any, i: any) => {
+        steps.forEach((s, i) => {
           if (i > 0) {
             const arrow = document.createElement('span');
             arrow.className = 'admin-pipeline-arrow';
@@ -4210,21 +4574,21 @@ export const AdminCockpit: any = {
         // Backend warnings
         AdminCockpit._renderBackendWarnings(p.warnings || []);
       })
-      .catch((e: any) => {
+      .catch((e: Error) => {
         if (e.name === 'AbortError') return;
         wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${e.message}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
       });
   },
 
-  _pipelineDetailDB(p: any, dbSt: any) {
+  _pipelineDetailDB(p: AdminPipelineSnapshot, dbSt: AdminDbStatsDeep): DocumentFragment {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
     head.textContent = Util.t('ui.db_load_details');
     frag.appendChild(head);
 
-    const rows = [
+    const rows: AdminKvRow[] = [
       [Util.t('ui.diag_total_in_db'), (dbSt.total ?? '—').toLocaleString()],
       [Util.t('ui.diag_null_start_date'), dbSt.null_start ?? '—'],
       [Util.t('ui.diag_null_end_date'), dbSt.null_end ?? '—'],
@@ -4252,7 +4616,7 @@ export const AdminCockpit: any = {
     return frag;
   },
 
-  _pipelineDetailColor(p: any, cw: any, st: any) {
+  _pipelineDetailColor(p: AdminPipelineSnapshot, cw: AdminColorWheelStats, st: AdminPersistenceStats): DocumentFragment {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4263,9 +4627,9 @@ export const AdminCockpit: any = {
     // Misses are now plant-scoped — pulled from the last /tasks meta via Persistence stats.
     const requestMiss = st?.color_merge_misses ?? 0;
     const requestMissed = st?.missed_colors ?? [];
-    const requestMs = st?.backend_meta?.color_merge_ms;
+    const requestMs = st?.backend_meta?.color_merge_ms as number | undefined;
 
-    const rows = [
+    const rows: AdminKvRow[] = [
       [Util.t('ui.diag_scope'), st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant} only` : Util.t('ui.all_plants')],
       [Util.t('ui.diag_rows_entering_merge'), st?.pre_color_merge_count ?? '—'],
       [Util.t('ui.diag_global_wheel_colors'), cw.wheel_total ?? '—'],
@@ -4298,7 +4662,7 @@ export const AdminCockpit: any = {
     return frag;
   },
 
-  _pipelineDetailEmitted(p: any, st: any) {
+  _pipelineDetailEmitted(p: AdminPipelineSnapshot, st: AdminPersistenceStats): DocumentFragment {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4306,7 +4670,7 @@ export const AdminCockpit: any = {
     frag.appendChild(head);
 
     const scopeLbl = st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant}` : Util.t('ui.all_plants');
-    const rows = [
+    const rows: AdminKvRow[] = [
       [Util.t('ui.diag_raw_from_db'), p.raw_row_count ?? '—'],
       [Util.t('ui.diag_dropped_no_start'), p.dropped_no_start_date ?? 0],
       [Util.t('ui.diag_active_scope'), scopeLbl],
@@ -4329,7 +4693,7 @@ export const AdminCockpit: any = {
     return frag;
   },
 
-  _pipelineDetailPlantFilter(st: any, plantFiltered: any, rawDb: any) {
+  _pipelineDetailPlantFilter(st: AdminPersistenceStats, plantFiltered: number, rawDb: number): DocumentFragment {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4339,7 +4703,7 @@ export const AdminCockpit: any = {
     // Pipeline order is now: DB → Plant filter → Color merge → Emitted.
     // The pre-merge count here is what reaches the color merge stage.
     const preMerge = st?.pre_color_merge_count ?? 0;
-    const rows = [
+    const rows: AdminKvRow[] = [
       [Util.t('ui.diag_active_plant'), st.plant ?? '—'],
       [Util.t('ui.diag_raw_rows_from_db'), rawDb ?? '—'],
       [Util.t('ui.diag_rows_this_plant'), preMerge],
@@ -4350,7 +4714,7 @@ export const AdminCockpit: any = {
     return frag;
   },
 
-  _pipelineDetailRendered(st: any, p: any) {
+  _pipelineDetailRendered(st: AdminPersistenceStats, p: AdminPipelineSnapshot): DocumentFragment {
     const frag = document.createDocumentFragment();
     const head = document.createElement('div');
     head.className = 'admin-pdtl-head';
@@ -4362,7 +4726,7 @@ export const AdminCockpit: any = {
     const received = st.raw_received ?? 0;
     const rendered = st.rendered ?? 0;
     const gap = received - rendered;
-    const rows = [
+    const rows: AdminKvRow[] = [
       [Util.t('ui.diag_received_by_ui'), received],
       [Util.t('ui.diag_pl_filtered'), st.filtered_pl ?? 0],
       [Util.t('ui.diag_null_id_dropped'), st.filtered_null_id ?? 0],
@@ -4382,7 +4746,7 @@ export const AdminCockpit: any = {
     return frag;
   },
 
-  _kvTable(rows: any) {
+  _kvTable(rows: AdminKvRow[]): HTMLTableElement {
     const tbl = document.createElement('table');
     tbl.className = 'admin-pdtl-tbl';
     for (const [k, v] of rows) {
@@ -4400,11 +4764,11 @@ export const AdminCockpit: any = {
     return tbl;
   },
 
-  _lineBar(byLine: any) {
+  _lineBar(byLine: Record<string, number>): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-pdtl-linebars';
-    const max = Math.max(...(Object.values(byLine) as any[]));
-    for (const [line, cnt] of Object.entries(byLine) as [string, any][]) {
+    const max = Math.max(...Object.values(byLine));
+    for (const [line, cnt] of Object.entries(byLine)) {
       const row = document.createElement('div');
       row.className = 'admin-pdtl-linebar-row';
       const lbl = document.createElement('span');
@@ -4417,7 +4781,7 @@ export const AdminCockpit: any = {
       fill.style.width = `${Math.round((cnt / max) * 100)}%`;
       const num = document.createElement('span');
       num.className = 'admin-pdtl-linebar-num';
-      num.textContent = cnt;
+      num.textContent = String(cnt);
       bar.appendChild(fill);
       row.appendChild(lbl);
       row.appendChild(bar);
@@ -4427,7 +4791,7 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _warningList(warnings: any) {
+  _warningList(warnings: AdminPipelineWarning[]): HTMLDivElement {
     const ul = document.createElement('div');
     ul.className = 'admin-bwarn-list';
     for (const w of warnings) {
@@ -4446,7 +4810,7 @@ export const AdminCockpit: any = {
     return ul;
   },
 
-  _renderBackendWarnings(warnings: any) {
+  _renderBackendWarnings(warnings: AdminPipelineWarning[]): void {
     const host = document.getElementById('admin-backend-warnings');
     const countEl = document.getElementById('admin-bwarn-count');
     if (!host) return;
@@ -4499,7 +4863,7 @@ export const AdminCockpit: any = {
     }
   },
 
-  _updatePurgeCount() {
+  _updatePurgeCount(): void {
     const start = AdminCockpit._fpPurgeStart?.selectedDates[0];
     const end   = AdminCockpit._fpPurgeEnd?.selectedDates[0];
     const el    = document.getElementById('admin-past-count');
@@ -4512,7 +4876,7 @@ export const AdminCockpit: any = {
       : `<span style="color:var(--text-muted,#888)">${Util.t('ui.orders_in_range', {count: 0, plural: 's'})}</span>`;
   },
 
-  _renderPurgeMeta() {
+  _renderPurgeMeta(): void {
     const yesterday   = new Date(); yesterday.setDate(yesterday.getDate() - 1);
     const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
     if (!AdminCockpit._fpPurgeStart) {
@@ -4525,24 +4889,24 @@ export const AdminCockpit: any = {
         onChange: () => AdminCockpit._updatePurgeCount(),
       });
     }
-    AdminCockpit._fpPurgeStart.setDate(twoWeeksAgo, false);
-    AdminCockpit._fpPurgeEnd.setDate(yesterday, false);
+    AdminCockpit._fpPurgeStart!.setDate(twoWeeksAgo, false);
+    AdminCockpit._fpPurgeEnd!.setDate(yesterday, false);
     AdminCockpit._updatePurgeCount();
   },
 
-  _setStatus(el: any, text: any, kind: any) {
+  _setStatus(el: HTMLElement | null, text: string, kind?: string): void {
     if (!el) return;
     el.textContent = text;
     el.className = 'admin-status' + (kind ? ' ' + kind : '');
   },
 
-  _pickFile(file: any) {
+  _pickFile(file: File | null): void {
     if (!file) return;
     AdminCockpit._pendingFile = file;
-    (document.getElementById('admin-upload-info') as any).hidden = false;
-    (document.getElementById('admin-upload-actions') as any).hidden = false;
-    (document.getElementById('admin-upload-fname') as any).textContent = file.name;
-    (document.getElementById('admin-upload-fsize') as any).textContent =
+    document.getElementById('admin-upload-info')!.hidden = false;
+    document.getElementById('admin-upload-actions')!.hidden = false;
+    document.getElementById('admin-upload-fname')!.textContent = file.name;
+    document.getElementById('admin-upload-fsize')!.textContent =
       file.size < 1_048_576
         ? `${(file.size / 1024).toFixed(1)} KB`
         : `${(file.size / 1_048_576).toFixed(1)} MB`;
@@ -4550,9 +4914,9 @@ export const AdminCockpit: any = {
     if (status) { status.textContent = ''; status.className = 'admin-status'; }
   },
 
-  _clearUpload() {
+  _clearUpload(): void {
     AdminCockpit._pendingFile = null;
-    const fi = document.getElementById('admin-upload-file') as any;
+    const fi = document.getElementById('admin-upload-file') as HTMLInputElement | null;
     if (fi) fi.value = '';
     const info    = document.getElementById('admin-upload-info');
     const actions = document.getElementById('admin-upload-actions');
@@ -4562,11 +4926,11 @@ export const AdminCockpit: any = {
     if (status)  { status.textContent = ''; status.className = 'admin-status'; }
   },
 
-  _upload() {
+  _upload(): void {
     const f      = AdminCockpit._pendingFile;
     const status = document.getElementById('admin-upload-status');
     const zone   = document.getElementById('admin-upload-zone');
-    const btn    = document.getElementById('admin-upload-btn') as any;
+    const btn    = document.getElementById('admin-upload-btn') as HTMLButtonElement | null;
     if (!f) {
       AdminCockpit._setStatus(status, Util.t('toast.pick_xlsx_first'), 'warn');
       return;
@@ -4580,8 +4944,8 @@ export const AdminCockpit: any = {
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     Util.fetchTraced(`${Config.API_BASE}/upload`, { method: 'POST', body: fd, headers: { 'x-request-id': reqId } })
-      .then((r: any) => r.json().catch(() => ({})).then((j: any) => ({ ok: r.ok, body: j })))
-      .then(({ ok, body }: any) => {
+      .then((r) => r.json().catch(() => ({})).then((j) => ({ ok: r.ok, body: j as AdminUploadResult })))
+      .then(({ ok, body }) => {
         if (zone) zone.classList.remove('uploading');
         if (btn)  btn.disabled = false;
         if (!ok || body.status !== 'ok') {
@@ -4611,7 +4975,7 @@ export const AdminCockpit: any = {
         });
         AdminCockpit._renderAudit();
       })
-      .catch(e => {
+      .catch((e: Error) => {
         if (zone) zone.classList.remove('uploading');
         if (btn)  btn.disabled = false;
         AdminCockpit._setStatus(status, Util.t('toast.upload_failed', { msg: e.message }), 'error');
@@ -4620,12 +4984,12 @@ export const AdminCockpit: any = {
       });
   },
 
-  async _purge() {
-    const startEl = document.getElementById('admin-purge-start');
-    const endEl   = document.getElementById('admin-purge-end');
+  async _purge(): Promise<void> {
+    const startEl = document.getElementById('admin-purge-start') as HTMLInputElement | null;
+    const endEl   = document.getElementById('admin-purge-end') as HTMLInputElement | null;
     const status  = document.getElementById('admin-purge-status');
-    const start = (startEl as any)?.value;
-    const end   = (endEl as any)?.value;
+    const start = startEl?.value;
+    const end   = endEl?.value;
     if (!start || !end) {
       AdminCockpit._setStatus(status, Util.t('toast.pick_purge_dates'), 'warn');
       return;
@@ -4646,8 +5010,8 @@ export const AdminCockpit: any = {
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
       body: JSON.stringify({ start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
     })
-      .then((r: any) => r.json().catch(() => ({})))
-      .then((body: any) => {
+      .then((r) => r.json().catch(() => ({})) as Promise<AdminPurgeResult>)
+      .then((body) => {
         if (body.status !== 'ok') {
           AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: body.message || body.detail || 'unknown' }), 'error');
           ErrorLog.error('admin', `Purge failed: ${body.message || body.detail || 'unknown'}`, body,
@@ -4662,14 +5026,14 @@ export const AdminCockpit: any = {
           AdminCockpit._renderPipeline();
         });
       })
-      .catch((e: any) => {
+      .catch((e: Error) => {
         AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: e.message }), 'error');
         ErrorLog.error('admin', `Purge network error: ${e.message}`,
           { reqId }, { reqId, errorCode: 'http.network' });
       });
   },
 
-  async _runMaintenance(action: any, table: any, triggerBtn: any) {
+  async _runMaintenance(action: 'vacuum-analyze' | 'analyze', table: string | null, triggerBtn: HTMLButtonElement | null): Promise<void> {
     const label = triggerBtn ? triggerBtn.textContent : action;
     if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = Util.t('ui.maint_running'); }
     const body = table ? { table } : {};
@@ -4678,21 +5042,22 @@ export const AdminCockpit: any = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }).then((res: any) => res.json());
+      }).then((res) => res.json() as Promise<AdminMaintenanceResult>);
       if (!r.ok) throw new Error(r.error || 'maintenance failed');
       Toast.show(Util.t('ui.maint_done', { label }), 'success');
       ErrorLog.info('admin', `Maintenance: ${action} ${table || '(all)'} ok`);
       AdminCockpit._renderDbDeep();
-    } catch (e: any) {
-      Toast.show(Util.t('ui.maint_failed', { label, msg: e.message }), 'error');
-      ErrorLog.error('admin', `Maintenance: ${action} ${table || '(all)'} failed: ${e.message}`);
+    } catch (e) {
+      const err = e as Error;
+      Toast.show(Util.t('ui.maint_failed', { label, msg: err.message }), 'error');
+      ErrorLog.error('admin', `Maintenance: ${action} ${table || '(all)'} failed: ${err.message}`);
       if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = label; }
     }
   },
 
   /* FE↔BE correlation: clicking a reqId pins it as a filter on BOTH panes and
      refreshes them so the operator sees the matching frontend + backend events. */
-  _correlateReqId(reqId: any) {
+  _correlateReqId(reqId: string | undefined): void {
     if (!reqId) return;
     AdminCockpit._logFilter.reqId        = reqId;
     AdminCockpit._backendLogFilter.reqId = reqId;
@@ -4703,7 +5068,7 @@ export const AdminCockpit: any = {
   /* Render (or clear) a small "filtering by request <id>" chip at the top of a
      log list. `onClear` removes the filter. Self-contained: builds the chip if
      a reqId is set, removes any prior chip otherwise. */
-  _renderReqIdChip(listId: any, reqId: any, onClear: any) {
+  _renderReqIdChip(listId: string, reqId: string, onClear: () => void): void {
     const list = document.getElementById(listId);
     if (!list || !list.parentElement) return;
     const chipId = `${listId}-reqid-chip`;
@@ -4729,7 +5094,7 @@ export const AdminCockpit: any = {
     chip.appendChild(x);
   },
 
-  _getFilteredEntries() {
+  _getFilteredEntries(): AdminFrontendLogEntry[] {
     const { level, scope, search, errorCode, reqId } = AdminCockpit._logFilter;
     return ErrorLog.entries().filter(e => {
       if (level !== 'all' && e.level !== level) return false;
@@ -4747,7 +5112,7 @@ export const AdminCockpit: any = {
   /* -----------------------------------------------------------------------
      DB DEEP DIVE — fetches /diagnostics/db on demand, renders sections
      ----------------------------------------------------------------------- */
-  _renderDbDeep() {
+  _renderDbDeep(): void {
     const wrap = document.getElementById('admin-db-deep');
     if (!wrap) return;
     wrap.innerHTML = `<div class="admin-db-loading">${Util.t('ui.diag_loading')}</div>`;
@@ -4759,7 +5124,7 @@ export const AdminCockpit: any = {
       : AdminCockpit._dbDeepAbort.signal;
 
     Util.fetchTraced(`${Config.API_BASE}/diagnostics/db`, { signal: sig })
-      .then(r => r.json())
+      .then(r => r.json() as Promise<AdminDbDeepResponse>)
       .then(d => {
         wrap.textContent = '';
 
@@ -4773,7 +5138,7 @@ export const AdminCockpit: any = {
           wrap.appendChild(tsEl);
         }
 
-        const mkSection = (title: any, statusCls: any, buildFn: any, openByDefault: any, helpText: any) => {
+        const mkSection = (title: string, statusCls: string, buildFn: (body: HTMLDivElement) => void, openByDefault: boolean, helpText?: string): void => {
           const det = document.createElement('details');
           det.className = 'admin-db-section';
           if (openByDefault) det.open = true;
@@ -4791,7 +5156,7 @@ export const AdminCockpit: any = {
             hEl.className = 'adm-help';
             hEl.tabIndex = 0;
             hEl.setAttribute('aria-label', Util.t('aria.help'));
-            hEl.addEventListener('click', (e: any) => e.stopPropagation());
+            hEl.addEventListener('click', (e: Event) => e.stopPropagation());
             const hDot = document.createElement('span');
             hDot.className = 'adm-help-dot';
             hDot.textContent = '?';
@@ -4811,11 +5176,11 @@ export const AdminCockpit: any = {
         };
 
         // ── 1. Connection Pool
-        const pool = d.pool || {};
+        const pool = d.pool || ({} as AdminPoolStats);
         const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
         const poolMax  = pool.pool_max || 1;
-        const poolSt   = pool.error ? 'err' : (pool.requests_waiting > 0 || pool.requests_errors > 0 ? 'warn' : 'ok');
-        mkSection(Util.t('ui.diag_section_pool'), poolSt, (body: any) => {
+        const poolSt   = pool.error ? 'err' : ((pool.requests_waiting ?? 0) > 0 || (pool.requests_errors ?? 0) > 0 ? 'warn' : 'ok');
+        mkSection(Util.t('ui.diag_section_pool'), poolSt, (body) => {
           if (pool.error) { body.textContent = pool.error; return; }
           body.appendChild(AdminCockpit._dbFillBar(poolUsed, poolMax, Util.t('ui.diag_pool_utilization')));
           body.appendChild(AdminCockpit._kvTable([
@@ -4826,15 +5191,15 @@ export const AdminCockpit: any = {
             [Util.t('ui.diag_request_errors'),        pool.requests_errors ?? 0],
             [Util.t('ui.diag_bad_returns'),           pool.returns_bad ?? 0],
           ]));
-          if (pool.requests_waiting > 0)
-            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_queued', { count: pool.requests_waiting }));
-          if (pool.requests_errors > 0)
-            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_errors', { count: pool.requests_errors }), true);
+          if ((pool.requests_waiting ?? 0) > 0)
+            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_queued', { count: pool.requests_waiting ?? 0 }));
+          if ((pool.requests_errors ?? 0) > 0)
+            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_errors', { count: pool.requests_errors ?? 0 }), true);
         }, true, Util.t('ui.diag_desc_pool'));
 
         // ── 2. Server Info
-        const srv = d.server || {};
-        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', (body: any) => {
+        const srv = d.server || ({} as AdminServerInfo);
+        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', (body) => {
           if (srv.error) { body.textContent = srv.error; return; }
           body.appendChild(AdminCockpit._kvTable([
             [Util.t('ui.diag_database'),        srv.database ?? '—'],
@@ -4846,12 +5211,12 @@ export const AdminCockpit: any = {
         }, true, Util.t('ui.diag_desc_server'));
 
         // ── 3. Table Health
-        const tables = Array.isArray(d.tables) ? d.tables : [];
+        const tables: AdminTableStat[] = Array.isArray(d.tables) ? d.tables : [];
         const hasTableErr = tables[0]?.error;
-        const tablesNeedWork = !hasTableErr && tables.some((t: any) => t.needs_vacuum || t.needs_analyze);
+        const tablesNeedWork = !hasTableErr && tables.some((t) => t.needs_vacuum || t.needs_analyze);
         mkSection(Util.t('ui.diag_section_table_health', { count: hasTableErr ? '?' : tables.length }),
-            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body: any) => {
-          if (hasTableErr) { body.textContent = tables[0].error; return; }
+            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body) => {
+          if (hasTableErr) { body.textContent = tables[0].error!; return; }
           if (!tables.length) { body.textContent = Util.t('empty.no_user_tables'); return; }
           const strip = document.createElement('div');
           strip.className = 'db-maint-strip';
@@ -4866,10 +5231,10 @@ export const AdminCockpit: any = {
         }, false, Util.t('ui.diag_desc_table_health'));
 
         // ── 4. Active Connections
-        const conn = d.connections || {};
+        const conn = d.connections || ({} as AdminConnectionActivity);
         const hasLong = (conn.long_running || []).length > 0;
         mkSection(Util.t('ui.diag_section_connections', { count: conn.total ?? '?' }),
-            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), (body: any) => {
+            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), (body) => {
           if (conn.error) { body.textContent = conn.error; return; }
           body.appendChild(AdminCockpit._dbStackBar(conn.by_state || {}));
           if (hasLong) {
@@ -4879,7 +5244,7 @@ export const AdminCockpit: any = {
             body.appendChild(sub);
             body.appendChild(AdminCockpit._dbTable(
               ['PID', 'State', 'Dur (s)', 'Wait event', 'Query'],
-              (conn.long_running || []).map((q: any) => ({
+              (conn.long_running || []).map((q): AdminDbTableRow => ({
                 cells: [q.pid, q.state || '—', q.duration_s ?? '—', q.wait_event || '—', (q.query || '').slice(0, 120)],
                 rowWarn: (q.duration_s || 0) > 30,
                 cellWarn: [],
@@ -4889,12 +5254,12 @@ export const AdminCockpit: any = {
         }, false, Util.t('ui.diag_desc_connections'));
 
         // ── 5. Lock Waits
-        const locks = Array.isArray(d.locks) ? d.locks : [];
+        const locks: AdminLockWait[] = Array.isArray(d.locks) ? d.locks : [];
         const hasLockErr = locks[0]?.error;
         const activeLocks = !hasLockErr && locks.length > 0;
         mkSection(Util.t('ui.diag_section_lock_waits', { count: hasLockErr ? '?' : locks.length }),
-            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body: any) => {
-          if (hasLockErr) { body.textContent = locks[0].error; return; }
+            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body) => {
+          if (hasLockErr) { body.textContent = locks[0].error!; return; }
           if (!activeLocks) {
             const ok = document.createElement('div');
             ok.className = 'admin-db-ok-msg';
@@ -4907,14 +5272,14 @@ export const AdminCockpit: any = {
         }, false, Util.t('ui.diag_desc_lock_waits'));
 
         // ── 6. Index Usage
-        const indexes = Array.isArray(d.indexes) ? d.indexes : [];
+        const indexes: AdminIndexUsage[] = Array.isArray(d.indexes) ? d.indexes : [];
         const hasIdxErr = indexes[0]?.error;
-        const unusedCount = !hasIdxErr ? indexes.filter((ix: any) => ix.unused).length : 0;
+        const unusedCount = !hasIdxErr ? indexes.filter((ix) => ix.unused).length : 0;
         mkSection(unusedCount
             ? Util.t('ui.diag_section_index_unused', { count: hasIdxErr ? '?' : indexes.length, unused: unusedCount })
             : Util.t('ui.diag_section_index_usage', { count: hasIdxErr ? '?' : indexes.length }),
-            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body: any) => {
-          if (hasIdxErr) { body.textContent = indexes[0].error; return; }
+            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body) => {
+          if (hasIdxErr) { body.textContent = indexes[0].error!; return; }
           if (!indexes.length) { body.textContent = Util.t('empty.no_indexes'); return; }
           if (unusedCount > 0)
             AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_unused_indexes_warn', { count: unusedCount }));
@@ -4922,9 +5287,9 @@ export const AdminCockpit: any = {
         }, false, Util.t('ui.diag_desc_index_usage'));
 
         // ── 7. Slow Queries
-        const sq = d.slow_queries || {};
+        const sq = d.slow_queries || ({} as AdminSlowQueriesResult);
         mkSection(Util.t('ui.diag_section_slow_queries'),
-            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), (body: any) => {
+            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), (body) => {
           if (!sq.available) {
             const msg = document.createElement('div');
             msg.className = 'admin-db-na-msg';
@@ -4945,17 +5310,17 @@ export const AdminCockpit: any = {
         }, false, Util.t('ui.diag_desc_slow_queries'));
 
         // ── 8. Sequences
-        const seqs = Array.isArray(d.sequences) ? d.sequences : [];
+        const seqs: AdminSequenceHealth[] = Array.isArray(d.sequences) ? d.sequences : [];
         const hasSeqErr = seqs[0]?.error;
-        const seqIssues = !hasSeqErr ? seqs.filter((s: any) => s.status !== 'ok').length : 0;
+        const seqIssues = !hasSeqErr ? seqs.filter((s) => s.status !== 'ok').length : 0;
         mkSection(Util.t('ui.diag_section_sequences', { count: hasSeqErr ? '?' : seqs.length }),
-            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body: any) => {
-          if (hasSeqErr) { body.textContent = seqs[0].error; return; }
+            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body) => {
+          if (hasSeqErr) { body.textContent = seqs[0].error!; return; }
           if (!seqs.length) { body.textContent = Util.t('empty.no_sequences'); return; }
           body.appendChild(AdminCockpit._dbProgressBars(seqs));
         }, false, Util.t('ui.diag_desc_sequences'));
       })
-      .catch((e: any) => {
+      .catch((e: Error) => {
         if (e.name === 'AbortError') return;
         wrap.textContent = '';
         const err = document.createElement('div');
@@ -4970,10 +5335,10 @@ export const AdminCockpit: any = {
      DB visual helpers
      ----------------------------------------------------------------------- */
 
-  _dbSummaryStrip(d: any, wrap: any) {
+  _dbSummaryStrip(d: AdminDbDeepResponse, wrap: HTMLElement): void {
     const strip = document.createElement('div');
     strip.className = 'admin-db-summary';
-    const mkTile = (label: any, num: any, sub: any, status: any, extra: any) => {
+    const mkTile = (label: string, num: string, sub: string, status: string, extra: HTMLElement | null): HTMLDivElement => {
       const tile = document.createElement('div');
       tile.className = `admin-db-stat-tile ${status}`;
       const top = document.createElement('div');
@@ -4998,7 +5363,7 @@ export const AdminCockpit: any = {
       }
       return tile;
     };
-    const pool = d.pool || {};
+    const pool = d.pool || ({} as AdminPoolStats);
     const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
     const poolMax  = pool.pool_max || 1;
     const poolPct  = Math.round(100 * poolUsed / poolMax);
@@ -5007,22 +5372,22 @@ export const AdminCockpit: any = {
       `${poolUsed}<span style="font-size:14px;font-weight:400;color:var(--fg-mute)">/${poolMax}</span>`,
       Util.t('ui.diag_tile_pct_utilized', {pct: poolPct}), poolSt,
       pool.error ? null : AdminCockpit._dbFillBar(poolUsed, poolMax, null)));
-    const conn = d.connections || {};
+    const conn = d.connections || ({} as AdminConnectionActivity);
     const activeConn = (conn.by_state || {})['active'] ?? 0;
     strip.appendChild(mkTile(Util.t('ui.diag_tile_sessions'), String(conn.total ?? '—'), Util.t('ui.diag_tile_active', {count: activeConn}),
       conn.error ? 'err' : ((conn.long_running || []).length > 0 ? 'warn' : 'ok'), null));
-    const locks = Array.isArray(d.locks) && !d.locks[0]?.error ? d.locks : [];
+    const locks: AdminLockWait[] = Array.isArray(d.locks) && !d.locks[0]?.error ? d.locks : [];
     strip.appendChild(mkTile(Util.t('ui.diag_tile_lock_waits'),
       locks.length > 0 ? `<span style="color:var(--err)">${locks.length}</span>` : '0',
       locks.length > 0 ? Util.t('ui.diag_tile_contention') : Util.t('ui.diag_tile_clear'),
       locks.length > 0 ? 'err' : 'ok', null));
-    const tables = Array.isArray(d.tables) && !d.tables[0]?.error ? d.tables : [];
-    const tblIssues = tables.filter((t: any) => t.needs_vacuum || t.needs_analyze).length;
+    const tables: AdminTableStat[] = Array.isArray(d.tables) && !d.tables[0]?.error ? d.tables : [];
+    const tblIssues = tables.filter((t) => t.needs_vacuum || t.needs_analyze).length;
     strip.appendChild(mkTile(Util.t('ui.diag_tile_table_issues'),
       tblIssues > 0 ? `<span style="color:var(--warn)">${tblIssues}</span>` : '0',
       tblIssues > 0 ? Util.t('ui.diag_tables_need_work', {total: tables.length, issues: tblIssues}) : Util.t('ui.diag_tables_healthy', {count: tables.length}),
       tblIssues > 0 ? 'warn' : 'ok', null));
-    const sq = d.slow_queries || {};
+    const sq = d.slow_queries || ({} as AdminSlowQueriesResult);
     let sqNum = '—', sqSub = Util.t('ui.diag_not_tracked'), sqSt = 'warn';
     if (sq.available && (sq.queries || []).length) {
       const top = sq.queries[0];
@@ -5036,7 +5401,7 @@ export const AdminCockpit: any = {
     wrap.appendChild(strip);
   },
 
-  _dbFillBar(used: any, max: any, label: any) {
+  _dbFillBar(used: number, max: number, label: string | null): HTMLDivElement {
     const pct = max > 0 ? Math.min(100, Math.round(100 * used / max)) : 0;
     const cls = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
     const wrap = document.createElement('div');
@@ -5058,15 +5423,15 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbStackBar(byState: any) {
-    const STATE_CLS: any = { 'active': 'state-active', 'idle in transaction': 'state-xit',
+  _dbStackBar(byState: Record<string, number>): HTMLDivElement {
+    const STATE_CLS: Record<string, string> = { 'active': 'state-active', 'idle in transaction': 'state-xit',
       'idle in transaction (aborted)': 'state-xit', 'idle': 'state-idle' };
-    const total = Math.max((Object.values(byState) as any[]).reduce((a: any, b: any) => a + b, 0), 1);
+    const total = Math.max(Object.values(byState).reduce((a, b) => a + b, 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-stackbar-wrap';
     const bar = document.createElement('div');
     bar.className = 'admin-db-stackbar';
-    for (const [state, count] of Object.entries(byState) as [string, any][]) {
+    for (const [state, count] of Object.entries(byState)) {
       if (!count) continue;
       const pct = Math.max(1, Math.round(100 * count / total));
       const seg = document.createElement('div');
@@ -5078,7 +5443,7 @@ export const AdminCockpit: any = {
     wrap.appendChild(bar);
     const legend = document.createElement('div');
     legend.className = 'admin-db-stackbar-legend';
-    for (const [state, count] of Object.entries(byState) as [string, any][]) {
+    for (const [state, count] of Object.entries(byState)) {
       if (!count) continue;
       const chip = document.createElement('span');
       chip.className = `admin-db-stackbar-chip ${STATE_CLS[state] || 'state-other'}`;
@@ -5089,13 +5454,13 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbTableCards(tables: any) {
+  _dbTableCards(tables: AdminTableStat[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-tbl-cards';
     for (const tbl of tables) {
       const card = document.createElement('div');
       card.className = 'admin-db-tbl-card';
-      const issues = [];
+      const issues: string[] = [];
       if (tbl.needs_vacuum)  issues.push(Util.t('ui.diag_vacuum'));
       if (tbl.needs_analyze) issues.push(Util.t('ui.diag_analyze'));
       if (issues.length) card.classList.add('has-issues');
@@ -5160,8 +5525,8 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbHBarChart(indexes: any) {
-    const maxScans = Math.max(...indexes.map((ix: any) => ix.scans ?? 0), 1);
+  _dbHBarChart(indexes: AdminIndexUsage[]): HTMLDivElement {
+    const maxScans = Math.max(...indexes.map((ix) => ix.scans ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
     for (const ix of indexes) {
@@ -5195,8 +5560,8 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbSlowQueryBars(queries: any) {
-    const maxMs = Math.max(...queries.map((q: any) => q.mean_ms ?? 0), 1);
+  _dbSlowQueryBars(queries: AdminSlowQuery[]): HTMLDivElement {
+    const maxMs = Math.max(...queries.map((q) => q.mean_ms ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
     for (const q of queries) {
@@ -5230,7 +5595,7 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbProgressBars(seqs: any) {
+  _dbProgressBars(seqs: AdminSequenceHealth[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-progress-list';
     for (const s of seqs) {
@@ -5255,13 +5620,13 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbLockChain(locks: any) {
+  _dbLockChain(locks: AdminLockWait[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-lock-chains';
     for (const lk of locks) {
       const chain = document.createElement('div');
       chain.className = 'admin-db-lock-chain';
-      const mkNode = (pid: any, role: any, query: any, cls: any) => {
+      const mkNode = (pid: number | null, role: string, query: string | null, cls: string): HTMLDivElement => {
         const node = document.createElement('div');
         node.className = `admin-db-lock-node ${cls}`;
         node.innerHTML = `<span class="admin-db-lock-pid">PID ${pid}</span>`
@@ -5280,31 +5645,31 @@ export const AdminCockpit: any = {
     return wrap;
   },
 
-  _dbWarnBanner(parent: any, text: any, isError: any) {
+  _dbWarnBanner(parent: HTMLElement, text: string, isError?: boolean): void {
     const d = document.createElement('div');
     d.className = `admin-db-banner ${isError ? 'admin-db-banner-err' : 'admin-db-banner-warn'}`;
     d.textContent = text;
     parent.appendChild(d);
   },
 
-  _dbTable(headers: any, rowDefs: any) {
+  _dbTable(headers: string[], rowDefs: AdminDbTableRow[]): HTMLTableElement {
     const tbl = document.createElement('table');
     tbl.className = 'admin-db-tbl';
     const thead = tbl.createTHead();
     const hrow = thead.insertRow();
-    headers.forEach((h: any) => {
+    headers.forEach((h) => {
       const th = document.createElement('th');
       th.textContent = h;
       hrow.appendChild(th);
     });
     const tbody = tbl.createTBody();
-    for (const { cells, rowWarn, rowErr, cellWarn } of rowDefs as any[]) {
+    for (const { cells, rowWarn, rowErr, cellWarn } of rowDefs) {
       const tr = tbody.insertRow();
       if (rowErr)  tr.style.background = 'rgba(192,57,43,0.07)';
       else if (rowWarn) tr.style.background = 'rgba(243,156,18,0.06)';
-      cells.forEach((c: any, i: any) => {
+      cells.forEach((c, i) => {
         const td = tr.insertCell();
-        td.textContent = (c === null || c === undefined) ? '—' : c;
+        td.textContent = (c === null || c === undefined) ? '—' : String(c);
         if (cellWarn.includes(i)) td.style.color = 'var(--warn)';
       });
     }
@@ -5314,7 +5679,7 @@ export const AdminCockpit: any = {
   /* -----------------------------------------------------------------------
      BACKEND EVENT LOG — fetches /logs/backend, renders like the front-end log
      ----------------------------------------------------------------------- */
-  _renderBackendLog() {
+  _renderBackendLog(): void {
     const host = document.getElementById('admin-backend-log-list');
     const countEl = document.getElementById('admin-backend-log-count');
     if (!host) return;
@@ -5337,8 +5702,8 @@ export const AdminCockpit: any = {
       qIn.className = 'input';
       qIn.placeholder = 'Filter backend (msg / code / category)';
       qIn.title = 'Server-side free-text filter';
-      qIn.addEventListener('input', Util.debounce((ev: any) => {
-        AdminCockpit._backendLogFilter.q = ev.target.value.trim();
+      qIn.addEventListener('input', Util.debounce((ev: Event) => {
+        AdminCockpit._backendLogFilter.q = (ev.target as HTMLInputElement).value.trim();
         AdminCockpit._renderBackendLog();
       }, 350));
       lvlSel.insertAdjacentElement('afterend', qIn);
@@ -5359,16 +5724,16 @@ export const AdminCockpit: any = {
     });
 
     Util.fetchTraced(`${Config.API_BASE}/logs/backend${params}`, { signal: sig })
-      .then((r: any) => r.json())
-      .then(({ entries: rawEntries, total, dropped }: any) => {
+      .then((r) => r.json() as Promise<BackendLogResponse>)
+      .then(({ entries: rawEntries, total, dropped }) => {
         host.textContent = '';
         // Client-side reqId correlation filter (server filters category/since/q/level).
         let entries = rawEntries || [];
-        if (reqIdFilter) entries = entries.filter((e: any) => e.rid === reqIdFilter || e.reqId === reqIdFilter);
+        if (reqIdFilter) entries = entries.filter((e) => e.rid === reqIdFilter || e.reqId === reqIdFilter);
         if (countEl) countEl.textContent = Util.t('ui.backend_log_count', { total, shown: entries.length });
 
         // Overflow marker if the backend reports a dropped count.
-        if (dropped > 0) {
+        if (dropped && dropped > 0) {
           const ov = document.createElement('div');
           ov.className = 'admin-log-older';
           ov.textContent = `${dropped} older backend entr${dropped === 1 ? 'y' : 'ies'} dropped`;
@@ -5458,7 +5823,7 @@ export const AdminCockpit: any = {
           host.appendChild(row);
         }
       })
-      .catch(e => {
+      .catch((e: Error) => {
         host.textContent = '';
         const err = document.createElement('div');
         err.className = 'admin-log-empty';
@@ -5467,15 +5832,15 @@ export const AdminCockpit: any = {
       });
   },
 
-  _clearBackendLog() {
+  _clearBackendLog(): void {
     Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' })
       .then(() => AdminCockpit._renderBackendLog())
       .catch(() => {});
   },
 
-  _copyFiltered() {
+  _copyFiltered(): void {
     const entries = AdminCockpit._getFilteredEntries();
-    const txt = entries.map((e: any) =>
+    const txt = entries.map((e) =>
       `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
     ).join('\n');
     navigator.clipboard?.writeText(txt).then(
@@ -5484,13 +5849,13 @@ export const AdminCockpit: any = {
     );
   },
 
-  _renderLogs() {
+  _renderLogs(): void {
     const list = document.getElementById('admin-log-list');
     if (!list) return;
 
     // Rebuild scope filter options
     const allEntries = ErrorLog.entries();
-    const scopeEl = document.getElementById('admin-log-filter-scope');
+    const scopeEl = document.getElementById('admin-log-filter-scope') as HTMLSelectElement | null;
     if (scopeEl) {
       const currentScope = AdminCockpit._logFilter.scope;
       const scopes = [...new Set(allEntries.map(e => e.scope).filter(Boolean))].sort();
@@ -5508,28 +5873,28 @@ export const AdminCockpit: any = {
       }
       // Lazily inject an errorCode filter select beside the scope select (the
       // markup lives in index.html which we don't own — build it on demand).
-      let codeEl = document.getElementById('admin-log-filter-code');
+      let codeEl = document.getElementById('admin-log-filter-code') as HTMLSelectElement | null;
       if (!codeEl && scopeEl.parentElement) {
         codeEl = document.createElement('select');
         codeEl.id = 'admin-log-filter-code';
         codeEl.className = scopeEl.className || '';
         codeEl.title = 'Filter by error code';
-        codeEl.addEventListener('change', (ev: any) => {
-          AdminCockpit._logFilter.errorCode = ev.target.value;
+        codeEl.addEventListener('change', (ev: Event) => {
+          AdminCockpit._logFilter.errorCode = (ev.target as HTMLSelectElement).value;
           AdminCockpit._renderLogs();
         });
         scopeEl.insertAdjacentElement('afterend', codeEl);
       }
       if (codeEl) {
         const curCode = AdminCockpit._logFilter.errorCode;
-        const codes = [...new Set(allEntries.map(e => e.errorCode).filter(Boolean))].sort();
+        const codes = [...new Set(allEntries.map(e => e.errorCode).filter((c): c is string => Boolean(c)))].sort();
         codeEl.textContent = '';
         const cAll = document.createElement('option');
         cAll.value = 'all'; cAll.textContent = 'All codes';
         codeEl.appendChild(cAll);
         for (const c of codes) {
           const opt = document.createElement('option');
-          opt.value = c as any; opt.textContent = c as any;
+          opt.value = c; opt.textContent = c;
           if (c === curCode) opt.selected = true;
           codeEl.appendChild(opt);
         }
@@ -5565,7 +5930,7 @@ export const AdminCockpit: any = {
       list.appendChild(empty);
     }
 
-    const SCOPE_COLORS: any = {
+    const SCOPE_COLORS: Record<string, string> = {
       persistence: 'var(--info,#3498db)',
       engine:      '#9b59b6',
       admin:       'var(--accent,#b8791a)',
@@ -5601,26 +5966,28 @@ export const AdminCockpit: any = {
       head.appendChild(lvl);
       head.appendChild(ts);
       head.appendChild(scope);
-      if (e.errorCode) {
+      const errorCode = e.errorCode;
+      if (errorCode) {
         const code = document.createElement('span');
         code.className = 'admin-log-code';
-        code.textContent = e.errorCode;
+        code.textContent = errorCode;
         code.title = 'Filter by this error code';
         code.addEventListener('click', ev => {
           ev.stopPropagation();
-          AdminCockpit._logFilter.errorCode = e.errorCode;
+          AdminCockpit._logFilter.errorCode = errorCode;
           AdminCockpit._renderLogs();
         });
         head.appendChild(code);
       }
-      if (e.reqId) {
+      const reqId = e.reqId;
+      if (reqId) {
         const rid = document.createElement('span');
         rid.className = 'admin-log-reqid';
-        rid.textContent = `req ${String(e.reqId).slice(0, 8)}`;
-        rid.title = `Correlate request ${e.reqId} across the backend log`;
+        rid.textContent = `req ${String(reqId).slice(0, 8)}`;
+        rid.title = `Correlate request ${reqId} across the backend log`;
         rid.addEventListener('click', ev => {
           ev.stopPropagation();
-          AdminCockpit._correlateReqId(e.reqId);
+          AdminCockpit._correlateReqId(reqId);
         });
         head.appendChild(rid);
       }
@@ -5656,7 +6023,7 @@ export const AdminCockpit: any = {
     }
   },
 
-  _relTime(d: any) {
+  _relTime(d: Date | string | number): string {
     const diffMs = Date.now() - (d instanceof Date ? d : new Date(d)).getTime();
     const s = Math.round(diffMs / 1000);
     if (s < 60)    return Util.t('ui.time_s_ago', { n: s });
@@ -5665,20 +6032,20 @@ export const AdminCockpit: any = {
     return Util.t('ui.time_d_ago', { n: Math.floor(s / 86400) });
   },
 
-  async _clearAudit() {
+  async _clearAudit(): Promise<void> {
     const ok = await Modal.confirm({ title: Util.t('modal.delete_upload_history'), confirmLabel: Util.t('btn.yes_delete_all') });
     if (!ok) return;
     fetch(`${Config.API_BASE}/upload/audit/clear`, { method: 'POST' })
       .then(r => r.json())
-      .then(body => {
+      .then((body: { status: string; deleted: number }) => {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_history_failed'), 'error'); return; }
         Toast.show(Util.t('toast.history_cleared', { count: body.deleted }), 'success');
         AdminCockpit._renderAudit();
       })
-      .catch(e => Toast.show(Util.t('toast.clear_history_failed') + ': ' + e.message, 'error'));
+      .catch((e: Error) => Toast.show(Util.t('toast.clear_history_failed') + ': ' + e.message, 'error'));
   },
 
-  _renderAudit() {
+  _renderAudit(): void {
     const host = document.getElementById('admin-audit-list');
     if (!host) return;
     host.textContent = Util.t('ui.loading');
@@ -5688,7 +6055,7 @@ export const AdminCockpit: any = {
       ? AbortSignal.any([AdminCockpit._auditAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._auditAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/upload/audit`, { signal: sig })
-      .then(r => r.json())
+      .then(r => r.json() as Promise<AdminUploadAuditResponse>)
       .then(body => {
         host.textContent = '';
         const items = body?.audit || [];
@@ -5758,7 +6125,7 @@ export const AdminCockpit: any = {
         tbl.appendChild(tb);
         host.appendChild(tbl);
       })
-      .catch(e => {
+      .catch((e: Error) => {
         if (e?.name === 'AbortError') return;
         host.textContent = '';
         const err = document.createElement('div');
@@ -5768,20 +6135,20 @@ export const AdminCockpit: any = {
       });
   },
 
-  async _clearAuditLog() {
+  async _clearAuditLog(): Promise<void> {
     const ok = await Modal.confirm({ title: Util.t('modal.clear_audit_log'), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
     fetch(`${Config.API_BASE}/audit/log/clear`, { method: 'POST' })
       .then(r => r.json())
-      .then(body => {
+      .then((body: { status: string }) => {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_failed'), 'error'); return; }
         Toast.show(Util.t('toast.audit_log_cleared'), 'success');
         AdminCockpit._renderAuditLog();
       })
-      .catch(e => Toast.show(Util.t('toast.clear_failed') + ': ' + e.message, 'error'));
+      .catch((e: Error) => Toast.show(Util.t('toast.clear_failed') + ': ' + e.message, 'error'));
   },
 
-  _renderAuditLog() {
+  _renderAuditLog(): void {
     const host = document.getElementById('admin-audit-log-list');
     if (!host) return;
     host.textContent = Util.t('ui.loading');
@@ -5791,7 +6158,7 @@ export const AdminCockpit: any = {
       ? AbortSignal.any([AdminCockpit._auditLogAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._auditLogAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/audit/log?limit=200`, { signal: sig })
-      .then(r => r.json())
+      .then(r => r.json() as Promise<AdminAuditLogResponse>)
       .then(body => {
         host.textContent = '';
         const items = body?.entries || [];
@@ -5814,13 +6181,13 @@ export const AdminCockpit: any = {
         thead.appendChild(htr);
         tbl.appendChild(thead);
 
-        const ACTION_ICONS: any = {
+        const ACTION_ICONS: Record<string, string> = {
           color_wheel_upload:  '⬆',
           color_wheel_replace: '↻',
           color_wheel_delete:  '⌫',
           optimization_run:    '📈',
         };
-        const ACTION_COLORS: any = {
+        const ACTION_COLORS: Record<string, string> = {
           color_wheel_upload:  'var(--ok,#2f7a4d)',
           color_wheel_replace: 'var(--info,#2d5f8c)',
           color_wheel_delete:  'var(--err,#c0392b)',
@@ -5865,7 +6232,7 @@ export const AdminCockpit: any = {
         tbl.appendChild(tb);
         host.appendChild(tbl);
       })
-      .catch(e => {
+      .catch((e: Error) => {
         if (e?.name === 'AbortError') return;
         host.textContent = '';
         const err = document.createElement('div');
@@ -5880,7 +6247,7 @@ export const AdminCockpit: any = {
      Rendered into #admin-ov-thread on tab activation and on each
      PerfMonitor notification (debounced 250 ms by PerfMonitor itself).
      --------------------------------------------------------------------- */
-  _refreshThreadPane() {
+  _refreshThreadPane(): void {
     const tbody = document.getElementById('admin-perf-tbody');
     if (!tbody) return;
     const rows = PerfMonitor.all();
@@ -5889,9 +6256,9 @@ export const AdminCockpit: any = {
       return;
     }
     rows.sort((a, b) => b.last - a.last);
-    const fmt = (ms: any) => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
-    const cls = (ms: any) => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
-    const ago = (ts: any) => {
+    const fmt = (ms: number): string => ms < 1 ? `${ms.toFixed(2)}` : ms < 100 ? `${ms.toFixed(1)}` : `${Math.round(ms)}`;
+    const cls = (ms: number): string => ms >= 50 ? 'perf-hot' : ms >= 16 ? 'perf-warn' : 'perf-ok';
+    const ago = (ts: number): string => {
       if (!ts) return '—';
       const s = Math.round((Date.now() - ts) / 1000);
       if (s < 2)  return 'just now';
@@ -5916,7 +6283,7 @@ export const AdminCockpit: any = {
      DIAGNOSTICS PANEL — client-side health summary, "Reset client state",
      diagnostics bundle export. Renders into #admin-diagnostics-pane.
      --------------------------------------------------------------------- */
-  _renderDiagnostics() {
+  _renderDiagnostics(): void {
     const host = document.getElementById('admin-diagnostics-pane');
     if (!host) return;
 
@@ -5928,10 +6295,11 @@ export const AdminCockpit: any = {
     const warnCount = ErrorLog.countBy('warn');
     const errRate   = ErrorLog.errorRatePerMin();
     const warnRate  = ErrorLog.warnRatePerMin();
-    const heap = (performance && (performance as any).memory)
-      ? `${((performance as any).memory.usedJSHeapSize / 1048576).toFixed(0)} / ${((performance as any).memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
+    const mem = (performance as Performance & { memory?: ChromePerformanceMemory }).memory;
+    const heap = mem
+      ? `${(mem.usedJSHeapSize / 1048576).toFixed(0)} / ${(mem.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
       : 'n/a';
-    const stats = (Persistence.stats && Persistence.stats()) || {};
+    const stats: AdminPersistenceStats | Record<string, never> = (Persistence.stats && Persistence.stats()) || {};
 
     const autosaveTxt = inv.autosaveDisabled
       ? `<span class="admin-bad">${Util.t('ui.ls_quota_disabled')}</span>`
@@ -5970,13 +6338,13 @@ export const AdminCockpit: any = {
         </div>
       </div>`;
 
-    (document.getElementById('admin-diag-refresh') as any).onclick = () => AdminCockpit._renderDiagnostics();
-    (document.getElementById('admin-diag-storage') as any).onclick = () => AdminCockpit._showStorageInventory(inv);
-    (document.getElementById('admin-diag-export' ) as any).onclick = () => AdminCockpit._exportDiagnostics();
-    (document.getElementById('admin-diag-reset'  ) as any).onclick = () => AdminCockpit._resetClientState();
+    document.getElementById('admin-diag-refresh')!.addEventListener('click', () => AdminCockpit._renderDiagnostics());
+    document.getElementById('admin-diag-storage')!.addEventListener('click', () => AdminCockpit._showStorageInventory(inv));
+    document.getElementById('admin-diag-export' )!.addEventListener('click', () => AdminCockpit._exportDiagnostics());
+    document.getElementById('admin-diag-reset'  )!.addEventListener('click', () => AdminCockpit._resetClientState());
   },
 
-  async _resetClientState() {
+  async _resetClientState(): Promise<void> {
     const ok = await Modal.confirm({
       title:        Util.t('modal.reset_client_title'),
       message:      Util.t('modal.reset_client_msg'),
@@ -5989,7 +6357,7 @@ export const AdminCockpit: any = {
     try { sessionStorage.clear(); } catch {}
     try {
       const prefix = `${Config.LS_KEY}.quarantine.`;
-      const toRemove = [];
+      const toRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
         if (k && k.startsWith(prefix)) toRemove.push(k);
@@ -6001,10 +6369,10 @@ export const AdminCockpit: any = {
     setTimeout(() => location.reload(), 50);
   },
 
-  _showStorageInventory(inv: any) {
+  _showStorageInventory(inv?: AdminStorageInventory): void {
     if (!inv) inv = Persistence.storageInventory();
     const top = inv.items.slice(0, 12)
-      .map((i: any) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
+      .map((i) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
       .join('\n') || Util.t('ui.ls_empty');
     const lsStatus = inv.degraded ? Util.t('ui.ls_evicted_tier') : inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : Util.t('ui.ls_healthy');
     const detail =
@@ -6022,7 +6390,8 @@ export const AdminCockpit: any = {
     });
   },
 
-  _exportDiagnostics() {
+  _exportDiagnostics(): void {
+    const mem = (performance as Performance & { memory?: ChromePerformanceMemory }).memory;
     const bundle = {
       generatedAt: new Date().toISOString(),
       build:       Config.BUILD_ID,
@@ -6030,9 +6399,9 @@ export const AdminCockpit: any = {
       userAgent:   navigator.userAgent,
       location:    location.href,
       storage:     Persistence.storageInventory(),
-      heap: (performance && (performance as any).memory) ? {
-        usedMB:  +((performance as any).memory.usedJSHeapSize / 1048576).toFixed(1),
-        limitMB: +((performance as any).memory.jsHeapSizeLimit / 1048576).toFixed(1),
+      heap: mem ? {
+        usedMB:  +(mem.usedJSHeapSize / 1048576).toFixed(1),
+        limitMB: +(mem.jsHeapSizeLimit / 1048576).toFixed(1),
       } : null,
       persistence: (Persistence.stats && Persistence.stats()) || null,
       health:      AdminCockpit._healthData || null,
