@@ -2217,10 +2217,18 @@ export const Table = {
         overlay.className = 'table-empty-overlay';
         grid?.parentElement?.appendChild(overlay);
       }
-      NIMBUS!.EmptyState!.render!(overlay, {
-        title: Util.t('empty.no_plant_selected'),
-        msg:   Util.t('empty.no_plant_table')
-      });
+      // NIMBUS/EmptyState is a forward reference (EmptyState lives in
+      // application-shell.mjs, loaded after this module) — safe once boot
+      // has finished, but this can also be reached synchronously from
+      // Table.init()'s own AG Grid construction before that. Skip the
+      // render rather than throw; the next tasks:bulk/plant:selected event
+      // calls this again once NIMBUS/EmptyState are real.
+      if (typeof NIMBUS !== 'undefined' && NIMBUS.EmptyState) {
+        NIMBUS.EmptyState.render?.(overlay, {
+          title: Util.t('empty.no_plant_selected'),
+          msg:   Util.t('empty.no_plant_table')
+        });
+      }
       if (grid) grid.style.visibility = 'hidden';
     } else {
       if (overlay) overlay.remove();
@@ -2240,9 +2248,17 @@ export const Table = {
         || (Table._api && Table._api.isAnyFilterPresent())
         || !!(document.getElementById('quick-filter') as HTMLInputElement | null)?.value;
       this._eGui = document.createElement('div');
-      NIMBUS!.EmptyState!.render!(this._eGui, filtered
-        ? { title: Util.t('empty.no_orders_filtered_title'), msg: Util.t('empty.no_orders_filtered_msg'), icon: '⌕' }
-        : { title: Util.t('empty.no_orders_plant_title'),    msg: Util.t('empty.no_orders_plant_msg') });
+      // AG Grid calls init() synchronously as part of agGrid.createGrid()
+      // (Table.init()'s initial rowData is always [] at boot, before the
+      // async task fetch resolves) — at that exact moment NIMBUS/EmptyState
+      // (a forward reference; EmptyState lives in application-shell.mjs,
+      // loaded after this module) doesn't exist yet. Skip the render rather
+      // than throw; AG Grid re-invokes init() itself once row count changes.
+      if (typeof NIMBUS !== 'undefined' && NIMBUS.EmptyState) {
+        NIMBUS.EmptyState.render?.(this._eGui, filtered
+          ? { title: Util.t('empty.no_orders_filtered_title'), msg: Util.t('empty.no_orders_filtered_msg'), icon: '⌕' }
+          : { title: Util.t('empty.no_orders_plant_title'),    msg: Util.t('empty.no_orders_plant_msg') });
+      }
       if (filtered) {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -6146,7 +6162,7 @@ export const OptimizeDialog = (() => {
     const trigger = document.getElementById('opt-plant-trigger');
     const sel     = document.getElementById('opt-plant-select');
     if (!dd) return;
-    const opening = dd.hidden;
+    const opening = !!dd.hidden;
     if (opening && trigger) {
       const rect = trigger.getBoundingClientRect();
       dd.style.top   = (rect.bottom + 4) + 'px';
