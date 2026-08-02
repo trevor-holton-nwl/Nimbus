@@ -7217,12 +7217,32 @@ interface SecurityUsersResponse {
 
 /** A row staged client-side via "Paste rows" (`_pasteUsers`), not yet POSTed
  *  to `/security/users/bulk` — distinct from `SecurityUser` (no
- *  `has_password`; that only exists once the backend has a real row). */
+ *  `has_password`; that only exists once the backend has a real row). All
+ *  four fields are genuinely guaranteed present here because `_pasteUsers`
+ *  always normalizes a `SecurityPastedRow` (below) through `|| ''` before
+ *  pushing onto `_staged` — this interface describes that post-normalization
+ *  invariant, not the raw parse output. */
 interface SecurityStagedUser {
   username: string;
   role: string;
   first_name: string;
   last_name: string;
+}
+
+/** The RAW shape of one `_parseUserPaste` row, before `_pasteUsers`
+ *  normalizes it into a `SecurityStagedUser` — built dynamically from
+ *  whatever header columns actually appeared in the pasted clipboard text
+ *  (`headers.forEach((h, i) => { row[h] = ...; })`), so only the fields
+ *  matching a detected header column exist. `username` is intentionally
+ *  optional here too (a plain `Record<string, string>`'s index signature
+ *  cannot prove any specific key is present) — `_parseUserPaste`'s trailing
+ *  `.filter((r): r is SecurityPastedRow & { username: string } => ...)` is
+ *  what actually narrows it to guaranteed-present before returning. */
+interface SecurityPastedRow {
+  username?: string;
+  role?: string;
+  first_name?: string;
+  last_name?: string;
 }
 
 /** `POST /security/users/bulk` payload (`auth.bulk_upsert_users`) — role-only
@@ -7631,7 +7651,7 @@ export const Security = (() => {
 
   // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
   // username/role 2-column shape (no password column — passwords are never pasted).
-  function _parseUserPaste(rawText: string): SecurityStagedUser[] {
+  function _parseUserPaste(rawText: string): (SecurityPastedRow & { username: string })[] {
     const lines = rawText.replace(/\r/g, '').split('\n').filter((l) => l.trim());
     if (!lines.length) return [];
     const first = lines[0].split('\t').map((h) => h.trim().toLowerCase());
@@ -7659,8 +7679,12 @@ export const Security = (() => {
       const vals = line.split('\t');
       const row: Record<string, string> = {};
       headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
-      return row as unknown as SecurityStagedUser;
-    }).filter((r) => r.username);
+      return row as SecurityPastedRow;
+      // Single cast (not the prior `as unknown as`): every field on
+      // SecurityPastedRow is optional, so a plain Record<string,string>'s
+      // index signature genuinely does overlap it — no bridge through
+      // `unknown` needed. `username`'s presence is proven below, not here.
+    }).filter((r): r is SecurityPastedRow & { username: string } => Boolean(r.username));
   }
 
   async function _pasteUsers(): Promise<void> {
