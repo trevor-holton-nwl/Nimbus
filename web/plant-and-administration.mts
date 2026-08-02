@@ -6478,6 +6478,137 @@ export const AdminCockpit = {
   }
 };
 
+// SAP transport kinds — must mirror sap_sync._CONNECTORS' keys in the backend contract.
+type SapTransport = 'file_drop' | 'odata' | 'rfc';
+
+// SAP value-transform names — must mirror sap_sync.TRANSFORMS' keys.
+type SapTransformName = 'none' | 'alpha' | 'strip_zeros' | 'dats' | 'tims' | 'decimal' | 'uom' | 'bool_x';
+
+/** One `sap_sync_run` row — shared shape returned both embedded as
+ *  `SapObject.last_run` (`GET /sap/interface/objects`, latest run only) and
+ *  in bulk by `GET /sap/interface/runs` (`sap_sync.list_runs`). Not part of
+ *  the backend's `response_model=` scope (only the task-date-update endpoint
+ *  family is — see Phase 4's landed note), so hand-written locally. */
+interface SapRun {
+  id: number;
+  object_key: string;
+  started_at: string | null;
+  ended_at: string | null;
+  status: string;
+  rows_read: number;
+  rows_inserted: number;
+  rows_updated: number;
+  rows_failed: number;
+  error: string | null;
+  watermark_before: string | null;
+  watermark_after: string | null;
+  triggered_by: string | null;
+}
+
+/** One entry of `GET /sap/interface/objects` (`sap_sync.SAP_OBJECTS` catalog
+ *  + live config/last-run/next-run overlay — `brain.py`'s `sap_objects`). */
+interface SapObject {
+  object_key: string;
+  label?: string;
+  kind?: 'master' | 'orders';
+  enabled: boolean;
+  transport?: SapTransport;
+  schedule_cron?: string | null;
+  last_run: SapRun | null;
+  next_run: string | null;
+}
+
+interface SapObjectsResponse {
+  objects: SapObject[];
+}
+
+/** `GET /sap/interface/config/{object}` / `POST` response (`sap_get_config`/
+ *  `sap_set_config`) — secret `source_params` keys are stripped server-side,
+ *  replaced by the `has_secret` flag. `object_key`/`enabled` are optional here
+ *  because `_renderOverview`'s catch-fallback constructs a partial literal
+ *  missing them (network/parse failure path, not a real endpoint response).
+ *  `last_watermark` is READ by `_renderOverview` but neither `sap_get_config`
+ *  nor the fallback literal ever supplies it — a pre-existing latent gap in
+ *  the frontend (the field never actually appears at runtime); kept optional
+ *  so the existing read type-checks without changing behavior. */
+interface SapObjectConfig {
+  object_key?: string;
+  enabled?: boolean;
+  transport: SapTransport;
+  schedule_cron: string | null;
+  source_params: Record<string, string>;
+  has_secret: boolean;
+  last_watermark?: string | null;
+}
+
+/** Payload accepted by `POST /sap/interface/config/{object}` — every field optional
+ *  (only supplied fields are merged server-side; `source_params` itself is a
+ *  merge, not a replace — see `sap_set_config`). */
+interface SapConfigPatch {
+  enabled?: boolean;
+  transport?: SapTransport;
+  schedule_cron?: string | null;
+  source_params?: Record<string, string>;
+}
+
+/** One row of the Mapping tab's client-side editor buffer (`_mapState[key].rows`) —
+ *  mirrors `GET /sap/interface/mappings/{object}`'s `mappings[]` shape minus
+ *  `field_order` (assigned from array position only when saving). */
+interface SapMapRow {
+  sap_field: string;
+  nimbus_column: string;
+  transform: SapTransformName | string;
+  active: boolean;
+}
+
+interface SapMapState {
+  rows: SapMapRow[];
+  dirty: boolean;
+}
+
+interface SapMappingsResponse {
+  object_key: string;
+  mappings: SapMapRow[];
+}
+
+/** `POST /sap/interface/mappings/{object}` response (`sap_sync.replace_field_map`). */
+interface SapMappingsSaveResult {
+  status: string;
+  object_key: string;
+  count: number;
+}
+
+interface SapRunsResponse {
+  runs: SapRun[];
+}
+
+/** `POST /sap/interface/test-connection` response (`sap_sync.test_connection`
+ *  / `SapConnector.test_connection` — always a stub `{ok:false,...}` today). */
+interface SapTestConnectionResult {
+  ok: boolean;
+  detail?: string;
+}
+
+/** `_testResult` UI state — a locally-synthesized status strip, not a raw
+ *  backend shape (built in `_testConnection` from `SapTestConnectionResult`). */
+interface SapTestResultUI {
+  cls: string;
+  dot: string;
+  msg: string;
+}
+
+/** `POST /sap/interface/sync/{object}` response (`sap_sync.sync_object`). */
+interface SapSyncResult {
+  object_key: string;
+  status: 'ok' | 'error';
+  rows_read: number;
+  rows_inserted: number;
+  rows_updated: number;
+  rows_failed: number;
+  error: string | null;
+  run_id: number | null;
+}
+
 /* =============================================================================
    INTERFACE — SAP integration console (Admin → Interface sub-tab)
    A master-detail console rendered into #sap-interface-host, driven by the
@@ -6497,18 +6628,18 @@ export const Interface = (() => {
   const TRANSFORMS = ['none', 'alpha', 'strip_zeros', 'dats', 'tims', 'decimal', 'uom', 'bool_x'];
   const TRANSPORTS = ['file_drop', 'odata', 'rfc'];
 
-  let _objects: any[] = [];               // last GET /objects payload — drives ribbon + rail
-  let _selected: any = null;            // selected object_key (master selection)
-  let _tab = 'overview';           // active detail tab: 'overview' | 'mapping' | 'history'
-  let _testResult: any = null;          // last {cls,dot,msg} from a Test-connection click
-  let _lastNewestKey: any = null;       // object_key of the most-recent run (ribbon deep-link)
-  const _config: any = {};              // object_key -> GET /config payload (transport/params/has_secret)
+  let _objects: SapObject[] = [];         // last GET /objects payload — drives ribbon + rail
+  let _selected: string | null = null;    // selected object_key (master selection)
+  let _tab: 'overview' | 'mapping' | 'history' = 'overview'; // active detail tab
+  let _testResult: SapTestResultUI | null = null; // last {cls,dot,msg} from a Test-connection click
+  let _lastNewestKey: string | null = null; // object_key of the most-recent run (ribbon deep-link)
+  const _config: Record<string, SapObjectConfig> = {}; // object_key -> GET /config payload (transport/params/has_secret)
   // Per-object mapping editor state: { rows:[{sap_field,nimbus_column,transform,active}], dirty:bool }
-  const _mapState: any = {};
+  const _mapState: Record<string, SapMapState> = {};
 
   // Master upsert keys — MUST mirror sap_sync._MASTER_KEY_COLUMNS. A master object whose
   // active mapping omits any of these hits a NOT-NULL on upsert, so the editor blocks Save.
-  const MASTER_KEYS: any = {
+  const MASTER_KEYS: Record<string, string[]> = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
     production_lines: ['subnetwork', 'plant', 'production_line'],
@@ -6516,24 +6647,24 @@ export const Interface = (() => {
     material_plants:  ['material_id', 'plant'],
   };
   // One-line transform descriptions (keys mirror sap_sync.TRANSFORMS).
-  const XHINT: any = {
+  const XHINT: Record<string, string> = {
     none: 'pass through unchanged',    alpha: 'ALPHA-pad — e.g. MATNR',
     strip_zeros: 'drop leading zeros', dats: 'SAP YYYYMMDD → ISO date',
     tims: 'SAP HHMMSS → time',         decimal: 'packed decimal, trailing sign',
     uom: 'unit of measure → ISO',      bool_x: "SAP 'X' flag → boolean",
   };
   // Transport-specific connection fields (label + example only — scaffolds the params editor).
-  const TRANSPORT_FIELDS: any = {
+  const TRANSPORT_FIELDS: Record<SapTransport, [string, string, string][]> = {
     file_drop: [['path', 'Share / Blob path', '/data/sap_drop'], ['glob', 'File glob', 'plants_*.xlsx']],
     odata:     [['base_url', 'Service base URL', 'https://sap-gw/odata/ZNIMBUS_SRV'], ['entity_set', 'Entity set', 'PlantSet'], ['filter', '$filter (delta)', 'LAEDA gt {watermark}'], ['page_size', 'Page size', '1000']],
     rfc:       [['dest', 'RFC destination', 'SAP_PRD'], ['function', 'Function module', 'Z_NIMBUS_GET_PLANTS'], ['batch', 'Batch size', '2000']],
   };
 
-  const _esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
+  const _esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
 
-  function _writeHeaders(json = true) {
-    const h: any = { 'x-user-email': Session.actor() };
+  function _writeHeaders(json = true): Record<string, string> {
+    const h: Record<string, string> = { 'x-user-email': Session.actor() };
     if (json) h['content-type'] = 'application/json';
     return h;
   }
@@ -6541,36 +6672,36 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Public entry point
   // -----------------------------------------------------------------------
-  async function render() {
+  async function render(): Promise<void> {
     const host = document.getElementById('sap-interface-host');
     if (!host) return;
     await _reload();
   }
 
   // Fetch /objects, then paint the console. Used on first load + after every write.
-  async function _reload() {
+  async function _reload(): Promise<void> {
     const host = document.getElementById('sap-interface-host');
     if (!host) return;
     try {
-      const data = await Util.fetchTraced(`${API}/sap/interface/objects`).then((r: any) => {
+      const data: SapObjectsResponse = await Util.fetchTraced(`${API}/sap/interface/objects`).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
       _objects = data.objects || [];
-      if (!_selected || !_objects.some((o: any) => o.object_key === _selected)) {
+      if (!_selected || !_objects.some((o) => o.object_key === _selected)) {
         _selected = _objects.length ? _objects[0].object_key : null;
       }
       _paint();
-    } catch (e: any) {
+    } catch (e) {
       host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">⚠</div>`
         + `<div class="sap-empty-t">${_esc(Util.t('ui.sap_load_failed'))}</div>`
-        + `<div class="sap-empty-d">${_esc(e.message)}</div></div>`;
-      ErrorLog.error('sap-interface', `Load objects failed: ${e.message}`);
+        + `<div class="sap-empty-d">${_esc((e as Error).message)}</div></div>`;
+      ErrorLog.error('sap-interface', `Load objects failed: ${(e as Error).message}`);
     }
   }
 
   // Rebuild the whole console from cached _objects (no fetch).
-  function _paint() {
+  function _paint(): void {
     const host = document.getElementById('sap-interface-host');
     if (!host) return;
     host.innerHTML = `
@@ -6587,9 +6718,9 @@ export const Interface = (() => {
         <div id="sap-rail"></div>
         <div id="sap-detail"></div>
       </div>`;
-    host.querySelectorAll('[data-jump]').forEach((tile: any) => tile.addEventListener('click', () => {
+    host.querySelectorAll<HTMLElement>('[data-jump]').forEach((tile) => tile.addEventListener('click', () => {
       const j = tile.dataset.jump;
-      if (j === 'errors') { const eo = _objects.find((o: any) => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
+      if (j === 'errors') { const eo = _objects.find((o) => o.last_run && o.last_run.status === 'error'); if (eo) _selected = eo.object_key; }
       else if (j === 'last' && _lastNewestKey) { _selected = _lastNewestKey; }
       _tab = 'history'; _renderRail(); _renderDetail();
     }));
@@ -6597,20 +6728,26 @@ export const Interface = (() => {
     _renderDetail();
   }
 
-  function _renderRibbon() {
-    const enabled = _objects.filter((o: any) => o.enabled).length;
-    let newest: any = null, newestObj: any = null;
-    _objects.forEach((o: any) => {
+  function _renderRibbon(): string {
+    const enabled = _objects.filter((o) => o.enabled).length;
+    // A plain for-of (not .forEach) so TS's flow analysis actually widens
+    // `newest`/`newestObj` back to their declared nullable type after the
+    // loop — a `let x: T | null = null` reassigned only inside a callback
+    // stays narrowed to `null` at every read after a `.forEach`, a known TS
+    // control-flow limitation across function boundaries.
+    let newest: SapRun | null = null;
+    let newestObj: SapObject | null = null;
+    for (const o of _objects) {
       const lr = o.last_run;
-      if (lr && lr.started_at && (!newest || new Date(lr.started_at) > new Date(newest.started_at))) { newest = lr; newestObj = o; }
-    });
+      if (lr && lr.started_at && (!newest || new Date(lr.started_at) > new Date(newest.started_at as string))) { newest = lr; newestObj = o; }
+    }
     _lastNewestKey = newestObj ? newestObj.object_key : null;
-    const errs = _objects.filter((o: any) => o.last_run && o.last_run.status === 'error').length;
-    const tile = (k: any, v: any, d: any, cls: any, act: any) =>
+    const errs = _objects.filter((o) => o.last_run && o.last_run.status === 'error').length;
+    const tile = (k: string, v: string, d: string, cls: string, act: string) =>
       `<div class="kpi-tile${cls ? ' ' + cls : ''}${act ? ' is-actionable' : ''}"${act ? ` data-jump="${act}"` : ''}>`
       + `<div class="k">${_esc(k)}</div><div class="v">${v}</div><div class="d">${_esc(d)}</div></div>`;
     const lastV = newest ? `<span class="sap-v-sm">${_esc(_relTime(newest.started_at))}</span>` : '—';
-    const lastD = newest ? `${newestObj.label} · ${newest.triggered_by || 'manual'}` : 'no runs yet';
+    const lastD = newest ? `${newestObj?.label} · ${newest.triggered_by || 'manual'}` : 'no runs yet';
     const rowsV = newest ? Number(newest.rows_read || 0).toLocaleString() : '0';
     const rowsD = newest ? `+${newest.rows_inserted ?? 0} ins / ~${newest.rows_updated ?? 0} upd` : '—';
     return `<div class="sap-ribbon">
@@ -6625,10 +6762,10 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Object rail (master) + detail shell (Overview / Mapping / History tabs)
   // -----------------------------------------------------------------------
-  function _renderRail() {
+  function _renderRail(): void {
     const el = document.getElementById('sap-rail');
     if (!el) return;
-    const rows = _objects.map((o: any) => {
+    const rows = _objects.map((o) => {
       const sel = o.object_key === _selected ? ' sap-rail-row-sel' : '';
       const lr = o.last_run;
       const dotCls = !lr ? '' : (lr.status === 'ok' ? 'ok' : (lr.status === 'error' ? 'err' : (lr.status === 'running' ? 'warn' : '')));
@@ -6651,23 +6788,23 @@ export const Interface = (() => {
     }).join('');
     el.innerHTML = `<div class="panel">
       <div class="panel-head"><span class="sap-section-label">${_esc(Util.t('ui.sap_objects'))}</span>
-        <span class="sap-hint">${_objects.filter((o: any) => o.enabled).length} / ${_objects.length}</span></div>
+        <span class="sap-hint">${_objects.filter((o) => o.enabled).length} / ${_objects.length}</span></div>
       <div class="sap-rail">${rows}</div></div>`;
-    el.querySelectorAll('[data-obj]').forEach((r: any) =>
-      r.addEventListener('click', () => { _selected = r.dataset.obj; _testResult = null; _renderRail(); _renderDetail(); }));
-    el.querySelectorAll('[data-enable]').forEach((cb: any) => {
-      cb.addEventListener('click', (e: any) => e.stopPropagation());
-      cb.addEventListener('change', () => _saveConfig(cb.dataset.enable, { enabled: cb.checked }, cb.checked ? Util.t('toast.sap_enable_note') : null));
+    el.querySelectorAll<HTMLElement>('[data-obj]').forEach((r) =>
+      r.addEventListener('click', () => { _selected = r.dataset.obj ?? null; _testResult = null; _renderRail(); _renderDetail(); }));
+    el.querySelectorAll<HTMLInputElement>('[data-enable]').forEach((cb) => {
+      cb.addEventListener('click', (e) => e.stopPropagation());
+      cb.addEventListener('change', () => _saveConfig(cb.dataset.enable as string, { enabled: cb.checked }, cb.checked ? Util.t('toast.sap_enable_note') : null));
     });
   }
 
-  function _renderDetail() {
+  function _renderDetail(): void {
     const el = document.getElementById('sap-detail');
     if (!el) return;
-    const o = _objects.find((x: any) => x.object_key === _selected);
+    const o = _objects.find((x) => x.object_key === _selected);
     if (!o) { el.innerHTML = ''; return; }
     const kind = o.kind || 'master';
-    const tabBtn = (id: any, label: any) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    const tabBtn = (id: string, label: string) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
     el.innerHTML = `<div class="panel">
       <div class="sap-detail-head">
         <span class="sap-detail-name">${_esc(o.label || o.object_key)}</span>
@@ -6681,16 +6818,16 @@ export const Interface = (() => {
       <div class="sap-tabs">${tabBtn('overview', Util.t('ui.sap_overview'))}${tabBtn('mapping', Util.t('ui.sap_mapping'))}${tabBtn('history', Util.t('ui.sap_history'))}</div>
       <div class="sap-tabbody" id="sap-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>
     </div>`;
-    el.querySelectorAll('[data-tab]').forEach((b: any) =>
-      b.addEventListener('click', () => { _tab = b.dataset.tab; _renderDetail(); }));
-    el.querySelectorAll('[data-act]').forEach((b: any) =>
-      b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b)));
+    el.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) =>
+      b.addEventListener('click', () => { _tab = b.dataset.tab as 'overview' | 'mapping' | 'history'; _renderDetail(); }));
+    el.querySelectorAll<HTMLElement>('[data-act]').forEach((b) =>
+      b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b as HTMLButtonElement)));
     if (_tab === 'overview') _renderOverview(o);
     else if (_tab === 'mapping') _renderMapping(o);
     else _renderHistory(o);
   }
 
-  function _relTime(ts: any) {
+  function _relTime(ts: string | null | undefined): string {
     if (!ts) return '—';
     const d = new Date(ts); if (isNaN(d.getTime())) return String(ts);
     let s = Math.floor((Date.now() - d.getTime()) / 1000); if (s < 0) s = 0;
@@ -6700,11 +6837,11 @@ export const Interface = (() => {
     return `${Math.floor(h / 24)}d ago`;
   }
 
-  function _cronProse(c: any) {
+  function _cronProse(c: string | null | undefined): string | null {
     if (!c) return null;
     const p = c.trim().split(/\s+/); if (p.length !== 5) return null;
     const mi = p[0], ho = p[1], dom = p[2], mon = p[3];
-    const pad = (x: any) => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
+    const pad = (x: string) => (x === '*' ? '00' : (x.length < 2 ? '0' + x : x));
     if (dom === '*' && mon === '*' && p[4] === '*' && ho !== '*' && mi !== '*') return `Every day at ${pad(ho)}:${pad(mi)}`;
     if (mi.indexOf('*/') === 0) return `Every ${mi.slice(2)} minutes`;
     if (ho.indexOf('*/') === 0 && dom === '*') return `Every ${ho.slice(2)} hours`;
@@ -6714,25 +6851,32 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Overview tab — transport config, secret indicator, schedule, checklist
   // -----------------------------------------------------------------------
-  async function _renderOverview(o: any) {
+  async function _renderOverview(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
-    let cfg: any = _config[o.object_key];
+    let cfg: SapObjectConfig | undefined = _config[o.object_key];
     if (!cfg) {
       try {
-        cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then((r: any) => {
+        cfg = await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(o.object_key)}`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
-        _config[o.object_key] = cfg;
+        _config[o.object_key] = cfg as SapObjectConfig;
       } catch {
-        cfg = { transport: o.transport, source_params: {}, has_secret: false, schedule_cron: o.schedule_cron };
+        cfg = { transport: (o.transport || 'file_drop'), source_params: {}, has_secret: false, schedule_cron: o.schedule_cron ?? null };
       }
     }
     // bail if the user switched object/tab while awaiting
     if (document.getElementById('sap-tabbody') !== body || _tab !== 'overview' || _selected !== o.object_key) return;
+    // cfg is always assigned by this point (fetch-success or catch-fallback
+    // above) — TS's flow analysis can't track the reassignment through the
+    // async .then()-with-throw chain inside the try, a known CFA limitation
+    // across function boundaries (same family of gap as `_renderRibbon`'s
+    // for-of note above), so it's asserted here rather than left as a
+    // scattered `cfg!` at every read site below.
+    cfg = cfg as SapObjectConfig;
 
-    const transport = cfg.transport || o.transport || 'file_drop';
+    const transport: SapTransport = cfg.transport || o.transport || 'file_drop';
     const cron = cfg.schedule_cron != null ? cfg.schedule_cron : (o.schedule_cron || '');
     const prose = _cronProse(cron);
     const lr = o.last_run;
@@ -6742,8 +6886,8 @@ export const Interface = (() => {
     const secret = cfg.has_secret
       ? `<div class="sap-chipline"><span class="admin-health-dot ok"></span> ${_esc(Util.t('ui.sap_credential_present'))}</div>`
       : `<div class="sap-chipline"><span class="admin-health-dot warn"></span> ${_esc(Util.t('ui.sap_no_credential'))}</div>`;
-    const activeMaps = (_mapState[o.object_key]?.rows || []).filter((m: any) => m.active && m.sap_field && m.nimbus_column).length;
-    const steps: any[] = [
+    const activeMaps = (_mapState[o.object_key]?.rows || []).filter((m) => m.active && m.sap_field && m.nimbus_column).length;
+    const steps: [string, string, boolean][] = [
       ['01', Util.t('ui.sap_step_transport'), true],
       ['02', Util.t('ui.sap_step_map'), activeMaps > 0],
       ['03', Util.t('ui.sap_step_enable'), o.enabled && !!cron],
@@ -6751,7 +6895,7 @@ export const Interface = (() => {
       ['05', Util.t('ui.sap_step_dryrun'), !!(lr && lr.triggered_by === 'dry-run')],
       ['06', Util.t('ui.sap_step_first'), !!(lr && lr.status === 'ok' && (lr.rows_inserted || 0) > 0)],
     ];
-    const checklist = steps.map((s: any) =>
+    const checklist = steps.map((s) =>
       `<div class="sap-check-step${s[2] ? ' done' : ''}"><span class="sap-check-n">${s[0]}</span><span class="sap-check-mark">${s[2] ? '✓' : ''}</span><span class="sap-check-t">${_esc(s[1])}</span></div>`).join('');
     const tr = _testResult;
     const testStrip = tr
@@ -6784,75 +6928,76 @@ export const Interface = (() => {
         </div>
       </div>`;
 
-    document.getElementById('sap-transport-sel')?.addEventListener('change', (e: any) => {
-      _config[o.object_key] = { ...(_config[o.object_key] || {}), transport: e.target.value };
+    document.getElementById('sap-transport-sel')?.addEventListener('change', (e: Event) => {
+      const value = (e.target as HTMLSelectElement).value as SapTransport;
+      _config[o.object_key] = { ...(_config[o.object_key] || cfg as SapObjectConfig), transport: value };
       _testResult = null;
-      _saveConfig(o.object_key, { transport: e.target.value }, null);
+      _saveConfig(o.object_key, { transport: value }, null);
     });
-    document.getElementById('sap-cron-input')?.addEventListener('change', (e: any) =>
-      _saveConfig(o.object_key, { schedule_cron: e.target.value.trim() || null }, null));
+    document.getElementById('sap-cron-input')?.addEventListener('change', (e: Event) =>
+      _saveConfig(o.object_key, { schedule_cron: (e.target as HTMLInputElement).value.trim() || null }, null));
     document.getElementById('sap-test-btn')?.addEventListener('click', () => _testConnection(o.object_key, transport));
   }
 
-  function _transportFieldsHTML(transport: any, params: any) {
+  function _transportFieldsHTML(transport: SapTransport, params: Record<string, string>): string {
     const fields = TRANSPORT_FIELDS[transport] || [];
     if (!fields.length) return '';
-    return fields.map((f: any) =>
+    return fields.map((f) =>
       `<div class="sap-field"><label>${_esc(f[1])}</label><input class="sap-mono" data-param="${_esc(f[0])}" value="${_esc(params[f[0]] != null ? params[f[0]] : '')}" placeholder="${_esc(f[2])}" spellcheck="false"></div>`).join('');
   }
 
-  async function _testConnection(object: any, transport: any) {
-    const params: any = {};
-    document.querySelectorAll('#sap-transport-fields [data-param]').forEach((inp: any) => {
-      if (inp.value.trim()) params[inp.dataset.param] = inp.value.trim();
+  async function _testConnection(object: string, transport: SapTransport): Promise<void> {
+    const params: Record<string, string> = {};
+    document.querySelectorAll<HTMLInputElement>('#sap-transport-fields [data-param]').forEach((inp) => {
+      if (inp.value.trim() && inp.dataset.param) params[inp.dataset.param] = inp.value.trim();
     });
     _testResult = { cls: 'info', dot: '', msg: Util.t('ui.sap_testing') };
     _renderDetail();
     try {
-      const res = await fetch(`${API}/sap/interface/test-connection`, {
+      const res: SapTestConnectionResult = await fetch(`${API}/sap/interface/test-connection`, {
         method: 'POST', headers: _writeHeaders(),
         body: JSON.stringify({ transport, source_params: params }),
-      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       _testResult = res.ok
         ? { cls: 'ok', dot: 'ok', msg: `${Util.t('toast.sap_conn_ok')} — ${res.detail || ''}`.trim() }
         : { cls: 'info', dot: '', msg: res.detail || Util.t('toast.sap_conn_fail') };
-    } catch (e: any) {
-      _testResult = { cls: 'err', dot: 'err', msg: `${Util.t('toast.sap_conn_fail')} — ${e.message}` };
-      ErrorLog.error('sap-interface', `Test connection failed: ${e.message}`);
+    } catch (e) {
+      _testResult = { cls: 'err', dot: 'err', msg: `${Util.t('toast.sap_conn_fail')} — ${(e as Error).message}` };
+      ErrorLog.error('sap-interface', `Test connection failed: ${(e as Error).message}`);
     }
     if (_tab === 'overview' && _selected === object) _renderDetail();
   }
 
-  async function _saveConfig(object: any, patch: any, confirmMsg: any) {
+  async function _saveConfig(object: string, patch: SapConfigPatch, confirmMsg: string | null): Promise<void> {
     try {
       await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
-      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
       if (confirmMsg) Toast.show(confirmMsg, 'info');
       await _reload();
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('sap-interface', `Config save failed for ${object}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('sap-interface', `Config save failed for ${object}: ${(e as Error).message}`);
       await _reload();
     }
   }
 
-  async function _runNow(object: any, dryRun: any, btn: any) {
+  async function _runNow(object: string, dryRun: boolean, btn: HTMLButtonElement | null): Promise<void> {
     if (btn) btn.disabled = true;
     try {
-      const res = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
+      const res: SapSyncResult = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
-      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (res.status === 'ok') {
         Toast.show(`${dryRun ? Util.t('toast.sap_dryrun_done') : Util.t('toast.sap_sync_done')} (read ${res.rows_read ?? 0} · +${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
       } else {
         Toast.show(`${Util.t('toast.sap_sync_failed')}: ${res.error || ''}`.trim(), 'error', 6000);
       }
       await _reload();
-    } catch (e: any) {
-      Toast.show(`${Util.t('toast.sap_sync_failed')}: ${e.message}`, 'error');
-      ErrorLog.error('sap-interface', `Sync failed for ${object}: ${e.message}`);
+    } catch (e) {
+      Toast.show(`${Util.t('toast.sap_sync_failed')}: ${(e as Error).message}`, 'error');
+      ErrorLog.error('sap-interface', `Sync failed for ${object}: ${(e as Error).message}`);
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -6861,26 +7006,26 @@ export const Interface = (() => {
   // -----------------------------------------------------------------------
   // Mapping tab — SAP field ━▶ transform ━▶ NIMBUS column flow editor
   // -----------------------------------------------------------------------
-  async function _renderMapping(o: any) {
+  async function _renderMapping(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
     if (!_mapState[o.object_key]) {
       body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
       try {
-        const data = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then((r: any) => {
+        const data: SapMappingsResponse = await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(o.object_key)}`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
         _mapState[o.object_key] = {
-          rows: (data.mappings || []).map((m: any) => ({
+          rows: (data.mappings || []).map((m) => ({
             sap_field: m.sap_field || '', nimbus_column: m.nimbus_column || '',
             transform: m.transform || 'none', active: m.active !== false,
           })),
           dirty: false,
         };
-      } catch (e: any) {
-        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_map_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
-        ErrorLog.error('sap-interface', `Load mappings failed for ${o.object_key}: ${e.message}`);
+      } catch (e) {
+        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_map_load_failed'))}</div><div class="sap-empty-d">${_esc((e as Error).message)}</div></div>`;
+        ErrorLog.error('sap-interface', `Load mappings failed for ${o.object_key}: ${(e as Error).message}`);
         return;
       }
     }
@@ -6888,9 +7033,9 @@ export const Interface = (() => {
     _drawMapping(o);
   }
 
-  function _drawMapping(o: any) {
+  function _drawMapping(o: SapObject): void {
     const body = document.getElementById('sap-tabbody');
-    const st: any = _mapState[o.object_key];
+    const st = _mapState[o.object_key];
     if (!body || !st) return;
     const isMaster = (o.kind || 'master') === 'master';
     const keys = MASTER_KEYS[o.object_key] || [];
@@ -6906,9 +7051,9 @@ export const Interface = (() => {
       return;
     }
 
-    const rows = st.rows.map((m: any, i: any) => {
+    const rows = st.rows.map((m, i) => {
       const isKey = isMaster && keys.indexOf(m.nimbus_column) > -1;
-      const opts = TRANSFORMS.map((tr: any) => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
+      const opts = TRANSFORMS.map((tr) => `<option${tr === m.transform ? ' selected' : ''}>${tr}</option>`).join('');
       return `<div class="sap-map-row${m.active ? '' : ' inactive'}" style="animation-delay:${i * 55}ms">
         <input class="sap-node sap-node-sap" data-idx="${i}" data-f="sap_field" value="${_esc(m.sap_field)}" placeholder="SAP field" spellcheck="false">
         <span class="sap-wire"><span class="sap-wire-fill" style="animation-delay:${i * 55}ms"></span></span>
@@ -6920,7 +7065,7 @@ export const Interface = (() => {
 
     let guard = '', blocked = false;
     if (isMaster && keys.length) {
-      const missing = keys.filter((k: any) => !st.rows.some((m: any) => m.nimbus_column === k && m.active));
+      const missing = keys.filter((k) => !st.rows.some((m) => m.nimbus_column === k && m.active));
       blocked = missing.length > 0;
       guard = _keystrip(o, st);
       if (blocked) {
@@ -6938,61 +7083,67 @@ export const Interface = (() => {
         <button class="btn btn-sm btn-primary" id="sap-save-map"${blocked ? ` disabled title="${_esc(Util.t('ui.sap_resolve_keys'))}"` : ''}>${_esc(Util.t('ui.sap_save_mappings'))}</button>
       </div>`;
 
-    body.querySelectorAll('[data-f]').forEach((inp: any) => {
-      const isText = inp.tagName === 'INPUT' && inp.type === 'text';
+    body.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-f]').forEach((inp) => {
+      const isText = inp.tagName === 'INPUT' && (inp as HTMLInputElement).type === 'text';
       const update = () => {
-        const row = st.rows[+inp.dataset.idx]; if (!row) return;
-        row[inp.dataset.f] = inp.type === 'checkbox' ? inp.checked : inp.value;
+        const idx = Number(inp.dataset.idx);
+        const field = inp.dataset.f as keyof SapMapRow;
+        const row = st.rows[idx]; if (!row || !field) return;
+        const checked = (inp as HTMLInputElement).type === 'checkbox' ? (inp as HTMLInputElement).checked : undefined;
+        if (field === 'active') row.active = !!checked;
+        else if (field === 'sap_field') row.sap_field = inp.value;
+        else if (field === 'nimbus_column') row.nimbus_column = inp.value;
+        else if (field === 'transform') row.transform = inp.value;
         st.dirty = true;
       };
       if (isText) { inp.addEventListener('input', update); inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
       else { inp.addEventListener('change', () => { update(); _drawMapping(o); }); }
     });
-    body.querySelectorAll('[data-del]').forEach((b: any) =>
-      b.addEventListener('click', () => { st.rows.splice(+b.dataset.del, 1); st.dirty = true; _drawMapping(o); }));
+    body.querySelectorAll<HTMLElement>('[data-del]').forEach((b) =>
+      b.addEventListener('click', () => { st.rows.splice(Number(b.dataset.del), 1); st.dirty = true; _drawMapping(o); }));
     document.getElementById('sap-add-map')?.addEventListener('click', () => { st.rows.push({ sap_field: '', nimbus_column: '', transform: 'none', active: true }); st.dirty = true; _drawMapping(o); });
     document.getElementById('sap-save-map')?.addEventListener('click', () => _saveMappings(o.object_key));
   }
 
-  function _keystrip(o: any, st: any) {
+  function _keystrip(o: SapObject, st: SapMapState): string {
     const keys = MASTER_KEYS[o.object_key] || [];
     if (!keys.length) return '';
-    const chips = keys.map((k: any) => {
-      const ok = st.rows.some((m: any) => m.nimbus_column === k && m.active);
+    const chips = keys.map((k) => {
+      const ok = st.rows.some((m) => m.nimbus_column === k && m.active);
       return `<span class="sap-keychip${ok ? '' : ' miss'}"><span class="admin-health-dot ${ok ? 'ok' : 'err'}"></span>${_esc(k)}${ok ? '' : ` <span class="sap-req">${_esc(Util.t('ui.sap_required'))}</span>`}</span>`;
     }).join('');
     return `<div class="sap-keystrip"><span class="sap-ks-label">${_esc(Util.t('ui.sap_key_columns'))}</span>${chips}</div>`;
   }
 
-  async function _saveMappings(object: any) {
-    const st: any = _mapState[object];
+  async function _saveMappings(object: string): Promise<void> {
+    const st = _mapState[object];
     if (!st) return;
     const mappings = st.rows
-      .filter((m: any) => m.sap_field.trim() && m.nimbus_column.trim())
-      .map((m: any, i: any) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
+      .filter((m) => m.sap_field.trim() && m.nimbus_column.trim())
+      .map((m, i) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
     try {
       await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
-      }).then((r: any) => { if (!r.ok) return r.json().then((e: any) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json() as Promise<SapMappingsSaveResult>; });
       delete _mapState[object];
       Toast.show(Util.t('toast.sap_mappings_saved'), 'success');
       await _reload();
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('sap-interface', `Save mappings failed for ${object}: ${(e as Error).message}`);
     }
   }
 
   // -----------------------------------------------------------------------
   // History tab — run timeline (status, counts, duration, watermark, errors)
   // -----------------------------------------------------------------------
-  async function _renderHistory(o: any) {
+  async function _renderHistory(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
     body.innerHTML = `<div class="md-loading">${_esc(Util.t('ui.loading'))}</div>`;
     try {
       const params = new URLSearchParams({ limit: '50', object: o.object_key });
-      const data = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then((r: any) => {
+      const data: SapRunsResponse = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
@@ -7003,16 +7154,16 @@ export const Interface = (() => {
         body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
         return;
       }
-      body.innerHTML = `<div class="sap-feed">${runs.map((rn: any, i: any) => _runRow(rn, i)).join('')}</div>`;
-      body.querySelectorAll('[data-exp]').forEach((b: any) =>
-        b.addEventListener('click', () => b.closest('.sap-run').classList.toggle('open')));
-    } catch (e: any) {
-      body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${_esc(e.message)}</div></div>`;
-      ErrorLog.error('sap-interface', `Load runs failed: ${e.message}`);
+      body.innerHTML = `<div class="sap-feed">${runs.map((rn, i) => _runRow(rn, i)).join('')}</div>`;
+      body.querySelectorAll<HTMLElement>('[data-exp]').forEach((b) =>
+        b.addEventListener('click', () => b.closest('.sap-run')?.classList.toggle('open')));
+    } catch (e) {
+      body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${_esc(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${_esc((e as Error).message)}</div></div>`;
+      ErrorLog.error('sap-interface', `Load runs failed: ${(e as Error).message}`);
     }
   }
 
-  function _runRow(rn: any, i: any) {
+  function _runRow(rn: SapRun, i: number): string {
     const status = rn.status || 'unknown';
     const cls = status === 'ok' ? 'ok' : (status === 'error' ? 'err' : 'info');
     const pill = status === 'ok' ? '<span class="sap-pill ok">ok</span>'
@@ -7026,7 +7177,7 @@ export const Interface = (() => {
     return `<div class="sap-run ${cls}"><div class="sap-run-head">${pill}<span class="sap-run-t">${_esc(_fmtTs(rn.started_at))}</span><span class="sap-run-by">${_esc(rn.triggered_by || 'manual')}</span>${dur ? `<span class="sap-run-dur">${_esc(dur)}</span>` : ''}</div><div class="sap-run-counts">${counts}</div>${wm}${err}</div>`;
   }
 
-  function _dur(a: any, b: any) {
+  function _dur(a: string | null | undefined, b: string | null | undefined): string {
     if (!a || !b) return '';
     const d = (new Date(b).getTime() - new Date(a).getTime()) / 1000;
     if (isNaN(d) || d < 0) return '';
@@ -7035,7 +7186,7 @@ export const Interface = (() => {
     return `${Math.floor(d / 60)}m ${Math.round(d % 60)}s`;
   }
 
-  function _fmtTs(ts: any) {
+  function _fmtTs(ts: string | null | undefined): string {
     if (!ts) return '—';
     try {
       const d = new Date(ts);
@@ -7044,8 +7195,78 @@ export const Interface = (() => {
     } catch { return String(ts); }
   }
 
-  return { render } as any;
+  return { render };
 })();
+
+/** One `GET /security/users` row (`auth.list_users`) — username, role, and
+ *  whether a password is set; NEVER carries the hash itself. Not part of the
+ *  backend's `response_model=` scope (only the task-date-update endpoint
+ *  family is), so hand-written locally, matching Interface's precedent. */
+interface SecurityUser {
+  username: string;
+  role: string | null;
+  has_password: boolean;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+interface SecurityUsersResponse {
+  users: SecurityUser[];
+  meta?: { total: number };
+}
+
+/** A row staged client-side via "Paste rows" (`_pasteUsers`), not yet POSTed
+ *  to `/security/users/bulk` — distinct from `SecurityUser` (no
+ *  `has_password`; that only exists once the backend has a real row). */
+interface SecurityStagedUser {
+  username: string;
+  role: string;
+  first_name: string;
+  last_name: string;
+}
+
+/** `POST /security/users/bulk` payload (`auth.bulk_upsert_users`) — role-only
+ *  upserts never send passwords (`set_user_password` owns those separately). */
+interface SecurityUserUpsert {
+  username: string;
+  role?: string | null;
+  first_name?: string;
+  last_name?: string;
+}
+
+/** Shared bulk-write result shape — `auth.bulk_upsert_users` and
+ *  `master_data.bulk_apply` (used generically here for `roles`/`role_plants`,
+ *  per the correction that those two tables belong to Security's domain, not
+ *  MasterData's — kept as Security's own local type rather than reused from
+ *  MasterData's `MasterDataBulkResult`, same self-contained spirit as the
+ *  module's own `_esc`/`_writeHeaders` copies). */
+interface SecurityBulkResult {
+  inserted: number;
+  updated: number;
+  deleted: number;
+}
+
+/** One `roles` table row (`GET /master-data/roles`, generic master_data.py
+ *  read path — `roles`/`role_plants` are registered in `ALLOWED_TABLES` but
+ *  belong to Security's domain, not MasterData's UI). */
+interface SecurityRoleRow {
+  role: string;
+  description?: string | null;
+}
+
+/** One `role_plants` table row (`GET /master-data/role_plants`). */
+interface SecurityRolePlantRow {
+  role: string;
+  plant: string;
+}
+
+/** Generic `GET /master-data/{table}` envelope, narrowed to the two rows
+ *  shapes Security reads (`roles`, `role_plants`) — mirrors
+ *  `MasterDataResponse` structurally but kept local/self-contained. */
+interface SecurityMasterDataResponse<T> {
+  rows: T[];
+  meta?: { total: number };
+}
 
 /* =============================================================================
    SECURITY — admin sub-tab: user accounts (username / role / password) and
@@ -7063,41 +7284,41 @@ export const Interface = (() => {
 export const Security = (() => {
   const API = Config.API_BASE;
 
-  let _tab = 'users';              // active top-level tab: 'users' | 'roles'
+  let _tab: 'users' | 'roles' = 'users'; // active top-level tab
 
   // ---- Users tab state ----
-  let _users: any[] = [];                 // last GET /security/users .users: [{username,role,has_password}]
+  let _users: SecurityUser[] = [];        // last GET /security/users .users: [{username,role,has_password}]
   let _usersSearch = '';           // current server-side search query
-  let _roleOptions: any[] = [];           // role names for the Role <select> (from GET /master-data/roles)
-  let _staged: any[] = [];                // rows staged via "Paste rows", not yet saved: [{username, role}]
-  const _pwOpen: any = new Set();       // usernames with an open inline password-reveal row
-  const _nameSaveTimers: any = new Map(); // username -> pending debounce timeout id
+  let _roleOptions: string[] = [];        // role names for the Role <select> (from GET /master-data/roles)
+  let _staged: SecurityStagedUser[] = []; // rows staged via "Paste rows", not yet saved: [{username, role}]
+  const _pwOpen: Set<string> = new Set();       // usernames with an open inline password-reveal row
+  const _nameSaveTimers: Map<string, ReturnType<typeof setTimeout>> = new Map(); // username -> pending debounce timeout id
 
   // ---- Roles tab state ----
-  let _roles: any[] = [];                 // GET /master-data/roles rows: [{role, description}]
-  let _rolePlants: any[] = [];            // GET /master-data/role_plants rows: [{role, plant}]
-  let _rolesInUse: any = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
-  let _selectedRole: any = null;
+  let _roles: SecurityRoleRow[] = [];         // GET /master-data/roles rows: [{role, description}]
+  let _rolePlants: SecurityRolePlantRow[] = []; // GET /master-data/role_plants rows: [{role, plant}]
+  let _rolesInUse: Set<string> = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
+  let _selectedRole: string | null = null;
 
-  const _esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (c: any) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
+  const _esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
 
-  function _writeHeaders(json = true) {
-    const h: any = { 'x-user-email': Session.actor() };
+  function _writeHeaders(json = true): Record<string, string> {
+    const h: Record<string, string> = { 'x-user-email': Session.actor() };
     if (json) h['content-type'] = 'application/json';
     return h;
   }
 
-  function _postJSON(url: any, body: any) {
+  function _postJSON(url: string, body: unknown): Promise<unknown> {
     return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
-      .then((r: any) => {
+      .then((r) => {
         if (!r.ok) {
           // A 403 here means the backend admin gate rejected us though the UI
           // believed we were admin (stale cached role). Reconcile + prompt
           // re-auth instead of only bubbling a raw error to the caller.
           if (r.status === 403) { try { Session.onAuthDenied(); } catch {} }
-          return r.json().catch(() => ({})).then((e: any) => {
-            const err: any = new Error(e.detail || `HTTP ${r.status}`);
+          return r.json().catch(() => ({})).then((e) => {
+            const err: Error & { status?: number } = new Error(e.detail || `HTTP ${r.status}`);
             err.status = r.status;
             throw err;
           });
@@ -7111,71 +7332,71 @@ export const Security = (() => {
   // -----------------------------------------------------------------------
   // Public entry point
   // -----------------------------------------------------------------------
-  async function render() {
+  async function render(): Promise<void> {
     const host = document.getElementById('security-host');
     if (!host) return;
     _paintShell();
     await _loadActiveTab();
   }
 
-  function _paintShell() {
+  function _paintShell(): void {
     const host = document.getElementById('security-host');
     if (!host) return;
-    const tabBtn = (id: any, label: any) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
+    const tabBtn = (id: string, label: string) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${_esc(label)}</button>`;
     host.innerHTML = `
       <div class="sap-pagehead">
         <div><div class="sap-pagehead-title"><h2>${_esc(Util.t('tab.security'))}</h2></div></div>
       </div>
       <div class="sap-tabs">${tabBtn('users', Util.t('tab.security_users'))}${tabBtn('roles', Util.t('tab.security_roles'))}</div>
       <div id="security-tabbody"><div class="md-loading">${_esc(Util.t('ui.loading'))}</div></div>`;
-    host.querySelectorAll('[data-tab]').forEach((b: any) =>
-      b.addEventListener('click', () => { _tab = b.dataset.tab; _paintShell(); _loadActiveTab(); }));
+    host.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) =>
+      b.addEventListener('click', () => { _tab = b.dataset.tab as 'users' | 'roles'; _paintShell(); _loadActiveTab(); }));
   }
 
-  function _loadActiveTab() {
+  function _loadActiveTab(): Promise<void> {
     return _tab === 'users' ? _reloadUsers() : _reloadRoles();
   }
 
   // -----------------------------------------------------------------------
   // USERS tab
   // -----------------------------------------------------------------------
-  async function _reloadUsers() {
+  async function _reloadUsers(): Promise<void> {
     const body = document.getElementById('security-tabbody');
     try {
       const q = _usersSearch.trim();
       const usersUrl = `${API}/security/users` + (q ? `?search=${encodeURIComponent(q)}` : '');
-      const [usersData, rolesData]: any = await Promise.all([
-        Util.fetchTraced(usersUrl).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-        Util.fetchTraced(`${API}/master-data/roles`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      const [usersData, rolesData]: [SecurityUsersResponse, SecurityMasterDataResponse<SecurityRoleRow>] = await Promise.all([
+        Util.fetchTraced(usersUrl).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/roles`).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
       ]);
       _users = usersData.users || [];
-      _roleOptions = [...new Set((rolesData.rows || []).map((r: any) => r.role).filter(Boolean))].sort();
+      _roleOptions = [...new Set((rolesData.rows || []).map((r) => r.role).filter(Boolean))].sort();
       if (_tab !== 'users') return; // bail if the admin switched tabs while awaiting
       _renderUsersTab();
-    } catch (e: any) {
-      const is403 = e.status === 403 || /\b403\b/.test(e.message || '');
+    } catch (e) {
+      const is403 = (e as Error & { status?: number }).status === 403 || /\b403\b/.test((e as Error).message || '');
       // Stale-admin 403 (the /master-data/roles half of the Promise.all is
       // ungated, so a 403 here is from /security/users): reconcile + re-auth.
       if (is403) { try { Session.onAuthDenied(); } catch {} }
-      if (body) body.innerHTML = `<div class="md-empty">${_esc(is403 ? Util.t('sec.access_revoked') : Util.t('sec.load_users_failed', { msg: e.message }))}</div>`;
-      ErrorLog.error('security', `Load users failed: ${e.message}`);
+      if (body) body.innerHTML = `<div class="md-empty">${_esc(is403 ? Util.t('sec.access_revoked') : Util.t('sec.load_users_failed', { msg: (e as Error).message }))}</div>`;
+      ErrorLog.error('security', `Load users failed: ${(e as Error).message}`);
     }
   }
 
-  function _renderUsersTab() {
+  function _renderUsersTab(): void {
     const body = document.getElementById('security-tabbody');
     if (!body) return;
     // Preserve the search box's focus/caret across the re-render a debounced
     // keystroke-driven reload causes (captured synchronously, not via
     // focus/blur listeners, since replacing innerHTML can race those).
     const hadFocus = document.activeElement && document.activeElement.id === 'sec-user-search';
-    const caret = hadFocus ? (document.activeElement as any).selectionStart : null;
+    const caret = hadFocus ? (document.activeElement as HTMLInputElement).selectionStart : null;
     body.innerHTML = _usersShellHtml();
     _wireUsersShell();
     _renderUsersRows();
     _renderUsersActions();
     if (hadFocus) {
-      const search = document.getElementById('sec-user-search') as any;
+      const search = document.getElementById('sec-user-search') as HTMLInputElement | null;
       if (search) {
         search.focus();
         const pos = caret ?? search.value.length;
@@ -7184,7 +7405,7 @@ export const Security = (() => {
     }
   }
 
-  function _usersShellHtml() {
+  function _usersShellHtml(): string {
     return `
       <div class="panel">
         <div class="md-toolbar">
@@ -7217,8 +7438,8 @@ export const Security = (() => {
       </div>`;
   }
 
-  function _wireUsersShell() {
-    const search = document.getElementById('sec-user-search') as any;
+  function _wireUsersShell(): void {
+    const search = document.getElementById('sec-user-search') as HTMLInputElement | null;
     if (search) {
       search.addEventListener('input', () => { _usersSearch = search.value; _debouncedUserSearch(); });
     }
@@ -7226,7 +7447,7 @@ export const Security = (() => {
     document.getElementById('sec-add-user-btn')?.addEventListener('click', _addUser);
   }
 
-  function _renderUsersActions() {
+  function _renderUsersActions(): void {
     const el = document.getElementById('sec-users-actions');
     if (!el) return;
     el.innerHTML = _staged.length
@@ -7237,14 +7458,14 @@ export const Security = (() => {
   }
 
   // extraAttrs is a caller-built, already-escaped attribute string (id="..." or data-x="...").
-  function _roleSelectHtml(value: any, extraAttrs: any) {
+  function _roleSelectHtml(value: string, extraAttrs: string): string {
     const opts = [`<option value=""${!value ? ' selected' : ''}>${_esc(Util.t('ui.select_placeholder'))}</option>`]
-      .concat(_roleOptions.map((r: any) => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
+      .concat(_roleOptions.map((r) => `<option value="${_esc(r)}"${r === value ? ' selected' : ''}>${_esc(r)}</option>`))
       .join('');
     return `<select class="input" ${extraAttrs}>${opts}</select>`;
   }
 
-  function _userRowHtml(u: any) {
+  function _userRowHtml(u: SecurityUser): string {
     const pwOpen = _pwOpen.has(u.username);
     const pwCell = pwOpen
       ? `<div style="display:flex;gap:6px;align-items:center">
@@ -7261,13 +7482,13 @@ export const Security = (() => {
       <td class="md-td">${_esc(u.username)}</td>
       <td class="md-td"><input type="text" class="input" data-first-name-user="${_esc(u.username)}" value="${_esc(u.first_name || '')}" maxlength="100"></td>
       <td class="md-td"><input type="text" class="input" data-last-name-user="${_esc(u.username)}" value="${_esc(u.last_name || '')}" maxlength="100"></td>
-      <td class="md-td">${_roleSelectHtml(u.role, `data-role-select-user="${_esc(u.username)}"`)}</td>
+      <td class="md-td">${_roleSelectHtml(u.role || '', `data-role-select-user="${_esc(u.username)}"`)}</td>
       <td class="md-td">${pwCell}</td>
       <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${_esc(u.username)}" title="${_esc(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }
 
-  function _stagedRowHtml(r: any, i: any) {
+  function _stagedRowHtml(r: SecurityStagedUser, i: number): string {
     return `<tr class="md-row-new">
       <td class="md-td">${_esc(r.username)}</td>
       <td class="md-td"><input type="text" class="input" data-first-name-staged="${i}" value="${_esc(r.first_name || '')}" maxlength="100"></td>
@@ -7278,7 +7499,7 @@ export const Security = (() => {
     </tr>`;
   }
 
-  function _renderUsersRows() {
+  function _renderUsersRows(): void {
     const tbody = document.getElementById('sec-users-tbody');
     if (!tbody) return;
     if (!_users.length && !_staged.length) {
@@ -7286,36 +7507,36 @@ export const Security = (() => {
     } else {
       tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
     }
-    tbody.querySelectorAll('[data-role-select-user]').forEach((sel: any) =>
-      sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser, sel.value)));
-    tbody.querySelectorAll('[data-role-select-staged]').forEach((sel: any) =>
-      sel.addEventListener('change', () => { _staged[+sel.dataset.roleSelectStaged].role = sel.value; }));
-    tbody.querySelectorAll('[data-first-name-user]').forEach((inp: any) =>
-      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.firstNameUser)));
-    tbody.querySelectorAll('[data-last-name-user]').forEach((inp: any) =>
-      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.lastNameUser)));
-    tbody.querySelectorAll('[data-first-name-staged]').forEach((inp: any) =>
-      inp.addEventListener('blur', () => { _staged[+inp.dataset.firstNameStaged].first_name = inp.value; }));
-    tbody.querySelectorAll('[data-last-name-staged]').forEach((inp: any) =>
-      inp.addEventListener('blur', () => { _staged[+inp.dataset.lastNameStaged].last_name = inp.value; }));
-    tbody.querySelectorAll('[data-pw-toggle]').forEach((b: any) =>
-      b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle); _renderUsersRows(); }));
-    tbody.querySelectorAll('[data-pw-cancel]').forEach((b: any) =>
-      b.addEventListener('click', () => { _pwOpen.delete(b.dataset.pwCancel); _renderUsersRows(); }));
-    tbody.querySelectorAll('[data-pw-save]').forEach((b: any) =>
-      b.addEventListener('click', () => _savePassword(b.dataset.pwSave)));
-    tbody.querySelectorAll('[data-del-user]').forEach((b: any) =>
-      b.addEventListener('click', () => _deleteUser(b.dataset.delUser)));
-    tbody.querySelectorAll('[data-del-staged]').forEach((b: any) =>
-      b.addEventListener('click', () => { _staged.splice(+b.dataset.delStaged, 1); _renderUsersRows(); _renderUsersActions(); }));
+    tbody.querySelectorAll<HTMLSelectElement>('[data-role-select-user]').forEach((sel) =>
+      sel.addEventListener('change', () => _setUserRole(sel.dataset.roleSelectUser as string, sel.value)));
+    tbody.querySelectorAll<HTMLSelectElement>('[data-role-select-staged]').forEach((sel) =>
+      sel.addEventListener('change', () => { _staged[Number(sel.dataset.roleSelectStaged)].role = sel.value; }));
+    tbody.querySelectorAll<HTMLInputElement>('[data-first-name-user]').forEach((inp) =>
+      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.firstNameUser as string)));
+    tbody.querySelectorAll<HTMLInputElement>('[data-last-name-user]').forEach((inp) =>
+      inp.addEventListener('blur', () => _scheduleSetUserName(inp.dataset.lastNameUser as string)));
+    tbody.querySelectorAll<HTMLInputElement>('[data-first-name-staged]').forEach((inp) =>
+      inp.addEventListener('blur', () => { _staged[Number(inp.dataset.firstNameStaged)].first_name = inp.value; }));
+    tbody.querySelectorAll<HTMLInputElement>('[data-last-name-staged]').forEach((inp) =>
+      inp.addEventListener('blur', () => { _staged[Number(inp.dataset.lastNameStaged)].last_name = inp.value; }));
+    tbody.querySelectorAll<HTMLElement>('[data-pw-toggle]').forEach((b) =>
+      b.addEventListener('click', () => { _pwOpen.add(b.dataset.pwToggle as string); _renderUsersRows(); }));
+    tbody.querySelectorAll<HTMLElement>('[data-pw-cancel]').forEach((b) =>
+      b.addEventListener('click', () => { _pwOpen.delete(b.dataset.pwCancel as string); _renderUsersRows(); }));
+    tbody.querySelectorAll<HTMLElement>('[data-pw-save]').forEach((b) =>
+      b.addEventListener('click', () => _savePassword(b.dataset.pwSave as string)));
+    tbody.querySelectorAll<HTMLElement>('[data-del-user]').forEach((b) =>
+      b.addEventListener('click', () => _deleteUser(b.dataset.delUser as string)));
+    tbody.querySelectorAll<HTMLElement>('[data-del-staged]').forEach((b) =>
+      b.addEventListener('click', () => { _staged.splice(Number(b.dataset.delStaged), 1); _renderUsersRows(); _renderUsersActions(); }));
   }
 
-  async function _setUserRole(username: any, role: any) {
+  async function _setUserRole(username: string, role: string): Promise<void> {
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role: role || null }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Set role failed for ${username}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Set role failed for ${username}: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
@@ -7324,7 +7545,7 @@ export const Security = (() => {
   // in the same row coalesces into one save (reading both fields' live
   // values) instead of firing mid-edit and losing the second field's
   // keystrokes to the unconditional reload/re-render below.
-  function _scheduleSetUserName(username: any) {
+  function _scheduleSetUserName(username: string): void {
     clearTimeout(_nameSaveTimers.get(username));
     _nameSaveTimers.set(username, setTimeout(() => {
       _nameSaveTimers.delete(username);
@@ -7332,12 +7553,12 @@ export const Security = (() => {
     }, 200));
   }
 
-  async function _setUserName(username: any) {
+  async function _setUserName(username: string): Promise<void> {
     const row = document.querySelector(`tr[data-username="${CSS.escape(username)}"]`);
     if (!row) return;
-    const roleSelect = row.querySelector('[data-role-select-user]') as any;
-    const firstInput = row.querySelector('[data-first-name-user]') as any;
-    const lastInput = row.querySelector('[data-last-name-user]') as any;
+    const roleSelect = row.querySelector('[data-role-select-user]') as HTMLSelectElement | null;
+    const firstInput = row.querySelector('[data-first-name-user]') as HTMLInputElement | null;
+    const lastInput = row.querySelector('[data-last-name-user]') as HTMLInputElement | null;
     try {
       await _postJSON(`${API}/security/users/bulk`, {
         upserts: [{
@@ -7347,28 +7568,28 @@ export const Security = (() => {
           last_name: lastInput ? lastInput.value.trim() : '',
         }],
       });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Set name failed for ${username}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Set name failed for ${username}: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
 
-  async function _savePassword(username: any) {
-    const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`) as any;
+  async function _savePassword(username: string): Promise<void> {
+    const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`) as HTMLInputElement | null;
     const pw = input ? input.value : '';
     if (!pw || pw.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
     try {
       await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
       _pwOpen.delete(username);
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Set password failed for ${username}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Set password failed for ${username}: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
 
-  async function _deleteUser(username: any) {
+  async function _deleteUser(username: string): Promise<void> {
     const ok = await Modal.confirm({
       title: Util.t('sec.confirm_delete_user_title'),
       message: Util.t('sec.confirm_delete_user_msg', { username }),
@@ -7378,19 +7599,19 @@ export const Security = (() => {
     if (!ok) return;
     try {
       await _postJSON(`${API}/security/users/bulk`, { deletes: [{ username }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Delete user failed for ${username}: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Delete user failed for ${username}: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
 
-  async function _addUser() {
-    const uInput = document.getElementById('sec-new-username') as any;
-    const fInput = document.getElementById('sec-new-firstname') as any;
-    const lInput = document.getElementById('sec-new-lastname') as any;
-    const rSelect = document.getElementById('sec-new-role-select') as any;
-    const pInput = document.getElementById('sec-new-password') as any;
+  async function _addUser(): Promise<void> {
+    const uInput = document.getElementById('sec-new-username') as HTMLInputElement | null;
+    const fInput = document.getElementById('sec-new-firstname') as HTMLInputElement | null;
+    const lInput = document.getElementById('sec-new-lastname') as HTMLInputElement | null;
+    const rSelect = document.getElementById('sec-new-role-select') as HTMLSelectElement | null;
+    const pInput = document.getElementById('sec-new-password') as HTMLInputElement | null;
     const username = (uInput?.value || '').trim();
     if (!username) { Toast.show(Util.t('sec.username_required'), 'error'); return; }
     const password = pInput?.value || '';
@@ -7401,28 +7622,28 @@ export const Security = (() => {
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts: [{ username, role, first_name, last_name }] });
       if (password) await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Add user failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Add user failed: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
 
   // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
   // username/role 2-column shape (no password column — passwords are never pasted).
-  function _parseUserPaste(rawText: any) {
-    const lines = rawText.replace(/\r/g, '').split('\n').filter((l: any) => l.trim());
+  function _parseUserPaste(rawText: string): SecurityStagedUser[] {
+    const lines = rawText.replace(/\r/g, '').split('\n').filter((l) => l.trim());
     if (!lines.length) return [];
-    const first = lines[0].split('\t').map((h: any) => h.trim().toLowerCase());
+    const first = lines[0].split('\t').map((h) => h.trim().toLowerCase());
     const nameHdrs = ['username', Util.t('sec.username').toLowerCase()];
     const roleHdrs = ['role', Util.t('sec.role').toLowerCase()];
     const firstNameHdrs = ['first name', 'firstname', Util.t('sec.first_name').toLowerCase()];
     const lastNameHdrs = ['last name', 'lastname', Util.t('sec.last_name').toLowerCase()];
-    const hasHeader = first.some((h: any) =>
+    const hasHeader = first.some((h) =>
       nameHdrs.includes(h) || roleHdrs.includes(h) || firstNameHdrs.includes(h) || lastNameHdrs.includes(h));
-    let headers: any, dataLines: any;
+    let headers: string[], dataLines: string[];
     if (hasHeader) {
-      headers = first.map((h: any) => {
+      headers = first.map((h) => {
         if (nameHdrs.includes(h)) return 'username';
         if (roleHdrs.includes(h)) return 'role';
         if (firstNameHdrs.includes(h)) return 'first_name';
@@ -7434,22 +7655,22 @@ export const Security = (() => {
       headers = ['username', 'role'];
       dataLines = lines;
     }
-    return dataLines.map((line: any) => {
+    return dataLines.map((line) => {
       const vals = line.split('\t');
-      const row: any = {};
-      headers.forEach((h: any, i: any) => { row[h] = (vals[i] ?? '').trim(); });
-      return row;
-    }).filter((r: any) => r.username);
+      const row: Record<string, string> = {};
+      headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+      return row as unknown as SecurityStagedUser;
+    }).filter((r) => r.username);
   }
 
-  async function _pasteUsers() {
-    let raw: any;
+  async function _pasteUsers(): Promise<void> {
+    let raw: string;
     try { raw = await navigator.clipboard.readText(); }
     catch { Toast.show(Util.t('toast.clipboard_denied'), 'error'); return; }
     if (!raw.trim()) { Toast.show(Util.t('toast.clipboard_empty'), 'error'); return; }
     const rows = _parseUserPaste(raw);
     if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
-    rows.forEach((r: any) => _staged.push({
+    rows.forEach((r) => _staged.push({
       username: r.username, role: r.role || '',
       first_name: r.first_name || '', last_name: r.last_name || '',
     }));
@@ -7457,18 +7678,18 @@ export const Security = (() => {
     _renderUsersActions();
   }
 
-  async function _saveStaged() {
+  async function _saveStaged(): Promise<void> {
     if (!_staged.length) return;
-    const upserts = _staged.map((r: any) => ({
+    const upserts: SecurityUserUpsert[] = _staged.map((r) => ({
       username: r.username, role: r.role || null,
       first_name: r.first_name || '', last_name: r.last_name || '',
     }));
     try {
       await _postJSON(`${API}/security/users/bulk`, { upserts });
       _staged = [];
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Save staged users failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Save staged users failed: ${(e as Error).message}`);
     }
     await _reloadUsers();
   }
@@ -7476,32 +7697,32 @@ export const Security = (() => {
   // -----------------------------------------------------------------------
   // ROLES tab — master-detail: role list (left) + its plant assignments (right)
   // -----------------------------------------------------------------------
-  async function _reloadRoles() {
+  async function _reloadRoles(): Promise<void> {
     const body = document.getElementById('security-tabbody');
     try {
-      const [rolesData, rpData]: any = await Promise.all([
-        Util.fetchTraced(`${API}/master-data/roles`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-        Util.fetchTraced(`${API}/master-data/role_plants`).then((r: any) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      const [rolesData, rpData]: [SecurityMasterDataResponse<SecurityRoleRow>, SecurityMasterDataResponse<SecurityRolePlantRow>] = await Promise.all([
+        Util.fetchTraced(`${API}/master-data/roles`).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+        Util.fetchTraced(`${API}/master-data/role_plants`).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
       ]);
       _roles = rolesData.rows || [];
       _rolePlants = rpData.rows || [];
-      if (_selectedRole && !_roles.some((r: any) => r.role === _selectedRole)) _selectedRole = null;
+      if (_selectedRole && !_roles.some((r) => r.role === _selectedRole)) _selectedRole = null;
       // Best-effort: knowing which roles have >=1 user lets the delete button be
       // disabled pre-emptively. Non-fatal if this fetch fails — bulk_apply's FK
       // hardening (ForeignKeyViolation -> clean 400) remains the authoritative guard.
       try {
-        const usersData: any = await Util.fetchTraced(`${API}/security/users`).then((r: any) => { if (!r.ok) throw new Error(); return r.json(); });
-        _rolesInUse = new Set((usersData.users || []).map((u: any) => u.role).filter(Boolean));
+        const usersData: SecurityUsersResponse = await Util.fetchTraced(`${API}/security/users`).then((r) => { if (!r.ok) throw new Error(); return r.json(); });
+        _rolesInUse = new Set((usersData.users || []).map((u) => u.role).filter((r): r is string => Boolean(r)));
       } catch { _rolesInUse = new Set(); }
       if (_tab !== 'roles') return; // bail if the admin switched tabs while awaiting
       _renderRolesTab();
-    } catch (e: any) {
-      if (body) body.innerHTML = `<div class="md-empty">Failed to load roles: ${_esc(e.message)}</div>`;
-      ErrorLog.error('security', `Load roles failed: ${e.message}`);
+    } catch (e) {
+      if (body) body.innerHTML = `<div class="md-empty">Failed to load roles: ${_esc((e as Error).message)}</div>`;
+      ErrorLog.error('security', `Load roles failed: ${(e as Error).message}`);
     }
   }
 
-  function _renderRolesTab() {
+  function _renderRolesTab(): void {
     const body = document.getElementById('security-tabbody');
     if (!body) return;
     body.innerHTML = `<div class="sap-console"><div id="sec-roles-rail"></div><div id="sec-roles-detail"></div></div>`;
@@ -7509,7 +7730,7 @@ export const Security = (() => {
     _renderRolesDetail();
   }
 
-  function _roleRowHtml(r: any) {
+  function _roleRowHtml(r: SecurityRoleRow): string {
     const sel = r.role === _selectedRole ? ' sap-rail-row-sel' : '';
     const inUse = _rolesInUse.has(r.role);
     const delAttrs = inUse
@@ -7527,7 +7748,7 @@ export const Security = (() => {
     </div>`;
   }
 
-  function _renderRolesRail() {
+  function _renderRolesRail(): void {
     const el = document.getElementById('sec-roles-rail');
     if (!el) return;
     const rows = !_roles.length
@@ -7543,29 +7764,29 @@ export const Security = (() => {
       <div class="sap-rail" id="sec-roles-list">${rows}</div>
     </div>`;
     document.getElementById('sec-add-role-btn')?.addEventListener('click', _addRole);
-    el.querySelectorAll('[data-role-select]').forEach((nameEl: any) =>
-      nameEl.addEventListener('click', () => _selectRole(nameEl.dataset.roleSelect)));
-    el.querySelectorAll('[data-role-desc-save]').forEach((b: any) =>
-      b.addEventListener('click', () => _saveRoleDescription(b.dataset.roleDescSave)));
-    el.querySelectorAll('[data-role-del]').forEach((b: any) =>
-      b.addEventListener('click', () => _deleteRole(b.dataset.roleDel)));
+    el.querySelectorAll<HTMLElement>('[data-role-select]').forEach((nameEl) =>
+      nameEl.addEventListener('click', () => _selectRole(nameEl.dataset.roleSelect as string)));
+    el.querySelectorAll<HTMLElement>('[data-role-desc-save]').forEach((b) =>
+      b.addEventListener('click', () => _saveRoleDescription(b.dataset.roleDescSave as string)));
+    el.querySelectorAll<HTMLElement>('[data-role-del]').forEach((b) =>
+      b.addEventListener('click', () => _deleteRole(b.dataset.roleDel as string)));
   }
 
-  function _selectRole(role: any) {
+  function _selectRole(role: string): void {
     _selectedRole = role;
     // Local-only: toggle the selected highlight instead of rebuilding the rail,
     // so an in-progress "add role" draft elsewhere in the rail isn't wiped.
-    document.querySelectorAll('#sec-roles-list .sap-rail-row').forEach((el: any) =>
+    document.querySelectorAll<HTMLElement>('#sec-roles-list .sap-rail-row').forEach((el) =>
       el.classList.toggle('sap-rail-row-sel', el.dataset.role === role));
     _renderRolesDetail();
   }
 
-  function _renderRolesDetail() {
+  function _renderRolesDetail(): void {
     const el = document.getElementById('sec-roles-detail');
     if (!el) return;
     const role = _selectedRole;
     const header = role ? Util.t('sec.plants_for_role', { role }) : Util.t('sec.no_role_selected');
-    const plants = role ? _rolePlants.filter((rp: any) => rp.role === role).map((rp: any) => rp.plant).sort() : [];
+    const plants = role ? _rolePlants.filter((rp) => rp.role === role).map((rp) => rp.plant).sort() : [];
     const addHtml = !role ? '' : `
       <div class="sap-section-label">${_esc(Util.t('sec.add_plant'))}</div>
       <div class="hps-combobox" id="sec-plant-combobox" style="max-width:280px">
@@ -7574,7 +7795,7 @@ export const Security = (() => {
       </div>`;
     const listHtml = !role ? '' : !plants.length
       ? `<div class="sap-help" style="margin-top:12px">${_esc(Util.t('sec.no_plants_yet'))}</div>`
-      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map((p: any) =>
+      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map((p) =>
           `<span class="sap-keychip">${_esc(p)}<button data-remove-plant="${_esc(p)}" title="${_esc(Util.t('tip.delete_row'))}"
              style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
         ).join('')}</div>`;
@@ -7583,83 +7804,83 @@ export const Security = (() => {
       <div class="panel-body">${addHtml}${listHtml}</div>
     </div>`;
     if (role) {
-      const srch = document.getElementById('sec-plant-search') as any;
-      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as any).hidden = false; });
-      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as any).hidden = false; });
+      const srch = document.getElementById('sec-plant-search') as HTMLInputElement | null;
+      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as HTMLElement).hidden = false; });
+      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as HTMLElement).hidden = false; });
       srch?.addEventListener('blur', () => { setTimeout(() => { const dd = document.getElementById('sec-plant-dropdown'); if (dd) dd.hidden = true; }, 150); });
     }
-    el.querySelectorAll('[data-remove-plant]').forEach((b: any) =>
-      b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant)));
+    el.querySelectorAll<HTMLElement>('[data-remove-plant]').forEach((b) =>
+      b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant as string)));
   }
 
   // Type-to-filter Store.knownPlants() down to matches, click one to add it —
   // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
   // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
-  function _renderPlantDropdown(query: any) {
+  function _renderPlantDropdown(query: string): void {
     const dd = document.getElementById('sec-plant-dropdown');
     if (!dd || !_selectedRole) return;
-    const assigned = new Set(_rolePlants.filter((rp: any) => rp.role === _selectedRole).map((rp: any) => rp.plant));
-    const all = Store.knownPlants().filter((p: any) => !assigned.has(p));
+    const assigned = new Set(_rolePlants.filter((rp) => rp.role === _selectedRole).map((rp) => rp.plant));
+    const all = Store.knownPlants().filter((p) => !assigned.has(p));
     const q = (query || '').trim().toLowerCase();
-    const filtered = q ? all.filter((p: any) => p.toLowerCase().includes(q)) : all;
+    const filtered = q ? all.filter((p) => p.toLowerCase().includes(q)) : all;
     if (!filtered.length) {
       dd.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plants available'}</div>`;
       return;
     }
-    dd.innerHTML = filtered.map((p: any) => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
-    dd.querySelectorAll('[data-plant]').forEach((optEl: any) =>
-      optEl.addEventListener('mousedown', (e: any) => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant); }));
+    dd.innerHTML = filtered.map((p) => `<div class="hps-option" data-plant="${_esc(p)}">${_esc(p)}</div>`).join('');
+    dd.querySelectorAll<HTMLElement>('[data-plant]').forEach((optEl) =>
+      optEl.addEventListener('mousedown', (e) => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant as string); }));
   }
 
-  async function _addPlantToRole(plant: any) {
+  async function _addPlantToRole(plant: string): Promise<void> {
     if (!_selectedRole) return;
     try {
       await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role: _selectedRole, plant }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Add plant to role failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Add plant to role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
   }
 
-  async function _removePlantFromRole(plant: any) {
+  async function _removePlantFromRole(plant: string): Promise<void> {
     if (!_selectedRole) return;
     try {
       await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role: _selectedRole, plant }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Remove plant from role failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Remove plant from role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
   }
 
-  async function _addRole() {
-    const nameInput = document.getElementById('sec-new-role') as any;
-    const descInput = document.getElementById('sec-new-role-desc') as any;
+  async function _addRole(): Promise<void> {
+    const nameInput = document.getElementById('sec-new-role') as HTMLInputElement | null;
+    const descInput = document.getElementById('sec-new-role-desc') as HTMLInputElement | null;
     const role = (nameInput?.value || '').trim();
     if (!role) return;
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: (descInput?.value || '').trim() }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Add role failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Add role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
   }
 
-  async function _saveRoleDescription(role: any) {
-    const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`) as any;
+  async function _saveRoleDescription(role: string): Promise<void> {
+    const input = document.querySelector(`[data-role-desc="${CSS.escape(role)}"]`) as HTMLInputElement | null;
     if (!input) return;
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { upserts: [{ role, description: input.value }] });
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Save role description failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Save role description failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
   }
 
-  async function _deleteRole(role: any) {
+  async function _deleteRole(role: string): Promise<void> {
     const ok = await Modal.confirm({
       title: Util.t('sec.confirm_delete_role_title'),
       message: Util.t('sec.confirm_delete_role_msg', { role }),
@@ -7670,12 +7891,12 @@ export const Security = (() => {
     try {
       await _postJSON(`${API}/master-data/roles/bulk`, { deletes: [{ role }] });
       if (_selectedRole === role) _selectedRole = null;
-    } catch (e: any) {
-      Toast.show(Util.t('toast.save_failed', { msg: e.message }), 'error');
-      ErrorLog.error('security', `Delete role failed: ${e.message}`);
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Delete role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
   }
 
-  return { render } as any;
+  return { render };
 })();
