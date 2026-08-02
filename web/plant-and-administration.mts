@@ -3925,7 +3925,7 @@ interface AdminServerInfo {
   error?: string;
 }
 
-interface AdminTableStat {
+interface AdminTableStatData {
   table: string;
   live_rows: number;
   dead_rows: number;
@@ -3938,8 +3938,14 @@ interface AdminTableStat {
   mods_since_analyze: number;
   needs_vacuum: boolean;
   needs_analyze: boolean;
-  error?: string;
 }
+
+/** db.get_db_table_stats() returns either N real rows or a single-element
+ *  `[{error}]` sentinel list on failure — never a mix, and never a real row
+ *  carrying an `error` field alongside its domain data. A discriminated
+ *  union (rather than an optional `error?` bolted onto the domain shape)
+ *  models that honestly and lets callers narrow with `'error' in x`. */
+type AdminTableStat = AdminTableStatData | { error: string };
 
 interface AdminLongRunningQuery {
   pid: number;
@@ -3958,17 +3964,20 @@ interface AdminConnectionActivity {
   error?: string;
 }
 
-interface AdminLockWait {
+interface AdminLockWaitData {
   blocked_pid: number;
   blocked_query: string | null;
   blocking_pid: number;
   blocking_query: string | null;
   lock_type: string | null;
   blocked_for_s: number | null;
-  error?: string;
 }
 
-interface AdminIndexUsage {
+/** db.get_db_lock_waits() — same `[{error}]`-sentinel-on-failure shape as
+ *  AdminTableStat; see that type's comment. */
+type AdminLockWait = AdminLockWaitData | { error: string };
+
+interface AdminIndexUsageData {
   table: string;
   index: string;
   scans: number;
@@ -3976,8 +3985,11 @@ interface AdminIndexUsage {
   tuples_fetched: number;
   index_size: string;
   unused: boolean;
-  error?: string;
 }
+
+/** db.get_db_index_usage() — same `[{error}]`-sentinel-on-failure shape as
+ *  AdminTableStat; see that type's comment. */
+type AdminIndexUsage = AdminIndexUsageData | { error: string };
 
 interface AdminSlowQuery {
   query: string;
@@ -3994,7 +4006,7 @@ interface AdminSlowQueriesResult {
   error?: string;
 }
 
-interface AdminSequenceHealth {
+interface AdminSequenceHealthData {
   schema: string;
   name: string;
   data_type: string;
@@ -4003,7 +4015,28 @@ interface AdminSequenceHealth {
   used_pct: number;
   cycles: boolean;
   status: 'ok' | 'warn' | 'err';
-  error?: string;
+}
+
+/** db.get_db_sequence_health() — same `[{error}]`-sentinel-on-failure shape
+ *  as AdminTableStat; see that type's comment. */
+type AdminSequenceHealth = AdminSequenceHealthData | { error: string };
+
+/** Postgres ops console list endpoints (db.get_db_table_stats /
+ *  get_db_lock_waits / get_db_index_usage / get_db_sequence_health) return
+ *  either N real rows or a single-element `[{error}]` sentinel on failure —
+ *  never a mix. Narrows a raw union-typed list down to that error message
+ *  (or null when the list holds real rows), so call sites can branch on a
+ *  real discriminated-union check instead of an unenforced optional-chain
+ *  probe like `list[0]?.error`. */
+function _adminListError<T extends object>(list: ReadonlyArray<T | { error: string }>): string | null {
+  const first = list[0];
+  return first && 'error' in first ? first.error : null;
+}
+
+/** Companion to _adminListError: the same list narrowed to its real-data
+ *  rows (empty array when the list is the `[{error}]` sentinel). */
+function _adminListRows<T extends object>(list: ReadonlyArray<T | { error: string }>): T[] {
+  return _adminListError(list) ? [] : (list as T[]);
 }
 
 /** GET /diagnostics/db — the Admin Cockpit DB Deep Dive panel. */
@@ -4021,17 +4054,19 @@ interface AdminDbDeepResponse {
 
 /** One row of the in-memory backend event ring buffer (brain.py _log_event /
  *  ingest_frontend_logs) — GET /logs/backend returns these, newest first. */
+/** rid/error_code are always snake_case here — brain.py's _log_event and
+ *  ingest_frontend_logs (the only two writers of the ring buffer this
+ *  endpoint reads) never write camelCase reqId/errorCode, so those aliases
+ *  were dropped rather than kept as permanently-undefined dead fields. */
 interface BackendLogEntry {
   ts: string;
   level: 'info' | 'warn' | 'error';
   category: string;
   msg: string;
   rid?: string;
-  reqId?: string;
   event?: string;
   outcome?: string;
   error_code?: string;
-  errorCode?: string;
   error_type?: string;
   exc?: string;
   ctx?: Record<string, unknown>;
@@ -5211,12 +5246,13 @@ export const AdminCockpit = {
         }, true, Util.t('ui.diag_desc_server'));
 
         // ── 3. Table Health
-        const tables: AdminTableStat[] = Array.isArray(d.tables) ? d.tables : [];
-        const hasTableErr = tables[0]?.error;
-        const tablesNeedWork = !hasTableErr && tables.some((t) => t.needs_vacuum || t.needs_analyze);
-        mkSection(Util.t('ui.diag_section_table_health', { count: hasTableErr ? '?' : tables.length }),
-            hasTableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body) => {
-          if (hasTableErr) { body.textContent = tables[0].error!; return; }
+        const tablesRaw: AdminTableStat[] = Array.isArray(d.tables) ? d.tables : [];
+        const tableErr = _adminListError(tablesRaw);
+        const tables = _adminListRows(tablesRaw);
+        const tablesNeedWork = !tableErr && tables.some((t) => t.needs_vacuum || t.needs_analyze);
+        mkSection(Util.t('ui.diag_section_table_health', { count: tableErr ? '?' : tables.length }),
+            tableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body) => {
+          if (tableErr) { body.textContent = tableErr; return; }
           if (!tables.length) { body.textContent = Util.t('empty.no_user_tables'); return; }
           const strip = document.createElement('div');
           strip.className = 'db-maint-strip';
@@ -5254,12 +5290,13 @@ export const AdminCockpit = {
         }, false, Util.t('ui.diag_desc_connections'));
 
         // ── 5. Lock Waits
-        const locks: AdminLockWait[] = Array.isArray(d.locks) ? d.locks : [];
-        const hasLockErr = locks[0]?.error;
-        const activeLocks = !hasLockErr && locks.length > 0;
-        mkSection(Util.t('ui.diag_section_lock_waits', { count: hasLockErr ? '?' : locks.length }),
-            hasLockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body) => {
-          if (hasLockErr) { body.textContent = locks[0].error!; return; }
+        const locksRaw: AdminLockWait[] = Array.isArray(d.locks) ? d.locks : [];
+        const lockErr = _adminListError(locksRaw);
+        const locks = _adminListRows(locksRaw);
+        const activeLocks = !lockErr && locks.length > 0;
+        mkSection(Util.t('ui.diag_section_lock_waits', { count: lockErr ? '?' : locks.length }),
+            lockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body) => {
+          if (lockErr) { body.textContent = lockErr; return; }
           if (!activeLocks) {
             const ok = document.createElement('div');
             ok.className = 'admin-db-ok-msg';
@@ -5272,14 +5309,15 @@ export const AdminCockpit = {
         }, false, Util.t('ui.diag_desc_lock_waits'));
 
         // ── 6. Index Usage
-        const indexes: AdminIndexUsage[] = Array.isArray(d.indexes) ? d.indexes : [];
-        const hasIdxErr = indexes[0]?.error;
-        const unusedCount = !hasIdxErr ? indexes.filter((ix) => ix.unused).length : 0;
+        const indexesRaw: AdminIndexUsage[] = Array.isArray(d.indexes) ? d.indexes : [];
+        const idxErr = _adminListError(indexesRaw);
+        const indexes = _adminListRows(indexesRaw);
+        const unusedCount = !idxErr ? indexes.filter((ix) => ix.unused).length : 0;
         mkSection(unusedCount
-            ? Util.t('ui.diag_section_index_unused', { count: hasIdxErr ? '?' : indexes.length, unused: unusedCount })
-            : Util.t('ui.diag_section_index_usage', { count: hasIdxErr ? '?' : indexes.length }),
-            hasIdxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body) => {
-          if (hasIdxErr) { body.textContent = indexes[0].error!; return; }
+            ? Util.t('ui.diag_section_index_unused', { count: idxErr ? '?' : indexes.length, unused: unusedCount })
+            : Util.t('ui.diag_section_index_usage', { count: idxErr ? '?' : indexes.length }),
+            idxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body) => {
+          if (idxErr) { body.textContent = idxErr; return; }
           if (!indexes.length) { body.textContent = Util.t('empty.no_indexes'); return; }
           if (unusedCount > 0)
             AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_unused_indexes_warn', { count: unusedCount }));
@@ -5310,12 +5348,13 @@ export const AdminCockpit = {
         }, false, Util.t('ui.diag_desc_slow_queries'));
 
         // ── 8. Sequences
-        const seqs: AdminSequenceHealth[] = Array.isArray(d.sequences) ? d.sequences : [];
-        const hasSeqErr = seqs[0]?.error;
-        const seqIssues = !hasSeqErr ? seqs.filter((s) => s.status !== 'ok').length : 0;
-        mkSection(Util.t('ui.diag_section_sequences', { count: hasSeqErr ? '?' : seqs.length }),
-            hasSeqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body) => {
-          if (hasSeqErr) { body.textContent = seqs[0].error!; return; }
+        const seqsRaw: AdminSequenceHealth[] = Array.isArray(d.sequences) ? d.sequences : [];
+        const seqErr = _adminListError(seqsRaw);
+        const seqs = _adminListRows(seqsRaw);
+        const seqIssues = !seqErr ? seqs.filter((s) => s.status !== 'ok').length : 0;
+        mkSection(Util.t('ui.diag_section_sequences', { count: seqErr ? '?' : seqs.length }),
+            seqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body) => {
+          if (seqErr) { body.textContent = seqErr; return; }
           if (!seqs.length) { body.textContent = Util.t('empty.no_sequences'); return; }
           body.appendChild(AdminCockpit._dbProgressBars(seqs));
         }, false, Util.t('ui.diag_desc_sequences'));
@@ -5376,12 +5415,12 @@ export const AdminCockpit = {
     const activeConn = (conn.by_state || {})['active'] ?? 0;
     strip.appendChild(mkTile(Util.t('ui.diag_tile_sessions'), String(conn.total ?? '—'), Util.t('ui.diag_tile_active', {count: activeConn}),
       conn.error ? 'err' : ((conn.long_running || []).length > 0 ? 'warn' : 'ok'), null));
-    const locks: AdminLockWait[] = Array.isArray(d.locks) && !d.locks[0]?.error ? d.locks : [];
+    const locks = _adminListRows<AdminLockWaitData>(Array.isArray(d.locks) ? d.locks : []);
     strip.appendChild(mkTile(Util.t('ui.diag_tile_lock_waits'),
       locks.length > 0 ? `<span style="color:var(--err)">${locks.length}</span>` : '0',
       locks.length > 0 ? Util.t('ui.diag_tile_contention') : Util.t('ui.diag_tile_clear'),
       locks.length > 0 ? 'err' : 'ok', null));
-    const tables: AdminTableStat[] = Array.isArray(d.tables) && !d.tables[0]?.error ? d.tables : [];
+    const tables = _adminListRows<AdminTableStatData>(Array.isArray(d.tables) ? d.tables : []);
     const tblIssues = tables.filter((t) => t.needs_vacuum || t.needs_analyze).length;
     strip.appendChild(mkTile(Util.t('ui.diag_tile_table_issues'),
       tblIssues > 0 ? `<span style="color:var(--warn)">${tblIssues}</span>` : '0',
@@ -5454,7 +5493,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbTableCards(tables: AdminTableStat[]): HTMLDivElement {
+  _dbTableCards(tables: AdminTableStatData[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-tbl-cards';
     for (const tbl of tables) {
@@ -5525,7 +5564,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbHBarChart(indexes: AdminIndexUsage[]): HTMLDivElement {
+  _dbHBarChart(indexes: AdminIndexUsageData[]): HTMLDivElement {
     const maxScans = Math.max(...indexes.map((ix) => ix.scans ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
@@ -5595,7 +5634,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbProgressBars(seqs: AdminSequenceHealth[]): HTMLDivElement {
+  _dbProgressBars(seqs: AdminSequenceHealthData[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-progress-list';
     for (const s of seqs) {
@@ -5620,13 +5659,15 @@ export const AdminCockpit = {
     return wrap;
   },
 
-  _dbLockChain(locks: AdminLockWait[]): HTMLDivElement {
+  _dbLockChain(locks: AdminLockWaitData[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-lock-chains';
     for (const lk of locks) {
       const chain = document.createElement('div');
       chain.className = 'admin-db-lock-chain';
-      const mkNode = (pid: number | null, role: string, query: string | null, cls: string): HTMLDivElement => {
+      // pid is non-nullable on AdminLockWaitData — both real call sites below
+      // pass lk.blocking_pid/lk.blocked_pid, never a null.
+      const mkNode = (pid: number, role: string, query: string | null, cls: string): HTMLDivElement => {
         const node = document.createElement('div');
         node.className = `admin-db-lock-node ${cls}`;
         node.innerHTML = `<span class="admin-db-lock-pid">PID ${pid}</span>`
@@ -5729,7 +5770,7 @@ export const AdminCockpit = {
         host.textContent = '';
         // Client-side reqId correlation filter (server filters category/since/q/level).
         let entries = rawEntries || [];
-        if (reqIdFilter) entries = entries.filter((e) => e.rid === reqIdFilter || e.reqId === reqIdFilter);
+        if (reqIdFilter) entries = entries.filter((e) => e.rid === reqIdFilter);
         if (countEl) countEl.textContent = Util.t('ui.backend_log_count', { total, shown: entries.length });
 
         // Overflow marker if the backend reports a dropped count.
@@ -5779,7 +5820,7 @@ export const AdminCockpit = {
             src.title = 'Forwarded from a frontend client';
             head.appendChild(src);
           }
-          const code = e.error_code || e.errorCode;
+          const code = e.error_code;
           if (code) {
             const codeEl = document.createElement('span');
             codeEl.className = 'admin-log-code';
@@ -5792,7 +5833,7 @@ export const AdminCockpit = {
             });
             head.appendChild(codeEl);
           }
-          const rid = e.rid || e.reqId;
+          const rid = e.rid;
           if (rid) {
             const ridEl = document.createElement('span');
             ridEl.className = 'admin-log-reqid';
