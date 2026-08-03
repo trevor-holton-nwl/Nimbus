@@ -461,40 +461,36 @@ h1, h2, h3, h4 {
   background: var(--chrome-panel);
   border-color: transparent;
 }
-#user-settings-btn::before {
-  content: '';
-  position: absolute;
-  left: -6px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 20px;
-  background: var(--chrome-border);
-}
-/* Divider between the status/info widgets (Confidence badge, alert bell) and
-   the action/account cluster (Save, user icon, admin log toggle) — same
-   pattern as #user-settings-btn::before above. */
+/* Dividers between the status/info widgets (Confidence badge, alert bell), Save,
+   and the action/account cluster (user icon, admin log toggle) — both anchored to
+   Save itself as a symmetric pair so they stay centered in each 6px row gap
+   regardless of neighboring button width/visibility. */
 .topbar-actions .btn-primary {
   position: relative;
   background: var(--chrome-accent);
   color: var(--chrome-accent-fg);
   border-color: var(--chrome-accent);
+  height: 27px;
+  padding: 5px 11px;
+  font-size: 11.3px;
 }
 .topbar-actions .btn-primary:hover {
   background: var(--chrome-accent);
   border-color: var(--chrome-accent);
   filter: brightness(0.92);
 }
-.topbar-actions .btn-primary::before {
+.topbar-actions .btn-primary::before,
+.topbar-actions .btn-primary::after {
   content: '';
   position: absolute;
-  left: -6px;
   top: 50%;
   transform: translateY(-50%);
   width: 1px;
   height: 20px;
   background: var(--chrome-border);
 }
+.topbar-actions .btn-primary::before { left: -3.5px; }
+.topbar-actions .btn-primary::after { right: -3.5px; }
 
 /* Narrow-viewport fallback: brand + plant selector + utility widgets hold
    their size, tab labels truncate instead of clipping/overflowing the bar. */

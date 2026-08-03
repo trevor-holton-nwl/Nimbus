@@ -241,8 +241,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-conf-label { font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--chrome-fg-mute); }
 .ni-conf-score { font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace; min-width:24px; text-align:right; }
 .ni-conf-ring { display:inline-block; position:relative; width:16px; height:16px;
-  border-radius:50%; flex-shrink:0; }
-.ni-conf-ring::after { content:''; position:absolute; inset:3px; border-radius:50%; background:var(--chrome-panel); }
+  border-radius:50%; flex-shrink:0;
+  -webkit-mask-image: radial-gradient(circle, transparent 5px, #000 5px);
+  mask-image: radial-gradient(circle, transparent 5px, #000 5px); }
 .ni-conf-delta { position:absolute; top:-8px; right:4px; font-size:10px; font-weight:700;
   font-family:'JetBrains Mono',monospace; animation:ni-fade-up 1.8s ease forwards; pointer-events:none; }
 @keyframes ni-fade-up { 0%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-12px)} }
