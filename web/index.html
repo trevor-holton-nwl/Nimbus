@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-08-02-a';</script>
-<link rel="stylesheet" href="styles.css?v=2026-08-02-a">
+<script>window.NIMBUS_BUILD_ID = '2026-08-03-a';</script>
+<link rel="stylesheet" href="styles.css?v=2026-08-03-a">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1981,16 +1981,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="nav-drawer-section nav-drawer-nav" role="tablist">
     <div class="nav-drawer-eyebrow" data-i18n="ui.nav_drawer_heading">NAVIGATE</div>
     <button class="tab-btn active" data-tab="home" role="tab">
-      <span class="tab-ico">◉</span><span data-i18n="tab.home">Dashboard</span>
+      <span data-i18n="tab.home">Dashboard</span>
     </button>
     <button class="tab-btn" data-tab="gantt" role="tab">
-      <span class="tab-ico">▦</span><span data-i18n="tab.gantt">Scheduling Board</span>
+      <span data-i18n="tab.gantt">Scheduling Board</span>
     </button>
     <button class="tab-btn" data-tab="labor" role="tab">
-      <span class="tab-ico">☖</span><span data-i18n="tab.labor">Labor Plan</span>
+      <span data-i18n="tab.labor">Labor Plan</span>
     </button>
     <button class="tab-btn" data-tab="masterdata" role="tab">
-      <span class="tab-ico">🗂️</span><span data-i18n="tab.masterdata">Master Data</span>
+      <span data-i18n="tab.masterdata">Master Data</span>
     </button>
     <!-- Activates the dormant admin-gate in application-shell.mjs
          (`adminBtn.hidden = !Session.isAdmin()`), which previously targeted
@@ -1998,15 +1998,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
          precedent of hidden-until-resolved) — the gate corrects this on init
          for whichever way Session.isAdmin() resolves. -->
     <button class="tab-btn" data-tab="admin" role="tab" hidden>
-      <span class="tab-ico">⚙</span><span data-i18n="tab.admin">Admin Cockpit</span>
+      <span data-i18n="tab.admin">Admin Cockpit</span>
     </button>
   </div>
 
   <div class="nav-drawer-section nav-drawer-plant">
     <div class="nav-drawer-eyebrow">PLANT</div>
-    <button type="button" class="nav-drawer-plant-row" id="nav-drawer-plant-btn">
-      <span class="nav-drawer-plant-label">Change Plant</span>
-    </button>
+    <div class="nav-drawer-plant-row">
+      <span class="nav-drawer-plant-label" id="nav-drawer-plant-current">No plant selected</span>
+      <button type="button" class="nav-drawer-plant-change-btn" id="nav-drawer-plant-btn">Change</button>
+    </div>
   </div>
 
   <div class="nav-drawer-footer" data-i18n="ui.nav_drawer_footer">NIMBUS Production Scheduling</div>
@@ -2036,6 +2037,29 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <button data-action="override" data-i18n="ctx.override_datetime">📅 Override date / time…</button>
   <div class="ctx-sep"></div>
   <button data-action="inspect" data-i18n="ctx.open_inspector">👁 Open in inspector</button>
+</div>
+
+<!-- =========================================================
+     MODAL: Change Plant (nav-drawer "Change" action) — searchable list,
+     stays open ON TOP of the still-open nav-drawer. Filter/pinned-first
+     logic mirrors PlantSelector's _renderDropdown at a level of complexity
+     appropriate for a modal (click-to-select, no keyboard nav) — see
+     App._renderChangePlantList in application-shell.mts.
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-change-plant" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3>Change Plant</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-change-plant')">✕</button>
+    </header>
+    <div class="modal-body">
+      <input type="text" id="cpm-search" placeholder="Search plants…" autocomplete="off" spellcheck="false">
+      <div class="cpm-list" id="cpm-list" role="listbox"></div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-change-plant')">Close</button>
+    </footer>
+  </div>
 </div>
 
 <!-- =========================================================

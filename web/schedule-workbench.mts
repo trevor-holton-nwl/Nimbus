@@ -6162,7 +6162,7 @@ export const OptimizeDialog = (() => {
     const trigger = document.getElementById('opt-plant-trigger');
     const sel     = document.getElementById('opt-plant-select');
     if (!dd) return;
-    const opening = !!dd.hidden;
+    const opening = dd.hidden;
     if (opening && trigger) {
       const rect = trigger.getBoundingClientRect();
       dd.style.top   = (rect.bottom + 4) + 'px';

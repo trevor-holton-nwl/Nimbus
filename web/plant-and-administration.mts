@@ -5075,7 +5075,7 @@ export const AdminCockpit = {
     try {
       const r = await fetch(`${Config.API_BASE}/maintenance/${action}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify(body),
       }).then((res) => res.json() as Promise<AdminMaintenanceResult>);
       if (!r.ok) throw new Error(r.error || 'maintenance failed');
