@@ -1,0 +1,20 @@
+-- 2026-08-03 — last_login on user_security
+--
+-- Why: server-side audit trail of successful sign-ins, surfaced read-only in
+-- the admin Security tab's user list. Written exclusively by
+-- auth.authenticate() on a SUCCESSFUL POST /security/login — never on a
+-- failed attempt, and never through any other path (this column is NOT part
+-- of bulk_upsert_users or any other client-writable payload). Nullable — NULL
+-- means "never logged in since this column existed," shown as "Never" in
+-- the admin table.
+--
+-- This is unrelated to and does not enforce the frontend's 12-hour local
+-- session expiry (a purely client-side localStorage timestamp, checked only
+-- at page load) — this column is a separate, server-side audit record of
+-- login events.
+--
+-- auth.ensure_user_security_table() also self-bootstraps this column at app
+-- startup (mirrors how it self-bootstraps first_name/last_name), so a running
+-- app never lacks it — but this file (or a schema.sql re-apply, which carries
+-- the same statement) is the explicit migration + record of drift.
+ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;

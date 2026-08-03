@@ -701,6 +701,14 @@ CREATE TABLE IF NOT EXISTS user_security (
 ALTER TABLE user_security ADD COLUMN IF NOT EXISTS first_name TEXT;
 ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_name  TEXT;
 
+-- last_login is a server-set audit timestamp, updated only by
+-- auth.authenticate() on a SUCCESSFUL login. Nullable — NULL means "never
+-- logged in since this column existed," shown as "Never" in the admin
+-- Security tab. Unrelated to the frontend's local 12h session expiry (a
+-- purely client-side localStorage check) — this is just an audit trail.
+-- See migrations/2026-08-03-user-last-login.sql.
+ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;
+
 -- Case-insensitive uniqueness on username. The PK stays case-sensitive (so
 -- display case like 'PJ29587' is preserved), but login + require_admin match on
 -- lower(username), and the auth.py user upserts infer ON CONFLICT (lower(username))

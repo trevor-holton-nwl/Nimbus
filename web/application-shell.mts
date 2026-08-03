@@ -913,7 +913,7 @@ const SessionUIAdapter = {
    the left, a fixed-dark-chrome sign-in panel on the right. The panel is
    --chrome-* tokens in both light and dark mode by design (not themed).
    ========================================================================== */
-function showLoginScreen(): void {
+function showLoginScreen(opts?: { expired?: boolean }): void {
   const root = document.createElement('div');
   root.className = 'login-screen';
   root.setAttribute('role', 'dialog');
@@ -975,6 +975,11 @@ function showLoginScreen(): void {
     errEl.textContent = msg;
     errEl.hidden = false;
   }
+
+  // Reuses the same error element/styling the invalid-credentials path uses
+  // below — no separate "session expired" UI state, per the boot gate's
+  // one-shot opts.expired flag (nothing persisted, consumed once here).
+  if (opts?.expired) _showError(Util.t('sec.session_expired'));
 
   async function _submit(): Promise<void> {
     const username = userInp.value.trim().toLowerCase();

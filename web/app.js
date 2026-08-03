@@ -702,6 +702,11 @@ const NIMBUS = (function () {
     // user_security. A cached session (page reload while signed in) skips
     // straight to _bootMain(); otherwise showLoginScreen() takes over and calls
     // App._bootMain() itself once Session.signIn() resolves.
+    //
+    // The 12h local cache lifetime is checked ONLY here, at boot — not via a
+    // live in-tab timer — so a session older than Config.SESSION_MAX_AGE_MS
+    // is cleared and treated exactly like "not logged in" on the next reload.
+    if (Session.isExpired()) { Session.clearExpired(); showLoginScreen({ expired: true }); return; }
     if (!Session.currentUser()) { showLoginScreen(); return; }
     _bootMain();
   }

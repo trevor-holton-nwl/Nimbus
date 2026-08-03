@@ -7208,6 +7208,10 @@ interface SecurityUser {
   has_password: boolean;
   first_name?: string | null;
   last_name?: string | null;
+  // ISO timestamp string (or null = never logged in since this column
+  // existed) from auth.list_users; server-side audit only, unrelated to the
+  // frontend's own 12h local session-cache expiry.
+  last_login?: string | null;
 }
 
 interface SecurityUsersResponse {
@@ -7450,6 +7454,7 @@ export const Security = (() => {
               <th class="md-th">${_esc(Util.t('sec.last_name'))}</th>
               <th class="md-th">${_esc(Util.t('sec.role'))}</th>
               <th class="md-th">${_esc(Util.t('sec.password'))}</th>
+              <th class="md-th">${_esc(Util.t('sec.last_login'))}</th>
               <th class="md-th"></th>
             </tr></thead>
             <tbody id="sec-users-tbody"></tbody>
@@ -7504,6 +7509,7 @@ export const Security = (() => {
       <td class="md-td"><input type="text" class="input" data-last-name-user="${_esc(u.username)}" value="${_esc(u.last_name || '')}" maxlength="100"></td>
       <td class="md-td">${_roleSelectHtml(u.role || '', `data-role-select-user="${_esc(u.username)}"`)}</td>
       <td class="md-td">${pwCell}</td>
+      <td class="md-td">${_esc(u.last_login ? new Date(u.last_login).toLocaleString() : Util.t('sec.never'))}</td>
       <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${_esc(u.username)}" title="${_esc(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }
@@ -7515,6 +7521,7 @@ export const Security = (() => {
       <td class="md-td"><input type="text" class="input" data-last-name-staged="${i}" value="${_esc(r.last_name || '')}" maxlength="100"></td>
       <td class="md-td">${_roleSelectHtml(r.role, `data-role-select-staged="${i}"`)}</td>
       <td class="md-td">${_esc(Util.t('sec.password_not_set'))}</td>
+      <td class="md-td">—</td>
       <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${_esc(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }
@@ -7523,7 +7530,7 @@ export const Security = (() => {
     const tbody = document.getElementById('sec-users-tbody');
     if (!tbody) return;
     if (!_users.length && !_staged.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="md-empty">${_esc(Util.t('sec.no_users_yet'))}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="md-empty">${_esc(Util.t('sec.no_users_yet'))}</td></tr>`;
     } else {
       tbody.innerHTML = _users.map(_userRowHtml).join('') + _staged.map(_stagedRowHtml).join('');
     }

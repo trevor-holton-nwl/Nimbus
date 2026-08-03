@@ -140,7 +140,8 @@ export const Config = {
   KNOWN_PLANTS:       ['5512', '1006'],
   CENTER_ON_CLICK:    true,                       // set false to disable click-to-center in Gantt
   DEBUG_BLOCKS:       true,                       // when true, Store.addBlock/addPlantBlock console.trace every push (for diagnosing duplicate-add bugs)
-  CONCURRENCY_CHECK:  true                         // optimistic-concurrency guard on task writes. Set false to force every write (legacy last-write-wins) if the guard misbehaves in a multi-user pilot.
+  CONCURRENCY_CHECK:  true,                        // optimistic-concurrency guard on task writes. Set false to force every write (legacy last-write-wins) if the guard misbehaves in a multi-user pilot.
+  SESSION_MAX_AGE_MS: 12 * 60 * 60 * 1000          // local login cache lifetime (Session.isExpired) — 12h literal, not 12 * Config.MS_HOUR (Config can't reference itself mid-initializer)
 };
 
 /* =============================================================================

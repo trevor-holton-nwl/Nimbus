@@ -40,7 +40,8 @@ def ensure_user_security_table() -> None:
     the app self-bootstrap even before the migration is applied, matching
     db.ensure_color_wheel_table()'s pattern. Must run AFTER roles exists —
     user_security.role FKs to roles(role). Also self-bootstraps the optional
-    first_name/last_name columns (added 2026-07-08) the same way."""
+    first_name/last_name columns (added 2026-07-08) and the last_login audit
+    column (added 2026-08-03) the same way."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_security (
@@ -53,6 +54,7 @@ def ensure_user_security_table() -> None:
         """)
         cur.execute("ALTER TABLE user_security ADD COLUMN IF NOT EXISTS first_name TEXT")
         cur.execute("ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_name TEXT")
+        cur.execute("ALTER TABLE user_security ADD COLUMN IF NOT EXISTS last_login TIMESTAMP")
         conn.commit()
 
     # Case-insensitive uniqueness on username. The PK stays case-sensitive
@@ -173,7 +175,7 @@ def list_users(limit: int | None = None, offset: int | None = None,
         where_params = [f"%{search}%"]
 
     query = (
-        "SELECT username, role, (password_hash IS NOT NULL) AS has_password, first_name, last_name "
+        "SELECT username, role, (password_hash IS NOT NULL) AS has_password, first_name, last_name, last_login "
         "FROM user_security" + where_sql + " ORDER BY username"
     )
     params = list(where_params)
@@ -188,7 +190,7 @@ def list_users(limit: int | None = None, offset: int | None = None,
         cur.execute(query, params)
         users = [
             {"username": r[0], "role": r[1], "has_password": bool(r[2]),
-             "first_name": r[3], "last_name": r[4]}
+             "first_name": r[3], "last_name": r[4], "last_login": r[5]}
             for r in cur.fetchall()
         ]
 
@@ -545,8 +547,16 @@ def update_own_name(actor_email: str | None, first_name: str | None, last_name: 
 def authenticate(username: str, password: str) -> dict | None:
     """Verify a username/password pair against user_security. Returns
     {"username", "role", "first_name", "last_name"} on success, None on
-    failure. Never returns or logs the password hash."""
+    failure. Never returns or logs the password hash. On success, also stamps
+    last_login = NOW() — a server-side audit record, separate from and not
+    used by the frontend's own 12h local session-cache expiry."""
     if verify_user_password(username, password):
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE user_security SET last_login = NOW() WHERE lower(username) = lower(%s)",
+                (username,),
+            )
+            conn.commit()
         profile = get_user_profile(username) or {}
         return {
             "username": username,

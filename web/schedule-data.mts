@@ -111,6 +111,11 @@ interface CachedSessionUser {
   last_name: string | null;
   settings: Record<string, unknown>;
   role_settings: Record<string, unknown>;
+  // Epoch ms this session was established (signIn only — refresh() carries it
+  // forward, never resets it). Optional: sessions cached before this field
+  // existed predate it, same reasoning as is_admin? above; isExpired() below
+  // treats a missing/non-numeric value as expired rather than never-expiring.
+  loggedInAt?: number;
 }
 
 /** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
@@ -1737,6 +1742,7 @@ export const Session = (() => {
       allowed_plants: data.allowed_plants ?? null,
       first_name: data.first_name || null, last_name: data.last_name || null,
       settings, role_settings: roleSettings,
+      loggedInAt: Date.now(),
     }));
     Store.setUserSettings(settings, 'session-signin');
     Store.setRoleDefaults(roleSettings, 'session-signin');
@@ -1748,6 +1754,28 @@ export const Session = (() => {
     localStorage.removeItem(KEY);
     Store.emit({ type: 'session:changed', kind: 'signout' });
     location.reload();
+  }
+
+  // 12-hour local cache lifetime, checked ONLY at the boot gate (app.js
+  // _domReadyGate) — not a live in-tab timer, so a tab left open past 12h
+  // keeps working until its next reload. A missing/non-numeric loggedInAt
+  // (a session cached before this field existed, or a corrupted blob) counts
+  // as expired rather than never-expiring — Date.now() - undefined is NaN,
+  // and NaN > threshold is false, so this must be checked explicitly rather
+  // than folded into the arithmetic comparison alone.
+  function isExpired(): boolean {
+    const u = currentUser();
+    if (!u) return false;   // no session cached — not "expired", just signed out
+    if (typeof u.loggedInAt !== 'number') return true;
+    return Date.now() - u.loggedInAt > Config.SESSION_MAX_AGE_MS;
+  }
+
+  // Clears a stale/expired cached session pre-boot. Deliberately NOT signOut():
+  // no event emit, no reload — the boot gate calls this once, synchronously,
+  // before _domReadyGate falls through to the same showLoginScreen() path an
+  // ordinary "not logged in" state already uses.
+  function clearExpired(): void {
+    localStorage.removeItem(KEY);
   }
 
   // Reconcile the role cached at login (which the admin UI gates on) against the
@@ -1783,6 +1811,7 @@ export const Session = (() => {
         first_name: me.first_name || null,
         last_name: me.last_name || null,
         settings, role_settings: roleSettings,
+        loggedInAt: u.loggedInAt, // carried forward, never reset — the 12h clock is anchored to signIn()
       }));
       Store.setUserSettings(settings, 'session-refresh');
       Store.setRoleDefaults(roleSettings, 'session-refresh');
@@ -1898,5 +1927,6 @@ export const Session = (() => {
     currentUser, actor, isAdmin, allowedPlants,
     signIn, signOut, refresh, onAuthDenied,
     setPref, flushPrefs, pref, updateCachedUser,
+    isExpired, clearExpired,
   };
 })();
