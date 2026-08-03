@@ -43,7 +43,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit } from './types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -7276,6 +7276,10 @@ interface SecurityBulkResult {
 interface SecurityRoleRow {
   role: string;
   description?: string | null;
+  /** roles.settings.pages — per-role top-level page-access toggles, attached
+   *  by master_data.py's list_rows() for the 'roles' table only (not a real
+   *  registered column_metadata column, so it never shows in a plain grid). */
+  pages?: Partial<Record<TopLevelTab, boolean>> | null;
 }
 
 /** One `role_plants` table row (`GET /master-data/role_plants`). */
@@ -7812,10 +7816,47 @@ export const Security = (() => {
     _renderRolesDetail();
   }
 
+  // Nav order + labels for the Page Access toggles — mirrors App._firstAccessibleTab's
+  // order (application-shell.mts) and Session.DEFAULT_PAGE_ACCESS's key set
+  // (schedule-data.mts); keep all three, plus master_data.py's PAGE_ACCESS_KEYS, in sync.
+  function _pageAccessDefs(): Array<[TopLevelTab, string]> {
+    return [
+      ['home',       Util.t('tab.home')],
+      ['gantt',      Util.t('tab.gantt')],
+      ['labor',      Util.t('us.tab_labor')],
+      ['masterdata', Util.t('tab.masterdata')],
+      ['admin',      Util.t('tab.admin')],
+    ];
+  }
+
+  // Default when a role hasn't customized a given page yet: everything on
+  // except Admin Cockpit — except for the 'admin' role itself, which defaults
+  // to Admin Cockpit on too (Session.canAccessTab never even reaches this
+  // default for real admin users, since it short-circuits on isAdmin(), but
+  // the Roles tab shows explicit per-role state so 'admin' needs it directly).
+  function _defaultPageAccess(role: string): Record<TopLevelTab, boolean> {
+    return { home: true, gantt: true, labor: true, masterdata: true, admin: role === 'admin' };
+  }
+
+  function _pageAccessRowHtml(role: string, tab: TopLevelTab, label: string, roleRow: SecurityRoleRow | undefined): string {
+    const defaults = _defaultPageAccess(role);
+    const checked = roleRow?.pages?.[tab] ?? defaults[tab];
+    const locked = role === 'admin' && tab === 'admin';
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <span style="font-size:13px">${_esc(label)}</span>
+      <label class="cal-day-toggle-wrap" style="${locked ? 'cursor:default' : ''}"
+          title="${locked ? _esc(Util.t('sec.admin_page_locked')) : ''}">
+        <input type="checkbox" data-page-toggle="${_esc(tab)}" ${checked ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+        <span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span>
+      </label>
+    </div>`;
+  }
+
   function _renderRolesDetail(): void {
     const el = document.getElementById('sec-roles-detail');
     if (!el) return;
     const role = _selectedRole;
+    const roleRow = role ? _roles.find((r) => r.role === role) : undefined;
     const header = role ? Util.t('sec.plants_for_role', { role }) : Util.t('sec.no_role_selected');
     const plants = role ? _rolePlants.filter((rp) => rp.role === role).map((rp) => rp.plant).sort() : [];
     const addHtml = !role ? '' : `
@@ -7830,9 +7871,15 @@ export const Security = (() => {
           `<span class="sap-keychip">${_esc(p)}<button data-remove-plant="${_esc(p)}" title="${_esc(Util.t('tip.delete_row'))}"
              style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
         ).join('')}</div>`;
+    const pageAccessHtml = !role ? '' : `
+      <div class="sap-section-label" style="margin-top:20px">${_esc(Util.t('sec.page_access'))}</div>
+      <div class="sap-help" style="margin:2px 0 8px">${_esc(Util.t('sec.page_access_sub'))}</div>
+      <div id="sec-role-pages" style="display:flex;flex-direction:column;gap:8px">
+        ${_pageAccessDefs().map(([tab, label]) => _pageAccessRowHtml(role, tab, label, roleRow)).join('')}
+      </div>`;
     el.innerHTML = `<div class="panel">
       <div class="sap-detail-head"><span class="sap-detail-name">${_esc(header)}</span></div>
-      <div class="panel-body">${addHtml}${listHtml}</div>
+      <div class="panel-body">${addHtml}${listHtml}${pageAccessHtml}</div>
     </div>`;
     if (role) {
       const srch = document.getElementById('sec-plant-search') as HTMLInputElement | null;
@@ -7842,6 +7889,8 @@ export const Security = (() => {
     }
     el.querySelectorAll<HTMLElement>('[data-remove-plant]').forEach((b) =>
       b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant as string)));
+    el.querySelectorAll<HTMLInputElement>('[data-page-toggle]').forEach((cb) =>
+      cb.addEventListener('change', () => _setRolePageAccess(cb.dataset.pageToggle as TopLevelTab, cb.checked)));
   }
 
   // Type-to-filter Store.knownPlants() down to matches, click one to add it —
@@ -7883,6 +7932,33 @@ export const Security = (() => {
       ErrorLog.error('security', `Remove plant from role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
+  }
+
+  // Backend rejects role:'admin' + admin:false outright (server-side backstop
+  // for the checkbox's own disabled state), so this can only ever persist a
+  // legal combination. Full-page reload isn't needed — patch the in-memory
+  // role row on success (same "commit only once confirmed" posture as
+  // Plant's constraint toggles) and repaint either way, so a failure visibly
+  // reverts the checkbox to the last-confirmed state.
+  async function _setRolePageAccess(tab: TopLevelTab, checked: boolean): Promise<void> {
+    const role = _selectedRole;
+    if (!role) return;
+    const roleRow = _roles.find((r) => r.role === role);
+    const pages: Partial<Record<TopLevelTab, boolean>> = { ..._defaultPageAccess(role), ...(roleRow?.pages || {}), [tab]: checked };
+    try {
+      const r = await fetch(`${API}/master-data/roles/${encodeURIComponent(role)}/page-access`, {
+        method:  'POST',
+        headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+        body:    JSON.stringify({ pages }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+      const result: { pages?: Partial<Record<TopLevelTab, boolean>> } = await r.json();
+      if (roleRow) roleRow.pages = result.pages ?? pages;
+    } catch (e) {
+      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('security', `Save role page access failed: ${(e as Error).message}`);
+    }
+    _renderRolesDetail();
   }
 
   async function _addRole(): Promise<void> {

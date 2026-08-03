@@ -542,12 +542,13 @@ const NIMBUS = (function () {
       }
     }, 1000);
 
-    // Ctrl+Alt+L → open Admin Cockpit log tab (admin-only; App.goto('admin') already
-    // guards this, but the early-return here is a redundant defense-in-depth check).
+    // Ctrl+Alt+L → open Admin Cockpit log tab (gated by the same per-role page
+    // access as the Admin Cockpit tab itself; App.goto('admin') already guards
+    // this, but the early-return here is a redundant defense-in-depth check).
     document.addEventListener('keydown', e => {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
-        if (!Session.isAdmin()) return;
+        if (!Session.canAccessTab('admin')) return;
         App.goto('admin'); AdminCockpit.gotoOvTab('logs');
       }
     });

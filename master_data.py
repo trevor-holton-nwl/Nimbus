@@ -221,6 +221,29 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 log.warning("Unexpected error attaching plant constraints",
                             exc_info=True, extra={"category": "master_data"})
 
+        # Roles carry a JSONB `settings` column (per-role default UI prefs +
+        # page-visibility toggles under settings.pages). Deliberately NOT
+        # registered in column_metadata (same reasoning as plants.constraints
+        # above), so we attach the `pages` sub-key to each row here — this is
+        # how the Security > Roles tab reads current page-access state.
+        if table == 'roles':
+            try:
+                role_names = list({r.get('role') for r in rows if r.get('role') is not None})
+                if role_names:
+                    cur.execute(
+                        "SELECT role, settings FROM roles WHERE role = ANY(%s)",
+                        (role_names,),
+                    )
+                    smap = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+                    for row in rows:
+                        settings = smap.get(row.get('role')) or {}
+                        row['pages'] = settings.get('pages') if isinstance(settings, dict) else None
+            except psycopg.errors.UndefinedColumn:
+                pass  # column not migrated yet — leave it absent (expected)
+            except Exception:
+                log.warning("Unexpected error attaching role page access",
+                            exc_info=True, extra={"category": "master_data"})
+
     return {"columns": columns, "rows": rows, "meta": {"total": total}}
 
 
@@ -602,6 +625,55 @@ def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
         conn.commit()
 
     return {"status": "ok", "plant": plant, "constraints": clean}
+
+
+# Top-level pages a role's access can be toggled for. Must mirror the frontend
+# TopLevelTab union (web/types.mts) and Session.DEFAULT_PAGE_ACCESS
+# (web/schedule-data.mts) — keep the three in sync.
+PAGE_ACCESS_KEYS = ('home', 'gantt', 'labor', 'masterdata', 'admin')
+
+
+def set_role_page_access(role: str, pages: dict, user_email: str | None = None) -> dict:
+    """Persist a role's per-page UI-visibility toggles into roles.settings.pages
+    (JSONB, shallow-merged — untouched keys are preserved). Deliberately kept
+    out of column_metadata, same as plants.constraints, so it never shows as
+    an editable Master Data grid column. This is UI-visibility gating only
+    (no endpoint-level enforcement), matching today's Admin Cockpit tab check.
+
+    The 'admin' role can never have its own 'admin' page toggled off — a
+    server-side backstop for the Roles tab's client-side self-lockout guard,
+    so no path (bug, direct API call) can lock every admin out of Security."""
+    if not role:
+        raise ValueError("role is required")
+    if not isinstance(pages, dict):
+        raise ValueError("pages must be an object")
+    clean = {k: bool(pages[k]) for k in PAGE_ACCESS_KEYS if k in pages}
+    if not clean:
+        raise ValueError("pages must include at least one known page key")
+    if role == "admin" and clean.get("admin") is False:
+        raise ValueError("The admin role cannot have Admin Cockpit access disabled")
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT settings FROM roles WHERE role = %s FOR UPDATE", (role,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Role {role!r} not found")
+        settings = dict(row[0] or {})
+        merged_pages = dict(settings.get("pages") or {})
+        merged_pages.update(clean)
+        settings["pages"] = merged_pages
+        cur.execute(
+            "UPDATE roles SET settings = %s, updated_at = NOW() WHERE role = %s",
+            (Jsonb(settings), role),
+        )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('roles', 'set_page_access', %s, %s)",
+            (Jsonb({"role": role, "pages": merged_pages}), user_email),
+        )
+        conn.commit()
+
+    return {"status": "ok", "role": role, "pages": merged_pages}
 
 
 def list_audit(limit: int = 100) -> list[dict]:

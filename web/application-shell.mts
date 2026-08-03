@@ -195,7 +195,7 @@ const Settings = (() => {
    actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/signIn/signOut/refresh/
    onAuthDenied/updateCachedUser) lives in schedule-data.mjs, bridged in as the
    `Session` import above. This adapter owns everything that touches the DOM:
-   gates (Admin tab visibility, header user-settings button, error-log badge),
+   gates (per-role tab visibility, header user-settings button, error-log badge),
    the User Settings modal (tab switching, Personalization/Workflow panes,
    Profile self-service, password change), all built on top of Session's
    public API. Mirrors the Phase 1 Sandbox/SandboxAdapter split exactly:
@@ -204,12 +204,15 @@ const Settings = (() => {
    (called once from `_bootMain()`, alongside `SandboxAdapter.init()`) is the
    sole subscriber.
      SessionUIAdapter.init()        — subscribe to session:changed (call once, at boot)
-     SessionUIAdapter._applyGates() — re-hides the Admin tab button / header
-                                       user-settings button / error-log badge for
-                                       non-admins; called after every session:changed
-                                       AND once explicitly at boot (see _bootMain) so
-                                       a resumed cached session (which never fires
-                                       signIn(), so never emits) re-gates too.
+     SessionUIAdapter._applyGates() — re-hides tab buttons per the current
+                                       role's page access (Security > Roles),
+                                       plus the header user-settings button /
+                                       error-log badge for non-admins; called
+                                       after every session:changed AND once
+                                       explicitly at boot (see _bootMain) so a
+                                       resumed cached session (which never
+                                       fires signIn(), so never emits) re-gates
+                                       too.
    ========================================================================== */
 const SessionUIAdapter = {
   init(): void {
@@ -221,9 +224,9 @@ const SessionUIAdapter = {
         // (schedule-data.mjs) only reports the FACTS (isAdmin(), plantAccessChanged);
         // every actual DOM/tab-navigation effect happens here.
         try { if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions(); } catch {}
-        // If we just lost admin while sitting on the Admin tab, leave it.
-        if (!Session.isAdmin() && typeof App !== 'undefined' && App._currentTab === 'admin') {
-          try { App.goto('home'); } catch {}
+        // If we just lost access to the tab we're sitting on, leave it.
+        if (typeof App !== 'undefined' && !Session.canAccessTab(App._currentTab)) {
+          try { App.goto(App._firstAccessibleTab()); } catch {}
         }
         try {
           if (evt.plantAccessChanged) Toast.show(Util.t('sec.plant_access_changed'), 'warn');
@@ -234,8 +237,10 @@ const SessionUIAdapter = {
   },
 
   _applyGates(): void {
-    const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]') as HTMLElement | null;
-    if (adminBtn) adminBtn.hidden = !Session.isAdmin();
+    document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
+      const tab = btn.dataset.tab as TopLevelTab | undefined;
+      if (tab) btn.hidden = !Session.canAccessTab(tab);
+    });
     SessionUIAdapter._renderUserButton();
     try { ErrorLog.renderBadge(); } catch {}
   },
@@ -381,16 +386,17 @@ const SessionUIAdapter = {
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   },
 
-  // Landing-view tab choices (admin tab only for admins) and their sub-views.
+  // Landing-view tab choices, filtered by per-role page access (Security >
+  // Roles "Page Access" toggles) and their sub-views.
   _landingTabDefs(): Array<[string, string]> {
-    const defs: Array<[string, string]> = [
+    const defs: Array<[TopLevelTab, string]> = [
       ['home',       Util.t('tab.home')],
       ['gantt',      Util.t('tab.gantt')],
       ['labor',      Util.t('us.tab_labor')],
       ['masterdata', Util.t('tab.masterdata')],
+      ['admin',      Util.t('tab.admin')],
     ];
-    if (Session.isAdmin()) defs.push(['admin', Util.t('tab.admin')]);
-    return defs;
+    return defs.filter(([tab]) => Session.canAccessTab(tab));
   },
   _landingSubDefs(tab: string): Array<[string, string]> | null {
     if (tab === 'gantt')      return [['timeline', Util.t('us.landing_timeline')], ['orders', Util.t('tab.table')]];
@@ -2088,10 +2094,21 @@ const App = {
     });
   },
 
+  // First tab (in nav order) the current role can see; 'home' if somehow none
+  // are — home is the only tab a role can't have hidden via the Roles tab UI
+  // in practice (all-off would leave a user stranded), but this stays a hard
+  // fallback rather than an assumption.
+  _firstAccessibleTab(): TopLevelTab {
+    const order: TopLevelTab[] = ['home', 'gantt', 'labor', 'masterdata', 'admin'];
+    return order.find(t => Session.canAccessTab(t)) ?? 'home';
+  },
+
   goto(tab: TopLevelTab | 'table'): void {
-    // Admin Cockpit is admin-only — blocks the tab button, the Log button's click
-    // handler, and the Ctrl+Alt+L shortcut simultaneously (all three route through here).
-    if (tab === 'admin' && !Session.isAdmin()) return;
+    // Per-role page access (Security > Roles "Page Access" toggles) — blocks
+    // the tab button, the Log button's click handler, and the Ctrl+Alt+L
+    // shortcut simultaneously (all three route through here). Admins always
+    // pass via Session.canAccessTab's own isAdmin() short-circuit.
+    if (tab !== 'table' && !Session.canAccessTab(tab)) return;
 
     // Close the nav drawer on every navigation (Command Band re-skin, Task 4).
     if (App._drawerOpen) App._closeDrawer();
@@ -2188,14 +2205,14 @@ const App = {
 
   // Navigate to the user's saved default landing view (pref('landingView') =
   // { tab, sub }), falling back to the Dashboard. Called once on boot after the
-  // first task payload arrives. Guards the admin tab against non-admins and only
-  // applies a sub-view for tabs that have one.
+  // first task payload arrives. Guards each tab against the current role's
+  // page access and only applies a sub-view for tabs that have one.
   _gotoLanding(): void {
     let lv: LandingViewPref | null = null;
     try { lv = (Store.pref('landingView') as LandingViewPref | undefined) ?? null; } catch {}
     const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
     let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
-    if (tab === 'admin' && !Session.isAdmin()) tab = 'home';
+    if (!Session.canAccessTab(tab)) tab = App._firstAccessibleTab();
     App.goto(tab);
     const sub = lv && lv.sub;
     if (sub) {

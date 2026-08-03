@@ -35,7 +35,7 @@
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab } from './types.mjs';
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
@@ -1666,6 +1666,9 @@ export const CalendarSync = {
      Session.actor()         — username for X-User/x-user-email headers, else 'system'
      Session.isAdmin()       — true iff current user's role === 'admin' (or is_admin)
      Session.allowedPlants() — null (unrestricted) | string[] (role_plants scope)
+     Session.canAccessTab(tab) — per-role top-level page visibility (Security >
+       Roles "Page Access" toggles); admins always pass. DEFAULT_PAGE_ACCESS
+       fills in for any tab a role hasn't customized.
      Session.pref(key) / .setPref(key, value) / .flushPrefs() — per-user
        settings: optimistic Store write + a debounced PATCH /security/me/settings
      Session.signIn(u, p)    — POST /security/login; persists session, emits
@@ -1719,6 +1722,30 @@ export const Session = (() => {
   function allowedPlants(): string[] | null {
     const u = currentUser();
     return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
+  }
+
+  // Every page is on by default except Admin Cockpit. Must mirror
+  // master_data.py's PAGE_ACCESS_KEYS / set_role_page_access default posture
+  // and the Security > Roles tab's own copy in plant-and-administration.mts —
+  // keep all three in sync.
+  const DEFAULT_PAGE_ACCESS: Record<TopLevelTab, boolean> = {
+    home: true, gantt: true, labor: true, masterdata: true, admin: false,
+  };
+
+  // Per-role top-level page visibility. Admins always pass (super-admin escape
+  // hatch, same posture as isAdmin() itself) — this is UI-visibility gating
+  // only, not endpoint-level enforcement (see brain.py's admin route note).
+  // Deliberately reads ONLY role_settings (never the per-user settings
+  // override) — unlike theme/lang, page access is a role-level control, not a
+  // user preference. auth.get_role_settings() always returns {} for the
+  // 'admin' role itself, so an admin-role user's own role_settings.pages is
+  // never consulted — irrelevant here since isAdmin() already short-circuits.
+  function canAccessTab(tab: TopLevelTab): boolean {
+    if (isAdmin()) return true;
+    const u = currentUser();
+    const pages = (u?.role_settings?.pages ?? null) as Partial<Record<TopLevelTab, boolean>> | null;
+    const override = pages?.[tab];
+    return override ?? DEFAULT_PAGE_ACCESS[tab];
   }
 
   async function signIn(username: string, password: string): Promise<SessionUserBlob> {
@@ -1924,7 +1951,7 @@ export const Session = (() => {
   }
 
   return {
-    currentUser, actor, isAdmin, allowedPlants,
+    currentUser, actor, isAdmin, allowedPlants, canAccessTab, DEFAULT_PAGE_ACCESS,
     signIn, signOut, refresh, onAuthDenied,
     setPref, flushPrefs, pref, updateCachedUser,
     isExpired, clearExpired,

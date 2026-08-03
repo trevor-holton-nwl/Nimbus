@@ -189,6 +189,11 @@
     {
       "file": "index.html",
       "attribute": "onclick",
+      "expression": "NIMBUS.Modal.close('modal-change-plant')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
       "expression": "NIMBUS.Modal.close('modal-lines-block')"
     },
     {
@@ -782,6 +787,7 @@
     "Utilization.computeMatrix"
   ],
   "privateConsumers": [
+    "App._renderChangePlantList",
     "CommandPalette._activate",
     "CommandPalette._buildIndex",
     "CommandPalette._buildPanel",

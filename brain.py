@@ -548,6 +548,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/{table}/columns": "master_data.column_write",
     "/master-data/{table}/columns/{column}": "master_data.column_write",
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
+    "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/security/users/bulk": "security.users_bulk_write",
     "/security/users/{username}/reset-password": "security.password_reset",
     "/sap/interface/mappings/{object}": "sap.mapping_update",
@@ -1895,6 +1896,24 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             constraints=body.get("constraints", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/roles/{role}/page-access", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_role_page_access(role: str, request: Request, body: dict = Body(default={})):
+    """Persist a role's per-page UI-visibility toggles (Dashboard/Scheduling
+    Board/Labor Plan/Master Data/Admin Cockpit).
+
+    Payload: { pages: { home?, gantt?, labor?, masterdata?, admin?: bool } }
+    UI-visibility gating only — no endpoint-level enforcement, same as the
+    existing Admin Cockpit tab check this generalizes."""
+    try:
+        return md.set_role_page_access(
+            role=role,
+            pages=body.get("pages", {}),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
