@@ -8,7 +8,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Git Branch Conventions
 
-**`main` is stale and not the active trunk** — it predates most of the current feature set (no BOM, no auth.py, no sap_sync.py) and is not kept up to date. **`feature/user-first-last-name` is the real long-lived trunk**: active feature branches (e.g. the CQ-1 frontend module migration) fork from its tip and merge back into it, not into `main`. Before using `main` as a merge-base, diff base, or "what's in production" reference, verify against `feature/user-first-last-name` instead — `git merge-base` against `main` will silently pick a much older, wrong ancestor.
+**`main` is the active trunk again** (as of 2026-08-03). It had gone stale for a stretch — an actively-developed branch (`feature/user-first-last-name`) quietly became the de facto trunk while `main` stopped being updated — but `main` has since been fast-forwarded to that branch's tip and is back to being kept current. Feature branches fork from `main`'s tip and merge back into it. `feature/user-first-last-name` is retired as a trunk (left in place for now, not deleted) — don't fork new work from it or treat it as the merge-base going forward.
 
 ## Design Context
 
