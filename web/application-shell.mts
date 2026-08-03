@@ -2068,7 +2068,13 @@ const App = {
         if (onMaster('lines')) ProdLines.render();
       }
       if (evt.type === 'plant:selected') {
-        ProdLines._lineFilter = '';
+        ProdLines._lineSearch = '';
+        if (onMaster('lines')) ProdLines.render();
+      }
+      if (evt.type === 'lines:selected') {
+        // Cross-screen production-line filter (Gantt/Orders/Dashboard/Labor
+        // Plan) — Store.setSelectedPlant already clears the selection itself
+        // on a real plant change, so this only needs to react, not reset anything.
         if (onMaster('lines')) ProdLines.render();
       }
     }, 'App.sync');

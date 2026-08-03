@@ -1476,7 +1476,10 @@ export const Table = {
   _selectedId: null as string | null,  // for the override modal
   _noteOutsideHandler: null as ((ev: MouseEvent) => void) | null,
   _noteKeyHandler: null as ((ev: KeyboardEvent) => void) | null,
-  _chipFilters: { lines: new Set<string>(), colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>() } as TableChipFilters,
+  // lines aliases the shared Store.selectedLines Set (same object, not a copy) —
+  // the cross-screen production-line filter. See GanttFilter._selectedLines
+  // for the identical convention and why it must never be reassigned.
+  _chipFilters: { lines: Store.selectedLines, colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>() } as TableChipFilters,
   _lineSearch:       '',
   _colorSearch:      '',
   _rangeMode:        false,
@@ -1906,16 +1909,16 @@ export const Table = {
     }
     const sorted = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-    // Drop stale
-    for (const l of [...Table._chipFilters.lines]) {
-      if (!lineSet.has(l)) Table._chipFilters.lines.delete(l);
-    }
-    const q = Table._lineSearch.toLowerCase().trim();
-    const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
-    drop.innerHTML = visible.length
-      ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Table._chipFilters.lines.has(l) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('line', this)"> ${esc(l)}</label>`).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
+    // No pruning here anymore: _chipFilters.lines is the shared cross-screen Set —
+    // see Store.selectedLines and GanttFilter._buildLineDropdown's identical note.
+    Util.renderLineChecklist(drop, sorted, Table._chipFilters.lines, Table._lineSearch,
+      (line, checked) => {
+        const next = new Set(Table._chipFilters.lines);
+        if (checked) next.add(line); else next.delete(line);
+        Store.setSelectedLines(next, 'table');
+        Table._refreshChipButtons();
+        if (Table._api) Table._api.onFilterChanged();
+      });
   },
 
   _buildColorChipDropdown(): void {
@@ -1989,12 +1992,11 @@ export const Table = {
          </label>`;
   },
 
+  // 'line' is handled by _buildLineChipDropdown's own onToggle callback (routes
+  // through Store.setSelectedLines) — never generated as an onchange="..." kind here.
   _onChipChange(kind: string, input: HTMLInputElement): void {
     const f = Table._chipFilters;
-    if (kind === 'line') {
-      if (input.checked) f.lines.add(input.value);
-      else               f.lines.delete(input.value);
-    } else if (kind === 'color') {
+    if (kind === 'color') {
       if (input.checked) f.colors.add(input.value.toUpperCase());
       else               f.colors.delete(input.value.toUpperCase());
     } else if (kind === 'status') {
@@ -2012,7 +2014,10 @@ export const Table = {
   },
 
   _clearChipFilters(): void {
-    Table._chipFilters.lines.clear();
+    // Routes through Store so the clear propagates to every other line-
+    // filterable screen too (self-sourced, so Table's own _onStore guard
+    // skips reprocessing — the calls below already do the local refresh).
+    Store.setSelectedLines([], 'table');
     Table._chipFilters.colors.clear();
     Table._chipFilters.status = null;
     Table._chipFilters.dateKey = null;
@@ -2070,7 +2075,7 @@ export const Table = {
     const f = Table._chipFilters;
     if ('status' in patch)  f.status  = patch.status  || null;
     if ('dateKey' in patch) f.dateKey = patch.dateKey || null;
-    if (patch.lines)  { f.lines.clear();  for (const l of patch.lines)  f.lines.add(l); }
+    if (patch.lines)  Store.setSelectedLines(patch.lines, 'table');
     if (patch.colors) { f.colors.clear(); for (const c of patch.colors) f.colors.add(String(c).toUpperCase()); }
     Table._refreshChipDropdowns();
     Table._refreshChipButtons();
@@ -2146,7 +2151,7 @@ export const Table = {
       Table._renderEmptyState();
       if (evt.type === 'plant:selected') {
         // Clear chip filters on plant change — stale line/color sets don't apply.
-        Table._chipFilters.lines.clear();
+        // (selectedLines itself is cleared centrally by Store.setSelectedPlant.)
         Table._chipFilters.colors.clear();
         Table._chipFilters.status = null;
         Table._chipFilters.dateKey = null;
@@ -2162,6 +2167,12 @@ export const Table = {
       if (evt.type === 'tasks:bulk') {
         ErrorLog.info('table', `Rebuilt grid with ${rows.length} rows`);
       }
+    } else if (evt.type === 'lines:selected') {
+      // Cross-screen change (Gantt/Dashboard/Labor Plan/Master Data) — a
+      // self-sourced 'table' event never reaches here (top-of-function guard);
+      // _buildLineChipDropdown's own onToggle callback already did this locally.
+      Table._buildLineChipDropdown();
+      Table._api.onFilterChanged();
     } else if (evt.type === 'tasks:bulkUpdate') {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
@@ -3288,7 +3299,12 @@ interface GanttFilterActiveState {
    ========================================================================== */
 export const GanttFilter = {
   _active:         { text: '' } as GanttFilterActiveState,
-  _selectedLines:  new Set<string>(),
+  // Aliases the shared Store.selectedLines Set (same object, not a copy) — the
+  // cross-screen production-line filter. Every scattered direct read of this
+  // field elsewhere in this file (Timeline's optimize-run patch skip, its
+  // row-height reservation, Hierarchy's scoping) keeps working unmodified
+  // because Store.setSelectedLines() always mutates that Set in place.
+  _selectedLines:  Store.selectedLines,
   _selectedColors: new Set<string>(),
   _selectedForms:  new Set<string>(),
   _pastedIds:      new Set<string>(),
@@ -3318,7 +3334,8 @@ export const GanttFilter = {
       }
       if (evt.type === 'tasks:bulkUpdate') { setTimeout(() => GanttFilter._apply!(), 80); }
       if (evt.type === 'plant:selected') {
-        GanttFilter._selectedLines.clear();
+        // selectedLines is cleared centrally by Store.setSelectedPlant (lines are
+        // plant-scoped) — the 'lines:selected' branch below picks up the rebuild.
         GanttFilter._selectedColors.clear();
         GanttFilter._selectedForms.clear();
         GanttFilter._clearPoMat();
@@ -3327,6 +3344,16 @@ export const GanttFilter = {
         GanttFilter._buildLineDropdown();
         GanttFilter._refreshLineBtn();
         setTimeout(() => GanttFilter._apply!(), 80);
+      }
+      if (evt.type === 'lines:selected') {
+        // Single code path for every line-selection change, whether it
+        // originated here (checkbox/isolate/restore) or on another screen
+        // (Table/Dashboard/Labor Plan/Master Data) — matches() doesn't cover
+        // lines, so Timeline/Hierarchy need their own explicit rebuild.
+        GanttFilter._buildLineDropdown();
+        GanttFilter._refreshLineBtn();
+        Timeline.rebuild();
+        Hierarchy.render();
       }
     }, 'GanttFilter');
 
@@ -3405,7 +3432,10 @@ export const GanttFilter = {
     GanttFilter._active = { text: '' };
     const textIn = document.getElementById('flt-text') as HTMLInputElement | null;
     if (textIn) textIn.value = '';
-    GanttFilter._selectedLines.clear();
+    // Routes through Store so the clear propagates to every other line-
+    // filterable screen too; the 'lines:selected' subscriber above handles
+    // the dropdown/Timeline/Hierarchy rebuild (no-ops if lines were already empty).
+    Store.setSelectedLines([], 'gantt-clear');
     GanttFilter._selectedColors.clear();
     GanttFilter._selectedForms.clear();
     GanttFilter._clearPoMat();
@@ -3416,8 +3446,6 @@ export const GanttFilter = {
     GanttFilter._refreshColorBtn();
     GanttFilter._buildFormDropdown();
     GanttFilter._refreshFormBtn();
-    Timeline.rebuild();
-    Hierarchy.render();
     GanttFilter._apply!();
   },
 
@@ -3455,46 +3483,21 @@ export const GanttFilter = {
     }
     const sorted = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-    for (const l of [...GanttFilter._selectedLines]) {
-      if (!lineSet.has(l)) GanttFilter._selectedLines.delete(l);
-    }
-    const q = GanttFilter._lineSearch.toLowerCase().trim();
-    const visible = q ? sorted.filter(l => l.toLowerCase().includes(q)) : sorted;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
-      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
-    drop.innerHTML = visible.length
-      ? visible.map(l =>
-          `<label><input type="checkbox" value="${esc(l)}"${GanttFilter._selectedLines.has(l) ? ' checked' : ''}
-           onchange="NIMBUS.GanttFilter._onLineChange(this)"> ${esc(l)}</label>`
-        ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
+    // No pruning here anymore: _selectedLines is the shared cross-screen Set,
+    // and this screen's candidate list is only a subset of the lines other
+    // screens (Labor Plan, Master Data) may recognize — see Store.selectedLines.
+    Util.renderLineChecklist(drop, sorted, GanttFilter._selectedLines, GanttFilter._lineSearch,
+      (line, checked) => {
+        const next = new Set(GanttFilter._selectedLines);
+        if (checked) next.add(line); else next.delete(line);
+        Store.setSelectedLines(next, 'gantt');
+      });
   },
 
   _refreshLineBtn(): void {
     const btn = document.getElementById('gantt-flt-line-btn');
     const lbl = document.getElementById('gantt-flt-line-label');
-    if (!lbl) return;
-    const n = GanttFilter._selectedLines.size;
-    lbl.textContent = n === 0 ? Util.t('ui.all_lines')
-      : n === 1 ? [...GanttFilter._selectedLines][0]
-      : Util.t('ui.n_lines_filter', { count: n });
-    if (btn) btn.classList.toggle('active', n > 0);
-  },
-
-  _onLineChange(cb: HTMLInputElement): void {
-    if (cb.checked) GanttFilter._selectedLines.add(cb.value);
-    else            GanttFilter._selectedLines.delete(cb.value);
-    GanttFilter._refreshLineBtn();
-    Timeline.rebuild();
-    Hierarchy.render();
-  },
-
-  _clearLines(): void {
-    GanttFilter._selectedLines.clear();
-    GanttFilter._buildLineDropdown();
-    GanttFilter._refreshLineBtn();
-    Timeline.rebuild();
-    Hierarchy.render();
+    Util.refreshMultiSelectLabel(lbl, btn, GanttFilter._selectedLines);
   },
 
   _toggleColorDropdown(): void {
@@ -3689,16 +3692,15 @@ export const GanttFilter = {
   // private-field sequences these replace.
   selectedLines(): Set<string> { return GanttFilter._selectedLines; },
   activeFilter(): GanttFilterActiveState { return GanttFilter._active; },
+  // Both delegate to Store so the change propagates everywhere; the
+  // 'lines:selected' subscriber above does the dropdown/button/Timeline/
+  // Hierarchy rebuild. Signatures unchanged — nimbus-intelligence.js's
+  // Command Palette "go to line" action calls isolateLine() directly.
   isolateLine(line: string): void {
-    GanttFilter._selectedLines.clear();
-    GanttFilter._selectedLines.add(line);
-    GanttFilter._refreshLineBtn();
-    GanttFilter._buildLineDropdown();
+    Store.setSelectedLines([line], 'gantt-isolate');
   },
   restoreAllLines(): void {
-    GanttFilter._selectedLines.clear();
-    GanttFilter._refreshLineBtn();
-    GanttFilter._buildLineDropdown();
+    Store.setSelectedLines([], 'gantt-isolate');
   },
 };
 
@@ -3758,7 +3760,9 @@ type DashboardLatenessMatrix = Record<string, Record<string, DashboardLatenessCe
 export const Dashboard = {
   _prevKpi:    {} as Record<string, string>,
 
-  _filterLines:  new Set<string>(),
+  // Aliases the shared Store.selectedLines Set (same object, not a copy) — see
+  // GanttFilter._selectedLines for the identical convention and rationale.
+  _filterLines:  Store.selectedLines,
   _allLines:     null as string[] | null,
   _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
   _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
@@ -3774,6 +3778,21 @@ export const Dashboard = {
         Dashboard._refreshLineDropdown();
         Dashboard._refreshFilterBtns();
         Dashboard.render();
+        return;
+      }
+      if (evt.type === 'lines:selected') {
+        // Single code path for every line-selection change, whether it
+        // originated here (checkbox/clear) or on another screen (Gantt/
+        // Table/Labor Plan/Master Data). Utilization.computeMatrix() with a
+        // filtered task subset bypasses memoization entirely (CLAUDE.md), so
+        // skip the expensive render while this tab isn't visible — App.goto
+        // ('home') already calls Dashboard.render() unconditionally on
+        // tab activation, so there's nothing to catch up on later.
+        Dashboard._renderLineChecklist();
+        Dashboard._refreshFilterBtns();
+        if (document.getElementById('home-tab')?.classList.contains('active')) {
+          Dashboard.render();
+        }
         return;
       }
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
@@ -3869,13 +3888,9 @@ export const Dashboard = {
     }
     btn.disabled = false;
 
-    const lines = new Set(Store.linesForSelectedPlant());
-    // Drop stale line selections
-    for (const l of [...Dashboard._filterLines]) {
-      if (!lines.has(l)) Dashboard._filterLines.delete(l);
-    }
-
-    Dashboard._allLines = [...lines].sort();
+    // No pruning here anymore: _filterLines is the shared cross-screen Set —
+    // see Store.selectedLines and GanttFilter._buildLineDropdown's identical note.
+    Dashboard._allLines = [...new Set(Store.linesForSelectedPlant())].sort();
     Dashboard._renderLineChecklist();
   },
 
@@ -3884,14 +3899,12 @@ export const Dashboard = {
   // dashboard's line filter's share of that, matching the Gantt/Orders dropdowns.
   _renderLineChecklist(): void {
     const list = document.getElementById('line-filter-checklist');
-    if (!list) return;
-    const all = Dashboard._allLines || [];
-    const q = Dashboard._lineSearch.toLowerCase().trim();
-    const visible = q ? all.filter(l => l.toLowerCase().includes(q)) : all;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
-    list.innerHTML = visible.length
-      ? visible.map(l => `<label><input type="checkbox" value="${esc(l)}"${Dashboard._filterLines.has(l) ? ' checked' : ''} onchange="NIMBUS.Dashboard._onLineChange(this)"> ${esc(l)}</label>`).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${all.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
+    Util.renderLineChecklist(list, Dashboard._allLines || [], Dashboard._filterLines, Dashboard._lineSearch,
+      (line, checked) => {
+        const next = new Set(Dashboard._filterLines);
+        if (checked) next.add(line); else next.delete(line);
+        Store.setSelectedLines(next, 'dashboard');
+      });
   },
 
   _refreshFilterBtns(): void {
@@ -3900,12 +3913,7 @@ export const Dashboard = {
     const clearBtn  = document.getElementById('dash-filter-clear');
     const hint      = document.getElementById('dash-filter-hint');
 
-    if (lineBtn)  lineBtn.classList.toggle('active',  Dashboard._filterLines.size > 0);
-
-    if (lineLbl) {
-      const ls = Dashboard._filterLines.size;
-      lineLbl.textContent = ls === 0 ? Util.t('ui.all_lines') : ls === 1 ? [...Dashboard._filterLines][0] : Util.t('ui.n_lines_filter', { count: ls });
-    }
+    Util.refreshMultiSelectLabel(lineLbl, lineBtn, Dashboard._filterLines);
 
     const hasFilter = Dashboard._filterLines.size > 0;
     if (clearBtn) clearBtn.hidden = !hasFilter;
@@ -3927,18 +3935,13 @@ export const Dashboard = {
     if (btn) btn.setAttribute('aria-expanded', String(!drop.hidden));
   },
 
-  _onLineChange(cb: HTMLInputElement): void {
-    if (cb.checked) Dashboard._filterLines.add(cb.value);
-    else Dashboard._filterLines.delete(cb.value);
-    Dashboard._refreshFilterBtns();
-    Dashboard.render();
-  },
-
+  // Checkbox toggling now happens via _renderLineChecklist's onToggle callback
+  // (routes through Store.setSelectedLines); no onchange="..." reaches this
+  // method's old (cb: HTMLInputElement) shape anymore.
   _clearFilters(): void {
-    Dashboard._filterLines.clear();
-    Dashboard._refreshLineDropdown();
-    Dashboard._refreshFilterBtns();
-    Dashboard.render();
+    // Routes through Store so the clear propagates everywhere; the
+    // 'lines:selected' subscriber above does the checklist/button/render refresh.
+    Store.setSelectedLines([], 'dashboard');
   },
   _syncLineStatusHeight(): void {
     requestAnimationFrame(() => {
@@ -5133,13 +5136,12 @@ export const Interaction = {
       const sel = GanttFilter._selectedLines;
       const isAlreadyIsolated = sel.size === 1 && sel.has(groupId);
 
-      sel.clear();
-      if (!isAlreadyIsolated) sel.add(groupId);
-
-      GanttFilter._buildLineDropdown();
-      GanttFilter._refreshLineBtn();
-      Timeline.rebuild();
-      Hierarchy.render();
+      // Routed through GanttFilter's public wrappers (→ Store.setSelectedLines)
+      // instead of mutating `sel` directly — a raw Set mutation here would
+      // update the data but never fire 'lines:selected', silently breaking
+      // cross-screen propagation for this one gesture while everything else worked.
+      if (isAlreadyIsolated) GanttFilter.restoreAllLines();
+      else                   GanttFilter.isolateLine(groupId);
 
       if (!isAlreadyIsolated && !Interaction._isolateToastShown) {
         Toast.show(Util.t('toast.isolated_line', { line: groupId }), 'info');

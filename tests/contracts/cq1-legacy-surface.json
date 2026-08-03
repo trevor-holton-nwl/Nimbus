@@ -169,6 +169,11 @@
     {
       "file": "index.html",
       "attribute": "onclick",
+      "expression": "NIMBUS.LaborPlanning.toggleLineDropdown(event)"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
       "expression": "NIMBUS.Modal.close('md-addcol-modal')"
     },
     {
@@ -549,7 +554,7 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
-      "expression": "NIMBUS.Dashboard._onLineChange(this)"
+      "expression": "..."
     },
     {
       "file": "schedule-workbench.mjs",
@@ -560,11 +565,6 @@
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
       "expression": "NIMBUS.GanttFilter._onFormChange(this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onLineChange(this)"
     },
     {
       "file": "schedule-workbench.mjs",
@@ -580,11 +580,6 @@
       "file": "schedule-workbench.mjs",
       "attribute": "onchange",
       "expression": "NIMBUS.Table._onChipChange('date', this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('line', this)"
     },
     {
       "file": "schedule-workbench.mjs",
@@ -710,6 +705,7 @@
     "LaborPlanning.prevHorizon",
     "LaborPlanning.setSpan",
     "LaborPlanning.toggleGroupDropdown",
+    "LaborPlanning.toggleLineDropdown",
     "Modal.close",
     "OptimizeDialog.applyPreset",
     "OptimizeDialog.cancelFromPicker",

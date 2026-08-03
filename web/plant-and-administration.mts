@@ -1095,7 +1095,7 @@ type LinesNavInput = HTMLInputElement & { _wired?: boolean };
    and line-scoped blackout blocks.
    ========================================================================== */
 export const ProdLines = {
-  _lineFilter: '',
+  _lineSearch: '', // search text for the cross-screen line-filter dropdown (not the selection itself)
   _activeNavLine: null as string | null,
   _delegated: false,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
@@ -1120,9 +1120,12 @@ export const ProdLines = {
         </div>`;
     }
 
-    const shownLines = !ProdLines._lineFilter
-      ? allLines
-      : allLines.filter(l => l.toLowerCase().includes(ProdLines._lineFilter.toLowerCase()));
+    // Cross-screen production-line filter (Store.selectedLines) — same
+    // selection as the Scheduling Board / Dashboard / Labor Plan pickers.
+    // Type-to-filter within the dropdown itself (ProdLines._lineSearch)
+    // narrows the checklist, not this nav list directly.
+    const lineSel = Store.selectedLines;
+    const shownLines = lineSel.size === 0 ? allLines : allLines.filter(l => lineSel.has(l));
 
     // Default or reset active line if stale
     if (!ProdLines._activeNavLine || !allLines.includes(ProdLines._activeNavLine)) {
@@ -1231,34 +1234,74 @@ export const ProdLines = {
         ${ls.excludeFromOpt ? '<span class="lines-nav-excl-opt" title="Excluded from optimization">🚫</span>' : ''}
       </div>`;
     }).join('');
-    if (!document.getElementById('lines-nav-input')) {
+    // Cross-screen multi-select filter (Store.selectedLines) replaces the old
+    // single free-text substring box — scale mandate (CLAUDE.md Production
+    // Scale Roadmap): every plant/line picker must stay filterable via a
+    // searchable multi-select, not a bare text box, once plants carry 70+ lines.
+    if (!document.getElementById('lines-nav-filter-btn')) {
       nav.innerHTML = `
         <div class="lines-nav-header">
           <div class="lines-nav-title" id="lines-nav-title">Lines &middot; ${allLines.length}</div>
-          <input id="lines-nav-input" class="lines-nav-input" type="text" placeholder="${Util.t('ph.search_lines')}" autocomplete="off" spellcheck="false">
+          <div class="lines-nav-filter" id="lines-nav-filter" style="position:relative;">
+            <button class="seg-btn lp-group-btn" id="lines-nav-filter-btn" type="button" style="width:100%;">
+              <span id="lines-nav-filter-label">All Lines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+            </button>
+            <div class="dash-filter-dropdown" id="lines-nav-filter-dropdown" hidden style="width:100%;min-width:0;box-sizing:border-box;">
+              <div class="dash-filter-paste-row">
+                <input id="lines-nav-search" class="dash-filter-paste-input" type="text"
+                       placeholder="${Util.t('ph.search_lines')}" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="dash-filter-checklist" id="lines-nav-checklist"></div>
+            </div>
+          </div>
         </div>
         <div class="lines-nav-list" id="lines-nav-list"></div>`;
     } else {
       const t = document.getElementById('lines-nav-title');
       if (t) t.textContent = `Lines · ${allLines.length}`;
-      const inp = document.getElementById('lines-nav-input') as HTMLInputElement | null;
-      if (inp) inp.value = ProdLines._lineFilter;
     }
+    Util.refreshMultiSelectLabel(
+      document.getElementById('lines-nav-filter-label'), document.getElementById('lines-nav-filter-btn'), Store.selectedLines);
+    ProdLines._rebuildLineFilterChecklist(allLines);
     const listEl = document.getElementById('lines-nav-list');
     if (listEl) listEl.innerHTML = items || `<div class="lines-nav-empty">${Util.t('ui.no_lines_match')}</div>`;
   },
 
+  // Shared by _renderNav (every render) and the filter dropdown's own search
+  // input (live type-to-filter) — same split as GanttFilter's _buildLineDropdown
+  // vs. _filterLineSearch.
+  _rebuildLineFilterChecklist(allLines: string[]): void {
+    const sorted = [...allLines].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+    Util.renderLineChecklist(
+      document.getElementById('lines-nav-checklist'), sorted, Store.selectedLines, ProdLines._lineSearch,
+      (line, checked) => {
+        const next = new Set(Store.selectedLines);
+        if (checked) next.add(line); else next.delete(line);
+        Store.setSelectedLines(next, 'masterdata');
+      });
+  },
+
   _wireNav(): void {
-    const input = document.getElementById('lines-nav-input') as LinesNavInput | null;
-    if (input && !input._wired) {
-      input._wired = true;
-      // Reference the captured `input` rather than a `this` parameter — `.oninput`'s
+    const btn  = document.getElementById('lines-nav-filter-btn') as (HTMLButtonElement & { _wired?: boolean }) | null;
+    const drop = document.getElementById('lines-nav-filter-dropdown');
+    if (btn && drop && !btn._wired) {
+      btn._wired = true;
+      btn.addEventListener('click', (e) => { e.stopPropagation(); drop.hidden = !drop.hidden; });
+      document.addEventListener('click', (e: MouseEvent) => {
+        if (!drop.hidden && !drop.contains(e.target as Node) && e.target !== btn) drop.hidden = true;
+      });
+    }
+    const search = document.getElementById('lines-nav-search') as LinesNavInput | null;
+    if (search && !search._wired) {
+      search._wired = true;
+      // Reference the captured `search` rather than a `this` parameter — `.oninput`'s
       // lib.dom type is `(this: GlobalEventHandlers, ev: Event) => any`, and
       // GlobalEventHandlers has no `.value`, so a `this: HTMLInputElement` signature
       // isn't assignable to it even though the runtime `this` is always the element.
-      input.oninput = function() {
-        ProdLines._lineFilter = input.value;
-        ProdLines.render();
+      search.oninput = function() {
+        ProdLines._lineSearch = search.value;
+        const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : CalendarUI._getLines();
+        ProdLines._rebuildLineFilterChecklist(allLines);
       };
     }
     const list = document.getElementById('lines-nav-list');
@@ -1521,6 +1564,7 @@ export const LaborPlanning = (() => {
   let _horizonOffset  = 0;         // weeks offset from today's Monday
   let _horizonSpan    = 12;        // number of weeks in view
   let _selectedGroups: Set<string> = new Set(); // empty = all groups; used to scope all sub-tabs
+  let _lineSearch = ''; // current search text for the cross-screen line-filter dropdown
   let _aggrData: LaborAggrData = {};        // { [plant]: { [grp]: { [period]: avail_hours } } }
   let _lineData: LaborLineData = {};        // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
   let _groups: string[]       = [];        // sorted unique pl_group values for current plant
@@ -2000,8 +2044,14 @@ export const LaborPlanning = (() => {
     // Show all groups unless user has filtered to specific ones
     const visibleGroups = _displayGroups.length ? _displayGroups : _groups;
     const fetchGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
+    // Cross-screen production-line filter (Store.selectedLines) ANDs with the
+    // group filter above — same combination GanttFilter's line/color/form
+    // filters already use. Can legitimately yield zero rows (line selected
+    // from a different group than the active group filter); the existing
+    // empty-state below already covers that, same as a group-only miss.
+    const lineSel = Store.selectedLines;
     const allLinesMeta = Store.masterLinesForPlant(plant)
-      .filter((l) => visibleGroups.includes(l.pl_group ?? ''))
+      .filter((l) => visibleGroups.includes(l.pl_group ?? '') && (lineSel.size === 0 || lineSel.has(l.production_line)))
       .sort((a, b) => visibleGroups.indexOf(a.pl_group ?? '') - visibleGroups.indexOf(b.pl_group ?? '') || a.production_line.localeCompare(b.production_line));
     if (!allLinesMeta.length) {
       grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return;
@@ -2146,8 +2196,9 @@ export const LaborPlanning = (() => {
     const container = document.getElementById('labor-capacity-grid'); if (!container) return;
     const scopeGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
     await _fetchLines(plant, scopeGroup);
+    const lineSel = Store.selectedLines;
     const lines = Store.masterLinesForPlant(plant)
-      .filter((l) => !scopeGroup || l.pl_group === scopeGroup)
+      .filter((l) => (!scopeGroup || l.pl_group === scopeGroup) && (lineSel.size === 0 || lineSel.has(l.production_line)))
       .map((l) => l.production_line).sort();
     if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return; }
 
@@ -2209,7 +2260,10 @@ export const LaborPlanning = (() => {
   async function _renderExceptions(plant: string): Promise<void> {
     const container = document.getElementById('labor-exceptions-list'); if (!container) return;
     await _fetchLines(plant, null);
-    const lines = (Store._state.masterData?.lines || []).filter((l) => l.plant === plant).map((l) => l.production_line);
+    const lineSel = Store.selectedLines;
+    const lines = (Store._state.masterData?.lines || [])
+      .filter((l) => l.plant === plant && (lineSel.size === 0 || lineSel.has(l.production_line)))
+      .map((l) => l.production_line);
     const horizonStart = _weeks[0].monday;
     const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
     const exceptions: LaborException[] = [];
@@ -2300,6 +2354,24 @@ export const LaborPlanning = (() => {
           <button class="btn btn-sm" onclick="NIMBUS.LaborPlanning.clearGroupFilter()">Clear</button>
         </div>`;
     }
+    // Cross-screen production-line filter (Store.selectedLines) — same
+    // selection as Gantt/Orders/Dashboard/Master Data's line pickers.
+    // Rebuild only the checklist body; the search <input> is static markup
+    // wired once in init(), so its value/focus survive this rebuild.
+    Util.refreshMultiSelectLabel(
+      document.getElementById('lp-line-label'), document.getElementById('lp-line-btn'), Store.selectedLines);
+    if (plant) {
+      const lineCandidates = Store.masterLinesForPlant(plant)
+        .map((l) => l.production_line)
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      Util.renderLineChecklist(
+        document.getElementById('lp-line-checklist'), lineCandidates, Store.selectedLines, _lineSearch,
+        (line, checked) => {
+          const next = new Set(Store.selectedLines);
+          if (checked) next.add(line); else next.delete(line);
+          Store.setSelectedLines(next, 'labor');
+        });
+    }
     // Flatpickr date-jump: lazily init, then sync to current horizon start
     if (_weeks.length) {
       if (!_fpHorizon) {
@@ -2354,6 +2426,18 @@ export const LaborPlanning = (() => {
     else if (sub === 'inputs')     _renderInputs();
   }
 
+  // Re-renders whichever Labor Plan sub-tab is currently active — shared by
+  // the group-filter and cross-screen line-filter change handlers, neither
+  // of which needs a full render() (KPI strip / horizon / groups unchanged).
+  function _rerenderActiveSub(): void {
+    const plant = Store.selectedPlant; if (!plant) return;
+    const sub = _activeTabResolvers.laborSub();
+    if (sub === 'aggregate')       _renderAggregate(plant);
+    else if (sub === 'line-plan')  _renderLinePlan(plant);
+    else if (sub === 'capacity')   _renderCapacity(plant);
+    else if (sub === 'exceptions') _renderExceptions(plant);
+  }
+
   function _onLPKeyDown(e: KeyboardEvent): void {
     if (!_selRange || _activeTabResolvers.currentTab() !== 'labor') return;
     const mod = e.metaKey || e.ctrlKey;
@@ -2380,7 +2464,28 @@ export const LaborPlanning = (() => {
         }
         render();
       }
+      if (evt.type === 'lines:selected' && _activeTabResolvers.currentTab() === 'labor') {
+        // Cross-screen change (Gantt/Table/Dashboard/Master Data) — only the
+        // line-checklist/label + active sub-tab need refreshing, not a full render().
+        _renderToolbar(Store.selectedPlant || '');
+        _rerenderActiveSub();
+      }
     }, 'Labor');
+    const lineSearchIn = document.getElementById('lp-line-search') as HTMLInputElement | null;
+    if (lineSearchIn) {
+      lineSearchIn.oninput = () => {
+        _lineSearch = lineSearchIn.value || '';
+        Util.renderLineChecklist(
+          document.getElementById('lp-line-checklist'),
+          Store.selectedPlant ? Store.masterLinesForPlant(Store.selectedPlant).map((l) => l.production_line).sort() : [],
+          Store.selectedLines, _lineSearch,
+          (line, checked) => {
+            const next = new Set(Store.selectedLines);
+            if (checked) next.add(line); else next.delete(line);
+            Store.setSelectedLines(next, 'labor');
+          });
+      };
+    }
   }
 
   return {
@@ -2388,22 +2493,25 @@ export const LaborPlanning = (() => {
     onGroupToggle(group: string, checked: boolean): void {
       if (checked) _selectedGroups.add(group); else _selectedGroups.delete(group);
       _renderToolbar(Store.selectedPlant || '');
-      const plant = Store.selectedPlant; if (!plant) return;
-      const sub = _activeTabResolvers.laborSub();
-      if (sub === 'aggregate')       _renderAggregate(plant);
-      else if (sub === 'line-plan')  _renderLinePlan(plant);
-      else if (sub === 'capacity')   _renderCapacity(plant);
-      else if (sub === 'exceptions') _renderExceptions(plant);
+      _rerenderActiveSub();
     },
     clearGroupFilter(): void {
       _selectedGroups.clear();
       _renderToolbar(Store.selectedPlant || '');
-      const plant = Store.selectedPlant; if (!plant) return;
-      const sub = _activeTabResolvers.laborSub();
-      if (sub === 'aggregate')       _renderAggregate(plant);
-      else if (sub === 'line-plan')  _renderLinePlan(plant);
-      else if (sub === 'capacity')   _renderCapacity(plant);
-      else if (sub === 'exceptions') _renderExceptions(plant);
+      _rerenderActiveSub();
+    },
+    toggleLineDropdown(e?: Event): void {
+      e?.stopPropagation();
+      const drop = document.getElementById('lp-line-dropdown');
+      if (!drop) return;
+      drop.hidden = !drop.hidden;
+      if (!drop.hidden) {
+        const close = (ev: MouseEvent) => {
+          const target = ev.target as Node | null;
+          if (!drop.contains(target) && (target as HTMLElement | null)?.id !== 'lp-line-btn') { drop.hidden = true; document.removeEventListener('click', close); }
+        };
+        setTimeout(() => document.addEventListener('click', close), 0);
+      }
     },
     toggleGroupDropdown(e?: Event): void {
       e?.stopPropagation();

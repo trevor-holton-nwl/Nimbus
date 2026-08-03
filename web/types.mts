@@ -166,7 +166,7 @@ export type ConstraintKey = 'colorWheel';
 export type StoreEventType =
   | 'tasks:bulk' | 'task:update' | 'task:remove' | 'tasks:bulkUpdate'
   | 'fixed:change' | 'calendar:change' | 'blocks:change' | 'plantBlocks:change'
-  | 'lineSettings:change' | 'plant:selected' | 'alerts:change' | 'settings:change'
+  | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
   /** Wholesale *:replace variants, e.g. 'tasks:replace'. */

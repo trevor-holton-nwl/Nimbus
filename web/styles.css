@@ -3157,21 +3157,6 @@ span.flatpickr-weekday {
   color: var(--fg-mute);
   margin-bottom: 8px;
 }
-input.lines-nav-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  color: var(--fg);
-  font-size: 12px;
-  padding: 5px 8px;
-}
-input.lines-nav-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
 .lines-nav-list {
   flex: 1;
   overflow-y: auto;

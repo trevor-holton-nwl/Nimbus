@@ -635,6 +635,54 @@ export const Util = {
     return !!((po && idSet.has(po)) || (mat && idSet.has(mat)));
   },
 
+  // Shared search+checkbox "N selected" multi-select combobox — the pattern
+  // GanttFilter/Table/Dashboard's line pickers already used independently
+  // (and, since the cross-screen production-line filter, Labor Planning's
+  // and Master Data > Production Lines' line pickers too). Renders checkboxes
+  // for `candidateLines` (filtered by `search`, case-insensitive substring)
+  // checked per `selected.has(line)`, and wires each box's change event to
+  // `onToggle` — the caller owns what happens next (Store mutation, re-render
+  // of dependents, etc). Deliberately does NOT prune `selected` down to
+  // `candidateLines` the way the old per-screen copies did: `selected` is
+  // now a single Set shared across five screens with five different
+  // candidate universes (see docs note on Store.selectedLines), so one
+  // screen unilaterally dropping an entry it doesn't recognize would fight
+  // with the others. A selected line invisible to the current screen's
+  // candidate list simply renders unchecked there — harmless.
+  renderLineChecklist(
+    checklistEl: HTMLElement | null,
+    candidateLines: string[],
+    selected: Set<string>,
+    search: string,
+    onToggle: (line: string, checked: boolean) => void,
+  ): void {
+    if (!checklistEl) return;
+    const q = (search || '').toLowerCase().trim();
+    const visible = q ? candidateLines.filter(l => l.toLowerCase().includes(q)) : candidateLines;
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
+      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
+    checklistEl.innerHTML = visible.length
+      ? visible.map(l =>
+          `<label><input type="checkbox" value="${esc(l)}"${selected.has(l) ? ' checked' : ''}> ${esc(l)}</label>`
+        ).join('')
+      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${candidateLines.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
+    checklistEl.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', () => onToggle(cb.value, cb.checked));
+    });
+  },
+
+  // Updates a line multi-select's trigger button label/active state — "All
+  // lines" / the one selected name / "N lines" — shared by every line-picker
+  // button (companion to renderLineChecklist above).
+  refreshMultiSelectLabel(labelEl: HTMLElement | null, btnEl: HTMLElement | null, selected: Set<string>): void {
+    if (!labelEl) return;
+    const n = selected.size;
+    labelEl.textContent = n === 0 ? Util.t('ui.all_lines')
+      : n === 1 ? [...selected][0]
+      : Util.t('ui.n_lines_filter', { count: n });
+    if (btnEl) btnEl.classList.toggle('active', n > 0);
+  },
+
   // Diagnostic "how many of these pasted values matched a known id" count,
   // used for the paste toast on the Production Order / Material filter.
   countPasteMatches(text: string, knownIdSet: Set<string>): { matched: number; total: number } {

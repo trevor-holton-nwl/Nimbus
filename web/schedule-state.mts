@@ -41,6 +41,11 @@ interface StoreState {
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
   selectedPlant: string | null;
+  /** Global cross-screen line filter (Gantt/Orders/Dashboard/Labor Plan/Master Data).
+   *  Object identity is never replaced after creation — GanttFilter/Table/Dashboard
+   *  alias this exact Set rather than copying it, so their many existing direct
+   *  reads keep working; setSelectedLines() always mutates it in place. */
+  selectedLines: Set<string>;
   masterData: NimbusMasterData | null;
   /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
   userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
@@ -98,6 +103,7 @@ export const Store = {
     plantBlocks:  [],
     lineSettings: {},
     selectedPlant: null,
+    selectedLines: new Set<string>(),
     masterData: null,
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {}
@@ -132,6 +138,9 @@ export const Store = {
   get plantBlocks(): NimbusPlantBlock[]   { return this._state.plantBlocks; },
   get lineSettings(): Record<string, NimbusLineSetting>  { return this._state.lineSettings; },
   get selectedPlant(): string | null { return this._state.selectedPlant; },
+  // Live reference (same convention as fixedIds above) — callers that alias this
+  // Set (GanttFilter/Table/Dashboard) see every future in-place mutation for free.
+  get selectedLines(): Set<string> { return this._state.selectedLines; },
   get userSettings(): StoreState['userSettings']  { return this._state.userSettings; },
   get roleDefaults(): Record<string, unknown>  { return this._state.roleDefaults; },
   get masterData(): NimbusMasterData | null    { return this._state.masterData; },
@@ -441,7 +450,22 @@ export const Store = {
     const next = plant || null;
     if (next === this._state.selectedPlant) return; // no-op: don't re-emit
     this._state.selectedPlant = next;
+    // Lines are plant-scoped — a stale selection from the old plant must never
+    // leak into the new one. Routed through setSelectedLines so this reuses its
+    // in-place-mutate + no-op-guard + emit logic instead of duplicating it.
+    this.setSelectedLines([], source);
     this.emit({ type: 'plant:selected', plant: this._state.selectedPlant, source });
+  },
+  setSelectedLines(lines: Iterable<string>, source?: string): void {
+    const next = new Set(lines);
+    const current = this._state.selectedLines;
+    if (next.size === current.size && [...next].every(l => current.has(l))) return; // no-op: content unchanged
+    // Mutate in place — never reassign — so every existing direct alias
+    // (GanttFilter._selectedLines, Table._chipFilters.lines, Dashboard._filterLines,
+    // plus scattered direct reads in Timeline/Hierarchy) sees the update for free.
+    current.clear();
+    for (const l of next) current.add(l);
+    this.emit({ type: 'lines:selected', lines: [...current], source });
   },
 
   /* ----- plant-scoped accessors ----------------------------------------- */

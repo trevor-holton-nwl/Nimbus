@@ -1512,6 +1512,22 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="lp-group-dropdown" id="lp-group-dropdown" hidden></div>
       </div>
       <div class="sep-v"></div>
+      <!-- Cross-screen production-line filter (Store.selectedLines) — same
+           selection as the Scheduling Board / Dashboard / Master Data line
+           pickers; narrows the group filter above rather than replacing it. -->
+      <div class="lp-group-filter" id="lp-line-filter">
+        <button class="seg-btn lp-group-btn" id="lp-line-btn" onclick="NIMBUS.LaborPlanning.toggleLineDropdown(event)">
+          <span id="lp-line-label">All Lines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+        </button>
+        <div class="dash-filter-dropdown" id="lp-line-dropdown" hidden>
+          <div class="dash-filter-paste-row">
+            <input type="text" class="dash-filter-paste-input" id="lp-line-search"
+                   data-i18n-placeholder="ph.search_lines" placeholder="Search lines…" autocomplete="off">
+          </div>
+          <div class="dash-filter-checklist" id="lp-line-checklist"></div>
+        </div>
+      </div>
+      <div class="sep-v"></div>
       <div class="lp-seg-group">
         <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period">‹</button>
         <input id="labor-horizon-input" class="labor-horizon-input" readonly placeholder="Jump to week…" title="Click to jump to any week">
