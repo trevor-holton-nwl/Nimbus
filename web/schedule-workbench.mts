@@ -1622,7 +1622,7 @@ export const Table = {
         },
         {
           headerName: Util.t('col.fixed'), field: 'fixed',
-          width: 42, minWidth: 42, maxWidth: 42, flex: 0,
+          width: 60, minWidth: 60, maxWidth: 60, flex: 0,
           pinned: 'left',
           editable: false,
           cellRenderer: (p: { value: unknown }) => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
