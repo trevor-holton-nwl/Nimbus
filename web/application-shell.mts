@@ -1720,6 +1720,10 @@ const App = {
   _pausables: new Set<{ pause?(): void; resume?(): void }>(),
   _drawerOpen: false,
   _prevTab: null as TopLevelTab | null,
+  // Context-bar Lines combobox search text (mirrors ProdLines._lineSearch /
+  // LaborPlanning's equivalent — same pattern, just owned by the persistent
+  // header control instead of a per-tab toolbar).
+  _linesPillSearch: '',
   // Assigned externally from app.js once this module loads (see this file's
   // header comment) — showLoginScreen's sign-in success handler and the
   // DOMContentLoaded gate both call it. Never set from within this file.
@@ -1881,29 +1885,35 @@ const App = {
     el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
   },
 
-  // Lines pill (context bar) — dispatcher only, no new line-filter UI or data
-  // path. Routes to whichever tab/sub-tab's EXISTING line filter is active;
-  // see the task report for the full tab → target dispatch table.
-  _dispatchLinesPill(e: MouseEvent): void {
-    const tab = App._currentTab;
-    if (tab === 'home') {
-      Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn');
-    } else if (tab === 'gantt') {
-      if (App._ganttSub === 'orders') Table._toggleChipDropdown('line');
-      else GanttFilter._toggleLineDropdown();
-    } else if (tab === 'labor') {
-      LaborPlanning.toggleGroupDropdown(e);
-    }
-    // masterdata / admin: no equivalent line filter — the pill is hidden for
-    // these tabs (see _updateLinesPillVisibility), so this is unreachable.
+  // Context-bar Lines combobox — a persistent, always-visible control (same
+  // footing as the Plant selector next to it), reading/writing the same
+  // Store.selectedLines every screen already reacts to via 'lines:selected'.
+  // Tab-local Lines buttons (Gantt/Dashboard/Labor/Master Data) are untouched
+  // and keep working independently — this is an additional global entry
+  // point into the same shared selection, not a replacement.
+  _renderLinesPillChecklist(): void {
+    const plant = Store.selectedPlant;
+    const candidates = plant ? Store.linesForSelectedPlant() : [];
+    Util.renderLineChecklist(
+      document.getElementById('context-lines-checklist'), candidates, Store.selectedLines, App._linesPillSearch,
+      (line, checked) => {
+        const next = new Set(Store.selectedLines);
+        if (checked) next.add(line); else next.delete(line);
+        Store.setSelectedLines(next, 'header');
+      });
   },
 
-  // Hidden entirely on tabs with no equivalent line filter (masterdata/admin);
-  // visible (and dispatched per-tab by _dispatchLinesPill) everywhere else.
-  _updateLinesPillVisibility(tab: TopLevelTab): void {
-    const pill = document.getElementById('context-lines-pill');
-    if (!pill) return;
-    pill.hidden = (tab === 'masterdata' || tab === 'admin');
+  _refreshLinesPillLabel(): void {
+    Util.refreshMultiSelectLabel(
+      document.getElementById('context-lines-label'), document.getElementById('context-lines-pill'), Store.selectedLines);
+  },
+
+  _toggleLinesPillDropdown(e?: Event): void {
+    e?.stopPropagation();
+    const drop = document.getElementById('context-lines-dropdown');
+    if (!drop) return;
+    drop.hidden = !drop.hidden;
+    if (!drop.hidden) App._renderLinesPillChecklist();
   },
 
   init(): void {
@@ -1960,11 +1970,37 @@ const App = {
       if (evt.type === 'plant:selected') App._reflectDrawerPlantLabel();
     }, 'NavDrawerPlantLabel');
 
-    /* Lines pill (context bar) — dispatch-only click handler; visibility is
-       kept in sync with the active tab on every App.goto(), set once here
-       for the initial ('home') tab. */
-    document.getElementById('context-lines-pill')?.addEventListener('click', e => App._dispatchLinesPill(e));
-    App._updateLinesPillVisibility(App._currentTab);
+    /* Lines combobox (context bar) — persistent, always-visible control next
+       to Plant. Wiring mirrors GanttFilter/LaborPlanning/ProdLines' own line
+       pickers: click toggles the dropdown, outside-click closes it, search
+       filters the checklist, paste auto-checks matches. */
+    const linesPillBtn  = document.getElementById('context-lines-pill');
+    const linesPillDrop = document.getElementById('context-lines-dropdown');
+    linesPillBtn?.addEventListener('click', e => App._toggleLinesPillDropdown(e));
+    document.addEventListener('click', (e: MouseEvent) => {
+      if (linesPillDrop && !linesPillDrop.hidden
+          && !linesPillDrop.contains(e.target as Node) && e.target !== linesPillBtn) {
+        linesPillDrop.hidden = true;
+      }
+    });
+    const linesPillSearch = document.getElementById('context-lines-search') as HTMLInputElement | null;
+    if (linesPillSearch) {
+      linesPillSearch.oninput = () => {
+        App._linesPillSearch = linesPillSearch.value || '';
+        App._renderLinesPillChecklist();
+      };
+      Util.wirePasteToCheckboxes(linesPillSearch,
+        () => Array.from(document.getElementById('context-lines-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+    }
+    App._refreshLinesPillLabel();
+    Store.subscribe(evt => {
+      if (evt.type === 'lines:selected') App._refreshLinesPillLabel();
+      if (evt.type === 'plant:selected') {
+        App._linesPillSearch = '';
+        App._renderLinesPillChecklist();
+        App._refreshLinesPillLabel();
+      }
+    }, 'ContextLinesPill');
 
     /* Manage Master Data sub-tabs (Production Lines / Plant) */
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(btn => {
@@ -2125,6 +2161,10 @@ const App = {
     // Collapse line accordions when leaving the masterdata tab entirely
     if (App._currentTab === 'masterdata' && tab !== 'masterdata') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
+      // The Production Lines line-filter dropdown is portaled onto <body> (see
+      // ProdLines._wireNav) to escape the sidebar's overflow:hidden clipping,
+      // so it no longer gets hidden for free by the tab-panel switch below.
+      document.getElementById('lines-nav-filter-dropdown')?.setAttribute('hidden', '');
     }
     if (App._currentTab === 'admin' && tab !== 'admin') {
       try { AdminCockpit._stopHealthPolling(); } catch {}
@@ -2132,7 +2172,6 @@ const App = {
     if (App._currentTab && App._currentTab !== tab) App._prevTab = App._currentTab;
     App._currentTab = tab;
     App._updateSectionLabel(tab);
-    App._updateLinesPillVisibility(tab);
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.getElementById(tab + '-tab')!.classList.add('active');
     document.querySelectorAll<HTMLElement>('.tab-btn').forEach(b => {
@@ -2252,6 +2291,7 @@ const App = {
     // Collapse line accordions when switching away from the lines sub-tab
     if (App._currentMasterSub === 'lines' && sub !== 'lines') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
+      document.getElementById('lines-nav-filter-dropdown')?.setAttribute('hidden', '');
     }
     App._currentMasterSub = sub;
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(b => {

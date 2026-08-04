@@ -1246,7 +1246,7 @@ export const ProdLines = {
             <button class="seg-btn lp-group-btn" id="lines-nav-filter-btn" type="button" style="width:100%;">
               <span id="lines-nav-filter-label">All Lines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
             </button>
-            <div class="dash-filter-dropdown" id="lines-nav-filter-dropdown" hidden style="width:100%;min-width:0;box-sizing:border-box;">
+            <div class="dash-filter-dropdown" id="lines-nav-filter-dropdown" hidden>
               <div class="dash-filter-paste-row">
                 <input id="lines-nav-search" class="dash-filter-paste-input" type="text"
                        placeholder="${Util.t('ph.search_lines')}" autocomplete="off" spellcheck="false">
@@ -1286,7 +1286,23 @@ export const ProdLines = {
     const drop = document.getElementById('lines-nav-filter-dropdown');
     if (btn && drop && !btn._wired) {
       btn._wired = true;
-      btn.addEventListener('click', (e) => { e.stopPropagation(); drop.hidden = !drop.hidden; });
+      // `.lines-nav`/`.lines-nav-header` are `overflow:hidden` (so the line list
+      // below scrolls correctly inside this fixed-width sidebar), which clips
+      // this dropdown regardless of z-index. Move it to <body> and position it
+      // from the button's own rect so it floats above the page like every
+      // other line-filter dropdown instead of getting cut off.
+      document.body.appendChild(drop);
+      drop.classList.add('dash-filter-dropdown-portal');
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const opening = drop.hidden;
+        drop.hidden = !drop.hidden;
+        if (opening) {
+          const r = btn.getBoundingClientRect();
+          drop.style.top = `${r.bottom + 4}px`;
+          drop.style.left = `${r.left}px`;
+        }
+      });
       document.addEventListener('click', (e: MouseEvent) => {
         if (!drop.hidden && !drop.contains(e.target as Node) && e.target !== btn) drop.hidden = true;
       });
@@ -1303,6 +1319,8 @@ export const ProdLines = {
         const allLines = Store.selectedPlant ? Store.linesForSelectedPlant() : CalendarUI._getLines();
         ProdLines._rebuildLineFilterChecklist(allLines);
       };
+      Util.wirePasteToCheckboxes(search,
+        () => Array.from(document.getElementById('lines-nav-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
     }
     const list = document.getElementById('lines-nav-list');
     if (list) {
@@ -2485,6 +2503,8 @@ export const LaborPlanning = (() => {
             Store.setSelectedLines(next, 'labor');
           });
       };
+      Util.wirePasteToCheckboxes(lineSearchIn,
+        () => Array.from(document.getElementById('lp-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
     }
   }
 

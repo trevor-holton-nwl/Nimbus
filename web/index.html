@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-08-03-a';</script>
-<link rel="stylesheet" href="styles.css?v=2026-08-03-a">
+<script>window.NIMBUS_BUILD_ID = '2026-08-03-c';</script>
+<link rel="stylesheet" href="styles.css?v=2026-08-03-c">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -121,6 +121,13 @@
   padding: 5px 0;
   max-height: 260px;
   overflow-y: auto;
+}
+/* Used by dropdowns whose trigger sits inside an overflow:hidden ancestor
+   (e.g. the Production Lines sidebar) — position:absolute would just get
+   clipped there regardless of z-index. top/left are set inline from the
+   trigger button's getBoundingClientRect() at open time. */
+.dash-filter-dropdown-portal {
+  position: fixed;
 }
 .dash-filter-dropdown label {
   display: flex;
@@ -1129,8 +1136,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </header>
 
   <!-- =========================================================
-       CONTEXT BAR — relocated plant selector + Lines pill
-       (Lines-pill click dispatch is a later task)
+       CONTEXT BAR — relocated plant selector + Lines combobox.
+       Lines is always visible/wired on every tab, same as Plant —
+       a persistent global filter, not a per-tab dispatcher.
        ========================================================= -->
   <div class="context-bar">
     <div class="header-plant-selector" id="header-plant-selector" title="Select the plant to view across NIMBUS" data-i18n-title="tip.select_plant_title">
@@ -1143,9 +1151,19 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
     </div>
 
-    <button type="button" class="context-pill" id="context-lines-pill">
-      <span data-i18n="ui.lines_section">Lines</span>
-    </button>
+    <div class="dash-filter-group" id="context-lines-group">
+      <button type="button" class="context-pill" id="context-lines-pill" aria-haspopup="listbox" aria-expanded="false">
+        <span id="context-lines-label" data-i18n="ui.lines_section">Lines</span>
+        <span class="dash-filter-arrow">▾</span>
+      </button>
+      <div class="dash-filter-dropdown" id="context-lines-dropdown" role="listbox" hidden>
+        <div class="dash-filter-paste-row">
+          <input type="text" class="dash-filter-paste-input" id="context-lines-search"
+                 placeholder="Search lines…" data-i18n-placeholder="ph.search_lines" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="dash-filter-checklist" id="context-lines-checklist"></div>
+      </div>
+    </div>
   </div>
 
   <!-- =========================================================
