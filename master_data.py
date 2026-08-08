@@ -68,6 +68,46 @@ _KEY_COLUMNS = {
     'role_plants':      frozenset({'role', 'plant'}),
 }
 
+# The ONLY material_plants columns POST /master-data/material-plants/attributes
+# may ever write. This is a security boundary, not a convenience list: it is
+# what keeps that (deliberately non-admin-gated) endpoint away from the
+# composite key (material_id, plant), the SAP-owned fields (status_pl,
+# default_production_version) and the lot sizes the optimizer consumes.
+# Widening it is a deliberate act — see tests/test_material_plant_attributes.py,
+# which pins its exact contents.
+EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color'})
+
+# Columns the Master Data > Material Plant grid joins in from `materials` for
+# display/filtering only. Never writable; never physically on material_plants.
+_MATERIAL_PLANT_JOINED = ('material_type', 'material_description')
+
+# Hard ceiling on one attributes save — bounds statement count and audit payload.
+MAX_ATTRIBUTE_UPDATES = 5000
+
+
+class PlantNotAllowed(PermissionError):
+    """The caller's role_plants scope excludes the requested plant.
+
+    Its own exception class (not ValueError) so brain.py maps it to 403, never
+    400. Needed because the plant-scoped Material / Material Plant grids
+    resolve their row set THROUGH material_plants.plant rather than through a
+    plant column on their own base table (materials has none), so
+    PLANT_SCOPED_TABLES — which governs the generic /master-data/{table} path
+    and deliberately means "this table's OWN plant column is scoped data" —
+    cannot express the check for them.
+    """
+
+
+def _assert_plant_allowed(plant: str, allowed_plants: list[str] | None) -> None:
+    """Single choke point for the plant-derived read/write surface below.
+    Called FIRST in every function that resolves rows through a plant, before
+    any query is composed — so the check can't be forgotten at the route layer
+    or bypassed by a future second caller of these functions."""
+    if not plant or not plant.strip():
+        raise ValueError("plant is required")
+    if allowed_plants is not None and plant not in allowed_plants:
+        raise PlantNotAllowed(f"Plant {plant!r} is not in your assigned plants")
+
 
 def _assert_table(table: str):
     if table not in ALLOWED_TABLES:
@@ -86,6 +126,43 @@ def _assert_col_name(column_name: str):
 
 def _row_key(table: str, row: dict) -> tuple:
     return tuple(row.get(k) for k in sorted(_KEY_COLUMNS[table]))
+
+
+def _column_meta(cur, table: str) -> list[dict]:
+    """column_metadata JOIN information_schema.columns for `table`, in display
+    order, system columns excluded. Extracted verbatim out of list_rows so the
+    plant-scoped grids (material_grid / material_plant_grid) get IDENTICAL
+    column semantics: a physical column with no column_metadata row stays
+    invisible to the API, and vice versa (the JOIN is an INNER JOIN on
+    purpose). list_rows's external contract is unchanged by this extraction —
+    it's a pure ~15-line lift."""
+    cur.execute(
+        """
+        SELECT cm.column_name, cm.display_label, cm.is_locked, cm.column_order,
+               c.data_type, c.is_nullable, c.column_default
+        FROM column_metadata cm
+        JOIN information_schema.columns c
+          ON c.table_name = cm.table_name
+         AND c.column_name = cm.column_name
+         AND c.table_schema = 'public'
+        WHERE cm.table_name = %s
+          AND cm.column_name != ALL(%s)
+        ORDER BY cm.column_order, cm.column_name
+        """,
+        (table, list(SYSTEM_COLUMNS)),
+    )
+    return [
+        {
+            "column_name":    r[0],
+            "display_label":  r[1],
+            "is_locked":      r[2],
+            "column_order":   r[3],
+            "sql_type":       r[4].upper(),
+            "is_nullable":    r[5] == "YES",
+            "column_default": r[6],
+        }
+        for r in cur.fetchall()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -115,33 +192,7 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
 
     with _pool.connection() as conn, conn.cursor() as cur:
         # Column metadata in display order, excluding system columns.
-        cur.execute(
-            """
-            SELECT cm.column_name, cm.display_label, cm.is_locked, cm.column_order,
-                   c.data_type, c.is_nullable, c.column_default
-            FROM column_metadata cm
-            JOIN information_schema.columns c
-              ON c.table_name = cm.table_name
-             AND c.column_name = cm.column_name
-             AND c.table_schema = 'public'
-            WHERE cm.table_name = %s
-              AND cm.column_name != ALL(%s)
-            ORDER BY cm.column_order, cm.column_name
-            """,
-            (table, list(SYSTEM_COLUMNS)),
-        )
-        columns = [
-            {
-                "column_name":    r[0],
-                "display_label":  r[1],
-                "is_locked":      r[2],
-                "column_order":   r[3],
-                "sql_type":       r[4].upper(),
-                "is_nullable":    r[5] == "YES",
-                "column_default": r[6],
-            }
-            for r in cur.fetchall()
-        ]
+        columns = _column_meta(cur, table)
 
         col_names = [c["column_name"] for c in columns]
 
@@ -245,6 +296,277 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                             exc_info=True, extra={"category": "master_data"})
 
     return {"columns": columns, "rows": rows, "meta": {"total": total}}
+
+
+def material_grid(plant: str, limit: int | None = None, offset: int | None = None,
+                  allowed_plants: list[str] | None = None) -> dict:
+    """Materials that exist AT `plant`, i.e. semi-joined through material_plants.
+
+    A plant with zero material_plants rows yields an EMPTY grid even though the
+    global materials catalog is non-empty — that is the defining rule of this
+    function, not a degenerate case. Read-only: every column comes back with
+    editable=False.
+
+    Columns are column_metadata-driven (not hardcoded), so a column added to
+    `materials` via the Add-Column wizard appears here automatically, exactly
+    as it does in the Admin grid.
+
+    `materials` is deliberately NOT in PLANT_SCOPED_TABLES (it has no plant
+    column of its own), so the per-user role_plants scope can't be enforced by
+    the generic list_rows() path here — _assert_plant_allowed is the
+    substitute choke point.
+    """
+    _assert_plant_allowed(plant, allowed_plants)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        columns = _column_meta(cur, 'materials')
+        col_names = [c["column_name"] for c in columns]
+        if not col_names:
+            return {"columns": [], "rows": [], "meta": {"total": 0, "plant": plant}}
+        for c in columns:
+            c["source_table"] = "materials"
+            c["editable"] = False
+
+        # Explicit key-membership filter, NOT list_rows' positional
+        # col_names[:len(keys)] slice (which only works by seed-order luck).
+        order_cols = [c for c in col_names if c in _KEY_COLUMNS['materials']] or col_names[:1]
+
+        # EXISTS rather than JOIN: states the semi-join intent, lets the
+        # planner stop at the first match, and stays correct if the PK ever
+        # changes. The subquery's identifiers are compile-time literals
+        # (never user input); the only value is the %s plant parameter.
+        where = sql.SQL(
+            " WHERE EXISTS (SELECT 1 FROM material_plants mp"
+            "               WHERE mp.material_id = m.material_id AND mp.plant = %s)"
+        )
+        query = (
+            sql.SQL("SELECT {cols} FROM materials AS m").format(
+                cols=sql.SQL(", ").join(sql.Identifier("m", c) for c in col_names))
+            + where
+            + sql.SQL(" ORDER BY {order}").format(
+                order=sql.SQL(", ").join(sql.Identifier("m", c) for c in order_cols))
+        )
+        params: list = [plant]
+        if limit is not None:
+            query += sql.SQL(" LIMIT %s")
+            params.append(int(limit))
+        if offset:
+            query += sql.SQL(" OFFSET %s")
+            params.append(int(offset))
+        cur.execute(query, params)
+        rows = [dict(zip(col_names, r, strict=True)) for r in cur.fetchall()]
+
+        # Same rule as list_rows above — a separate COUNT is only worth a
+        # second scan when a page window was applied; otherwise `rows` IS the
+        # whole filtered set.
+        if limit is not None or offset:
+            cur.execute(sql.SQL("SELECT COUNT(*) FROM materials AS m") + where, [plant])
+            total = int(cur.fetchone()[0])
+        else:
+            total = len(rows)
+
+    return {"columns": columns, "rows": rows, "meta": {"total": total, "plant": plant}}
+
+
+def material_plant_grid(plant: str, limit: int | None = None, offset: int | None = None,
+                        allowed_plants: list[str] | None = None) -> dict:
+    """material_plants rows for `plant`, plus material_type /
+    material_description LEFT JOINed in from `materials` for the UI's filters.
+
+    The joined columns come back in `columns[]` with editable=False and
+    source_table='materials' so the grid can render them and refuse to edit
+    them. Physical material_plants columns come back with
+    editable = (name in EDITABLE_MATERIAL_PLANT_ATTRS) — the same allowlist
+    the write endpoint enforces, so the client can never present a cell the
+    server would reject.
+
+    LEFT (not INNER) JOIN on purpose: material_plants.material_id has a NOT
+    NULL FK to materials, so a match is guaranteed today — but an INNER JOIN
+    would SILENTLY DROP material_plants rows if that ever stopped holding (FK
+    disabled during a bulk load). Dropping rows from a plant-scoped grid is a
+    data-loss-shaped bug; NULL enrichment is not. Same plan cost given the PK
+    lookup.
+    """
+    _assert_plant_allowed(plant, allowed_plants)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        columns = _column_meta(cur, 'material_plants')
+        col_names = [c["column_name"] for c in columns]
+        if not col_names:
+            return {"columns": [], "rows": [], "meta": {"total": 0, "plant": plant}}
+        for c in columns:
+            c["source_table"] = "material_plants"
+            c["editable"] = c["column_name"] in EDITABLE_MATERIAL_PLANT_ATTRS
+
+        # Joined columns: label/type sourced from materials' OWN column_metadata
+        # so an admin's display_label rename propagates here too. Skipped if
+        # material_plants ever grows a physical column of the same name (the
+        # Add-Column wizard can do that) — the physical column wins.
+        mat_meta = {c["column_name"]: c for c in _column_meta(cur, 'materials')}
+        next_order = max((c["column_order"] or 0) for c in columns) + 1
+        joined: list[dict] = []
+        for name in _MATERIAL_PLANT_JOINED:
+            if name in col_names or name not in mat_meta:
+                continue
+            entry = dict(mat_meta[name])
+            entry.update({"is_locked": True, "editable": False,
+                          "source_table": "materials", "column_order": next_order})
+            next_order += 1
+            joined.append(entry)
+        joined_names = [c["column_name"] for c in joined]
+
+        order_cols = [c for c in col_names
+                      if c in _KEY_COLUMNS['material_plants']] or col_names[:1]
+        where = sql.SQL(" WHERE {col} = %s").format(col=sql.Identifier("mp", "plant"))
+        query = (
+            sql.SQL("SELECT {cols} FROM material_plants AS mp"
+                    " LEFT JOIN materials AS m ON m.material_id = mp.material_id").format(
+                cols=sql.SQL(", ").join(
+                    [sql.Identifier("mp", c) for c in col_names]
+                    + [sql.Identifier("m", c) for c in joined_names]))
+            + where
+            + sql.SQL(" ORDER BY {order}").format(
+                order=sql.SQL(", ").join(sql.Identifier("mp", c) for c in order_cols))
+        )
+        params: list = [plant]
+        if limit is not None:
+            query += sql.SQL(" LIMIT %s")
+            params.append(int(limit))
+        if offset:
+            query += sql.SQL(" OFFSET %s")
+            params.append(int(offset))
+        cur.execute(query, params)
+        all_names = col_names + joined_names
+        rows = [dict(zip(all_names, r, strict=True)) for r in cur.fetchall()]
+
+        if limit is not None or offset:
+            # No LEFT JOIN in the COUNT: a LEFT JOIN on the PK side cannot
+            # change the row count, so joining here would only cost a scan.
+            cur.execute(sql.SQL("SELECT COUNT(*) FROM material_plants AS mp") + where, [plant])
+            total = int(cur.fetchone()[0])
+        else:
+            total = len(rows)
+
+    return {"columns": columns + joined, "rows": rows,
+            "meta": {"total": total, "plant": plant}}
+
+
+def set_material_plant_attributes(plant: str, updates: list[dict],
+                                  allowed_plants: list[str] | None = None,
+                                  user_email: str | None = None) -> dict:
+    """Update the three planner-editable material_plants attributes for ONE
+    plant (prt_01, prt_02, color).
+
+    UPDATE only — never INSERT, never ON CONFLICT. These rows are SAP-owned
+    master data; a missing (material_id, plant) pair means the client is
+    stale or the material is not at this plant. An upsert would fabricate a
+    material_plants row with empty status_pl / zero lot sizes, and — because
+    bom_items' two FKs both reference material_plants(material_id, plant)
+    (schema.sql) — would silently make that material BOM-eligible at a plant
+    it does not belong to. So a missing row is an ERROR, not an insert.
+
+    All rows in one transaction: a grid Save is atomic or it fails. A partial
+    save would leave the client's row cache diverged from the DB with no
+    indication which cells landed.
+    """
+    _assert_plant_allowed(plant, allowed_plants)
+    if not isinstance(updates, list):
+        raise ValueError("updates must be a list")
+    if len(updates) > MAX_ATTRIBUTE_UPDATES:
+        raise ValueError(
+            f"Too many updates in one request ({len(updates)}; max {MAX_ATTRIBUTE_UPDATES}).")
+
+    # ---- Phase 1: normalize + allowlist. No DB work yet, so a rejected
+    # request cannot have written anything even in principle.
+    normalized: list[tuple[str, dict]] = []
+    touched: set[str] = set()
+    for i, u in enumerate(updates):
+        if not isinstance(u, dict):
+            raise ValueError(f"updates[{i}] must be an object")
+        if "plant" in u:
+            raise ValueError(
+                f"updates[{i}] must not include 'plant' — plant is specified once, at the top level")
+        mid = _str_id(u.get("material_id"))
+        if not mid:
+            raise ValueError(f"updates[{i}] requires a material_id")
+        attrs = {k: v for k, v in u.items() if k != "material_id"}
+        rejected = sorted(set(attrs) - EDITABLE_MATERIAL_PLANT_ATTRS)
+        if rejected:
+            # HARD 400, never a silent drop. A silently-dropped status_pl or
+            # min_lot_size write must not be indistinguishable from a
+            # successful save — that is how an allowlist bypass goes unnoticed.
+            raise ValueError(
+                "These columns are not editable through this endpoint: "
+                + ", ".join(rejected)
+                + f" (allowed: {', '.join(sorted(EDITABLE_MATERIAL_PLANT_ATTRS))})")
+        if not attrs:
+            continue  # nothing to write for this row
+        touched |= set(attrs)
+        normalized.append((mid, attrs))
+
+    if not normalized:
+        return {"status": "ok", "plant": plant, "updated": 0, "columns": []}
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        # ---- Phase 2: narrow the STATIC allowlist to what actually exists and
+        # is registered. Guarantees the write surface can never exceed the read
+        # surface the grid rendered, and turns an un-migrated DB into a clean
+        # 400 instead of a psycopg UndefinedColumn 500.
+        live = {c["column_name"] for c in _column_meta(cur, 'material_plants')}
+        missing_cols = sorted(touched - live)
+        if missing_cols:
+            raise ValueError(
+                "Column(s) not present on material_plants in this database: "
+                + ", ".join(missing_cols)
+                + " — apply migrations/2026-08-07-material-plant-attributes.sql.")
+
+        # ---- Phase 3: pre-flight existence in ONE round trip. Makes the
+        # not-found error deterministic and complete BEFORE any write, instead
+        # of discovering it row-by-row mid-transaction.
+        mids = [m for m, _ in normalized]
+        cur.execute(
+            "SELECT material_id FROM material_plants WHERE plant = %s AND material_id = ANY(%s)",
+            (plant, mids),
+        )
+        present = {r[0] for r in cur.fetchall()}
+        unknown = sorted(set(mids) - present)
+        if unknown:
+            raise ValueError(
+                f"{len(unknown)} material(s) have no material_plants row at plant {plant!r}: "
+                + ", ".join(unknown[:20]) + ("…" if len(unknown) > 20 else ""))
+
+        # ---- Phase 4: write. Per-row UPDATE because the supplied column set
+        # varies per row (PATCH semantics: keys present are written, explicit
+        # null clears, absent keys are untouched) — mirrors bulk_apply's
+        # per-row shape. No explicit rollback needed: every raise above
+        # happens before any write, and _pool.connection()'s context manager
+        # rolls back on exception regardless.
+        updated = 0
+        for mid, attrs in normalized:
+            cols = sorted(attrs)
+            cur.execute(
+                sql.SQL("UPDATE material_plants SET {sets}, updated_at = NOW()"
+                        " WHERE material_id = %s AND plant = %s").format(
+                    sets=sql.SQL(", ").join(
+                        sql.SQL("{} = %s").format(sql.Identifier(c)) for c in cols)),
+                [attrs[c] for c in cols] + [mid, plant],
+            )
+            updated += cur.rowcount
+
+        # Audit. material_ids capped so a large save cannot write a
+        # multi-hundred-KB JSONB blob per audit row.
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('material_plants', 'set_attributes', %s, %s)",
+            (Jsonb({"plant": plant, "updated": updated,
+                    "columns": sorted(touched),
+                    "material_ids": mids[:50],
+                    "material_id_count": len(mids),
+                    "truncated": len(mids) > 50}), user_email),
+        )
+        conn.commit()
+
+    return {"status": "ok", "plant": plant, "updated": updated, "columns": sorted(touched)}
 
 
 def cascade_preview(table: str, deletes: list[dict]) -> dict:
@@ -582,6 +904,34 @@ def ensure_plant_constraints_column() -> None:
     column_metadata so it never shows as an editable Master Data grid column."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS constraints JSONB")
+        conn.commit()
+
+
+def ensure_material_plant_attributes() -> None:
+    """Idempotent: add material_plants.prt_01/prt_02/color + their
+    column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
+    (keep column names/types in sync with that file and with schema.sql's
+    drift block) so a fresh dev DB — or a container pointed at a DB that
+    missed the migration — still renders and can save the Material Plant
+    grid's three editable columns."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_01 TEXT")
+        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_02 TEXT")
+        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS color TEXT")
+        cur.execute(
+            """
+            INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)
+            VALUES
+                ('material_plants', 'prt_01', 'Prod. Resource Tool (01)', FALSE, 8),
+                ('material_plants', 'prt_02', 'Prod. Resource Tool (02)', FALSE, 9),
+                ('material_plants', 'color',  'Color',                    FALSE, 10)
+            ON CONFLICT (table_name, column_name) DO NOTHING
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_material_plants_plant_material"
+            " ON material_plants(plant, material_id)"
+        )
         conn.commit()
 
 

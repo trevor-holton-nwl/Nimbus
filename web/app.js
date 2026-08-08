@@ -267,8 +267,8 @@ const NIMBUS = (function () {
     throw new Error('NIMBUS boot error: nimbus-compute-core.js did not load before app.js — check index.html script order / deploy.');
   }
 
-  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE || !window.__NIMBUS_SERVICES || !window.__NIMBUS_DATA || !window.__NIMBUS_WORKBENCH || !window.__NIMBUS_PLANT_ADMIN || !window.__NIMBUS_SHELL) {
-    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs/schedule-services.mjs/schedule-data.mjs/schedule-workbench.mjs/plant-and-administration.mjs/application-shell.mjs did not load before app.js — check app-entry.mjs.');
+  if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE || !window.__NIMBUS_SERVICES || !window.__NIMBUS_DATA || !window.__NIMBUS_WORKBENCH || !window.__NIMBUS_PLANT_ADMIN || !window.__NIMBUS_SHELL || !window.__NIMBUS_MATERIAL_GRIDS) {
+    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs/schedule-services.mjs/schedule-data.mjs/schedule-workbench.mjs/plant-and-administration.mjs/application-shell.mjs/master-data-grids.mjs did not load before app.js — check app-entry.mjs.');
   }
   const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
@@ -277,6 +277,7 @@ const NIMBUS = (function () {
   const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
   const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
+  const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
   // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
   // statically import schedule-services.mjs — see that file's header). Arrow-function
   // wrappers, not bare method references: Calendar's methods read `this._runCache`/
@@ -615,10 +616,11 @@ const NIMBUS = (function () {
           Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
         }
         try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
-        try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub !== 'plant') ProdLines.render(); } catch {}
+        try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub === 'lines') ProdLines.render(); } catch {}
       }
     }, 'App.masterData');
     try { Plant.init();       } catch (e) { ErrorLog.error('boot', `Plant.init: ${e.message}`); }
+    try { MaterialGrids.init(); } catch (e) { ErrorLog.error('boot', `MaterialGrids.init: ${e.message}`); }
     try { PlantSelector.init();  } catch (e) { ErrorLog.error('boot', `PlantSelector.init: ${e.message}`); }
     try { App.init();            } catch (e) { ErrorLog.error('boot', `App.init: ${e.message}`); }
     // ProdLines has no async init — it renders on-demand when its tab is activated.
@@ -734,6 +736,6 @@ const NIMBUS = (function () {
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
     PlantSelector, EmptyState, MasterData,
     LaborPlanning, Interface, Security, CalendarSync,
-    Session, SessionUIAdapter, showLoginScreen
+    Session, SessionUIAdapter, showLoginScreen, MaterialGrids
   };
 })();

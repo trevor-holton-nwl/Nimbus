@@ -649,37 +649,68 @@ export const Util = {
   // screen unilaterally dropping an entry it doesn't recognize would fight
   // with the others. A selected line invisible to the current screen's
   // candidate list simply renders unchecked there — harmless.
+  // Optional 6th param, additive: `cap` bounds the rendered/delegated-listener
+  // count (undefined = today's unlimited behavior, unchanged for all existing
+  // callers); `emptyKey` overrides the empty-candidates i18n key (was a
+  // hardcoded English 'No lines' literal — a real bug for any non-line reuse,
+  // now `ui.no_lines` by default, same text); `onCapped(shown, total)` lets a
+  // caller surface "showing N of M" when the cap actually trims the list.
+  // Event delegation (one listener on checklistEl, not one per checkbox) is
+  // what makes `cap` meaningful for a huge candidate list — needed because a
+  // per-checkbox listener count at candidate-list scale (tens of thousands)
+  // is itself the freeze this is guarding against. Delegation still catches
+  // paste-driven checks: matchPasteToCheckboxes dispatches a bubbling
+  // 'change' (see below), which a delegated listener on the container catches
+  // exactly like a direct one would.
   renderLineChecklist(
     checklistEl: HTMLElement | null,
     candidateLines: string[],
     selected: Set<string>,
     search: string,
     onToggle: (line: string, checked: boolean) => void,
+    opts?: { cap?: number; emptyKey?: string; onCapped?: (shown: number, total: number) => void },
   ): void {
     if (!checklistEl) return;
     const q = (search || '').toLowerCase().trim();
-    const visible = q ? candidateLines.filter(l => l.toLowerCase().includes(q)) : candidateLines;
+    const matched = q ? candidateLines.filter(l => l.toLowerCase().includes(q)) : candidateLines;
+    const cap = opts?.cap;
+    const visible = cap != null && matched.length > cap ? matched.slice(0, cap) : matched;
     const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
       (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     checklistEl.innerHTML = visible.length
       ? visible.map(l =>
           `<label><input type="checkbox" value="${esc(l)}"${selected.has(l) ? ' checked' : ''}> ${esc(l)}</label>`
         ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${candidateLines.length ? Util.t('ui.no_matches') : 'No lines'}</div>`;
-    checklistEl.querySelectorAll<HTMLInputElement>('input[type=checkbox]').forEach(cb => {
-      cb.addEventListener('change', () => onToggle(cb.value, cb.checked));
-    });
+      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${candidateLines.length ? Util.t('ui.no_matches') : Util.t(opts?.emptyKey ?? 'ui.no_lines')}</div>`;
+    if (!(checklistEl as HTMLElement & { _delegated?: boolean })._delegated) {
+      (checklistEl as HTMLElement & { _delegated?: boolean })._delegated = true;
+      checklistEl.addEventListener('change', (e) => {
+        const cb = e.target as HTMLInputElement;
+        if (cb?.type === 'checkbox') onToggle(cb.value, cb.checked);
+      });
+    }
+    if (visible.length < matched.length) opts?.onCapped?.(visible.length, matched.length);
   },
 
   // Updates a line multi-select's trigger button label/active state — "All
   // lines" / the one selected name / "N lines" — shared by every line-picker
-  // button (companion to renderLineChecklist above).
-  refreshMultiSelectLabel(labelEl: HTMLElement | null, btnEl: HTMLElement | null, selected: Set<string>): void {
+  // button (companion to renderLineChecklist above). Optional `opts` bag lets
+  // a non-line reuse override the two i18n keys (and interpolation vars) so
+  // the label can read e.g. "All Material Types" / "3 selected" instead of
+  // being hardcoded to line semantics. Omitted entirely, behavior is
+  // unchanged from before this param existed.
+  refreshMultiSelectLabel(
+    labelEl: HTMLElement | null,
+    btnEl: HTMLElement | null,
+    selected: Set<string>,
+    opts?: { allKey?: string; allVars?: Record<string, string | number>;
+             nKey?: string; nVars?: Record<string, string | number> },
+  ): void {
     if (!labelEl) return;
     const n = selected.size;
-    labelEl.textContent = n === 0 ? Util.t('ui.all_lines')
+    labelEl.textContent = n === 0 ? Util.t(opts?.allKey ?? 'ui.all_lines', opts?.allVars)
       : n === 1 ? [...selected][0]
-      : Util.t('ui.n_lines_filter', { count: n });
+      : Util.t(opts?.nKey ?? 'ui.n_lines_filter', { count: n, ...(opts?.nVars ?? {}) });
     if (btnEl) btnEl.classList.toggle('active', n > 0);
   },
 

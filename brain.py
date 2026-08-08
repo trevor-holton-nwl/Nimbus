@@ -190,6 +190,7 @@ async def lifespan(app: FastAPI):
     md.ensure_line_key_columns()
     md.ensure_plant_blackout_table()
     md.ensure_unique_plant()
+    md.ensure_material_plant_attributes()
     md.ensure_roles_table()
     md.ensure_role_plants_table()
     auth.ensure_user_security_table()
@@ -549,6 +550,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/{table}/columns/{column}": "master_data.column_write",
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
+    "/master-data/material-plants/attributes": "material_plants.attributes_update",
     "/security/users/bulk": "security.users_bulk_write",
     "/security/users/{username}/reset-password": "security.password_reset",
     "/sap/interface/mappings/{object}": "sap.mapping_update",
@@ -1737,12 +1739,16 @@ def clear_audit_log():
 # MASTER DATA — Subnetwork / Plant / Production Line management
 # =============================================================================
 
-# NOTE: these two literal-path routes MUST be registered before the generic
+# NOTE: these four literal-path routes MUST be registered before the generic
 # GET /master-data/{table} below — FastAPI/Starlette matches routes in
 # registration order, not by specificity, so a route declared after {table}
 # is permanently shadowed (a request for it just gets captured as table="...",
 # then 404s inside md_list/_assert_table). _audit was previously registered
 # after {table} and was completely unreachable in production as a result.
+# (POST /master-data/material-plants/attributes below is NOT at this risk —
+# it's a two-segment path and the default `str` path converter behind
+# {table} excludes "/", so it can never be captured by {table} regardless of
+# registration order. Only single-segment literals need to precede it.)
 @api.get("/master-data/_audit", dependencies=[Depends(require_admin)])
 def md_audit(limit: int = 100):
     """Return the most recent N master-data change audit entries."""
@@ -1761,6 +1767,50 @@ def md_schema_export():
     get copy-pasteable text to fold back into schema.sql / a migrations file.
     """
     return {"sql": md.export_schema_sql()}
+
+
+@api.get("/master-data/_material-grid")
+def md_material_grid(
+        plant: str = Query(..., min_length=1,
+            description="Required. Materials are returned only if they have a "
+                        "material_plants row at this plant."),
+        limit: int | None = Query(default=None, ge=1, le=100000),
+        offset: int | None = Query(default=None, ge=0),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Plant-scoped Material grid (Master Data tab). Read-only.
+
+    `plant` is REQUIRED on purpose: an optional plant would make omitting it
+    the bypass around the role_plants scope enforced inside md.material_grid
+    (materials has no plant column of its own, so it isn't in
+    PLANT_SCOPED_TABLES and can't be scoped by the generic /master-data/{table}
+    path). A plant with zero material_plants rows returns an empty grid — that
+    is the rule, not an error. Not admin-gated, same as GET /master-data/{table}.
+    """
+    try:
+        return md.material_grid(plant, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.get("/master-data/_material-plant-grid")
+def md_material_plant_grid(
+        plant: str = Query(..., min_length=1,
+            description="Required. Returns material_plants rows for this plant, "
+                        "with material_type/material_description joined in from materials."),
+        limit: int | None = Query(default=None, ge=1, le=100000),
+        offset: int | None = Query(default=None, ge=0),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Plant-scoped Material Plant grid (Master Data tab). Read-only except
+    prt_01/prt_02/color, which come back with columns[].editable=True and are
+    written through POST /master-data/material-plants/attributes."""
+    try:
+        return md.material_plant_grid(plant, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @api.get("/master-data/{table}")
@@ -1918,6 +1968,39 @@ def md_set_role_page_access(role: str, request: Request, body: dict = Body(defau
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/material-plants/attributes")
+def md_set_material_plant_attributes(request: Request, body: dict = Body(default={}),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Update the planner-editable material_plants attributes (prt_01, prt_02,
+    color) for one plant. Deliberately NOT admin-gated — this is the Master
+    Data tab's Material Plant grid save, and planners (not just admins) are
+    its users. The write surface is a hard server-side allowlist
+    (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
+    default_production_version and the lot sizes are unreachable from here
+    regardless of what the client sends. Rows must already exist — this never
+    inserts.
+
+    Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color? }] }
+    """
+    plant = (body.get("plant") or "").strip()
+    rows = body.get("updates") or []
+    # Set BEFORE the call so the rejected/failure paths carry the target too —
+    # this route has no path params, so _admin_route_details' path-param
+    # harvest can't supply it on its own.
+    _set_admin_log_details(request, plant=plant, row_count=len(rows) if isinstance(rows, list) else 0)
+    try:
+        result = md.set_material_plant_attributes(
+            plant=plant, updates=rows, allowed_plants=allowed_plants,
+            user_email=request.headers.get("x-user-email"))
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _set_admin_log_details(request, updated=result.get("updated", 0),
+                           columns=",".join(result.get("columns", [])))
+    return result
 
 
 # =========================

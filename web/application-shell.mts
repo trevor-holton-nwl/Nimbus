@@ -64,6 +64,7 @@ import { Alerts } from './schedule-services.mjs';
 import { Persistence, Session } from './schedule-data.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from './schedule-workbench.mjs';
 import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-administration.mjs';
+import { MaterialGrids } from './master-data-grids.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab } from './types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
@@ -400,7 +401,12 @@ const SessionUIAdapter = {
   },
   _landingSubDefs(tab: string): Array<[string, string]> | null {
     if (tab === 'gantt')      return [['timeline', Util.t('us.landing_timeline')], ['orders', Util.t('tab.table')]];
-    if (tab === 'masterdata') return [['lines', Util.t('tab.production_lines')], ['plant', Util.t('tab.plant')]];
+    if (tab === 'masterdata') return [
+      ['lines',          Util.t('tab.production_lines')],
+      ['plant',          Util.t('tab.plant')],
+      ['material',       Util.t('tab.materials')],
+      ['material-plant', Util.t('tab.material_plant')],
+    ];
     return null;   // home / labor / admin land on the tab with no sub-view here
   },
 
@@ -2182,10 +2188,12 @@ const App = {
     } else if (tab === 'home') {
       setTimeout(() => Dashboard.render(), 30);
     } else if (tab === 'masterdata') {
-      setTimeout(() => {
-        if (App._currentMasterSub === 'plant') Plant.render();
-        else ProdLines.render();
-      }, 30);
+      // Delegating instead of re-deciding: gotoMasterSub owns the whole
+      // sub-pane registry (visibility + render dispatch), so a new sub-tab
+      // can never again fall through to ProdLines here. gotoMasterSub's own
+      // setTimeout(30) fires because App._currentTab is already 'masterdata'
+      // (set above), so the render timing is unchanged.
+      App.gotoMasterSub(App._currentMasterSub || 'lines');
     } else if (tab === 'admin') {
       setTimeout(() => AdminCockpit.render(), 30);
     } else if (tab === 'labor') {
@@ -2286,8 +2294,21 @@ const App = {
     }
   },
 
+  // Registry of Master Data sub-panes — mirrors gotoLaborSub's `valid` array
+  // above rather than a hardcoded two-pane if/else, so a new sub-tab is added
+  // by appending one entry instead of touching four separate branches (the
+  // old shape silently fell through to ProdLines.render() for any sub not
+  // literally 'plant'). Order matches the button order in index.html.
+  _MASTER_SUBS: [
+    { sub: 'lines',          paneId: 'md-master-lines-pane',          render: () => ProdLines.render() },
+    { sub: 'plant',          paneId: 'md-master-plant-pane',          render: () => Plant.render() },
+    { sub: 'material',       paneId: 'md-master-material-pane',       render: () => MaterialGrids.render('material') },
+    { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant') },
+  ] as Array<{ sub: MasterSubTab; paneId: string; render(): void }>,
+
   gotoMasterSub(sub: MasterSubTab): void {
-    if (!['lines', 'plant'].includes(sub)) return;
+    const entry = App._MASTER_SUBS.find(e => e.sub === sub);
+    if (!entry) return;
     // Collapse line accordions when switching away from the lines sub-tab
     if (App._currentMasterSub === 'lines' && sub !== 'lines') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
@@ -2297,19 +2318,13 @@ const App = {
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(b => {
       b.classList.toggle('active', b.dataset.mdMaster === sub);
     });
-    const linesPane = document.getElementById('md-master-lines-pane');
-    const plantPane = document.getElementById('md-master-plant-pane');
-    if (linesPane) linesPane.hidden = (sub !== 'lines');
-    if (plantPane) {
-      if (sub === 'plant') { plantPane.style.display = 'flex'; plantPane.removeAttribute('hidden'); }
-      else { plantPane.style.display = ''; plantPane.setAttribute('hidden', ''); }
-    }
+    App._MASTER_SUBS.forEach(e => {
+      const el = document.getElementById(e.paneId);
+      if (el) el.hidden = (e.sub !== sub);
+    });
     // Only trigger render when the masterdata tab is currently visible
     if (App._currentTab === 'masterdata') {
-      setTimeout(() => {
-        if (sub === 'plant') Plant.render();
-        else ProdLines.render();
-      }, 30);
+      setTimeout(() => entry.render(), 30);
     }
   },
 

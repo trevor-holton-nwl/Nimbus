@@ -1590,6 +1590,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <nav class="admin-subtabs md-master-subtabs" role="tablist">
       <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
+      <button class="admin-subtab" data-md-master="material" role="tab" data-i18n="tab.materials">Material</button>
+      <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
     </nav>
 
     <!-- SUB-PANE: PRODUCTION LINES -->
@@ -1612,7 +1614,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
 
     <!-- SUB-PANE: PLANT (MM03-style inner tabs) -->
-    <div id="md-master-plant-pane" hidden style="flex-direction:column;height:100%;overflow:hidden;">
+    <div id="md-master-plant-pane" hidden>
 
       <!-- Inner tab strip -->
       <nav class="admin-subtabs plant-inner-tabs" role="tablist"
@@ -1676,6 +1678,35 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <!-- Inner pane: System Settings (content injected by Plant's settings-pane renderer) -->
       <div id="plant-tab-settings" class="cal-scroll" hidden style="flex:1;overflow-y:auto;"></div>
 
+    </div>
+
+    <!-- SUB-PANE: MATERIAL (read-only, plant-scoped AG Grid) -->
+    <div id="md-master-material-pane" hidden>
+      <div class="table-toolbar">
+        <input id="md-mat-quick" class="input" type="search"
+               data-i18n-placeholder="ph.quick_filter_materials" placeholder="Quick filter materials…">
+        <div class="spacer"></div>
+        <span class="dash-filter-hint" data-i18n="ui.md_grid_admin_hint_ro">Read-only. Full editing lives in Admin › Manage Data Tables.</span>
+        <button class="btn btn-ghost" id="md-mat-export" data-i18n="btn.export_csv">Export CSV</button>
+      </div>
+      <div class="table-filterbar" id="md-mat-filterbar"></div>
+      <div id="md-mat-grid" class="ag-theme-quartz"></div>
+    </div>
+
+    <!-- SUB-PANE: MATERIAL PLANT (prt_01 / prt_02 / color editable) -->
+    <div id="md-master-material-plant-pane" hidden>
+      <div class="table-toolbar">
+        <input id="md-mp-quick" class="input" type="search"
+               data-i18n-placeholder="ph.quick_filter_materials" placeholder="Quick filter materials…">
+        <div class="spacer"></div>
+        <span class="dash-filter-hint" data-i18n="ui.md_grid_admin_hint_prt">Prod. Resource Tool and Color are editable here. Full editing lives in Admin › Manage Data Tables.</span>
+        <span class="md-dirty-badge" id="md-mp-dirty" hidden></span>
+        <button class="btn btn-ghost" id="md-mp-discard" hidden data-i18n="btn.discard">Discard</button>
+        <button class="btn btn-ghost" id="md-mp-export" data-i18n="btn.export_csv">Export CSV</button>
+        <button class="btn btn-primary" id="md-mp-save" disabled data-i18n="btn.save">Save</button>
+      </div>
+      <div class="table-filterbar" id="md-mp-filterbar"></div>
+      <div id="md-mp-grid" class="ag-theme-quartz"></div>
     </div>
   </section>
 

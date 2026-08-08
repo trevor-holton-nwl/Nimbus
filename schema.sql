@@ -264,6 +264,10 @@ CREATE TABLE IF NOT EXISTS material_plants (
     updated_at                   TIMESTAMP    NOT NULL DEFAULT NOW(),
     PRIMARY KEY (material_id, plant)
 );
+-- Redundant with the (material_id, plant) PK's left prefix for any
+-- material_id-only lookup — left in place; dropping it is unrelated cleanup
+-- (see idx_material_plants_plant_material below for the index this schema
+-- actually needed: a plant-LEADING composite for plant-scoped grid reads).
 CREATE INDEX IF NOT EXISTS idx_material_plants_material ON material_plants(material_id);
 
 -- ----------------------------------------------------------------------------
@@ -362,6 +366,80 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('production_lines', 'buffer_percent', 'Buffer %',               FALSE, 8),
     ('production_lines', 'buffer_hours',   'Buffer Hours',           FALSE, 9)
 ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- material_plants planner-attribute columns (prt_01, prt_02, color) — added via
+-- the Admin -> Manage Data Tables "Add Column" DDL wizard against the live Azure
+-- DB, never backfilled into schema.sql. Same failure mode as the optimizer flags
+-- above: list_rows INNER JOINs column_metadata against information_schema, so
+-- the physical column AND its metadata row must BOTH exist or the column is
+-- invisible to the API. These three are the ONLY columns writable through
+-- POST /master-data/material-plants/attributes
+-- (master_data.EDITABLE_MATERIAL_PLANT_ATTRS).
+-- Verbatim copy in migrations/2026-08-07-material-plant-attributes.sql.
+-- ----------------------------------------------------------------------------
+ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_01 TEXT;
+ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_02 TEXT;
+ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS color  TEXT;
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('material_plants', 'prt_01', 'Prod. Resource Tool (01)', FALSE,  8),
+    ('material_plants', 'prt_02', 'Prod. Resource Tool (02)', FALSE,  9),
+    ('material_plants', 'color',  'Color',                    FALSE, 10)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- Plant-leading index for the plant-scoped Master Data > Material / Material
+-- Plant grids: both filter material_plants by `plant` ALONE, which the
+-- (material_id, plant) PK cannot serve efficiently (material_id leads it), so
+-- a ?plant= filter would seq-scan the whole table. Same reasoning as
+-- idx_lines_plant_only on production_lines above. Composite (plant,
+-- material_id) rather than plant-only: it also satisfies the grid's
+-- ORDER BY material_id within a plant, and lets the Material grid's
+-- EXISTS(...) semi-join run as an index-only probe.
+-- (idx_material_plants_material above is redundant with the PK's left prefix
+-- but is left in place — dropping it is an unrelated cleanup, not bundled here.)
+CREATE INDEX IF NOT EXISTS idx_material_plants_plant_material
+    ON material_plants(plant, material_id);
+
+-- ----------------------------------------------------------------------------
+-- Live-schema catch-up: column_metadata rows restating columns already
+-- declared in this file's CREATE TABLE statements above (harmless — table_name
+-- lookups in list_rows/export_schema_sql only ever query registered columns
+-- that also physically exist; ON CONFLICT DO NOTHING makes re-running this a
+-- no-op). Captured from a live-DB schema export so a from-scratch DB and the
+-- deployed Azure DB agree on what's registered.
+-- ----------------------------------------------------------------------------
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('subnetworks',       'code',                         'Subnetwork',                   TRUE,  1),
+    ('subnetworks',       'name',                          'Subnetwork Name',              FALSE, 2),
+    ('plants',            'subnetwork',                    'Subnetwork',                   TRUE,  1),
+    ('plants',            'plant',                         'Plant',                        TRUE,  2),
+    ('plants',            'alt_flag_horizon',              'Alert Flag Horizon (days)',    FALSE, 3),
+    ('plants',            'conf_score_horizon',            'Conf Score Horizon (days)',    FALSE, 4),
+    ('production_lines',  'subnetwork',                    'Subnetwork',                   TRUE,  1),
+    ('production_lines',  'plant',                         'Plant',                        TRUE,  2),
+    ('production_lines',  'production_line',               'Production Line',              TRUE,  3),
+    ('roles',             'role',                          'Role',                         TRUE,  1),
+    ('roles',             'description',                   'Description',                  FALSE, 2),
+    ('role_plants',       'role',                          'Role',                         TRUE,  1),
+    ('role_plants',       'plant',                         'Plant',                        TRUE,  2)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- KNOWN, DELIBERATELY-UNMIRRORED inert drift: a live-DB schema export also
+-- carried column_metadata rows for an `orders` table (id, production_order,
+-- material_number, ... 28 columns). `orders` is NOT in
+-- master_data.ALLOWED_TABLES, so these rows are inert today — list_rows,
+-- export_schema_sql, and every other column_metadata reader gate on
+-- ALLOWED_TABLES first (master_data.py _assert_table / the ALLOWED_TABLES
+-- loop in export_schema_sql) and never reach them. They are deliberately NOT
+-- inserted here: if `orders` is ever added to ALLOWED_TABLES in the future,
+-- these stale rows would instantly materialize a live, ungated, editable
+-- CRUD grid over the orders table with whatever is_locked flags happen to be
+-- on record, which is a footgun with zero present benefit. If you need to
+-- confirm what's live on Azure, use GET /master-data/_schema-export against
+-- Azure directly rather than assuming this comment is current.
+-- ----------------------------------------------------------------------------
 
 -- ----------------------------------------------------------------------------
 -- Labor Planning — aggregate available labor hours by line group × ISO week

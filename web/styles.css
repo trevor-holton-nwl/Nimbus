@@ -4329,15 +4329,44 @@ body.dark .cw-active-card {
    internal scrollbars (instead of the whole page scrolling).
    ============================================================================= */
 #md-master-lines-pane,
-#md-master-plant-pane {
+#md-master-plant-pane,
+#md-master-material-pane,
+#md-master-material-plant-pane {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 #md-master-lines-pane[hidden],
-#md-master-plant-pane[hidden] { display: none; }
+#md-master-plant-pane[hidden],
+#md-master-material-pane[hidden],
+#md-master-material-plant-pane[hidden] { display: none; }
+/* Previously an inline style on the Plant pane itself (height:100%;overflow:hidden),
+   removed so gotoMasterSub can toggle all four sub-panes uniformly via [hidden].
+   Scoped here rather than folded into the shared rule above: the Plant pane's
+   inner scrollers (.cal-scroll etc.) rely on clipping their own overflow against
+   this ancestor; the other three panes don't need it. */
+#md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0 0 12px; flex: 0 0 auto; }
+
+/* =============================================================================
+   MASTER DATA > MATERIAL / MATERIAL PLANT — plant-scoped AG Grid sub-tabs
+   Mirrors #ag-grid's sizing (Orders table) — flex:1/min-height:0 so the grid
+   claims the remaining pane height instead of collapsing to its content size.
+   .ag-theme-quartz is a class selector (not #ag-grid), so both grids inherit
+   the entire --ag-* NIMBUS-token mapping above, including body.dark retinting,
+   with zero additional dark-mode work.
+   ============================================================================= */
+#md-mat-grid, #md-mp-grid { flex: 1; min-height: 0; width: 100%; }
+
+/* Dirty-cell marker for the three planner-editable Material Plant columns. */
+.ag-theme-quartz .md-cell-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
+.ag-theme-quartz .ag-cell[col-id="prt_01"]:hover:not(.ag-cell-inline-editing),
+.ag-theme-quartz .ag-cell[col-id="prt_02"]:hover:not(.ag-cell-inline-editing),
+.ag-theme-quartz .ag-cell[col-id="color"]:hover:not(.ag-cell-inline-editing) {
+  cursor: cell;
+  background: var(--accent-wash);
+}
 
 /* =============================================================================
    MANAGE PLANT DATA — inner 3-tab strip
