@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0c1c30;}
+  a{color:#4d9fff;text-decoration:none;}
+  a:hover{color:#7db8ff;text-decoration:underline;}
+  input::placeholder{color:#8fa1b3;}
+  @keyframes nimbus-led{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (max-width:860px){
+    .nl-scene{display:none !important;}
+    .nl-panel{width:100% !important;min-width:0 !important;}
+  }
+</style>
+</helmet>
+<div style="display:flex;width:100%;height:100vh;min-height:560px;background:#0c1c30;font-family:'Public Sans',system-ui,sans-serif;overflow:hidden">
+  <div class="nl-scene" style="flex:1 1 auto;position:relative;min-width:0;border-right:1px solid #2c4a6b">
+    <canvas ref="{{ canvasRef }}" role="img" aria-label="Animated manufacturing cell: raw components travel by conveyor into an automated machine and emerge as finished consumer products" style="position:absolute;inset:0;width:100%;height:100%;display:block"></canvas>
+  </div>
+  <div class="nl-panel" style="width:34%;min-width:400px;max-width:520px;flex:0 0 auto;background:#12263f;display:flex;flex-direction:column;justify-content:center;padding:0 56px;box-sizing:border-box;position:relative">
+    <div style="position:absolute;top:0;left:0;right:0;height:56px;display:flex;align-items:center;gap:12px;padding:0 56px;border-bottom:1px solid #2c4a6b;box-sizing:border-box">
+      <div aria-hidden="true" style="width:26px;height:26px;border-radius:4px;background:#4d9fff;display:grid;place-items:center;font-family:Archivo,sans-serif;font-weight:700;font-size:14px;color:#0c1c30">N</div>
+      <div style="font-family:Archivo,'Public Sans',sans-serif;font-weight:700;font-size:15px;letter-spacing:-0.015em;color:#ffffff">NIMBUS</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.06em;color:#7e93ab;text-transform:uppercase;margin-left:auto">SCHED&nbsp;CONSOLE</div>
+    </div>
+    <form onSubmit="{{ onSubmit }}" aria-label="Sign in to NIMBUS" style="display:flex;flex-direction:column;gap:0">
+      <h1 style="font-family:Archivo,'Public Sans',sans-serif;font-weight:700;font-size:26px;letter-spacing:-0.015em;color:#ffffff;margin:0 0 6px">Sign in</h1>
+      <p style="font-size:13px;line-height:1.45;color:#a7b8ca;margin:0 0 28px">Production scheduling for plants, lines, and crews.</p>
+      <sc-if value="{{ error }}" hint-placeholder-val="{{ false }}">
+        <div role="alert" style="display:flex;align-items:center;gap:8px;background:rgba(176,42,32,0.18);border:1px solid #b02a20;border-radius:4px;padding:8px 10px;margin:0 0 18px;font-size:12.5px;color:#f7ddd9">{{ error }}</div>
+      </sc-if>
+      <label for="nl-user" style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#a7b8ca;margin:0 0 6px">Username</label>
+      <input id="nl-user" name="username" type="text" autoComplete="username" spellCheck="false" value="{{ username }}" onChange="{{ onUser }}" placeholder="j.marsden"
+        style="height:30px;box-sizing:content-box;background:#ffffff;color:#1c2b3a;border:1px solid #d5dce4;border-radius:4px;padding:5px 10px;font-family:'Public Sans',system-ui,sans-serif;font-size:12.5px;outline:none;transition:border-color 0.15s,box-shadow 0.15s;margin:0 0 18px"
+        style-focus="border-color:#4d9fff;box-shadow:0 0 0 3px rgba(77,159,255,0.25)"></input>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin:0 0 6px">
+        <label for="nl-pass" style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#a7b8ca">Password</label>
+        <a href="#" style="font-size:12px">Forgot?</a>
+      </div>
+      <input id="nl-pass" name="password" type="password" autoComplete="current-password" value="{{ password }}" onChange="{{ onPass }}" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;"
+        style="height:30px;box-sizing:content-box;background:#ffffff;color:#1c2b3a;border:1px solid #d5dce4;border-radius:4px;padding:5px 10px;font-family:'Public Sans',system-ui,sans-serif;font-size:12.5px;outline:none;transition:border-color 0.15s,box-shadow 0.15s;margin:0 0 18px"
+        style-focus="border-color:#4d9fff;box-shadow:0 0 0 3px rgba(77,159,255,0.25)"></input>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:#a7b8ca;cursor:pointer;margin:0 0 24px;user-select:none">
+        <input type="checkbox" checked="{{ remember }}" onChange="{{ onRemember }}" style="width:14px;height:14px;accent-color:#4d9fff;margin:0"></input>
+        Remember this workstation
+      </label>
+      <button type="submit" disabled="{{ signingIn }}"
+        style="height:38px;background:#4d9fff;color:#0c1c30;border:1px solid #4d9fff;border-radius:4px;font-family:'Public Sans',system-ui,sans-serif;font-size:13px;font-weight:600;cursor:pointer;transition:background 0.15s,border-color 0.15s;outline:none"
+        style-hover="background:#7db8ff;border-color:#7db8ff"
+        style-focus="box-shadow:0 0 0 3px rgba(77,159,255,0.35)">{{ signInLabel }}</button>
+    </form>
+    <div style="position:absolute;bottom:0;left:0;right:0;height:46px;display:flex;align-items:center;justify-content:space-between;padding:0 56px;border-top:1px solid #2c4a6b;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.05em;color:#56677c">
+      <span>NIMBUS v4.2.1</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;animSpeed&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:1,&quot;min&quot;:0.2,&quot;max&quot;:2.5,&quot;step&quot;:0.1,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Scene&quot;},&quot;machineCycle&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:2.6,&quot;min&quot;:1,&quot;max&quot;:6,&quot;step&quot;:0.2,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Scene&quot;},&quot;spawnGap&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:1.2,&quot;min&quot;:0.4,&quot;max&quot;:5,&quot;step&quot;:0.2,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Scene&quot;},&quot;showOverlays&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Scene&quot;}}">
+class Component extends DCLogic {
+  state = { username: "", password: "", remember: true, signingIn: false, error: null, clock: "--:--:--", util: 87 };
+  canvas = null;
+
+  renderVals() {
+    const s = this.state;
+    return {
+      username: s.username, password: s.password, remember: s.remember,
+      signingIn: s.signingIn, error: s.error, clock: s.clock, util: s.util,
+      signInLabel: s.signingIn ? "Authenticating\u2026" : "Sign In",
+      onUser: (e) => this.setState({ username: e.target.value, error: null }),
+      onPass: (e) => this.setState({ password: e.target.value, error: null }),
+      onRemember: (e) => this.setState({ remember: e.target.checked }),
+      onSubmit: (e) => {
+        e.preventDefault();
+        if (!this.state.username.trim() || !this.state.password) {
+          this.setState({ error: "Enter your username and password." });
+          return;
+        }
+        this.setState({ signingIn: true, error: null });
+        setTimeout(() => this.setState({ signingIn: false, error: "Directory service unreachable. Contact your plant administrator." }), 1600);
+      },
+      canvasRef: (el) => { if (el && el !== this.canvas) { this.canvas = el; this.initScene(); } },
+    };
+  }
+
+  componentDidMount() {
+    if (this.canvas) this.initScene();
+  }
+  componentWillUnmount() {
+    cancelAnimationFrame(this.raf);
+    if (this.ro) this.ro.disconnect();
+  }
+
+  initScene() {
+    if (this.sceneInit || !this.canvas) return;
+    this.sceneInit = true;
+    const cv = this.canvas, ctx = cv.getContext("2d");
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const SPEED = 56 * (this.props.animSpeed ?? 1);       // px/s conveyor
+    const CYCLE = this.props.machineCycle ?? 2.6;          // s inside the cell
+    const SPAWN_GAP = this.props.spawnGap ?? 1.2;          // s between blanks queuing
+    const showOverlays = this.props.showOverlays ?? true;
+    let W = 0, H = 0, dpr = 1;
+
+    // iso constants: top faces offset up-right
+    const IX = 11, IY = -7;
+    const shade = (hex, f) => {
+      const n = parseInt(hex.slice(1), 16);
+      const c = (v) => Math.max(0, Math.min(255, Math.round(v)));
+      const r = c(((n >> 16) & 255) * f), g = c(((n >> 8) & 255) * f), b = c((n & 255) * f);
+      return "rgb(" + r + "," + g + "," + b + ")";
+    };
+    const hslHex = (h, s, l) => {
+      s /= 100; l /= 100;
+      const f = (n) => {
+        const kk = (n + h / 30) % 12;
+        const c = l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(kk - 3, 9 - kk, 1));
+        return Math.round(c * 255).toString(16).padStart(2, "0");
+      };
+      return "#" + f(0) + f(8) + f(4);
+    };
+    const quad = (a, b, c, d, fill) => {
+      ctx.fillStyle = fill; ctx.beginPath();
+      ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(d[0], d[1]);
+      ctx.closePath(); ctx.fill();
+    };
+    // front face at (x, y-h .. y), plus top + right side
+    const isoBox = (x, y, w, h, color, opts) => {
+      const o = opts || {};
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y - h, w, h);
+      quad([x, y - h], [x + w, y - h], [x + w + IX, y - h + IY], [x + IX, y - h + IY], o.top || shade(color, 1.22));
+      quad([x + w, y - h], [x + w + IX, y - h + IY], [x + w + IX, y + IY], [x + w, y], o.side || shade(color, 0.78));
+    };
+    const roundRect = (x, y, w, h, r) => {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+    };
+
+    // ---- product library (drawn with base-left at x, sitting on belt line y, scale k) ----
+    const PRODUCTS = [
+      { id: "COOLER-65Q", w: 70, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        // body: Coleman-style box in the item's tint
+        isoBox(0, 0, 66, 32, T(40));
+        ctx.fillStyle = T(32); ctx.fillRect(0, -10, 66, 2.5); // molded body groove
+        // white lid: overhangs, rounded
+        ctx.fillStyle = "#e8edf3"; roundRect(-3, -43, 72, 12, 3); ctx.fill();
+        quad([-1, -43], [70, -43], [70 + IX, -43 + IY], [-1 + IX, -43 + IY], "#ffffff");
+        quad([69, -42], [69 + IX, -42 + IY], [69 + IX, -32 + IY], [69, -31], shade("#e8edf3", 0.8));
+        // lid handle recess (front center)
+        ctx.fillStyle = shade("#e8edf3", 0.78); roundRect(22, -40, 22, 6, 3); ctx.fill();
+        ctx.fillStyle = shade("#e8edf3", 0.9); roundRect(24, -39, 18, 4, 2); ctx.fill();
+        // drain plug, bottom front corner
+        ctx.fillStyle = "#e8edf3"; ctx.beginPath(); ctx.arc(9, -5, 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = shade("#e8edf3", 0.7); ctx.beginPath(); ctx.arc(9, -5, 1.4, 0, Math.PI * 2); ctx.fill();
+        ctx.restore(); } },
+      { id: "BRUTE-44G", w: 46, draw(x, y, k, T, hue) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        const B = ["#3a4148", "#6b7278", "#9aa1a7", "#e2e5e8"][hue % 4]; // BRUTE ships gray/black/white only
+        quad([4, 0], [42, 0], [46, -48], [0, -48], B);                  // tapered body
+        quad([0, -48], [46, -48], [46 + IX, -48 + IY], [IX, -48 + IY], shade(B, 1.22));
+        ctx.fillStyle = shade(B, 0.8);
+        ctx.fillRect(-3, -50, 52, 5);                                   // rim
+        ctx.fillRect(8, -38, 4, 26); ctx.fillRect(34, -38, 4, 26);      // ribs
+        ctx.restore(); } },
+      { id: "BLENDER-PRO", w: 34, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        isoBox(0, 0, 34, 16, T(24));
+        ctx.globalAlpha = 0.75; quad([4, -16], [30, -16], [26, -50], [8, -50], "#c9ddf7"); ctx.globalAlpha = 1;
+        ctx.strokeStyle = "#8fa1b3"; ctx.strokeRect(9.5, -46.5, 15, 27); // jar marks
+        isoBox(7, -50, 20, 6, T(24));                                   // lid
+        ctx.fillStyle = T(55); ctx.fillRect(6, -12, 8, 5);              // dial
+        ctx.restore(); } },
+      { id: "STROLLER-S2", w: 58, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        // wheels (rear left, front right — travelling right)
+        const wheel = (wx, r) => {
+          ctx.fillStyle = "#1c2b3a"; ctx.beginPath(); ctx.arc(wx, -r, r, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#56677c"; ctx.beginPath(); ctx.arc(wx, -r, r * 0.42, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#1c2b3a"; ctx.beginPath(); ctx.arc(wx, -r, r * 0.16, 0, Math.PI * 2); ctx.fill();
+        };
+        wheel(12, 9); wheel(48, 7);
+        // frame: rear axle up to push handle (leaning back-left), front axle up to seat
+        ctx.strokeStyle = "#56677c"; ctx.lineWidth = 3; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(12, -9); ctx.lineTo(4, -52); ctx.stroke();   // handle stem
+        ctx.beginPath(); ctx.moveTo(48, -7); ctx.lineTo(30, -30); ctx.stroke();  // front strut
+        ctx.beginPath(); ctx.moveTo(12, -9); ctx.lineTo(30, -30); ctx.stroke();  // rear strut
+        // push handle grip
+        ctx.strokeStyle = "#1c2b3a"; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(4, -52); ctx.quadraticCurveTo(1, -56, 6, -58); ctx.stroke();
+        ctx.lineWidth = 1; ctx.lineCap = "butt";
+        // seat pod: reclined bucket hanging on the frame
+        ctx.fillStyle = T(44); ctx.beginPath();
+        ctx.moveTo(18, -26);                             // seat front-bottom
+        ctx.quadraticCurveTo(34, -22, 44, -28);          // footwell curve
+        ctx.quadraticCurveTo(48, -36, 42, -42);          // seat front rises
+        ctx.lineTo(28, -44);                             // seat top edge
+        ctx.quadraticCurveTo(18, -46, 16, -38);          // back of seat
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = T(30); ctx.beginPath();          // seat pad inset
+        ctx.moveTo(24, -40); ctx.quadraticCurveTo(34, -40, 40, -34);
+        ctx.quadraticCurveTo(34, -28, 24, -30); ctx.closePath(); ctx.fill();
+        // canopy hood over the top
+        ctx.fillStyle = T(37); ctx.beginPath();
+        ctx.moveTo(14, -40); ctx.quadraticCurveTo(20, -58, 40, -52);
+        ctx.quadraticCurveTo(30, -50, 24, -44); ctx.quadraticCurveTo(18, -42, 14, -40);
+        ctx.closePath(); ctx.fill();
+        ctx.restore(); } },
+      { id: "BOTTLE-40OZ", w: 24, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        // stainless body: tapered base like a tumbler-bottle
+        ctx.fillStyle = T(42); ctx.beginPath();
+        ctx.moveTo(3, 0); ctx.lineTo(1, -34);            // body side (slightly wider up top)
+        ctx.quadraticCurveTo(1, -40, 5, -42);            // shoulder
+        ctx.lineTo(19, -42); ctx.quadraticCurveTo(23, -40, 23, -34);
+        ctx.lineTo(21, 0); ctx.closePath(); ctx.fill();
+        // brushed-steel highlight + darker edge
+        ctx.fillStyle = "rgba(255,255,255,0.3)"; ctx.fillRect(4.5, -39, 3, 37);
+        ctx.fillStyle = T(30); ctx.fillRect(19, -38, 2.5, 37);
+        // neck + cap with carry loop
+        ctx.fillStyle = T(36); ctx.fillRect(6, -45, 12, 3);
+        ctx.fillStyle = "#1c2b3a"; roundRect(7, -52, 10, 7, 2); ctx.fill();
+        ctx.strokeStyle = "#1c2b3a"; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(12, -53, 4.5, Math.PI, 0); ctx.stroke(); ctx.lineWidth = 1;
+        ctx.restore(); } },
+      { id: "CANDLE-22OZ", w: 30, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        // glass jar: gently tapered cylinder, shoulder curving into a narrower neck
+        ctx.fillStyle = "rgba(201,221,247,0.35)"; ctx.beginPath();
+        ctx.moveTo(2, 0); ctx.lineTo(1, -30);            // straight body sides
+        ctx.quadraticCurveTo(1, -37, 6, -39);            // shoulder
+        ctx.lineTo(24, -39); ctx.quadraticCurveTo(29, -37, 29, -30);
+        ctx.lineTo(28, 0); ctx.closePath(); ctx.fill();
+        // wax fill visible through glass
+        ctx.fillStyle = T(48); ctx.globalAlpha = 0.8;
+        ctx.fillRect(3, -29, 24, 28); ctx.globalAlpha = 1;
+        // paper label band
+        ctx.fillStyle = "#f4f7fa"; ctx.fillRect(5, -25, 20, 15);
+        ctx.strokeStyle = "#c6d0db"; ctx.strokeRect(5.5, -24.5, 19, 14);
+        ctx.fillStyle = "#8fa1b3"; ctx.fillRect(9, -20, 12, 1.5); ctx.fillRect(11, -16, 8, 1.5); // label text lines
+        // glass highlight
+        ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.fillRect(4, -36, 3, 34);
+        // domed metal lid with knob
+        ctx.fillStyle = "#7a5a2a"; ctx.beginPath();
+        ctx.moveTo(4, -39); ctx.quadraticCurveTo(15, -47, 26, -39); ctx.closePath(); ctx.fill();
+        ctx.fillRect(3, -41, 24, 3);
+        ctx.fillStyle = shade("#7a5a2a", 1.25); ctx.beginPath(); ctx.arc(15, -45, 2.2, 0, Math.PI * 2); ctx.fill();
+        ctx.restore(); } },
+      { id: "BREW-12C", w: 42, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        const B = T(22);
+        isoBox(0, 0, 42, 8, B);                                         // base
+        isoBox(24, -8, 18, 40, B);                                      // tower
+        quad([24, -48], [42, -48], [10, -48], [10, -44], shade(B, 1.2));
+        isoBox(8, -44, 18, 5, B);                                       // head
+        ctx.globalAlpha = 0.7; quad([6, -8], [24, -8], [22, -30], [8, -30], "#c9ddf7"); ctx.globalAlpha = 1; // carafe
+        ctx.fillStyle = "#1e7a4a"; ctx.fillRect(30, -20, 4, 4);         // LED
+        ctx.restore(); } },
+      { id: "LANTERN-LED", w: 30, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        const B = T(38);
+        // base (cylinder hint: rounded + darker sides)
+        ctx.fillStyle = B; roundRect(1, -12, 28, 12, 3); ctx.fill();
+        ctx.fillStyle = shade(B, 0.75); ctx.fillRect(1, -12, 3, 12); ctx.fillRect(26, -12, 3, 12);
+        // glass globe with inner glow + vertical supports
+        const glow = ctx.createLinearGradient(0, -34, 0, -12);
+        glow.addColorStop(0, "#fdf6dd"); glow.addColorStop(1, "#f0ddac");
+        ctx.fillStyle = glow; roundRect(4, -34, 22, 22, 2); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fillRect(12, -31, 6, 16); // hot core
+        ctx.fillStyle = shade(B, 0.8); ctx.fillRect(4, -34, 2, 22); ctx.fillRect(24, -34, 2, 22);
+        // cap: vented dome
+        ctx.fillStyle = B; roundRect(2, -41, 26, 7, 3); ctx.fill();
+        ctx.fillStyle = shade(B, 1.2); ctx.beginPath();
+        ctx.moveTo(6, -41); ctx.quadraticCurveTo(15, -47, 24, -41); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = shade(B, 0.7); ctx.fillRect(8, -39, 14, 1.5); // vent slit
+        // wire bail handle, hinged at sides
+        ctx.strokeStyle = "#8fa1b3"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(5, -42); ctx.quadraticCurveTo(15, -54, 25, -42); ctx.stroke(); ctx.lineWidth = 1;
+        ctx.fillStyle = "#8fa1b3"; ctx.fillRect(4, -43, 2.5, 2.5); ctx.fillRect(23.5, -43, 2.5, 2.5);
+        ctx.restore(); } },
+      { id: "PEN-GEL07", w: 58, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        isoBox(0, 0, 50, 7, T(28));
+        quad([50, 0], [58, -3.5], [50, -7], [50, -7], T(28));           // nose cone
+        ctx.fillStyle = T(55); ctx.fillRect(38, -7, 4, 7);              // grip band
+        ctx.fillStyle = "#8fa1b3"; ctx.fillRect(4, -9, 14, 3);          // clip
+        ctx.restore(); } },
+    ];
+    const RAW = { w: 44, draw(x, y, k) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+      ctx.fillStyle = "#8fa1b3"; roundRect(0, -24, 44, 24, 5); ctx.fill();
+      quad([3, -24], [41, -24], [41 + IX, -24 + IY], [3 + IX, -24 + IY], shade("#8fa1b3", 1.18));
+      ctx.fillStyle = shade("#8fa1b3", 0.85); ctx.fillRect(6, -14, 32, 2); // mold line
+      ctx.restore(); } };
+
+    // ---- lanes ----
+    let lanes = [];
+    const build = () => {
+      lanes = [];
+      const mk = (y, k, cellTag, phase) => ({
+        y, k, cellTag, items: [], t: 0,
+        mx: W * 0.34, mw: 190 * k,
+        busy: null, busyT: 0, nextSpawn: phase,
+        scanX: W * 0.34 + 190 * k + 130 * k,
+        scanFlash: 0,
+      });
+      if (H > 480 && W > 700) lanes.push(mk(H * 0.40, 0.72, "A-02", 1.6)); // back lane
+      lanes.push(mk(H * 0.68, 1, "A-01", 0));
+    };
+
+    const fit = () => {
+      const r = cv.getBoundingClientRect();
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      W = r.width; H = r.height;
+      cv.width = Math.max(1, W * dpr); cv.height = Math.max(1, H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      build();
+    };
+    this.ro = new ResizeObserver(fit);
+    this.ro.observe(cv);
+
+    const WOS = ["WO-48213", "WO-48214", "WO-48297", "WO-48302", "WO-48318", "WO-48340"];
+
+    function drawBelt(l, t) {
+      const y = l.y, k = l.k, bh = 12 * k, depth = 16 * k;
+      // belt top surface (iso parallelogram)
+      quad([0, y], [W, y], [W + depth, y + IY * (depth / IX)], [depth, y + IY * (depth / IX)], "#16304f");
+      // belt front
+      ctx.fillStyle = "#12263f"; ctx.fillRect(0, y, W, bh);
+      ctx.strokeStyle = "#2c4a6b"; ctx.strokeRect(-1, y + 0.5, W + 2, bh - 1);
+      // moving seam marks on top surface
+      const seamGap = 42 * k, off = (t * SPEED) % seamGap;
+      ctx.strokeStyle = "rgba(44,74,107,0.9)";
+      for (let x = -off; x < W + depth; x += seamGap) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + depth, y + IY * (depth / IX)); ctx.stroke();
+      }
+      // rollers
+      const rr = 3 * k, spacing = 24 * k;
+      const roff = (t * SPEED / 2) % spacing;
+      ctx.strokeStyle = "#2c4a6b";
+      for (let x = -roff; x < W; x += spacing) {
+        ctx.beginPath(); ctx.arc(x, y + bh + 5 * k, rr, 0, Math.PI * 2); ctx.stroke();
+        const a = (t * SPEED) / rr * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x + Math.cos(a) * rr, y + bh + 5 * k + Math.sin(a) * rr);
+        ctx.lineTo(x - Math.cos(a) * rr, y + bh + 5 * k - Math.sin(a) * rr);
+        ctx.stroke();
+      }
+      // legs
+      ctx.fillStyle = "#0f2440";
+      for (let x = 60; x < W; x += 220 * k) ctx.fillRect(x, y + bh, 5 * k, Math.min(40 * k, H - y - bh - 6));
+    }
+
+    function drawMachine(l, t) {
+      const k = l.k, x = l.mx, w = l.mw, y = l.y, h = 118 * k;
+      const active = !!l.busy;
+      // body
+      isoBox(x, y, w, h, "#1a3252", { top: "#24446c", side: "#132844" });
+      // entrance/exit openings
+      ctx.fillStyle = "#0a1626";
+      ctx.fillRect(x - 1, y - 40 * k, 10 * k, 40 * k);
+      ctx.fillRect(x + w - 10 * k + 1, y - 40 * k, 10 * k, 40 * k);
+      // rubber flaps
+      ctx.fillStyle = "#2c4a6b";
+      for (let f = 0; f < 3; f++) { ctx.fillRect(x + 2, y - 38 * k + f, 6 * k, 1); ctx.fillRect(x + w - 8 * k, y - 38 * k + f, 6 * k, 1); }
+      // inspection windows with interior flashes
+      const wins = [[x + w * 0.18, y - 86 * k, w * 0.24, 30 * k], [x + w * 0.58, y - 86 * k, w * 0.24, 30 * k]];
+      for (let wi = 0; wi < wins.length; wi++) {
+        const [wx, wy, ww, wh] = wins[wi];
+        ctx.fillStyle = "#0a1626"; roundRect(wx, wy, ww, wh, 3); ctx.fill();
+        ctx.strokeStyle = "#2c4a6b"; roundRect(wx + 0.5, wy + 0.5, ww - 1, wh - 1, 3); ctx.stroke();
+        if (active) {
+          ctx.save(); roundRect(wx + 1, wy + 1, ww - 2, wh - 2, 3); ctx.clip();
+          const ph = (l.busyT * 2.1 + wi * 1.7) % 2;
+          // robotic arm silhouette
+          const aa = Math.sin(l.busyT * 5 + wi * 2) * 0.6;
+          ctx.strokeStyle = "#56677c"; ctx.lineWidth = 3; ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(wx + ww * 0.3, wy + wh);
+          ctx.lineTo(wx + ww * 0.3 + Math.cos(-1.2 + aa) * wh * 0.7, wy + wh + Math.sin(-1.2 + aa) * wh * 0.7);
+          ctx.stroke(); ctx.lineWidth = 1; ctx.lineCap = "butt";
+          // laser sweep
+          const lx = wx + ((l.busyT * 1.4 + wi * 0.5) % 1) * ww;
+          ctx.strokeStyle = "rgba(77,159,255,0.8)";
+          ctx.beginPath(); ctx.moveTo(lx, wy); ctx.lineTo(lx, wy + wh); ctx.stroke();
+          // weld sparks
+          if (ph > 1.55) {
+            const sx = wx + ww * 0.62, sy = wy + wh * 0.66;
+            ctx.fillStyle = "#f39c12";
+            for (let s = 0; s < 5; s++) {
+              const sa = (s / 5) * Math.PI * 2 + l.busyT * 9;
+              ctx.fillRect(sx + Math.cos(sa) * (2 + (ph - 1.55) * 26), sy + Math.sin(sa) * (2 + (ph - 1.55) * 20), 1.6, 1.6);
+            }
+            ctx.fillStyle = "#fff"; ctx.fillRect(sx - 1, sy - 1, 2.5, 2.5);
+          }
+          ctx.restore();
+        }
+      }
+      // pneumatic actuator on roof
+      const stroke = active ? Math.abs(Math.sin(l.busyT * 4)) * 7 * k : 0;
+      ctx.fillStyle = "#2c4a6b"; ctx.fillRect(x + w * 0.44, y - h - 16 * k - stroke, 6 * k, 16 * k + stroke);
+      isoBox(x + w * 0.40, y - h - 16 * k - stroke, 14 * k, 6 * k, "#3a5a80");
+      // LED stack
+      const lx2 = x + w + 8;
+      ctx.fillStyle = "#1f3a5c"; ctx.fillRect(lx2, y - 70 * k, 6, 26);
+      const leds = [["#1e7a4a", !active], ["#f39c12", active], ["#b02a20", false]];
+      leds.forEach((ld, i) => {
+        ctx.globalAlpha = ld[1] ? (0.55 + 0.45 * Math.sin(t * 6 + i)) : 0.18;
+        ctx.fillStyle = ld[0]; ctx.beginPath(); ctx.arc(lx2 + 3, y - 64 * k + i * 8, 2.6, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+      // cell label
+      ctx.fillStyle = "#7e93ab"; ctx.font = "600 " + Math.round(9.5 * Math.max(k, 0.85)) + "px 'JetBrains Mono', monospace";
+      ctx.fillText("CELL " + l.cellTag, x + 10, y - h + 16 * k);
+      ctx.fillStyle = active ? "#f39c12" : "#1e7a4a";
+      ctx.fillText(active ? "RUN" : "IDLE", x + w - 34 * k - 6, y - h + 16 * k);
+    }
+
+    function drawScanner(l, t) {
+      const k = l.k, sx = l.scanX, y = l.y;
+      ctx.fillStyle = "#1f3a5c";
+      ctx.fillRect(sx - 2 * k, y - 54 * k, 4 * k, 54 * k);
+      ctx.fillRect(sx - 9 * k, y - 58 * k, 18 * k, 6 * k);
+      const hit = l.items.some((it) => it.state === "out" && it.x < sx && it.x + it.def.w * k > sx);
+      if (hit) {
+        l.scanFlash = 0.18;
+        ctx.strokeStyle = "rgba(77,159,255,0.85)"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(sx, y - 52 * k); ctx.lineTo(sx, y); ctx.stroke(); ctx.lineWidth = 1;
+      }
+      ctx.fillStyle = hit || l.scanFlash > 0 ? "#4d9fff" : "#1e7a4a";
+      ctx.beginPath(); ctx.arc(sx + 6 * k, y - 55 * k, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    function drawLane(l, t) {
+      drawBelt(l, t);
+      // items behind machine drawn before machine so they disappear into it
+      for (const it of l.items) it.def.draw(it.x, l.y, l.k, (li, s) => hslHex(it.hue ?? 210, s ?? 58, li), it.hue ?? 0);
+      drawMachine(l, t);
+      drawScanner(l, t);
+      // WO overlay above freshest finished item
+      if (showOverlays) {
+        const out = l.items.find((it) => it.state === "out" && it.age < 3.4 && it.age > 0.5);
+        if (out) {
+          const a = Math.min(1, (out.age - 0.5) * 2, (3.4 - out.age) * 2);
+          ctx.globalAlpha = Math.max(0, a);
+          ctx.font = "500 10px 'JetBrains Mono', monospace";
+          const label = out.wo + " \u00B7 " + out.def.id + " \u00B7 " + out.util + "%";
+          const tw = ctx.measureText(label).width + 16;
+          const tx = Math.max(12, Math.min(W - tw - 12, out.x - 10)), ty = l.y - 110 * l.k;
+          ctx.fillStyle = "rgba(18,38,63,0.92)"; ctx.strokeStyle = "#2c4a6b";
+          roundRect(tx, ty, tw, 22, 3); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = "#a7b8ca"; ctx.fillText(label, tx + 8, ty + 14.5);
+          ctx.beginPath(); ctx.moveTo(tx + 12, ty + 22); ctx.lineTo(tx + 12, l.y - 64 * l.k); ctx.strokeStyle = "#2c4a6b"; ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+
+    const stepLane = (l, dt, t) => {
+      const k = l.k, speed = SPEED * (0.85 + 0.15 * k);
+      l.scanFlash = Math.max(0, l.scanFlash - dt);
+      // spawn raw blanks
+      if (t > l.nextSpawn) {
+        const lastRaw = l.items.filter((i) => i.state === "raw").pop();
+        if (!lastRaw || lastRaw.x > 90) {
+          l.items.push({ state: "raw", def: RAW, x: -70, age: 0 });
+          l.nextSpawn = t + SPAWN_GAP + CYCLE + Math.random() * 1.5;
+        }
+      }
+      // move
+      for (const it of l.items) {
+        it.age += dt;
+        if (it.state === "raw") {
+          const hold = l.mx - RAW.w * k - 30 * k; // pneumatic stop short of the door
+          if (it.entering) {
+            it.x += speed * dt; // glide fully under the cell body (machine is drawn over it)
+            if (it.x >= l.mx + 14 * k) { l.busyT = 0; it.state = "consumed"; }
+          } else if (l.busy) {
+            it.x = Math.min(it.x + speed * dt, hold); // wait at the stop
+          } else {
+            it.x += speed * dt;
+            if (it.x + RAW.w * k >= l.mx + 2) { // front crosses the door: claim the cell, keep sliding in
+              it.entering = true;
+              l.busy = { wo: WOS[Math.floor(Math.random() * WOS.length)] };
+              l.busyT = -((l.mx + 14 * k - it.x) / speed); // cycle starts once fully inside
+            }
+          }
+        } else if (it.state === "out") {
+          it.x += speed * dt;
+        }
+      }
+      l.items = l.items.filter((it) => it.state !== "consumed" && it.x < W + 120);
+      // machine cycle
+      if (l.busy) {
+        l.busyT += dt;
+        if (l.busyT >= CYCLE) {
+          const def = PRODUCTS[Math.floor(Math.random() * PRODUCTS.length)];
+          l.items.push({ state: "out", def, x: l.mx + l.mw + 2, age: 0, wo: l.busy.wo, hue: Math.floor(Math.random() * 360), util: 82 + Math.floor(Math.random() * 15) });
+          l.busy = null; l.busyT = 0;
+        }
+      }
+    };
+
+    function frame(t) {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#0c1c30"; ctx.fillRect(0, 0, W, H);
+      ctx.strokeStyle = "rgba(44,74,107,0.22)";
+      for (let x = 0; x < W; x += 80) { ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); ctx.stroke(); }
+      // floor line glow under lanes
+      for (const l of lanes) drawLane(l, t);
+    }
+
+    let last = performance.now(), t = 0;
+    const tick = (now) => {
+      const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
+      for (const l of lanes) stepLane(l, dt, t);
+      frame(t);
+      this.raf = requestAnimationFrame(tick);
+    };
+    fit();
+    if (reduced) {
+      // static factory illustration: one raw inbound, one product outbound, cells idle
+      for (const l of lanes) {
+        l.items.push({ state: "raw", def: RAW, x: W * 0.14, age: 1 });
+        l.items.push({ state: "out", def: PRODUCTS[(l.k === 1 ? 0 : 2)], x: l.mx + l.mw + 90 * l.k, age: 1.2, wo: "WO-48213", hue: l.k === 1 ? 210 : 30, util: 88 });
+      }
+      frame(1);
+    } else this.raf = requestAnimationFrame(tick);
+  }
+}
+</script>
+</body>
+</html>
