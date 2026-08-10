@@ -664,7 +664,7 @@ def _cw_df_to_entries(cw_df) -> dict:
 def _resolve_priority_list_columns(
         df: pd.DataFrame, plant: str, spec: dict, *,
         explicit_line: str = "", explicit_value_col: str | None = None,
-        explicit_rank_col: str | None = None,
+        explicit_rank_col: str | None = None, reject_conflicts: bool = True,
 ) -> dict:
     """Shared column-resolution/validation for POST /priority-list/{plant}/{field_key}
     (Stage 2) and the legacy POST /color-wheel/{plant} (Decision 9b — the two
@@ -674,26 +674,44 @@ def _resolve_priority_list_columns(
     the sole candidate in a well-formed color-wheel file. The two routes differ
     only in how they react to a "needs_mapping" result: the generic endpoint
     returns it to the client for the mapping modal; the legacy endpoint (no
-    mapping UI on the other end) turns it into a 400.
+    mapping UI on the other end) turns it into a 400. `reject_conflicts`
+    likewise differs by caller: the generic endpoint 400s on a duplicate value
+    with conflicting ranks (Decision 6 — new, desired behavior); the legacy
+    endpoint passes False so a previously-valid color-wheel file that relied
+    on the old _cw_df_to_entries's last-value-wins tolerance keeps working
+    (Decision 9b's "no previously-valid file starts failing" invariant).
+
+    NOTE on pandas 3 / requirements.txt's pandas==3.0.3: `Series.astype(str)`
+    on a column with missing values no longer turns them into the literal
+    string "nan" (pandas 2 behavior) — a NaN cell survives as an actual float,
+    which then blows up any `.str.*` accessor call or raw-NaN JSON encoding.
+    Every column read here is `.fillna("")`'d *before* `.astype(str)`, not
+    after, to normalize blanks up front instead of chasing NaN artifacts once
+    they've already leaked into string ops or the JSON response.
 
     Returns {"status": "needs_mapping", "headers": [...], "sample": [...]} or
     {"status": "resolved", "value_col": str, "rank_col": str | None,
      "line": str, "entries": {VALUE: RANK|None}}.
     Raises HTTPException(400) for plant-mismatch, unknown-line, multi-value
     LINE column, an explicitly-named column that doesn't exist in the file, or
-    conflicting ranks for the same value.
+    (when reject_conflicts) conflicting ranks for the same value.
     """
     headers = list(df.columns)
 
     if "PLANT" in headers:
-        file_plants = set(df["PLANT"].astype(str).str.strip()) - {"", "nan"}
+        # Normalize the same way db._str_id does (strips the Excel float
+        # suffix, e.g. a numeric-typed PLANT column read as 5512.0 -> "5512")
+        # and treats NaN/None as blank — both handled per-value since a mixed
+        # numeric/blank column can't be safely blanket-.astype(str)'d under
+        # pandas 3 (see the NaN note above).
+        file_plants = {db._str_id(v) for v in df["PLANT"]} - {""}
         if file_plants and file_plants != {plant}:
             raise HTTPException(status_code=400,
                 detail=f"File's PLANT column ({sorted(file_plants)}) doesn't match target plant {plant!r}")
 
     resolved_line = explicit_line.strip()
     if "LINE" in headers and not resolved_line:
-        file_lines = {v for v in df["LINE"].astype(str).str.strip() if v and v.lower() != "nan"}
+        file_lines = {v for v in df["LINE"].fillna("").astype(str).str.strip() if v and v.lower() != "nan"}
         if len(file_lines) > 1:
             raise HTTPException(status_code=400,
                 detail=f"File contains multiple LINE values {sorted(file_lines)} — upload once per line, or pass a single line explicitly")
@@ -713,18 +731,32 @@ def _resolve_priority_list_columns(
         if len(candidates) == 1:
             resolved_value_col = candidates[0]
         else:
-            return {"status": "needs_mapping", "headers": headers,
-                    "sample": df.head(5).to_dict(orient="records")}
+            # NaN -> None per-value on the already-extracted records, not via
+            # DataFrame.where(): under pandas 3's default "str"-dtype text
+            # columns, .where(df.notna(), None) silently leaves NaN in place
+            # (verified against the pinned pandas==3.0.3), which would then
+            # blow up JSONResponse's strict allow_nan=False encoding.
+            sample = [
+                {k: (None if pd.isna(v) else v) for k, v in rec.items()}
+                for rec in df.head(5).to_dict(orient="records")
+            ]
+            return {"status": "needs_mapping", "headers": headers, "sample": sample}
 
     resolved_rank_col = explicit_rank_col
     if resolved_rank_col and resolved_rank_col not in headers:
         raise HTTPException(status_code=400, detail=f"Missing required column: {resolved_rank_col!r}")
     if not resolved_rank_col:
-        candidates = [h for h in headers if h.upper() in {"ORDER_Y", "RANK", "ORDER"}]
-        if len(candidates) == 1:
-            resolved_rank_col = candidates[0]
+        # Deterministic priority (not "exactly one match") so a file that
+        # happens to carry more than one rank-shaped column (e.g. both a real
+        # ORDER_Y and an unrelated ORDER) still picks a rank column instead of
+        # silently discarding real rank data by falling back to row order.
+        upper_to_header = {h.upper(): h for h in headers}
+        for candidate_name in ("ORDER_Y", "RANK", "ORDER"):
+            if candidate_name in upper_to_header:
+                resolved_rank_col = upper_to_header[candidate_name]
+                break
 
-    values = df[resolved_value_col].astype(str).str.upper().str.strip()
+    values = df[resolved_value_col].fillna("").astype(str).str.upper().str.strip()
     if resolved_rank_col:
         ranks = pd.to_numeric(df[resolved_rank_col], errors="coerce")
     else:
@@ -733,10 +765,10 @@ def _resolve_priority_list_columns(
     entries: dict[str, float | None] = {}
     conflicts: list[str] = []
     for v, r in zip(values, ranks, strict=True):
-        if not v or v == "NAN":
+        if not v:
             continue
         r_val = None if pd.isna(r) else float(r)
-        if v in entries and entries[v] != r_val:
+        if reject_conflicts and v in entries and entries[v] != r_val:
             conflicts.append(v)
         entries[v] = r_val
     if conflicts:
@@ -1894,10 +1926,25 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     `file` is accepted, a file with no resolvable COLOR column 400s
     immediately (no needs_mapping round-trip — there's no mapping UI on the
     other end of this route), and audit entries keep the historical
-    color_wheel_upload/color_wheel_replace action names. One deliberate
-    loosening: ORDER_Y is no longer required (row order is used if omitted,
-    same as every other field, Decision 6) — strictly more permissive, so no
-    previously-valid file starts failing.
+    color_wheel_upload/color_wheel_replace action names. Two deliberate
+    loosenings, both strictly more permissive so no previously-valid file
+    starts failing (Decision 9b): ORDER_Y is no longer required (row order is
+    used if omitted, same as every other field, Decision 6), and this route
+    never validated an empty (header-only) file — that check is intentionally
+    NOT applied here (only the new generic endpoint gets it), so a 0-row file
+    still succeeds with row_count 0, exactly as it always did.
+
+    Two more preserved-behavior fixes: this route never supported line
+    scoping before this rewrite (external callers/`GET /color-wheel/{plant}`/
+    `ColorWheelViewer` only ever read the plant-wide line="" row), so it
+    always persists with line="" regardless of what
+    _resolve_priority_list_columns resolved from an incidental LINE column in
+    the file. And it passes reject_conflicts=False so a duplicate COLOR value
+    with two different ranks resolves last-value-wins, matching the old
+    _cw_df_to_entries's tolerance exactly, instead of the new 400 the generic
+    endpoint deliberately introduces (Decision 6) — that stricter behavior is
+    new/desired only for the generic endpoint's fresh, no-back-compat-promise
+    contract.
     """
     raw = await file.read()
     spec = md.RANKABLE_FIELDS["colorWheel"]
@@ -1910,10 +1957,8 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
             status_code=400,
             detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with a COLOR column",
         ) from e
-    if df.empty:
-        raise HTTPException(status_code=400, detail="Uploaded file has no rows")
 
-    resolved = _resolve_priority_list_columns(df, plant, spec)
+    resolved = _resolve_priority_list_columns(df, plant, spec, reject_conflicts=False)
     if resolved["status"] == "needs_mapping":
         raise HTTPException(status_code=400, detail="Missing required columns: ['COLOR']")
 
@@ -1923,7 +1968,7 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
 
     is_replace = await run_in_threadpool(
         _persist_priority_list, plant, "colorWheel", spec, resolved["entries"],
-        line=resolved["line"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
+        line="", value_col=resolved["value_col"], rank_col=resolved["rank_col"],
         filename=fname, row_count=row_count, user=user, legacy_action_names=True,
     )
     action = "color_wheel_replace" if is_replace else "color_wheel_upload"

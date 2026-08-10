@@ -635,6 +635,103 @@ class TestGenericPriorityListUpload:
                              files={"file": ("t.xlsx", body)})
         assert r.status_code == 400
 
+    def test_blank_line_cell_resolves_via_non_blank_value(self):
+        """C1 regression: under pandas 3 (pinned pandas==3.0.3), a blank LINE
+        cell survives as a raw float NaN even after .astype(str) — must not
+        500 (AttributeError from .lower() on NaN). One row has the real line,
+        the other is blank; the blank should just be ignored, not block
+        resolution to the one real value."""
+        body = self._xlsx([
+            {"TOOL": "DOG", "RANK": 1, "LINE": self.LINE},
+            {"TOOL": "CAT", "RANK": 2, "LINE": None},
+        ])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json()["line"] == self.LINE
+
+    def test_all_blank_line_column_falls_back_to_plant_wide(self):
+        """C1 companion case: if every LINE cell is blank, resolution must
+        fall back to plant-wide (line="") instead of 500ing."""
+        body = self._xlsx([
+            {"TOOL": "DOG", "RANK": 1, "LINE": None},
+            {"TOOL": "CAT", "RANK": 2, "LINE": None},
+        ])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json()["line"] == ""
+
+    def test_ambiguous_columns_with_blank_and_numeric_cells_does_not_500(self):
+        """C4 regression: the needs_mapping response's `sample` (df.head(5))
+        must not carry a raw NaN — JSONResponse rejects that. Include a blank
+        cell and a numeric (non-string) cell in the sampled rows."""
+        body = self._xlsx([{"FOO": "DOG", "BAR": None}, {"FOO": 123, "BAR": "CAT"}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)})
+        assert r.status_code == 200
+        body_json = r.json()
+        assert body_json["status"] == "needs_mapping"
+        assert set(body_json["headers"]) == {"FOO", "BAR"}
+        # The blank BAR cell must decode as JSON null (None), never NaN.
+        assert body_json["sample"][0]["BAR"] is None
+
+    def test_order_y_wins_over_unrelated_order_column(self, pg):
+        """I1 regression: when a file has both ORDER_Y and an unrelated
+        ORDER column, ORDER_Y must win deterministically — not silently fall
+        back to row-order ranking (which would discard the real rank data)."""
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 5, "ORDER": 99}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/colorWheel",
+                             files={"file": ("t.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        row = pg.get_priority_list(self.PLANT, "colorWheel", line="")
+        assert row["entries"] == {"RED": 5.0}
+
+
+@pytest.mark.pg
+def test_generic_upload_normalizes_numeric_plant_column_and_tolerates_blanks(client, pg):
+    """C2 regression: a numeric-typed PLANT column (as pandas reads a plain
+    numeric Excel cell, e.g. a plant code like 5512) must normalize the same
+    way db._str_id does (stripping the Excel float suffix) before comparing
+    to the target plant, and a blank/NaN PLANT cell must not crash the
+    comparison (TypeError mixing str/float in sorted()) or produce a
+    false-positive mismatch. Uses a bare numeric plant code (not the usual
+    ZZTEST_ prefix) specifically to exercise pandas' numeric-column dtype
+    inference, mirroring a real SAP plant code like '5512'."""
+    plant = "554433"
+    body_rows = [{"COLOR": "RED", "PLANT": 554433}, {"COLOR": "BLUE", "PLANT": None}]
+    import io as _io
+    import pandas as pd
+    buf = _io.BytesIO()
+    pd.DataFrame(body_rows).to_excel(buf, index=False)
+    try:
+        r = client.post(f"/priority-list/{plant}/colorWheel", files={"file": ("t.xlsx", buf.getvalue())})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        row = pg.get_priority_list(plant, "colorWheel", line="")
+        assert row["entries"] == {"RED": 1.0, "BLUE": 2.0}
+    finally:
+        pg.delete_priority_list(plant, "colorWheel", line="")
+
+
+@pytest.mark.pg
+def test_generic_upload_rejects_plant_mismatch_even_with_blank_cells(client):
+    """C2 companion: a genuine PLANT mismatch must still 400 (not silently
+    pass) once blank cells are tolerated. File's numeric PLANT column
+    normalizes to "554433"; target plant below is a different code."""
+    body_rows = [{"COLOR": "RED", "PLANT": 554433}, {"COLOR": "BLUE", "PLANT": None}]
+    import io as _io
+    import pandas as pd
+    buf = _io.BytesIO()
+    pd.DataFrame(body_rows).to_excel(buf, index=False)
+    r = client.post("/priority-list/999999/colorWheel", files={"file": ("t.xlsx", buf.getvalue())})
+    assert r.status_code == 400
+
 
 @pytest.mark.pg
 class TestLegacyColorWheelUploadConsolidation:
@@ -667,11 +764,16 @@ class TestLegacyColorWheelUploadConsolidation:
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "row_count": 2, "action": "color_wheel_upload", "replaced": False}
 
-    def test_order_column_still_auto_renames_to_rank(self):
+    def test_order_column_still_auto_renames_to_rank(self, pg):
         body = self._xlsx([{"COLOR": "RED", "ORDER": 1}])
         r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+        # I1/I5: assert the actual PERSISTED rank, not just status == "ok" —
+        # a silently-discarded rank (falling back to row order) would still
+        # report "ok" here, but the persisted entry would be wrong.
+        row = pg.get_priority_list(self.PLANT, "colorWheel", line="")
+        assert row["entries"] == {"RED": 1.0}
 
     def test_missing_order_y_now_falls_back_to_row_order_instead_of_400ing(self):
         body = self._xlsx([{"COLOR": "RED"}, {"COLOR": "BLUE"}])
@@ -691,3 +793,44 @@ class TestLegacyColorWheelUploadConsolidation:
         assert r.status_code == 200
         assert r.json()["action"] == "color_wheel_replace"
         assert r.json()["replaced"] is True
+
+    def test_audit_log_records_legacy_action_name(self):
+        """I5: don't just trust the endpoint's self-reported `action` field —
+        read the audit trail back via GET /audit/log (backed by
+        _cw_append_audit's on-disk log) to confirm legacy_action_names is
+        actually wired correctly, not just echoed in the response body."""
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 1}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        log = self.client.get("/audit/log", params={"limit": 20})
+        assert log.status_code == 200
+        entries = [e for e in log.json()["entries"] if e.get("plant") == self.PLANT]
+        assert entries, "expected at least one audit entry for this plant"
+        assert entries[0]["action"] == "color_wheel_upload"
+        assert "priority_list_upload" not in {e["action"] for e in entries}
+
+    def test_duplicate_color_value_last_value_wins_on_legacy_route(self, pg):
+        """I2 regression: the legacy route must tolerate a duplicate COLOR
+        value with two different ranks (last-value-wins, matching the old
+        _cw_df_to_entries semantics exactly) rather than 400ing like the new
+        generic endpoint deliberately does (Decision 6)."""
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 1}, {"COLOR": "RED", "ORDER_Y": 2}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        row = pg.get_priority_list(self.PLANT, "colorWheel", line="")
+        assert row["entries"] == {"RED": 2.0}
+
+    def test_empty_file_still_succeeds_on_legacy_route(self):
+        """I4 regression: the OLD legacy endpoint had no empty-file check — a
+        header-only (0-row) file succeeded with row_count 0, clearing the
+        wheel. The new df.empty check is new/reasonable validation for the
+        generic endpoint only; it must NOT be applied to this back-compat
+        route."""
+        import io as _io
+        import pandas as pd
+        buf = _io.BytesIO()
+        pd.DataFrame(columns=["COLOR", "ORDER_Y"]).to_excel(buf, index=False)
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("empty.xlsx", buf.getvalue())})
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "row_count": 0, "action": "color_wheel_upload", "replaced": False}
