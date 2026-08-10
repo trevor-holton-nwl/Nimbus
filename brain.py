@@ -1804,6 +1804,32 @@ def get_missing_master_data(batch_id: str, format: str | None = Query(default=No
     }
 
 
+@api.get("/master-data/{plant}/missing-master-data", dependencies=[Depends(require_admin)])
+def get_live_missing_master_data(
+        plant: str, format: str | None = Query(default=None),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Live (not batch-scoped) missing-master-data report for one plant's
+    Optimization tab (docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+    Decision 3). Same JSON/CSV shape as GET /upload/{batch_id}/missing-master-data
+    so the frontend shares one renderer."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    result = db.missing_master_data_for_plant(plant)
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
+        writer.writeheader()
+        for e in result["exceptions"]:
+            writer.writerow({k: e.get(k) for k in ["plant", "material_number", "order_count", "reason"]})
+        return Response(
+            content=buf.getvalue(), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="missing-master-data-{plant}.csv"'},
+        )
+    return {"plant": plant, **result}
+
+
 @api.post("/upload/audit/clear", dependencies=[Depends(require_admin)])
 def clear_upload_audit():
     """Delete all upload history records."""

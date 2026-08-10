@@ -541,6 +541,36 @@ def test_missing_master_data_endpoint(client, pg):
 
 
 @pytest.mark.pg
+def test_live_missing_master_data_endpoint(client, pg):
+    plant = "ZZTEST_LMD_PLANT"
+    sub = "ZZTEST_LMD_SUB"
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (sub, sub))
+        cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING", (sub, plant))
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date)"
+            " VALUES ('zzlmd1','PO1','MAT-X',%s, NOW()) ON CONFLICT (id) DO NOTHING", (plant,))
+        conn.commit()
+    try:
+        r = client.get(f"/master-data/{plant}/missing-master-data")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["unmatched_pairs"] == 1
+        assert body["exceptions"][0]["material_number"] == "MAT-X"
+
+        r_csv = client.get(f"/master-data/{plant}/missing-master-data?format=csv")
+        assert r_csv.status_code == 200
+        assert r_csv.headers["content-type"].startswith("text/csv")
+        assert "MAT-X" in r_csv.text
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = 'zzlmd1'")
+            cur.execute("DELETE FROM plants WHERE plant = %s", (plant,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (sub,))
+            conn.commit()
+
+
+@pytest.mark.pg
 class TestGenericPriorityListUpload:
     PLANT = "ZZTEST_UP_PLANT"
     SUB = "ZZTEST_UP_SUB"
