@@ -77,3 +77,7 @@ desktop.ini
 .impeccable/hook.cache.json
 .impeccable/hook.pending.json
 .impeccable/config.local.json
+
+# Superpowers subagent-driven-development — per-plan scratch workspace (ledger,
+# briefs, review packages); the git history is the durable record, not this.
+.superpowers/
