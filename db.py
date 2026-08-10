@@ -1386,6 +1386,39 @@ def resync_order_attributes(plant: str) -> dict:
     return result
 
 
+def missing_master_data_for_plant(plant: str) -> dict:
+    """Live, READ-ONLY version of _stamp_order_attributes' plant-scoped
+    exception query — no UPDATE. Backs GET /master-data/{plant}/missing-master-data,
+    the Optimization tab's report panel (docs/scheduling_priority.md Stage 2
+    Decision 3): unlike the batch-scoped GET /upload/{batch_id}/missing-master-data,
+    this reflects CURRENT state regardless of when the plant was last uploaded
+    to or resynced. Same response shape as the batch-scoped report so the
+    frontend renders both with one function."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.plant, o.material_number, COUNT(*), 'no_mp_row'
+              FROM orders o
+              LEFT JOIN material_plants mp
+                ON mp.plant = o.plant AND mp.material_id = o.material_number
+             WHERE o.plant = %s
+               AND mp.material_id IS NULL
+             GROUP BY o.plant, o.material_number
+            """,
+            (plant,),
+        )
+        rows = cur.fetchall()
+    exceptions = [
+        {"plant": r[0], "material_number": r[1], "order_count": r[2], "reason": r[3]}
+        for r in rows
+    ]
+    return {
+        "unmatched_pairs": len(exceptions),
+        "unmatched_orders": sum(e["order_count"] for e in exceptions),
+        "exceptions": exceptions,
+    }
+
+
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None) -> dict:

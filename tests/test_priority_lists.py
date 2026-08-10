@@ -433,6 +433,43 @@ def test_color_wheel_endpoints_are_backed_by_priority_list(client, pg):
 
 
 @pytest.mark.pg
+class TestMissingMasterDataForPlant:
+    PLANT = "ZZTEST_MMD_PLANT"
+    SUB = "ZZTEST_MMD_SUB"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (self.SUB, self.SUB))
+            cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING", (self.SUB, self.PLANT))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date)"
+                " VALUES ('zzmmd1','PO1','MAT-NO-MP',%s, NOW()) ON CONFLICT (id) DO NOTHING",
+                (self.PLANT,),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = 'zzmmd1'")
+            cur.execute("DELETE FROM plants WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+            conn.commit()
+
+    def test_reports_unmatched_pair_with_no_update(self, pg):
+        result = pg.missing_master_data_for_plant(self.PLANT)
+        assert result["unmatched_pairs"] == 1
+        assert result["unmatched_orders"] == 1
+        assert result["exceptions"][0] == {
+            "plant": self.PLANT, "material_number": "MAT-NO-MP",
+            "order_count": 1, "reason": "no_mp_row",
+        }
+        # Read-only: confirm the order's color is still untouched (no UPDATE ran)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT color FROM orders WHERE id = 'zzmmd1'")
+            assert cur.fetchone()[0] is None
+
+
+@pytest.mark.pg
 def test_missing_master_data_endpoint(client, pg):
     batch_id = "00000000-0000-0000-0000-000000000000"
     with pg._pool.connection() as conn, conn.cursor() as cur:
