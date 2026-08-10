@@ -106,16 +106,19 @@ EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default
 RANKABLE_FIELDS = {
     'colorWheel': {
         'mp_column': 'color', 'orders_column': 'color', 'task_field': 'COLOR',
+        'default_label': 'Color Wheel',
     },
     'prt01': {
         'mp_column': 'prt_01', 'orders_column': 'prt_01', 'task_field': 'PRT_01',
+        'default_label': 'Prod. Resource Tool (01)',
     },
     'prt02': {
         'mp_column': 'prt_02', 'orders_column': 'prt_02', 'task_field': 'PRT_02',
+        'default_label': 'Prod. Resource Tool (02)',
     },
     'productionVersion': {
         'mp_column': 'default_production_version', 'orders_column': 'production_version',
-        'task_field': 'PRODUCTION_VERSION',
+        'task_field': 'PRODUCTION_VERSION', 'default_label': 'Production Version',
     },
 }
 
@@ -1825,6 +1828,15 @@ def known_plant_line_codes() -> dict:
         cur.execute("SELECT production_line FROM production_lines")
         lines = {r[0] for r in cur.fetchall()}
     return {"plants": plants, "lines": lines}
+
+
+def known_line_codes_for_plant(plant: str) -> set[str]:
+    """Return production-line codes for ONE plant — for validating an uploaded
+    priority-list file's optional Line column against that specific plant
+    (N4), unlike known_plant_line_codes()'s whole-catalog sets used by /upload."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT production_line FROM production_lines WHERE plant = %s", (plant,))
+        return {r[0] for r in cur.fetchall()}
 
 
 def known_material_plant_pairs() -> set[tuple[str, str]]:

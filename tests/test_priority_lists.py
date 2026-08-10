@@ -35,16 +35,19 @@ def test_rankable_fields_has_exactly_four_entries_with_expected_columns():
     assert set(md.RANKABLE_FIELDS) == {"colorWheel", "prt01", "prt02", "productionVersion"}
     assert md.RANKABLE_FIELDS["colorWheel"] == {
         "mp_column": "color", "orders_column": "color", "task_field": "COLOR",
+        "default_label": "Color Wheel",
     }
     assert md.RANKABLE_FIELDS["prt01"] == {
         "mp_column": "prt_01", "orders_column": "prt_01", "task_field": "PRT_01",
+        "default_label": "Prod. Resource Tool (01)",
     }
     assert md.RANKABLE_FIELDS["prt02"] == {
         "mp_column": "prt_02", "orders_column": "prt_02", "task_field": "PRT_02",
+        "default_label": "Prod. Resource Tool (02)",
     }
     assert md.RANKABLE_FIELDS["productionVersion"] == {
         "mp_column": "default_production_version", "orders_column": "production_version",
-        "task_field": "PRODUCTION_VERSION",
+        "task_field": "PRODUCTION_VERSION", "default_label": "Production Version",
     }
 
 
@@ -94,6 +97,37 @@ def test_resync_route_is_registered_for_admin_audit_logging():
     assert brain._ADMIN_WRITE_OPERATIONS.get("/master-data/resync-order-attributes") == (
         "material_plants.resync_order_attributes"
     )
+
+
+def test_rankable_fields_now_carry_a_default_label():
+    expected = {
+        'colorWheel': 'Color Wheel',
+        'prt01': 'Prod. Resource Tool (01)',
+        'prt02': 'Prod. Resource Tool (02)',
+        'productionVersion': 'Production Version',
+    }
+    for key, label in expected.items():
+        assert md.RANKABLE_FIELDS[key]['default_label'] == label
+
+
+@pytest.mark.pg
+def test_known_line_codes_for_plant_is_scoped(pg):
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO subnetworks (subnetwork) VALUES ('ZZTEST_SUB') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP2') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES ('ZZTEST_SUB','ZZTEST_LP','L01') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES ('ZZTEST_SUB','ZZTEST_LP2','L99') ON CONFLICT DO NOTHING")
+        conn.commit()
+    try:
+        assert md.known_line_codes_for_plant('ZZTEST_LP') == {'L01'}
+        assert 'L99' not in md.known_line_codes_for_plant('ZZTEST_LP')
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM production_lines WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
+            cur.execute("DELETE FROM plants WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
+            cur.execute("DELETE FROM subnetworks WHERE subnetwork = 'ZZTEST_SUB'")
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
