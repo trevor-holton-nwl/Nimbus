@@ -113,7 +113,7 @@ def test_rankable_fields_now_carry_a_default_label():
 @pytest.mark.pg
 def test_known_line_codes_for_plant_is_scoped(pg):
     with pg._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO subnetworks (subnetwork) VALUES ('ZZTEST_SUB') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO subnetworks (code, name) VALUES ('ZZTEST_SUB','ZZTEST_SUB') ON CONFLICT DO NOTHING")
         cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP') ON CONFLICT DO NOTHING")
         cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP2') ON CONFLICT DO NOTHING")
         cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES ('ZZTEST_SUB','ZZTEST_LP','L01') ON CONFLICT DO NOTHING")
@@ -126,7 +126,7 @@ def test_known_line_codes_for_plant_is_scoped(pg):
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM production_lines WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
             cur.execute("DELETE FROM plants WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
-            cur.execute("DELETE FROM subnetworks WHERE subnetwork = 'ZZTEST_SUB'")
+            cur.execute("DELETE FROM subnetworks WHERE code = 'ZZTEST_SUB'")
             conn.commit()
 
 
