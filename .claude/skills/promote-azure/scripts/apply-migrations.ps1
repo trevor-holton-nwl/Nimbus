@@ -24,8 +24,11 @@
   destructive verbs. Use to preview before a real apply.
 
 .EXAMPLE
-  $env:PGPASSWORD = '...'; .\apply-migrations.ps1 -DryRun
-  $env:PGPASSWORD = '...'; .\apply-migrations.ps1
+  .\apply-migrations.ps1 -DryRun
+  .\apply-migrations.ps1
+  (if $env:PGPASSWORD isn't already set, you'll be prompted for it interactively
+  -- it's never typed into the command line, so it never lands in shell history
+  or a pasted transcript)
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +36,7 @@ param(
   [int]    $Port          = 5432,
   [string] $Database      = "nimbus",
   [string] $User          = "TempAdmin",
-  [string] $MigrationsDir = "migrations",
+  [string] $MigrationsDir = (Join-Path (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName "migrations"),
   [string] $PsqlPath      = "C:\Program Files\PostgreSQL\18\bin\psql.exe",
   [switch] $AllowDestructive,
   [switch] $DryRun
@@ -68,11 +71,19 @@ if ($DryRun) {
 }
 
 # ---- REAL APPLY: requires password ----
-if ([string]::IsNullOrEmpty($env:PGPASSWORD)) {
-  Write-Error "PGPASSWORD is not set. Set `$env:PGPASSWORD before running (never pulled from Azure)."
-  exit 2
+# Never pulled from Azure. If the caller hasn't already set $env:PGPASSWORD,
+# prompt for it interactively (masked) so it never appears as literal text in
+# a command line, shell history, or a pasted transcript. Cleared in `finally`
+# below regardless of how the script exits.
+$pgPasswordWasPreset = -not [string]::IsNullOrEmpty($env:PGPASSWORD)
+if (-not $pgPasswordWasPreset) {
+  $securePw = Read-Host -Prompt "PGPASSWORD for $User@$PgHost (input hidden, not persisted)" -AsSecureString
+  $env:PGPASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePw))
 }
 if (-not (Test-Path $PsqlPath)) { Write-Error "psql not found at $PsqlPath"; exit 2 }
+
+try {
 
 # Ensure ledger, then read applied set.
 & $PsqlPath $conn -v ON_ERROR_STOP=1 -q -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
@@ -108,3 +119,9 @@ Write-Host "already-applied: $skipStr"
 Write-Host "blocked:         $blockStr"
 if ($blocked.Count -gt 0) { Write-Warning "One or more migrations were blocked -- resolve deliberately before the roll."; exit 3 }
 exit 0
+
+} finally {
+  # Clear the password from this process's env regardless of how we exit --
+  # whether we prompted for it or the caller pre-set it.
+  Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+}

@@ -14,7 +14,7 @@ This consolidates the authoritative runbook in `DEPLOYMENT.md` — read that fil
 ## Hard rules (never violate)
 
 - **NEVER run `schema.sql` against the live DB.** It re-multiplies `plants` horizon columns ×1440 on every run (`schema.sql` ~line 110). Apply schema changes only via files in `migrations/`.
-- **NEVER read/echo the `pg-pass` secret** (`az containerapp secret show`). The operator supplies the DB password at runtime as `$env:PGPASSWORD`; it must never land in the transcript.
+- **NEVER read/echo the `pg-pass` secret** (`az containerapp secret show`). The operator supplies the DB password at runtime — `apply-migrations.ps1` prompts for it interactively (masked, `-AsSecureString`) when `$env:PGPASSWORD` isn't already set, so it's never typed into a command line, shell history, or a pasted transcript. Never ask the operator to paste the password into chat; have them run the script themselves.
 - **NEVER reuse an image tag.** A fresh `vN` is what makes rollback a one-liner.
 - **Confirm before each prod mutation** (migration apply, image build, app roll). Auto-mode will gate these — that's expected; surface the command and get explicit go-ahead.
 - **Do not set `NIMBUS_SAP_SYNC_ENABLED`** unless the operator explicitly wants the SAP scheduler live (it's a stub skeleton).
@@ -32,13 +32,13 @@ az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.templ
 - Decide what changed: code only? deps? schema? (schema → step 1 is required.)
 
 ### 1. DB migration FIRST — only if schema changed (guarded)
-Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` rule, or Azure Cloud Shell). The operator sets the password; the skill never pulls it:
+Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` rule, or Azure Cloud Shell). The script's paths are resolved from its own location (`$PSScriptRoot`-relative), so it works from **any** starting directory — give it as an absolute path, no `cd` to the repo required:
 ```powershell
-$env:PGPASSWORD = '<DB_PASSWORD>'   # operator-supplied; never from the secret store, never committed
-& ".claude\skills\promote-azure\scripts\apply-migrations.ps1" -DryRun   # preview: pending files, destructive-verb flags
-& ".claude\skills\promote-azure\scripts\apply-migrations.ps1"           # apply pending additive migrations + record in ledger
-Remove-Item Env:\PGPASSWORD
+& "C:\Users\PJ29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Claude\.claude\skills\promote-azure\scripts\apply-migrations.ps1" -DryRun
+& "C:\Users\PJ29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Claude\.claude\skills\promote-azure\scripts\apply-migrations.ps1"
 ```
+- The real-apply run **prompts for the password interactively** (`Read-Host -AsSecureString`) if `$env:PGPASSWORD` isn't already set — the operator types/pastes it at that prompt, never into the command itself, and it's cleared from the process environment in a `finally` block on exit either way. Never pre-type `$env:PGPASSWORD = '...'` into a message to Claude; just run the script and answer its prompt.
+- A pending migration that trips the destructive-verb filter but is actually additive/idempotent (verified by reading the file — e.g. `ADD COLUMN IF NOT EXISTS`, `ON CONFLICT DO NOTHING`) can be forced through with `-AllowDestructive`. Already-applied files (per the ledger) are skipped regardless of that flag, so it only affects genuinely new files.
 - The script maintains a `schema_migrations` ledger (run-once semantics), applies `migrations/*.sql` not yet recorded in lexicographic order, **refuses `schema.sql`**, and **blocks any file containing `ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE`** unless re-run with `-AllowDestructive` (those need expand/contract sequencing — treat as a deliberate, separate decision, not part of a routine roll).
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
