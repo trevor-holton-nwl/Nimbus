@@ -18,6 +18,7 @@ import uuid
 from dotenv import load_dotenv
 import pandas as pd
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -204,6 +205,9 @@ _ORDERS_SELECT = f"""
         (scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
         run_time              AS "RUN_TIME",
         color                 AS "COLOR",
+        prt_01                AS "PRT_01",
+        prt_02                AS "PRT_02",
+        production_version    AS "PRODUCTION_VERSION",
         order_quantity        AS "ORDER_QUANTITY_(GMEIN)",
         form_size             AS "FORM_SIZE",
         notes                 AS "NOTES",
@@ -443,6 +447,18 @@ def get_task_versions(ids: list[str]) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def get_upload_audit_warnings(batch_id: str) -> list[dict] | None:
+    """Return one batch's raw `warnings` list (as persisted by upsert_orders),
+    or None if the batch doesn't exist. Backs GET /upload/{batch_id}/
+    missing-master-data — the caller filters for category=='missing_master_data'."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT warnings FROM upload_audit WHERE batch_id = %s", (batch_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return row[0] or []
 
 
 def upload_audit_log(limit: int = 50) -> list[dict]:
@@ -1193,9 +1209,10 @@ _UPSERT_SQL = """
     INSERT INTO orders (
         id, production_order, material_number, material_description,
         production_line, plant, basic_start_date, basic_finish_date,
-        run_time, color, order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
+        run_time, color, prt_01, prt_02, production_version,
+        order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
@@ -1224,6 +1241,14 @@ _UPSERT_SQL = """
         basic_finish_date     = EXCLUDED.basic_finish_date,
         run_time              = EXCLUDED.run_time,
         color                 = EXCLUDED.color,
+        -- prt_01/prt_02/production_version: written from the uploaded row like color
+        -- (NULL today — no upload source carries them yet), then overwritten for
+        -- matched materials by the post-upsert db._stamp_order_attributes call, which
+        -- always runs last and wins (mirrors the existing color/SAP precedence, R5 in
+        -- docs/scheduling_priority.md).
+        prt_01                = EXCLUDED.prt_01,
+        prt_02                = EXCLUDED.prt_02,
+        production_version    = EXCLUDED.production_version,
         order_quantity        = EXCLUDED.order_quantity,
         form_size             = EXCLUDED.form_size,
         firming_indicator     = EXCLUDED.firming_indicator,
@@ -1238,12 +1263,127 @@ _UPSERT_SQL = """
 # Build the per-row tuple in the exact _UPSERT_SQL column order. The SQL VALUES
 # clause expects: id, production_order, material_number, material_description,
 # production_line, plant, basic_start_date, basic_finish_date, run_time, color,
-# order_quantity, form_size, firming_indicator, upload_batch_id.
+# prt_01, prt_02, production_version, order_quantity, form_size, firming_indicator,
+# upload_batch_id.
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "production_line", "plant", "basic_start_date", "basic_finish_date",
-    "run_time", "color", "order_quantity", "form_size", "firming_indicator",
+    "run_time", "color", "prt_01", "prt_02", "production_version",
+    "order_quantity", "form_size", "firming_indicator",
 )
+
+
+def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | None = None) -> dict:
+    """Seam 2 (docs/scheduling_priority.md): the ONE place attribute provenance
+    lives for color/prt_01/prt_02/production_version. One UPDATE orders ... FROM
+    material_plants keyed (plant, material_number = material_id), scoped either
+    to a single ingest batch (batch_id — called post-upsert from upsert_orders)
+    or to a whole plant (plant — called from POST /master-data/resync-order-attributes).
+
+    Must run AFTER orders.plant is derived, since it reads the derived value —
+    callers scoped by batch_id must call this after the plant/line_key backfill,
+    not before. Runs LAST and wins over anything sap_field_map ever maps to
+    orders.color (R5): sap_sync shares this same upsert_orders path. When PRT_02
+    moves from a single TEXT value to a production-version-keyed table, this
+    query is the only thing that changes.
+
+    Does not commit — the caller controls the transaction boundary.
+
+    Returns the missing-master-data exception summary (never used to block
+    anything — see docs/scheduling_priority.md's "Unmatched MP rows" decision):
+        {"unmatched_pairs": int, "unmatched_orders": int, "exceptions": [
+            {"plant": str|None, "material_number": str, "order_count": int,
+             "reason": "no_mp_row" | "no_plant_derived"},
+            ...
+        ]}
+    "no_plant_derived" means the order has no plant at all (an ambiguous
+    multi-plant line code left it NULL — a different, pre-existing problem,
+    N9) and can only occur in the batch_id scope; a plant-scoped resync only
+    ever sees "no_mp_row" by construction.
+    """
+    if batch_id is None and plant is None:
+        raise ValueError("_stamp_order_attributes requires batch_id or plant")
+
+    with conn.cursor() as cur:
+        if batch_id is not None:
+            cur.execute(
+                """
+                UPDATE orders o
+                   SET color              = mp.color,
+                       prt_01             = mp.prt_01,
+                       prt_02             = mp.prt_02,
+                       production_version = mp.default_production_version,
+                       updated_at         = NOW()
+                  FROM material_plants mp
+                 WHERE mp.plant = o.plant
+                   AND mp.material_id = o.material_number
+                   AND o.upload_batch_id = %s
+                """,
+                (batch_id,),
+            )
+            cur.execute(
+                """
+                SELECT o.plant, o.material_number, COUNT(*),
+                       CASE WHEN o.plant IS NULL THEN 'no_plant_derived' ELSE 'no_mp_row' END
+                  FROM orders o
+                  LEFT JOIN material_plants mp
+                    ON mp.plant = o.plant AND mp.material_id = o.material_number
+                 WHERE o.upload_batch_id = %s
+                   AND mp.material_id IS NULL
+                 GROUP BY o.plant, o.material_number
+                """,
+                (batch_id,),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE orders o
+                   SET color              = mp.color,
+                       prt_01             = mp.prt_01,
+                       prt_02             = mp.prt_02,
+                       production_version = mp.default_production_version,
+                       updated_at         = NOW()
+                  FROM material_plants mp
+                 WHERE mp.plant = o.plant
+                   AND mp.material_id = o.material_number
+                   AND o.plant = %s
+                """,
+                (plant,),
+            )
+            cur.execute(
+                """
+                SELECT o.plant, o.material_number, COUNT(*), 'no_mp_row'
+                  FROM orders o
+                  LEFT JOIN material_plants mp
+                    ON mp.plant = o.plant AND mp.material_id = o.material_number
+                 WHERE o.plant = %s
+                   AND mp.material_id IS NULL
+                 GROUP BY o.plant, o.material_number
+                """,
+                (plant,),
+            )
+        rows = cur.fetchall()
+
+    exceptions = [
+        {"plant": r[0], "material_number": r[1], "order_count": r[2], "reason": r[3]}
+        for r in rows
+    ]
+    return {
+        "unmatched_pairs": len(exceptions),
+        "unmatched_orders": sum(e["order_count"] for e in exceptions),
+        "exceptions": exceptions,
+    }
+
+
+def resync_order_attributes(plant: str) -> dict:
+    """Public entry point for POST /master-data/resync-order-attributes — the
+    real mechanism the ingest-time stamp is convenience for (R3). Opens its
+    own connection/commit so brain.py never has to reach into the private
+    connection pool directly, matching every other db.py public function."""
+    with _pool.connection() as conn:
+        result = _stamp_order_attributes(conn, plant=plant)
+        conn.commit()
+    return result
 
 
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
@@ -1387,6 +1527,27 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 (batch_id,),
             )
             conn.commit()
+            # Seam 2 — materialize color/prt_01/prt_02/production_version from
+            # material_plants (docs/scheduling_priority.md). Strictly downstream of
+            # the plant backfill above: it reads o.plant, which must already be
+            # derived. The upload ALWAYS succeeds regardless of how much is
+            # unmatched (N5/N6/N7) — unmatched pairs become an exception report,
+            # never a block.
+            attr_result = _stamp_order_attributes(conn, batch_id=batch_id)
+            conn.commit()
+            missing_master_data = attr_result["exceptions"]
+            if attr_result["unmatched_pairs"]:
+                warnings.append({
+                    "level": "info",
+                    "category": "missing_master_data",
+                    "msg": (f"{attr_result['unmatched_orders']} order(s) across "
+                            f"{attr_result['unmatched_pairs']} material/plant pair(s) have no "
+                            f"matching material_plants row — color/PRT/production-version "
+                            f"sequencing is unavailable for them until master data is added "
+                            f"and this plant is resynced. See GET /upload/{batch_id}/"
+                            f"missing-master-data for the full list."),
+                    "exceptions": missing_master_data,
+                })
             # Surface (don't guess) rows left NULL because their line maps to >1 plant.
             cur.execute(
                 """
@@ -1434,6 +1595,13 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         "updated": updated,
         "failed": 0,
         "warnings": warnings,
+        # Summary only (never blocking — N5/N6/N7). Full per-material detail is the
+        # same list persisted into upload_audit.warnings above, served in full by
+        # GET /upload/{batch_id}/missing-master-data.
+        "missing_master_data": {
+            "unmatched_pairs": attr_result["unmatched_pairs"],
+            "unmatched_orders": attr_result["unmatched_orders"],
+        },
     }
 
 
@@ -1725,3 +1893,217 @@ def list_color_wheels_meta(limit: int | None = None,
                 "row_count": row_count,
             }
     return out, total
+
+
+# =========================
+# PRIORITY LISTS (docs/scheduling_priority.md — Stage 1: data plumbing only)
+# =========================
+# Generalizes color_wheel to any field in master_data.RANKABLE_FIELDS. One row
+# per (plant, line, field_key); line = '' means plant-wide, a specific
+# production_line overrides the plant-wide list for that line only (mirrors
+# line_calendar / line_blackout's line: null convention). `entries` is a
+# {NORMALIZED_VALUE: RANK} map, the same shape color_wheel already used for
+# {COLOR: ORDER_Y}. This module owns persistence only — brain.py owns the
+# upload parsing and the PLANT_LISTS in-memory cache, same split as
+# color_wheel above. Deliberately mirrors that block's function shapes
+# one-for-one so a caller familiar with color_wheel needs nothing new.
+def ensure_priority_list_table() -> None:
+    """Idempotent: create the priority_list table if missing (mirrors schema.sql /
+    migrations/2026-08-11-priority-lists.sql). Lets the app self-bootstrap even
+    before the migration is applied, matching the other ensure_* startup hooks."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS priority_list (
+                plant         TEXT NOT NULL,
+                line          TEXT NOT NULL DEFAULT '',
+                field_key     TEXT NOT NULL,
+                entries       JSONB NOT NULL,
+                source_column TEXT NOT NULL,
+                value_column  TEXT,
+                rank_column   TEXT,
+                filename      TEXT,
+                row_count     INTEGER NOT NULL DEFAULT 0,
+                uploaded_by   TEXT,
+                uploaded_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (plant, line, field_key)
+            )
+        """)
+        conn.commit()
+
+
+def upsert_priority_list(plant: str, field_key: str, entries: dict, *, line: str = "",
+                         source_column: str, value_column: str | None = None,
+                         rank_column: str | None = None, filename: str | None = None,
+                         row_count: int = 0, uploaded_by: str | None = None) -> dict:
+    """Insert or replace one (plant, line, field_key) priority list. Returns
+    {"inserted": bool} — True on a first upload for that scope, False when an
+    existing list was replaced. `line=""` (the default) is plant-wide."""
+    q = """
+        INSERT INTO priority_list (
+            plant, line, field_key, entries, source_column, value_column,
+            rank_column, filename, row_count, uploaded_by, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (plant, line, field_key) DO UPDATE SET
+            entries       = EXCLUDED.entries,
+            source_column = EXCLUDED.source_column,
+            value_column  = EXCLUDED.value_column,
+            rank_column   = EXCLUDED.rank_column,
+            filename      = EXCLUDED.filename,
+            row_count     = EXCLUDED.row_count,
+            uploaded_by   = EXCLUDED.uploaded_by,
+            updated_at    = NOW()
+        RETURNING (xmax = 0) AS inserted
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(q, (plant, line, field_key, Jsonb(entries), source_column,
+                        value_column, rank_column, filename, int(row_count), uploaded_by))
+        inserted = bool(cur.fetchone()[0])
+        conn.commit()
+    return {"inserted": inserted}
+
+
+def delete_priority_list(plant: str, field_key: str, line: str = "") -> dict | None:
+    """Delete one (plant, line, field_key) priority list. Returns {"filename": ...}
+    for the deleted row, or None if there was nothing to delete."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM priority_list WHERE plant = %s AND line = %s AND field_key = %s"
+            " RETURNING filename",
+            (plant, line, field_key),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    return None if row is None else {"filename": row[0]}
+
+
+def get_priority_list(plant: str, field_key: str, line: str = "") -> dict | None:
+    """Return one (plant, line, field_key) priority-list row (entries JSONB
+    auto-decoded to a dict), or None if it doesn't exist."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT plant, line, field_key, entries, source_column, value_column,"
+            " rank_column, filename, row_count, uploaded_by, uploaded_at"
+            " FROM priority_list WHERE plant = %s AND line = %s AND field_key = %s",
+            (plant, line, field_key),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "plant": row[0], "line": row[1], "field_key": row[2], "entries": row[3] or {},
+        "source_column": row[4], "value_column": row[5], "rank_column": row[6],
+        "filename": row[7], "row_count": row[8],
+        "uploaded_by": row[9], "uploaded_at": row[10],
+    }
+
+
+def load_all_priority_lists() -> dict:
+    """Return {plant: {line: {field_key: {VALUE: RANK}}}} for every stored list —
+    used to rebuild brain.py's PLANT_LISTS cache at startup, on /reload, and
+    after any upload/resync. `line=""` is the plant-wide scope."""
+    out: dict = {}
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant, line, field_key, entries FROM priority_list")
+        for plant, line, field_key, entries in cur.fetchall():
+            out.setdefault(plant, {}).setdefault(line, {})[field_key] = entries or {}
+    return out
+
+
+def list_priority_lists_meta(plant: str | None = None, field_key: str | None = None,
+                             limit: int | None = None,
+                             offset: int | None = None) -> tuple[list[dict], int]:
+    """Return ([{plant, line, field_key, uploaded_at, uploaded_by, filename,
+    row_count}, ...], total) for the Optimization tab's list of uploaded
+    priority lists, optionally scoped to one plant and/or one field (the
+    legacy-compat GET /color-wheels endpoint passes field_key='colorWheel' so
+    pagination applies to the already-filtered set, not the whole table).
+    Ordered by (plant, field_key, line) for a deterministic paged slice;
+    total is the full count regardless of paging."""
+    where, params = [], []
+    if plant:
+        where.append("plant = %s")
+        params.append(plant)
+    if field_key:
+        where.append("field_key = %s")
+        params.append(field_key)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM priority_list{where_sql}", params)
+        total = cur.fetchone()[0]
+        q = (f"SELECT plant, line, field_key, uploaded_at, uploaded_by, filename, row_count"
+             f" FROM priority_list{where_sql} ORDER BY plant, field_key, line")
+        page_params = list(params)
+        if limit is not None:
+            q += " LIMIT %s"
+            page_params.append(int(limit))
+        if offset:
+            q += " OFFSET %s"
+            page_params.append(int(offset))
+        cur.execute(q, page_params)
+        out = [
+            {
+                "plant": r[0], "line": r[1], "field_key": r[2],
+                "uploaded_at": r[3].isoformat() if r[3] else None,
+                "uploaded_by": r[4], "filename": r[5], "row_count": r[6],
+            }
+            for r in cur.fetchall()
+        ]
+    return out, total
+
+
+def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
+    """ONE aggregate query per plant (N3: 70 lines x 4 fields must not become up
+    to 280 separate lookups) — a UNION ALL of one SELECT per field, returning
+    for every production line with orders at this plant how many distinct
+    values that field has and how many of those are covered by a rank.
+
+    `fields` is {field_key: source_column} — supplied by the caller
+    (master_data.RANKABLE_FIELDS is the single source of truth for that
+    mapping, N19; this function stays agnostic of what fields exist to avoid
+    db.py importing master_data, which already imports db.py).
+
+    A line's "covered by a rank" set falls back plant-wide when no
+    line-specific list exists — COALESCE(line row, plant-wide row) — the same
+    resolution Stage 3's client-side rank lookup will use. In Stage 1 no
+    upload path exists yet (Stage 2), so every priority_list row today is
+    plant-wide (line=''); the per-line breakdown already works correctly for
+    that case (every line falls back to the one plant-wide row) and needs no
+    change once Stage 2 starts writing line-scoped rows.
+
+    Returns {field_key: {line_or_empty_string: {"distinct_values": int,
+    "ranked_values": int}}}. Caller should cache this (R12).
+    """
+    if not fields:
+        return {}
+    parts, params = [], []
+    for field_key, source_column in fields.items():
+        parts.append(sql.SQL("""
+            SELECT %s AS field_key,
+                   COALESCE(o.production_line, '') AS line,
+                   COUNT(DISTINCT UPPER(TRIM(o.{col}))) AS distinct_values,
+                   COUNT(DISTINCT UPPER(TRIM(o.{col}))) FILTER (
+                       WHERE COALESCE(pl_line.entries, pl_plant.entries, '{{}}'::jsonb)
+                             ? UPPER(TRIM(o.{col}))
+                   ) AS ranked_values
+              FROM orders o
+              LEFT JOIN priority_list pl_line
+                ON pl_line.plant = o.plant AND pl_line.line = o.production_line
+               AND pl_line.field_key = %s
+              LEFT JOIN priority_list pl_plant
+                ON pl_plant.plant = o.plant AND pl_plant.line = ''
+               AND pl_plant.field_key = %s
+             WHERE o.plant = %s
+               AND o.{col} IS NOT NULL AND o.{col} <> ''
+             GROUP BY COALESCE(o.production_line, '')
+        """).format(col=sql.Identifier(source_column)))
+        params.extend([field_key, field_key, field_key, plant])
+
+    full_q = sql.SQL(" UNION ALL ").join(parts)
+    result: dict[str, dict] = {fk: {} for fk in fields}
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(full_q, params)
+        for field_key, line, dv, rv in cur.fetchall():
+            result[field_key][line] = {"distinct_values": dv, "ranked_values": rv}
+    return result

@@ -48,6 +48,15 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'FIRMING_INDICATOR', dbColumn: 'firming_indicator', type: 'text',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.firming', i18nInspectorKey: 'ui.insp_firming', gridWidth: 90 },
+    // PRT_01/PRT_02 — materialized from material_plants at ingest, Stage 1 of
+    // docs/scheduling_priority.md. Default hidden until an admin opts in, same
+    // as the other optional attribute columns above.
+    { key: 'PRT_01', dbColumn: 'prt_01', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.prt_01', i18nInspectorKey: 'ui.insp_prt_01' },
+    { key: 'PRT_02', dbColumn: 'prt_02', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.prt_02', i18nInspectorKey: 'ui.insp_prt_02' },
     // 10 new SAP fields (COOIS extract) — default hidden until an admin opts in.
     { key: 'PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)', dbColumn: 'planned_order_initial_quantity', type: 'number',
         gridDefault: false, inspectorDefault: false,
@@ -61,6 +70,11 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'ORDER_TYPE', dbColumn: 'order_type', type: 'text',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.order_type', i18nInspectorKey: 'ui.insp_order_type' },
+    // Was dead (db.py never wrote this column) until Stage 1 of
+    // docs/scheduling_priority.md — materialized from
+    // material_plants.default_production_version at ingest. Kept in its
+    // original spot in this list rather than moved up by the PRT_01/PRT_02
+    // entries above.
     { key: 'PRODUCTION_VERSION', dbColumn: 'production_version', type: 'text',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.prod_version', i18nInspectorKey: 'ui.insp_prod_version' },

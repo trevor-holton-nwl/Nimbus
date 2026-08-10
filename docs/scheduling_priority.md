@@ -1,0 +1,356 @@
+# Scheduling Priority — multi-field priority lists
+
+Tracks NIMBUS's move from a single per-plant **color wheel** to **per-plant, per-field priority
+lists** arranged in a configurable priority tree, and the optimizer work to honor them. This is a
+multi-stage effort — update the stage table below as work lands, the same way
+`docs/typescript_migration.md` tracks its phases.
+
+> **This document is deliberately front-loaded.** The [Decisions](#decisions) and
+> [Review findings](#review-findings) sections capture two full design-review passes done against
+> the live code before any implementation, including the options that were *rejected* and why.
+> Each stage should read findings *here* instead of re-deriving them. When a stage lands, correct
+> anything here that turned out wrong rather than letting it rot.
+
+## Stages
+
+| Stage | Scope | Status |
+|---|---|---|
+| **1** | Data plumbing — `priority_list` table, values materialized onto `orders` at ingest, `color_wheel` migrated in, exception report, resync endpoint, `GLOBAL_CW` retired | **Code complete 2026-08-11, not yet applied to any database** — see below |
+| **2** | Upload + column-mapping UI, per-field coverage, generic list viewer, resync prompt. Non-color fields visibly inert | Not started |
+| **3** | The priority tree, effective-sequence panel, generic optimizer sort terms. **The only stage that changes sequencing.** | Not started |
+
+Each stage is independently deployable. Staging exists so the risky data work settles on the pilot
+before anything about sequencing behavior depends on it.
+
+**Stage 1 status (2026-08-11):** all code from `docs/superpowers/plans/2026-08-10-priority-lists-stage-1.md`
+is written, tested at the pure-logic level, and both `npm run build`/`typecheck` and the Python test
+suite pass. **Not done:** the migration has not been applied to any database (local or Azure), and
+pre-ship check #1 (population counts for `material_plants.color`/`prt_01`/`prt_02` per plant) was
+explicitly waived by the user rather than run before this landed — see Risk 3. The `@pytest.mark.pg`
+tests in `tests/test_priority_lists.py` have not been executed against a live database either.
+Applying the migration and running that check remain open steps before this is genuinely "shipped."
+
+## Why
+
+Today NIMBUS can rank orders by exactly one attribute: color. One `.xlsx` per plant (`COLOR` +
+`ORDER_Y`) uploads through Master Data → Plant → Optimization into the `color_wheel` table, and
+Plant → System Settings → Scheduling Constraints shows a flat on/off + ▲▼ list whose catalog
+(`Engine.CONSTRAINT_CATALOG`) has a single entry. `Engine._sortTerms` carries a
+`// future: if (key === 'tooling')` placeholder — the extension point was anticipated, never built.
+
+`material_plants` already holds three more planner attributes — `prt_01`, `prt_02` (Production
+Resource Tools, i.e. machine tooling) and `color` — editable in the Material Plant grid since
+2026-08-07, but **unreachable by the optimizer**. Plants also need different precedence from one
+another, with sub-ordering inside each level: one plant sequences Color → PRT01 → PRT02, another
+PRT01 → PRT02 → Color.
+
+Stage 1 materializes a fourth field alongside those three: `production_version`, from
+`material_plants.default_production_version` (a base column that predates this feature — unlike
+`prt_01`/`prt_02`/`color`, it was never behind the special attributes-only write endpoint, since
+it's plain-editable through the generic Material Plant grid already). See the **Materialized
+fields (Stage 1)** row in [Decisions](#decisions) for why.
+
+**Outcome:** an admin uploads one priority list per rankable field per plant (with column mapping,
+so an arbitrary spreadsheet works, and an optional per-line override), arranges those fields into a
+per-plant priority tree, sees the exact effective sort sequence that tree produces, and the
+optimizer honors it — without weakening the day-integrity dispatch that protects due dates.
+
+## Decisions
+
+Every locked call, with the reasoning and what it displaced. Two review passes fed this; the
+findings themselves are in [Review findings](#review-findings).
+
+| Decision | Resolution | Why / what was rejected |
+|---|---|---|
+| **Sub-sort model** | **Nested UI, flat engine.** Build and see an indented tree; NIMBUS flattens it (pre-order DFS, duplicate keys dropped) and displays the effective sequence with duplicates marked "(no effect)". | A field nested under a field is *mathematically identical* to the next key in a lexicographic sort — a tree of fields flattens with no loss. Nesting would only differ if the sub-order varied **per value**. Rejected: per-value sub-orders (needs per-value config UI + storage) and weighted scoring (a real optimizer rewrite). The effective-sequence panel is what keeps the presentational tree honest rather than a fiction. |
+| **Vs. due dates** | **Priority sequences *inside* each calendar day**, exactly as color does now. Due-date tiering in `_dispatchDayIntegrity` keeps winning. | Preserves the v18/v19 day-integrity redesign. **Verified: zero dispatch changes needed** — both `seqCompare` and `rankForDay`'s `wheelFirst` already iterate `tieBreakTerms` generically. Rejected: letting a field cross day boundaries to hold a tool campaign together (weakens due-date adherence); hierarchy outranking due dates entirely. |
+| **Attribute source** | **Materialized onto `orders` at ingest from `material_plants`.** No read-path join. Excel `COLOR` stops being a source. | User's call: *"rather than frequently doing joins we do a join on ingest based on mp.color and it sets that value… I'm trying to optimize and keep this clean."* Rejected: a `LEFT JOIN material_plants` on the `/tasks` hot path (the original draft). |
+| **Ranked value** | **The field's own values, at plant scope** (`{DOG:1, CAT:2}`) — not per material. | `material_plants` PK is `(material_id, plant)` — one `prt_01` per material per plant, and only one is being allowed for now. So material → tool is 1:1, and a per-material tool rank collapses to a per-material rank, making the ranked field redundant. If material priority is ever wanted it is a `MATERIAL_NUMBER` registry entry, **not** a compound key. |
+| **List scope** | **Plant-wide, with an optional per-line override.** Line row wins for that line; otherwise the plant row. Mirrors plant calendars/blackouts (`line: null` = whole plant). | Justified by the domain, not speculation: the coming PRT setup/teardown matrix is keyed by *workcenter/production line*, so PRT data is inherently line-scoped. |
+| **Uploaded file** | **One file per plant.** A mapped `Plant` column is **validation** that the file matches the plant being uploaded to. Optional `Line` column selects the override scope. Other columns (Material, …) are validation-only or ignored. | User: *"I want plant in the upload as an extra validation."* Rejected: one file seeding many plants by splitting on the Plant column. |
+| **Storage** | **One `priority_list` table**; `color_wheel` rows migrated in; `/color-wheel/*` kept read-compatible. | Color stops being a special case with its own upload path. Keeping the old routes read-compatible is what lets `ColorWheelViewer` and the Admin Cockpit coverage panel survive the change untouched. Rejected: a separate table for the new fields only (Color would keep a different UX forever); retiring `color_wheel` and its routes in the same change (too much at once). |
+| **Default tier** | **Per-plant only.** The global `COLOR_FILE` / `GLOBAL_CW` fallback is **retired**. | It is an ephemeral file lost on container restart (`docs/MIGRATION.md` WS5) — a fallback nobody can rely on. Rejected: a `plant = '*'` shared default row, and a three-tier default → subnetwork → plant resolution. |
+| **Unmatched MP rows** | **Never block the upload.** A missing-master-data **exception report** instead: distinct `(plant, material_number)` pairs with no `material_plants` row, order counts, and the reason — viewable and CSV-exportable. | The blocking threshold originally proposed would have refused the *first* upload to every new plant (empty `material_plants` ⇒ 100% unmatched), training everyone to always pass the override and destroying the guard. Making the gap **actionable** beats refusing work. Rejected: block past a threshold; block only on genuine mismatch; keeping Excel `COLOR` as a gap-filler. |
+| **Keeping orders fresh** | **Batch-scoped ingest stamp + a Resync prompt right after upload + a manual Resync button.** No propagation from the Material Plant grid, no scheduler. | Grid auto-propagation is **unsafe at any cost** — see [the `xmin` hazard](#the-xmin-hazard-general). Batch scoping keeps the row-version blast radius small; the post-upload prompt puts the consistency decision at the moment it is created, with full information, rather than letting drift go unnoticed. Rejected: whole-plant stamp on every upload (bumps row versions on untouched orders); a passive drift indicator (nobody reads it); a nightly scheduler. |
+| **Materialized fields (Stage 1)** | `color`, `prt_01`, `prt_02`, and **`production_version`** (from `material_plants.default_production_version`). | **Correction, 2026-08-11:** an earlier draft of this stage materialized `default_workcenter` as the fourth field. The user caught this during implementation: `default_workcenter` is a plain admin-editable `material_plants` column unrelated to routing, and doesn't belong here. `production_version` is the right fourth field — it's the eventual PRT_02 join anchor once PRT_02 moves from a single TEXT value to a production-version-keyed table (see the **PRT_02** decision below), and materializing it now costs nothing. Bonus: `PRODUCTION_VERSION` is already a *dead* entry in `web/order-field-catalog.mjs` (`db.py` never wrote it) — this fixes that pre-existing drift instead of adding a new dead entry for `default_workcenter`. |
+| **Unranked / equal-rank values** | **Grouped by value, placed after ranked ones.** Sort key = `pad(rank) + '\|' + normalizedValue`. Applies to Color too. | A bare rank makes all unranked values tie, so they scatter under later terms — **maximum** changeovers among exactly the orders whose changeover cost is the point. Also fixes the equal-rank case (DOG=1, CAT=1 currently scatter). Encoded as one fixed-width **string** key, not an object, so the Schwartzian decorate stays allocation-free. **This changes existing color output** for any plant with an incomplete wheel. |
+| **PRT vs. cost** | **Ordinal ranks now, behind a term-factory seam.** | The setup/teardown matrix is **1–2 years out** per the user, so waiting is not viable — but cost *is* coming, so the seam lets `setupCostTerm(field)` replace `ordinalTerm(field)` per field with no tree, storage, or UI change. It bounds *code* churn, not the re-tuning plants will need. Rejected: shipping Color-only and deferring all PRT ranking; building ordinal with no abstraction. |
+| **PRT_02 shape** | **Single-valued now.** | Matches what the column holds and what the user is allowing (*"for now, lets just assume there is only one mold (PRT02)"*). Logged as known rework: the long-term model is PRT_02 → production version → BoM + routing. |
+| **Production Version table** | **Out of scope**, though it lands in weeks. | Asked directly by the user. The design ranks the value *on the order* and is indifferent to provenance — when PRT_02 moves to production versions, only [`_stamp_order_attributes`](#seam-2--_stamp_order_attributes) changes. **Nothing built here gets undone.** Pre-empting would pull a new master-data table (CRUD registration, BoM/routing FKs, admin grid, cascade-delete preview) into an already-large change and risk conflicting with the real design. |
+| **Delivery** | **Three stages**, each independently deployable. | Isolates the migration and ingest risk from the visible behavior change. |
+
+## Architecture — the three seams
+
+These are the load-bearing boundaries. Each exists so a foreseeable future change touches one
+place instead of many.
+
+### Seam 1 — values on the order, ranks on the client
+
+Values materialize onto the order row at ingest: no hot-path join, and they display as Orders-grid
+columns. **Ranks never touch the order row.** They resolve on the client from per-plant rank maps
+(`{field_key: {line|'': {VALUE: RANK}}}`) loaded with plant state and refreshed after any upload.
+
+A rank is therefore always looked up against the order's **current** line — which is what makes
+line overrides survive a cross-line drag. `ORDER_Y` is still stamped server-side, for color
+compatibility only (the emitted row sort at `brain.py:823`, `ColorWheelViewer`, the coverage panel).
+
+Why not the alternatives:
+- *Materializing ranks onto orders* would rewrite the whole `orders` table on every list upload,
+  and break the current behavior where re-uploading a wheel takes effect on the next `GET /tasks`.
+- *Stamping ranks per-order in the response* (the original design) goes stale on every line change
+  — see [N2](#pass-2--review-of-the-revised-plan). It also put a dict on every one of thousands of
+  orders where a few hundred map entries per plant suffice.
+
+### Seam 2 — `_stamp_order_attributes`
+
+The single place attribute provenance lives: one `UPDATE orders … FROM material_plants` keyed
+`(plant, material_number = material_id)`. When PRT_02 moves to production versions, **this query
+changes and nothing else does.** `material_plants.default_production_version` (`schema.sql:260`) is
+the eventual join anchor.
+
+It runs *post*-upsert because `orders.plant` is itself backfilled after the upsert and the stamp
+must see the derived value. Shared by the Excel and `sap_sync` ingest paths, and it **wins over any
+color `sap_field_map` maps** (no live conflict — the SAP connectors are stubs — but a recorded
+decision, not an accident).
+
+### Seam 3 — the term factory
+
+`_sortTerms` asks a factory for each field's optimizer term. `ordinalTerm(field)` today;
+`setupCostTerm(field)` when the matrix exists. The tree, storage, and UI are indifferent to which
+is active.
+
+Setup/teardown data belongs in its **own** `(line, from_prt, to_prt)` matrix table — deliberately
+*not* columns on `priority_list`.
+
+## Review findings
+
+Two passes against the live code before implementation. Verified claims cite the file that proves
+them. `R*` = pass 1, `N*` = pass 2.
+
+### Pass 1 — review of the first draft
+
+**Would have shipped as bugs:**
+
+- **R1 — `Config.SCHEMA_VERSION` was never bumped** (`web/application-foundation.mts:137`, currently
+  `4` → must be `5`). The localStorage cache is discarded only on version mismatch
+  (`schedule-data.mts:837`). Without the bump, returning users rehydrate old-shape tasks missing
+  the new fields → every order ranks 999999 → every priority list silently ignored, no error. The
+  worst class of bug: looks configured, does nothing.
+- **R2 — auto-propagating Material Plant edits into `orders` would destroy planner work.** See
+  [the `xmin` hazard](#the-xmin-hazard-general). Dropped entirely.
+- **R3 — ledger-guard trap.** If the backfill migration runs before `material_plants` is populated,
+  the `schema_migrations` row records it applied and it **never runs again** → orders permanently
+  blank. Same shape as the ×1440 landmine (`schema.sql:135-143`), inverted. Resolution: the
+  backfill is *convenience*; `POST /master-data/resync-order-attributes` is the mechanism.
+
+**Gaps:**
+
+- **R4** — `web/order-field-catalog.mjs` needs `PRT_01`/`PRT_02` entries, or the materialized values
+  are not selectable as Orders-grid columns. **Correction (2026-08-11):** the fourth materialized
+  field is `production_version` (from `material_plants.default_production_version`), not
+  `default_workcenter` — see the [Decisions](#decisions) table. `PRODUCTION_VERSION` needs no new
+  catalog entry; it already exists (dead) at `web/order-field-catalog.mjs:64`, one of the ~10 fields
+  `db.py` never writes — see [cross-cutting findings](#cross-cutting-findings-lift-these-out). This
+  stage fixes that one entry rather than adding a new dead one for `default_workcenter`.
+- **R5** — SAP precedence must be stated (seam 2).
+- **R6** — the emitted row sort (`brain.py:823`, keyed on `ORDER_Y`) is **presentation and
+  link-building order only**, never the optimizer's order. Documented so nobody "fixes" it by
+  reading `plants.constraints` on the hot path for an ordering the optimizer overwrites anyway.
+- **R8** — `_renderSettingsPane`'s `initConstraints` is **synchronous** today
+  (`plant-and-administration.mts:1073`); sourcing the field list from a fetch needs a loading state
+  and a `CONSTRAINT_CATALOG` fallback, or a slow first paint renders an empty list.
+- **R9** — `column_metadata.display_label` is single-language, so de/es/fr/pt would show English.
+  Resolve labels as `t('constraint.<field_key>')` with the DB label as fallback.
+- **R14** — reject a multi-file drop with two files targeting the same field+scope (otherwise silent
+  last-write-wins).
+- **R16** — superseded by the exception-report decision.
+
+**Perf / scale:**
+
+- **R10** — prune the new task fields from the `Compute` worker snapshot; the `postMessage`
+  structured clone is the documented dominant main-thread compute cost and Alerts/Utilization never
+  read ranks. *(Unverified: confirm the snapshot ships whole task objects.)*
+- **R11** — `tieBreakTerms.map()` runs per task **per calendar day** (`schedule-services.mts:1145`);
+  term count goes 4 → 7 with all fields enabled. Opt-in cost (terms are only added for configured
+  fields), but it constrained the N12 encoding to a scalar key.
+- **R12** — coverage must not be one query per (line, field); see N3.
+
+**Operational / debt:**
+
+- **R13** — `PLANT_LISTS` is per-process, like today's `PLANT_CWS`, but **widened from 1 field to 4
+  × line scopes**: on multi-replica, an upload to replica A leaves B stale. Pilot is single-replica,
+  so not blocking. → `docs/MIGRATION.md`.
+- **R17** — three accepted compat shims to track: the dead `color_wheel` table, `/color-wheel/*`
+  serving a differently-named table, and `ORDER_Y` aliasing the color rank. → `docs/MIGRATION.md`.
+- **R18** — `CLAUDE.md` and `AGENTS.md` are twins; both document this architecture and both must be
+  updated or they drift.
+- **R19** — `tests/modules/schedule-services.test.mjs` will **break** on the `_sortTerms` signature
+  change; budget for updating it, not only for new tests.
+
+**Corrected in pass 1:**
+
+- **R7 downgraded from risk to note.** `wheelFirst` (`schedule-services.mts:1135`) already spans
+  `[color, FORM_SIZE, MATERIAL_NUMBER, runHours]`, so due date was *already* the last resort in
+  `changeover`'s tier-2 and those three terms already discriminate nearly every pair. Extra PRT
+  terms make due date matter marginally less often, not qualitatively less.
+
+### Pass 2 — review of the revised plan
+
+Mostly consequences of the two things that changed after pass 1: line scope became a built feature,
+and delivery became staged.
+
+**The significant one:**
+
+- **N2 — CONFIRMED in code, and it forced an architecture change.**
+  `web/schedule-workbench.mts:250` sets vis-timeline `editable: { updateGroup: true }`, so orders
+  can be dragged **between lines**; `:1641` makes the Orders grid `PRODUCTION_LINE` column
+  `editable: true`. Line changes are first-class through two surfaces, so a line-scoped rank stamped
+  onto the order row is wrong the instant a planner moves that order. `OptimizeDialog` loads rank
+  maps and would self-correct, but the **alert auto-fix path** (`schedule-services.mts:697`) loads
+  none and would sequence off the stale value. Plant-scoped color never had this failure mode.
+- **N2b — resolution: drop the per-order rank payload entirely** (now [seam 1](#seam-1--values-on-the-order-ranks-on-the-client)).
+  Adopted rather than offered because it is better on every axis: eliminates N1 and N2, eliminates
+  N14, removes the worker-snapshot concern in R10, and shrinks the `/tasks` payload.
+
+**Other line-scope consequences:**
+
+- **N1** — dissolved by N2b (the server no longer resolves scope for ranks at all).
+- **N4** — validate a mapped `Line` column against `production_lines` for that plant; reuse
+  `master_data.known_plant_line_codes()`, which `/upload` already uses. A typo'd line code otherwise
+  creates a list that never matches anything, indistinguishable from a working override.
+- **N3** — coverage must be **one aggregate query per plant**. 70 lines × 4 fields is up to 280
+  lookups per Optimization render; R12's "cache it" was written when the cardinality was 4.
+
+**Ingest:**
+
+- **N5/N6/N7** — the threshold, override, and override-audit requirement are all **removed** in
+  favor of the exception report. See [Decisions](#decisions).
+- **N9** — separate "order has no plant" from "order has a plant but no MP row" in the report.
+  `orders.plant` derivation can fail on an ambiguous multi-plant line code (already a warning path);
+  one signal for two unrelated failures sends people to the wrong fix.
+- **N10** — `make_id` is not plant-aware (a known `docs/MIGRATION.md` gap) and a stamp keyed
+  `(plant, material_number)` **amplifies** it: colliding ids across reused line codes now affect
+  sequencing attributes, not just dates.
+
+**Sequencing:**
+
+- **N12** — adopted, including for Color. See [Decisions](#decisions).
+- **N11** — the tree must show "enabled but no list uploaded" per field, generalizing the existing
+  `cons-warn` / `ui.constraint_no_wheel` hint. Harmless at runtime, but silently inert config is
+  what people file bugs about.
+- **N14** — dissolved by N2b (`Sandbox` mutates the live Store, so it had the same staleness).
+
+**Stage boundaries — two of these were my own contradictions:**
+
+- **N15** — Stage 1 claimed "no visible behavior change" while re-sourcing color from Material
+  Plant, retiring `GLOBAL_CW`, and adding a blocking guard. All three are visible; the rollback
+  story rested on a false premise. Corrected to a checkable invariant: the *mechanism* is unchanged
+  (one ordinal list per plant, color the only ranked field), so **every ordering difference must
+  trace to a material where `material_plants.color` disagrees with `orders.color`**.
+- **N21** — Stage 2's field card had a Preview button while "generalize `ColorWheelViewer`" sat in
+  Out of scope. A Preview that works for color and breaks for tooling is worse than none, so a
+  minimal generic viewer moved into Stage 2.
+- **N16** — resolved: all field cards ship in Stage 2, non-color explicitly labelled "not yet used
+  in sequencing", so real tooling data and its coverage can be validated *before* the optimizer
+  depends on it — which is exactly when free-text spelling mismatches should be found.
+- **N17** — Stage 3's `ConstraintConfig.children` is purely additive, so cached `plants` rows still
+  parse: **no** second `SCHEMA_VERSION` bump. (Stated so nobody assumes one is needed and then skips
+  it where it *was* — Stage 1, R1.)
+
+**Debt this plan introduces:**
+
+- **N19** — `priority_list.source_column` duplicates `RANKABLE_FIELDS[field]['source_column']`. Make
+  the registry authoritative and the column audit-only, or drop it; two sources of truth for one
+  fact will drift.
+- **N20** — `value_column`/`rank_column` are upload provenance only; nothing re-parses from them.
+- **N18** — the Admin Cockpit color-coverage panel and the new per-field coverage must share one
+  function; two implementations of "which values are unranked" drift apart.
+- **N22** — `t('constraint.' + key)` defeats static i18n extraction. Needs a fallback chain plus a
+  test asserting every registered field has a locale key in all five locales.
+- **N8** — batch-scoped stamping leaves a plant with orders stamped at different times from
+  different Material Plant values. Resolved by the post-upload Resync prompt.
+
+## Risks
+
+1. **Master data must load before orders, and nothing enforces it.** Excel `COLOR` is no longer a
+   source and the upload no longer blocks, so an orders-first load produces a schedule with no color
+   or tooling sequencing at all. The exception report makes it *actionable*, not *impossible*.
+   Accepted deliberately — blocking was self-defeating (N5). Re-enabling an Excel fallback remains a
+   one-line `COALESCE` in seam 2.
+2. **N12 changes existing color sequencing.** Any plant whose wheel does not cover every color in
+   its orders sees a different (better-grouped) sequence after Stage 3. Expected — so "the schedule
+   changed" is a legitimate observation rather than a bug. Capture a before/after for one real plant
+   so the difference can be explained instead of investigated.
+3. **Free-text values.** `prt_01`/`prt_02` are planner-typed TEXT; a misspelled list matches nothing
+   and degrades to all-999999 — *appears* configured, does nothing. Coverage is the guard; both
+   sides normalize via `Util.norm`.
+4. **Resync bumps row versions** — a deliberate action, never a hot path.
+5. **PRT ordinal ranks will need re-tuning** when the setup/teardown matrix lands. Seam 3 bounds the
+   *code* churn, not the re-tuning.
+6. **PRT_02 single-value rework** is accepted, logged debt.
+
+## Pre-ship checks
+
+Do these **before** Stage 1, not after:
+
+1. **How populated `material_plants.color` / `prt_01` / `prt_02` actually are, per plant.** These
+   columns were added via the Add Column wizard on 2026-08-07. If they are sparse, Stage 1's
+   re-sourcing blanks live color sequencing — and with the guard removed, nothing stops it. This is
+   the single most important check. **Not done** — explicitly waived by the user during
+   implementation (2026-08-11); still outstanding before applying the migration anywhere real. Two
+   ready-to-run queries are in the implementation session's record; someone with local Postgres
+   access needs to actually run them.
+2. **Whether any plant relies on the global wheel.** Confirm via `GET /diagnostics` rather than
+   assuming. `COLOR_FILE` on the pilot is `/data/color_wheel.xlsx`, ephemeral and documented as lost
+   on restart, so it is likely already empty. **Not done** — GLOBAL_CW/COLOR_FILE were retired in
+   code regardless, per the locked "Default tier: Per-plant only" decision; this check would only
+   have added confidence before that irreversible-feeling step, not gated whether to do it.
+3. **R10's premise** — whether the `Compute` worker snapshot ships whole task objects. **Done and
+   confirmed true** (`Compute._snap()` in `web/schedule-services.mts` sends full `NimbusTask[]`
+   objects with no field pruning) — fixed by stripping `PRT_01`/`PRT_02`/`PRODUCTION_VERSION` before
+   the `postMessage` structured-clone via a new `_stripPriorityFields` helper.
+
+## Out of scope
+
+- Per-**value** sub-orders and weighted changeover scoring (seam 3 is the entry point).
+- **Tool routing** — choosing which PRT an order uses. Needs alternative-tool master data, an
+  optimizer that can reassign tooling, and per-tool cost modeling. None exist. Note this is what
+  the "material A can run on Dog or Cat, prefer Dog" case actually requires.
+- The setup/teardown matrix table itself.
+- A Material Plant Production Version table (seam 2 is why waiting is safe).
+- Priority fields crossing day boundaries (tool campaigns).
+- Retiring `color_wheel` / `/color-wheel/*` / the `ORDER_Y` alias (R17 tracks them).
+- Fixing `order-field-catalog.mjs`'s pre-existing declared-but-unwritten fields (R4).
+
+## Cross-cutting findings — lift these out
+
+Discovered during this review but **not specific to this feature**. They belong in the durable docs
+so the next person to touch `orders` finds them.
+
+### The `xmin` hazard (general)
+
+`orders.xmin` is the optimistic-concurrency `base_version` surfaced as `ROW_VERSION`
+(`db.py:215`). **Any `UPDATE orders` bumps it** — including one that only touches an unrelated
+column. The affected ids then return in the `stale` list on the next `POST /tasks/update`, and the
+frontend reconciles with **last-writer-loses**: it discards the local edit and refetches server
+truth.
+
+So a background or incidental write to `orders` silently destroys planners' unsaved drags. This is
+why Material Plant grid edits do **not** propagate to orders here, and why resync is an explicit,
+warned action. → belongs in `CLAUDE.md` / `AGENTS.md`.
+
+### `order-field-catalog.mjs` declares fields `db.py` never writes
+
+`web/order-field-catalog.mjs` lists ~10 order fields whose `dbColumn`s the ingest path never
+populates (`order_category`, `production_version`, `planned_order_initial_quantity`,
+`labor_hours`, … — confirmed by grepping `db.py` for them and finding nothing). The catalog is a
+*declaration* layer, so a declared-but-unwritten field renders as a silently blank column. Worth
+either reconciling or annotating.
+
+### The inverse ledger trap
+
+`schema.sql` already documents the ×1440 landmine — a data mutation that re-ran on every apply. The
+**inverse** is equally dangerous and not yet documented: a ledger-guarded migration that runs
+*before* its source data exists records itself as applied and never re-runs, leaving the target
+permanently empty. Any ledger-guarded backfill needs an idempotent re-run path (here,
+`POST /master-data/resync-order-attributes`) rather than relying on the migration alone.

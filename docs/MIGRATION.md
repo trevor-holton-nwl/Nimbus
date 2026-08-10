@@ -331,8 +331,39 @@ The single concession to multi-user, sized for "a few editors, same plant":
 Container Apps filesystem is ephemeral, but `COLOR_WHEEL_DIR` was written at runtime. **Resolved by pulling the post-pilot option forward: per-plant color wheels now persist in a Postgres `color_wheel` table** (one row per plant: a JSONB `{COLOR: ORDER_Y}` map + upload metadata; migration `migrations/2026-07-07-color-wheel-table.sql`, mirrored into `schema.sql`, self-bootstrapped by `db.ensure_color_wheel_table()`). This needed **no new Azure infra, dependency, or auth** — Postgres was already the only durable store wired — and removes the durability/SMB-race reason the app was pinned to single-replica (the in-process `PLANT_CWS` cache + log ring buffer are the remaining single-replica reasons; cross-replica cache refresh after an upload still needs `/reload`). The originally-planned **Azure Files SMB mount at `/data` was NOT built** (net-new storage account + share, and it kept single-replica); this **supersedes Fork 1's "Azure Files now" default**. The `brain.py` seams (`load_color_wheels`, `_reload_one_plant_wheel`, the four `/color-wheel*` endpoints) now read/write the DB. An **opt-in** one-time `_backfill_color_wheels_from_disk()` (env `NIMBUS_CW_BACKFILL=1`, **off by default**) imports legacy on-disk wheels into the empty table — off by default so running the app locally against a remote DB never silently pushes local dev wheels into it; a no-op in the container regardless (its `/data` is empty on boot).
 
 **Still on `/data` (ephemeral) — separate follow-ups:**
-- **Global wheel** (`COLOR_FILE`): not uploadable through the app (a deploy-time file), so it stays out of the table and still loads from disk. It currently lives at `/data/color_wheel.xlsx` — **NOT** "baked read-only into the image" as an earlier draft of this note claimed: `.dockerignore` excludes all `*.xlsx`, so nothing ships in the image and `GLOBAL_CW` is simply empty after a restart. Durability fix = **bake `color_wheel.xlsx` into the image** (add it to the build context) or seed it into the table later.
+- ~~**Global wheel** (`COLOR_FILE`)~~ — **retired entirely, 2026-08-11** (`docs/scheduling_priority.md` Stage 1: "Default tier: Per-plant only"). It previously lived at `/data/color_wheel.xlsx`, was never baked into the image (`.dockerignore` excludes all `*.xlsx`), and so was always empty after a restart in practice — one more reason removing the tier cost nothing real. The `COLOR_FILE`/`COLOR_WHEEL_DIR` split in deployment config is now vestigial (`COLOR_WHEEL_DIR` still holds the audit log below; `COLOR_FILE` can be dropped from container env vars in a follow-up).
 - **Audit log** (`COLOR_WHEEL_DIR/_audit_log.json`): a shared append-only log of color-wheel **and** `optimization_run` events (see the `/audit/log` endpoints). Left file-based for now; its durability is a distinct item spanning optimization events, not just color wheels.
+
+### Priority lists generalize color wheels (2026-08-11) — three follow-ups
+
+`docs/scheduling_priority.md` Stage 1 generalized this workstream's `color_wheel` table into
+`priority_list` (one row per plant/line/field instead of one row per plant). Three items to track
+going forward, none blocking:
+
+1. **`PLANT_LISTS` is per-process — same gap as `PLANT_CWS` before it, but wider.** An upload/
+   resync on one replica does not update another replica's in-memory cache until that replica's
+   own `POST /reload` runs. This was already true for the color-only cache; it now spans up to 4
+   fields × however many line overrides exist, instead of 1 field × 1 scope per plant. Not a
+   blocker on the pilot's single-replica deployment; needs a real fix (pub/sub invalidation, or
+   just reading `priority_list` per request) before multi-replica.
+2. **Three deliberate compat shims**, kept so `ColorWheelViewer`, the Admin Cockpit coverage
+   panel, and the `/color-wheel/*` API contract could survive the migration untouched:
+   - The `color_wheel` table itself is left in place, fully populated, and never read again except
+     by the one-time migration that already ran.
+   - `/color-wheel/{plant}` (GET/POST/DELETE) and `/color-wheels` are a thin compat layer over
+     `priority_list` rows scoped to `field_key='colorWheel', line=''` — a real client of the
+     generalized API would call the (Stage 2+) `priority_list` endpoints directly instead.
+   - `ORDER_Y` on the task DTO is a color-only alias, stamped by `apply_priority_merge` from
+     whichever `colorWheel` list applies — not a generic rank, and not read by the optimizer once
+     Stage 3 ships its own per-field terms.
+   Untracked, these read as odd/redundant surface to a future reader; this paragraph is that
+   tracking.
+3. **PRT_02 is single-valued today** (`material_plants.prt_02` is one TEXT column), matching what
+   the schema holds and what was explicitly scoped for now. The known long-term shape is
+   PRT_02 → **production version** → BoM + routing (multiple molds/tools per material via a
+   production-version-keyed table) — `material_plants.default_production_version` (materialized
+   onto `orders.production_version`) is deliberately the eventual join anchor for that rework, so
+   when it lands, only `db._stamp_order_attributes`' query changes.
 
 ## Workstream 6 — Networking: same-origin reverse proxy
 
@@ -656,6 +687,34 @@ model (never hand-mutate prod outside that flow).
 **pre-minutes (day-valued) dump**. Handle it as an explicit, backup-first one-off — run the two
 `UPDATE ... * 1440 WHERE ... <= 365` statements once (preserved in the `schema.sql` comment), then
 `INSERT INTO schema_migrations (id) VALUES ('plants_horizon_minutes')` so it never repeats.
+
+### The inverse ledger trap — a general pattern (2026-08-11)
+
+The ×1440 landmine above is a ledger-guarded step running **too often** (unguarded, so it re-ran
+forever and corrupted data). There is a mirror-image failure mode: a ledger-guarded step that runs
+**too early** — before the data it depends on exists — records itself applied and then **never runs
+again**, even after the dependency shows up. Both are "the ledger and reality disagree," just in
+opposite directions; both are worth checking for whenever a new guarded migration step is added.
+
+Concrete instance: `migrations/2026-08-11-priority-lists.sql`'s `orders_mp_attrs_backfill` step
+copies `material_plants.{color,prt_01,prt_02,default_production_version}` onto matching `orders`
+rows. If it runs on a fresh/empty `material_plants` (a new plant onboarding, or an environment
+provisioned before master data was loaded), it finds no matches, does nothing useful, and still
+records `orders_mp_attrs_backfill` as applied — a re-apply of `schema.sql` after `material_plants`
+is finally populated will **not** retroactively fix those orders, because the ledger says it already
+ran. This is why that step is documented (in `schema.sql` and the migration file itself) as
+**convenience only** — the real mechanism is `POST /master-data/resync-order-attributes`
+(`db._stamp_order_attributes`, called with a plant rather than a batch), which has no ledger gate and
+can be re-run any time master data changes. See `docs/scheduling_priority.md`'s R3 finding for the
+full writeup, and `tests/test_priority_lists.py::TestStampOrderAttributesAndTheInverseLedgerTrap` for
+the regression test.
+
+**Rule of thumb going forward:** if a ledger-guarded `schema.sql` step's correctness depends on
+another table already being populated, either (a) provide a live, ungated resync path as the actual
+mechanism and label the guarded step convenience-only (as here), or (b) make the step's effect
+naturally re-appliable without the ledger at all (a `WHERE col IS NULL`-style backfill, like
+`orders.plant`'s NULL-only backfill just above it in `schema.sql`, which is safe to leave unguarded
+because re-running it only ever fills in newly-NULL rows).
 
 ## Multi-user real-time sync (planned)
 

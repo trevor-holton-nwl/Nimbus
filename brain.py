@@ -18,11 +18,15 @@ Data flow:
 Task IDs are stable MD5 hashes of "{PRODUCTION_ORDER}|{MATERIAL_NUMBER}"
 computed in db.make_id(). The frontend keys every drag/edit operation on these IDs.
 
-Color wheels are still per-plant .xlsx files under COLOR_WHEEL_DIR, loaded into a
-small in-process cache (GLOBAL_CW / PLANT_CWS); POST /reload refreshes that cache.
+Per-plant/per-line priority lists (color today; PRT_01/PRT_02/production_version
+materialized but not yet ranked — docs/scheduling_priority.md Stage 1) persist in
+the Postgres `priority_list` table and are loaded into a small in-process cache
+(PLANT_LISTS); POST /reload refreshes that cache. There is no more global
+fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 """
 import collections
 import contextvars
+import csv
 import io
 import json
 import logging
@@ -38,7 +42,7 @@ from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, 
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager, suppress
@@ -108,12 +112,15 @@ def _current_rid() -> str | None:
 # GLOBAL DATA
 # =========================
 # (No in-memory order cache — see module docstring. Orders are queried per request.)
-COLOR_FILE = os.getenv("COLOR_FILE", r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheel.xlsx")
 
-# Color-wheel cache populated by load_color_wheels(); apply_color_merge() reads from these
-# instead of touching disk per request.
-GLOBAL_CW: dict = {}        # { COLOR -> ORDER_Y }
-PLANT_CWS: dict = {}        # { safe_plant_key: { COLOR: ORDER_Y } }
+# Priority-list cache populated by load_priority_lists(); apply_priority_merge()
+# reads from this instead of touching the DB per request. Keyed by RAW plant
+# name (docs/scheduling_priority.md: "drop _cw_safe_name() from the lookup
+# path") — NOT the _cw_safe_name() slug the old PLANT_CWS/color_wheel table
+# used; that sanitizer is kept below only for the legacy-compat /color-wheel/*
+# file-era helpers. There is no more global fallback wheel (GLOBAL_CW/
+# COLOR_FILE are retired — Stage 1 decision: "Default tier: Per-plant only").
+PLANT_LISTS: dict = {}      # { plant: { line_or_'': { field_key: {VALUE: RANK} } } }
 CW_LOADED_AT: str | None = None
 
 # =============================================================================
@@ -178,9 +185,10 @@ async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
     _migrate_audit_log()
     db.ensure_color_wheel_table()
+    db.ensure_priority_list_table()
     if CW_BACKFILL_FROM_DISK:
         _backfill_color_wheels_from_disk()
-    load_color_wheels(COLOR_FILE)
+    load_priority_lists()
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
     md.ensure_plant_constraints_column()
@@ -197,8 +205,8 @@ async def lifespan(app: FastAPI):
     auth.ensure_bootstrap_admin()
     auth.ensure_role_settings_column()
     auth.ensure_user_settings_table()
-    _log_event("info", "startup", "Color wheels loaded",
-               global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
+    _log_event("info", "startup", "Priority lists loaded",
+               plants_with_lists=len(PLANT_LISTS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
     # /tasks request queries Postgres with a plant/line scope. This is what lets
     # the app run as multiple workers/replicas. We just probe the DB so startup
@@ -551,6 +559,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
+    "/master-data/resync-order-attributes": "material_plants.resync_order_attributes",
     "/security/users/bulk": "security.users_bulk_write",
     "/security/users/{username}/reset-password": "security.password_reset",
     "/sap/interface/mappings/{object}": "sap.mapping_update",
@@ -696,75 +705,78 @@ def _backfill_color_wheels_from_disk() -> None:
                    count=imported)
 
 
-def load_color_wheels(color_file: str = COLOR_FILE) -> None:
+def load_priority_lists() -> None:
     """
-    Populate the GLOBAL_CW / PLANT_CWS module-level cache. The global wheel is
-    still read from COLOR_FILE on disk (a deploy-time file); per-plant wheels are
-    loaded from the durable color_wheel Postgres table. Called at startup, on
-    /reload, and after a color-wheel upload/delete.
+    Populate the PLANT_LISTS module-level cache from the durable priority_list
+    Postgres table — { plant: { line_or_'': { field_key: {VALUE: RANK} } } },
+    keyed by RAW plant name. Called at startup, on /reload, and after a
+    priority-list upload/delete/resync. No global fallback wheel anymore
+    (GLOBAL_CW/COLOR_FILE retired — docs/scheduling_priority.md "Default tier"
+    decision): a plant with nothing uploaded just has no entry here.
     """
-    global GLOBAL_CW, PLANT_CWS, CW_LOADED_AT
-
-    g_cw: dict = {}
+    global PLANT_LISTS, CW_LOADED_AT
     try:
-        gdf = db.clean(pd.read_excel(color_file))
-        if "ORDER" in gdf.columns:
-            gdf = gdf.rename(columns={"ORDER": "ORDER_Y"})
-        gdf["COLOR"] = gdf["COLOR"].astype(str).str.upper().str.strip()
-        g_cw = dict(zip(gdf["COLOR"], pd.to_numeric(gdf["ORDER_Y"], errors="coerce"), strict=True))
+        PLANT_LISTS = db.load_all_priority_lists()
     except Exception as e:
-        # Degrade (empty global wheel) but record why — a missing/corrupt global
-        # file silently disabling color priority used to be invisible.
-        _log_event("warn", "color_wheel", "Could not read global color wheel",
-                   exc=e, error_code="file.read", filename=color_file)
-
-    try:
-        p_cws = db.load_all_color_wheels()   # { safe_plant_key: {COLOR: ORDER_Y} }
-    except Exception as e:
-        # Degrade (no per-plant priority) but record why — orders still schedule,
-        # just without color-wheel ordering, matching the missing-wheel behavior.
-        p_cws = {}
-        _log_event("error", "color_wheel", "Could not load plant color wheels from DB",
+        # Degrade (no priority-list ordering) but record why — orders still
+        # schedule, just without color/PRT ordering, matching the old
+        # missing-wheel behavior.
+        PLANT_LISTS = {}
+        _log_event("error", "color_wheel", "Could not load priority lists from DB",
                    exc=e, error_code="db.read")
-
-    GLOBAL_CW = g_cw
-    PLANT_CWS = p_cws
     CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
 
 
-def _reload_one_plant_wheel(plant: str) -> None:
+def _reload_one_plant_lists(plant: str) -> None:
     """
-    Refresh the PLANT_CWS cache entry for a single plant from the color_wheel
-    table — used after an upload/delete so we don't reload every plant's wheel.
-    Pops the key when the plant has no stored wheel (delete path). The key
-    derivation matches load_all_color_wheels() exactly: _cw_safe_name(plant).
+    Refresh the PLANT_LISTS cache entry for a single plant from the
+    priority_list table — used after an upload/delete/resync so we don't
+    reload every plant's lists. Keyed by the RAW plant name (no
+    _cw_safe_name() — see the PLANT_LISTS module comment). Currently reloads
+    the whole plant (all lines/fields) since Stage 1 has no per-(line, field)
+    upload endpoint yet; Stage 2 can narrow this once it does.
     """
-    global PLANT_CWS, CW_LOADED_AT
-    key = _cw_safe_name(plant)
+    global PLANT_LISTS, CW_LOADED_AT
     try:
-        row = db.get_color_wheel_row(key)
-        if row is None:
-            PLANT_CWS.pop(key, None)
+        all_lists = db.load_all_priority_lists()
+        if plant in all_lists:
+            PLANT_LISTS[plant] = all_lists[plant]
         else:
-            PLANT_CWS[key] = row["entries"]
+            PLANT_LISTS.pop(plant, None)
     except Exception as e:
-        _log_event("warn", "color_wheel", "Could not refresh plant color wheel",
+        _log_event("warn", "color_wheel", "Could not refresh plant priority lists",
                    exc=e, error_code="db.read", plant=plant)
     CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
 
 
-def apply_color_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd.DataFrame, dict]:
+def _apply_priority_scope(df: pd.DataFrame, mask: "pd.Series[bool]", cw_map: dict | None) -> None:
+    """Stamp ORDER_Y for the rows selected by `mask` from `cw_map`, in place.
+    A no-op when `cw_map` is empty/None or nothing in `df` matches `mask`."""
+    if cw_map and mask.any():
+        df.loc[mask, "ORDER_Y"] = df.loc[mask, "COLOR"].map(cw_map)
+
+
+def apply_priority_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd.DataFrame, dict]:
     """
-    Apply per-plant color-wheel priority (with global fallback) to a possibly
-    plant-filtered DataFrame. Adds ORDER_Y. Orders whose color isn't in any
-    wheel are NOT dropped — they are assigned last priority (999999) so they
-    sequence after listed colors. Returns (df, stats). Reads wheels from the
-    GLOBAL_CW / PLANT_CWS module cache — callers should ensure
-    load_color_wheels() has been invoked at least once.
+    Generalizes the old apply_color_merge to every plant's configured
+    priority lists (docs/scheduling_priority.md). Stage 1 still only stamps
+    ORDER_Y — the color-compat alias the emitted row sort and ColorWheelViewer
+    depend on — from each plant's 'colorWheel' list; PRT_01/PRT_02/
+    production_version are materialized onto orders (Task 2's seam) but not
+    yet consulted here (Stage 3 is the optimizer change, and ranks resolve
+    client-side there — N2b, no generic RANKS field is ever emitted).
+
+    A line-specific 'colorWheel' list wins over the plant-wide one for that
+    line (docs/scheduling_priority.md "List scope" decision); orders whose
+    color isn't in the applicable list are NOT dropped — they are assigned
+    last priority (999999) so they sequence after listed colors. Returns
+    (df, stats). Reads from the PLANT_LISTS module cache — callers should
+    ensure load_priority_lists() has been invoked at least once. No global
+    fallback wheel anymore (GLOBAL_CW/COLOR_FILE retired).
 
     When `plant` is supplied (the /tasks path already has a plant-scoped df),
-    only that plant's wheel is consulted — we skip the loop over every plant's
-    wheel. `plant=None` preserves the original all-plants behavior.
+    only that plant's lists are consulted — we skip the loop over every
+    plant. `plant=None` preserves the original all-plants behavior.
     """
     stats: dict = {
         "color_merge_misses": 0,
@@ -781,32 +793,36 @@ def apply_color_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd.Da
     try:
         df = df.copy()
         df["COLOR"] = df["COLOR"].astype(str).str.upper().str.strip()
-        df["PLANT_SAFE"] = df["PLANT"].fillna("").astype(str).apply(_cw_safe_name)
         df = df.drop(columns=["ORDER_Y"], errors="ignore")
         df["ORDER_Y"] = None
 
+        def _merge_one_plant(by_line: dict, plant_mask) -> None:
+            plantwide = (by_line.get("") or {}).get("colorWheel")
+            _apply_priority_scope(df, plant_mask, plantwide)
+            for line_key, fields in by_line.items():
+                if line_key == "":
+                    continue
+                line_map = fields.get("colorWheel")
+                if line_map:
+                    _apply_priority_scope(df, plant_mask & (df["PRODUCTION_LINE"] == line_key), line_map)
+
         if plant:
-            # Scoped path: only this plant's wheel matters for a plant-scoped df.
-            cw_map = PLANT_CWS.get(_cw_safe_name(plant))
-            if cw_map:
-                df["ORDER_Y"] = df["COLOR"].map(cw_map)
+            # Scoped path: only this plant's lists matter for a plant-scoped df.
+            by_line = PLANT_LISTS.get(plant)
+            if by_line:
+                _merge_one_plant(by_line, pd.Series(True, index=df.index))
         else:
-            for plant_key, cw_map in PLANT_CWS.items():
-                mask = df["PLANT_SAFE"] == plant_key
-                if mask.any():
-                    df.loc[mask, "ORDER_Y"] = df.loc[mask, "COLOR"].map(cw_map)
+            for plant_key, by_line in PLANT_LISTS.items():
+                plant_mask = df["PLANT"] == plant_key
+                if plant_mask.any():
+                    _merge_one_plant(by_line, plant_mask)
 
-        still_missing = df["ORDER_Y"].isna()
-        if still_missing.any() and GLOBAL_CW:
-            df.loc[still_missing, "ORDER_Y"] = df.loc[still_missing, "COLOR"].map(GLOBAL_CW)
-
-        df = df.drop(columns=["PLANT_SAFE"], errors="ignore")
-
-        # Orders whose COLOR isn't found in any wheel are NOT dropped — they flow
-        # through and sequence LAST via ORDER_Y = 999999 below. Color wheels are
-        # plant-optional (and switchable per plant on the frontend), so a missing
-        # match must never remove an order from the schedule. We still record the
-        # unlisted colors so the diagnostics panel can surface them.
+        # Orders whose COLOR isn't found in any applicable list are NOT dropped —
+        # they flow through and sequence LAST via ORDER_Y = 999999 below.
+        # Priority lists are plant-optional (and switchable per plant on the
+        # frontend), so a missing match must never remove an order from the
+        # schedule. We still record the unlisted colors so the diagnostics
+        # panel can surface them.
         miss_mask = df["ORDER_Y"].isna()
         color_miss = int(miss_mask.sum())
         if color_miss:
@@ -816,10 +832,16 @@ def apply_color_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd.Da
 
         df["ORDER_Y"] = pd.to_numeric(df["ORDER_Y"], errors="coerce").fillna(999999)
     except Exception as e:
-        _warn("error", f"Color-wheel merge failed: {e}; all rows get priority 999999")
+        _warn("error", f"Priority-list merge failed: {e}; all rows get priority 999999")
         df = df.copy()
         df["ORDER_Y"] = 999999
 
+    # Presentation + finish-to-start-link-building order ONLY (R6) — never the
+    # optimizer's order. The optimizer (Engine._sortTerms/_dispatchDayIntegrity,
+    # frontend) reads plants.constraints and computes its own sequence; this
+    # sort only affects what order rows arrive in this response and therefore
+    # which rows get linked into a chain in get_tasks. Do not "fix" this by
+    # reading plants.constraints here — the optimizer overwrites it anyway.
     df = df.sort_values(
         by=["BASIC_START_DATE", "PRODUCTION_LINE", "ORDER_Y"]
     ).reset_index(drop=True)
@@ -881,6 +903,9 @@ class TaskDTO(BaseModel):
     MATERIAL_NUMBER: str | None = None
     order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
     COLOR: str | None = None
+    PRT_01: str | None = None
+    PRT_02: str | None = None
+    PRODUCTION_VERSION: str | None = None
     PLANT: str | None = None
     ORDER: str | None = None
     ORDER_Y: float | None = None
@@ -974,11 +999,6 @@ def get_diagnostics():
 def get_health():
     """Fast DB ping + system snapshot. Polled every 30 s by the Admin Cockpit."""
     db_stats = db.get_health_stats()
-    color_reachable = True
-    try:
-        color_reachable = os.path.isfile(COLOR_FILE)
-    except Exception:
-        color_reachable = False
 
     # Stateless: "loaded" now means "DB reachable" rather than "DataFrame in RAM".
     return {
@@ -990,9 +1010,11 @@ def get_health():
             "task_count":  db_stats.get("total_orders", 0),
             "loaded_at":   DIAGNOSTICS.get("loaded_at"),
         },
+        # No more "path"/"reachable" file check (GLOBAL_CW/COLOR_FILE retired —
+        # priority lists are DB-backed, covered by db.connected above). Key
+        # name kept as color_wheel for frontend compat — only .misses is read
+        # (web/plant-and-administration.mts _renderHealth).
         "color_wheel": {
-            "path":      COLOR_FILE,
-            "reachable": color_reachable,
             "misses":    DIAGNOSTICS.get("color_merge_misses", 0),
             "missed_colors": DIAGNOSTICS.get("missed_colors", []),
         },
@@ -1015,17 +1037,26 @@ def get_diagnostics_deep():
 
     # Color wheel analysis against the colors currently in the orders table.
     # Source distinct colors from the DB (color column only — no full-table load)
-    # and the wheel from the already-cached GLOBAL_CW dict (no Excel re-read).
+    # and the wheel from the already-cached PLANT_LISTS dict (no DB re-read) —
+    # union of every plant's plant-wide 'colorWheel' entries, repointed at
+    # priority_list now that GLOBAL_CW is retired (docs/scheduling_priority.md
+    # N18: this is a DB-wide summary, not per-plant coverage — the generalized
+    # per-field, per-plant coverage panel is Stage 2/3, backed by
+    # db.priority_list_coverage()).
     color_stats: dict = {"error": None, "total_in_orders": 0, "matched": 0,
                          "missed": 0, "missed_colors": DIAGNOSTICS.get("missed_colors", [])}
     try:
-        # Normalize order colors the same way GLOBAL_CW keys are (upper/strip).
+        # Normalize order colors the same way priority_list entries are (upper/strip).
         order_colors = {
             c.upper().strip()
             for c in db.distinct_order_colors()
             if c is not None and str(c).strip()
         }
-        wheel_colors = set(GLOBAL_CW.keys())
+        wheel_colors = {
+            color
+            for by_line in PLANT_LISTS.values()
+            for color in (by_line.get("") or {}).get("colorWheel", {}).keys()
+        }
         if order_colors:
             missed = order_colors - wheel_colors
             color_stats.update({
@@ -1057,18 +1088,19 @@ def get_diagnostics_deep():
 @api.post("/reload", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def reload_data():
     """
-    Refresh the in-process color-wheel cache from disk. In stateless mode orders
-    are never cached, so there is nothing to re-read for them — this is the
-    cross-replica hook to pick up a newly uploaded color wheel without a restart.
+    Refresh the in-process priority-list cache from Postgres. In stateless mode
+    orders are never cached, so there is nothing to re-read for them — this is
+    the cross-replica hook to pick up a newly uploaded/resynced priority list
+    without a restart.
     """
     try:
-        load_color_wheels(COLOR_FILE)
+        load_priority_lists()
         DIAGNOSTICS["loaded_at"] = pd.Timestamp.utcnow().isoformat()
-        _log_event("info", "reload", "Color-wheel cache refreshed",
-                   global_colors=len(GLOBAL_CW), plant_wheels=len(PLANT_CWS))
+        _log_event("info", "reload", "Priority-list cache refreshed",
+                   plants_with_lists=len(PLANT_LISTS))
         return {"status": "ok", "diagnostics": _diag_snapshot()}
     except Exception as e:
-        _log_event("error", "reload", "Color-wheel reload failed", exc=e)
+        _log_event("error", "reload", "Priority-list reload failed", exc=e)
         raise HTTPException(status_code=500,
                             detail=f"Reload failed — ref: {_current_rid()}") from e
 
@@ -1153,7 +1185,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
     pre_merge_count = len(df)
 
-    df, cm_stats = apply_color_merge(df, plant=plant)
+    df, cm_stats = apply_priority_merge(df, plant=plant)
     df = df.astype(object).where(pd.notna(df), other=None)
     data = []
     link_id_counter = 1
@@ -1184,6 +1216,9 @@ def get_tasks(plant: str | None = None, line: str | None = None,
                 "MATERIAL_NUMBER": _clean_id(row.get("MATERIAL_NUMBER")),
                 "ORDER_QUANTITY_(GMEIN)": row.get("ORDER_QUANTITY_(GMEIN)"),
                 "COLOR": row.get("COLOR"),
+                "PRT_01": row.get("PRT_01"),
+                "PRT_02": row.get("PRT_02"),
+                "PRODUCTION_VERSION": row.get("PRODUCTION_VERSION"),
                 "PLANT": row.get("PLANT"),
                 "ORDER": _clean_id(row.get("PRODUCTION_ORDER")),
                 "ORDER_Y": row.get("ORDER_Y"),
@@ -1576,6 +1611,51 @@ def get_upload_audit(limit: int = 50):
     return {"audit": db.upload_audit_log(limit)}
 
 
+@api.get("/upload/{batch_id}/missing-master-data", dependencies=[Depends(require_admin)])
+def get_missing_master_data(batch_id: str, format: str | None = Query(default=None)):
+    """
+    The missing-master-data exception report for one upload batch
+    (docs/scheduling_priority.md "Unmatched MP rows" decision: uploads never
+    block — this is what makes the resulting gap actionable). Reads the
+    category=='missing_master_data' entries db._stamp_order_attributes wrote
+    into that batch's upload_audit.warnings. ?format=csv returns a
+    downloadable CSV instead of JSON, for handing to whoever owns collecting
+    the missing material_plants rows.
+
+    Response (JSON): {batch_id, unmatched_pairs, unmatched_orders,
+    exceptions: [{plant, material_number, order_count, reason}, ...]}
+    reason is 'no_mp_row' (material absent from material_plants at that
+    plant) or 'no_plant_derived' (the order has no plant at all — an
+    ambiguous multi-plant line code, a different pre-existing problem, N9).
+    """
+    warnings = db.get_upload_audit_warnings(batch_id)
+    if warnings is None:
+        raise HTTPException(status_code=404, detail=f"No upload found for batch {batch_id!r}")
+
+    exceptions: list[dict] = []
+    for w in warnings:
+        if isinstance(w, dict) and w.get("category") == "missing_master_data":
+            exceptions.extend(w.get("exceptions") or [])
+
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
+        writer.writeheader()
+        for e in exceptions:
+            writer.writerow({k: e.get(k) for k in ["plant", "material_number", "order_count", "reason"]})
+        return Response(
+            content=buf.getvalue(), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="missing-master-data-{batch_id}.csv"'},
+        )
+
+    return {
+        "batch_id": batch_id,
+        "unmatched_pairs": len(exceptions),
+        "unmatched_orders": sum(int(e.get("order_count") or 0) for e in exceptions),
+        "exceptions": exceptions,
+    }
+
+
 @api.post("/upload/audit/clear", dependencies=[Depends(require_admin)])
 def clear_upload_audit():
     """Delete all upload history records."""
@@ -1583,12 +1663,16 @@ def clear_upload_audit():
 
 
 # =========================
-# COLOR WHEEL ENDPOINTS
+# COLOR WHEEL ENDPOINTS (legacy-compat — now read/write priority_list rows
+# with field_key='colorWheel', line='' — docs/scheduling_priority.md Stage 1
+# "Storage" decision. Response shapes are UNCHANGED so ColorWheelViewer and
+# the Admin Cockpit coverage panel keep working untouched. The underlying
+# color_wheel table is left in place, unread from here on.)
 # =========================
 
 @api.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...)):
-    """Upload or replace a plant-specific color wheel (persisted to the color_wheel table)."""
+    """Upload or replace a plant-specific color wheel (persisted to the priority_list table)."""
     raw = await file.read()
     # Excel parse is blocking/CPU-bound — keep it off the event loop.
     try:
@@ -1614,13 +1698,13 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     ts = datetime.utcnow().isoformat() + "Z"
     user = request.headers.get("X-User", "system")
     fname = file.filename or "upload.xlsx"
-    safe = _cw_safe_name(plant)
 
     def _persist():
         # upsert (insert-or-replace) is a single statement; RETURNING (xmax = 0)
         # tells us whether this was a first upload or a replace.
-        res = db.upsert_color_wheel(safe, plant, entries,
-                                    filename=fname, row_count=row_count, uploaded_by=user)
+        res = db.upsert_priority_list(plant, "colorWheel", entries, line="",
+                                      source_column="color",
+                                      filename=fname, row_count=row_count, uploaded_by=user)
         is_replace = not res["inserted"]
         _cw_append_audit({
             "ts": ts, "user": user,
@@ -1628,10 +1712,10 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
             "plant": plant,
             "details": {"filename": fname, "row_count": row_count, "replaced": is_replace},
         })
-        # Color-merge runs per-request from the cache; refresh ONLY this plant's
-        # wheel so the new wheel takes effect on the next /tasks call without
-        # reloading every plant's wheel (or requiring a full /reload).
-        _reload_one_plant_wheel(plant)
+        # Priority merge runs per-request from the cache; refresh ONLY this
+        # plant's lists so the new wheel takes effect on the next /tasks call
+        # without reloading every plant's lists (or requiring a full /reload).
+        _reload_one_plant_lists(plant)
         return is_replace
 
     is_replace = await run_in_threadpool(_persist)
@@ -1642,11 +1726,11 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
 @api.get("/color-wheel/{plant}")
 def get_color_wheel(plant: str):
     """Return the stored color wheel for a plant as sorted JSON entries."""
-    row = db.get_color_wheel_row(_cw_safe_name(plant))
+    row = db.get_priority_list(plant, "colorWheel", line="")
     if row is None:
         raise HTTPException(status_code=404, detail=f"No color wheel uploaded for plant {plant!r}")
     # entries: {COLOR: ORDER_Y|None} -> [{color, order_y}] ascending by rank, with
-    # a null/blank rank sorting last (999999), matching apply_color_merge().
+    # a null/blank rank sorting last (999999), matching apply_priority_merge().
     entries = [
         {"color": c, "order_y": (999999 if o is None else o)}
         for c, o in row["entries"].items()
@@ -1664,7 +1748,7 @@ def get_color_wheel(plant: str):
 @api.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def delete_color_wheel(plant: str, request: Request):
     """Delete a plant's stored color wheel."""
-    res = db.delete_color_wheel(_cw_safe_name(plant))
+    res = db.delete_priority_list(plant, "colorWheel", line="")
     if res is None:
         return {"status": "not_found"}
     ts = datetime.utcnow().isoformat() + "Z"
@@ -1674,7 +1758,7 @@ def delete_color_wheel(plant: str, request: Request):
         "details": {"filename": res.get("filename") or "unknown"},
     })
     # Row already removed above — drop just this plant's cache entry.
-    _reload_one_plant_wheel(plant)
+    _reload_one_plant_lists(plant)
     return {"status": "ok"}
 
 
@@ -1688,7 +1772,18 @@ def list_color_wheels(
 
     Optional ?limit=/?offset= page the listing (default = full catalog). When
     supplied, meta.total carries the full count so callers can paginate."""
-    plants, total = db.list_color_wheels_meta(limit, offset)
+    rows, total = db.list_priority_lists_meta(field_key="colorWheel", limit=limit, offset=offset)
+    # Response shape kept identical to the old color_wheel-table version: a
+    # dict keyed by plant name (web/plant-and-administration.mts:270 pins this).
+    plants = {
+        r["plant"]: {
+            "uploaded_at": r["uploaded_at"],
+            "uploaded_by": r["uploaded_by"],
+            "filename": r["filename"],
+            "row_count": r["row_count"],
+        }
+        for r in rows
+    }
     if limit is None and offset is None:
         return {"plants": plants}
     return {"plants": plants, "meta": {"total": total}}
@@ -2002,6 +2097,51 @@ def md_set_material_plant_attributes(request: Request, body: dict = Body(default
     _set_admin_log_details(request, updated=result.get("updated", 0),
                            columns=",".join(result.get("columns", [])))
     return result
+
+
+@api.post("/master-data/resync-order-attributes", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def resync_order_attributes(request: Request, body: dict = Body(default={})):
+    """
+    Re-stamp one plant's orders.{color,prt_01,prt_02,production_version} from
+    material_plants NOW, via seam 2 (db._stamp_order_attributes). This is the
+    REAL mechanism — the batch-scoped ingest-time stamp is convenience only
+    (R3 in docs/scheduling_priority.md, the inverse-ledger-trap risk). Call
+    this after adding/fixing material_plants rows for a plant so its orders
+    pick up the new values without waiting for a re-upload.
+
+    WARNING: this bumps orders.xmin for every matched row, which IS the
+    optimistic-concurrency base_version (db.py ROW_VERSION). Any planner's
+    unsaved edit to an affected order is discarded on their next save
+    (last-writer-loses reconciliation, R2) — run this at a quiet moment, not
+    mid-shift. Admin-gated for exactly that reason.
+
+    Payload: { plant: str }
+    Response: { status, plant, unmatched_pairs, unmatched_orders, exceptions }
+    (same exception shape as GET /upload/{batch_id}/missing-master-data — a
+    resync has no batch_id, so its unmatched pairs are returned here directly
+    rather than persisted to upload_audit.)
+    """
+    plant = (body.get("plant") or "").strip()
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant is required")
+
+    # Note: this writes orders.* columns only — it never touches priority_list,
+    # so no PLANT_LISTS cache refresh is needed (unlike the /color-wheel/*
+    # upload path, which writes priority_list rows directly).
+    result = db.resync_order_attributes(plant)
+    _set_admin_log_details(request, plant=plant,
+                           unmatched_pairs=result["unmatched_pairs"],
+                           unmatched_orders=result["unmatched_orders"])
+    _log_event("info", "master_data", "Order attributes resynced from material_plants",
+               plant=plant, unmatched_pairs=result["unmatched_pairs"],
+               unmatched_orders=result["unmatched_orders"])
+    return {
+        "status": "ok",
+        "plant": plant,
+        "unmatched_pairs": result["unmatched_pairs"],
+        "unmatched_orders": result["unmatched_orders"],
+        "exceptions": result["exceptions"],
+    }
 
 
 # =========================

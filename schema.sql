@@ -837,3 +837,126 @@ CREATE TABLE IF NOT EXISTS user_settings (
     settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- ============================================================================
+-- SCHEDULING PRIORITY LISTS (docs/scheduling_priority.md, Stage 1 — data
+-- plumbing only: no upload UI, no optimizer change yet)
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- priority_list: one row per (plant, line-scope, rankable field). Generalizes
+-- color_wheel to any field in master_data.RANKABLE_FIELDS. line = '' means
+-- plant-wide; a specific production_line value overrides the plant-wide list
+-- for that line only (mirrors line_calendar / line_blackout's line: null
+-- convention). entries is {NORMALIZED_VALUE: RANK}, same shape color_wheel
+-- already uses for {COLOR: ORDER_Y}.
+--
+-- No FK to plants/production_lines — like color_wheel, a list may exist for
+-- an order-derived plant/line that lags master data. value_column/rank_column
+-- are upload provenance only (which uploaded headers were mapped); they are
+-- never re-parsed from — master_data.RANKABLE_FIELDS is the sole source of
+-- truth for a field's DB source column (N19 in docs/scheduling_priority.md).
+-- Verbatim copy in migrations/2026-08-11-priority-lists.sql.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS priority_list (
+    plant         TEXT NOT NULL,
+    line          TEXT NOT NULL DEFAULT '',
+    field_key     TEXT NOT NULL,
+    entries       JSONB NOT NULL,
+    source_column TEXT NOT NULL,
+    value_column  TEXT,
+    rank_column   TEXT,
+    filename      TEXT,
+    row_count     INTEGER NOT NULL DEFAULT 0,
+    uploaded_by   TEXT,
+    uploaded_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (plant, line, field_key)
+);
+
+-- ----------------------------------------------------------------------------
+-- orders.{prt_01,prt_02,production_version} — materialized copies of the
+-- matching material_plants planner attributes (seam 2:
+-- db._stamp_order_attributes), read directly by db._ORDERS_SELECT with no
+-- JOIN on the hot /tasks path. orders.color already exists (added long before
+-- this feature); Stage 1 changes what populates it, not its column
+-- definition. production_version sources from material_plants.
+-- default_production_version (the material_plants base table above) — NOT
+-- material_plants.default_workcenter, which stays a plain admin-editable
+-- material_plants column and is deliberately not part of this feature.
+-- production_version is also the eventual PRT_02 join anchor once PRT_02
+-- moves from a single TEXT value to a production-version-keyed table (see
+-- docs/scheduling_priority.md's "PRT_02" decision) — materializing it now
+-- costs nothing and the column name already exists as a dead entry in
+-- web/order-field-catalog.mjs, so this is fixing pre-existing drift, not
+-- adding new.
+-- ----------------------------------------------------------------------------
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS prt_01             TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS prt_02             TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS production_version TEXT;
+
+-- ----------------------------------------------------------------------------
+-- One-time: copy every existing color_wheel row into priority_list as a
+-- plant-wide (line = '') 'colorWheel' entry. Keyed on plant_label (the raw
+-- plant name as typed), NOT plant_key (a _cw_safe_name() slug) — priority_list
+-- is keyed by raw plant name throughout. color_wheel itself is left in place,
+-- unread from here on except by the legacy-compat /color-wheel/* endpoints,
+-- which are repointed at priority_list in brain.py.
+-- ----------------------------------------------------------------------------
+DO $mig$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'priority_list_from_color_wheel') THEN
+        INSERT INTO priority_list
+            (plant, line, field_key, entries, source_column, value_column, rank_column,
+             filename, row_count, uploaded_by, uploaded_at, updated_at)
+        SELECT plant_label, '', 'colorWheel', entries, 'color', NULL, NULL,
+               filename, row_count, uploaded_by, uploaded_at, updated_at
+          FROM color_wheel
+        ON CONFLICT (plant, line, field_key) DO NOTHING;
+
+        INSERT INTO schema_migrations (id) VALUES ('priority_list_from_color_wheel');
+    END IF;
+END
+$mig$;
+
+-- ----------------------------------------------------------------------------
+-- One-time CONVENIENCE backfill of orders.{color,prt_01,prt_02,
+-- production_version} from material_plants (the last one sourced from
+-- material_plants.default_production_version), keyed (plant,
+-- material_number = material_id). This is NOT the mechanism — POST
+-- /master-data/resync-order-attributes is (db._stamp_order_attributes,
+-- called with a plant rather than a batch_id). If this runs before a
+-- plant's material_plants rows are populated, it finds no matches, records
+-- itself applied anyway, and will NEVER run again for that plant even after
+-- the data shows up later — the inverse of the historical plants-horizon
+-- x1440 ledger trap (:123 above: that one re-ran forever and corrupted data;
+-- this one can permanently no-op instead). Call the resync endpoint for any
+-- plant populated after this ran.
+--
+-- ANY UPDATE to `orders` bumps every touched row's xmin, which IS the
+-- optimistic-concurrency base_version (db.py ROW_VERSION) — a bumped xmin
+-- makes the row come back `stale` on the next save and the frontend discards
+-- the planner's unsaved edit (last-writer-loses). Apply this migration (and
+-- call the resync endpoint) at deploy time only, never mid-shift.
+--
+-- Unmatched orders (no material_plants row at that plant) are left exactly
+-- as they were — this statement only touches rows that join successfully.
+-- ----------------------------------------------------------------------------
+DO $mig$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_mp_attrs_backfill') THEN
+        UPDATE orders o
+           SET color              = mp.color,
+               prt_01             = mp.prt_01,
+               prt_02             = mp.prt_02,
+               production_version = mp.default_production_version,
+               updated_at         = NOW()
+          FROM material_plants mp
+         WHERE mp.plant = o.plant
+           AND mp.material_id = o.material_number
+           AND o.plant IS NOT NULL;
+
+        INSERT INTO schema_migrations (id) VALUES ('orders_mp_attrs_backfill');
+    END IF;
+END
+$mig$;

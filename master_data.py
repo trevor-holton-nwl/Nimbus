@@ -77,6 +77,48 @@ _KEY_COLUMNS = {
 # which pins its exact contents.
 EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default_workcenter'})
 
+# ---------------------------------------------------------------------------
+# Scheduling priority — rankable fields (docs/scheduling_priority.md, Stage 1:
+# data plumbing only — no upload UI, no optimizer change yet)
+# ---------------------------------------------------------------------------
+# The SINGLE source of truth for which material_plants column a rankable
+# priority-list field materializes from, which `orders` column it lands on
+# (also the column priority-list ranks are matched against), and which
+# TaskDTO/DataFrame field name carries it. Anything stored in
+# priority_list.source_column is upload provenance/audit metadata ONLY, never
+# re-parsed from (N19) — this dict is authoritative, read by
+# GET /priority-fields, brain.apply_priority_merge, db.priority_list_coverage
+# callers, and the eventual priority-tree UI (Stage 3).
+#
+# To add a rankable field: one entry here + one `orders` column
+# (schema.sql + a migration) + one line in db._stamp_order_attributes'
+# hand-written UPDATE + one web/order-field-catalog.mjs entry. No other
+# frontend change required — Stage 3's Scheduling Constraints UI renders from
+# GET /priority-fields, not a hardcoded list.
+#
+# `production_version` (mp_column default_production_version) is deliberately
+# NOT one of EDITABLE_MATERIAL_PLANT_ATTRS above — it is a SAP-owned field,
+# editable only through the generic Material Plant grid (bulk_apply), never
+# through the attributes-only endpoint (see that frozenset's comment). The
+# other three mp_columns ARE in that allowlist. RANKABLE_FIELDS and
+# EDITABLE_MATERIAL_PLANT_ATTRS are separate concerns that happen to overlap
+# on three of four entries — do not assume they must always match.
+RANKABLE_FIELDS = {
+    'colorWheel': {
+        'mp_column': 'color', 'orders_column': 'color', 'task_field': 'COLOR',
+    },
+    'prt01': {
+        'mp_column': 'prt_01', 'orders_column': 'prt_01', 'task_field': 'PRT_01',
+    },
+    'prt02': {
+        'mp_column': 'prt_02', 'orders_column': 'prt_02', 'task_field': 'PRT_02',
+    },
+    'productionVersion': {
+        'mp_column': 'default_production_version', 'orders_column': 'production_version',
+        'task_field': 'PRODUCTION_VERSION',
+    },
+}
+
 # Columns the Master Data > Material Plant grid joins in from `materials` for
 # display/filtering only. Never writable; never physically on material_plants.
 _MATERIAL_PLANT_JOINED = ('material_type', 'material_description')

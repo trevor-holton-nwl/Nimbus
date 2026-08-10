@@ -499,12 +499,21 @@ export const Compute = (() => {
     });
   }
 
+  // Alerts/Utilization compute never read these (docs/scheduling_priority.md
+  // R10) — dropped before the structured-clone postMessage, the documented
+  // dominant main-thread cost of the Worker.* round trip. Excludes only the
+  // three fields Stage 1 added; every other field ships exactly as before.
+  function _stripPriorityFields(t: NimbusTask): NimbusTask {
+    const { PRT_01, PRT_02, PRODUCTION_VERSION, ...rest } = t;
+    return rest as NimbusTask;
+  }
+
   function _snap(): WorkerSnapshotBase {
     const plant = Store.selectedPlant;
     if (!plant) {
       // No plant selected — nothing is rendered; fall back to the global snapshot.
       return {
-        tasks:        Store.tasksArr,
+        tasks:        Store.tasksArr.map(_stripPriorityFields),
         blocks:       Store._state.blocks,
         plantBlocks:  Store._state.plantBlocks,
         calendars:    Store._state.calendars,
@@ -527,7 +536,7 @@ export const Compute = (() => {
       return out;
     };
     return {
-      tasks:        Store.tasksByPlant(plant),
+      tasks:        Store.tasksByPlant(plant).map(_stripPriorityFields),
       blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
       plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
       calendars:    pick(Store._state.calendars),

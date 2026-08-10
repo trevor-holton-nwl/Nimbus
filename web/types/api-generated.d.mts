@@ -98,9 +98,10 @@ export interface paths {
         put?: never;
         /**
          * Reload Data
-         * @description Refresh the in-process color-wheel cache from disk. In stateless mode orders
-         *     are never cached, so there is nothing to re-read for them — this is the
-         *     cross-replica hook to pick up a newly uploaded color wheel without a restart.
+         * @description Refresh the in-process priority-list cache from Postgres. In stateless mode
+         *     orders are never cached, so there is nothing to re-read for them — this is
+         *     the cross-replica hook to pick up a newly uploaded/resynced priority list
+         *     without a restart.
          */
         post: operations["reload_data_reload_post"];
         delete?: never;
@@ -378,6 +379,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/upload/{batch_id}/missing-master-data": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Missing Master Data
+         * @description The missing-master-data exception report for one upload batch
+         *     (docs/scheduling_priority.md "Unmatched MP rows" decision: uploads never
+         *     block — this is what makes the resulting gap actionable). Reads the
+         *     category=='missing_master_data' entries db._stamp_order_attributes wrote
+         *     into that batch's upload_audit.warnings. ?format=csv returns a
+         *     downloadable CSV instead of JSON, for handing to whoever owns collecting
+         *     the missing material_plants rows.
+         *
+         *     Response (JSON): {batch_id, unmatched_pairs, unmatched_orders,
+         *     exceptions: [{plant, material_number, order_count, reason}, ...]}
+         *     reason is 'no_mp_row' (material absent from material_plants at that
+         *     plant) or 'no_plant_derived' (the order has no plant at all — an
+         *     ambiguous multi-plant line code, a different pre-existing problem, N9).
+         */
+        get: operations["get_missing_master_data_upload__batch_id__missing_master_data_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/upload/audit/clear": {
         parameters: {
             query?: never;
@@ -413,7 +446,7 @@ export interface paths {
         put?: never;
         /**
          * Upload Color Wheel
-         * @description Upload or replace a plant-specific color wheel (persisted to the color_wheel table).
+         * @description Upload or replace a plant-specific color wheel (persisted to the priority_list table).
          */
         post: operations["upload_color_wheel_color_wheel__plant__post"];
         /**
@@ -531,6 +564,56 @@ export interface paths {
          *     get copy-pasteable text to fold back into schema.sql / a migrations file.
          */
         get: operations["md_schema_export_master_data__schema_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/_material-grid": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Md Material Grid
+         * @description Plant-scoped Material grid (Master Data tab). Read-only.
+         *
+         *     `plant` is REQUIRED on purpose: an optional plant would make omitting it
+         *     the bypass around the role_plants scope enforced inside md.material_grid
+         *     (materials has no plant column of its own, so it isn't in
+         *     PLANT_SCOPED_TABLES and can't be scoped by the generic /master-data/{table}
+         *     path). A plant with zero material_plants rows returns an empty grid — that
+         *     is the rule, not an error. Not admin-gated, same as GET /master-data/{table}.
+         */
+        get: operations["md_material_grid_master_data__material_grid_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/_material-plant-grid": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Md Material Plant Grid
+         * @description Plant-scoped Material Plant grid (Master Data tab). Read-only except
+         *     prt_01/prt_02/color/default_workcenter, which come back with
+         *     columns[].editable=True and are written through
+         *     POST /master-data/material-plants/attributes.
+         */
+        get: operations["md_material_plant_grid_master_data__material_plant_grid_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -670,6 +753,97 @@ export interface paths {
          *     toward a general per-plant constraint registry (tooling, etc.).
          */
         post: operations["md_set_plant_constraints_master_data_plants__plant__constraints_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/roles/{role}/page-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Role Page Access
+         * @description Persist a role's per-page UI-visibility toggles (Dashboard/Scheduling
+         *     Board/Labor Plan/Master Data/Admin Cockpit).
+         *
+         *     Payload: { pages: { home?, gantt?, labor?, masterdata?, admin?: bool } }
+         *     UI-visibility gating only — no endpoint-level enforcement, same as the
+         *     existing Admin Cockpit tab check this generalizes.
+         */
+        post: operations["md_set_role_page_access_master_data_roles__role__page_access_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/material-plants/attributes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Material Plant Attributes
+         * @description Update the planner-editable material_plants attributes (prt_01, prt_02,
+         *     color, default_workcenter) for one plant. Deliberately NOT admin-gated —
+         *     this is the Master Data tab's Material Plant grid save, and planners (not
+         *     just admins) are its users. The write surface is a hard server-side
+         *     allowlist (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
+         *     default_production_version and the lot sizes are unreachable from here
+         *     regardless of what the client sends. Rows must already exist — this never
+         *     inserts.
+         *
+         *     Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_workcenter? }] }
+         */
+        post: operations["md_set_material_plant_attributes_master_data_material_plants_attributes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/resync-order-attributes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resync Order Attributes
+         * @description Re-stamp one plant's orders.{color,prt_01,prt_02,production_version} from
+         *     material_plants NOW, via seam 2 (db._stamp_order_attributes). This is the
+         *     REAL mechanism — the batch-scoped ingest-time stamp is convenience only
+         *     (R3 in docs/scheduling_priority.md, the inverse-ledger-trap risk). Call
+         *     this after adding/fixing material_plants rows for a plant so its orders
+         *     pick up the new values without waiting for a re-upload.
+         *
+         *     WARNING: this bumps orders.xmin for every matched row, which IS the
+         *     optimistic-concurrency base_version (db.py ROW_VERSION). Any planner's
+         *     unsaved edit to an affected order is discarded on their next save
+         *     (last-writer-loses reconciliation, R2) — run this at a quiet moment, not
+         *     mid-shift. Admin-gated for exactly that reason.
+         *
+         *     Payload: { plant: str }
+         *     Response: { status, plant, unmatched_pairs, unmatched_orders, exceptions }
+         *     (same exception shape as GET /upload/{batch_id}/missing-master-data — a
+         *     resync has no batch_id, so its unmatched pairs are returned here directly
+         *     rather than persisted to upload_audit.)
+         */
+        post: operations["resync_order_attributes_master_data_resync_order_attributes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1437,6 +1611,12 @@ export interface components {
             "ORDER_QUANTITY_(GMEIN)"?: number | null;
             /** Color */
             COLOR?: string | null;
+            /** Prt 01 */
+            PRT_01?: string | null;
+            /** Prt 02 */
+            PRT_02?: string | null;
+            /** Production Version */
+            PRODUCTION_VERSION?: string | null;
             /** Plant */
             PLANT?: string | null;
             /** Order */
@@ -2070,6 +2250,39 @@ export interface operations {
             };
         };
     };
+    get_missing_master_data_upload__batch_id__missing_master_data_get: {
+        parameters: {
+            query?: {
+                format?: string | null;
+            };
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     clear_upload_audit_upload_audit_clear_post: {
         parameters: {
             query?: never;
@@ -2362,6 +2575,74 @@ export interface operations {
             };
         };
     };
+    md_material_grid_master_data__material_grid_get: {
+        parameters: {
+            query: {
+                /** @description Required. Materials are returned only if they have a material_plants row at this plant. */
+                plant: string;
+                limit?: number | null;
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_material_plant_grid_master_data__material_plant_grid_get: {
+        parameters: {
+            query: {
+                /** @description Required. Returns material_plants rows for this plant, with material_type/material_description joined in from materials. */
+                plant: string;
+                limit?: number | null;
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     md_list_master_data__table__get: {
         parameters: {
             query?: {
@@ -2600,6 +2881,117 @@ export interface operations {
             path: {
                 plant: string;
             };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_role_page_access_master_data_roles__role__page_access_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_material_plant_attributes_master_data_material_plants_attributes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resync_order_attributes_master_data_resync_order_attributes_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: {

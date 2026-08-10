@@ -103,8 +103,8 @@ def client():
     """
     FastAPI TestClient over brain.api, for endpoint-level tests (e.g. the #191
     color-wheel auth-gate fix). Imports brain lazily and skips if it cannot be
-    constructed (e.g. the hardcoded COLOR_FILE / COLOR_WHEEL_DIR paths are absent
-    on this machine).
+    constructed (e.g. the hardcoded COLOR_WHEEL_DIR path is absent on this
+    machine).
     """
     try:
         from starlette.testclient import TestClient

@@ -52,6 +52,12 @@ export interface NimbusTask {
   /** Opaque Postgres xmin; sent back to the server as `base_version`. */
   row_version: number | null;
   COLOR?: string;
+  /** Materialized from material_plants at ingest (docs/scheduling_priority.md
+   *  Stage 1) — not yet consulted by the optimizer (Stage 3). No RANKS field
+   *  exists or is planned; ranks resolve client-side from per-plant maps. */
+  PRT_01?: string;
+  PRT_02?: string;
+  PRODUCTION_VERSION?: string;
   FORM_SIZE?: string;
   MATERIAL_NUMBER?: string;
   MATERIAL_DESCRIPTION?: string;
