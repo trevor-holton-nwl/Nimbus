@@ -538,3 +538,156 @@ def test_missing_master_data_endpoint(client, pg):
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM upload_audit WHERE batch_id = %s", (batch_id,))
             conn.commit()
+
+
+@pytest.mark.pg
+class TestGenericPriorityListUpload:
+    PLANT = "ZZTEST_UP_PLANT"
+    SUB = "ZZTEST_UP_SUB"
+    LINE = "ZZTEST_UP_L01"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg, client):
+        self.client = client
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (self.SUB, self.SUB))
+            cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING", (self.SUB, self.PLANT))
+            cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (self.SUB, self.PLANT, self.LINE))
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM priority_list WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM production_lines WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM plants WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+            conn.commit()
+
+    def _xlsx(self, rows: list[dict]) -> bytes:
+        import io as _io
+        import pandas as pd
+        buf = _io.BytesIO()
+        pd.DataFrame(rows).to_excel(buf, index=False)
+        return buf.getvalue()
+
+    def test_legacy_color_columns_auto_detect_with_no_mapping(self):
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 1}, {"COLOR": "BLUE", "ORDER_Y": 2}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/colorWheel",
+                             files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json()["line"] == ""
+
+    def test_no_rank_column_uses_row_order(self):
+        body = self._xlsx([{"PRT_01": "DOG"}, {"PRT_01": "CAT"}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "PRT_01"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    def test_ambiguous_columns_return_needs_mapping(self):
+        body = self._xlsx([{"FOO": "DOG", "BAR": "CAT"}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "needs_mapping"
+        assert set(r.json()["headers"]) == {"FOO", "BAR"}
+
+    def test_explicit_mapping_with_line_scope_persists(self):
+        body = self._xlsx([{"TOOL": "DOG", "RANK": 1}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK", "line": self.LINE})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json()["line"] == self.LINE
+
+    def test_unknown_line_is_rejected(self):
+        body = self._xlsx([{"TOOL": "DOG", "RANK": 1}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK", "line": "NOT-A-REAL-LINE"})
+        assert r.status_code == 400
+
+    def test_multiple_line_values_in_file_rejected_without_explicit_line(self):
+        body = self._xlsx([
+            {"TOOL": "DOG", "RANK": 1, "LINE": self.LINE},
+            {"TOOL": "CAT", "RANK": 2, "LINE": "SOME-OTHER-LINE"},
+        ])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK"})
+        assert r.status_code == 400
+        assert "multiple" in r.json()["detail"].lower()
+
+    def test_duplicate_value_conflicting_rank_rejected(self):
+        body = self._xlsx([{"TOOL": "DOG", "RANK": 1}, {"TOOL": "DOG", "RANK": 2}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "TOOL", "rank_column": "RANK"})
+        assert r.status_code == 400
+        assert "DOG" in r.json()["detail"]
+
+    def test_unknown_field_key_rejected(self):
+        body = self._xlsx([{"TOOL": "DOG"}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/not-a-real-field",
+                             files={"file": ("t.xlsx", body)})
+        assert r.status_code == 400
+
+
+@pytest.mark.pg
+class TestLegacyColorWheelUploadConsolidation:
+    """POST /color-wheel/{plant} now shares _resolve_priority_list_columns/
+    _persist_priority_list with the generic endpoint (Decision 9b). No
+    existing test exercised this route's POST before (confirmed by grep —
+    only its GET and /color-wheels were tested), so these are new regression
+    pins for the preserved contract, plus one test for the one deliberate,
+    strictly-permissive behavior change (ORDER_Y is no longer required)."""
+    PLANT = "ZZTEST_CWLEGACY_PLANT"
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self, pg, client):
+        self.client = client
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM priority_list WHERE plant = %s", (self.PLANT,))
+            conn.commit()
+
+    def _xlsx(self, rows: list[dict]) -> bytes:
+        import io as _io
+        import pandas as pd
+        buf = _io.BytesIO()
+        pd.DataFrame(rows).to_excel(buf, index=False)
+        return buf.getvalue()
+
+    def test_color_and_order_y_still_uploads_with_legacy_action_names(self):
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 1}, {"COLOR": "BLUE", "ORDER_Y": 2}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "row_count": 2, "action": "color_wheel_upload", "replaced": False}
+
+    def test_order_column_still_auto_renames_to_rank(self):
+        body = self._xlsx([{"COLOR": "RED", "ORDER": 1}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    def test_missing_order_y_now_falls_back_to_row_order_instead_of_400ing(self):
+        body = self._xlsx([{"COLOR": "RED"}, {"COLOR": "BLUE"}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    def test_missing_color_column_still_400s(self):
+        body = self._xlsx([{"FOO": "RED", "ORDER_Y": 1}])
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        assert r.status_code == 400
+
+    def test_replace_uses_legacy_replace_action_name(self):
+        body = self._xlsx([{"COLOR": "RED", "ORDER_Y": 1}])
+        self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w.xlsx", body)})
+        r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("w2.xlsx", body)})
+        assert r.status_code == 200
+        assert r.json()["action"] == "color_wheel_replace"
+        assert r.json()["replaced"] is True

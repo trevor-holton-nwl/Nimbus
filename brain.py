@@ -38,7 +38,7 @@ import traceback
 import uuid
 import pandas as pd
 import psycopg
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -553,6 +553,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/logs/backend/clear": "backend_log.clear",
     "/audit/log/clear": "audit_log.clear",
     "/color-wheel/{plant}": "color_wheel.write",
+    "/priority-list/{plant}/{field_key}": "priority_list.write",
     "/master-data/{table}/bulk": "master_data.bulk_write",
     "/master-data/{table}/columns": "master_data.column_write",
     "/master-data/{table}/columns/{column}": "master_data.column_write",
@@ -658,6 +659,121 @@ def _cw_df_to_entries(cw_df) -> dict:
         str(c): (None if pd.isna(v) else float(v))
         for c, v in zip(colors, ranks, strict=True)
     }
+
+
+def _resolve_priority_list_columns(
+        df: pd.DataFrame, plant: str, spec: dict, *,
+        explicit_line: str = "", explicit_value_col: str | None = None,
+        explicit_rank_col: str | None = None,
+) -> dict:
+    """Shared column-resolution/validation for POST /priority-list/{plant}/{field_key}
+    (Stage 2) and the legacy POST /color-wheel/{plant} (Decision 9b — the two
+    were independent implementations before this consolidation). The legacy
+    caller passes no explicit_* — auto-detect finds COLOR/ORDER_Y|ORDER exactly
+    as it always did, since COLOR is spec['mp_column'] and is therefore always
+    the sole candidate in a well-formed color-wheel file. The two routes differ
+    only in how they react to a "needs_mapping" result: the generic endpoint
+    returns it to the client for the mapping modal; the legacy endpoint (no
+    mapping UI on the other end) turns it into a 400.
+
+    Returns {"status": "needs_mapping", "headers": [...], "sample": [...]} or
+    {"status": "resolved", "value_col": str, "rank_col": str | None,
+     "line": str, "entries": {VALUE: RANK|None}}.
+    Raises HTTPException(400) for plant-mismatch, unknown-line, multi-value
+    LINE column, an explicitly-named column that doesn't exist in the file, or
+    conflicting ranks for the same value.
+    """
+    headers = list(df.columns)
+
+    if "PLANT" in headers:
+        file_plants = set(df["PLANT"].astype(str).str.strip()) - {"", "nan"}
+        if file_plants and file_plants != {plant}:
+            raise HTTPException(status_code=400,
+                detail=f"File's PLANT column ({sorted(file_plants)}) doesn't match target plant {plant!r}")
+
+    resolved_line = explicit_line.strip()
+    if "LINE" in headers and not resolved_line:
+        file_lines = {v for v in df["LINE"].astype(str).str.strip() if v and v.lower() != "nan"}
+        if len(file_lines) > 1:
+            raise HTTPException(status_code=400,
+                detail=f"File contains multiple LINE values {sorted(file_lines)} — upload once per line, or pass a single line explicitly")
+        if len(file_lines) == 1:
+            resolved_line = next(iter(file_lines))
+    if resolved_line:
+        known_lines = md.known_line_codes_for_plant(plant)
+        if resolved_line not in known_lines:
+            raise HTTPException(status_code=400,
+                detail=f"{resolved_line!r} is not a known production line for plant {plant!r}")
+
+    resolved_value_col = explicit_value_col
+    if resolved_value_col and resolved_value_col not in headers:
+        raise HTTPException(status_code=400, detail=f"Missing required column: {resolved_value_col!r}")
+    if not resolved_value_col:
+        candidates = [h for h in headers if h.upper() in {spec["mp_column"].upper(), "VALUE"}]
+        if len(candidates) == 1:
+            resolved_value_col = candidates[0]
+        else:
+            return {"status": "needs_mapping", "headers": headers,
+                    "sample": df.head(5).to_dict(orient="records")}
+
+    resolved_rank_col = explicit_rank_col
+    if resolved_rank_col and resolved_rank_col not in headers:
+        raise HTTPException(status_code=400, detail=f"Missing required column: {resolved_rank_col!r}")
+    if not resolved_rank_col:
+        candidates = [h for h in headers if h.upper() in {"ORDER_Y", "RANK", "ORDER"}]
+        if len(candidates) == 1:
+            resolved_rank_col = candidates[0]
+
+    values = df[resolved_value_col].astype(str).str.upper().str.strip()
+    if resolved_rank_col:
+        ranks = pd.to_numeric(df[resolved_rank_col], errors="coerce")
+    else:
+        ranks = pd.Series(range(1, len(df) + 1), dtype=float)
+
+    entries: dict[str, float | None] = {}
+    conflicts: list[str] = []
+    for v, r in zip(values, ranks, strict=True):
+        if not v or v == "NAN":
+            continue
+        r_val = None if pd.isna(r) else float(r)
+        if v in entries and entries[v] != r_val:
+            conflicts.append(v)
+        entries[v] = r_val
+    if conflicts:
+        raise HTTPException(status_code=400,
+            detail=f"Conflicting ranks for the same value in this file: {sorted(set(conflicts))}")
+
+    return {"status": "resolved", "value_col": resolved_value_col, "rank_col": resolved_rank_col,
+            "line": resolved_line, "entries": entries}
+
+
+def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict, *,
+                           line: str, value_col: str, rank_col: str | None,
+                           filename: str, row_count: int, user: str,
+                           legacy_action_names: bool = False) -> bool:
+    """Shared upsert+audit+cache-reload step (Decision 9b) — this part was
+    ALREADY byte-for-byte identical between the legacy and generic upload
+    paths before consolidation; only the audit action-name family differs,
+    controlled by legacy_action_names so /color-wheel/{plant}'s historical
+    audit trail (color_wheel_upload/color_wheel_replace) doesn't fork into a
+    second naming scheme for the same route. Returns is_replace."""
+    res = db.upsert_priority_list(
+        plant, field_key, entries, line=line,
+        source_column=spec["orders_column"], value_column=value_col,
+        rank_column=rank_col, filename=filename, row_count=row_count, uploaded_by=user,
+    )
+    is_replace = not res["inserted"]
+    if legacy_action_names:
+        action = "color_wheel_replace" if is_replace else "color_wheel_upload"
+    else:
+        action = "priority_list_replace" if is_replace else "priority_list_upload"
+    _cw_append_audit({
+        "ts": datetime.utcnow().isoformat() + "Z", "user": user, "action": action, "plant": plant,
+        "details": {"field_key": field_key, "line": line, "filename": filename,
+                    "row_count": row_count, "replaced": is_replace},
+    })
+    _reload_one_plant_lists(plant)
+    return is_replace
 
 
 def _parse_color_wheel(path: str) -> dict:
@@ -1709,6 +1825,55 @@ def get_priority_lists_for_plant(
     return {"plant": plant, "fields": fields}
 
 
+@api.post("/priority-list/{plant}/{field_key}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def upload_priority_list(
+        plant: str, field_key: str, request: Request, file: UploadFile = File(...),
+        line: str = Form(default=""), value_column: str | None = Form(default=None),
+        rank_column: str | None = Form(default=None),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Generic priority-list upload (Stage 2) — one file per plant [+ optional
+    line override]. See docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+    Decisions 5-6 for the Line-column and implicit-rank rules, and Decision 9b
+    for why this shares _resolve_priority_list_columns/_persist_priority_list
+    with the legacy POST /color-wheel/{plant}."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    spec = md.RANKABLE_FIELDS.get(field_key)
+    if spec is None:
+        raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
+
+    raw = await file.read()
+    try:
+        df = await run_in_threadpool(lambda: db.clean(pd.read_excel(io.BytesIO(raw))))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Could not parse the uploaded file as .xlsx") from e
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Uploaded file has no rows")
+
+    resolved = _resolve_priority_list_columns(
+        df, plant, spec, explicit_line=line, explicit_value_col=value_column, explicit_rank_col=rank_column,
+    )
+    if resolved["status"] == "needs_mapping":
+        return resolved
+
+    row_count = len(df)
+    user = request.headers.get("X-User", "system")
+    fname = file.filename or "upload.xlsx"
+
+    is_replace = await run_in_threadpool(
+        _persist_priority_list, plant, field_key, spec, resolved["entries"],
+        line=resolved["line"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
+        filename=fname, row_count=row_count, user=user, legacy_action_names=False,
+    )
+    return {"status": "ok", "row_count": row_count, "line": resolved["line"],
+            "action": "replace" if is_replace else "upload", "replaced": is_replace}
+
+
 # =========================
 # COLOR WHEEL ENDPOINTS (legacy-compat — now read/write priority_list rows
 # with field_key='colorWheel', line='' — docs/scheduling_priority.md Stage 1
@@ -1719,53 +1884,48 @@ def get_priority_lists_for_plant(
 
 @api.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...)):
-    """Upload or replace a plant-specific color wheel (persisted to the priority_list table)."""
+    """Upload or replace a plant-specific color wheel (persisted to the
+    priority_list table). Consolidated (Decision 9b) onto the same
+    _resolve_priority_list_columns/_persist_priority_list helpers
+    POST /priority-list/{plant}/colorWheel uses — this route is now a thin
+    back-compat wrapper for external callers that predate the generic
+    endpoint; NIMBUS's own frontend uploads color the same way as every
+    other field after Task 12. Preserves the historical contract: only
+    `file` is accepted, a file with no resolvable COLOR column 400s
+    immediately (no needs_mapping round-trip — there's no mapping UI on the
+    other end of this route), and audit entries keep the historical
+    color_wheel_upload/color_wheel_replace action names. One deliberate
+    loosening: ORDER_Y is no longer required (row order is used if omitted,
+    same as every other field, Decision 6) — strictly more permissive, so no
+    previously-valid file starts failing.
+    """
     raw = await file.read()
-    # Excel parse is blocking/CPU-bound — keep it off the event loop.
+    spec = md.RANKABLE_FIELDS["colorWheel"]
     try:
-        cw_df = await run_in_threadpool(lambda: db.clean(pd.read_excel(io.BytesIO(raw))))
-        if "ORDER" in cw_df.columns and "ORDER_Y" not in cw_df.columns:
-            cw_df = cw_df.rename(columns={"ORDER": "ORDER_Y"})
-        missing = [c for c in ["COLOR", "ORDER_Y"] if c not in cw_df.columns]
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Missing required columns: {missing}")
-    except HTTPException:
-        raise
+        df = await run_in_threadpool(lambda: db.clean(pd.read_excel(io.BytesIO(raw))))
     except Exception as e:
         _log_event("warn", "color_wheel", "Color-wheel xlsx parse failed",
-                   exc=e, error_code="xlsx.parse", plant=plant,
-                   filename=file.filename)
+                   exc=e, error_code="xlsx.parse", plant=plant, filename=file.filename)
         raise HTTPException(
             status_code=400,
-            detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with COLOR and ORDER columns",
+            detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with a COLOR column",
         ) from e
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Uploaded file has no rows")
 
-    entries = _cw_df_to_entries(cw_df)
-    row_count = len(cw_df)
-    ts = datetime.utcnow().isoformat() + "Z"
+    resolved = _resolve_priority_list_columns(df, plant, spec)
+    if resolved["status"] == "needs_mapping":
+        raise HTTPException(status_code=400, detail="Missing required columns: ['COLOR']")
+
+    row_count = len(df)
     user = request.headers.get("X-User", "system")
     fname = file.filename or "upload.xlsx"
 
-    def _persist():
-        # upsert (insert-or-replace) is a single statement; RETURNING (xmax = 0)
-        # tells us whether this was a first upload or a replace.
-        res = db.upsert_priority_list(plant, "colorWheel", entries, line="",
-                                      source_column="color",
-                                      filename=fname, row_count=row_count, uploaded_by=user)
-        is_replace = not res["inserted"]
-        _cw_append_audit({
-            "ts": ts, "user": user,
-            "action": "color_wheel_replace" if is_replace else "color_wheel_upload",
-            "plant": plant,
-            "details": {"filename": fname, "row_count": row_count, "replaced": is_replace},
-        })
-        # Priority merge runs per-request from the cache; refresh ONLY this
-        # plant's lists so the new wheel takes effect on the next /tasks call
-        # without reloading every plant's lists (or requiring a full /reload).
-        _reload_one_plant_lists(plant)
-        return is_replace
-
-    is_replace = await run_in_threadpool(_persist)
+    is_replace = await run_in_threadpool(
+        _persist_priority_list, plant, "colorWheel", spec, resolved["entries"],
+        line=resolved["line"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
+        filename=fname, row_count=row_count, user=user, legacy_action_names=True,
+    )
     action = "color_wheel_replace" if is_replace else "color_wheel_upload"
     return {"status": "ok", "row_count": row_count, "action": action, "replaced": is_replace}
 
