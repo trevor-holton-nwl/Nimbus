@@ -483,6 +483,31 @@ class TestMissingMasterDataForPlant:
 
 
 @pytest.mark.pg
+def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
+    plant = "ZZTEST_PLE_PLANT"
+    pg.upsert_priority_list(plant, "colorWheel", {"RED": 1.0}, line="",
+                            source_column="color", filename="w.xlsx", row_count=1, uploaded_by="t")
+    pg.upsert_priority_list(plant, "colorWheel", {"BLUE": 1.0}, line="L01",
+                            source_column="color", filename="w2.xlsx", row_count=1, uploaded_by="t")
+    try:
+        r = client.get(f"/priority-lists?plant={plant}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["plant"] == plant
+        cw = body["fields"]["colorWheel"]
+        assert cw["plant_wide"]["filename"] == "w.xlsx"
+        assert len(cw["line_overrides"]) == 1
+        assert cw["line_overrides"][0]["line"] == "L01"
+        assert "coverage" in cw
+        assert body["fields"]["prt01"]["plant_wide"] is None
+        assert body["fields"]["prt01"]["line_overrides"] == []
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM priority_list WHERE plant = %s", (plant,))
+            conn.commit()
+
+
+@pytest.mark.pg
 def test_missing_master_data_endpoint(client, pg):
     batch_id = "00000000-0000-0000-0000-000000000000"
     with pg._pool.connection() as conn, conn.cursor() as cur:

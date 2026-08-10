@@ -1676,6 +1676,39 @@ def list_priority_fields():
     }
 
 
+@api.get("/priority-lists")
+def get_priority_lists_for_plant(
+        plant: str = Query(..., min_length=1),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Per-field metadata + coverage for one plant's Optimization tab (Stage 2).
+    Groups the flat list_priority_lists_meta rows by field_key, splitting
+    line='' (plant-wide) from everything else (line overrides), and merges in
+    priority_list_coverage's per-line ranked/distinct counts."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    rows, _total = db.list_priority_lists_meta(plant=plant)
+    coverage = db.priority_list_coverage(
+        plant, {k: v["orders_column"] for k, v in md.RANKABLE_FIELDS.items()}
+    )
+    fields: dict = {}
+    for key, spec in md.RANKABLE_FIELDS.items():
+        field_rows = [r for r in rows if r["field_key"] == key]
+        plant_wide = next((r for r in field_rows if r["line"] == ""), None)
+        line_overrides = [r for r in field_rows if r["line"] != ""]
+        fields[key] = {
+            "default_label": spec["default_label"],
+            "plant_wide": plant_wide,
+            "line_overrides": line_overrides,
+            "coverage": coverage.get(key, {}),
+        }
+    return {"plant": plant, "fields": fields}
+
+
 # =========================
 # COLOR WHEEL ENDPOINTS (legacy-compat — now read/write priority_list rows
 # with field_key='colorWheel', line='' — docs/scheduling_priority.md Stage 1
