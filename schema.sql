@@ -402,6 +402,20 @@ CREATE INDEX IF NOT EXISTS idx_material_plants_plant_material
     ON material_plants(plant, material_id);
 
 -- ----------------------------------------------------------------------------
+-- material_plants.default_workcenter — same drift-repair pattern as prt_01/
+-- prt_02/color above: added directly to schema.sql + a standalone migration
+-- (migrations/2026-08-10-material-plant-default-workcenter.sql) rather than
+-- via the Add Column wizard, to avoid the same backfill gap. Editable
+-- through POST /master-data/material-plants/attributes alongside
+-- prt_01/prt_02/color (master_data.EDITABLE_MATERIAL_PLANT_ATTRS).
+-- ----------------------------------------------------------------------------
+ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_workcenter TEXT;
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('material_plants', 'default_workcenter', 'Default Workcenter', FALSE, 11)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
 -- Live-schema catch-up: column_metadata rows restating columns already
 -- declared in this file's CREATE TABLE statements above (harmless — table_name
 -- lookups in list_rows/export_schema_sql only ever query registered columns

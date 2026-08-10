@@ -171,6 +171,11 @@ window.__NIMBUS_LOCALES.fr = {
   'col.status_pl':                     'Statut Usine',
   'col.prt_01':                        'Outil de Production (01)',
   'col.prt_02':                        'Outil de Production (02)',
+  'col.subnetwork':                    'Sous-réseau',
+  'col.default_production_version':   'Version de Production par Défaut',
+  'col.min_lot_size':                  'Taille de Lot Minimale',
+  'col.incremental_lot_size':          'Taille de Lot Incrémentale',
+  'col.default_workcenter':            'Poste de Travail par Défaut',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Ajouter une interruption',

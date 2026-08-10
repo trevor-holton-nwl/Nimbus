@@ -20,11 +20,11 @@ import brain
 from starlette.routing import compile_path
 
 
-def test_editable_material_plant_attrs_is_exactly_the_three_planner_fields():
+def test_editable_material_plant_attrs_is_exactly_the_four_planner_fields():
     """This is a security boundary, not a convenience list — widening it is a
     deliberate act. If this test needs to change, the change itself is the
     thing that should get scrutiny."""
-    assert md.EDITABLE_MATERIAL_PLANT_ATTRS == frozenset({"prt_01", "prt_02", "color"})
+    assert md.EDITABLE_MATERIAL_PLANT_ATTRS == frozenset({"prt_01", "prt_02", "color", "default_workcenter"})
 
 
 def test_editable_material_plant_attrs_excludes_key_and_sap_owned_columns():

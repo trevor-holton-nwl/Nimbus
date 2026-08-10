@@ -172,6 +172,11 @@ window.__NIMBUS_LOCALES.es = {
   'col.status_pl':                     'Estado Centro',
   'col.prt_01':                        'Herramienta de Producción (01)',
   'col.prt_02':                        'Herramienta de Producción (02)',
+  'col.subnetwork':                    'Subred',
+  'col.default_production_version':   'Versión de Producción Predet.',
+  'col.min_lot_size':                  'Tamaño de Lote Mínimo',
+  'col.incremental_lot_size':          'Tamaño de Lote Incremental',
+  'col.default_workcenter':            'Centro de Trabajo Predet.',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Añadir bloqueo',

@@ -1803,8 +1803,9 @@ def md_material_plant_grid(
         offset: int | None = Query(default=None, ge=0),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Plant-scoped Material Plant grid (Master Data tab). Read-only except
-    prt_01/prt_02/color, which come back with columns[].editable=True and are
-    written through POST /master-data/material-plants/attributes."""
+    prt_01/prt_02/color/default_workcenter, which come back with
+    columns[].editable=True and are written through
+    POST /master-data/material-plants/attributes."""
     try:
         return md.material_plant_grid(plant, limit=limit, offset=offset, allowed_plants=allowed_plants)
     except md.PlantNotAllowed as e:
@@ -1974,15 +1975,15 @@ def md_set_role_page_access(role: str, request: Request, body: dict = Body(defau
 def md_set_material_plant_attributes(request: Request, body: dict = Body(default={}),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Update the planner-editable material_plants attributes (prt_01, prt_02,
-    color) for one plant. Deliberately NOT admin-gated — this is the Master
-    Data tab's Material Plant grid save, and planners (not just admins) are
-    its users. The write surface is a hard server-side allowlist
-    (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
+    color, default_workcenter) for one plant. Deliberately NOT admin-gated —
+    this is the Master Data tab's Material Plant grid save, and planners (not
+    just admins) are its users. The write surface is a hard server-side
+    allowlist (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
     default_production_version and the lot sizes are unreachable from here
     regardless of what the client sends. Rows must already exist — this never
     inserts.
 
-    Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color? }] }
+    Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_workcenter? }] }
     """
     plant = (body.get("plant") or "").strip()
     rows = body.get("updates") or []

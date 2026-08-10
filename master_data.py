@@ -75,7 +75,7 @@ _KEY_COLUMNS = {
 # default_production_version) and the lot sizes the optimizer consumes.
 # Widening it is a deliberate act — see tests/test_material_plant_attributes.py,
 # which pins its exact contents.
-EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color'})
+EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default_workcenter'})
 
 # Columns the Master Data > Material Plant grid joins in from `materials` for
 # display/filtering only. Never writable; never physically on material_plants.
@@ -454,8 +454,8 @@ def material_plant_grid(plant: str, limit: int | None = None, offset: int | None
 def set_material_plant_attributes(plant: str, updates: list[dict],
                                   allowed_plants: list[str] | None = None,
                                   user_email: str | None = None) -> dict:
-    """Update the three planner-editable material_plants attributes for ONE
-    plant (prt_01, prt_02, color).
+    """Update the four planner-editable material_plants attributes for ONE
+    plant (prt_01, prt_02, color, default_workcenter).
 
     UPDATE only — never INSERT, never ON CONFLICT. These rows are SAP-owned
     master data; a missing (material_id, plant) pair means the client is
@@ -518,7 +518,9 @@ def set_material_plant_attributes(plant: str, updates: list[dict],
             raise ValueError(
                 "Column(s) not present on material_plants in this database: "
                 + ", ".join(missing_cols)
-                + " — apply migrations/2026-08-07-material-plant-attributes.sql.")
+                + " — restart the app to apply pending material_plants migrations"
+                  " (see master_data.ensure_material_plant_attributes), or apply the"
+                  " relevant file(s) under migrations/ directly.")
 
         # ---- Phase 3: pre-flight existence in ONE round trip. Makes the
         # not-found error deterministic and complete BEFORE any write, instead
@@ -908,23 +910,26 @@ def ensure_plant_constraints_column() -> None:
 
 
 def ensure_material_plant_attributes() -> None:
-    """Idempotent: add material_plants.prt_01/prt_02/color + their
-    column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
-    (keep column names/types in sync with that file and with schema.sql's
-    drift block) so a fresh dev DB — or a container pointed at a DB that
-    missed the migration — still renders and can save the Material Plant
-    grid's three editable columns."""
+    """Idempotent: add material_plants.prt_01/prt_02/color/default_workcenter +
+    their column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
+    and migrations/2026-08-10-material-plant-default-workcenter.sql (keep column
+    names/types in sync with those files and with schema.sql's drift block) so
+    a fresh dev DB — or a container pointed at a DB that missed a migration —
+    still renders and can save the Material Plant grid's four editable
+    columns."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_01 TEXT")
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_02 TEXT")
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS color TEXT")
+        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_workcenter TEXT")
         cur.execute(
             """
             INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)
             VALUES
                 ('material_plants', 'prt_01', 'Prod. Resource Tool (01)', FALSE, 8),
                 ('material_plants', 'prt_02', 'Prod. Resource Tool (02)', FALSE, 9),
-                ('material_plants', 'color',  'Color',                    FALSE, 10)
+                ('material_plants', 'color',  'Color',                    FALSE, 10),
+                ('material_plants', 'default_workcenter', 'Default Workcenter', FALSE, 11)
             ON CONFLICT (table_name, column_name) DO NOTHING
             """
         )

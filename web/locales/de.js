@@ -171,6 +171,11 @@ window.__NIMBUS_LOCALES.de = {
   'col.status_pl':                     'Status Werk',
   'col.prt_01':                        'Fertigungshilfsmittel (01)',
   'col.prt_02':                        'Fertigungshilfsmittel (02)',
+  'col.subnetwork':                    'Subnetzwerk',
+  'col.default_production_version':   'Standard-Fertigungsversion',
+  'col.min_lot_size':                  'Mindestlosgröße',
+  'col.incremental_lot_size':          'Losgrößenzuschlag',
+  'col.default_workcenter':            'Standard-Arbeitsplatz',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Sperrzeit hinzufügen',

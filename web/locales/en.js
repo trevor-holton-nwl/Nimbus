@@ -172,6 +172,11 @@ window.__NIMBUS_LOCALES.en = {
   'col.status_pl':                     'Status Pl',
   'col.prt_01':                        'Prod. Resource Tool (01)',
   'col.prt_02':                        'Prod. Resource Tool (02)',
+  'col.subnetwork':                    'Subnetwork',
+  'col.default_production_version':   'Default Production Version',
+  'col.min_lot_size':                  'Minimum Lot Size',
+  'col.incremental_lot_size':          'Incremental Lot Size',
+  'col.default_workcenter':            'Default Workcenter',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Add blackout block',

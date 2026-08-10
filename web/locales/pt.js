@@ -171,6 +171,11 @@ window.__NIMBUS_LOCALES.pt = {
   'col.status_pl':                     'Status Planta',
   'col.prt_01':                        'Ferramenta de Produção (01)',
   'col.prt_02':                        'Ferramenta de Produção (02)',
+  'col.subnetwork':                    'Sub-rede',
+  'col.default_production_version':   'Versão de Produção Padrão',
+  'col.min_lot_size':                  'Tamanho de Lote Mínimo',
+  'col.incremental_lot_size':          'Tamanho de Lote Incremental',
+  'col.default_workcenter':            'Centro de Trabalho Padrão',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Adicionar paralisação',

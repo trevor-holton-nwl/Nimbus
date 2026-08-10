@@ -5,7 +5,7 @@
 // material_plants rows renders an empty grid even if the global materials
 // catalog is non-empty — see brain.py GET /master-data/_material-grid).
 // Material is fully read-only; Material Plant is read-only except prt_01,
-// prt_02, color (POST /master-data/material-plants/attributes).
+// prt_02, color, default_workcenter (POST /master-data/material-plants/attributes).
 //
 // New, standalone module (not folded into plant-and-administration.mts,
 // which is already 8000+ lines carrying 8 other modules) — bridged as an 8th
@@ -31,10 +31,15 @@ interface MaterialGridRow {
   material_type?: string;
   material_description?: string;
   base_uom?: string;
+  subnetwork?: string;
   status_pl?: string;
+  default_production_version?: string;
+  min_lot_size?: number;
+  incremental_lot_size?: number;
   prt_01?: string | null;
   prt_02?: string | null;
   color?: string | null;
+  default_workcenter?: string | null;
   [key: string]: unknown;
 }
 
@@ -86,6 +91,7 @@ interface MatPlantPatch {
   prt_01?: string;
   prt_02?: string;
   color?: string;
+  default_workcenter?: string;
 }
 
 interface GridState {
@@ -98,7 +104,7 @@ interface GridState {
   distinctSet: Map<string, Set<string>>;
   search: Map<string, string>;
   dirty: Map<string, MatPlantPatch>;
-  baseline: Map<string, { prt_01: string; prt_02: string; color: string }>;
+  baseline: Map<string, { prt_01: string; prt_02: string; color: string; default_workcenter: string }>;
   readOnly: boolean;
   saving: boolean;
   loaded: boolean;
@@ -140,29 +146,37 @@ const SPECS: Record<GridId, GridSpec> = {
     endpoint: '_material-plant-grid',
     rowKey: r => `${r.material_id}|${r.plant}`,
     cols: [
-      { field: 'material_id',          i18n: 'col.material_id' },
-      { field: 'material_description', i18n: 'col.material_desc' },
-      { field: 'material_type',        i18n: 'col.material_type' },
-      { field: 'status_pl',            i18n: 'col.status_pl' },
-      { field: 'prt_01',               i18n: 'col.prt_01', width: 170, editable: true },
-      { field: 'prt_02',               i18n: 'col.prt_02', width: 170, editable: true },
-      { field: 'color',                i18n: 'col.color',  width: 130, editable: true },
+      { field: 'material_id',                i18n: 'col.material_id' },
+      { field: 'material_description',       i18n: 'col.material_desc' },
+      { field: 'material_type',               i18n: 'col.material_type' },
+      { field: 'subnetwork',                  i18n: 'col.subnetwork' },
+      { field: 'status_pl',                   i18n: 'col.status_pl' },
+      { field: 'default_production_version',  i18n: 'col.default_production_version' },
+      { field: 'min_lot_size',                i18n: 'col.min_lot_size', numeric: true },
+      { field: 'incremental_lot_size',        i18n: 'col.incremental_lot_size', numeric: true },
+      { field: 'prt_01',                      i18n: 'col.prt_01', width: 170, editable: true },
+      { field: 'prt_02',                      i18n: 'col.prt_02', width: 170, editable: true },
+      { field: 'color',                       i18n: 'col.color',  width: 130, editable: true },
+      { field: 'default_workcenter',          i18n: 'col.default_workcenter', width: 170, editable: true },
     ],
     filters: [
-      { field: 'material_id',          i18n: 'col.material_id',   mode: 'bigset' },
-      { field: 'material_type',        i18n: 'col.material_type', mode: 'checklist' },
-      { field: 'material_description', i18n: 'col.material_desc', mode: 'bigset' },
-      { field: 'status_pl',            i18n: 'col.status_pl',     mode: 'checklist' },
-      { field: 'prt_01',               i18n: 'col.prt_01',        mode: 'checklist' },
-      { field: 'prt_02',               i18n: 'col.prt_02',        mode: 'checklist' },
-      { field: 'color',                i18n: 'col.color',         mode: 'checklist' },
+      { field: 'material_id',                i18n: 'col.material_id',   mode: 'bigset' },
+      { field: 'material_type',              i18n: 'col.material_type', mode: 'checklist' },
+      { field: 'material_description',       i18n: 'col.material_desc', mode: 'bigset' },
+      { field: 'subnetwork',                 i18n: 'col.subnetwork',    mode: 'checklist' },
+      { field: 'status_pl',                  i18n: 'col.status_pl',     mode: 'checklist' },
+      { field: 'default_production_version', i18n: 'col.default_production_version', mode: 'checklist' },
+      { field: 'prt_01',                     i18n: 'col.prt_01',        mode: 'checklist' },
+      { field: 'prt_02',                     i18n: 'col.prt_02',        mode: 'checklist' },
+      { field: 'color',                      i18n: 'col.color',         mode: 'checklist' },
     ],
-    editableFields: ['prt_01', 'prt_02', 'color'] as const,
+    editableFields: ['prt_01', 'prt_02', 'color', 'default_workcenter'] as const,
     saveUrl: '/master-data/material-plants/attributes',
   },
 };
 
-const MP_EDITABLE: readonly ('prt_01' | 'prt_02' | 'color')[] = ['prt_01', 'prt_02', 'color'];
+const MP_EDITABLE: readonly ('prt_01' | 'prt_02' | 'color' | 'default_workcenter')[] =
+  ['prt_01', 'prt_02', 'color', 'default_workcenter'];
 
 function _mkState(): GridState {
   return {
@@ -257,6 +271,7 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
       for (const r of st.rows) {
         st.baseline.set(spec.rowKey(r), {
           prt_01: String(r.prt_01 ?? ''), prt_02: String(r.prt_02 ?? ''), color: String(r.color ?? ''),
+          default_workcenter: String(r.default_workcenter ?? ''),
         });
       }
     }
@@ -540,7 +555,7 @@ function _createGrid(spec: GridSpec): void {
 
 function _onCellChanged(spec: GridSpec, p: unknown): void {
   const params = p as { colDef: { field: string }; data: MaterialGridRow; newValue: unknown; api: NimbusVendor.AgGridApi; node: unknown };
-  const field = params.colDef.field as 'prt_01' | 'prt_02' | 'color';
+  const field = params.colDef.field as 'prt_01' | 'prt_02' | 'color' | 'default_workcenter';
   if (!spec.editableFields.includes(field)) return;
   const st = _state[spec.id];
   const key = spec.rowKey(params.data);
@@ -603,6 +618,7 @@ async function _save(id: GridId): Promise<void> {
       for (const f of MP_EDITABLE) if (f in u) (row as Record<string, unknown>)[f] = (u as unknown as Record<string, unknown>)[f] ?? '';
       st.baseline.set(key, {
         prt_01: String(row.prt_01 ?? ''), prt_02: String(row.prt_02 ?? ''), color: String(row.color ?? ''),
+        default_workcenter: String(row.default_workcenter ?? ''),
       });
     }
     try {
@@ -642,6 +658,7 @@ function _discard(id: GridId): void {
     const base = st.baseline.get(key);
     if (!row || !base) continue;
     row.prt_01 = base.prt_01; row.prt_02 = base.prt_02; row.color = base.color;
+    row.default_workcenter = base.default_workcenter;
   }
   st.dirty.clear();
   try {
