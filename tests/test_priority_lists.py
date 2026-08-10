@@ -734,6 +734,25 @@ def test_generic_upload_rejects_plant_mismatch_even_with_blank_cells(client):
 
 
 @pytest.mark.pg
+def test_generic_get_and_delete_priority_list(client, pg):
+    plant = "ZZTEST_GD_PLANT"
+    pg.upsert_priority_list(plant, "prt01", {"DOG": 1.0, "CAT": None}, line="",
+                            source_column="prt_01", filename="t.xlsx", row_count=2, uploaded_by="t")
+    r = client.get(f"/priority-list/{plant}/prt01")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["entries"] == [{"value": "DOG", "rank": 1.0}, {"value": "CAT", "rank": 999999}]
+
+    r2 = client.delete(f"/priority-list/{plant}/prt01",
+                       headers={"X-API-Key": os.environ.get("NIMBUS_API_KEY", "")})
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "ok"
+
+    r3 = client.get(f"/priority-list/{plant}/prt01")
+    assert r3.status_code == 404
+
+
+@pytest.mark.pg
 class TestLegacyColorWheelUploadConsolidation:
     """POST /color-wheel/{plant} now shares _resolve_priority_list_columns/
     _persist_priority_list with the generic endpoint (Decision 9b). No

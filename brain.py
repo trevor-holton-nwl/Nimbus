@@ -1906,6 +1906,60 @@ async def upload_priority_list(
             "action": "replace" if is_replace else "upload", "replaced": is_replace}
 
 
+@api.get("/priority-list/{plant}/{field_key}")
+def get_priority_list_generic(
+        plant: str, field_key: str, line: str = Query(default=""),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Generic value/rank listing for one (plant, field_key[, line]) — the
+    Stage 2 field card's Preview data source for non-color fields (color
+    keeps using GET /color-wheel/{plant} via ColorWheelViewer, unchanged)."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    if field_key not in md.RANKABLE_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
+    row = db.get_priority_list(plant, field_key, line=line)
+    if row is None:
+        raise HTTPException(status_code=404,
+            detail=f"No {field_key!r} priority list uploaded for plant {plant!r}" + (f" line {line!r}" if line else ""))
+    entries = [
+        {"value": v, "rank": (999999 if r is None else r)}
+        for v, r in row["entries"].items()
+    ]
+    entries.sort(key=lambda e: e["rank"])
+    return {
+        "plant": plant, "field_key": field_key, "line": line, "entries": entries,
+        "meta": {
+            "uploaded_at": row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
+            "uploaded_by": row["uploaded_by"], "filename": row["filename"], "row_count": row["row_count"],
+        },
+    }
+
+
+@api.delete("/priority-list/{plant}/{field_key}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def delete_priority_list_generic(
+        plant: str, field_key: str, request: Request, line: str = Query(default=""),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    if field_key not in md.RANKABLE_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
+    res = db.delete_priority_list(plant, field_key, line=line)
+    if res is None:
+        return {"status": "not_found"}
+    ts = datetime.utcnow().isoformat() + "Z"
+    user = request.headers.get("X-User", "system")
+    _cw_append_audit({
+        "ts": ts, "user": user, "action": "priority_list_delete", "plant": plant,
+        "details": {"field_key": field_key, "line": line, "filename": res.get("filename") or "unknown"},
+    })
+    _reload_one_plant_lists(plant)
+    return {"status": "ok"}
+
+
 # =========================
 # COLOR WHEEL ENDPOINTS (legacy-compat — now read/write priority_list rows
 # with field_key='colorWheel', line='' — docs/scheduling_priority.md Stage 1
