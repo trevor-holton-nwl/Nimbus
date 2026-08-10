@@ -110,6 +110,19 @@ def test_rankable_fields_now_carry_a_default_label():
         assert md.RANKABLE_FIELDS[key]['default_label'] == label
 
 
+def test_priority_fields_endpoint_lists_four_fields(client):
+    r = client.get("/priority-fields")
+    assert r.status_code == 200
+    body = r.json()
+    keys = [f["field_key"] for f in body["fields"]]
+    assert keys == ["colorWheel", "prt01", "prt02", "productionVersion"]
+    color = body["fields"][0]
+    assert color == {
+        "field_key": "colorWheel", "mp_column": "color", "orders_column": "color",
+        "task_field": "COLOR", "default_label": "Color Wheel",
+    }
+
+
 @pytest.mark.pg
 def test_known_line_codes_for_plant_is_scoped(pg):
     with pg._pool.connection() as conn, conn.cursor() as cur:

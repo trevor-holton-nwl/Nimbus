@@ -1662,6 +1662,20 @@ def clear_upload_audit():
     return db.clear_upload_audit()
 
 
+@api.get("/priority-fields")
+def list_priority_fields():
+    """Registry of rankable fields for the priority-list upload UI (Stage 2)
+    and, later, the Scheduling Constraints tree (Stage 3's GET /priority-fields
+    consumer, per master_data.py's RANKABLE_FIELDS comment). Order matches
+    RANKABLE_FIELDS' declaration order."""
+    return {
+        "fields": [
+            {"field_key": key, **spec}
+            for key, spec in md.RANKABLE_FIELDS.items()
+        ]
+    }
+
+
 # =========================
 # COLOR WHEEL ENDPOINTS (legacy-compat — now read/write priority_list rows
 # with field_key='colorWheel', line='' — docs/scheduling_priority.md Stage 1
