@@ -322,7 +322,6 @@ window.__NIMBUS_LOCALES.en = {
   'ui.filter_n_selected':              '{{count}} selected',
   'ui.filter_capped':                  'Showing {{shown}} of {{total}} — type to narrow',
   'ui.md_grid_admin_hint_ro':          'Read-only. Full editing lives in Admin › Manage Data Tables.',
-  'ui.md_grid_admin_hint_prt':         'Prod. Resource Tool and Color are editable here. Full editing lives in Admin › Manage Data Tables.',
   'ui.select_plant_materials':         'Select a plant to see its materials.',
   'ui.n_unsaved':                      '{{count}} unsaved',
   'ui.all_colors':                     'All Colors',

@@ -161,11 +161,7 @@ const SPECS: Record<GridId, GridSpec> = {
     ],
     filters: [
       { field: 'material_id',                i18n: 'col.material_id',   mode: 'bigset' },
-      { field: 'material_type',              i18n: 'col.material_type', mode: 'checklist' },
-      { field: 'material_description',       i18n: 'col.material_desc', mode: 'bigset' },
-      { field: 'subnetwork',                 i18n: 'col.subnetwork',    mode: 'checklist' },
       { field: 'status_pl',                  i18n: 'col.status_pl',     mode: 'checklist' },
-      { field: 'default_production_version', i18n: 'col.default_production_version', mode: 'checklist' },
       { field: 'prt_01',                     i18n: 'col.prt_01',        mode: 'checklist' },
       { field: 'prt_02',                     i18n: 'col.prt_02',        mode: 'checklist' },
       { field: 'color',                      i18n: 'col.color',         mode: 'checklist' },

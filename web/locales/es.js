@@ -321,7 +321,6 @@ window.__NIMBUS_LOCALES.es = {
   'ui.filter_n_selected':              '{{count}} seleccionados',
   'ui.filter_capped':                  'Mostrando {{shown}} de {{total}} — escriba para acotar',
   'ui.md_grid_admin_hint_ro':          'Solo lectura. La edición completa está en Admin › Administrar Tablas de Datos.',
-  'ui.md_grid_admin_hint_prt':         'Herramienta de Producción y Color son editables aquí. La edición completa está en Admin › Administrar Tablas de Datos.',
   'ui.select_plant_materials':         'Seleccione un centro para ver sus materiales.',
   'ui.n_unsaved':                      '{{count}} sin guardar',
   'ui.all_colors':                     'Todos los Colores',

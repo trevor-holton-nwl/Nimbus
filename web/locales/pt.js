@@ -317,7 +317,6 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.filter_n_selected':              '{{count}} selecionado(s)',
   'ui.filter_capped':                  'Mostrando {{shown}} de {{total}} — digite para refinar',
   'ui.md_grid_admin_hint_ro':          'Somente leitura. A edição completa está em Admin › Gerenciar Tabelas de Dados.',
-  'ui.md_grid_admin_hint_prt':         'Ferramenta de Produção e Cor são editáveis aqui. A edição completa está em Admin › Gerenciar Tabelas de Dados.',
   'ui.select_plant_materials':         'Selecione uma planta para ver seus materiais.',
   'ui.n_unsaved':                      '{{count}} não salvo(s)',
   'ui.all_colors':                     'Todas as Cores',

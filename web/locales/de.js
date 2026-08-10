@@ -317,7 +317,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.filter_n_selected':              '{{count}} ausgewählt',
   'ui.filter_capped':                  '{{shown}} von {{total}} angezeigt — zum Eingrenzen tippen',
   'ui.md_grid_admin_hint_ro':          'Nur lesbar. Vollständige Bearbeitung unter Admin › Stammdaten verwalten.',
-  'ui.md_grid_admin_hint_prt':         'Fertigungshilfsmittel und Farbe sind hier bearbeitbar. Vollständige Bearbeitung unter Admin › Stammdaten verwalten.',
   'ui.select_plant_materials':         'Werk auswählen, um dessen Materialien zu sehen.',
   'ui.n_unsaved':                      '{{count}} ungespeichert',
   'ui.all_colors':                     'Alle Farben',

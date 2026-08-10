@@ -317,7 +317,6 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.filter_n_selected':              '{{count}} sélectionné(s)',
   'ui.filter_capped':                  'Affichage de {{shown}} sur {{total}} — tapez pour affiner',
   'ui.md_grid_admin_hint_ro':          'Lecture seule. L\'édition complète se trouve dans Admin › Gérer les Tables de Données.',
-  'ui.md_grid_admin_hint_prt':         'Outil de Production et Couleur sont modifiables ici. L\'édition complète se trouve dans Admin › Gérer les Tables de Données.',
   'ui.select_plant_materials':         'Sélectionnez une usine pour voir ses articles.',
   'ui.n_unsaved':                      '{{count}} non enregistré(s)',
   'ui.all_colors':                     'Toutes les Couleurs',
