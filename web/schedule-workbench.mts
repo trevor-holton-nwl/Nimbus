@@ -6345,20 +6345,17 @@ export const OptimizeDialog = (() => {
     );
   }
 
-  /** Does the currently-loaded rank cache carry ANY colorWheel ranks the
-   *  optimizer could apply — plant-wide ('') or scoped to a specific line?
-   *  Reads the exact same Store.priorityRankMaps that Engine._sortTerms' term
-   *  factory reads, so the wheel badge and the "no color wheel" confirm below
-   *  can no longer disagree with what the run actually does. (Stage 3 replaced
-   *  the old `GET /color-wheel/{plant}` probe, which saw plant-wide lists
-   *  only and therefore mis-reported a plant configured purely with per-line
-   *  overrides.) */
+  /** Does this plant have any colorWheel ranks the optimizer could apply?
+   *  Delegates to Engine.hasPriorityRanks — the SHARED implementation, so this
+   *  badge / the "no color wheel" confirm below / Plant → System Settings'
+   *  "(no wheel)" note can never drift apart again. Reads the exact same
+   *  Store.priorityRankMaps that Engine._sortTerms' term factory reads, and
+   *  counts per-line overrides as well as the plant-wide list (Stage 3 replaced
+   *  the old `GET /color-wheel/{plant}` probe, which saw plant-wide lists only
+   *  and therefore mis-reported a plant configured purely with per-line
+   *  overrides). Callers must have ensured the cache is fresh for `_plant`. */
   function _hasColorRanks(): boolean {
-    const byLine = Store.priorityRankMaps || {};
-    return Object.keys(byLine).some(line => {
-      const m = byLine[line] && byLine[line].colorWheel;
-      return !!m && Object.keys(m).length > 0;
-    });
+    return Engine.hasPriorityRanks('colorWheel');
   }
 
   function _updatePlantBadge() {

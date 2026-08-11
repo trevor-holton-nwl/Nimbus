@@ -250,6 +250,27 @@ test('_sortTerms groups unranked values together, after ranked ones, instead of 
   assert.ok(blueKey.startsWith('0999999|') && greenKey.startsWith('0999999|'));  // grouped under the same rank prefix
 });
 
+test('_sortTerms keeps the rank half exactly 7 digits for fractional and oversized ranks', () => {
+  // Ranks are floats end to end (brain.py persists float(rank); JSON round-trips
+  // 1.4 verbatim), so the padded-key encoding has to survive a non-integer.
+  // Unguarded, String(1.4).padStart(7,'0') === '00001.4' — already 7 chars, so
+  // NOTHING is padded — and it compares AFTER '0000003' on the 4th character,
+  // silently putting rank 1.4 behind rank 3. Same class of break above 1e7,
+  // where the rank half overflows to 8 digits.
+  Store.setMasterData({ plants: [{ plant: 'P7', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1.4, BLUE: 3, HUGE: 99999999 } } }, 'unit-test');
+  const terms = Engine._sortTerms('changeover', { plant: 'P7' });
+  const redKey  = terms[0].get({ COLOR: 'RED',  PRODUCTION_LINE: 'L1' });
+  const blueKey = terms[0].get({ COLOR: 'BLUE', PRODUCTION_LINE: 'L1' });
+  const hugeKey = terms[0].get({ COLOR: 'HUGE', PRODUCTION_LINE: 'L1' });
+  assert.match(redKey,  /^\d{7}\|RED$/,  'a fractional rank must still yield a 7-digit rank half');
+  assert.match(hugeKey, /^\d{7}\|HUGE$/, 'an oversized rank must be clamped to a 7-digit rank half');
+  assert.equal(redKey, '0000001|RED');   // 1.4 rounds to 1
+  assert.equal(hugeKey, '9999999|HUGE'); // clamped at the 7-digit ceiling
+  assert.ok(redKey < blueKey,
+    'fractional rank 1.4 must still sort before integer rank 3 — the unguarded encoding inverted this');
+});
+
 test('_sortTerms with no rank map for the field falls back to 999999 for every value (no crash)', () => {
   Store.setMasterData({ plants: [{ plant: 'P5', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
   Store.setPriorityRankMaps({}, 'unit-test');

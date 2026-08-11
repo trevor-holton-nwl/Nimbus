@@ -1061,6 +1061,30 @@ export const Engine = {
     }
   },
 
+  /** Does the loaded rank cache carry ANY ranks for this priority field —
+   *  plant-wide ('') or scoped to a specific line? Reads the exact same
+   *  Store.priorityRankMaps that _sortTerms' terms read, so every "is this
+   *  field actually configured?" UI hint agrees with what a run will actually
+   *  do. Two consumers today: OptimizeDialog's wheel badge + its pre-Run
+   *  "no color wheel" confirm (schedule-workbench.mts) and Plant → System
+   *  Settings' "(no wheel)" note (plant-and-administration.mts) — both
+   *  previously probed `GET /color-wheel/{plant}` independently, which saw
+   *  `line=''` rows only and so mis-reported a plant configured purely with
+   *  per-line overrides.
+   *
+   *  A pure read: callers own making the cache fresh for the plant they care
+   *  about (`Persistence._rankMapsPlant`). Both current callers' plant IS
+   *  `Store.selectedPlant`, which is why this single non-plant-keyed cache is
+   *  safe to read without a plant argument. */
+  hasPriorityRanks(fieldKey: string): boolean {
+    const byLine = Store.priorityRankMaps || {};
+    for (const line of Object.keys(byLine)) {
+      const m = byLine[line]?.[fieldKey];
+      if (m && Object.keys(m).length > 0) return true;
+    }
+    return false;
+  },
+
   /** Ordered list of sort terms for a mode — single source of truth for
    *  optimizer ordering, shared by _comparator and runAndApply's decorate
    *  sort. Term-factory rewrite (Stage 3, seam 3): each active constraint key
@@ -1070,9 +1094,10 @@ export const Engine = {
    *  pad(rank,7)+'|'+value (N12): a fixed-width zero-padded rank so
    *  equal/unranked values GROUP by value instead of interleaving (999999
    *  unranked sorts after any real rank; two orders both at 999999 still sort
-   *  deterministically against each other by value). One scalar string key
-   *  keeps _dispatchDayIntegrity's Schwartzian decorate allocation-free (R11)
-   *  — same shape as before, just built generically instead of only for color.
+   *  deterministically against each other by value). Each term yields one
+   *  scalar string key (a single allocation, not a decorate object) for
+   *  _dispatchDayIntegrity's Schwartzian sort — same shape as before, just
+   *  built generically instead of only for color.
    *
    *  opts.plant selects which plant's constraint tree applies. The line scope
    *  is resolved PER TASK inside each term's get(), off the task's *current*
@@ -1102,7 +1127,21 @@ export const Engine = {
             const byLine = Store.priorityRankMaps || {};
             const line = t.PRODUCTION_LINE || '';
             const scoped = byLine[line]?.[key] ?? byLine['']?.[key];
-            const rank = scoped?.[v] ?? 999999;
+            const raw = scoped?.[v] ?? 999999;
+            // Defensive floor on the SORT KEY, not on what gets stored or
+            // uploaded: ranks are floats end to end (brain.py persists
+            // float(rank), and JSON round-trips 1.5 verbatim), and a
+            // non-integer — or a rank >= 1e7 — silently defeats the
+            // fixed-width padding this encoding depends on.
+            // String(1.5).padStart(7,'0') is '00001.5': already 7 chars, so
+            // NOTHING is padded, and it compares AFTER '0000002' on the 4th
+            // character. Round + clamp so the rank half is always exactly 7
+            // digits and lexicographic order always matches numeric order.
+            // (Whether fractional ranks should be a supported input at all is
+            // a separate product question — this only guarantees the sort
+            // can't silently invert.) A non-finite/non-numeric rank from a
+            // malformed payload falls back to unranked rather than NaN.
+            const rank = Number.isFinite(raw) ? Math.max(0, Math.min(9999999, Math.round(raw))) : 999999;
             return String(rank).padStart(7, '0') + '|' + v;
           },
           cmp: strCmp,

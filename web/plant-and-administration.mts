@@ -1418,13 +1418,31 @@ export const Plant = {
     (function initConstraints() {
       rebuildConsStateFromPersisted();
       renderConstraints();
-      // Probe whether a wheel is actually uploaded (hint only — the toggle works
-      // regardless, since enabling color with no wheel is a harmless no-op).
+      // Whether a wheel is actually uploaded (hint only — the toggle works
+      // regardless, since enabling color with no list is a harmless no-op:
+      // every rank lookup just returns 999999).
+      //
+      // Stage 3: reads the same Store.priorityRankMaps that Engine._sortTerms
+      // ranks from, via the shared Engine.hasPriorityRanks, instead of the old
+      // plant-wide-only `GET /color-wheel/{plant}` probe. Two reasons: this hint
+      // and OptimizeDialog's wheel badge / pre-Run confirm were two independent
+      // readings of "does this plant have a color wheel" that could disagree,
+      // and the narrow probe mis-reported a plant configured purely with
+      // per-line colorWheel overrides as having none. `plantName` is
+      // Store.selectedPlant (see above), so the shared non-plant-keyed cache is
+      // always the right one to read here.
       if (plantName) {
-        fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(4000) })
-          .then(r => r.ok ? r.json() : null)
-          .then(b => { _wheelPresent = !!(b && b.entries && b.entries.length); renderConstraints(); })
-          .catch(() => {});
+        const applyWheelHint = () => {
+          // Leave _wheelPresent null (hint hidden) when the fetch never
+          // succeeded — "unknown" is the honest state, and asserting
+          // "(no wheel)" off a failed probe is exactly what the old
+          // `.catch(() => {})` avoided.
+          if (Persistence._rankMapsPlant !== plantName) return;
+          _wheelPresent = Engine.hasPriorityRanks('colorWheel');
+          renderConstraints();
+        };
+        if (Persistence._rankMapsPlant === plantName) applyWheelHint();
+        else Persistence.loadPriorityRankMaps(plantName).then(applyWheelHint);
       }
     })();
   },
