@@ -1007,11 +1007,52 @@ export const Engine = {
   /** Is a given constraint enabled for this plant? Unconfigured default:
    *  colorWheel ON (a no-op when the plant has no list — every lookup then
    *  returns 999999), everything else OFF. So "respect a wheel where one
-   *  exists" emerges without a synchronous wheel probe in the optimizer. */
+   *  exists" emerges without a synchronous wheel probe in the optimizer.
+   *
+   *  TREE-AWARE (Stage 3). This used to be a top-level-only
+   *  `constraintsFor(plant)?.find(x => x.key === key)`, which was harmless
+   *  while `plants.constraints` was always a flat list — but nesting is now
+   *  reachable from the Scheduling Constraints UI, and a key nested as a CHILD
+   *  was invisible to that `find()`. It then fell through to the
+   *  `key === 'colorWheel'` default and reported `true` for a colorWheel that
+   *  was nested and switched OFF (and `false` for any non-colorWheel field
+   *  configured below the root). Sequencing was never affected — _sortTerms
+   *  goes through flattenConstraints, which has always walked the tree — but
+   *  OptimizeDialog's pre-run "no color wheel configured" confirm
+   *  (schedule-workbench.mts) reads this directly and could nag or stay
+   *  silent for the wrong tree.
+   *
+   *  Semantics deliberately mirror flattenConstraints', so the two can never
+   *  disagree about whether a key is in effect:
+   *    • a disabled node takes its ENTIRE subtree with it (an unreachable
+   *      priority is off, not "half-configured");
+   *    • with the key present more than once, ANY reachable enabled occurrence
+   *      makes it enabled — exactly the occurrence flattenConstraints would
+   *      emit;
+   *    • only a key absent from the whole tree (or a plant with no stored
+   *      tree at all) falls through to the colorWheel-ON default, which is
+   *      the never-configured behavior this function has always had. */
   constraintEnabled(plant: string | null, key: string): boolean {
-    const c = Engine.constraintsFor(plant)?.find(x => x.key === key);
-    if (c) return !!c.enabled;
-    return key === 'colorWheel';
+    const tree = Engine.constraintsFor(plant);
+    if (!tree) return key === 'colorWheel';
+    // `present` and `effective` are tracked separately so "configured but
+    // unreachable" (found under a disabled ancestor, or itself disabled)
+    // returns false instead of falling through to the default — that
+    // fall-through is the actual bug this replaces.
+    let present = false;
+    let effective = false;
+    const walk = (nodes: ConstraintConfig[], reachable: boolean): void => {
+      for (const node of nodes) {
+        const nodeReachable = reachable && !!node.enabled;
+        if (node.key === key) {
+          present = true;
+          if (nodeReachable) effective = true;
+        }
+        if (node.children && node.children.length) walk(node.children, nodeReachable);
+      }
+    };
+    walk(tree, true);
+    return present ? effective : key === 'colorWheel';
   },
 
   /** Pre-order DFS flatten of the (possibly nested) constraint tree — a field

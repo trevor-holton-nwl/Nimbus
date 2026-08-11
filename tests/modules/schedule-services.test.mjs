@@ -228,6 +228,94 @@ test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has n
   assert.deepEqual(keys, ['colorWheel']); // only colorWheel defaults enabled, per constraintEnabled's existing rule
 });
 
+// --- constraintEnabled is tree-aware ---------------------------------------
+// Regression cover for the top-level-only `find()` this replaced. Harmless
+// while plants.constraints was always flat; a real defect once the Stage 3
+// Scheduling Constraints UI made nesting reachable, because a nested key fell
+// through to the `key === 'colorWheel'` default. Its one real consumer is
+// OptimizeDialog's pre-run "no color wheel configured" confirm
+// (web/schedule-workbench.mts) — a UI nag, never a sequencing decision
+// (_sortTerms goes through flattenConstraints, which has always walked the
+// tree). Semantics must stay identical to flattenConstraints': a disabled node
+// takes its whole subtree with it, and any reachable enabled occurrence counts.
+
+test('constraintEnabled finds a key nested BELOW the root, not just at the top level', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE1', constraints: [
+    { key: 'colorWheel', enabled: true, order: 1, children: [
+      { key: 'prt01', enabled: true, order: 1, children: [
+        { key: 'prt02', enabled: true, order: 1 },   // depth 3 — must still be found
+      ] },
+    ] },
+  ] }], lines: [] }, 'unit-test');
+  // Deliberately asserted on NON-colorWheel keys: the old top-level find()
+  // missed them and then returned `key === 'colorWheel'` => false, so these two
+  // are the assertions that actually fail against the pre-fix implementation.
+  assert.equal(Engine.constraintEnabled('CE1', 'prt01'), true,
+    'prt01 nested under an enabled parent is enabled — the old top-level find() reported false');
+  assert.equal(Engine.constraintEnabled('CE1', 'prt02'), true, 'found at the deepest allowed level too');
+  assert.equal(Engine.constraintEnabled('CE1', 'colorWheel'), true);
+  // Agrees with the function it mirrors.
+  assert.deepEqual(Engine.flattenConstraints('CE1'), ['colorWheel', 'prt01', 'prt02']);
+});
+
+test('constraintEnabled returns false for a nested key whose ancestor is disabled (subtree is off)', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE2', constraints: [
+    { key: 'prt01', enabled: false, order: 1, children: [
+      { key: 'colorWheel', enabled: true, order: 1 },  // reachable only through a disabled parent
+    ] },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE2', 'colorWheel'), false,
+    'a disabled ancestor takes its whole subtree with it — and this must NOT fall through to the colorWheel-ON default');
+  assert.equal(Engine.constraintEnabled('CE2', 'prt01'), false);
+  assert.deepEqual(Engine.flattenConstraints('CE2'), [], 'flattenConstraints must agree: nothing is in effect');
+});
+
+test('constraintEnabled returns false for a nested key that is itself disabled', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE3', constraints: [
+    { key: 'prt01', enabled: true, order: 1, children: [
+      { key: 'colorWheel', enabled: false, order: 1 },
+    ] },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE3', 'colorWheel'), false);
+  assert.deepEqual(Engine.flattenConstraints('CE3'), ['prt01']);
+});
+
+test('constraintEnabled: any REACHABLE enabled occurrence wins, matching the one flattenConstraints emits', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE4', constraints: [
+    { key: 'colorWheel', enabled: false, order: 1 },        // off at the root...
+    { key: 'prt01', enabled: true, order: 2, children: [
+      { key: 'colorWheel', enabled: true, order: 1 },       // ...but on, and reachable, here
+    ] },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE4', 'colorWheel'), true);
+  assert.ok(Engine.flattenConstraints('CE4').includes('colorWheel'),
+    'flattenConstraints emits it, so constraintEnabled must not claim otherwise');
+});
+
+test('constraintEnabled preserves the flat top-level behavior it always had', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE5', constraints: [
+    { key: 'colorWheel', enabled: false, order: 1 },
+    { key: 'prt01', enabled: true, order: 2 },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE5', 'colorWheel'), false, 'explicit top-level off stays off');
+  assert.equal(Engine.constraintEnabled('CE5', 'prt01'), true, 'explicit top-level on stays on');
+  // A key absent from a stored tree still falls through to the documented
+  // colorWheel-ON / everything-else-OFF default — unchanged by the tree walk.
+  assert.equal(Engine.constraintEnabled('CE5', 'prt02'), false);
+});
+
+test('constraintEnabled preserves the never-configured default (colorWheel ON, rest OFF)', () => {
+  Store.setMasterData({ plants: [{ plant: 'CE6', constraints: null }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE6', 'colorWheel'), true);
+  assert.equal(Engine.constraintEnabled('CE6', 'prt01'), false);
+  // Same for an unknown plant, and for an empty stored array (which
+  // flattenConstraints also treats as never-configured).
+  assert.equal(Engine.constraintEnabled('NOPE', 'colorWheel'), true);
+  Store.setMasterData({ plants: [{ plant: 'CE7', constraints: [] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE7', 'colorWheel'), true);
+  assert.equal(Engine.constraintEnabled('CE7', 'prt01'), false);
+});
+
 test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning over plant-wide', () => {
   Store.setMasterData({ plants: [{ plant: 'P3', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 5 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
