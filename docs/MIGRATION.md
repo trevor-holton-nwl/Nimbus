@@ -365,6 +365,48 @@ going forward, none blocking:
    onto `orders.production_version`) is deliberately the eventual join anchor for that rework, so
    when it lands, only `db._stamp_order_attributes`' query changes.
 
+### Priority lists Stage 2 (2026-08-10) — four more follow-ups
+
+Stage 2 of `docs/scheduling_priority.md` shipped the generic upload/column-mapping UI, per-field
+coverage, a generic list-preview viewer, and the missing-master-data admin panel on top of Stage 1's
+data plumbing above. Checking the two open items Stage 1 left behind: **R13** (`PLANT_LISTS` is
+per-process) is unaffected — Stage 2 adds read/CRUD surface, not a new caching layer, and everything
+still funnels through the existing `_reload_one_plant_lists`. **R17**'s three compat shims are if
+anything narrowed by item 3 below (the `/color-wheel/{plant}` rewrite consolidates onto shared
+helpers instead of adding a fourth shim) — though it surfaces one new naming-family nuance worth
+tracking on its own. Four more items, in addition to the three above:
+
+1. **`PriorityListMapping` and `PriorityListViewer` are new bridge-wired modules**, added to
+   `schedule-workbench.mts` (bridged onto `window.__NIMBUS_WORKBENCH` per CQ-1's module bridge — see
+   `CLAUDE.md`/`AGENTS.md` → Architecture → Frontend). They belong in
+   `docs/architecture/cq1-compatibility-inventory.md`'s §1 Module Ownership Map and §5 export lists
+   alongside `ColorWheelViewer`/`OptimizerPreview`/etc. — that inventory was **not** touched as part
+   of this stage, so keep it in sync if a future module reshuffle moves workbench modules around.
+2. **The "not yet used in sequencing" badge is Stage-3-removable scaffolding, not permanent UI.** It
+   exists so real tooling/production-version data — and its coverage — can be validated before the
+   optimizer depends on it (`docs/scheduling_priority.md` N16). Grep the literal strings
+   `pl-inert-badge` (CSS class, `web/styles.css`) and `not_yet_used_in_sequencing` (i18n key, all 5
+   `web/locales/*.js`) to find every place it needs to come out once a field is actually wired into
+   `Engine._sortTerms`.
+3. **`POST /color-wheel/{plant}` was rewritten (Task 5, Decision 9b) onto the same
+   `_resolve_priority_list_columns`/`_persist_priority_list` helpers** the new generic
+   `POST /priority-list/{plant}/{field_key}` endpoint uses. One deliberate behavior change: a
+   color-wheel file with no `ORDER_Y` column now succeeds via row-order fallback instead of
+   400ing — strictly more permissive (no previously-valid file can start failing), but worth knowing
+   if any external caller relied on the old rejection as a validation signal. Its audit-log action
+   names (`color_wheel_upload`/`color_wheel_replace`) are now the **only** route still emitting that
+   naming family — `priority_list_upload`/`priority_list_replace` is standard everywhere else,
+   including color uploaded through the new generic UI. Two other legacy behaviors were deliberately
+   preserved on this route only (duplicate-value last-write-wins instead of the generic endpoint's
+   400 on conflicting ranks, and no empty-file rejection) — see the `upload_color_wheel` docstring in
+   `brain.py`. **Not yet verified against a real external caller** — a manual curl/Postman test with
+   and without `ORDER_Y` is still on `docs/scheduling_priority.md`'s own pre-ship checklist.
+4. **`tests/contracts/cq1-legacy-surface.json` is stale.** Tasks 10-12 added new onclick handlers to
+   `web/index.html` for the mapping/viewer modals that the legacy-surface contract snapshot
+   (`tests/modules/legacy-surface.test.mjs`) doesn't yet know about, so that test currently fails.
+   Run `node scripts/legacy-surface.mjs --write` and commit the regenerated fixture before merge —
+   not a design problem, just a snapshot that needs regenerating after this stage's UI additions.
+
 ## Workstream 6 — Networking: same-origin reverse proxy
 
 Frontend nginx proxies `/api` → backend; **backend ingress = `internal`** (not publicly exposed). Eliminates CORS entirely (resolves the invalid `*`+credentials combo), makes auth/token flow clean, shrinks attack surface. `NIMBUS_API_BASE="/api"`. (Cross-origin + CORS only needed if the frontend later moves to a CDN/Static Web App.)
@@ -715,6 +757,39 @@ mechanism and label the guarded step convenience-only (as here), or (b) make the
 naturally re-appliable without the ledger at all (a `WHERE col IS NULL`-style backfill, like
 `orders.plant`'s NULL-only backfill just above it in `schema.sql`, which is safe to leave unguarded
 because re-running it only ever fills in newly-NULL rows).
+
+## pandas 3 `NaN` handling in xlsx ingest — a general landmine (found 2026-08-10)
+
+`requirements.txt` pins `pandas==3.0.3`. Under pandas 3, `Series.astype(str)` on a column with
+missing values no longer stringifies them to the literal `"nan"` the way pandas 2 did — they survive
+as an actual float `NaN`, which then crashes the next `.lower()`/`.upper()` call and breaks JSON
+serialization downstream (`allow_nan=False`). This surfaced as four separate crash bugs during
+`docs/scheduling_priority.md` Stage 2's upload-parsing work: blank `LINE`/`PLANT` cells producing
+500s, and a stray `NaN` surviving into a `needs_mapping` column-sample payload doing the same. All
+four were fixed with the same pattern, applied throughout the new upload-parsing code in
+`brain.py`: **call `.fillna("")` before `.astype(str)`, never after.**
+
+**Not specific to priority lists** — this is a landmine for any future code that parses an uploaded
+`.xlsx` with `pandas` (a new upload endpoint, SAP sync's eventual real connectors, anything touching
+`pandas.read_excel` output). Copying an older, pandas-2-era `.astype(str)`-then-clean snippet will
+silently reintroduce these crashes; check the ordering explicitly instead.
+
+## Admin-gated and plant-scoped fetches must use `Util.fetchTraced`, never bare `fetch()` (found 2026-08-10)
+
+A production-breaking bug in `docs/scheduling_priority.md` Stage 2's new Optimization tab:
+`_fetchAndRenderOptimization` (`web/plant-and-administration.mts`) called bare `fetch()` against
+`GET /master-data/{plant}/missing-master-data`, an admin-gated, plant-scoped endpoint. Bare `fetch()`
+carries no identity header, so locally — where auth is effectively disabled — it worked fine, but on
+the Azure pilot, where identity actually determines access, the missing-master-data panel and its
+Resync Now button would have silently never rendered for a real admin user; worse, a plant-restricted
+user's request would have been evaluated as unrestricted instead of scoped to their allowed plants.
+Fixed by switching to `Util.fetchTraced`, which attaches the identity header (see `CLAUDE.md`/
+`AGENTS.md` → Architecture → Frontend, `Util` row of the module layer table).
+
+**General rule, not specific to this feature:** any new fetch against an admin-gated or plant-scoped
+endpoint must go through `Util.fetchTraced`, never bare `fetch()`. The failure mode — works locally
+with no auth, silently breaks or mis-scopes once real users/roles exist — is easy to miss in local
+dev and easy to reintroduce in a future feature that copies an older snippet using bare `fetch()`.
 
 ## Multi-user real-time sync (planned)
 
