@@ -99,6 +99,10 @@ def test_resync_route_is_registered_for_admin_audit_logging():
     )
 
 
+def test_priority_list_write_route_is_registered_for_admin_audit_logging():
+    assert brain._ADMIN_WRITE_OPERATIONS["/priority-list/{plant}/{field_key}"] == "priority_list.write"
+
+
 def test_rankable_fields_now_carry_a_default_label():
     expected = {
         'colorWheel': 'Color Wheel',
