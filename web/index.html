@@ -2611,6 +2611,70 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Priority List Mapping
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-priority-mapping" hidden
+     onclick="if(event.target===this)NIMBUS.PriorityListMapping.close()">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head">
+      <h3 data-i18n="ui.mapping_modal_title">Map columns</h3>
+      <button class="modal-close" onclick="NIMBUS.PriorityListMapping.close()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--fg-mute)" data-i18n="ui.mapping_modal_sub">
+        We couldn't tell which column holds the value and which holds the rank. Pick them below.
+      </p>
+      <div class="form-row">
+        <label data-i18n="ui.mapping_value_col">Value column</label>
+        <select id="pl-mapping-value-col" class="input"></select>
+      </div>
+      <div class="form-row">
+        <label data-i18n="ui.mapping_rank_col">Rank column (optional — row order used if left blank)</label>
+        <select id="pl-mapping-rank-col" class="input">
+          <option value="" data-i18n="ui.mapping_rank_none">— use row order —</option>
+        </select>
+      </div>
+      <div id="pl-mapping-sample" class="pl-mapping-sample"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="NIMBUS.PriorityListMapping.close()" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.PriorityListMapping.confirm()" data-i18n="btn.upload">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Priority List Viewer (generic list)
+     ========================================================= -->
+<div class="modal-backdrop cw-viewer-backdrop" id="modal-priority-viewer" hidden
+     onclick="if(event.target===this)NIMBUS.PriorityListViewer.close()">
+  <div class="cw-viewer-modal">
+    <div class="opt-header">
+      <div class="opt-header-icon">&#128203;</div>
+      <div class="opt-header-text">
+        <div class="opt-header-title"><span id="pl-viewer-field-label">&mdash;</span> &middot; <span id="pl-viewer-plant-name">&mdash;</span></div>
+        <div class="opt-header-sub" id="pl-viewer-meta">&mdash;</div>
+      </div>
+      <button class="opt-close" onclick="NIMBUS.PriorityListViewer.close()">&times;</button>
+    </div>
+    <div class="cw-viewer-toolbar">
+      <div class="cw-search-wrap">
+        <span class="cw-search-icon">&#128269;</span>
+        <input type="search" id="pl-viewer-search" class="cw-search-input" data-i18n-placeholder="ph.search_values"
+               oninput="NIMBUS.PriorityListViewer.search(this.value)">
+      </div>
+      <span class="cw-count-badge" id="pl-viewer-count"></span>
+    </div>
+    <div class="cw-viewer-list" id="pl-viewer-list">
+      <div class="cw-loading"><span class="cw-spin"></span><span data-i18n="ui.loading">Loading&hellip;</span></div>
+    </div>
+    <div class="cw-viewer-footer">
+      <button class="btn btn-ghost" onclick="NIMBUS.PriorityListViewer.close()" data-i18n="btn.close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Edit Calendar  (per production line)
      ========================================================= -->
 <div class="cal-edit-backdrop" id="modal-edit-calendar" hidden
