@@ -1,4 +1,14 @@
-# Stage 3 — pre-implementation sequencing-impact audit
+# Stage 3 — sequencing-impact audit (pre- and post-implementation)
+
+> **Two parts.** **§1-8** is the *pre-implementation* audit (Task 0, run against `8bf2f94` before any
+> Stage 3 code existed) — it establishes why the stage was built the way it was. **§9-14** is the
+> *post-implementation* verification (Task 10, run against `e71e986` after all 11 tasks landed) — it
+> re-runs those same checks against the shipped code and records what is genuinely verified versus
+> what still needs a human with production access. If the two parts disagree, §9-14 wins.
+
+---
+
+# Part 1 — pre-implementation audit
 
 **Run:** 2026-08-11, against the working tree at `8bf2f94` (branch `master-data-tab`, clean except
 the two untracked Stage 2/3 plan docs).
@@ -382,4 +392,356 @@ Stated plainly so no one reads more certainty into it than it earned:
   verified by reading code, not by observing a real plant's stored tree.
 - **Steps 5-6 only.** This audit covers Task 0 Steps 1-4 plus the doc corrections. Task 10's
   post-implementation half — the Risk 2 before/after diff, the manual auto-fix check, the cross-line
-  drag check, and the R11 perf delta — is untouched by design.
+  drag check, and the R11 perf delta — is untouched by design. **→ now covered in Part 2 below.**
+
+---
+---
+
+# Part 2 — post-implementation verification
+
+**Run:** 2026-08-11, against `e71e986` (branch `master-data-tab`; working tree clean apart from one
+untracked Stage 2 plan doc). All 11 Stage 3 tasks landed in `de2f528`..`e71e986`.
+**Scope:** Task 10 of the Stage 3 plan, Steps 1-7 plus the plan's cross-cutting checklist.
+
+## 9. The honesty frame for this half — read this first
+
+Task 10's brief specifies five checks (Steps 1-5). **Step 1 is a pure code check and was performed as
+specified.** Steps 2-5 as written all require a running app with real data:
+
+> Step 2 "Run Smart optimize before this stage's changes … and after … on the same order snapshot".
+> Step 3 "Trigger an overlap alert's auto-fix on a plant with a configured tree".
+> Step 4 "Drag an order from a line with a line-override list to a line without one".
+> Step 5 "run Smart optimize on a realistic order count and compare wall-clock".
+
+**None of those were performed, and this document does not claim they were.** This session had no
+browser and no working Postgres: local Postgres is reachable, but `.env` carries leftover Azure-pilot
+settings (`PG_SSLMODE=require` against a local server with no SSL, plus Azure credentials) — a
+standing, documented gap recorded by every task in this stage.
+
+What was done instead, following the same method Task 0's audit, Task 6's report and Task 8's Step 4
+all used: **the real shipped modules were loaded and executed under Node** (the same harness
+`tests/modules/schedule-services.test.mjs` uses — a `createRequire` bootstrap of
+`nimbus-compute-core.js` plus minimal `window`/`document` stubs), driven against synthetic orders, and
+every claim below states its confidence and what a human still has to confirm. Two throwaway scripts
+were used (their fixtures and full output are reproduced in §11.2/§11.3 and §12); both import
+`web/schedule-services.mjs`, `web/schedule-state.mjs` and `web/application-foundation.mjs` directly —
+**the logic under test is never reimplemented**, only the deleted pre-Stage-3 comparison term is, and
+that is copied verbatim from `git show`.
+
+**The distinction that matters:** this verifies the *sequencing rules* Stage 3 shipped, exactly as
+shipped. It does **not** verify that any real plant's `priority_list` rows, `plants.constraints` tree,
+or `material_plants` attribute population are what anyone expects. Those are data facts and only
+production access settles them.
+
+## 10. Step 1 — Task 0's greps re-run against the finished code
+
+`npm run build` was run first, so the compiled `.mjs` outputs are current (Task 0 §6.8's trap).
+Literal output:
+
+```
+$ grep -n "if (key ===" web/schedule-services.mts
+(exit 1 — no matches)
+
+$ grep -n "colorMap" web/*.mts
+(exit 1 — no matches)
+
+$ grep -rn "colorMap" web/
+(exit 1 — no matches anywhere under web/, compiled .mjs included)
+
+$ grep -n "ORDER_Y" web/schedule-services.mts
+1177:   *  branch, and ORDER_Y is no longer consulted at all. Key encoding is
+```
+
+**All three expectations met.** The term factory replaced every hardcoded branch (`if (key ===` is
+gone, including the `// future: if (key === 'tooling')` placeholder). `colorMap` is gone from the whole
+tree, not just `schedule-services.mts` — Task 0's warning that `schedule-workbench.mts` held 11 of the
+16 references, and that the `SortTerm` doc comment at `:111` held a 17th, were both acted on.
+
+The single `ORDER_Y` match inside `Engine` is a **doc comment stating the retirement**
+("…and ORDER_Y is no longer consulted at all"), not a live read. Tracked down in full, the remaining
+`ORDER_Y` occurrences under `web/` are:
+
+| Location | Why it is legitimately still there |
+|---|---|
+| `web/locales/{en,de,es,fr,pt}.js` `ui.drop_hint` | Upload UI copy — the uploaded `.xlsx` still uses an `ORDER_Y` column. Ingest-side, not optimizer-side. |
+| `web/types.mts:67` (`ORDER_Y?: number`) | `TaskDTO` still carries it; R17 keeps it as the color-only alias. |
+| `web/types/api-generated.d.mts:1625` | Generated from `brain.py`'s Pydantic model — same reason. |
+| `web/schedule-services.mts:1177` | Comment recording the retirement. |
+| `web/schedule-workbench.mts:6532` | Comment explaining why the old 1500 ms fetch bound was dropped ("back then a missing wheel still left a usable ORDER_Y fallback"). |
+
+**No live `ORDER_Y` read remains on the optimizer path. Confidence: certain** (exhaustive grep of a
+static tree).
+
+### 10a. Bonus check the brief did not ask for, worth having: is `_dispatchDayIntegrity` really untouched?
+
+Task 0 §2 predicted zero changes needed. Rather than re-read it, the two versions were diffed
+directly:
+
+```
+$ git show 8bf2f94:web/schedule-services.mts | sed -n '1060,1311p' > old
+$ sed -n '1285,1536p' web/schedule-services.mts        > new
+$ diff old new        # (no output)
+```
+
+**252 lines, byte-identical.** The day-integrity dispatch survived the stage completely unmodified —
+the strongest available confirmation of the "Vs. due dates" decision and of the seam Task 4/6 relied
+on. *(Incidentally this also corrects Part 1 §2's own re-pin: the pre-stage body was `:1060-1311`, not
+the `:1069-1320` recorded there — the signature line was off by 9.)* **Confidence: certain.**
+
+## 11. Steps 2-4 — what the sequencing rules actually do
+
+### 11.1 Step 3 (alert auto-fix) — CONFIRMED as a mechanism, with a **new residual finding**
+
+The call site is verbatim and unmoved: `web/schedule-services.mts:706`, in `Alerts.applyFix`'s
+`overload` branch — `Engine.runAndApply('combined', { lines: [line], startDate: dayStart, endDate:
+dayEnd })`. No plant, no map.
+
+**The mechanism works.** `tests/modules/schedule-services.test.mjs:528` exercises exactly this shape
+(`runAndApply('combined', …)` with no `plant` and no rank argument) against `Store.setMasterData` +
+`Store.setPriorityRankMaps` + `Store.setSelectedPlant`, and asserts rank-1 RED is scheduled before
+rank-2 BLUE where BLUE is both first in insertion order **and** the shorter job — so neither input
+order nor the SPT tail term could produce the pass by accident, and a 999999-for-everything fallback
+would fail it. It passes. **Confidence: high** that when `Store.priorityRankMaps` holds the right
+plant's maps, auto-fix honors the configured order rather than a flat fallback.
+
+**FINDING (new, not previously recorded — the single most important output of this task).** Task 6's
+report claimed this path is "provably safe rather than safe-in-the-common-case," on the grounds that
+`schedule:hydrated` (which triggers the alert recompute that creates the Fix button) is emitted inside
+the `.finally()` of the `Promise.all` containing `loadPriorityRankMaps`. **That is only half true, and
+the untrue half is worse than "unranked".** Reading `web/schedule-data.mts`:
+
+- `schedule:hydrated` is emitted **twice** on the successful plant-load path: once at **`:404`**,
+  immediately after `Store.setTasks(...)`, and again at **`:446`** inside the `.finally()` Task 6
+  cited.
+- `Persistence.loadPriorityRankMaps(plant)` is only called at **`:445`** — inside the `.finally()` of
+  the *master-data* `Promise.all` at `:425`, whose two fetches each carry a 5,000 ms timeout. So the
+  rank-map fetch does not even **start** until master data settles.
+- `Store.priorityRankMaps` is **never cleared** when the plant changes. `load()` has no
+  `setPriorityRankMaps({})` for a real plant (only the `!plant` branch at `:250` clears it).
+
+Consequence: between `:404` and `:446` on a plant switch, `Store.tasks` and `Store.selectedPlant` are
+plant **B** while `Store.priorityRankMaps` still holds plant **A**'s maps, and the alert recompute the
+`:404` emit triggers has already produced B's alerts and their Fix buttons. An overload auto-fix
+clicked in that window sequences B's orders against **A's ranks** — a plausible-looking but wrong
+sequence, which is harder to notice than the all-999999 case Task 6 designed for. Two further paths
+never load rank maps at all and emit `schedule:hydrated` regardless: `_loadCache()` (`:893`, the
+backend-failure fallback) and `_loadDemo()` (`:1003`).
+
+**Severity: low-probability, moderate-consequence.** The window is a few hundred ms to a few seconds,
+requires a click inside it (most likely with the alert drawer already open), and `Optimize → Run` is
+**not** affected (Task 6's replacement guard awaits `loadPriorityRankMaps` when
+`Persistence._rankMapsPlant !== plant` and confirms with the user when it is still not fresh). The
+auto-fix path structurally cannot do the same: `schedule-services.mts` must not import
+`schedule-data.mts` (layer direction), so it has no access to `_rankMapsPlant`.
+
+**Cheapest mitigation, if wanted** — not applied here, because it changes another task's file and
+trades one behavior for another rather than being a single objectively-correct fix: clear the cache at
+the top of `Persistence.load()` whenever the requested plant differs from `_rankMapsPlant`
+(`Store.setPriorityRankMaps({}); Persistence._rankMapsPlant = null;`). That converts the failure mode
+from "silently ranked by the previous plant" to "silently unranked", which is the mode Task 6 already
+reasoned about and which the Run-path confirm already catches. Moving the `loadPriorityRankMaps(plant)`
+call out of the master-data `.finally()` so it starts immediately would additionally shrink the window
+to roughly one round trip. **Needs a human decision, not a silent fix.**
+
+### 11.2 Step 4 (cross-line drag, the N2 fix) — CONFIRMED by execution
+
+Not a browser drag. Instead the real shipped term was asked the same question a drag asks it: the
+line changed on the task object, nothing refetched, no `_sortTerms` rebuild.
+
+Setup: plant with `colorWheel` enabled; rank maps `{'': {colorWheel: {WHITE: 1, TAUPE: 2}}, LOVR:
+{colorWheel: {WHITE: 9, TAUPE: 1}}}` — i.e. line `LOVR` carries an override, `LNOOVR` does not.
+Output, with the **same term closure** reused throughout:
+
+```
+on LNOOVR (no override) -> 0000001|WHITE     [plant-wide rank 1]
+after drag to LOVR      -> 0000009|WHITE     [the DESTINATION line's rank 9]
+dragged back            -> 0000001|WHITE     [plant-wide again]
+```
+
+The mechanism is `web/schedule-services.mts:1211-1214` — `byLine[t.PRODUCTION_LINE]?.[key] ??
+byLine['']?.[key]`, evaluated **inside `get()`**, per task, per call. No rank is stamped anywhere, so
+there is nothing to go stale. The three surfaces that mutate the line all write `PRODUCTION_LINE`
+through `Store.updateTask`, and `runAndApply` re-groups from `Store.tasksByPlant(plant)` at `:1581`
+on every run, so it always sees the current value: timeline drag (`schedule-workbench.mts:5666`,
+multi-drag `:5679`, `:5703`), the Table override modal (`:2429`), and the Orders-grid editable
+`PRODUCTION_LINE` column (`:1641`, N2's own citation, still exact). **Confidence: high** on the rank
+resolution itself; **what a human still needs to confirm** is only that a real drag reaches
+`Store.updateTask` with the new line — which is pre-existing behavior Stage 3 did not touch.
+
+### 11.3 Step 2 (Risk 2 before/after) — the differential, executed
+
+**Method.** The real shipped `Engine._sortTerms('combined', { plant })` was diffed against the
+pre-Stage-3 colorWheel term copied **verbatim** from `git show 8bf2f94:web/schedule-services.mts`:
+
+```ts
+// BEFORE (8bf2f94)
+{ get: t => colorMap ? (colorMap[Util.norm(t.COLOR)] ?? 999999) : (t.ORDER_Y ?? 999999), cmp: numCmp }
+```
+
+…with the same three tail terms (`FORM_SIZE`, `runHours`, `MATERIAL_NUMBER`) on both sides, and the
+same lexicographic-over-terms comparator both `seqCompare` (`:1345-1351`) and `wheelFirst`
+(`:1360-1370`) implement. Since §10a proves the dispatch is byte-identical, diffing the term ordering
+isolates precisely what Stage 3 changed.
+
+**Fixture.** One plant, one line, 12 orders, 6 distinct colors, wheel ranks 3 of them
+(`{WHITE:1, IVORY:2, BEIGE:3}`; `TAUPE`/`SLATE`/`BLACK` unranked) — the exact Risk 2 shape. `FORM_SIZE`
+held uniform so the color term is the discriminator; `MATERIAL_NUMBER`/`RUN_TIME` vary so the tail can
+still order.
+
+```
+BEFORE: o01:WHITE o10:WHITE o04:IVORY o12:IVORY o07:BEIGE | o03:SLATE o09:BLACK o05:TAUPE o11:TAUPE o02:TAUPE o06:BLACK o08:SLATE
+AFTER : o01:WHITE o10:WHITE o04:IVORY o12:IVORY o07:BEIGE | o09:BLACK o06:BLACK o03:SLATE o08:SLATE o05:TAUPE o11:TAUPE o02:TAUPE
+```
+
+**Result — 7 positional differences, all attributable to category (a):**
+
+| Claim | Result |
+|---|---|
+| Every difference involves an unranked color | **true** (all 7) |
+| The ranked orders' relative order is unchanged | **true** — `o01,o10,o04,o12,o07` on both sides |
+| Unranked colors now form one run each | **true** — 3 runs / 3 distinct colors |
+| …and did not before | **true** — 5 runs / 3 distinct colors |
+
+So the whole delta is: `SLATE→BLACK→TAUPE→BLACK→SLATE` became `BLACK→SLATE→TAUPE`. **Two fewer color
+changeovers**, among exactly the orders whose changeover cost N12 was written to fix, and the minimum
+achievable for that set. Nothing a wheel actually ranks moved at all — which is the sentence to give a
+planner who reports "the schedule changed": *only orders whose color is missing from your wheel moved,
+and they moved next to their own color; completing the wheel collapses the difference to zero.*
+
+**Category (b) — a newly-configured field.** Second scenario, same wheel plus `prt01` enabled with
+`{TOOL-A: 1, TOOL-B: 2}`: term count goes 4 → 5, and within `COLOR=TAUPE` the sequence becomes
+`TOOL-A → TOOL-B → TOOL-B`, i.e. the second term discriminates inside the first term's groups exactly
+as the flattened-tree model predicts.
+
+**Confidence: high** that this is the complete set of *rule* differences for the within-day
+resequence. **Two things a human with production access still has to do:**
+
+1. **Run it on real orders.** 12 synthetic orders prove the rule; they do not tell you how many real
+   orders on a real plant are unranked. A plant with a complete wheel sees **no** change; a plant with
+   80% unranked colors sees a lot. The Stage 2 coverage readout is the number to look at first.
+2. **Check the cross-day second-order effect. It is real in both modes, and larger in `'changeover'`.**
+   The differential above measures phase-2 resequencing *within* an admitted fragment. But the same
+   terms also drive `rankForDay`'s intra-tier ordering (`:1372-1383`), and admission is by that
+   ranking — so if a day fills or fragments, a changed key changes **which order gets admitted and
+   which spills to the next day**. Per tier:
+
+   | Tier | Comparator | Sensitivity to the key change |
+   |---|---|---|
+   | 0 native (due today) | `wheelFirst(a,b)` alone (`:1382`) | **fully sensitive, both modes** |
+   | 1 carry (overdue) | `(a.due - b.due) \|\| wheelFirst` (`:1376`) | tie-break only |
+   | 2 pull-in (due later) | `'changeover'`: `wheelFirst \|\| due` (`:1379`); `'combined'`: `due \|\| wheelFirst` (`:1380`) | **fully sensitive in `'changeover'`**; tie-break only in `'combined'` |
+   | 3 floater (no due date) | `wheelFirst(a,b)` alone (`:1382`) | **fully sensitive, both modes** |
+
+   So the honest statement is: *the within-day rule change is fully characterized above; day assignment
+   can also shift, via tier 0 and tier 3 in both modes and additionally via tier 2 in `'changeover'`.*
+   Expect `'combined'`/Smart to be the more stable of the two across this upgrade, but do **not** expect
+   either to be day-stable on a plant with lots of unranked values or lots of orders with no due date.
+   This is the single thing most worth watching on the first real run, and it is not measurable without
+   real due dates and real capacity.
+
+## 12. Step 5 — R11 performance
+
+Real `Engine.runAndApply('combined')`, executed, on a synthetic book sized for a plant: **1,200 orders
+/ 12 lines / 20-day due-date spread / 8 colors, 4 PRT01, 3 PRT02, 3 production versions**, warm-up pass
+then 9 timed reps, median reported. `respectFixed: false`, `respectCalendar: false`.
+
+```
+term count:  1 field ->  4 terms;   4 fields -> 7 terms        (R11 predicted 4 -> 7)  ✓
+1 field  (colorWheel only): median 12.2 ms   [min  8.8, max 15.8]
+4 fields (all enabled)    : median 18.5 ms   [min 16.0, max 28.5]
+ratio                     : 1.52x
+
+Isolated tieBreakTerms.map() decoration (:1370), 1,200 tasks x 200 day-passes:
+1 field :  70.7 ms
+4 fields: 194.3 ms
+ratio   : 2.75x
+```
+
+**Verdict: in the accepted ballpark end to end (1.52x vs. R11's ~1.75x), but R11's per-term estimate
+was low.** R11 derived ~1.75x from term **count** alone. The isolated decoration is **2.75x**, because
+a priority term is more expensive *per call* than the tail terms it is counted against: `Util.norm` +
+two map lookups + `Number.isFinite` + `Math.round` + two clamps + `String()` + `padStart(7)` + a
+concat, versus a bare `Util.norm` or `Util.runHours`. End-to-end still lands under the estimate only
+because the decoration is a fraction of total run cost.
+
+**This is not a surprise regression.** +6 ms on a 1,200-order plant, for an opt-in cost that only
+applies to fields an admin deliberately configured. And the measured 1.52x is an **upper bound** on the
+real figure: `respectCalendar: false` removes all `Calendar.workWindow`/`nextAvailable` work, which is
+term-count-**independent** and therefore inflates both arms equally when re-added, pushing the ratio
+toward 1.0.
+
+**Confidence: high** on the ratio and the mechanism; **medium** on absolute milliseconds (Node/V8 on
+one machine, synthetic data, no calendar work, no browser main-thread contention). **What a human still
+needs to confirm:** one wall-clock Smart optimize in a real browser on a real plant with all 4 fields
+on, against the same plant with only `colorWheel` on. If that lands far outside ~1.5x, the difference
+is calendar/DOM interaction, not the terms. The parked `localeCompare`-vs-`<` note on the padded string
+keys (Task 6 review, finding E) is included in these numbers and is not a problem at this scale.
+
+## 13. Cross-cutting verification results
+
+| Check | Result |
+|---|---|
+| `npm run build` | **clean** (exit 0) |
+| `npm run typecheck` | **clean** (both `tsconfig.worker.json` and `tsconfig.json`) |
+| `npm run lint:errors` | **47 errors — all pre-existing.** Every one is `no-dupe-keys`, and every one is in `web/locales/{de,en,es,fr,pt}.js`. **Verified as baseline, not asserted:** the same rule run against those five files as they exist at `8bf2f94` also reports exactly 47. Zero lint errors in any `.mts`/`.mjs`/`app.js`. |
+| `npm test` → `test:legacy` | **15/15 pass** |
+| `npm test` → `test:modules` | **138/139 pass.** The 1 failure is `Engine.autoReflow …` (`tests/modules/schedule-services.test.mjs:158`) — **pre-existing, unrelated, expected.** Its dates are hardcoded to `2026-08-03` and expired on 2026-08-04; Tasks 5-9 each independently reproduced it, including at the pre-stage baseline. Not a Stage 3 regression. Housekeeping follow-up outside this plan. |
+| `npm run check:legacy-surface` | **clean** — "Legacy surface matches contract. No drift detected." (Task 0 §6.7's predicted regeneration was handled by Task 8/9.) |
+| `npm run check:static-assets` | **clean** — "Static asset boundary OK." |
+| `pytest tests/test_priority_lists.py` | **17 passed, 40 skipped, 0 failed.** Both Stage 3 endpoint tests pass (`test_priority_rank_maps_endpoint_reads_in_memory_cache`, `…_empty_for_unknown_plant`), as does Task 2's `test_set_plant_constraints_rejects_depth_beyond_three`. |
+| `pytest` (whole suite) | **128 passed, 68 skipped, 0 failed.** |
+| pg-marked skips | **Same standing environment gap every task in this stage recorded.** Forced `PG_HOST=localhost NIMBUS_TEST_DB=1`; the probe still fails with `server does not support SSL, but SSL was required` — `.env`'s `PG_SSLMODE=require` against a local server without SSL, plus Azure credentials. Skipping is the harness guard working as designed, not a test defect. `test_set_plant_constraints_preserves_nested_children` is among the skipped. |
+| `docs/MIGRATION.md` | Updated — new "Priority lists Stage 3" section revisiting R13 and R17 (see §14). |
+| `CLAUDE.md` / `AGENTS.md` | Both updated (Key Patterns → Optimization). Verified the paragraph was byte-identical in the two files before editing, and that both received the same replacement. |
+
+**Drift noticed while checking the twins, not fixed:** `CLAUDE.md` and `AGENTS.md` are the same 230
+lines but diverge on **8 substantive lines** predating this stage — most visibly `AGENTS.md` still
+says `brain.py` exposes "~38 endpoints" (`CLAUDE.md`: ~77), still places the `Compute` module "in
+`app.js`" rather than `schedule-services.mjs`, and carries stale `styles.css`/`nimbus-intelligence.js`
+line counts. R18's twin-drift warning has already come true. Out of scope here — resolving it means
+adjudicating 8 unrelated claims — but worth its own housekeeping pass.
+
+## 14. Three findings to hand off
+
+**(1) The stale-plant window on the alert auto-fix path.** §11.1 in full. Needs a human decision on
+the mitigation, not a silent fix.
+
+**(2) `GET /priority-rank-maps` has no plant-authorization check** — `brain.py:1885-1892`. It is the
+**only** plant-scoped endpoint in that block without one: `/priority-lists` (`:1898`),
+`/priority-list/{plant}/{field_key}` (`:1942`, `:1995`, `:2028`) and `GET /tasks` (`:1316`) all take
+`allowed_plants: … = Depends(auth.get_allowed_plants_for_request)` and gate on it; this one takes only
+`plant: str = Query(...)` and returns `PLANT_LISTS.get(plant, {})`. So a plant-restricted user (or any
+caller who knows a plant name) can read any plant's rank maps — color names, tool codes and their
+ranks.
+
+Two mitigating facts and one aggravating one. Mitigating: actor identity is read from spoofable
+`X-User`/`x-user-email` headers anyway until Entra SSO lands (`docs/MIGRATION.md`), so this is a
+consistency gap inside an already-acknowledged-weak authorization story rather than a new hole; and
+rank maps are low-sensitivity master data. Aggravating: `Persistence.loadPriorityRankMaps`
+(`web/schedule-data.mts:1187`) calls this with **bare `fetch`**, not `Util.fetchTraced`. Today that is
+*why it works* — no identity header is needed because nothing checks one. Adding the gate therefore
+requires switching that call to `Util.fetchTraced` in the same change, or every rank-map load starts
+403ing for plant-restricted users. That coupling is precisely the Stage 2 bug class
+(`docs/scheduling_priority.md` Stage 2 status, the missing-master-data fetch), so the two edits belong
+together. Using `fetchTraced` would also restore `x-request-id` correlation, which this fetch currently
+loses.
+
+**(3) The "not yet used in sequencing" badge is now a false statement, and Stage 3 left it up.**
+`web/plant-and-administration.mts:878` still renders `<span class="pl-inert-badge">` +
+`Util.t('ui.not_yet_used_in_sequencing')` for every field whose `field_key !== 'colorWheel'` — i.e. an
+admin who uploads a PRT01 list and enables `prt01` in the tree is told, on the same screen, that it is
+not used in sequencing. It is. `docs/MIGRATION.md`'s Stage 2 follow-up #2 anticipated exactly this and
+named the two grep strings to remove (`pl-inert-badge`, `not_yet_used_in_sequencing`); Stage 3 wired the
+fields and did not do the removal. Three files carry it: the `.mts` above, `web/styles.css:3653`, and
+the `ui.not_yet_used_in_sequencing` key in all five `web/locales/*.js`.
+
+**Deliberately not fixed here, and the reason is not purely scope.** A blank deletion is one option, but
+there is a real argument for *replacing* rather than removing it: per §13 and the Stage 3 status
+paragraph in `docs/scheduling_priority.md`, nobody has yet validated real `prt_01`/`prt_02` values
+against a real uploaded list, and Risk 3 (free-text spelling mismatches degrading to all-999999) is now
+live. A label like "newly used in sequencing — verify coverage" would be both true *and* useful, where a
+bare deletion loses the warning. That is a copy/UX decision, not a mechanical correction.
+
+None of the three findings was fixed by this task: all are code changes outside Task 10's file scope,
+and each involves a genuine trade-off rather than one objectively-correct answer — the stage's standing
+instruction is to surface those rather than decide them unilaterally.

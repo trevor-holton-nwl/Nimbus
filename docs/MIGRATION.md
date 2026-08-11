@@ -388,6 +388,16 @@ tracking on its own. Five more items, in addition to the three above:
    `pl-inert-badge` (CSS class, `web/styles.css`) and `not_yet_used_in_sequencing` (i18n key, all 5
    `web/locales/*.js`) to find every place it needs to come out once a field is actually wired into
    `Engine._sortTerms`.
+   **STILL OPEN, and now actively wrong (2026-08-11).** Stage 3 wired all four fields into
+   `Engine._sortTerms` and **did not** remove this badge, so
+   `web/plant-and-administration.mts:878` now tells an admin who has configured `prt01` that it is not
+   used in sequencing, on the same screen where it is. Three files carry it: that `.mts`,
+   `web/styles.css:3653`, and the `ui.not_yet_used_in_sequencing` key in all five locales. Note the
+   fix is not necessarily a deletion — nobody has validated real `prt_01`/`prt_02` values against a
+   real list yet (Risk 3 is now live), so a replacement like "newly used in sequencing — verify
+   coverage" would be both truthful and more useful than removing the warning outright. That makes it
+   a copy decision rather than a mechanical cleanup, which is why Stage 3's Task 10 flagged it instead
+   of silently changing it.
 3. **`POST /color-wheel/{plant}` was rewritten (Task 5, Decision 9b) onto the same
    `_resolve_priority_list_columns`/`_persist_priority_list` helpers** the new generic
    `POST /priority-list/{plant}/{field_key}` endpoint uses. One deliberate behavior change: a
@@ -429,6 +439,68 @@ tracking on its own. Five more items, in addition to the three above:
    (external API callers do not). Do not "fix" the UI path to match the legacy route; if anything
    converges later, it should be the legacy route tightening once no external caller depends on its
    tolerance (item 3's unverified-external-caller note still applies).
+
+### Priority lists Stage 3 (2026-08-11) — R13 widens, R17 narrows, plus two new items
+
+Stage 3 of `docs/scheduling_priority.md` wired the priority tree into the optimizer: `Engine._sortTerms`
+is now a generic term factory over the plant's (possibly nested) constraint tree, resolving ranks from
+`Store.priorityRankMaps`, which is loaded from a new `GET /priority-rank-maps?plant=` served straight
+out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left behind:
+
+- **R13 (`PLANT_LISTS` is per-process) — same mechanism, materially wider blast radius. Read the
+  Stage 1 wording above as *understated* from Stage 3 onward.** Before Stage 3 a stale `PLANT_LISTS` on
+  one replica meant that replica served stale *display* data — the Optimization tab's coverage numbers,
+  `ColorWheelViewer`, the Admin Cockpit coverage panel, and the `ORDER_Y` column stamped on `/tasks`.
+  Now `GET /priority-rank-maps` reads the same cache and the optimizer's tie-break terms read *that*,
+  so **a stale replica changes the sequence a planner gets from Optimize → Run and from an overload
+  alert's auto-fix** — not just what a panel displays. Concretely, on a multi-replica deploy: an admin
+  uploads a corrected tooling list, replica A refreshes its cache, a planner whose next request lands on
+  replica B optimizes against the *old* ranks, and nothing in the UI indicates which they got.
+  **Not urgent — the pilot is deliberately single-replica** (`docs/DEPLOYMENT.md`; the in-process cache
+  and the log ring buffer are the two reasons), so today there is exactly one cache and it is always the
+  one that was updated. But this moves R13 from "stale numbers on a screen" to "wrong schedule", so it
+  should be fixed *before* scaling to 2+ replicas, not after. The fix options are unchanged (pub/sub
+  invalidation, or have `/priority-rank-maps` read `priority_list` per request and accept the DB hit —
+  the endpoint exists precisely to be a zero-DB read, so the second option is a deliberate trade).
+- **R17 (three compat shims) — narrowed by one, and the third is now factually true rather than
+  forward-looking.** The `ORDER_Y` shim's wording ("not read by the optimizer once Stage 3 ships its own
+  per-field terms") is now **realized**: `grep -rn "colorMap" web/` returns nothing, and no live
+  `ORDER_Y` read remains anywhere on the optimizer path (only the upload drop-hint locale strings, the
+  `NimbusTask`/`TaskDTO` declarations, and two comments recording the retirement). `ORDER_Y` is still
+  stamped server-side by `apply_priority_merge` and still keys the emitted row sort (`brain.py:1026`,
+  presentation only) and `ColorWheelViewer`. The `/color-wheel/{plant}` shim also lost frontend readers:
+  Stage 3 repointed the Optimize dialog's wheel badge/confirm **and** Plant → System Settings' "(no
+  wheel)" hint onto the shared `Engine.hasPriorityRanks(fieldKey)`, which reads
+  `Store.priorityRankMaps` — so it sees per-line overrides, which the plant-wide-only endpoint never
+  did. `ColorWheelViewer._load()` is now that endpoint's **only** frontend reader; everything else is
+  external-API back-compat.
+- **NEW: `GET /priority-rank-maps` has no plant-authorization check, and its client uses bare
+  `fetch`.** It is the only plant-scoped endpoint in `brain.py`'s priority-list block without an
+  `allowed_plants: … = Depends(auth.get_allowed_plants_for_request)` gate — `/priority-lists`,
+  `/priority-list/{plant}/{field_key}` and `GET /tasks` all have one. A plant-restricted user can read
+  any plant's rank maps (color names, tool codes, ranks). Low severity while actor identity still comes
+  from spoofable `X-User`/`x-user-email` headers (see Workstream 3 / `Entra_Auth_Migration.md`), but it
+  is an inconsistency to close. **These two facts are coupled:** `Persistence.loadPriorityRankMaps`
+  (`web/schedule-data.mts:1187`) calls the endpoint with bare `fetch`, not `Util.fetchTraced`, so it
+  sends no identity header — adding the gate without switching that call to `fetchTraced` in the same
+  change would 403 every rank-map load for plant-restricted users. That is the same coupling that
+  produced a production-only bug in Stage 2 (the missing-master-data fetch). Switching to `fetchTraced`
+  also restores the `x-request-id` correlation this fetch currently loses.
+- **NEW: the alert auto-fix path can sequence against the previously-selected plant's ranks.**
+  `Store.priorityRankMaps` is never cleared when the selected plant changes, and
+  `Persistence.loadPriorityRankMaps(plant)` is only invoked inside the `.finally()` of `load()`'s
+  master-data `Promise.all` (`web/schedule-data.mts:445`, whose fetches carry 5 s timeouts) — while
+  `schedule:hydrated` is *also* emitted earlier, at `:404`, which is what triggers the alert recompute
+  that renders the Fix buttons. So there is a window during a plant switch where plant B's alerts are
+  live but plant A's rank maps are still cached. `Optimize → Run` is protected (it awaits
+  `loadPriorityRankMaps` on a `Persistence._rankMapsPlant` mismatch and confirms with the user
+  otherwise); `Alerts.applyFix` structurally cannot be, because `schedule-services.mts` may not import
+  `schedule-data.mts`. Cheapest mitigation, deliberately **not** applied: clear the cache and
+  `_rankMapsPlant` at the top of `Persistence.load()` when the plant differs, degrading the failure
+  mode from "wrong plant's ranks" to "unranked" (which the Run-path confirm already catches). Also
+  affects `_loadCache()` (`:893`) and `_loadDemo()` (`:1003`), which emit `schedule:hydrated` and never
+  load rank maps at all. Full trace in
+  `docs/superpowers/plans/2026-08-11-stage-3-sequencing-audit.md` §11.1.
 
 ## Workstream 6 — Networking: same-origin reverse proxy
 
