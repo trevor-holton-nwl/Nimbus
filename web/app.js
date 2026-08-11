@@ -275,7 +275,7 @@ const NIMBUS = (function () {
   const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
   const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
   const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
-  const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
+  const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
   // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
@@ -734,7 +734,7 @@ const NIMBUS = (function () {
     ErrorLog, AdminCockpit,
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer,
-    PlantSelector, EmptyState, MasterData,
+    PlantSelector, EmptyState, MasterData, PriorityListMapping,
     LaborPlanning, Interface, Security, CalendarSync,
     Session, SessionUIAdapter, showLoginScreen, MaterialGrids
   };

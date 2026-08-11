@@ -33,3 +33,10 @@ test('Interface/Security/AdminCockpit expose their documented public API', () =>
   assert.equal(typeof AdminCockpit.gotoOvTab, 'function');
   assert.equal(typeof AdminCockpit._setSub, 'function');
 });
+
+test('Plant exposes the generalized priority-list optimization API', () => {
+  assert.equal(typeof Plant._renderOptimization, 'function');
+  assert.equal(typeof Plant._uploadPriorityList, 'function');
+  assert.equal(typeof Plant._confirmDeletePriorityList, 'function');
+  assert.equal(typeof Plant._resyncOrderAttributes, 'function');
+});

@@ -42,8 +42,8 @@ import { Store, UndoStack } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
-import { AlertsUIAdapter } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab } from './types.mjs';
+import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -296,6 +296,9 @@ export const Plant = {
   _rosterCollapsed: true,
   _cwMeta: {} as Record<string, ColorWheelMeta>,           // cached color wheel metadata: { [plant]: {filename, row_count, uploaded_at} }
   _cwLoading: false,     // prevent concurrent fetches
+  _priorityFields: [] as PriorityFieldMeta[],
+  _priorityLists: {} as Record<string, PriorityListFieldSummary>,
+  _missingMasterData: null as MissingMasterDataReport | null,
   _currentPlantTab: 'general',
   _pillFps: null as PillFpPair[] | null,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
@@ -717,18 +720,25 @@ export const Plant = {
   _fetchAndRenderOptimization(plantName: string | null): void {
     const panel = document.getElementById('plant-opt-panel');
     if (!panel) return;
-    // Show spinner while fetching metadata
     const body = panel.querySelector('.panel-body');
     if (body) body.innerHTML = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading')}</div>`;
+    if (!plantName) return;
 
-    fetch(`${Config.API_BASE}/color-wheels`, { signal: AbortSignal.timeout(6000) })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => {
-        Plant._cwMeta = data.plants || {};
+    Promise.all([
+      fetch(`${Config.API_BASE}/priority-fields`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()),
+      fetch(`${Config.API_BASE}/priority-lists?plant=${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()),
+      fetch(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName)}/missing-master-data`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()).catch(() => null),
+    ])
+      .then(([fieldsBody, listsBody, missingBody]) => {
+        Plant._priorityFields = fieldsBody.fields || [];
+        Plant._priorityLists = listsBody.fields || {};
+        Plant._missingMasterData = missingBody;
         Plant._renderOptimization(plantName);
       })
       .catch(() => {
-        Plant._cwMeta = {};
+        Plant._priorityFields = [];
+        Plant._priorityLists = {};
+        Plant._missingMasterData = null;
         Plant._renderOptimization(plantName);
       });
   },
@@ -736,124 +746,272 @@ export const Plant = {
   _renderOptimization(plantName: string | null): void {
     const body = document.getElementById('plant-opt-body');
     if (!body) return;
-    const wheelInfo = Plant._cwMeta[plantName!];
     const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
-
-    const _relTime = (ts: string | undefined): string => {
-      if (!ts) return 'unknown';
+    const relTime = (ts: string | null | undefined): string => {
+      if (!ts) return Util.t('ui.unknown_time');
       const diff = Math.round((Date.now() - new Date(ts).getTime()) / 1000);
-      if (diff < 120)   return 'just now';
-      if (diff < 3600)  return `${Math.floor(diff/60)}m ago`;
-      if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
-      return `${Math.floor(diff/86400)}d ago`;
+      if (diff < 120)   return Util.t('ui.just_now');
+      if (diff < 3600)  return Util.t('ui.mins_ago', { n: Math.floor(diff / 60) });
+      if (diff < 86400) return Util.t('ui.hours_ago', { n: Math.floor(diff / 3600) });
+      return Util.t('ui.days_ago', { n: Math.floor(diff / 86400) });
     };
 
-    let html: string;
-    if (wheelInfo) {
-      html = `
-        <div class="cw-active-card">
-          <div class="cw-active-icon">🎨</div>
-          <div class="cw-active-info">
-            <div class="cw-active-name">${esc(wheelInfo.filename || '—')}</div>
-            <div class="cw-active-meta">${wheelInfo.row_count ?? '?'} colors &middot; uploaded ${_relTime(wheelInfo.uploaded_at)} by ${esc(wheelInfo.uploaded_by || 'system')}</div>
-          </div>
-          <div class="cw-active-actions">
-            <button class="btn btn-ghost sm" onclick="NIMBUS.ColorWheelViewer.open('${esc(plantName)}')">👁 Preview</button>
-            <button class="btn btn-ghost sm cw-delete-btn" onclick="NIMBUS.Plant._confirmDeleteWheel('${esc(plantName)}')">⌫ Remove</button>
-          </div>
-        </div>
-        <div class="cw-dropzone cw-replace-zone" id="plant-cw-dropzone" title="Drop to replace or click to browse">
-          <div class="cw-drop-inner">
-            <span class="cw-drop-icon">↻</span>
-            <span class="cw-drop-text">Drop new file to replace, or click to browse</span>
-            <input type="file" id="plant-cw-file" accept=".xlsx,.xls" style="display:none">
-          </div>
-        </div>`;
-    } else {
-      html = `
-        <div class="cw-empty-hint">
-          No color wheel uploaded yet. Optimization will still run using the global fallback wheel, skipping color-priority ordering if that is also absent.
-        </div>
-        <div class="cw-dropzone" id="plant-cw-dropzone">
-          <div class="cw-drop-inner">
-            <span class="cw-drop-icon">📂</span>
-            <span class="cw-drop-text">Drag a color wheel here, or click to browse</span>
-            <div class="cw-drop-hint">.xlsx · must contain COLOR and ORDER_Y columns</div>
-            <input type="file" id="plant-cw-file" accept=".xlsx,.xls" style="display:none">
-          </div>
-        </div>`;
-    }
+    const fields = Plant._priorityFields || [];
+    const lists  = Plant._priorityLists  || {};
 
-    html += `<div id="plant-cw-status" class="admin-status" style="margin-top:10px;"></div>`;
-    body.innerHTML = html;
+    const fieldCardHtml = (f: { field_key: string; default_label: string }): string => {
+      const summary = lists[f.field_key] || { plant_wide: null, line_overrides: [], coverage: {} };
+      // Util.t(key, vars?) — no fallback-string param (confirmed at
+      // web/application-foundation.mts:556-562): it already falls back
+      // en -> raw key on a missing translation, which is why Task 14 must
+      // land the constraint.* keys in en.js at minimum. f.default_label is
+      // the backend's own default (surfaced via GET /priority-fields) and is
+      // NOT threaded through Util.t — it exists for API consumers that don't
+      // have the locale bundle at all, not as an in-app i18n fallback.
+      const label = Util.t(`constraint.${f.field_key}`);
+      const inertBadge = f.field_key === 'colorWheel' ? '' :
+        `<span class="pl-inert-badge">${Util.t('ui.not_yet_used_in_sequencing')}</span>`;
+      const cov = summary.coverage[''] || null;
+      const covHtml = cov
+        ? `<div class="pl-coverage"><span class="pl-coverage-num">${cov.ranked_values}/${cov.distinct_values}</span> ${Util.t('ui.values_ranked')}</div>`
+        : '';
 
-    // Wire drag-drop + click
-    const zone = document.getElementById('plant-cw-dropzone');
-    const fileInput = document.getElementById('plant-cw-file') as HTMLInputElement | null;
-    if (zone && fileInput) {
+      let activeOrDrop: string;
+      if (summary.plant_wide) {
+        const w = summary.plant_wide;
+        activeOrDrop = `
+          <div class="cw-active-card">
+            <div class="cw-active-icon">${f.field_key === 'colorWheel' ? '🎨' : '🔧'}</div>
+            <div class="cw-active-info">
+              <div class="cw-active-name">${esc(w.filename || '—')}</div>
+              <div class="cw-active-meta">${w.row_count ?? '?'} ${Util.t('ui.values')} &middot; ${relTime(w.uploaded_at)} &middot; ${esc(w.uploaded_by || 'system')}</div>
+              ${covHtml}
+            </div>
+            <div class="cw-active-actions">
+              <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}">👁 ${Util.t('btn.preview')}</button>
+              <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="">⌫ ${Util.t('btn.remove')}</button>
+            </div>
+          </div>
+          <div class="cw-dropzone cw-replace-zone" id="plant-pl-dropzone-${f.field_key}" data-field="${f.field_key}" title="${Util.t('ui.drop_to_replace')}">
+            <div class="cw-drop-inner">
+              <span class="cw-drop-icon">↻</span>
+              <span class="cw-drop-text">${Util.t('ui.drop_replace_text')}</span>
+              <input type="file" id="plant-pl-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">
+            </div>
+          </div>`;
+      } else {
+        activeOrDrop = `
+          <div class="cw-dropzone" id="plant-pl-dropzone-${f.field_key}" data-field="${f.field_key}">
+            <div class="cw-drop-inner">
+              <span class="cw-drop-icon">📂</span>
+              <span class="cw-drop-text">${Util.t('ui.drop_list_text', { field: label })}</span>
+              <div class="cw-drop-hint">${Util.t('ui.drop_list_hint')}</div>
+              <input type="file" id="plant-pl-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">
+            </div>
+          </div>`;
+      }
+
+      const overridesHtml = summary.line_overrides.map(o => {
+        // priority_list_coverage (db.py:2056) computes coverage PER LINE, not
+        // just plant-wide — an override row that only ever showed row_count/
+        // upload time would silently drop the one number `covHtml` above proves
+        // is available and useful (the whole point of N3's per-line breakdown).
+        const lineCov = summary.coverage[o.line] || null;
+        const lineCovHtml = lineCov
+          ? `<span class="pl-coverage pl-override-coverage">${lineCov.ranked_values}/${lineCov.distinct_values} ${Util.t('ui.values_ranked')}</span>`
+          : '';
+        return `
+        <div class="pl-override-row">
+          <span class="pl-override-line">${esc(o.line)}</span>
+          <span class="pl-override-meta">${o.row_count} ${Util.t('ui.values')} &middot; ${relTime(o.uploaded_at)}</span>
+          ${lineCovHtml}
+          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}">👁</button>
+          <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${esc(o.line)}">⌫</button>
+        </div>`;
+      }).join('');
+
+      return `
+        <div class="pl-field-card" data-field="${f.field_key}">
+          <div class="pl-field-card-head">
+            <h4>${esc(label)}</h4>
+            ${inertBadge}
+          </div>
+          ${activeOrDrop}
+          <div class="pl-overrides">${overridesHtml}</div>
+          <div class="pl-add-override" id="pl-add-override-${f.field_key}"></div>
+          <div id="plant-pl-status-${f.field_key}" class="admin-status" style="margin-top:8px;"></div>
+        </div>`;
+    };
+
+    const missingHtml = Plant._missingMasterData && Plant._missingMasterData.unmatched_pairs > 0 ? `
+      <div class="pl-mmd-panel">
+        <div class="pl-mmd-head">
+          <h4>${Util.t('ui.missing_master_data_title')}</h4>
+          <button class="btn btn-ghost sm" id="pl-mmd-export">${Util.t('btn.export_csv')}</button>
+          <button class="btn btn-primary sm" id="pl-mmd-resync">${Util.t('btn.resync_now')}</button>
+        </div>
+        <p class="pl-mmd-sub">${Util.t('ui.missing_master_data_sub', { pairs: Plant._missingMasterData.unmatched_pairs, orders: Plant._missingMasterData.unmatched_orders })}</p>
+        <div class="pl-mmd-list">
+          ${Plant._missingMasterData.exceptions.slice(0, 20).map((e: { material_number: string; order_count: number; reason: string }) => `
+            <div class="pl-mmd-row">
+              <span class="pl-mmd-material">${esc(e.material_number)}</span>
+              <span class="pl-mmd-count">${e.order_count} ${Util.t('ui.orders')}</span>
+              <span class="pl-mmd-reason">${Util.t(`ui.mmd_reason_${e.reason}`)}</span>
+            </div>`).join('')}
+          ${Plant._missingMasterData.exceptions.length > 20 ? `
+            <div class="pl-mmd-more">${Util.t('ui.mmd_more_rows', { n: Plant._missingMasterData.exceptions.length - 20 })}</div>` : ''}
+        </div>
+      </div>` : '';
+
+    body.innerHTML = fields.map(fieldCardHtml).join('') + missingHtml;
+
+    // Wire dropzones (one per field) — see Task pattern at the old single-wheel wiring.
+    fields.forEach(f => {
+      const zone = document.getElementById(`plant-pl-dropzone-${f.field_key}`);
+      const fileInput = document.getElementById(`plant-pl-file-${f.field_key}`) as HTMLInputElement | null;
+      if (!zone || !fileInput) return;
       zone.onclick = e => { if (e.target !== fileInput) fileInput.click(); };
-      fileInput.onchange = () => { if (fileInput.files![0]) Plant._uploadWheel(plantName, fileInput.files![0]); };
+      fileInput.onchange = () => { if (fileInput.files![0]) Plant._uploadPriorityList(plantName, f.field_key, fileInput.files![0]); };
       zone.ondragover  = e => { e.preventDefault(); zone.classList.add('drag-over'); };
       zone.ondragleave = () => zone.classList.remove('drag-over');
       zone.ondrop = e => {
         e.preventDefault();
         zone.classList.remove('drag-over');
-        const f = e.dataTransfer!.files[0];
-        if (f) Plant._uploadWheel(plantName, f);
-      };
-    }
-  },
-
-  _uploadWheel(plantName: string | null, file: File): void {
-    const status = document.getElementById('plant-cw-status');
-    const zone   = document.getElementById('plant-cw-dropzone');
-    if (status) { status.textContent = Util.t('toast.uploading_file', { name: file.name }); status.className = 'admin-status info'; }
-    if (zone)   zone.classList.add('uploading');
-
-    const fd = new FormData();
-    fd.append('file', file);
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName!)}`, {
-      method: 'POST', body: fd,
-      headers: { 'X-User': Session.actor() },
-    })
-      .then(r => r.json())
-      .then(body => {
-        if (zone) zone.classList.remove('uploading');
-        if (body.status !== 'ok') {
-          if (status) { status.textContent = Util.t('toast.upload_failed', { msg: body.message || 'unknown' });  status.className = 'admin-status error'; }
-          ErrorLog.error('plant', `Color wheel upload failed for ${plantName}: ${body.message}`, body);
+        if (e.dataTransfer!.files.length > 1) {
+          Toast.show(Util.t('toast.one_file_at_a_time'), 'warn');
           return;
         }
-        const verb = body.replaced ? 'replaced' : 'uploaded';
-        if (status) { status.textContent = Util.t('ui.color_wheel_status', { verb, count: body.row_count }); status.className = 'admin-status success'; }
-        Toast.show(Util.t('toast.color_wheel_verb', { verb, plant: plantName! }), 'success');
-        ErrorLog.info('plant', `Color wheel ${verb} for ${plantName}: ${body.row_count} colors`);
-        Plant._fetchAndRenderOptimization(plantName);
-      })
-      .catch(e => {
-        if (zone) zone.classList.remove('uploading');
-        if (status) { status.textContent = Util.t('toast.upload_failed', { msg: e.message }); status.className = 'admin-status error'; }
-        ErrorLog.error('plant', `Color wheel upload network error: ${e.message}`);
+        const f0 = e.dataTransfer!.files[0];
+        if (f0) Plant._uploadPriorityList(plantName, f.field_key, f0);
+      };
+    });
+
+    // Wire preview/delete buttons.
+    body.querySelectorAll<HTMLElement>('[data-action="preview"]').forEach(btn => {
+      btn.addEventListener('click', () => PriorityListViewer.open(plantName!, btn.dataset.field!));
+    });
+    body.querySelectorAll<HTMLElement>('[data-action="delete"]').forEach(btn => {
+      btn.addEventListener('click', () => Plant._confirmDeletePriorityList(plantName!, btn.dataset.field!, btn.dataset.line || ''));
+    });
+
+    // Wire "+ add line override" combobox per field (Store.masterData lines for this plant).
+    fields.forEach(f => {
+      const host = document.getElementById(`pl-add-override-${f.field_key}`);
+      if (!host) return;
+      host.innerHTML = `<button class="btn btn-ghost sm" data-add-override="${f.field_key}">+ ${Util.t('ui.add_line_override')}</button>`;
+      host.querySelector('button')!.addEventListener('click', () => {
+        // Store.linesForSelectedPlant() — the established O(1)-indexed read
+        // used throughout this file (e.g. :256, :596) and schedule-workbench.mts;
+        // correct here since the Optimization tab is already scoped to
+        // Store.selectedPlant, which equals plantName in this render pass.
+        const lineNames = Store.linesForSelectedPlant();
+        host.innerHTML = `<div class="pl-override-combo"></div><input type="file" id="pl-override-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">`;
+        const comboHost = host.querySelector('.pl-override-combo') as HTMLElement;
+        _mkCombobox(comboHost, lineNames, {
+          placeholder: Util.t('ph.pick_a_line'),
+          onSelect: (line: string) => {
+            (document.getElementById(`pl-override-file-${f.field_key}`) as HTMLInputElement).onchange = (e) => {
+              const file = (e.target as HTMLInputElement).files![0];
+              if (file) Plant._uploadPriorityList(plantName, f.field_key, file, line);
+            };
+            (document.getElementById(`pl-override-file-${f.field_key}`) as HTMLInputElement).click();
+          },
+        });
       });
+    });
+
+    // Wire missing-master-data panel actions.
+    document.getElementById('pl-mmd-export')?.addEventListener('click', () => {
+      window.open(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName!)}/missing-master-data?format=csv`, '_blank');
+    });
+    document.getElementById('pl-mmd-resync')?.addEventListener('click', () => Plant._resyncOrderAttributes(plantName!));
   },
 
-  async _confirmDeleteWheel(plantName: string): Promise<void> {
-    const ok = await Modal.confirm({ title: Util.t('modal.remove_color_wheel', { plant: plantName }), confirmLabel: Util.t('btn.yes_delete') });
+  _uploadPriorityList(plantName: string | null, fieldKey: string, file: File, line?: string): void {
+    const status = document.getElementById(`plant-pl-status-${fieldKey}`);
+    if (status) { status.textContent = Util.t('toast.uploading_file', { name: file.name }); status.className = 'admin-status info'; }
+
+    const post = (extra: Record<string, string> = {}) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (line) fd.append('line', line);
+      Object.entries(extra).forEach(([k, v]) => fd.append(k, v));
+      return fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName!)}/${encodeURIComponent(fieldKey)}`, {
+        method: 'POST', body: fd, headers: { 'X-User': Session.actor() },
+      }).then(r => r.json());
+    };
+
+    post().then(body => {
+      if (body.status === 'needs_mapping') {
+        PriorityListMapping.open(body.headers, body.sample, (valueCol: string, rankCol: string) => {
+          post({ value_column: valueCol, rank_column: rankCol }).then(body2 => Plant._handleUploadResult(plantName, fieldKey, status, body2));
+        });
+        return;
+      }
+      Plant._handleUploadResult(plantName, fieldKey, status, body);
+    }).catch(e => {
+      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: e.message }); status.className = 'admin-status error'; }
+    });
+  },
+
+  _handleUploadResult(plantName: string | null, fieldKey: string, status: HTMLElement | null, body: { status: string; message?: string; row_count?: number; replaced?: boolean }): void {
+    // Every field card header resolves its label via Util.t('constraint.' + fieldKey)
+    // (see fieldCardHtml above) — toasts/modals must do the same, or a raw
+    // camelCase key ("prt01 list uploaded for 5512") leaks through next to
+    // polished card copy ("Prod. Resource Tool (01)").
+    const label = Util.t(`constraint.${fieldKey}`);
+    if (body.status !== 'ok') {
+      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: body.message || 'unknown' }); status.className = 'admin-status error'; }
+      ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${body.message}`, body);
+      return;
+    }
+    const verb = body.replaced ? 'replaced' : 'uploaded';
+    Toast.show(Util.t('toast.priority_list_verb', { verb, field: label, plant: plantName! }), 'success');
+    ErrorLog.info('plant', `Priority list ${verb} for ${plantName}/${fieldKey}: ${body.row_count} values`);
+    Plant._fetchAndRenderOptimization(plantName);
+  },
+
+  async _confirmDeletePriorityList(plantName: string, fieldKey: string, line: string): Promise<void> {
+    const label = Util.t(`constraint.${fieldKey}`); // same-resolution rule as _handleUploadResult above
+    const ok = await Modal.confirm({ title: Util.t('modal.remove_priority_list', { plant: plantName, field: label }), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plantName)}`, {
-      method: 'DELETE',
-      headers: { 'X-User': Session.actor() },
+    const qs = line ? `?line=${encodeURIComponent(line)}` : '';
+    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName)}/${encodeURIComponent(fieldKey)}${qs}`, {
+      method: 'DELETE', headers: { 'X-User': Session.actor() },
     })
       .then(r => r.json())
       .then(body => {
         if (body.status !== 'ok' && body.status !== 'not_found') {
           Toast.show(Util.t('toast.delete_failed'), 'error'); return;
         }
-        Toast.show(Util.t('toast.color_wheel_deleted', { plant: plantName }), 'success');
-        ErrorLog.info('plant', `Color wheel deleted for ${plantName}`);
+        Toast.show(Util.t('toast.priority_list_deleted', { plant: plantName, field: label }), 'success');
         Plant._fetchAndRenderOptimization(plantName);
       })
       .catch(e => Toast.show(Util.t('toast.delete_failed_msg', { msg: e.message }), 'error'));
+  },
+
+  async _resyncOrderAttributes(plantName: string): Promise<void> {
+    // Modal.confirm's real opts are {title, message, detail, confirmLabel, tone}
+    // (web/application-foundation.mts:1289-1291) — its own header comment is
+    // stale (documents an old callback-style signature); 'body' is not a field.
+    const ok = await Modal.confirm({
+      title: Util.t('modal.resync_title', { plant: plantName }),
+      message: Util.t('modal.resync_warning'),
+      confirmLabel: Util.t('btn.resync_now'),
+      tone: 'warn',
+    });
+    if (!ok) return;
+    fetch(`${Config.API_BASE}/master-data/resync-order-attributes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+      body: JSON.stringify({ plant: plantName }),
+    })
+      .then(r => r.json())
+      .then(body => {
+        Toast.show(Util.t('toast.resync_done', { pairs: body.unmatched_pairs, orders: body.unmatched_orders }), 'success');
+        Plant._fetchAndRenderOptimization(plantName);
+      })
+      .catch(e => Toast.show(Util.t('toast.resync_failed', { msg: e.message }), 'error'));
   },
 
   // Relocated bodily from app.js's `App._renderSettingsPane` (CQ-1 Phase 4
@@ -1084,6 +1242,49 @@ export const Plant = {
     })();
   },
 };
+
+/** Minimal modal-DOM adapter for the Task 10 `#modal-priority-mapping` markup
+ *  (`web/index.html`) — shown when a priority-list upload's headers don't
+ *  match the expected value/rank column names and the backend responds
+ *  `{status:'needs_mapping', headers, sample}` (see `Plant._uploadPriorityList`
+ *  above). Deliberately tiny: it only shuttles the user's column picks back
+ *  to whichever `onConfirm` callback the caller supplied. */
+export const PriorityListMapping = (() => {
+  let _onConfirm: ((valueCol: string, rankCol: string) => void) | null = null;
+
+  function open(headers: string[], sample: Record<string, unknown>[], onConfirm: (v: string, r: string) => void): void {
+    _onConfirm = onConfirm;
+    const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
+    const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
+    valSel.innerHTML = headers.map(h => `<option value="${h}">${h}</option>`).join('');
+    rankSel.innerHTML = `<option value="">${Util.t('ui.mapping_rank_none')}</option>` +
+      headers.map(h => `<option value="${h}">${h}</option>`).join('');
+    const sampleEl = document.getElementById('pl-mapping-sample');
+    if (sampleEl) {
+      sampleEl.innerHTML = `<table class="pl-sample-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${
+        sample.slice(0, 5).map(row => `<tr>${headers.map(h => `<td>${String(row[h] ?? '')}</td>`).join('')}</tr>`).join('')
+      }</tbody></table>`;
+    }
+    const el = document.getElementById('modal-priority-mapping');
+    if (el) el.hidden = false;
+  }
+
+  function close(): void {
+    const el = document.getElementById('modal-priority-mapping');
+    if (el) el.hidden = true;
+    _onConfirm = null;
+  }
+
+  function confirm(): void {
+    const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
+    const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
+    const cb = _onConfirm;
+    close();
+    if (cb) cb(valSel.value, rankSel.value);
+  }
+
+  return { open, close, confirm };
+})();
 
 /** `ProdLines._wireNav`'s search input carries a one-time-wiring flag, the same
  *  DOM-custom-property pattern as `Util.wirePasteToCheckboxes`'s `PasteWiredInput`
@@ -2733,6 +2934,92 @@ interface ComboboxOpts {
   onSelect?: (value: string) => void;
 }
 
+// Minimal self-contained searchable combobox — reuses the topbar
+// PlantSelector's markup/CSS classes (hps-*) for visual consistency and
+// the same type-to-filter/keyboard-nav interaction, but works off a plain
+// options array with no Store dependency, so it fits BOM's plant AND
+// material pickers (PlantSelector itself is wired one-to-one to
+// Store.selectedPlant and the global topbar DOM), as well as Plant's
+// priority-list line-override picker (`_renderOptimization` above) — moved
+// to true module top-level (out of MasterData's IIFE, where it previously
+// lived) so both call sites can reach it as a bare identifier.
+function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
+  if (!containerEl) return;
+  containerEl.innerHTML = `
+    <div class="hps-combobox md-bom-combobox">
+      <input type="text" class="hps-input" placeholder="${placeholder}" autocomplete="off" spellcheck="false"
+             aria-haspopup="listbox" aria-expanded="false">
+      <button type="button" class="hps-clear" hidden>&times;</button>
+      <div class="hps-dropdown" role="listbox" hidden></div>
+    </div>`;
+  const root      = containerEl.querySelector('.hps-combobox') as HTMLElement;
+  const input     = root.querySelector('.hps-input') as HTMLInputElement;
+  const clearBtn  = root.querySelector('.hps-clear') as HTMLButtonElement;
+  const dropdown  = root.querySelector('.hps-dropdown') as HTMLElement;
+  let filtered: string[]  = [];
+  let activeIdx = -1;
+  let open      = false;
+  let selected  = value;
+
+  function reflect(): void {
+    input.value = selected || '';
+    root.classList.toggle('has-value', !!selected);
+    clearBtn.hidden = !selected;
+  }
+  function renderDropdown(query: string): void {
+    const q = (query || '').trim().toLowerCase();
+    const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
+    const filterQ = looksLikeLabel ? '' : q;
+    filtered = filterQ ? options.filter((o) => String(o).toLowerCase().includes(filterQ)) : options.slice();
+    if (!filtered.length) {
+      dropdown.innerHTML = `<div class="hps-empty">${options.length ? Util.t('ui.no_matches') : Util.t('ui.no_options')}</div>`;
+      activeIdx = -1;
+      return;
+    }
+    dropdown.innerHTML = filtered.map((o, i) =>
+      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
+    ).join('');
+    activeIdx = Math.max(0, filtered.indexOf(selected));
+    highlight();
+    dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
+      el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(filtered[i]); });
+    });
+  }
+  function highlight(): void {
+    const items = dropdown.querySelectorAll('.hps-option');
+    items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+    if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
+  }
+  function openDd()  { dropdown.hidden = false; open = true;  input.setAttribute('aria-expanded', 'true'); }
+  function closeDd() { dropdown.hidden = true;  open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
+  function pick(o: string): void {
+    selected = o;
+    reflect();
+    closeDd();
+    input.blur();
+    if (onSelect) onSelect(o);
+  }
+
+  input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
+  input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
+  input.addEventListener('keydown', (e) => {
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
+      return;
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (filtered[activeIdx]) pick(filtered[activeIdx]); }
+    else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
+  });
+  input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
+  clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
+  document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
+
+  reflect();
+}
+
 /* =============================================================================
    MASTER DATA — Manage Data Tables admin sub-tab UI (Subnetwork / Plant / Production Line)
    ========================================================================== */
@@ -2897,89 +3184,6 @@ export const MasterData = (() => {
       if (matHost) matHost.innerHTML = `<div class="md-empty">${Util.t('err.load_materials_failed')}</div>`;
       ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${(e as Error).message}`);
     }
-  }
-
-  // Minimal self-contained searchable combobox — reuses the topbar
-  // PlantSelector's markup/CSS classes (hps-*) for visual consistency and
-  // the same type-to-filter/keyboard-nav interaction, but works off a plain
-  // options array with no Store dependency, so it fits BOM's plant AND
-  // material pickers (PlantSelector itself is wired one-to-one to
-  // Store.selectedPlant and the global topbar DOM).
-  function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
-    if (!containerEl) return;
-    containerEl.innerHTML = `
-      <div class="hps-combobox md-bom-combobox">
-        <input type="text" class="hps-input" placeholder="${placeholder}" autocomplete="off" spellcheck="false"
-               aria-haspopup="listbox" aria-expanded="false">
-        <button type="button" class="hps-clear" hidden>&times;</button>
-        <div class="hps-dropdown" role="listbox" hidden></div>
-      </div>`;
-    const root      = containerEl.querySelector('.hps-combobox') as HTMLElement;
-    const input     = root.querySelector('.hps-input') as HTMLInputElement;
-    const clearBtn  = root.querySelector('.hps-clear') as HTMLButtonElement;
-    const dropdown  = root.querySelector('.hps-dropdown') as HTMLElement;
-    let filtered: string[]  = [];
-    let activeIdx = -1;
-    let open      = false;
-    let selected  = value;
-
-    function reflect(): void {
-      input.value = selected || '';
-      root.classList.toggle('has-value', !!selected);
-      clearBtn.hidden = !selected;
-    }
-    function renderDropdown(query: string): void {
-      const q = (query || '').trim().toLowerCase();
-      const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
-      const filterQ = looksLikeLabel ? '' : q;
-      filtered = filterQ ? options.filter((o) => String(o).toLowerCase().includes(filterQ)) : options.slice();
-      if (!filtered.length) {
-        dropdown.innerHTML = `<div class="hps-empty">${options.length ? Util.t('ui.no_matches') : Util.t('ui.no_options')}</div>`;
-        activeIdx = -1;
-        return;
-      }
-      dropdown.innerHTML = filtered.map((o, i) =>
-        `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
-      ).join('');
-      activeIdx = Math.max(0, filtered.indexOf(selected));
-      highlight();
-      dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
-        el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(filtered[i]); });
-      });
-    }
-    function highlight(): void {
-      const items = dropdown.querySelectorAll('.hps-option');
-      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
-      if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
-    }
-    function openDd()  { dropdown.hidden = false; open = true;  input.setAttribute('aria-expanded', 'true'); }
-    function closeDd() { dropdown.hidden = true;  open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
-    function pick(o: string): void {
-      selected = o;
-      reflect();
-      closeDd();
-      input.blur();
-      if (onSelect) onSelect(o);
-    }
-
-    input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
-    input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
-    input.addEventListener('keydown', (e) => {
-      if (!open) {
-        if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
-        return;
-      }
-      if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
-      else if (e.key === 'Enter') { e.preventDefault(); if (filtered[activeIdx]) pick(filtered[activeIdx]); }
-      else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
-    });
-    input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
-    clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
-    clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
-
-    reflect();
   }
 
   // -----------------------------------------------------------------------
