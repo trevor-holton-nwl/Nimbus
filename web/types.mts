@@ -120,6 +120,61 @@ export interface ConstraintConfig {
   order?: number;
 }
 
+/** GET /priority-fields row. */
+export interface PriorityFieldMeta {
+  field_key: string;
+  mp_column: string;
+  orders_column: string;
+  task_field: string;
+  default_label: string;
+}
+
+/** One (plant, line, field_key) row's metadata, from list_priority_lists_meta. */
+export interface PriorityListRow {
+  plant: string;
+  line: string;
+  field_key: string;
+  uploaded_at: string | null;
+  uploaded_by: string | null;
+  filename: string | null;
+  row_count: number;
+}
+
+/** GET /priority-lists?plant= response, per field_key. */
+export interface PriorityListFieldSummary {
+  default_label: string;
+  plant_wide: PriorityListRow | null;
+  line_overrides: PriorityListRow[];
+  coverage: Record<string, { distinct_values: number; ranked_values: number }>;
+}
+export interface PriorityListsForPlant {
+  plant: string;
+  fields: Record<string, PriorityListFieldSummary>;
+}
+
+/** GET /priority-list/{plant}/{field_key} response. */
+export interface PriorityListEntry { value: string; rank: number; }
+export interface PriorityListResponse {
+  plant: string;
+  field_key: string;
+  line: string;
+  entries: PriorityListEntry[];
+  meta: { uploaded_at: string | null; uploaded_by: string | null; filename: string | null; row_count: number };
+}
+
+/** Shared shape of both missing-master-data endpoints (batch-scoped and live). */
+export interface MissingMasterDataException {
+  plant: string | null;
+  material_number: string;
+  order_count: number;
+  reason: 'no_mp_row' | 'no_plant_derived';
+}
+export interface MissingMasterDataReport {
+  unmatched_pairs: number;
+  unmatched_orders: number;
+  exceptions: MissingMasterDataException[];
+}
+
 /** Keyed by composite (subnetwork, plant), not plant alone. */
 export interface NimbusMasterPlant {
   subnetwork: string;
@@ -166,8 +221,10 @@ export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' 
 
 export type StoreMode = 'live' | 'draft';
 
-/** Only 'colorWheel' is wired today; 'tooling' is reserved/commented in Engine.CONSTRAINT_CATALOG. */
-export type ConstraintKey = 'colorWheel';
+/** Widened in Stage 2 — all four RANKABLE_FIELDS keys now exist as upload
+ *  targets, even though only 'colorWheel' is wired into Engine._sortTerms
+ *  until Stage 3. */
+export type ConstraintKey = 'colorWheel' | 'prt01' | 'prt02' | 'productionVersion';
 
 export type StoreEventType =
   | 'tasks:bulk' | 'task:update' | 'task:remove' | 'tasks:bulkUpdate'
