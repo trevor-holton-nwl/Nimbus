@@ -140,7 +140,7 @@ window.__NIMBUS_LOCALES.de = {
   'modal.export_schema_desc':          'Alle aktuell in dieser Datenbank vorhandenen Spalten als SQL. Kann sicher in schema.sql oder eine Migrationsdatei eingefügt werden — jede Anweisung ändert nur etwas, wenn es noch nicht vorhanden ist.',
   'modal.paste_rows_title':            'Zeilen einfügen',
   'modal.paste_rows_detail':           'Änderungen erscheinen in der Tabelle, werden aber erst nach Klick auf Speichern gesichert.',
-  'modal.no_color_wheel_confirm_msg':  'Keine Farbreihe für Werk {{plant}} gefunden.\n\nOhne Farbpriorität optimieren?',
+  'modal.no_priority_ranks_confirm_msg':  'Keine Prioritätsliste für Werk {{plant}} geladen: {{fields}}.\n\nOhne diese Prioritäten optimieren?',
   'modal.delete_upload_history':       'Gesamten Upload-Verlauf dauerhaft löschen?',
   'modal.clear_audit_log':             'Optimierungs- und Farbreihen-Audit-Protokoll dauerhaft löschen?',
   'modal.purge_confirm':               'Alle Aufträge mit Enddatum zwischen {{start}} und {{end}} dauerhaft löschen?',
@@ -366,7 +366,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.constraints_sub':                'Wählen Sie, welche Einschränkungen der Optimierer für dieses Werk berücksichtigt und in welcher Reihenfolge. Deaktivierte Einschränkungen werden ignoriert; Aufträge, die von keiner Einschränkung erfasst werden, werden immer zuletzt eingeplant — sie werden nie entfernt.',
   'ui.constraint_on':                  'Berücksichtigt',
   'ui.constraint_off':                 'Ignoriert',
-  'ui.constraint_no_wheel':            'Kein Farbrad für dieses Werk hochgeladen — keine Wirkung, bis eines hinzugefügt wird.',
+  'ui.constraint_no_list':                'Keine Prioritätsliste für dieses Feld hochgeladen — keine Wirkung, bis eine hinzugefügt wird.',
   'ui.move_up':                        'Nach oben',
   'ui.move_down':                      'Nach unten',
 

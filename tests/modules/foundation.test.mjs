@@ -99,6 +99,61 @@ test('Util.hoursToTimeString/timeStringToHours round-trip', () => {
   assert.equal(Util.timeStringToHours('13:30'), 13.5);
 });
 
+/* Final-review fix wave (2026-08-11): countChangeovers was hardcoded to
+   COLOR/FORM_SIZE, which made the Optimizer Preview's changeover KPI — the
+   number a planner reads to decide Apply vs Discard — blind to the three fields
+   Stage 3 wired into the optimizer. It now resolves its field set through an
+   injected seam (Engine.changeoverTaskFields; Util is Foundation and may not
+   import Engine). */
+
+test('Util.changeoverFields defaults to COLOR+FORM_SIZE, and survives a bad/throwing resolver', () => {
+  Util.setChangeoverFieldsResolver(null);
+  assert.deepEqual(Util.changeoverFields(), ['COLOR', 'FORM_SIZE'], 'unwired = historical behavior');
+  Util.setChangeoverFieldsResolver(() => []);
+  assert.deepEqual(Util.changeoverFields(), ['COLOR', 'FORM_SIZE'], 'an empty list must not disable changeover counting entirely');
+  Util.setChangeoverFieldsResolver(() => { throw new Error('boom'); });
+  assert.deepEqual(Util.changeoverFields(), ['COLOR', 'FORM_SIZE'], 'a throwing resolver is caught, not propagated');
+  Util.setChangeoverFieldsResolver(null); // reset
+});
+
+test('Util.countChangeovers counts on the resolved field set, not a hardcoded COLOR/FORM_SIZE pair', () => {
+  // Same COLOR and FORM_SIZE throughout, differing only in PRT_01: the old
+  // implementation reported 0 for this line no matter what the plant sequences on.
+  const tasks = [
+    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+    { id: 'c', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+  ];
+  Util.setChangeoverFieldsResolver(null);
+  assert.equal(Util.countChangeovers(tasks), 0, 'baseline: invisible to a COLOR/FORM_SIZE-only count');
+  Util.setChangeoverFieldsResolver(() => ['PRT_01', 'FORM_SIZE']);
+  assert.equal(Util.countChangeovers(tasks), 1, 'DOG->CAT is one changeover; CAT->CAT is none');
+  Util.setChangeoverFieldsResolver(null); // reset
+});
+
+test('Util.countChangeovers: ANY differing active field is ONE changeover, and blanks stay equal', () => {
+  Util.setChangeoverFieldsResolver(() => ['COLOR', 'PRT_01', 'FORM_SIZE']);
+  // Both COLOR and PRT_01 change between a and b — one physical changeover, not two.
+  assert.equal(Util.countChangeovers([
+    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+  ]), 1);
+  // Absent vs null vs '' must all read as the same blank (the `|| ''` coercion the
+  // hardcoded comparison used), or every order missing a value would look like a
+  // changeover on a plant that has not populated that field yet.
+  assert.equal(Util.countChangeovers([
+    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD' },
+    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: null },
+    { id: 'c', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: '' },
+  ]), 0);
+  // Lines are counted independently (regression guard on the existing grouping).
+  assert.equal(Util.countChangeovers([
+    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', PRODUCTION_LINE: 'L2', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+  ]), 0, 'adjacency is per line, so two orders on different lines are never a changeover');
+  Util.setChangeoverFieldsResolver(null); // reset
+});
+
 test('ErrorLog._route() falls back to the bare tab without a ganttSub, and to null with no resolver/data', () => {
   assert.equal(ErrorLog._route(), null); // default resolver, never set
   ErrorLog.setRouteResolver(() => ({ tab: 'dashboard' }));

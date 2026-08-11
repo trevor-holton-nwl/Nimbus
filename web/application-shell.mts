@@ -2154,13 +2154,27 @@ const App = {
     // is ever opened). Loading-state note (R8): until this resolves,
     // CONSTRAINT_CATALOG stays the one-entry fallback — exactly today's
     // synchronous behavior, so a plant opened before this completes sees no
-    // regression; the Scheduling Constraints pane re-renders once the fetch
-    // resolves (Task 8) if it's already open.
+    // regression.
+    //
+    // Plant.onPriorityFieldsLoaded() is what makes the R8 loading state actually
+    // recoverable: _renderSettingsPane is synchronous, so a Scheduling
+    // Constraints pane opened before this resolves renders its whole tree — and,
+    // critically, its add-field pickers — against the 1-entry fallback, which
+    // leaves every picker disabled with no way back. Nothing re-rendered it
+    // before (an earlier comment here asserted it did), so a slow fetch left the
+    // tree unusable for the session. That call is a guarded no-op unless that
+    // pane is the one on screen.
+    //
+    // Deliberately NOT a Store.emit: Persistence.autosave subscribes with no
+    // event-type filter, so a broadcast here would schedule a full localStorage
+    // write and invalidate Utilization's memo for a registry load that changes no
+    // schedule data (the same reason Store.setPriorityRankMaps does not emit).
     fetch(`${Config.API_BASE}/priority-fields`)
       .then(r => r.ok ? r.json() : { fields: [] })
       .then((body: { fields?: PriorityFieldMeta[] }) => {
         Engine.setConstraintCatalog(body.fields || []);
         Engine.setFieldTaskFields(body.fields || []);
+        Plant.onPriorityFieldsLoaded();
       })
       .catch(() => {}); // offline fallback: Engine.CONSTRAINT_CATALOG's hardcoded colorWheel entry stands
   },

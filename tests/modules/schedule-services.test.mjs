@@ -546,3 +546,165 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
   assert.ok(red.start_date <= blue.start_date,
     'rank-1 RED must be sequenced before rank-2 BLUE — a 999999-for-everything fallback would leave the longer RED job last under the SPT tail term');
 });
+
+/* ---------------------------------------------------------------------------
+   Final-review fix wave (2026-08-11). The whole-branch review found three
+   defects whose seams live here:
+     - effectiveConstraintPaths: per-NODE effectiveness, so the Scheduling
+       Constraints "Effective sequence" panel stops crediting the wrong
+       occurrence of a duplicated key.
+     - unrankedActiveFields: the generic (all-fields) form of "is this priority
+       actually configured?" behind the pre-Run confirm (N11).
+     - changeoverTaskFields: what the changeover KPI must measure so it tracks
+       the same fields _sortTerms sequences on.
+   Plus the two contained _sortTerms fixes (dead term, empty-override shadowing).
+   ------------------------------------------------------------------------ */
+
+test('effectiveConstraintPaths credits the ENABLED duplicate, not the disabled one before it', () => {
+  // The reviewer's exact repro. Real optimizer order is prt01 -> prt02 ->
+  // colorWheel: the colorWheel at index 1 is OFF, so index 3 is what takes
+  // effect. The old panel logic (`flat.includes(key) && !seen.has(key)`) marked
+  // index 1 effective and index 3 "(no effect)" — precisely inverted.
+  const tree = [
+    { key: 'prt01',      enabled: true,  order: 1 },
+    { key: 'colorWheel', enabled: false, order: 2 },
+    { key: 'prt02',      enabled: true,  order: 3 },
+    { key: 'colorWheel', enabled: true,  order: 4 },
+  ];
+  Store.setMasterData({ plants: [{ plant: 'EP1', constraints: tree }], lines: [] }, 'unit-test');
+
+  assert.deepEqual(Engine.flattenConstraints('EP1'), ['prt01', 'prt02', 'colorWheel'],
+    'optimizer order must skip the disabled duplicate and emit the enabled one last');
+  const paths = Engine.effectiveConstraintPaths(tree);
+  assert.deepEqual([...paths].sort(), ['0', '2', '3'],
+    'index 1 (disabled colorWheel) must NOT be effective; index 3 (enabled colorWheel) must be');
+  assert.ok(!paths.has('1'), 'the switched-OFF row must never be reported as in effect');
+});
+
+test('effectiveConstraintPaths: a node under a disabled ancestor loses to an enabled copy below', () => {
+  const tree = [
+    { key: 'prt01', enabled: false, order: 1, children: [{ key: 'colorWheel', enabled: true, order: 1 }] },
+    { key: 'colorWheel', enabled: true, order: 2 },
+  ];
+  Store.setMasterData({ plants: [{ plant: 'EP2', constraints: tree }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.flattenConstraints('EP2'), ['colorWheel']);
+  const paths = Engine.effectiveConstraintPaths(tree);
+  assert.deepEqual([...paths], ['1'],
+    'only the root-level enabled colorWheel is in effect — not the one inside the disabled subtree');
+  assert.ok(!paths.has('0.0'), 'a child of a disabled parent is unreachable, so it cannot be the effective occurrence');
+});
+
+test('effectiveConstraintPaths addresses ORIGINAL array positions, not the order-sorted view', () => {
+  // Array order deliberately disagrees with `order` — what a persisted tree from
+  // an older client can look like. Paths must point at the caller's own indices
+  // or a renderer would highlight the wrong row.
+  const tree = [
+    { key: 'prt02',      enabled: true, order: 3 },
+    { key: 'colorWheel', enabled: true, order: 1 },
+    { key: 'prt01',      enabled: true, order: 2 },
+  ];
+  Store.setMasterData({ plants: [{ plant: 'EP3', constraints: tree }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.flattenConstraints('EP3'), ['colorWheel', 'prt01', 'prt02'],
+    'effective ORDER follows `order`');
+  assert.deepEqual([...Engine.effectiveConstraintPaths(tree)].sort(), ['0', '1', '2'],
+    'every node is effective here, addressed by its own array index');
+  assert.equal(Engine.effectiveConstraintPaths(null).size, 0);
+  assert.equal(Engine.effectiveConstraintPaths([]).size, 0);
+});
+
+test('effectiveConstraintPaths still reaches a repeated node CHILD that introduces a new key', () => {
+  // A repeated parent contributes nothing itself but must not swallow its
+  // subtree — flattenConstraints walks children regardless of the dedupe.
+  const tree = [
+    { key: 'colorWheel', enabled: true, order: 1 },
+    { key: 'colorWheel', enabled: true, order: 2, children: [{ key: 'prt01', enabled: true, order: 1 }] },
+  ];
+  Store.setMasterData({ plants: [{ plant: 'EP4', constraints: tree }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.flattenConstraints('EP4'), ['colorWheel', 'prt01']);
+  const paths = Engine.effectiveConstraintPaths(tree);
+  assert.ok(paths.has('0'),   'first colorWheel is the effective occurrence');
+  assert.ok(!paths.has('1'),  'the repeat contributes nothing');
+  assert.ok(paths.has('1.0'), 'but the child prt01 under the repeat is still reached and effective');
+});
+
+test('unrankedActiveFields reports every ACTIVE field with no ranks — not just colorWheel', () => {
+  Store.setMasterData({ plants: [{ plant: 'UF1', constraints: [
+    { key: 'colorWheel', enabled: true,  order: 1 },
+    { key: 'prt01',      enabled: true,  order: 2 },
+    { key: 'prt02',      enabled: false, order: 3 },   // off -> not active, must not be nagged about
+  ] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
+  assert.deepEqual(Engine.unrankedActiveFields('UF1'), ['prt01'],
+    'colorWheel has ranks; prt02 is switched off; only the enabled-but-empty prt01 is reported');
+});
+
+test('unrankedActiveFields treats an EMPTY cache (failed fetch) as every active field unranked', () => {
+  // This is what lets OptimizeDialog.run() cover "ranks unavailable" with the
+  // same call as "nothing uploaded", including the case where a failed REFETCH
+  // wiped the cache while Persistence._rankMapsPlant still matched the plant.
+  Store.setMasterData({ plants: [{ plant: 'UF2', constraints: [
+    { key: 'prt01', enabled: true, order: 1 },
+    { key: 'prt02', enabled: true, order: 2 },
+  ] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({}, 'unit-test');
+  assert.deepEqual(Engine.unrankedActiveFields('UF2'), ['prt01', 'prt02']);
+  // A plant that sequences ONLY on non-color fields is exactly the case the old
+  // colorWheel-only gate stayed silent for.
+  assert.ok(!Engine.flattenConstraints('UF2').includes('colorWheel'));
+});
+
+test('unrankedActiveFields counts a per-LINE override as ranked (no plant-wide list required)', () => {
+  Store.setMasterData({ plants: [{ plant: 'UF3', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ L01: { prt01: { DOG: 1 } } }, 'unit-test');
+  assert.deepEqual(Engine.unrankedActiveFields('UF3'), [],
+    'a plant configured purely with per-line overrides must not be reported as unconfigured');
+});
+
+test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FORM_SIZE', () => {
+  // Never-configured plant: byte-identical to the hardcoded pair it replaces.
+  Store.setMasterData({ plants: [{ plant: 'CO1' }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.changeoverTaskFields('CO1'), ['COLOR', 'FORM_SIZE']);
+
+  // PRT-only plant: COLOR drops out (not sequenced on), FORM_SIZE stays because
+  // _sortTerms appends it in both grouping modes regardless.
+  Store.setMasterData({ plants: [{ plant: 'CO2', constraints: [
+    { key: 'prt01', enabled: true, order: 1, children: [{ key: 'prt02', enabled: true, order: 1 }] },
+  ] }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.changeoverTaskFields('CO2'), ['PRT_01', 'PRT_02', 'FORM_SIZE'],
+    'nested child included (tree-aware via flattenConstraints); FORM_SIZE appended once');
+
+  // An unregistered key contributes no field and must not throw.
+  Store.setMasterData({ plants: [{ plant: 'CO3', constraints: [{ key: 'legacyGone', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.changeoverTaskFields('CO3'), ['FORM_SIZE']);
+});
+
+test('_sortTerms skips the term for an unregistered key instead of adding a constant one', () => {
+  Store.setMasterData({ plants: [{ plant: 'DT1', constraints: [
+    { key: 'legacyGone', enabled: true, order: 1 },
+    { key: 'colorWheel', enabled: true, order: 2 },
+  ] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
+  // 'changeover' tail is [FORM_SIZE, MATERIAL_NUMBER, runHours] = 3 terms, so one
+  // priority term (colorWheel only) means 4 — not 5 with a dead one.
+  assert.equal(Engine._sortTerms('changeover', { plant: 'DT1' }).length, 4,
+    'an unregistered key must not contribute a term returning the same string for every task');
+});
+
+test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list', () => {
+  // Reachable state: the generic upload route rejects only a row-less file, so an
+  // override whose value column is entirely blank persists as {}. `??` does not
+  // bridge an empty object, so this used to rank every order on that line 999999
+  // while every other line ranked correctly.
+  Store.setMasterData({ plants: [{ plant: 'SH1', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: {} } }, 'unit-test');
+  const term = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
+  assert.equal(term.get({ COLOR: 'RED', PRODUCTION_LINE: 'L01' }), '0000004|RED',
+    'an empty override must not shadow the plant-wide rank');
+  assert.equal(term.get({ COLOR: 'RED', PRODUCTION_LINE: 'L02' }), '0000004|RED',
+    'unmapped line still resolves plant-wide (regression guard)');
+  // A NON-empty override must still win — the fix must not break line scoping.
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
+  const term2 = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
+  assert.equal(term2.get({ COLOR: 'RED', PRODUCTION_LINE: 'L01' }), '0000001|RED',
+    'a real line override must still beat the plant-wide list');
+});

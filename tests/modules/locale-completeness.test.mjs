@@ -42,6 +42,11 @@ test('Stage 3 priority-tree / effective-sequence ui.* keys exist in all 5 locale
     'ui.add_priority',
     'ui.all_fields_used',
     'ui.effective_sequence',
+    // Final-review fix wave: the generic (all-fields) replacements for the
+    // colorWheel-only 'ui.constraint_no_wheel' / 'modal.no_color_wheel_confirm_msg'
+    // pair, now that every registered priority field can be silently inert (N11).
+    'ui.constraint_no_list',
+    'modal.no_priority_ranks_confirm_msg',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED_STAGE3) {

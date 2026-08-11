@@ -141,7 +141,7 @@ window.__NIMBUS_LOCALES.en = {
   'modal.export_schema_desc':          'Every column currently in this database, as SQL. Safe to paste into schema.sql or a migrations file — each statement only changes something if it isn\'t already there.',
   'modal.paste_rows_title':            'Paste Rows',
   'modal.paste_rows_detail':           'Changes appear in the table but won\'t be saved until you click Save.',
-  'modal.no_color_wheel_confirm_msg':  'No color wheel found for plant {{plant}}.\n\nOptimize without color priority?',
+  'modal.no_priority_ranks_confirm_msg':  'No priority list is loaded for plant {{plant}}: {{fields}}.\n\nOptimize without those priorities?',
   'modal.delete_upload_history':       'Permanently delete all upload history?',
   'modal.clear_audit_log':             'Permanently clear the optimization & color wheel audit log?',
   'modal.purge_confirm':               'Permanently delete all orders with end_date between {{start}} and {{end}}?',
@@ -502,7 +502,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.constraints_sub':                'Choose which constraints the optimizer respects for this plant, and in what order. Disabled constraints are ignored; orders not covered by a constraint always sequence last — they are never dropped.',
   'ui.constraint_on':                  'Respected',
   'ui.constraint_off':                 'Ignored',
-  'ui.constraint_no_wheel':            'No color wheel uploaded for this plant — no effect until one is added.',
+  'ui.constraint_no_list':                'No priority list uploaded for this field — no effect until one is added.',
   'ui.move_up':                        'Move up',
   'ui.move_down':                      'Move down',
 

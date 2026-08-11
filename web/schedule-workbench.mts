@@ -6347,13 +6347,18 @@ export const OptimizeDialog = (() => {
 
   /** Does this plant have any colorWheel ranks the optimizer could apply?
    *  Delegates to Engine.hasPriorityRanks — the SHARED implementation, so this
-   *  badge / the "no color wheel" confirm below / Plant → System Settings'
-   *  "(no wheel)" note can never drift apart again. Reads the exact same
-   *  Store.priorityRankMaps that Engine._sortTerms' term factory reads, and
-   *  counts per-line overrides as well as the plant-wide list (Stage 3 replaced
-   *  the old `GET /color-wheel/{plant}` probe, which saw plant-wide lists only
-   *  and therefore mis-reported a plant configured purely with per-line
-   *  overrides). Callers must have ensured the cache is fresh for `_plant`. */
+   *  and Plant → System Settings' own hints can never drift apart. Reads the
+   *  exact same Store.priorityRankMaps that Engine._sortTerms' term factory
+   *  reads, and counts per-line overrides as well as the plant-wide list (Stage 3
+   *  replaced the old `GET /color-wheel/{plant}` probe, which saw plant-wide
+   *  lists only and therefore mis-reported a plant configured purely with
+   *  per-line overrides). Callers must have ensured the cache is fresh for
+   *  `_plant`.
+   *
+   *  Now colorWheel-specific for ONE remaining reason: the `wheel_used` field in
+   *  the optimization_run audit payload, which existing audit rows are keyed on.
+   *  The badge and the pre-Run confirm both moved to the all-fields
+   *  Engine.unrankedActiveFields — do not re-point either back here. */
   function _hasColorRanks(): boolean {
     return Engine.hasPriorityRanks('colorWheel');
   }
@@ -6380,7 +6385,7 @@ export const OptimizeDialog = (() => {
       return;
     }
 
-    setBadge('loading', '', 'Checking color wheel…');
+    setBadge('loading', '', 'Checking priority lists…');
     const token = ++_wheelFetchToken;
 
     // Prefetch this plant's priority rank maps so (a) the badge reflects what
@@ -6395,11 +6400,24 @@ export const OptimizeDialog = (() => {
       if (token !== _wheelFetchToken) return; // stale response — ignore
       if (Persistence._rankMapsPlant !== plant) {
         // Fetch resolved non-ok, or threw — cache is empty, not authoritative.
-        setBadge('warn', '○', 'Could not check wheel — optimizing without color priority');
-      } else if (_hasColorRanks()) {
-        setBadge('active', '✓', 'Color wheel is loaded');
+        setBadge('warn', '○', 'Could not check priority lists — optimizing without priority sequencing');
+        return;
+      }
+      // Reports on ALL of the plant's active priority fields, not colorWheel
+      // alone: on a plant that sequences by tooling this badge used to sit
+      // permanently on the ⚠ "no color wheel" state even with every PRT list
+      // loaded, and would now also contradict the (generalized) pre-Run confirm
+      // right next to it. Labels are plain strings here, as they were before —
+      // this badge's tooltips have never been routed through Util.t, and adding
+      // locale keys for them is a separate i18n pass.
+      const active   = Engine.activeConstraintKeys(plant);
+      const unranked = Engine.unrankedActiveFields(plant);
+      if (!active.length) {
+        setBadge('warn', '○', 'No priority fields enabled for this plant — optimizing on form/size and run time only');
+      } else if (!unranked.length) {
+        setBadge('active', '✓', `Priority lists loaded: ${active.map(k => Util.t(`constraint.${k}`)).join(' → ')}`);
       } else {
-        setBadge('warn', '○', 'No color wheel — will optimize without color priority');
+        setBadge('warn', '○', `No priority list for: ${unranked.map(k => Util.t(`constraint.${k}`)).join(', ')} — those priorities will have no effect`);
       }
     });
   }
@@ -6537,18 +6555,31 @@ export const OptimizeDialog = (() => {
       await Persistence.loadPriorityRankMaps(plant);
     }
     const ranksFresh = Persistence._rankMapsPlant === plant;
-    // Will color priority actually be applied? Read from the same rank maps the
-    // optimizer will read, and forced false when the fetch never succeeded — so
-    // the confirm below also covers "ranks unavailable" instead of letting that
-    // case sequence silently at 999999-for-everything.
+    // Kept for the audit payload's historical `wheel_used` field only — the
+    // gate below is no longer colorWheel-specific.
     const wheelUsed = ranksFresh && _hasColorRanks();
 
-    // Confirm only when the plant WANTS color (colorWheel constraint enabled)
-    // but no ranks are loaded. If the plant has switched color off, optimizing
-    // without it is intentional — don't nag.
-    const colorWheelOn = Engine.constraintEnabled(plant, 'colorWheel');
-    if (colorWheelOn && !wheelUsed && (_mode === 'changeover' || _mode === 'combined')) {
-      const ok = await Modal.confirm({ title: Util.t('modal.no_color_wheel_confirm_msg', { plant }) });
+    // Which of this plant's ACTIVE priority fields would rank nothing? Confirm
+    // when ANY of them would, not just colorWheel (N11,
+    // docs/scheduling_priority.md): since Stage 3 every field in the tree
+    // contributes a real sort term, so a plant that sequences purely on
+    // prt01/prt02/productionVersion can be just as silently inert as one with a
+    // missing wheel — and used to get no warning at all, including when the rank
+    // fetch failed outright. A field the plant has switched OFF is not active,
+    // so it is not in this list: optimizing without it is intentional, don't nag.
+    //
+    // unrankedActiveFields reads the same (possibly empty) cache the terms read,
+    // so a failed/non-ok fetch surfaces here as "every active field unranked"
+    // and needs no separate !ranksFresh branch. That also closes the case where
+    // a failed REFETCH wiped the cache while _rankMapsPlant still matched:
+    // ranksFresh was true, the old colorWheel probe found nothing, and the run
+    // went ahead unranked and unannounced.
+    const unrankedFields = Engine.unrankedActiveFields(plant);
+    if (unrankedFields.length && (_mode === 'changeover' || _mode === 'combined')) {
+      const names = unrankedFields.map(k => Util.t(`constraint.${k}`)).join(', ');
+      const ok = await Modal.confirm({
+        title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
+      });
       if (!ok) { OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
     }
 
@@ -6582,6 +6613,11 @@ export const OptimizeDialog = (() => {
         details: {
           mode: _mode, wheel_used: wheelUsed, task_count: Store.tasksArr.length,
           scope: _scope, lines: linesScope || null,
+          // `wheel_used` above is a colorWheel-only fact kept for continuity with
+          // existing audit rows; these two record what the run actually had to
+          // work with across ALL priority fields.
+          active_priority_fields: Engine.activeConstraintKeys(plant),
+          unranked_priority_fields: unrankedFields,
         },
       }),
     }).catch(() => {});
@@ -7652,10 +7688,15 @@ export const AlertsUIAdapter = {
     const scheduledH = cellTasks.reduce((s, t) => s + Util.runHours(t), 0);
     const effCap   = Calendar.effectiveCapacityHours(line, day) || 0;
     const utilPct  = effCap > 0 ? scheduledH / effCap : 0;
+    // Same field set as Util.countChangeovers / Engine._sortTerms — was a second
+    // hardcoded COLOR/FORM_SIZE copy, which reported 0 changeovers for a cell
+    // whose orders differ only in tooling on a plant that sequences by PRT.
+    const coFields = Util.changeoverFields();
     let changeovers = 0;
     for (let i = 1; i < cellTasks.length; i++) {
-      const a = cellTasks[i-1], b = cellTasks[i];
-      if ((a.COLOR || '') !== (b.COLOR || '') || (a.FORM_SIZE || '') !== (b.FORM_SIZE || '')) changeovers++;
+      const a = cellTasks[i-1] as unknown as Record<string, unknown>;
+      const b = cellTasks[i]   as unknown as Record<string, unknown>;
+      if (coFields.some(f => (a[f] || '') !== (b[f] || ''))) changeovers++;
     }
 
     // -------- Categorize alerts

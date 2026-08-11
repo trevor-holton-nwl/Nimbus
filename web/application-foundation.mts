@@ -147,24 +147,52 @@ export const Config = {
 /* =============================================================================
    UTIL — small pure helpers (no state, no DOM)
 
-   Three DI seams replace what used to be direct references from Util into
-   modules that stay in app.js (Store, Session, Utilization) — each defaults to
-   a safe no-op/fallback matching the original try/catch-swallowed behavior:
+   Four DI seams replace what used to be direct references from Util into
+   modules that stay in app.js (Store, Session, Utilization, Engine) — each
+   defaults to a safe no-op/fallback matching the original
+   try/catch-swallowed behavior:
      setPreferenceResolver(fn)   — feeds _timeFormatPref/_dateFormatPref (was Store.pref)
      setActorResolver(fn)        — feeds fetchTraced's x-user-email header (was Session.actor)
      setUtilizationResolver(fn)  — feeds scheduleKpis' peak-util lookup (was Utilization.computeMatrix)
+     setChangeoverFieldsResolver(fn) — feeds countChangeovers' field set
+                                   (Engine.changeoverTaskFields, which Util may
+                                   not import: Engine is the Domain layer)
    locale()/setLocale() replace the old `Util._locale` property so the active
    locale is proper module state instead of a bag property.
    ========================================================================== */
 let _prefResolver: PreferenceResolver = () => undefined;
 let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
+let _changeoverFieldsResolver: (() => string[]) | null = null;
 let _locale: string = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
+
+/** What counts as a changeover when no resolver is wired (Node tests, or before
+ *  app.js's boot glue runs): the historical hardcoded pair, so an unwired Util
+ *  behaves exactly as it did before this seam existed. */
+// Frozen because changeoverFields() hands this exact array out to public callers
+// (the alert cell-briefing reads it), and one stray push would corrupt the
+// fallback for the rest of the session.
+const _DEFAULT_CHANGEOVER_FIELDS: readonly string[] = Object.freeze(['COLOR', 'FORM_SIZE']);
 
 export const Util = {
   setPreferenceResolver(fn: PreferenceResolver): void { _prefResolver = typeof fn === 'function' ? fn : () => undefined; },
   setActorResolver(fn: ActorResolver): void { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
   setUtilizationResolver(fn: UtilizationResolverFn | null): void { _utilizationResolver = typeof fn === 'function' ? fn : null; },
+  setChangeoverFieldsResolver(fn: (() => string[]) | null): void { _changeoverFieldsResolver = typeof fn === 'function' ? fn : null; },
+
+  /** The task fields whose change between adjacent orders is a changeover, for
+   *  the plant currently being scheduled. Resolved through the injected seam so
+   *  this stays the SAME list `Engine._sortTerms` actually sequences on; falls
+   *  back to COLOR/FORM_SIZE when unwired. Exported (not just used internally)
+   *  so the alert cell-briefing's own adjacent-order count can share it rather
+   *  than keeping a second hardcoded copy. */
+  changeoverFields(): readonly string[] {
+    if (!_changeoverFieldsResolver) return _DEFAULT_CHANGEOVER_FIELDS;
+    try {
+      const f = _changeoverFieldsResolver();
+      return (Array.isArray(f) && f.length) ? f : _DEFAULT_CHANGEOVER_FIELDS;
+    } catch { return _DEFAULT_CHANGEOVER_FIELDS; }
+  },
   locale(): string { return _locale; },
   setLocale(lang: string): void { _locale = lang; },
 
@@ -499,7 +527,24 @@ export const Util = {
   },
 
   // Adjacent-order changeover count across the schedule, grouped by line.
-  // A "changeover" = neighbours differ in COLOR or FORM_SIZE.
+  // A "changeover" = neighbours differ in ANY of the fields the plant actually
+  // sequences on (Util.changeoverFields() -> Engine.changeoverTaskFields via the
+  // injected seam): every active priority field's task field, plus FORM_SIZE.
+  //
+  // Was hardcoded to COLOR/FORM_SIZE, which made this KPI blind to the three
+  // fields Stage 3 wired into the optimizer. Since this number is what the
+  // Optimizer Preview shows the planner to decide Apply vs Discard, a plant
+  // sequencing on PRT_01 saw a flat-or-worse count for a run that genuinely cut
+  // tooling changeovers — regrouping by tooling necessarily reshuffles colors —
+  // and was pushed toward discarding a correct optimization.
+  //
+  // Combination rule: ANY differing active field = ONE changeover. That is a
+  // straight generalization of the `COLOR !== COLOR || FORM_SIZE !== FORM_SIZE`
+  // it replaces (same "or", more operands), so a never-configured plant's count
+  // is unchanged. It deliberately does NOT sum per-field counts or weight by
+  // priority depth — a physical changeover between two orders is one event, and
+  // weighting needs the setup/teardown cost matrix that is 1-2 years out
+  // (docs/scheduling_priority.md, "PRT vs. cost").
   countChangeovers(tasks: NimbusTask[]): number {
     const byLine: Record<string, NimbusTask[]> = {};
     for (const t of tasks) {
@@ -507,12 +552,20 @@ export const Util = {
       const l = t.PRODUCTION_LINE || 'Unknown';
       (byLine[l] ||= []).push(t);
     }
+    const fields = Util.changeoverFields();
     let n = 0;
     for (const l of Object.keys(byLine)) {
       const sorted = byLine[l].sort((a, b) => Number(a.start_date) - Number(b.start_date));
       for (let i = 1; i < sorted.length; i++) {
-        const a = sorted[i - 1], b = sorted[i];
-        if ((a.COLOR || '') !== (b.COLOR || '') || (a.FORM_SIZE || '') !== (b.FORM_SIZE || '')) n++;
+        const a = sorted[i - 1] as unknown as Record<string, unknown>;
+        const b = sorted[i]     as unknown as Record<string, unknown>;
+        // `|| ''` (not `?? ''`), preserving the exact coercion the hardcoded
+        // COLOR/FORM_SIZE comparison used, so a blank/null/absent value stays
+        // equal to any other blank rather than becoming a changeover. Left as a
+        // raw compare rather than Util.norm: normalizing case/whitespace here
+        // would also be defensible (it is what _sortTerms does) but would shift
+        // every existing plant's baseline count, which is outside this fix.
+        if (fields.some(f => (a[f] || '') !== (b[f] || ''))) n++;
       }
     }
     return n;

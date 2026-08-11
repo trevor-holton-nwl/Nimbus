@@ -183,10 +183,21 @@ export const Store = {
    *  Persistence.loadPriorityRankMaps (schedule-data.mts) — this setter itself stays
    *  ignorant of which plant the maps belong to; that freshness tracking lives on the
    *  fetcher side as `Persistence._rankMapsPlant`, mirroring how `Persistence._currentLoadedPlant`
-   *  already tracks freshness for the sibling tasks/calendars cache rather than Store itself. */
-  setPriorityRankMaps(maps: PriorityRankMaps, source?: string): void {
+   *  already tracks freshness for the sibling tasks/calendars cache rather than Store itself.
+   *
+   *  Deliberately does NOT call `emit()` — the same rule, for the same reason,
+   *  as `setLastOptimize` above. `Store.subscribe` has one subscriber with no
+   *  event-type filter (`Persistence.autosave`, application-shell.mts), so any
+   *  emit here would schedule a full localStorage cache write and bump
+   *  `Store._rev` (invalidating `Utilization._cache`, whose memo key includes
+   *  `rev()`) on every rank load — including one per Optimize-dialog open and
+   *  one per Scheduling Constraints render, neither of which changes any
+   *  schedule data. Nothing subscribes to rank-map changes: every reader
+   *  (`Engine._sortTerms`' terms, `hasPriorityRanks`, `unrankedActiveFields`)
+   *  pulls on demand. `_source` is accepted only for signature symmetry with
+   *  the other setters, exactly as in `setLastOptimize`. */
+  setPriorityRankMaps(maps: PriorityRankMaps, _source?: string): void {
     this._state.priorityRankMaps = maps || {};
-    this.emit({ type: 'priority-rank-maps:updated', source });
   },
 
   /* ----- subscription ---------------------------------------------------- */

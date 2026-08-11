@@ -1087,17 +1087,54 @@ export const Engine = {
         .filter(c => Engine.constraintEnabled(plant, c.key))
         .map(c => c.key);
     }
+    return Engine._walkPriorityTree(tree).map(n => n.key);
+  },
+
+  /** THE tree walk — the single traversal `flattenConstraints` and
+   *  `effectiveConstraintPaths` both run, so "which key is in effect" and
+   *  "which NODE put it there" can never disagree. Returns the emitted nodes in
+   *  effective order, each tagged with its positional `path`
+   *  ("0", "0.2", "0.2.1" — index into the ORIGINAL sibling array at each
+   *  level, not into the order-sorted view, so a caller rendering the array can
+   *  address them directly).
+   *
+   *  Semantics, unchanged from the version that lived inline in
+   *  `flattenConstraints`: siblings walk in `order` (stable, `?? 99`); a
+   *  disabled node skips its ENTIRE subtree; a key already emitted is not
+   *  emitted again, but its children are still walked (a duplicate parent can
+   *  legitimately introduce a new child key). */
+  _walkPriorityTree(tree: ConstraintConfig[]): Array<{ key: string; path: string }> {
     const seen = new Set<string>();
-    const out: string[] = [];
-    const walk = (nodes: ConstraintConfig[]): void => {
-      for (const node of [...nodes].sort((a, b) => (a.order ?? 99) - (b.order ?? 99))) {
+    const out: Array<{ key: string; path: string }> = [];
+    const walk = (nodes: ConstraintConfig[], prefix: string): void => {
+      // Sort a index-carrying copy so `path` stays keyed to the caller's own
+      // array positions while traversal order follows `order`.
+      const indexed = nodes.map((node, i) => ({ node, i }));
+      indexed.sort((a, b) => (a.node.order ?? 99) - (b.node.order ?? 99));
+      for (const { node, i } of indexed) {
         if (!node.enabled) continue; // disabled -> whole subtree skipped
-        if (!seen.has(node.key)) { seen.add(node.key); out.push(node.key); }
-        if (node.children && node.children.length) walk(node.children);
+        const path = prefix ? `${prefix}.${i}` : String(i);
+        if (!seen.has(node.key)) { seen.add(node.key); out.push({ key: node.key, path }); }
+        if (node.children && node.children.length) walk(node.children, path);
       }
     };
-    walk(tree);
+    walk(tree, '');
     return out;
+  },
+
+  /** Positional paths of the nodes that are ACTUALLY in effect in `tree` —
+   *  i.e. exactly the occurrences `flattenConstraints` emits. Takes a tree
+   *  rather than a plant because its consumer (the Scheduling Constraints
+   *  "Effective sequence" panel) renders its own working copy of the tree, not
+   *  the persisted one, and needs per-NODE truth about that copy.
+   *
+   *  Exists because `flat.includes(key)` cannot answer "is THIS row the one in
+   *  effect?" when a key appears more than once: it credits whichever
+   *  occurrence is walked first, which for a disabled duplicate preceding an
+   *  enabled one is precisely backwards. */
+  effectiveConstraintPaths(tree: ConstraintConfig[] | null): Set<string> {
+    if (!tree || !tree.length) return new Set<string>();
+    return new Set(Engine._walkPriorityTree(tree).map(n => n.path));
   },
 
   /** Delegates to flattenConstraints — every existing caller (this file's
@@ -1169,6 +1206,49 @@ export const Engine = {
     return false;
   },
 
+  /** Which of this plant's ACTIVE priority fields would rank nothing — i.e.
+   *  are switched on in the tree but have no list loaded for them. The generic
+   *  form of the old "does this plant have a color wheel?" question (N11,
+   *  docs/scheduling_priority.md): every field in `flattenConstraints`' output
+   *  contributes a real sort term now, so every one of them can be silently
+   *  inert, not just colorWheel.
+   *
+   *  Reads the same `Store.priorityRankMaps` the terms read, so a cache that is
+   *  empty because the fetch FAILED yields "every active field unranked" —
+   *  which is the honest answer, and is what lets one call cover both
+   *  "nothing uploaded" and "ranks unavailable" for the pre-Run confirm.
+   *  Callers own cache freshness for the plant they pass
+   *  (`Persistence._rankMapsPlant`), same contract as `hasPriorityRanks`. */
+  unrankedActiveFields(plant: string | null): string[] {
+    return Engine.activeConstraintKeys(plant).filter(k => !Engine.hasPriorityRanks(k));
+  },
+
+  /** Task fields whose change between two adjacent orders constitutes a
+   *  changeover for this plant: every ACTIVE priority field's task field, plus
+   *  FORM_SIZE (which `_sortTerms` appends to the tail unconditionally in both
+   *  grouping modes, so form really is always part of what a run groups on).
+   *
+   *  The single source of truth for "what counts as a changeover", shared by
+   *  `Util.countChangeovers` (via the resolver app.js injects — Util is the
+   *  Foundation layer and must not import Engine) and the alert cell-briefing's
+   *  own count, so the optimizer's objective and every number reported about it
+   *  are derived from one list. For a never-configured plant this returns
+   *  ['COLOR', 'FORM_SIZE'] — byte-identical to the hardcoded pair it
+   *  replaces.
+   *
+   *  Reads `_fieldTaskFields` directly rather than through `_taskFieldFor`: an
+   *  unregistered key is a sequencing concern and `_taskFieldFor` warns about
+   *  it there, once per run. This runs on every KPI computation (twice per
+   *  optimizer preview, and on Dashboard renders), so routing it through the
+   *  warning path would turn one diagnostic into a flood of duplicates. */
+  changeoverTaskFields(plant: string | null): string[] {
+    const fields = Engine.activeConstraintKeys(plant)
+      .map(k => Engine._fieldTaskFields[k])
+      .filter(Boolean);
+    if (!fields.includes('FORM_SIZE')) fields.push('FORM_SIZE');
+    return fields;
+  },
+
   /** Ordered list of sort terms for a mode — single source of truth for
    *  optimizer ordering, shared by _comparator and runAndApply's decorate
    *  sort. Term-factory rewrite (Stage 3, seam 3): each active constraint key
@@ -1205,12 +1285,24 @@ export const Engine = {
       const terms: SortTerm[] = [];
       for (const key of Engine.activeConstraintKeys(plant ?? null)) {
         const taskField = Engine._taskFieldFor(key);
+        // No registered task field (_taskFieldFor already warned): pushing the
+        // term anyway would decorate every task, on every calendar day, with
+        // the SAME constant '0999999|' key — pure cost for a term that can
+        // never discriminate. Skip it instead.
+        if (!taskField) continue;
         terms.push({
           get: (t: NimbusTask): string => {
             const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
             const byLine = Store.priorityRankMaps || {};
             const line = t.PRODUCTION_LINE || '';
-            const scoped = byLine[line]?.[key] ?? byLine['']?.[key];
+            // An EMPTY line-scoped map must fall through to the plant-wide list,
+            // not shadow it: `??` only bridges null/undefined, and a stored
+            // override with zero entries ({} — reachable from an all-blank-value
+            // upload, which the generic upload route does not reject) is truthy.
+            // Left unguarded, one such override silently unranked every order on
+            // that line while every other line ranked correctly.
+            const lineScoped = byLine[line]?.[key];
+            const scoped = (lineScoped && Object.keys(lineScoped).length) ? lineScoped : byLine['']?.[key];
             const raw = scoped?.[v] ?? 999999;
             // Defensive floor on the SORT KEY, not on what gets stored or
             // uploaded: ranks are floats end to end (brain.py persists
@@ -1339,9 +1431,13 @@ export const Engine = {
       return true;
     };
 
-    // Phase-2 comparator: color -> form -> runHours -> material (tieBreakTerms,
-    // unchanged), due date then id as final tie-breaks so same-color/form items
-    // still land in a fully deterministic order among themselves.
+    // Phase-2 comparator: whatever `tieBreakTerms` holds, in its own order —
+    // since Stage 3 that is one ordinal term per ACTIVE priority field, in the
+    // plant's configured tree order (colorWheel is just one possible member, not
+    // a guaranteed first), followed by the intrinsic FORM_SIZE /
+    // MATERIAL_NUMBER / runHours tail. Then due date, then id, as final
+    // tie-breaks so items identical on every term still land in a fully
+    // deterministic order among themselves.
     const seqCompare = (a: any, b: any): number => {
       for (const tm of tieBreakTerms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
       const d = dueMs(a) - dueMs(b);

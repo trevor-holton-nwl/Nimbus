@@ -416,6 +416,34 @@ export const Plant = {
     Plant._renderRoster();
   },
 
+  /** Called by App once `GET /priority-fields` resolves (application-shell.mts),
+   *  so a late-arriving registry un-sticks a Scheduling Constraints pane that
+   *  rendered against the one-entry `Engine.CONSTRAINT_CATALOG` fallback.
+   *
+   *  This is not cosmetic. `_renderSettingsPane` is synchronous (R8) and
+   *  `renderConstraints`' add-picker gate is
+   *  `countConfiguredKeys(consTree) < Engine.CONSTRAINT_CATALOG.length` — with a
+   *  1-entry catalog that is false for any plant carrying even its default
+   *  `[colorWheel]` seed, so every "+ Add priority" / "+ Add sub-priority"
+   *  control renders DISABLED with Color Wheel as its only option. Nothing else
+   *  re-rendered the pane, so a slow or failed boot fetch left the tree
+   *  permanently unusable for the session with no recovery short of a page
+   *  reload. (A comment in App claimed this re-render already happened; it did
+   *  not.)
+   *
+   *  A direct method call rather than a Store event on purpose: `Store.emit`
+   *  reaches `Persistence.autosave`'s unfiltered subscriber, and this pane is the
+   *  only thing that needs waking — CLAUDE.md's "small public method" resolution
+   *  for a reverse-direction need. Guarded so it is a no-op unless that pane is
+   *  the one on screen; re-rendering it is otherwise identical to the user
+   *  clicking the sub-tab. */
+  onPriorityFieldsLoaded(): void {
+    const onSettingsPane = _activeTabResolvers.currentTab() === 'masterdata'
+      && _activeTabResolvers.currentMasterSub() === 'plant'
+      && Plant._currentPlantTab === 'settings';
+    if (onSettingsPane) Plant._renderSettingsPane();
+  },
+
   gotoTab(tab: string | undefined): void {
     if (!['general', 'optimization', 'settings'].includes(tab!)) return;
     const t = tab!;
@@ -1363,7 +1391,11 @@ export const Plant = {
     // is rejected server-side, so the UI must never offer to build one.
     const MAX_DEPTH = 3;
     let consTree: ConstraintConfig[] = [];
-    let _wheelPresent: boolean | null = null;  // null = unknown until the wheel probe returns
+    // null = unknown (the rank-map probe has not succeeded for this plant yet).
+    // Only `true` licenses the per-node "no list uploaded" hints below — see
+    // applyRankHints; asserting "no list" off a failed probe is exactly what the
+    // old `.catch(() => {})` avoided.
+    let _ranksLoaded: boolean | null = null;
 
     // Same escape used elsewhere in this file. Constraint keys are normally
     // backend-registry values, but plants.constraints JSONB stores whatever
@@ -1461,14 +1493,31 @@ export const Plant = {
       // (and reverts the whole tree if the write fails), so it converges
       // within one round trip and can never assert an edit that didn't land.
       const flat = Engine.flattenConstraints(plantName);
+      // Which NODES of the tree on screen are the occurrences that actually take
+      // effect — computed by Engine's own single tree walk (the very one
+      // flattenConstraints runs), keyed by positional path.
+      //
+      // This replaces a `flat.includes(key) && !seen.has(key)` test that could
+      // not distinguish two occurrences of the same key and so credited whichever
+      // came FIRST in tree order. With a disabled duplicate ahead of an enabled
+      // one — e.g. [prt01(on), colorWheel(OFF), prt02(on), colorWheel(on)],
+      // whose real optimizer order is prt01 -> prt02 -> colorWheel — it labelled
+      // the switched-OFF row "effective" (right beside its own Off toggle) and
+      // the switched-ON row "(no effect)": exactly backwards, in the one panel
+      // whose whole job is to tell the truth about the collapse.
+      const effectivePaths = Engine.effectiveConstraintPaths(consTree);
       const arrow = ` <span class="pl-seq-arrow">&rarr;</span> `;
-      const keysInTreeOrder: string[] = [];
-      const collect = (nodes: ConstraintConfig[]): void => {
-        for (const n of nodes) { keysInTreeOrder.push(n.key); if (n.children) collect(n.children); }
+      const nodesInTreeOrder: Array<{ key: string; path: string }> = [];
+      const collect = (nodes: ConstraintConfig[], prefix: string): void => {
+        nodes.forEach((n, i) => {
+          const path = prefix ? `${prefix}.${i}` : String(i);
+          nodesInTreeOrder.push({ key: n.key, path });
+          if (n.children) collect(n.children, path);
+        });
       };
-      collect(consTree);
+      collect(consTree, '');
 
-      if (!keysInTreeOrder.length) {
+      if (!nodesInTreeOrder.length) {
         // An empty tree is not necessarily "no constraints": for a plant with
         // nothing stored, flattenConstraints falls back to the catalog default
         // (colorWheel on) and the optimizer really does apply it. Show that
@@ -1479,12 +1528,12 @@ export const Plant = {
         return;
       }
 
-      const seen = new Set<string>();
-      seqPanelEl.innerHTML = keysInTreeOrder.map(key => {
-        // Not effective => either the node (or an ancestor) is switched off,
-        // or an earlier occurrence of the same key already claimed the slot.
-        const isEffective = flat.includes(key) && !seen.has(key);
-        if (isEffective) seen.add(key);
+      seqPanelEl.innerHTML = nodesInTreeOrder.map(({ key, path }) => {
+        // Not effective => this node (or an ancestor) is switched off, or another
+        // reachable occurrence of the same key already claimed the slot, or the
+        // key is not in the PERSISTED tree yet (an unsaved add — `flat` is the
+        // persisted collapse, so a pending edit can never claim to be in force).
+        const isEffective = effectivePaths.has(path) && flat.includes(key);
         return `<span class="pl-seq-chip${isEffective ? '' : ' pl-seq-chip-noeffect'}">${esc(_label(key))}`
              + `${isEffective ? '' : ` <em>(${esc(Util.t('ui.no_effect'))})</em>`}</span>`;
       }).join(arrow);
@@ -1518,7 +1567,13 @@ export const Plant = {
 
       const renderNode = (node: ConstraintConfig, siblings: ConstraintConfig[], depth: number, path: string): string => {
         const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === node.key);
-        const noWheel = (node.key === 'colorWheel' && _wheelPresent === false);
+        // "Enabled but no list uploaded", for EVERY rankable field, not just
+        // colorWheel (N11, docs/scheduling_priority.md). Since Stage 3 every
+        // enabled node contributes a real sort term, so any of them can be
+        // silently inert. Gated on `_ranksLoaded === true` so a failed probe
+        // shows nothing rather than asserting "no list", and on node.enabled
+        // because a switched-off row's missing list is not a problem to flag.
+        const noList = (_ranksLoaded === true && node.enabled && !Engine.hasPriorityRanks(node.key));
         const idx = siblings.indexOf(node);
         // At the deepest allowed level the add-child control is omitted
         // outright rather than rendered disabled — there is no honest tooltip
@@ -1538,7 +1593,7 @@ export const Plant = {
             </div>
             <div class="cons-meta">
               <div class="cons-label">${esc(_label(node.key))}</div>
-              <div class="cons-desc">${cat?.desc || ''}${noWheel ? ` <span class="cons-warn">${esc(Util.t('ui.constraint_no_wheel'))}</span>` : ''}</div>
+              <div class="cons-desc">${cat?.desc || ''}${noList ? ` <span class="cons-warn">${esc(Util.t('ui.constraint_no_list'))}</span>` : ''}</div>
             </div>
             <label class="cons-toggle">
               <input type="checkbox" ${node.enabled ? 'checked' : ''}>
@@ -1683,31 +1738,31 @@ export const Plant = {
     (function initConstraints() {
       rebuildConsTreeFromPersisted();
       renderConstraints();
-      // Whether a wheel is actually uploaded (hint only — the toggle works
-      // regardless, since enabling color with no list is a harmless no-op:
-      // every rank lookup just returns 999999).
+      // Whether each enabled field actually has a list uploaded (hint only — the
+      // toggles work regardless, since enabling a field with no list is a
+      // harmless no-op: every rank lookup just returns 999999).
       //
       // Stage 3: reads the same Store.priorityRankMaps that Engine._sortTerms
       // ranks from, via the shared Engine.hasPriorityRanks, instead of the old
       // plant-wide-only `GET /color-wheel/{plant}` probe. Two reasons: this hint
-      // and OptimizeDialog's wheel badge / pre-Run confirm were two independent
-      // readings of "does this plant have a color wheel" that could disagree,
-      // and the narrow probe mis-reported a plant configured purely with
-      // per-line colorWheel overrides as having none. `plantName` is
-      // Store.selectedPlant (see above), so the shared non-plant-keyed cache is
-      // always the right one to read here.
+      // and OptimizeDialog's badge / pre-Run confirm were two independent
+      // readings of "does this plant have a list" that could disagree, and the
+      // narrow probe mis-reported a plant configured purely with per-line
+      // overrides as having none. `plantName` is Store.selectedPlant (see above),
+      // so the shared non-plant-keyed cache is always the right one to read here.
+      //
+      // One flag for the whole tree, not one per field: `_ranksLoaded` records
+      // only whether the CACHE is trustworthy; renderNode then asks
+      // Engine.hasPriorityRanks per node, so a field added to the tree later in
+      // this same session picks its hint up on the next render with no refetch.
       if (plantName) {
-        const applyWheelHint = () => {
-          // Leave _wheelPresent null (hint hidden) when the fetch never
-          // succeeded — "unknown" is the honest state, and asserting
-          // "(no wheel)" off a failed probe is exactly what the old
-          // `.catch(() => {})` avoided.
+        const applyRankHints = () => {
           if (Persistence._rankMapsPlant !== plantName) return;
-          _wheelPresent = Engine.hasPriorityRanks('colorWheel');
+          _ranksLoaded = true;
           renderConstraints();
         };
-        if (Persistence._rankMapsPlant === plantName) applyWheelHint();
-        else Persistence.loadPriorityRankMaps(plantName).then(applyWheelHint);
+        if (Persistence._rankMapsPlant === plantName) applyRankHints();
+        else Persistence.loadPriorityRankMaps(plantName).then(applyRankHints);
       }
     })();
   },

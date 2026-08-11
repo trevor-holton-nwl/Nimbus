@@ -141,7 +141,7 @@ window.__NIMBUS_LOCALES.es = {
   'modal.export_schema_desc':          'Todas las columnas actuales de esta base de datos, como SQL. Seguro para pegar en schema.sql o un archivo de migración — cada instrucción solo cambia algo si aún no existe.',
   'modal.paste_rows_title':            'Pegar filas',
   'modal.paste_rows_detail':           'Los cambios aparecen en la tabla pero no se guardarán hasta que haga clic en Guardar.',
-  'modal.no_color_wheel_confirm_msg':  'No se encontró rueda de colores para la planta {{plant}}.\n\n¿Optimizar sin prioridad de color?',
+  'modal.no_priority_ranks_confirm_msg':  'No hay lista de prioridad cargada para la planta {{plant}}: {{fields}}.\n\n¿Optimizar sin esas prioridades?',
   'modal.delete_upload_history':       '¿Eliminar permanentemente todo el historial de cargas?',
   'modal.clear_audit_log':             '¿Borrar permanentemente el registro de auditoría de optimización y ruedas de colores?',
   'modal.purge_confirm':               '¿Eliminar permanentemente todos los pedidos con fecha_fin entre {{start}} y {{end}}?',
@@ -370,7 +370,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.constraints_sub':                'Elija qué restricciones respeta el optimizador para esta planta y en qué orden. Las restricciones desactivadas se ignoran; las órdenes no cubiertas por una restricción siempre se programan al final — nunca se descartan.',
   'ui.constraint_on':                  'Respetada',
   'ui.constraint_off':                 'Ignorada',
-  'ui.constraint_no_wheel':            'No hay rueda de colores cargada para esta planta: sin efecto hasta que se agregue una.',
+  'ui.constraint_no_list':                'No hay lista de prioridad cargada para este campo: sin efecto hasta que se agregue una.',
   'ui.move_up':                        'Subir',
   'ui.move_down':                      'Bajar',
 

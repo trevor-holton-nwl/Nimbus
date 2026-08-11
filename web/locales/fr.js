@@ -140,7 +140,7 @@ window.__NIMBUS_LOCALES.fr = {
   'modal.export_schema_desc':          "Toutes les colonnes actuellement présentes dans cette base de données, sous forme de SQL. Peut être collé en toute sécurité dans schema.sql ou un fichier de migration — chaque instruction ne modifie quelque chose que si ce n'est pas déjà présent.",
   'modal.paste_rows_title':            'Coller des lignes',
   'modal.paste_rows_detail':           'Les modifications apparaissent dans le tableau mais ne seront pas enregistrées avant de cliquer sur Enregistrer.',
-  'modal.no_color_wheel_confirm_msg':  'Aucune roue de couleurs trouvée pour l\'usine {{plant}}.\n\nOptimiser sans priorité de couleur ?',
+  'modal.no_priority_ranks_confirm_msg':  'Aucune liste de priorité chargée pour l\'usine {{plant}} : {{fields}}.\n\nOptimiser sans ces priorités ?',
   'modal.delete_upload_history':       'Supprimer définitivement tout l\'historique des chargements ?',
   'modal.clear_audit_log':             'Effacer définitivement le journal d\'audit d\'optimisation et de roues de couleurs ?',
   'modal.purge_confirm':               'Supprimer définitivement tous les ordres avec date_fin entre {{start}} et {{end}} ?',
@@ -366,7 +366,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.constraints_sub':                'Choisissez quelles contraintes l\'optimiseur respecte pour cette usine, et dans quel ordre. Les contraintes désactivées sont ignorées ; les ordres non couverts par une contrainte sont toujours planifiés en dernier — ils ne sont jamais supprimés.',
   'ui.constraint_on':                  'Respectée',
   'ui.constraint_off':                 'Ignorée',
-  'ui.constraint_no_wheel':            'Aucune roue chromatique chargée pour cette usine — sans effet tant qu\'aucune n\'est ajoutée.',
+  'ui.constraint_no_list':                'Aucune liste de priorité chargée pour ce champ — sans effet tant qu\'aucune n\'est ajoutée.',
   'ui.move_up':                        'Monter',
   'ui.move_down':                      'Descendre',
 

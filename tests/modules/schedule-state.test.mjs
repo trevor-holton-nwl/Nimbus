@@ -47,13 +47,26 @@ test('Store exposes priorityRankMaps state and setter', () => {
   assert.deepEqual(Store.priorityRankMaps, { '': { colorWheel: { RED: 1 } } });
 });
 
-test('Store.setPriorityRankMaps emits priority-rank-maps:updated and null-guards its argument', () => {
+test('Store.setPriorityRankMaps null-guards its argument and deliberately emits NOTHING', () => {
+  // Contract changed in Stage 3's final-review fix wave (2026-08-11): this setter
+  // used to emit 'priority-rank-maps:updated'. It must not. Store.subscribe has
+  // one subscriber with no event-type filter (Persistence.autosave,
+  // application-shell.mts), so ANY emit here schedules a full localStorage cache
+  // write and bumps Store._rev — invalidating Utilization._cache, whose memo key
+  // includes rev() — on every rank load, including one per Optimize-dialog open
+  // and one per Scheduling Constraints render, neither of which changes schedule
+  // data. Same rule, same reason, as setLastOptimize's own no-emit comment.
+  // Nothing subscribes to rank-map changes; every reader pulls on demand.
   const events = [];
   const off = Store.subscribe(evt => events.push(evt.type));
+  const revBefore = Store.rev();
   Store.setPriorityRankMaps(null);
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
   off();
-  assert.deepEqual(Store.priorityRankMaps, {});
-  assert.deepEqual(events, ['priority-rank-maps:updated']);
+  assert.deepEqual(Store.priorityRankMaps, { '': { colorWheel: { RED: 1 } } });
+  assert.deepEqual(events, [], 'no Store event may be emitted for a rank-map write');
+  assert.equal(Store.rev(), revBefore, 'Store._rev must not move — it gates Utilization memo validity');
+  Store.setPriorityRankMaps({}, 'unit-test'); // reset
 });
 
 test('Store.setAllowedPlantsResolver scopes knownPlants()', () => {

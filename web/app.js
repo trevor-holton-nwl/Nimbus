@@ -302,6 +302,14 @@ const NIMBUS = (function () {
   Util.setPreferenceResolver(key => Store.pref(key));
   Util.setActorResolver(() => Session.actor());
   Util.setUtilizationResolver((from, days, tasks) => Utilization.computeMatrix(from, days, tasks));
+  // What counts as a changeover follows the plant's OWN active priority fields
+  // (Stage 3), not a hardcoded COLOR/FORM_SIZE pair — so the Optimizer Preview's
+  // changeover KPI measures the same thing Engine._sortTerms sequences on.
+  // Resolved off Store.selectedPlant with no argument for the same reason
+  // Engine.hasPriorityRanks takes no plant: every runAndApply caller's effective
+  // plant IS Store.selectedPlant, and the KPI is always about the run in front
+  // of the user.
+  Util.setChangeoverFieldsResolver(() => Engine.changeoverTaskFields(Store.selectedPlant));
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
   ErrorLog.setAdminGate(() => Session.isAdmin());

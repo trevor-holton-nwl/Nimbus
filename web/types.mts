@@ -246,7 +246,11 @@ export type StoreEventType =
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
-  | 'priority-rank-maps:updated'
+  // NOTE: no 'priority-rank-maps:updated' member. Store.setPriorityRankMaps
+  // deliberately does not emit (see its comment in schedule-state.mts), and the
+  // late-arriving /priority-fields registry re-render is a direct
+  // Plant.onPriorityFieldsLoaded() call rather than a broadcast — precisely so
+  // neither path trips Persistence.autosave's unfiltered subscriber.
   /** Wholesale *:replace variants, e.g. 'tasks:replace'. */
   | `${string}:replace`;
 
