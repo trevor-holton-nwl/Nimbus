@@ -118,7 +118,18 @@ export interface ConstraintConfig {
   key: string;
   enabled: boolean;
   order?: number;
+  /** Stage 3: a field nested under a field is mathematically identical to the
+   *  next key in a lexicographic sort (docs/scheduling_priority.md "Sub-sort
+   *  model" decision) — Engine.flattenConstraints (Task 4) turns this into the
+   *  same flat key list _sortTerms already consumes. Purely additive: cached
+   *  `plants` rows with no `children` still parse as leaf nodes, so this is
+   *  NOT a SCHEMA_VERSION bump (N17). */
+  children?: ConstraintConfig[];
 }
+
+/** {field_key: {line|'': {NORMALIZED_VALUE: RANK}}} — GET /priority-rank-maps
+ *  response, cached on Store and read by Engine._sortTerms. */
+export type PriorityRankMaps = Record<string, Record<string, Record<string, number>>>;
 
 /** GET /priority-fields row. */
 export interface PriorityFieldMeta {
