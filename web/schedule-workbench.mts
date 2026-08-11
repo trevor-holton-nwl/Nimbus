@@ -7475,8 +7475,16 @@ export const PriorityListViewer = (() => {
   // override rows carry a line, and previewing one without threading it
   // through would always 404-fall-back to the plant-wide list (or "no list"
   // if there isn't one), even though the override upload itself succeeded.
+  // The colorWheel delegate to ColorWheelViewer's own richer swatch renderer
+  // only applies to the plant-wide case (no line) — ColorWheelViewer.open
+  // takes no line param and the legacy /color-wheel/{plant} route it calls
+  // only ever reads line=""; a colorWheel line override falls through to
+  // this module's own generic value/rank renderer instead, the same path
+  // every other field's line override already uses, so the preview actually
+  // reflects the override's data instead of silently showing the plant-wide
+  // wheel.
   function open(plant: string, fieldKey: string, line: string = '') {
-    if (fieldKey === 'colorWheel') { ColorWheelViewer.open(plant); return; }
+    if (fieldKey === 'colorWheel' && !line) { ColorWheelViewer.open(plant); return; }
     _plant = plant; _fieldKey = fieldKey; _line = line; _search = '';
     const el = document.getElementById('modal-priority-viewer');
     if (!el) return;
@@ -7502,8 +7510,14 @@ export const PriorityListViewer = (() => {
     if (nameEl)  nameEl.textContent  = _plant || '—';
     if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading')}</div>`;
 
+    // Util.fetchTraced (not bare fetch) — GET /priority-list/{plant}/{field_key}
+    // isn't admin-gated, but it does call _assert_plant_allowed server-side
+    // (brain.py:1943) to scope by the caller's role_plants; with no identity
+    // header a plant-restricted user could preview ANY plant's priority
+    // list, not just plants they're allowed to see (same class of bug as
+    // plant-and-administration.mts's fetch trio, just in a different file).
     const qs = _line ? `?line=${encodeURIComponent(_line)}` : '';
-    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}${qs}`,
+    Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}${qs}`,
           { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PriorityListResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {
