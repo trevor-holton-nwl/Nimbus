@@ -108,10 +108,10 @@ interface DayByLineRow {
 
 /** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
  *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
- *  different key types (number for runHours/colorMap, string for
- *  FORM_SIZE/MATERIAL_NUMBER) can share one array type without fighting
- *  strict-mode function-parameter variance. Precision here is intentionally
- *  deferred to a future Engine-focused phase. */
+ *  different key types (number for runHours, string for the padded
+ *  rank|value priority keys / FORM_SIZE / MATERIAL_NUMBER) can share one array
+ *  type without fighting strict-mode function-parameter variance. Precision
+ *  here is intentionally deferred to a future Engine-focused phase. */
 interface SortTerm {
   get(t: NimbusTask): number | string;
   cmp(a: any, b: any): number;
@@ -943,17 +943,29 @@ Store.subscribe(evt => {
    ========================================================================== */
 export const Engine = {
   /* ----- Per-plant switchable constraints (phased registry) -------------
-     CONSTRAINT_CATALOG is the single place a constraint type is declared.
-     Today only 'colorWheel' maps to an optimizer sort term; tooling and
-     others will be added here + given a term in _sortTerms when their data
-     exists. Per-plant config (which constraints are enabled, in what order)
-     lives in plants.constraints JSONB, surfaced on
+     CONSTRAINT_CATALOG declares which fields are rankable; every enabled key
+     gets an optimizer sort term generically (see _sortTerms). Per-plant config
+     (which constraints are enabled, in what order, and — Stage 3 — nested
+     under which parent) lives in plants.constraints JSONB, surfaced on
      Store.masterData.plants[*].constraints. */
+
+  /** Now sourced dynamically from GET /priority-fields (App boot, cached here
+   *  as the offline/loading-state fallback — R8). Order matches the backend
+   *  registry (master_data.RANKABLE_FIELDS' declaration order). */
   CONSTRAINT_CATALOG: [
     { key: 'colorWheel', label: 'Color wheel',
       desc: 'Sequence orders by color-wheel priority to minimize color changeovers.' },
-    // { key: 'tooling', label: 'Tooling', desc: '...' },  // added when the attribute exists
   ] as Array<{ key: string; label: string; desc: string }>,
+
+  /** Called once at boot (after GET /priority-fields resolves) to replace the
+   *  hardcoded single-entry fallback above with the real registry. Safe to
+   *  call multiple times (e.g. on /reload). */
+  setConstraintCatalog(fields: Array<{ field_key: string; default_label: string }>): void {
+    if (!fields || !fields.length) return; // keep the offline fallback rather than emptying the list
+    Engine.CONSTRAINT_CATALOG = fields.map(f => ({
+      key: f.field_key, label: f.default_label, desc: '',
+    }));
+  },
 
   /** Ordered constraint config stored for a plant, or null if never configured. */
   constraintsFor(plant: string | null): ConstraintConfig[] | null {
@@ -963,7 +975,7 @@ export const Engine = {
   },
 
   /** Is a given constraint enabled for this plant? Unconfigured default:
-   *  colorWheel ON (a no-op when the plant has no wheel — every lookup then
+   *  colorWheel ON (a no-op when the plant has no list — every lookup then
    *  returns 999999), everything else OFF. So "respect a wheel where one
    *  exists" emerges without a synchronous wheel probe in the optimizer. */
   constraintEnabled(plant: string | null, key: string): boolean {
@@ -972,27 +984,103 @@ export const Engine = {
     return key === 'colorWheel';
   },
 
-  /** Enabled constraint keys for a plant, in configured order (defaults applied). */
-  activeConstraintKeys(plant: string | null): string[] {
-    const list = Engine.constraintsFor(plant);
-    if (Array.isArray(list) && list.length) {
-      return list.filter(c => c.enabled)
-                 .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
-                 .map(c => c.key);
+  /** Pre-order DFS flatten of the (possibly nested) constraint tree — a field
+   *  nested under a field is mathematically identical to the next key in a
+   *  lexicographic sort (docs/scheduling_priority.md "Sub-sort model"
+   *  decision), so this is the ONLY tree-aware function in the optimizer;
+   *  every existing caller of activeConstraintKeys (including _sortTerms)
+   *  gets tree support for free. A disabled node skips its ENTIRE subtree
+   *  (an unreachable priority is not "half-configured," it's off). An
+   *  already-emitted key is skipped on a later occurrence (duplicates
+   *  collapse — the UI marks these "(no effect)"). Falls back to the flat
+   *  CONSTRAINT_CATALOG default (today: colorWheel only) when the plant has
+   *  no stored tree at all, matching activeConstraintKeys' old behavior
+   *  exactly for a never-configured plant. */
+  flattenConstraints(plant: string | null): string[] {
+    const tree = Engine.constraintsFor(plant);
+    if (!tree || !tree.length) {
+      return Engine.CONSTRAINT_CATALOG
+        .filter(c => Engine.constraintEnabled(plant, c.key))
+        .map(c => c.key);
     }
-    return Engine.CONSTRAINT_CATALOG
-      .filter(c => Engine.constraintEnabled(plant, c.key))
-      .map(c => c.key);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const walk = (nodes: ConstraintConfig[]): void => {
+      for (const node of [...nodes].sort((a, b) => (a.order ?? 99) - (b.order ?? 99))) {
+        if (!node.enabled) continue; // disabled -> whole subtree skipped
+        if (!seen.has(node.key)) { seen.add(node.key); out.push(node.key); }
+        if (node.children && node.children.length) walk(node.children);
+      }
+    };
+    walk(tree);
+    return out;
   },
 
-  /** Ordered list of sort terms for a mode — the single source of truth for
+  /** Delegates to flattenConstraints — every existing caller (this file's
+   *  _sortTerms, and anything else that asked "which constraints are active,
+   *  in order") picks up tree support with no call-site change. */
+  activeConstraintKeys(plant: string | null): string[] {
+    return Engine.flattenConstraints(plant);
+  },
+
+  /** Reads the task field a rankable key maps to. Sourced from the same
+   *  GET /priority-fields registry as setConstraintCatalog — cached
+   *  alongside it so this stays a pure lookup, no fetch.
+   *
+   *  The four known mappings are hardcoded as the offline fallback (the same
+   *  pattern CONSTRAINT_CATALOG already uses) and the registry MERGES over
+   *  them rather than replacing them, because a `key.toUpperCase()` guess is
+   *  wrong for 3 of the 4 ('prt01' -> 'PRT01', not 'PRT_01';
+   *  'productionVersion' -> 'PRODUCTIONVERSION', not 'PRODUCTION_VERSION').
+   *  That path is reachable: flattenConstraints sources keys from the plant's
+   *  STORED tree (Store.masterData), not from CONSTRAINT_CATALOG, so a plant
+   *  with prt01 configured emits that key whether or not the /priority-fields
+   *  fetch ever resolved (it has a `.catch(() => {})`). A wrong guess would
+   *  make Util.norm(t['PRT01']) === '' -> rank 999999 for every order:
+   *  configured, inert, silent. */
+  _fieldTaskFields: {
+    colorWheel:        'COLOR',
+    prt01:             'PRT_01',
+    prt02:             'PRT_02',
+    productionVersion: 'PRODUCTION_VERSION',
+  } as Record<string, string>,
+
+  _taskFieldFor(key: string): string {
+    const f = Engine._fieldTaskFields[key];
+    if (f) return f;
+    // No known mapping: warn rather than guess a field name that will
+    // silently resolve to undefined for every order.
+    ErrorLog.warn('engine', `No task field registered for priority field "${key}" — orders will not rank on it.`, { key });
+    return '';
+  },
+
+  setFieldTaskFields(fields: Array<{ field_key: string; task_field: string }>): void {
+    if (!fields || !fields.length) return; // keep the offline fallback
+    for (const f of fields) {
+      if (f.field_key && f.task_field) Engine._fieldTaskFields[f.field_key] = f.task_field;
+    }
+  },
+
+  /** Ordered list of sort terms for a mode — single source of truth for
    *  optimizer ordering, shared by _comparator and runAndApply's decorate
-   *  sort (so the two can no longer drift). Each term is
-   *  { get(task)->key, cmp(keyA,keyB)->number }. The colorWheel term is
-   *  included only when that constraint is enabled for the plant, which is
-   *  what makes the wheel switchable per plant. */
-  _sortTerms(mode: string, opts: { plant?: string | null; colorMap?: Record<string, number> | null } = {}): SortTerm[] {
-    const { plant, colorMap } = opts;
+   *  sort. Term-factory rewrite (Stage 3, seam 3): each active constraint key
+   *  (from flattenConstraints, so tree-aware for free) gets an ordinal term
+   *  reading Store.priorityRankMaps — no more single hardcoded colorWheel
+   *  branch, and ORDER_Y is no longer consulted at all. Key encoding is
+   *  pad(rank,7)+'|'+value (N12): a fixed-width zero-padded rank so
+   *  equal/unranked values GROUP by value instead of interleaving (999999
+   *  unranked sorts after any real rank; two orders both at 999999 still sort
+   *  deterministically against each other by value). One scalar string key
+   *  keeps _dispatchDayIntegrity's Schwartzian decorate allocation-free (R11)
+   *  — same shape as before, just built generically instead of only for color.
+   *
+   *  opts.plant selects which plant's constraint tree applies. The line scope
+   *  is resolved PER TASK inside each term's get(), off the task's *current*
+   *  PRODUCTION_LINE (line override winning over plant-wide, ''), which is
+   *  what makes a cross-line drag or an Orders-grid line edit picked up with
+   *  no refetch (the N2 fix — see docs/scheduling_priority.md's Seam 1). */
+  _sortTerms(mode: string, opts: { plant?: string | null } = {}): SortTerm[] {
+    const { plant } = opts;
     const numCmp = (a: number, b: number) => a - b;
     const strCmp = (a: string, b: string) => a.localeCompare(b);
 
@@ -1002,18 +1090,23 @@ export const Engine = {
     if (mode === 'changeover' || mode === 'combined') {
       // 'changeover' groups identical attributes adjacently to minimize setups;
       // 'combined' keeps that grouping but runs the shortest job first within
-      // each group (SPT). Domain constraints (color now, tooling later) come
-      // FIRST, in the plant's configured order; the intrinsic form / material /
+      // each group (SPT). Domain constraints come FIRST, in the plant's
+      // configured (now possibly nested) order; the intrinsic form / material /
       // hours heuristic always follows as the tail.
       const terms: SortTerm[] = [];
       for (const key of Engine.activeConstraintKeys(plant ?? null)) {
-        if (key === 'colorWheel') {
-          terms.push({
-            get: (t: NimbusTask) => colorMap ? (colorMap[Util.norm(t.COLOR)] ?? 999999) : (t.ORDER_Y ?? 999999),
-            cmp: numCmp,
-          });
-        }
-        // future: if (key === 'tooling') terms.push({ get: ..., cmp: ... });
+        const taskField = Engine._taskFieldFor(key);
+        terms.push({
+          get: (t: NimbusTask): string => {
+            const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
+            const byLine = Store.priorityRankMaps || {};
+            const line = t.PRODUCTION_LINE || '';
+            const scoped = byLine[line]?.[key] ?? byLine['']?.[key];
+            const rank = scoped?.[v] ?? 999999;
+            return String(rank).padStart(7, '0') + '|' + v;
+          },
+          cmp: strCmp,
+        });
       }
       terms.push({ get: (t: NimbusTask) => Util.norm(t.FORM_SIZE), cmp: strCmp });
       if (mode === 'combined') {
@@ -1034,7 +1127,7 @@ export const Engine = {
    *  color/form-grouping order — runAndApply no longer uses it for either
    *  mode; see _dispatchDayIntegrity for the actual (day-integrity, tiered
    *  admit-then-resequence) logic. */
-  _comparator(mode: string, opts: { plant?: string | null; colorMap?: Record<string, number> | null } = {}): (a: NimbusTask, b: NimbusTask) => number {
+  _comparator(mode: string, opts: { plant?: string | null } = {}): (a: NimbusTask, b: NimbusTask) => number {
     const terms = Engine._sortTerms(mode, opts);
     return (a, b) => {
       for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
@@ -1321,8 +1414,10 @@ export const Engine = {
 
   /** Main optimiser. Groups by line, optionally respects fixed + calendar.
    *  Writes results through Store.
-   *  opts.plant restricts to lines belonging to that plant.
-   *  opts.colorMap pre-fetched color→order_y priority map from plant wheel. */
+   *  opts.plant restricts to lines belonging to that plant. Priority ranks are
+   *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
+   *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
+   *  and every caller's effective plant IS Store.selectedPlant. */
   runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): void {
     const _pmT0e = performance.now();
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
@@ -1332,7 +1427,6 @@ export const Engine = {
       Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
       return;
     }
-    const colorMap        = (opts.colorMap as Record<string, number> | null | undefined) ?? null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
@@ -1342,7 +1436,7 @@ export const Engine = {
     // behavior exactly, while making Engine genuinely DOM-free.
     const respectFixed    = (opts.respectFixed as boolean | undefined)    ?? true;
     const respectCalendar = (opts.respectCalendar as boolean | undefined) ?? true;
-    const sortTerms = Engine._sortTerms(mode, { plant, colorMap });
+    const sortTerms = Engine._sortTerms(mode, { plant });
 
     const horizonStart = opts.startDate
       ? new Date(opts.startDate as string | number | Date)
@@ -1408,7 +1502,7 @@ export const Engine = {
       if (mode === 'combined' || mode === 'changeover') {
         // Day-integrity, tiered admit-then-resequence dispatch — see
         // Engine._dispatchDayIntegrity. sortTerms here already IS
-        // Engine._sortTerms(mode, { plant, colorMap }), so it doubles as both
+        // Engine._sortTerms(mode, { plant }), so it doubles as both
         // the pull-in/floater tie-break and the phase-2 color/form sequencer.
         patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
           respectCalendar, tieBreakTerms: sortTerms, mode,

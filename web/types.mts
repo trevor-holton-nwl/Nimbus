@@ -130,8 +130,8 @@ export interface ConstraintConfig {
 /** {line_or_empty: {field_key: {NORMALIZED_VALUE: RANK}}} — matches
  *  brain.PLANT_LISTS' native shape verbatim (GET /priority-rank-maps does no
  *  reshaping, since it's on the optimizer's hot path). Line-first because
- *  Engine._valueOf's caller resolves "this order's line, else plant-wide"
- *  before it knows which field it's looking up. */
+ *  Engine._sortTerms' per-task term resolves "this order's line, else
+ *  plant-wide" before it knows which field it's looking up. */
 export type PriorityRankMaps = Record<string, Record<string, Record<string, number>>>;
 
 /** GET /priority-fields row. */
@@ -235,9 +235,9 @@ export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' 
 
 export type StoreMode = 'live' | 'draft';
 
-/** Widened in Stage 2 — all four RANKABLE_FIELDS keys now exist as upload
- *  targets, even though only 'colorWheel' is wired into Engine._sortTerms
- *  until Stage 3. */
+/** Widened in Stage 2 — all four RANKABLE_FIELDS keys exist as upload targets;
+ *  since Stage 3's term-factory rewrite all four are also wired into
+ *  Engine._sortTerms generically (one ordinal term per enabled key). */
 export type ConstraintKey = 'colorWheel' | 'prt01' | 'prt02' | 'productionVersion';
 
 export type StoreEventType =

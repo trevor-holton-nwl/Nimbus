@@ -193,3 +193,111 @@ test('Engine.runAndApply respects explicit respectFixed/respectCalendar options 
     globalThis.document = priorDocument;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Stage 3 seam 3 — Engine.flattenConstraints + the _sortTerms term factory.
+// These are _sortTerms' first-ever direct coverage (Task 0's audit confirmed no
+// test anywhere referenced _sortTerms / _comparator / colorMap before this).
+//
+// NOTE on `Store.setMasterData(...)` vs. the plan's illustrative
+// `Store.masterData = {...}`: `masterData` is a getter-ONLY accessor on Store
+// (web/schedule-state.mts) — a bare assignment throws "Cannot set property
+// masterData of #<Object> which has only a getter" under ESM strict mode.
+// `setMasterData` is the real public setter (and the one Persistence itself
+// uses), so these tests go through it. Appended at the END of the file on
+// purpose: setMasterData rebuilds Store's line→plant index, which the
+// pre-existing Engine tests above depend on.
+// ---------------------------------------------------------------------------
+
+test('flattenConstraints does pre-order DFS, drops duplicates, skips disabled subtrees', () => {
+  Store.setMasterData({ plants: [{ plant: 'P1', constraints: [
+    { key: 'colorWheel', enabled: true, order: 1, children: [
+      { key: 'prt01', enabled: true, order: 1 },
+      { key: 'colorWheel', enabled: true, order: 2 },  // duplicate — must be dropped
+    ] },
+    { key: 'prt02', enabled: false, order: 2, children: [
+      { key: 'productionVersion', enabled: true, order: 1 },  // whole subtree skipped (parent disabled)
+    ] },
+  ] }], lines: [] }, 'unit-test');
+  assert.deepEqual(Engine.flattenConstraints('P1'), ['colorWheel', 'prt01']);
+});
+
+test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has no stored tree', () => {
+  Store.setMasterData({ plants: [{ plant: 'P2', constraints: null }], lines: [] }, 'unit-test');
+  const keys = Engine.flattenConstraints('P2');
+  assert.deepEqual(keys, ['colorWheel']); // only colorWheel defaults enabled, per constraintEnabled's existing rule
+});
+
+test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning over plant-wide', () => {
+  Store.setMasterData({ plants: [{ plant: 'P3', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 5 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
+  const terms = Engine._sortTerms('changeover', { plant: 'P3' });
+  const key = terms[0].get({ COLOR: 'red', PRODUCTION_LINE: 'L01' });
+  assert.equal(key, '0000001|RED');  // line override (rank 1), not plant-wide (rank 5)
+  const keyNoLine = terms[0].get({ COLOR: 'red', PRODUCTION_LINE: 'L99' });
+  assert.equal(keyNoLine, '0000005|RED');  // falls back to plant-wide for an unmapped line
+});
+
+test('_sortTerms groups unranked values together, after ranked ones, instead of interleaving (N12)', () => {
+  Store.setMasterData({ plants: [{ plant: 'P4', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
+  const terms = Engine._sortTerms('changeover', { plant: 'P4' });
+  const redKey    = terms[0].get({ COLOR: 'RED',    PRODUCTION_LINE: 'L1' });
+  const blueKey   = terms[0].get({ COLOR: 'BLUE',   PRODUCTION_LINE: 'L1' });   // unranked
+  const greenKey  = terms[0].get({ COLOR: 'GREEN',  PRODUCTION_LINE: 'L1' });   // unranked
+  assert.ok(redKey < blueKey);            // ranked sorts before unranked
+  assert.notEqual(blueKey, greenKey);     // both rank 999999 but keys still differ by value
+  assert.ok(blueKey.startsWith('0999999|') && greenKey.startsWith('0999999|'));  // grouped under the same rank prefix
+});
+
+test('_sortTerms with no rank map for the field falls back to 999999 for every value (no crash)', () => {
+  Store.setMasterData({ plants: [{ plant: 'P5', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({}, 'unit-test');
+  const terms = Engine._sortTerms('changeover', { plant: 'P5' });
+  assert.equal(terms[0].get({ PRT_01: 'DOG', PRODUCTION_LINE: 'L1' }), '0999999|DOG');
+});
+
+test('_sortTerms maps every registered priority key to its REAL task field, not key.toUpperCase()', () => {
+  // Task 0's audit defect 4a: 'prt01' -> 'PRT_01' (not 'PRT01'),
+  // 'productionVersion' -> 'PRODUCTION_VERSION' (not 'PRODUCTIONVERSION'). A
+  // toUpperCase() guess would read an undefined field and rank every order
+  // 999999 — configured, inert, silent. Assert the mapping directly AND that a
+  // real rank resolves off the real field name.
+  assert.equal(Engine._taskFieldFor('colorWheel'), 'COLOR');
+  assert.equal(Engine._taskFieldFor('prt01'), 'PRT_01');
+  assert.equal(Engine._taskFieldFor('prt02'), 'PRT_02');
+  assert.equal(Engine._taskFieldFor('productionVersion'), 'PRODUCTION_VERSION');
+  Store.setMasterData({ plants: [{ plant: 'P6', constraints: [
+    { key: 'prt01', enabled: true, order: 1 },
+    { key: 'productionVersion', enabled: true, order: 2 },
+  ] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': {
+    prt01: { 'TOOL-A': 2 },
+    productionVersion: { V1: 3 },
+  } }, 'unit-test');
+  const terms = Engine._sortTerms('changeover', { plant: 'P6' });
+  assert.equal(terms[0].get({ PRT_01: 'tool-a', PRODUCTION_LINE: 'L1' }), '0000002|TOOL-A');
+  assert.equal(terms[1].get({ PRODUCTION_VERSION: 'v1', PRODUCTION_LINE: 'L1' }), '0000003|V1');
+});
+
+test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
+  // The one call site Task 0's audit flagged as silently breakable:
+  // Alerts.applyFix's overload branch calls Engine.runAndApply('combined', {
+  // lines, startDate, endDate }) with no plant and no rank argument, so it
+  // depends entirely on Store.selectedPlant + Store.priorityRankMaps. Assert an
+  // end-to-end sequence, not just the term factory in isolation.
+  Store.setMasterData({ plants: [{ plant: '5512', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1, BLUE: 2 } } }, 'unit-test');
+  Store.setTasks([
+    // BLUE first in insertion order, and the LONGER job, so neither input order
+    // nor the SPT tail term could produce the expected result by accident.
+    { id: 'cw-blue', PRODUCTION_LINE: 'LC', PLANT: '5512', RUN_TIME: '2', COLOR: 'BLUE', start_date: null, end_date: null },
+    { id: 'cw-red',  PRODUCTION_LINE: 'LC', PLANT: '5512', RUN_TIME: '3', COLOR: 'RED',  start_date: null, end_date: null },
+  ], 'unit-test');
+  Store.setSelectedPlant('5512', 'unit-test');
+  Engine.runAndApply('combined', { respectFixed: true, respectCalendar: false });
+  const red = Store.tasks['cw-red'], blue = Store.tasks['cw-blue'];
+  assert.ok(red.start_date && blue.start_date, 'both orders must have been scheduled');
+  assert.ok(red.start_date <= blue.start_date,
+    'rank-1 RED must be sequenced before rank-2 BLUE — a 999999-for-everything fallback would leave the longer RED job last under the SPT tail term');
+});

@@ -6030,17 +6030,12 @@ export const Interaction = {
 // -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
 //    OptimizeDialog/OptimizerPreview) ----------------------------------------
 
-/** OptimizeDialog's per-plant color-wheel cache — populated by _updatePlantBadge,
- *  consumed by run() to skip a second round-trip fetch on submit. */
-interface OptimizeWheelCache {
-  plant: string;
-  colorMap: Record<string, number> | null;
-  wheelUsed: boolean;
-}
-
 /** One entry / the overall shape of the `GET /color-wheel/{plant}` response body.
- *  `meta` (CQ-1 Phase 6 Task 8) is read by ColorWheelViewer's `_load()` — the only
- *  caller that reads the upload-metadata half of this same response body. */
+ *  Read only by ColorWheelViewer's `_load()` now — Stage 3 retired
+ *  OptimizeDialog's own per-plant color→rank prefetch of this endpoint in favour
+ *  of Store.priorityRankMaps (the generic, all-fields rank source the
+ *  optimizer's term factory actually reads). `meta` (CQ-1 Phase 6 Task 8) is the
+ *  upload-metadata half of the same body. */
 interface ColorWheelEntry {
   color: string;
   order_y?: number;
@@ -6071,7 +6066,6 @@ interface OptimizerDefaults {
  *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
 interface OptimizerRunOptions {
   plant?: string | null;
-  colorMap?: Record<string, number> | null;
   lines?: string[] | null;
   startDate?: Date;
   endDate?: Date;
@@ -6093,7 +6087,6 @@ export const OptimizeDialog = (() => {
   let _scope: 'plant' | 'lines' = 'plant';
   let _selectedLines = new Set<string>();    // line names when _scope === 'lines'
   let _lineSearch = '';              // current line-list filter text
-  let _wheelCache: OptimizeWheelCache | null = null; // populated by _updatePlantBadge
   let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
 
   const PRESET_DAYS: Record<string, number> = { '2w': 14 }; // UI only exposes '2w' and 'custom'
@@ -6352,6 +6345,22 @@ export const OptimizeDialog = (() => {
     );
   }
 
+  /** Does the currently-loaded rank cache carry ANY colorWheel ranks the
+   *  optimizer could apply — plant-wide ('') or scoped to a specific line?
+   *  Reads the exact same Store.priorityRankMaps that Engine._sortTerms' term
+   *  factory reads, so the wheel badge and the "no color wheel" confirm below
+   *  can no longer disagree with what the run actually does. (Stage 3 replaced
+   *  the old `GET /color-wheel/{plant}` probe, which saw plant-wide lists
+   *  only and therefore mis-reported a plant configured purely with per-line
+   *  overrides.) */
+  function _hasColorRanks(): boolean {
+    const byLine = Store.priorityRankMaps || {};
+    return Object.keys(byLine).some(line => {
+      const m = byLine[line] && byLine[line].colorWheel;
+      return !!m && Object.keys(m).length > 0;
+    });
+  }
+
   function _updatePlantBadge() {
     const plant   = _plant;
     const badgeEl = document.getElementById('opt-wheel-badge');
@@ -6367,7 +6376,9 @@ export const OptimizeDialog = (() => {
     };
 
     if (!plant) {
-      _wheelCache = null;
+      // Deliberately does NOT clear the rank cache: `_plant` is null only when
+      // the dialog found no plant data at all, which says nothing about the
+      // plant Store is still loaded for.
       setBadge('none', '⚠', 'No plant selected');
       return;
     }
@@ -6375,28 +6386,25 @@ export const OptimizeDialog = (() => {
     setBadge('loading', '', 'Checking color wheel…');
     const token = ++_wheelFetchToken;
 
-    // Fetch the per-plant wheel directly so we can cache the colorMap and
-    // skip a second round-trip when the user clicks Run.
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
-      .then(r => r.ok ? r.json() as Promise<ColorWheelResponse> : Promise.reject())
-      .then(body => {
-        if (token !== _wheelFetchToken) return; // stale response — ignore
-        const entries = (body && body.entries) || [];
-        if (entries.length) {
-          const colorMap: Record<string, number> = {};
-          for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
-          _wheelCache = { plant, colorMap, wheelUsed: true };
-          setBadge('active', '✓', 'Color wheel is loaded');
-        } else {
-          _wheelCache = { plant, colorMap: null, wheelUsed: false };
-          setBadge('warn', '○', 'No color wheel — will optimize without color priority');
-        }
-      })
-      .catch(() => {
-        if (token !== _wheelFetchToken) return;
-        _wheelCache = { plant, colorMap: null, wheelUsed: false };
+    // Prefetch this plant's priority rank maps so (a) the badge reflects what
+    // the optimizer will actually rank on, and (b) run() finds
+    // Persistence._rankMapsPlant already fresh and needs no second round-trip
+    // on submit — the same "populated by _updatePlantBadge, consumed by run()"
+    // role the retired per-plant color→rank cache played. Safe to load into the
+    // shared (non-plant-keyed) Store cache from here because `_plant` is always
+    // Store.selectedPlant at this point: both callers (_buildPlantSelect and
+    // selectPlant) call Store.setSelectedPlant first. Never rejects.
+    Persistence.loadPriorityRankMaps(plant).then(() => {
+      if (token !== _wheelFetchToken) return; // stale response — ignore
+      if (Persistence._rankMapsPlant !== plant) {
+        // Fetch resolved non-ok, or threw — cache is empty, not authoritative.
         setBadge('warn', '○', 'Could not check wheel — optimizing without color priority');
-      });
+      } else if (_hasColorRanks()) {
+        setBadge('active', '✓', 'Color wheel is loaded');
+      } else {
+        setBadge('warn', '○', 'No color wheel — will optimize without color priority');
+      }
+    });
   }
 
   function open() {
@@ -6502,44 +6510,44 @@ export const OptimizeDialog = (() => {
       runBtn.innerHTML = `<span class="opt-run-icon">⏳</span>${Util.t('btn.optimizing')}`;
     }
 
-    // Open the preview dialog with a spinner IMMEDIATELY — before the wheel
-    // fetch (which can take up to 1.5s on cold cache) and the config-modal
-    // close transition. Otherwise the user stares at a blurry frozen page
-    // for ~1–2s with no visible response to their click.
+    // Open the preview dialog with a spinner IMMEDIATELY — before the rank-map
+    // freshness fetch below and the config-modal close transition. Otherwise
+    // the user stares at a blurry frozen page for ~1–2s with no visible
+    // response to their click.
     OptimizerPreview.showLoading(_mode, plant);
     // Hide the config modal RIGHT NOW (no 230ms fade). Its backdrop sits at
     // z-index 3000 with blur(12px) and would cover the preview spinner
-    // (z=2000) for the entire await fetch(wheel) + fade duration. Hiding
-    // immediately is what makes the spinner actually visible on click.
+    // (z=2000) for the entire await + fade duration. Hiding immediately is
+    // what makes the spinner actually visible on click.
     close(true);
 
-    // Use the cached per-plant wheel populated by _updatePlantBadge.
-    // Fall back to a quick fetch only if the cache hasn't filled yet (race
-    // on first open) — tighter timeout so a slow backend can't dominate UX.
-    let colorMap: Record<string, number> | null = null;
-    let wheelUsed = false;
-    if (_wheelCache && _wheelCache.plant === plant) {
-      colorMap  = _wheelCache.colorMap;
-      wheelUsed = _wheelCache.wheelUsed;
-    } else {
-      try {
-        const resp = await fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(1500) });
-        if (resp.ok) {
-          const body = await resp.json() as ColorWheelResponse;
-          const entries = body.entries || [];
-          if (entries.length) {
-            colorMap = {};
-            for (const e of entries) colorMap[Util.norm(e.color)] = e.order_y ?? 999999;
-            wheelUsed = true;
-          }
-        }
-      } catch {
-        // No wheel reachable — continue without
-      }
+    // --- Rank-source freshness guard (Stage 3) ---------------------------
+    // The Stage 3 replacement for the retired per-plant color→rank cache and
+    // its pre-Run fallback fetch. Engine._sortTerms now resolves EVERY priority
+    // field's rank straight out of Store.priorityRankMaps, so that cache — not
+    // a single color map — is what has to be fresh for this plant before Run. It
+    // normally already is (Persistence.load() fetches it on every plant
+    // select, and _updatePlantBadge prefetches it on open / plant change), but
+    // a Run clicked before that resolves — or after it failed — would
+    // otherwise rank EVERY order 999999 on EVERY field: configured, inert and
+    // silent. Awaiting here restores the guarantee the deleted fetch provided.
+    // Note this drops the old 1500 ms AbortSignal bound: back then a missing
+    // wheel still left a usable ORDER_Y fallback, so cutting the fetch short
+    // was cheap; now the ranks are load-bearing, so it is better to wait for
+    // them (loadPriorityRankMaps never rejects — a failing/non-ok response
+    // returns promptly and falls into the `!ranksFresh` confirm below).
+    if (Persistence._rankMapsPlant !== plant) {
+      await Persistence.loadPriorityRankMaps(plant);
     }
+    const ranksFresh = Persistence._rankMapsPlant === plant;
+    // Will color priority actually be applied? Read from the same rank maps the
+    // optimizer will read, and forced false when the fetch never succeeded — so
+    // the confirm below also covers "ranks unavailable" instead of letting that
+    // case sequence silently at 999999-for-everything.
+    const wheelUsed = ranksFresh && _hasColorRanks();
 
     // Confirm only when the plant WANTS color (colorWheel constraint enabled)
-    // but no wheel is loaded. If the plant has switched color off, optimizing
+    // but no ranks are loaded. If the plant has switched color off, optimizing
     // without it is intentional — don't nag.
     const colorWheelOn = Engine.constraintEnabled(plant, 'colorWheel');
     if (colorWheelOn && !wheelUsed && (_mode === 'changeover' || _mode === 'combined')) {
@@ -6550,7 +6558,6 @@ export const OptimizeDialog = (() => {
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
     const optsForEngine: OptimizerRunOptions = {
       plant,
-      colorMap,
       lines:           linesScope,
       startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
       endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
@@ -6558,8 +6565,8 @@ export const OptimizeDialog = (() => {
       respectCalendar: scEl?.checked ?? true,
     };
 
-    // Config modal was already hidden (close(true) above) before the wheel
-    // fetch — no second close() needed here.
+    // Config modal was already hidden (close(true) above) before the rank-map
+    // freshness guard — no second close() needed here.
 
     // Defer the optimizer run by one frame so the modal-close paint and the
     // heavy subscriber fanout don't fight for the same main-thread tick.
