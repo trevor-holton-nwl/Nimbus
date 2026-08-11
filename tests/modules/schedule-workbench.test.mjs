@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
@@ -242,4 +242,10 @@ test('EditCalendar/ColorWheelViewer/Printer/SandboxAdapter/AlertsUIAdapter expos
   assert.equal(typeof Printer.open, 'function');
   assert.equal(typeof SandboxAdapter.init, 'function');
   assert.equal(typeof AlertsUIAdapter.toggleDrawer, 'function');
+});
+
+test('PriorityListViewer exposes open/close/search', () => {
+  assert.equal(typeof PriorityListViewer.open, 'function');
+  assert.equal(typeof PriorityListViewer.close, 'function');
+  assert.equal(typeof PriorityListViewer.search, 'function');
 });

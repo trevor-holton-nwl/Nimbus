@@ -274,7 +274,7 @@ const NIMBUS = (function () {
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
   const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
   const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
-  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
+  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
   const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
@@ -733,7 +733,7 @@ const NIMBUS = (function () {
     Selection, UndoStack, Interaction,
     ErrorLog, AdminCockpit,
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
-    OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
+    OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer,
     PlantSelector, EmptyState, MasterData,
     LaborPlanning, Interface, Security, CalendarSync,
     Session, SessionUIAdapter, showLoginScreen, MaterialGrids

@@ -145,7 +145,7 @@ import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -7453,6 +7453,94 @@ export const ColorWheelViewer = (() => {
   }
 
   return { open, close, search, sort, _toggleExpand };
+})();
+
+/* =============================================================================
+   PRIORITY LIST VIEWER — generic modal preview of a plant's uploaded
+   priority list for a rankable field (prt01/prt02/productionVersion).
+   Delegates to ColorWheelViewer for the colorWheel field, which keeps its
+   own richer swatch/task-count rendering.
+   ========================================================================== */
+export const PriorityListViewer = (() => {
+  let _plant: string | null = null;
+  let _fieldKey: string | null = null;
+  let _entries: PriorityListEntry[] = [];
+  let _search = '';
+
+  const _esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) =>
+    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
+
+  function open(plant: string, fieldKey: string) {
+    if (fieldKey === 'colorWheel') { ColorWheelViewer.open(plant); return; }
+    _plant = plant; _fieldKey = fieldKey; _search = '';
+    const el = document.getElementById('modal-priority-viewer');
+    if (!el) return;
+    el.hidden = false;
+    const srch = document.getElementById('pl-viewer-search') as HTMLInputElement | null;
+    if (srch) srch.value = '';
+    requestAnimationFrame(() => el.querySelector('.cw-viewer-modal')?.classList.add('visible'));
+    _load();
+  }
+
+  function close() {
+    const el = document.getElementById('modal-priority-viewer');
+    if (!el) return;
+    el.querySelector('.cw-viewer-modal')?.classList.remove('visible');
+    setTimeout(() => { el.hidden = true; }, 240);
+  }
+
+  function _load() {
+    const labelEl = document.getElementById('pl-viewer-field-label');
+    const nameEl  = document.getElementById('pl-viewer-plant-name');
+    const listEl  = document.getElementById('pl-viewer-list');
+    if (labelEl) labelEl.textContent = _fieldKey ? Util.t(`constraint.${_fieldKey}`) : '—'; // resolved label, not the raw camelCase key — same rule as Plant's toasts/modals
+    if (nameEl)  nameEl.textContent  = _plant || '—';
+    if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading')}</div>`;
+
+    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}`,
+          { signal: AbortSignal.timeout(8000) })
+      .then(r => r.ok ? r.json() as Promise<PriorityListResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(body => {
+        _entries = body.entries || [];
+        const metaEl = document.getElementById('pl-viewer-meta');
+        const m = body.meta || {};
+        if (metaEl) metaEl.textContent = m.filename
+          ? `${m.filename} · ${m.row_count ?? _entries.length} values`
+          : `${_entries.length} values`;
+        _render();
+      })
+      .catch((err: Error) => {
+        _entries = [];
+        if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.pl_no_list_for_plant')}</div>`;
+        const metaEl = document.getElementById('pl-viewer-meta');
+        if (metaEl) metaEl.textContent = err.message.includes('404') ? Util.t('empty.pl_no_file') : err.message;
+      });
+  }
+
+  function _render() {
+    const listEl = document.getElementById('pl-viewer-list');
+    const countEl = document.getElementById('pl-viewer-count');
+    if (!listEl) return;
+    const q = _search.toLowerCase();
+    const data = _entries.filter(e => !q || e.value.toLowerCase().includes(q));
+    if (countEl) countEl.textContent = `${data.length} / ${_entries.length}`;
+    if (!data.length) {
+      listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.pl_no_matches')}</div>`;
+      return;
+    }
+    listEl.innerHTML = data.map(e => {
+      const pri = e.rank < 999999 ? e.rank : '—';
+      return `
+        <div class="cw-viewer-row">
+          <div class="cw-viewer-rank">${_esc(pri)}</div>
+          <div class="cw-viewer-name">${_esc(e.value)}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function search(val: string) { _search = String(val || ''); _render(); }
+
+  return { open, close, search };
 })();
 
 // VirtualList row-height const for AlertsUIAdapter's drawer (moved from
