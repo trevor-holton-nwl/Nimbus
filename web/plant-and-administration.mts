@@ -310,14 +310,11 @@ interface PillFpPair {
   end: NimbusVendor.FlatpickrInstance | null;
 }
 
-/** `Plant._renderSettingsPane`'s in-memory working copy of a plant's ordered
- *  constraint list (`ConstraintConfig`, but with `order` always resolved —
- *  never left absent — since the catalog default fills in any missing key). */
-interface ConstraintState {
-  key: string;
-  enabled: boolean;
-  order: number;
-}
+// `interface ConstraintState` lived here until Stage 3 (docs/scheduling_priority.md)
+// rebuilt `Plant._renderSettingsPane`'s flat constraint list into a nested
+// priority tree. Its working copy is now a `ConstraintConfig[]` (web/types.mts)
+// straight through — the shape that carries `children` — so a save can no
+// longer flatten a stored tree on its way back to the backend.
 
 export const Plant = {
   _blocksCollapsed: true,
@@ -1260,6 +1257,15 @@ export const Plant = {
             <div class="panel-body">
               <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">${Util.t('ui.constraints_sub')}</p>
               <div id="sys-constraints-list" class="constraint-list"></div>
+              <!-- Stage 3: the readout that keeps the presentational tree honest.
+                   The tree above is nested; the optimizer runs a FLAT ordered key
+                   list (Engine.flattenConstraints), so this shows exactly what
+                   that collapse produces — including which nodes contribute
+                   nothing. See docs/scheduling_priority.md, "Sub-sort model". -->
+              <div class="pl-seq-block">
+                <div class="pl-seq-title">${Util.t('ui.effective_sequence')}</div>
+                <div id="sys-effective-sequence"></div>
+              </div>
             </div>
           </div>
 
@@ -1328,78 +1334,333 @@ export const Plant = {
     alertDaysInp.addEventListener('change', saveAlert);
     confDaysInp.addEventListener('change', saveConf);
 
-    // --- Scheduling constraints (switchable, per-plant) ---------------------
-    // Ordered list [{key, enabled, order}] backed by plants.constraints JSONB.
-    // Only colorWheel is wired into the optimizer today; the catalog/order/UI
-    // are the first step toward a general per-plant constraint registry.
+    // --- Scheduling constraints (per-plant PRIORITY TREE) -------------------
+    // Stage 3 of docs/scheduling_priority.md rebuilt this from a flat on/off
+    // list into an indented tree: a field can be nested under another field to
+    // sub-sort within it. Per that doc's "Sub-sort model" decision the tree is
+    // presentational — a field nested under a field is mathematically
+    // identical to the next key in a lexicographic sort — so
+    // Engine.flattenConstraints is the SINGLE source of truth for the collapse
+    // (pre-order DFS, disabled subtrees skipped, duplicate keys dropped) and
+    // is deliberately NOT reimplemented here. The "Effective sequence" panel
+    // below the tree is what keeps the nesting honest rather than a fiction.
+    //
+    // DATA-LOSS FIX — the reason this block is a rewrite rather than an
+    // extension. The flat version rebuilt its in-memory state by mapping over
+    // Engine.CONSTRAINT_CATALOG and serialized each node as
+    // `{key, enabled, order}` with no `children`. So ANY save from this panel
+    // (even an unrelated toggle) silently (a) flattened a stored nested tree
+    // and (b) dropped every stored key the local catalog didn't happen to
+    // list. Both directions are now tree-shaped end to end: `_cloneTree`
+    // preserves whatever shape the backend returned, including unknown keys,
+    // and `_serializeTree` emits `children` recursively.
     const consListEl = pane.querySelector('#sys-constraints-list') as HTMLElement | null;
-    let consState: ConstraintState[] = [];
+    const seqPanelEl = pane.querySelector('#sys-effective-sequence') as HTMLElement | null;
+    // Mirrors master_data._normalize_constraint_tree's own cap: a deeper tree
+    // is rejected server-side, so the UI must never offer to build one.
+    const MAX_DEPTH = 3;
+    let consTree: ConstraintConfig[] = [];
     let _wheelPresent: boolean | null = null;  // null = unknown until the wheel probe returns
 
-    function renderConstraints(): void {
-      if (!consListEl) return;
-      consListEl.innerHTML = consState.map((c, i) => {
-        const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === c.key) || { label: c.key, desc: '' };
-        const noWheel = (c.key === 'colorWheel' && _wheelPresent === false);
-        return `
-          <div class="constraint-row" data-key="${c.key}">
-            <div class="cons-reorder">
-              <button class="cons-up" ${i === 0 ? 'disabled' : ''} title="${Util.t('ui.move_up')}">▲</button>
-              <button class="cons-dn" ${i === consState.length - 1 ? 'disabled' : ''} title="${Util.t('ui.move_down')}">▼</button>
-            </div>
-            <div class="cons-meta">
-              <div class="cons-label">${cat.label}</div>
-              <div class="cons-desc">${cat.desc}${noWheel ? ` <span class="cons-warn">${Util.t('ui.constraint_no_wheel')}</span>` : ''}</div>
-            </div>
-            <label class="cons-toggle">
-              <input type="checkbox" ${c.enabled ? 'checked' : ''}>
-              <span>${c.enabled ? Util.t('ui.constraint_on') : Util.t('ui.constraint_off')}</span>
-            </label>
-          </div>`;
-      }).join('');
+    // Same escape used elsewhere in this file. Constraint keys are normally
+    // backend-registry values, but plants.constraints JSONB stores whatever
+    // `key` a POST supplied (master_data._normalize_constraint_tree only
+    // `str()`s it), and Util.t echoes an unknown key back verbatim — so a
+    // stored key reaches innerHTML as text and must be escaped.
+    const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
 
-      consListEl.querySelectorAll<HTMLElement>('.constraint-row').forEach(rowEl => {
-        const key = rowEl.dataset.key!;
-        rowEl.querySelector<HTMLInputElement>('.cons-toggle input')!.addEventListener('change', e => {
-          const c = consState.find(x => x.key === key);
-          if (c) c.enabled = (e.target as HTMLInputElement).checked;
-          renderConstraints();
-          saveConstraints();
+    /** Display label for a constraint key. Locale first (Stage 2 registered
+     *  `constraint.<field_key>` for all five locales); Util.t echoes the key
+     *  back when there's no entry, in which case the backend registry's own
+     *  `default_label` reads far better than a raw `constraint.prtXX`. */
+    function _label(key: string): string {
+      const s = Util.t(`constraint.${key}`);
+      if (s !== `constraint.${key}`) return s;
+      return Engine.CONSTRAINT_CATALOG.find(c => c.key === key)?.label || key;
+    }
+
+    /** Deep clone of a persisted tree, dropping NOTHING — nested `children`
+     *  and keys absent from the local catalog both survive verbatim (see the
+     *  DATA-LOSS FIX note above). Each sibling group is sorted by `order` with
+     *  the same `?? 99` fallback and stable tie-break Engine.flattenConstraints
+     *  uses, so the on-screen order can never disagree with the order the
+     *  optimizer walks. */
+    function _cloneTree(nodes: ConstraintConfig[]): ConstraintConfig[] {
+      return [...nodes]
+        .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+        .map(n => {
+          const out: ConstraintConfig = {
+            key:     String(n.key),
+            enabled: !!n.enabled,
+            order:   Number.isFinite(n.order) ? n.order! : 99,
+          };
+          if (Array.isArray(n.children) && n.children.length) out.children = _cloneTree(n.children);
+          return out;
         });
-        rowEl.querySelector('.cons-up')!.addEventListener('click', () => moveConstraint(key, -1));
-        rowEl.querySelector('.cons-dn')!.addEventListener('click', () => moveConstraint(key, +1));
+    }
+
+    /** Renumber every sibling group's `order` to 1..n in place — the tree
+     *  counterpart of the flat version's
+     *  `consState.forEach((c, idx) => { c.order = idx + 1; })`. */
+    function _renumberTree(nodes: ConstraintConfig[]): void {
+      nodes.forEach((n, i) => { n.order = i + 1; if (n.children) _renumberTree(n.children); });
+    }
+
+    /** Wire payload for the whole tree: `{key, enabled, order}` PLUS a
+     *  recursive `children` array wherever one exists. This is the half the
+     *  flat version was missing, and the reason a save used to flatten a
+     *  stored tree. Empty `children` arrays (left behind by removing a node's
+     *  last child) are omitted rather than persisted as `[]`. */
+    function _serializeTree(nodes: ConstraintConfig[]): ConstraintConfig[] {
+      return nodes.map(n => {
+        const out: ConstraintConfig = { key: n.key, enabled: !!n.enabled, order: n.order ?? 0 };
+        if (n.children && n.children.length) out.children = _serializeTree(n.children);
+        return out;
       });
     }
 
-    function moveConstraint(key: string, dir: number): void {
-      const i = consState.findIndex(x => x.key === key);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= consState.length) return;
-      [consState[i], consState[j]] = [consState[j], consState[i]];
+    /** Resolve a row's `data-path` ("0.2.1" => consTree[0].children[2].children[1])
+     *  to its node, the sibling array holding it, and its index there.
+     *  Handlers address nodes by PATH, not by key: the same key may legally
+     *  appear more than once in the tree (that's how `PRT01 -> Color` is
+     *  expressed, with the repeat marked "(no effect)"), so `data-key` would
+     *  be ambiguous and would toggle/move the wrong node. */
+    function _resolvePath(path: string): { node: ConstraintConfig; siblings: ConstraintConfig[]; index: number } | null {
+      const parts = path.split('.').map(Number);
+      let siblings: ConstraintConfig[] = consTree;
+      for (let d = 0; d < parts.length; d++) {
+        const node = siblings[parts[d]];
+        if (!node) return null;
+        if (d === parts.length - 1) return { node, siblings, index: parts[d] };
+        if (!node.children) return null;
+        siblings = node.children;
+      }
+      return null;
+    }
+
+    /** Distinct keys anywhere in the tree — the bound on how large the tree
+     *  may grow (one node per registered field, plus any duplicates added
+     *  before that bound was reached). */
+    function countConfiguredKeys(nodes: ConstraintConfig[]): number {
+      const keys = new Set<string>();
+      const walk = (ns: ConstraintConfig[]): void => { for (const n of ns) { keys.add(n.key); if (n.children) walk(n.children); } };
+      walk(nodes);
+      return keys.size;
+    }
+
+    function renderEffectiveSequence(): void {
+      if (!seqPanelEl) return;
+      // flattenConstraints reads the plant's PERSISTED tree
+      // (Store.masterData.plants[*].constraints) — the very same source
+      // Engine._sortTerms ranks from. That is deliberate: this panel states
+      // what the optimizer would do right now, not what an unsaved edit hopes
+      // for. saveConstraints() re-renders it the moment a write is confirmed
+      // (and reverts the whole tree if the write fails), so it converges
+      // within one round trip and can never assert an edit that didn't land.
+      const flat = Engine.flattenConstraints(plantName);
+      const arrow = ` <span class="pl-seq-arrow">&rarr;</span> `;
+      const keysInTreeOrder: string[] = [];
+      const collect = (nodes: ConstraintConfig[]): void => {
+        for (const n of nodes) { keysInTreeOrder.push(n.key); if (n.children) collect(n.children); }
+      };
+      collect(consTree);
+
+      if (!keysInTreeOrder.length) {
+        // An empty tree is not necessarily "no constraints": for a plant with
+        // nothing stored, flattenConstraints falls back to the catalog default
+        // (colorWheel on) and the optimizer really does apply it. Show that
+        // fallback rather than claiming nothing is in effect.
+        seqPanelEl.innerHTML = flat.length
+          ? flat.map(k => `<span class="pl-seq-chip">${esc(_label(k))}</span>`).join(arrow)
+          : `<span class="pl-seq-empty">${esc(Util.t('ui.no_constraints_configured'))}</span>`;
+        return;
+      }
+
+      const seen = new Set<string>();
+      seqPanelEl.innerHTML = keysInTreeOrder.map(key => {
+        // Not effective => either the node (or an ancestor) is switched off,
+        // or an earlier occurrence of the same key already claimed the slot.
+        const isEffective = flat.includes(key) && !seen.has(key);
+        if (isEffective) seen.add(key);
+        return `<span class="pl-seq-chip${isEffective ? '' : ' pl-seq-chip-noeffect'}">${esc(_label(key))}`
+             + `${isEffective ? '' : ` <em>(${esc(Util.t('ui.no_effect'))})</em>`}</span>`;
+      }).join(arrow);
+    }
+
+    /** The field picker behind "+ Add sub-priority" / "+ Add priority" — a
+     *  native <select>, not a button, for two reasons:
+     *    1. The user must be able to CHOOSE the field, including one already
+     *       used elsewhere in the tree (that's the only way to express
+     *       `PRT01 -> Color`); a button auto-picking "the first unused field"
+     *       could not build that tree at all.
+     *    2. CLAUDE.md's production-scale rule: a plant/line/field list must
+     *       never become a bubble/chip selector. A <select> is the shape that
+     *       upgrades cleanly to a searchable combobox if the registry grows.
+     *  Disabled once every registered field already appears somewhere in the
+     *  tree — the tree's own size bound. */
+    function _addPicker(cls: string, enabled: boolean, placeholder: string): string {
+      const opts = Engine.CONSTRAINT_CATALOG
+        .map(c => `<option value="${esc(c.key)}">${esc(_label(c.key))}</option>`).join('');
+      return `<select class="cons-add ${cls}" ${enabled ? '' : 'disabled'}`
+           + ` title="${esc(enabled ? placeholder : Util.t('ui.all_fields_used'))}">`
+           + `<option value="" selected>+ ${esc(placeholder)}</option>${opts}</select>`;
+    }
+
+    function renderConstraints(): void {
+      if (!consListEl) return;
+      // One node per registered field is the ceiling: past that, every
+      // additional node is a guaranteed duplicate, which flattenConstraints
+      // drops anyway.
+      const canAddAnywhere = countConfiguredKeys(consTree) < Engine.CONSTRAINT_CATALOG.length;
+
+      const renderNode = (node: ConstraintConfig, siblings: ConstraintConfig[], depth: number, path: string): string => {
+        const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === node.key);
+        const noWheel = (node.key === 'colorWheel' && _wheelPresent === false);
+        const idx = siblings.indexOf(node);
+        // At the deepest allowed level the add-child control is omitted
+        // outright rather than rendered disabled — there is no honest tooltip
+        // for "this is as deep as the data model goes" that isn't noise on
+        // every leaf, and the server would reject the write regardless.
+        const canNest = depth + 1 < MAX_DEPTH;
+        // Children are rendered as DOM siblings with a left margin, not nested
+        // inside the parent row: .constraint-list is a flex column, and a flat
+        // row list keeps the per-row querySelector wiring below unambiguous.
+        const childrenHtml = (node.children || [])
+          .map((c, ci) => renderNode(c, node.children!, depth + 1, `${path}.${ci}`)).join('');
+        return `
+          <div class="constraint-row" data-path="${path}" data-depth="${depth}" style="margin-left:${depth * 24}px">
+            <div class="cons-reorder">
+              <button class="cons-up" ${idx === 0 ? 'disabled' : ''} title="${esc(Util.t('ui.move_up'))}">&#9650;</button>
+              <button class="cons-dn" ${idx === siblings.length - 1 ? 'disabled' : ''} title="${esc(Util.t('ui.move_down'))}">&#9660;</button>
+            </div>
+            <div class="cons-meta">
+              <div class="cons-label">${esc(_label(node.key))}</div>
+              <div class="cons-desc">${cat?.desc || ''}${noWheel ? ` <span class="cons-warn">${esc(Util.t('ui.constraint_no_wheel'))}</span>` : ''}</div>
+            </div>
+            <label class="cons-toggle">
+              <input type="checkbox" ${node.enabled ? 'checked' : ''}>
+              <span>${esc(Util.t(node.enabled ? 'ui.constraint_on' : 'ui.constraint_off'))}</span>
+            </label>
+            ${canNest ? _addPicker('cons-add-child', canAddAnywhere, Util.t('ui.add_sub_priority')) : ''}
+            <button class="btn btn-ghost sm cons-remove" title="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button>
+          </div>
+          ${childrenHtml}`;
+      };
+
+      // The root-level picker is not optional garnish: without it, removing
+      // every row (or opening a plant whose stored tree omits a field) would
+      // leave no way to put a field back.
+      consListEl.innerHTML = consTree.map((n, i) => renderNode(n, consTree, 0, String(i))).join('')
+        + `<div class="constraint-add-row">${_addPicker('cons-add-root', canAddAnywhere, Util.t('ui.add_priority'))}</div>`;
+
+      consListEl.querySelectorAll<HTMLElement>('.constraint-row').forEach(rowEl => {
+        const path = rowEl.dataset.path!;
+        rowEl.querySelector<HTMLInputElement>('.cons-toggle input')!.addEventListener('change', e => {
+          const hit = _resolvePath(path);
+          if (hit) hit.node.enabled = (e.target as HTMLInputElement).checked;
+          renderConstraints();
+          saveConstraints();
+        });
+        rowEl.querySelector('.cons-up')!.addEventListener('click', () => moveConstraint(path, -1));
+        rowEl.querySelector('.cons-dn')!.addEventListener('click', () => moveConstraint(path, +1));
+        rowEl.querySelector('.cons-remove')!.addEventListener('click', () => removeConstraint(path));
+        rowEl.querySelector<HTMLSelectElement>('.cons-add-child')?.addEventListener('change', e => {
+          const sel = e.target as HTMLSelectElement;
+          const key = sel.value;
+          sel.value = '';  // the picker is a control, not a state holder
+          if (key) addConstraint(path, key);
+        });
+      });
+      consListEl.querySelector<HTMLSelectElement>('.cons-add-root')?.addEventListener('change', e => {
+        const sel = e.target as HTMLSelectElement;
+        const key = sel.value;
+        sel.value = '';
+        if (key) addConstraint(null, key);
+      });
+
+      renderEffectiveSequence();
+    }
+
+    /** Reorder within the sibling group only — moving a node between levels is
+     *  what the remove/add pair is for. */
+    function moveConstraint(path: string, dir: number): void {
+      const hit = _resolvePath(path);
+      if (!hit) return;
+      const j = hit.index + dir;
+      if (j < 0 || j >= hit.siblings.length) return;
+      [hit.siblings[hit.index], hit.siblings[j]] = [hit.siblings[j], hit.siblings[hit.index]];
       renderConstraints();
       saveConstraints();
     }
 
-    // Rebuild consState from the last-known-persisted plantRow.constraints
-    // (the catalog default fills in any key absent from that persisted list).
-    // Shared by init and by saveConstraints' failure path, since plantRow.constraints
-    // is only mutated once a write is confirmed — it is always the source of truth to revert to.
-    function rebuildConsStateFromPersisted(): void {
+    /** Removes the node AND its subtree: those children were sub-sorts *of*
+     *  this node, so re-parenting them to the grandparent would silently
+     *  rewrite the effective sequence into something the user never asked
+     *  for. */
+    function removeConstraint(path: string): void {
+      const hit = _resolvePath(path);
+      if (!hit) return;
+      hit.siblings.splice(hit.index, 1);
+      renderConstraints();
+      saveConstraints();
+    }
+
+    /** Append a node — at the root when `parentPath` is null, otherwise as the
+     *  last child of that node. Enabled on creation (you added it because you
+     *  want it); a child added under a switched-off parent is born inert,
+     *  which the parent's own "Ignored" label and the child's "(no effect)"
+     *  chip both state plainly, so the parent's state is left alone rather
+     *  than silently flipped on. */
+    function addConstraint(parentPath: string | null, key: string): void {
+      const node: ConstraintConfig = { key, enabled: true, order: 99 };
+      if (parentPath === null) {
+        consTree.push(node);
+      } else {
+        const hit = _resolvePath(parentPath);
+        if (!hit) return;
+        if (!hit.node.children) hit.node.children = [];
+        hit.node.children.push(node);
+      }
+      renderConstraints();
+      saveConstraints();
+    }
+
+    /** Rebuild the working tree from the last-known-persisted
+     *  plantRow.constraints, PRESERVING its shape verbatim — nesting and
+     *  unknown keys both survive (the flat version mapped over
+     *  Engine.CONSTRAINT_CATALOG instead, which is exactly what destroyed
+     *  both). Only a plant that has never been configured falls back to the
+     *  catalog, and then seeded with its ENABLED defaults only — the exact
+     *  mirror of Engine.flattenConstraints' own never-configured fallback
+     *  (`CONSTRAINT_CATALOG.filter(constraintEnabled).map(key)`), so the tree
+     *  on screen and the sequence the optimizer runs agree from the very first
+     *  render.
+     *
+     *  The flat version instead seeded ALL catalog keys (with the unused ones
+     *  rendered as inert "Ignored" rows). That cannot carry over: with every
+     *  registered field already in the tree, `countConfiguredKeys(consTree) <
+     *  CONSTRAINT_CATALOG.length` is false on the very first render, so every
+     *  "+ Add sub-priority" picker would be born disabled and NO plant could
+     *  ever be nested. Seeding only the enabled defaults leaves the unused
+     *  fields one pick away in the root "+ Add priority" control instead of
+     *  occupying a slot to say they're off.
+     *
+     *  Shared by init and by saveConstraints' failure path, since
+     *  plantRow.constraints is only mutated once a write is confirmed — it is
+     *  always the truth to revert to. */
+    function rebuildConsTreeFromPersisted(): void {
       const stored: ConstraintConfig[] | null = Array.isArray(plantRow?.constraints) ? plantRow!.constraints! : null;
-      consState = Engine.CONSTRAINT_CATALOG.map((cat, i) => {
-        const s = stored?.find(x => x.key === cat.key);
-        return {
-          key:     cat.key,
-          enabled: s ? !!s.enabled : Engine.constraintEnabled(plantName, cat.key),
-          order:   (s && Number.isFinite(s.order)) ? s.order! : i + 1,
-        };
-      }).sort((a, b) => a.order - b.order);
+      consTree = (stored && stored.length)
+        ? _cloneTree(stored)
+        : Engine.CONSTRAINT_CATALOG
+            .filter(cat => Engine.constraintEnabled(plantName, cat.key))
+            .map((cat, i) => ({ key: cat.key, enabled: true, order: i + 1 }));
     }
 
     async function saveConstraints(): Promise<void> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      consState.forEach((c, idx) => { c.order = idx + 1; });
-      const payload = consState.map(c => ({ key: c.key, enabled: c.enabled, order: c.order }));
+      _renumberTree(consTree);
+      const payload = _serializeTree(consTree);  // full tree, `children` included
       try {
         const r = await fetch(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
           method:  'POST',
@@ -1408,15 +1669,16 @@ export const Plant = {
         });
         if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
         plantRow.constraints = payload;  // commit to Store only once the write is confirmed
+        renderEffectiveSequence();       // the persisted tree just changed — re-read it
       } catch (e) {
         Toast.show(Util.t('toast.constraints_save_failed', { msg: (e as Error).message }), 'error');
-        rebuildConsStateFromPersisted();
+        rebuildConsTreeFromPersisted();
         renderConstraints();
       }
     }
 
     (function initConstraints() {
-      rebuildConsStateFromPersisted();
+      rebuildConsTreeFromPersisted();
       renderConstraints();
       // Whether a wheel is actually uploaded (hint only — the toggle works
       // regardless, since enabling color with no list is a harmless no-op:

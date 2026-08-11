@@ -901,6 +901,15 @@ git commit -m "feat: rebuild Scheduling Constraints as an indented tree with an 
   Task 0's audit; the plan originally said `:5577-5596`)
 - Modify: `web/locales/{en,de,es,fr,pt}.js`
 
+> **Amended by Task 8's implementation (2026-08-11).** Task 8 shipped the tree markup and it needs
+> **6** locale keys and **4** more CSS selectors than this task originally listed — the two extra
+> strings back controls the original sketch didn't have (a root-level "+ Add priority" picker, without
+> which removing every row or opening a plant whose stored tree omits a field leaves no way to put one
+> back; and the "Effective sequence" panel's own heading). Both are `Util.t(...)` calls already live in
+> `web/plant-and-administration.mts`, so they render as raw key text until this task lands. The extra
+> selectors are the containers Task 8 introduced around the chips the CSS below already covers.
+> Do not drop back to the 4-key / 5-selector version.
+
 - [ ] **Step 1: Add tree/sequence CSS**
 
 ```css
@@ -914,9 +923,29 @@ git commit -m "feat: rebuild Scheduling Constraints as an indented tree with an 
 .pl-seq-chip-noeffect em { font-style: normal; text-decoration: none; margin-left: 4px; }
 .pl-seq-arrow { color: var(--fg-faint); }
 .pl-seq-empty { font-size: 12px; color: var(--fg-mute); }
+
+/* Containers Task 8 added (the wrapper around #sys-effective-sequence, the
+   root-level add row, and the field pickers inside each row). */
+.pl-seq-block { margin-top: 16px; max-width: 560px; }
+.pl-seq-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--fg-mute); margin-bottom: 6px;
+}
+.constraint-add-row { padding-top: 4px; }
+.cons-add {
+  flex-shrink: 0; max-width: 170px; padding: 3px 6px; font-size: 11px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--fg-mute); cursor: pointer;
+}
+.cons-add:disabled { opacity: .45; cursor: default; }
 ```
 
 No `body.dark` overrides needed — every token used already flips in `body.dark`, matching this section's existing zero-dark-override pattern.
+
+Task 8 indents child rows with an inline `margin-left:${depth * 24}px` and also stamps
+`data-depth="N"` on every `.constraint-row`. If this task prefers a CSS-driven indent
+(`.constraint-row[data-depth="1"] { margin-left: 24px }` …), drop the inline style in
+`renderNode` at the same time — don't leave both in play.
 
 - [ ] **Step 2: Add locale keys** (all 5 files)
 
@@ -924,12 +953,17 @@ No `body.dark` overrides needed — every token used already flips in `body.dark
   'ui.no_effect':                    'no effect',
   'ui.no_constraints_configured':    'No constraints configured — orders sequence in upload order within each day.',
   'ui.add_sub_priority':             'Add sub-priority',
+  'ui.add_priority':                 'Add priority',
   'ui.all_fields_used':              'All rankable fields are already in the tree',
+  'ui.effective_sequence':           'Effective sequence',
 ```
+
+`ui.add_sub_priority` / `ui.add_priority` are rendered as a `<select>`'s placeholder option, which
+Task 8 prefixes with `"+ "` itself — so the string must NOT carry its own `+`.
 
 - [ ] **Step 3: Extend Task 15 (Stage 2)'s locale-completeness test**
 
-Add these 4 keys to the `REQUIRED` array (or a second array) in `tests/modules/locale-completeness.test.mjs` — the test infrastructure already exists from Stage 2, this is just more coverage, not a new test file.
+Add these 6 keys to the `REQUIRED` array (or a second array) in `tests/modules/locale-completeness.test.mjs` — the test infrastructure already exists from Stage 2, this is just more coverage, not a new test file.
 
 - [ ] **Step 4: Verify and commit**
 

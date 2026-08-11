@@ -34,6 +34,16 @@ test('Interface/Security/AdminCockpit expose their documented public API', () =>
   assert.equal(typeof AdminCockpit._setSub, 'function');
 });
 
+test('Plant Settings pane exposes tree-rendering internals', () => {
+  // Smoke-level, matching this file's existing thin public-API-shape style.
+  // The Stage 3 priority tree's actual behavior is covered by
+  // Engine.flattenConstraints' own tests in tests/modules/schedule-services.test.mjs
+  // — _renderSettingsPane is a thin consumer of it (it deliberately does not
+  // reimplement the flatten), and its render path needs a live DOM, which this
+  // node:test suite has no jsdom for.
+  assert.equal(typeof Plant._renderSettingsPane, 'function');
+});
+
 test('Plant exposes the generalized priority-list optimization API', () => {
   assert.equal(typeof Plant._renderOptimization, 'function');
   assert.equal(typeof Plant._uploadPriorityList, 'function');
