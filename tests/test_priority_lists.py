@@ -1042,3 +1042,18 @@ class TestLegacyColorWheelUploadConsolidation:
         r = self.client.post(f"/color-wheel/{self.PLANT}", files={"file": ("empty.xlsx", buf.getvalue())})
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "row_count": 0, "action": "color_wheel_upload", "replaced": False}
+
+
+def test_priority_rank_maps_endpoint_reads_in_memory_cache(client, monkeypatch):
+    monkeypatch.setitem(brain.PLANT_LISTS, "ZZTEST_PRM_PLANT",
+                        {"": {"colorWheel": {"RED": 1.0}}, "L01": {"prt01": {"DOG": 1.0}}})
+    r = client.get("/priority-rank-maps?plant=ZZTEST_PRM_PLANT")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"": {"colorWheel": {"RED": 1.0}}, "L01": {"prt01": {"DOG": 1.0}}}
+
+
+def test_priority_rank_maps_endpoint_empty_for_unknown_plant(client):
+    r = client.get("/priority-rank-maps?plant=ZZ_TOTALLY_UNKNOWN")
+    assert r.status_code == 200
+    assert r.json() == {}

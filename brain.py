@@ -1882,6 +1882,16 @@ def list_priority_fields():
     }
 
 
+@api.get("/priority-rank-maps")
+def get_priority_rank_maps(plant: str = Query(..., min_length=1)):
+    """In-memory rank-map read for the optimizer's hot path (Stage 3) — zero DB
+    hit, since brain.PLANT_LISTS is already kept current by every priority-list
+    upload/delete (Stage 2) and POST /reload. Shape: {line_or_empty:
+    {field_key: {VALUE: RANK}}} — the exact native shape of PLANT_LISTS, no
+    reshaping, since this runs on every optimize call and every alert auto-fix."""
+    return PLANT_LISTS.get(plant, {})
+
+
 @api.get("/priority-lists")
 def get_priority_lists_for_plant(
         plant: str = Query(..., min_length=1),
