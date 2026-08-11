@@ -39,7 +39,7 @@ $env:PGPASSWORD = '<DB_PASSWORD>'   # operator-supplied; never from the secret s
 & ".Codex\skills\promote-azure\scripts\apply-migrations.ps1"           # apply pending additive migrations + record in ledger
 Remove-Item Env:\PGPASSWORD
 ```
-- The script maintains a `schema_migrations` ledger (run-once semantics), applies `migrations/*.sql` not yet recorded in lexicographic order, **refuses `schema.sql`**, and **blocks any file containing `ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE`** unless re-run with `-AllowDestructive` (those need expand/contract sequencing — treat as a deliberate, separate decision, not part of a routine roll).
+- The script maintains its own `migration_files_applied` ledger (run-once semantics, keyed by filename) — distinct from `schema_migrations` (id-keyed, owned by schema.sql for named one-time data mutations like `plants_horizon_minutes`; the script only bootstraps that table's existence, never writes to it). They collided under one overloaded name until 2026-08-11 — see the script's own header comment for the full story. Applies `migrations/*.sql` not yet recorded in lexicographic order, **refuses `schema.sql`**, and **blocks any file containing `ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE`** unless re-run with `-AllowDestructive` (those need expand/contract sequencing — treat as a deliberate, separate decision, not part of a routine roll).
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
 ### 2. Build the image (fresh tag)
