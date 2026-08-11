@@ -866,11 +866,17 @@ window.__NIMBUS_LOCALES.es = {
   'ui.color_wheel_no_upload':          'No se ha cargado ninguna rueda de colores para la planta {{plant}}.',
   'ui.upload_in_plant_tab':            'Cargue una en la pestaña Planta → Opciones de optimización.',
   'ui.drop_to_replace':                'Suelte para reemplazar o haga clic para buscar',
-  'ui.checking_color_wheel':           'Verificando rueda de colores…',
-  'ui.no_plant_selected_wheel':        'No hay planta seleccionada',
-  'ui.color_wheel_loaded':             'La rueda de colores está cargada',
-  'ui.no_color_wheel':                 'Sin rueda de colores — optimización sin prioridad de color',
-  'ui.check_wheel_failed':             'No se pudo verificar la rueda — optimización sin prioridad de color',
+  // Diálogo de optimización → tooltips del distintivo de listas de prioridad
+  // (uno por estado). La Etapa 3 de docs/scheduling_priority.md generalizó
+  // este distintivo de solo rueda de colores a todos los campos de prioridad
+  // activos; estas claves reemplazan las cinco específicas de color que
+  // estaban aquí sin usarse.
+  'ui.opt_badge_checking':             'Verificando listas de prioridad…',
+  'ui.opt_badge_no_plant':             'No hay planta seleccionada',
+  'ui.opt_badge_lists_loaded':         'Listas de prioridad cargadas: {{fields}}',
+  'ui.opt_badge_lists_missing':        'No hay lista de prioridad para: {{fields}} — esas prioridades no tendrán efecto',
+  'ui.opt_badge_check_failed':         'No se pudieron verificar las listas de prioridad — optimización sin secuenciación por prioridad',
+  'ui.opt_badge_none_enabled':         'No hay campos de prioridad activados para esta planta — optimización solo por forma/tamaño y tiempo de ejecución',
   'ui.cw_loading':                     'Cargando…',
 
   /* ── Data pipeline diagnostic ────────────────────────────────────────────── */

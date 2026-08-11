@@ -862,11 +862,17 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.color_wheel_no_upload':          'Aucune roue des couleurs téléchargée pour le site {{plant}}.',
   'ui.upload_in_plant_tab':            'Téléchargez-en une dans l\'onglet Site → Options d\'optimisation.',
   'ui.drop_to_replace':                'Déposez pour remplacer ou cliquez pour parcourir',
-  'ui.checking_color_wheel':           'Vérification de la roue des couleurs…',
-  'ui.no_plant_selected_wheel':        'Aucun site sélectionné',
-  'ui.color_wheel_loaded':             'La roue des couleurs est chargée',
-  'ui.no_color_wheel':                 'Pas de roue des couleurs — optimisation sans priorité de couleur',
-  'ui.check_wheel_failed':             'Impossible de vérifier la roue — optimisation sans priorité de couleur',
+  // Boîte de dialogue d'optimisation → infobulles du badge des listes de
+  // priorité (une par état). L'étape 3 de docs/scheduling_priority.md a
+  // généralisé ce badge de la seule roue chromatique à tous les champs de
+  // priorité actifs ; ces clés remplacent les cinq clés propres à la couleur
+  // qui restaient ici sans être utilisées.
+  'ui.opt_badge_checking':             'Vérification des listes de priorité…',
+  'ui.opt_badge_no_plant':             'Aucune usine sélectionnée',
+  'ui.opt_badge_lists_loaded':         'Listes de priorité chargées : {{fields}}',
+  'ui.opt_badge_lists_missing':        'Aucune liste de priorité pour : {{fields}} — ces priorités seront sans effet',
+  'ui.opt_badge_check_failed':         'Impossible de vérifier les listes de priorité — optimisation sans séquencement par priorité',
+  'ui.opt_badge_none_enabled':         'Aucun champ de priorité activé pour cette usine — optimisation uniquement sur la forme/taille et la durée d\'exécution',
   'ui.cw_loading':                     'Chargement…',
 
   /* ── Data pipeline diagnostic ────────────────────────────────────────────── */

@@ -862,11 +862,16 @@ window.__NIMBUS_LOCALES.de = {
   'ui.color_wheel_no_upload':          'Kein Farbrad für Werk {{plant}} hochgeladen.',
   'ui.upload_in_plant_tab':            'Laden Sie eines im Reiter Werk → Optimierungsoptionen hoch.',
   'ui.drop_to_replace':                'Ablegen zum Ersetzen oder klicken zum Durchsuchen',
-  'ui.checking_color_wheel':           'Farbrad wird geprüft…',
-  'ui.no_plant_selected_wheel':        'Kein Werk ausgewählt',
-  'ui.color_wheel_loaded':             'Farbrad ist geladen',
-  'ui.no_color_wheel':                 'Kein Farbrad — Optimierung ohne Farbpriorität',
-  'ui.check_wheel_failed':             'Rad konnte nicht geprüft werden — Optimierung ohne Farbpriorität',
+  // Optimierungsdialog → Tooltips der Prioritätslisten-Plakette (je Zustand).
+  // Stufe 3 von docs/scheduling_priority.md hat diese Plakette vom reinen
+  // Farbrad auf alle aktiven Prioritätsfelder erweitert; diese Schlüssel
+  // ersetzen die fünf farbrad-spezifischen, die hier unbenutzt lagen.
+  'ui.opt_badge_checking':             'Prioritätslisten werden geprüft…',
+  'ui.opt_badge_no_plant':             'Kein Werk ausgewählt',
+  'ui.opt_badge_lists_loaded':         'Prioritätslisten geladen: {{fields}}',
+  'ui.opt_badge_lists_missing':        'Keine Prioritätsliste für: {{fields}} — diese Prioritäten haben keine Wirkung',
+  'ui.opt_badge_check_failed':         'Prioritätslisten konnten nicht geprüft werden — Optimierung ohne Prioritätssequenzierung',
+  'ui.opt_badge_none_enabled':         'Keine Prioritätsfelder für dieses Werk aktiviert — Optimierung nur nach Form/Größe und Laufzeit',
   'ui.cw_loading':                     'Wird geladen…',
 
   /* ── Data pipeline diagnostic ────────────────────────────────────────────── */

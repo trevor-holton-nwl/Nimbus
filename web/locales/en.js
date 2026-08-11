@@ -464,11 +464,18 @@ window.__NIMBUS_LOCALES.en = {
   'ui.color_wheel_no_upload':          'No color wheel uploaded for plant {{plant}}.',
   'ui.upload_in_plant_tab':            'Upload one in the Plant tab → Optimization Options.',
   'ui.drop_to_replace':                'Drop to replace or click to browse',
-  'ui.checking_color_wheel':           'Checking color wheel…',
-  'ui.no_plant_selected_wheel':        'No plant selected',
-  'ui.color_wheel_loaded':             'Color wheel is loaded',
-  'ui.no_color_wheel':                 'No color wheel — will optimize without color priority',
-  'ui.check_wheel_failed':             'Could not check wheel — optimizing without color priority',
+  // Optimize dialog → priority-list badge tooltips (one per badge state).
+  // Stage 3 of docs/scheduling_priority.md generalized this badge from
+  // colorWheel-only to all active priority fields; these keys replace the
+  // five colorWheel-worded ones that sat here unwired (the badge had been
+  // setting literals). Field names inside {{fields}} are localized by the
+  // caller via `constraint.<field_key>`.
+  'ui.opt_badge_checking':             'Checking priority lists…',
+  'ui.opt_badge_no_plant':             'No plant selected',
+  'ui.opt_badge_lists_loaded':         'Priority lists loaded: {{fields}}',
+  'ui.opt_badge_lists_missing':        'No priority list for: {{fields}} — those priorities will have no effect',
+  'ui.opt_badge_check_failed':         'Could not check priority lists — optimizing without priority sequencing',
+  'ui.opt_badge_none_enabled':         'No priority fields enabled for this plant — optimizing on form/size and run time only',
   'ui.cw_loading':                     'Loading…',
   'ui.db_load_details':                'DB Load Details',
   'ui.color_wheel_details':            'Color Wheel Details',

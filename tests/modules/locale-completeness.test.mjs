@@ -47,6 +47,19 @@ test('Stage 3 priority-tree / effective-sequence ui.* keys exist in all 5 locale
     // pair, now that every registered priority field can be silently inert (N11).
     'ui.constraint_no_list',
     'modal.no_priority_ranks_confirm_msg',
+    // Same wave, i18n follow-up: the Optimize dialog's priority-list badge
+    // tooltips (OptimizeDialog._updatePlantBadge, one key per badge state).
+    // These replace five colorWheel-worded keys that had been authored and
+    // left unwired while the badge set English literals — which is how a
+    // localized `constraint.<field_key>` name ended up interpolated into an
+    // English sentence. Required here so the generic wordings can never
+    // regress to that state in one locale only.
+    'ui.opt_badge_checking',
+    'ui.opt_badge_no_plant',
+    'ui.opt_badge_lists_loaded',
+    'ui.opt_badge_lists_missing',
+    'ui.opt_badge_check_failed',
+    'ui.opt_badge_none_enabled',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED_STAGE3) {

@@ -6381,11 +6381,11 @@ export const OptimizeDialog = (() => {
       // Deliberately does NOT clear the rank cache: `_plant` is null only when
       // the dialog found no plant data at all, which says nothing about the
       // plant Store is still loaded for.
-      setBadge('none', '⚠', 'No plant selected');
+      setBadge('none', '⚠', Util.t('ui.opt_badge_no_plant'));
       return;
     }
 
-    setBadge('loading', '', 'Checking priority lists…');
+    setBadge('loading', '', Util.t('ui.opt_badge_checking'));
     const token = ++_wheelFetchToken;
 
     // Prefetch this plant's priority rank maps so (a) the badge reflects what
@@ -6400,24 +6400,34 @@ export const OptimizeDialog = (() => {
       if (token !== _wheelFetchToken) return; // stale response — ignore
       if (Persistence._rankMapsPlant !== plant) {
         // Fetch resolved non-ok, or threw — cache is empty, not authoritative.
-        setBadge('warn', '○', 'Could not check priority lists — optimizing without priority sequencing');
+        setBadge('warn', '○', Util.t('ui.opt_badge_check_failed'));
         return;
       }
       // Reports on ALL of the plant's active priority fields, not colorWheel
       // alone: on a plant that sequences by tooling this badge used to sit
       // permanently on the ⚠ "no color wheel" state even with every PRT list
       // loaded, and would now also contradict the (generalized) pre-Run confirm
-      // right next to it. Labels are plain strings here, as they were before —
-      // this badge's tooltips have never been routed through Util.t, and adding
-      // locale keys for them is a separate i18n pass.
+      // right next to it.
+      //
+      // Every tooltip goes through Util.t (`ui.opt_badge_*`, all five locales).
+      // These strings were the last hardcoded UI text on this dialog: locale
+      // keys for the five pre-Stage-3 wordings had in fact been authored and
+      // then left unwired, so the badge was interpolating LOCALIZED field names
+      // (`constraint.<key>`, below) into an English sentence — a mixed-language
+      // tooltip for every non-en user. The field-name interpolation was already
+      // right and is kept as-is; only the surrounding sentence moved.
       const active   = Engine.activeConstraintKeys(plant);
       const unranked = Engine.unrankedActiveFields(plant);
       if (!active.length) {
-        setBadge('warn', '○', 'No priority fields enabled for this plant — optimizing on form/size and run time only');
+        setBadge('warn', '○', Util.t('ui.opt_badge_none_enabled'));
       } else if (!unranked.length) {
-        setBadge('active', '✓', `Priority lists loaded: ${active.map(k => Util.t(`constraint.${k}`)).join(' → ')}`);
+        setBadge('active', '✓', Util.t('ui.opt_badge_lists_loaded', {
+          fields: active.map(k => Util.t(`constraint.${k}`)).join(' → '),
+        }));
       } else {
-        setBadge('warn', '○', `No priority list for: ${unranked.map(k => Util.t(`constraint.${k}`)).join(', ')} — those priorities will have no effect`);
+        setBadge('warn', '○', Util.t('ui.opt_badge_lists_missing', {
+          fields: unranked.map(k => Util.t(`constraint.${k}`)).join(', '),
+        }));
       }
     });
   }

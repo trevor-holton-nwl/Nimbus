@@ -862,11 +862,16 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.color_wheel_no_upload':          'Nenhuma roda de cores carregada para a planta {{plant}}.',
   'ui.upload_in_plant_tab':            'Carregue uma na aba Planta → Opções de otimização.',
   'ui.drop_to_replace':                'Solte para substituir ou clique para navegar',
-  'ui.checking_color_wheel':           'Verificando roda de cores…',
-  'ui.no_plant_selected_wheel':        'Nenhuma planta selecionada',
-  'ui.color_wheel_loaded':             'A roda de cores está carregada',
-  'ui.no_color_wheel':                 'Sem roda de cores — otimização sem prioridade de cor',
-  'ui.check_wheel_failed':             'Não foi possível verificar a roda — otimização sem prioridade de cor',
+  // Diálogo de otimização → tooltips do selo de listas de prioridade (um por
+  // estado). A Etapa 3 de docs/scheduling_priority.md generalizou este selo
+  // de apenas roda de cores para todos os campos de prioridade ativos; estas
+  // chaves substituem as cinco específicas de cor que estavam aqui sem uso.
+  'ui.opt_badge_checking':             'Verificando listas de prioridade…',
+  'ui.opt_badge_no_plant':             'Nenhuma planta selecionada',
+  'ui.opt_badge_lists_loaded':         'Listas de prioridade carregadas: {{fields}}',
+  'ui.opt_badge_lists_missing':        'Nenhuma lista de prioridade para: {{fields}} — essas prioridades não terão efeito',
+  'ui.opt_badge_check_failed':         'Não foi possível verificar as listas de prioridade — otimização sem sequenciamento por prioridade',
+  'ui.opt_badge_none_enabled':         'Nenhum campo de prioridade ativado para esta planta — otimização apenas por forma/tamanho e tempo de execução',
   'ui.cw_loading':                     'Carregando…',
 
   /* ── Data pipeline diagnostic ────────────────────────────────────────────── */
