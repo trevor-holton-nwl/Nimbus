@@ -3634,6 +3634,77 @@ body.dark .cw-active-card {
 .cw-drop-text { font-size: 13px; font-weight: 600; color: var(--fg); }
 .cw-drop-hint { font-size: 11.5px; color: var(--fg-mute); }
 
+/* ── Per-field priority-list cards (Stage 2 of docs/scheduling_priority.md) ── */
+.pl-field-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.pl-field-card-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 10px;
+}
+.pl-field-card-head h4 {
+  margin: 0; font-size: 13px; font-weight: 600; color: var(--fg);
+}
+/* Soft-tint badge, not a colored side-stripe (DESIGN.md §6 Don'ts) — same
+   -soft/text-color pairing as Toasts/Badges (§5), using Signal Info. */
+.pl-inert-badge {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 2px 8px; border-radius: var(--r-sm);
+  background: var(--info-soft); color: var(--info);
+}
+/* Mono-Means-Machine Rule (DESIGN.md §3) — coverage is a measured ratio. */
+.pl-coverage {
+  font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute);
+  margin-top: 4px;
+}
+.pl-coverage-num { font-weight: 600; color: var(--fg); }
+
+.pl-overrides { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.pl-override-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--bg-subtle);
+}
+.pl-override-line { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--fg); flex-shrink: 0; }
+.pl-override-meta { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); flex: 1; }
+/* .pl-coverage's margin-top:4px assumes a block layout under a card title;
+   inside this flex row (align-items:center) that margin would nudge it out
+   of vertical center, so zero it and stop it from stretching with .pl-override-meta. */
+.pl-override-row .pl-override-coverage { margin-top: 0; flex: 0 0 auto; }
+.pl-add-override { margin-top: 8px; }
+.pl-override-combo { max-width: 260px; }
+
+/* ── Missing-master-data report panel ── */
+.pl-mmd-panel {
+  border: 1px solid var(--warn); border-radius: var(--r-lg);
+  background: var(--warn-soft); padding: 14px 16px; margin-top: 8px;
+}
+.pl-mmd-head { display: flex; align-items: center; gap: 10px; }
+.pl-mmd-head h4 { margin: 0; flex: 1; font-size: 13px; font-weight: 600; color: var(--fg); }
+.pl-mmd-sub { font-size: 12px; color: var(--fg-mute); margin: 6px 0 10px; }
+.pl-mmd-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.pl-mmd-row {
+  display: flex; align-items: center; gap: 10px; font-size: 12px;
+  padding: 4px 8px; border-radius: var(--r-sm); background: var(--bg-elev);
+}
+.pl-mmd-material { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
+.pl-mmd-count { font-family: var(--font-mono); color: var(--fg-mute); }
+.pl-mmd-reason { color: var(--warn); margin-left: auto; font-size: 11px; }
+/* N3/scale mandate (CLAUDE.md): the list caps at 20 rows so it never renders
+   thousands of rows at 50+ plants — this makes the cap visible instead of
+   silently truncating (the sub-text's pairs/orders counts are already the
+   FULL total, not the sliced 20, but that alone doesn't say "there's more"). */
+.pl-mmd-more { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); text-align: center; padding: 6px 0 2px; }
+
+/* ── Column-mapping modal sample table ── */
+.pl-mapping-sample { margin-top: 10px; max-height: 160px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); }
+.pl-sample-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+.pl-sample-table th, .pl-sample-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.pl-sample-table th { background: var(--bg-strong); color: var(--fg-mute); font-weight: 600; }
+
 /* --- Order schedule upload zone --- */
 .ord-dropzone {
   border: 2px dashed var(--line-strong);
