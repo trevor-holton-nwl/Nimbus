@@ -143,6 +143,47 @@ test('CalendarSync is exported alongside Persistence with its documented public 
   assert.equal(typeof CalendarSync.flushPlant, 'function');
 });
 
+test('Persistence.loadPriorityRankMaps returns a real awaitable promise and null-clears the cache', async () => {
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
+  Persistence._rankMapsPlant = '5512';
+  const p = Persistence.loadPriorityRankMaps(null);
+  assert.ok(p instanceof Promise, 'must return a real promise, not fire-and-forget');
+  await p;
+  assert.deepEqual(Store.priorityRankMaps, {});
+  assert.equal(Persistence._rankMapsPlant, null);
+});
+
+test('Persistence.loadPriorityRankMaps fetches GET /priority-rank-maps?plant= and tracks freshness on success', async () => {
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ '': { colorWheel: { RED: 1 } } }) });
+  };
+  try {
+    await Persistence.loadPriorityRankMaps('5512');
+    assert.ok(calls.some(u => u.includes('/priority-rank-maps?plant=5512')), 'must GET the plant-scoped endpoint');
+    assert.deepEqual(Store.priorityRankMaps, { '': { colorWheel: { RED: 1 } } });
+    assert.equal(Persistence._rankMapsPlant, '5512', 'freshness marker must record the plant just fetched');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.loadPriorityRankMaps clears the cache but leaves the freshness marker stale on network failure, so a later check still retries', async () => {
+  Persistence._rankMapsPlant = null;
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new Error('offline'));
+  try {
+    await Persistence.loadPriorityRankMaps('9999');
+    assert.deepEqual(Store.priorityRankMaps, {}, 'a failed fetch must not leave stale data lying around');
+    assert.notEqual(Persistence._rankMapsPlant, '9999', 'must NOT claim freshness for a plant whose fetch failed');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('Session exposes only the pure session/pref API (no DOM-rendering methods)', () => {
   assert.equal(typeof Session.currentUser, 'function');
   assert.equal(typeof Session.actor, 'function');

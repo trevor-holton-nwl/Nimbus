@@ -1149,6 +1149,7 @@ export const Plant = {
     Toast.show(Util.t(key, { field: label, plant: plantName! }), 'success');
     ErrorLog.info('plant', `Priority list ${body.replaced ? 'replaced' : 'uploaded'} for ${plantName}/${fieldKey}: ${body.row_count} values`);
     Plant._fetchAndRenderOptimization(plantName);
+    Persistence.loadPriorityRankMaps(plantName);  // keep Store in sync with what just changed
   },
 
   async _confirmDeletePriorityList(plantName: string, fieldKey: string, line: string): Promise<void> {
@@ -1166,6 +1167,7 @@ export const Plant = {
         }
         Toast.show(Util.t('toast.priority_list_deleted', { plant: plantName, field: label }), 'success');
         Plant._fetchAndRenderOptimization(plantName);
+        Persistence.loadPriorityRankMaps(plantName);  // keep Store in sync with what just changed
       })
       .catch(e => Toast.show(Util.t('toast.delete_failed_msg', { msg: e.message }), 'error'));
   },

@@ -246,6 +246,7 @@ export type StoreEventType =
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
+  | 'priority-rank-maps:updated'
   /** Wholesale *:replace variants, e.g. 'tasks:replace'. */
   | `${string}:replace`;
 

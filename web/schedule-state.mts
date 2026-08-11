@@ -4,7 +4,7 @@
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
@@ -47,6 +47,11 @@ interface StoreState {
    *  reads keep working; setSelectedLines() always mutates it in place. */
   selectedLines: Set<string>;
   masterData: NimbusMasterData | null;
+  /** Stage 3: per-plant rank-map cache for the optimizer's hot path, fetched by
+   *  Persistence.loadPriorityRankMaps (schedule-data.mts) on plant load/switch and
+   *  after a priority-list upload/delete. Shape: {line_or_empty: {field_key:
+   *  {VALUE: RANK}}} — matches GET /priority-rank-maps verbatim, no reshaping. */
+  priorityRankMaps: PriorityRankMaps;
   /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
   userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
   roleDefaults: Record<string, unknown>;
@@ -105,6 +110,7 @@ export const Store = {
     selectedPlant: null,
     selectedLines: new Set<string>(),
     masterData: null,
+    priorityRankMaps: {},
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {}
   } as StoreState,
@@ -144,6 +150,7 @@ export const Store = {
   get userSettings(): StoreState['userSettings']  { return this._state.userSettings; },
   get roleDefaults(): Record<string, unknown>  { return this._state.roleDefaults; },
   get masterData(): NimbusMasterData | null    { return this._state.masterData; },
+  get priorityRankMaps(): PriorityRankMaps { return this._state.priorityRankMaps; },
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
 
   isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
@@ -170,6 +177,16 @@ export const Store = {
     this._state.masterData = masterData;
     this.rebuildPlantIndex();
     this.emit({ type: 'master-data-changed', source });
+  },
+
+  /** Replace the priority rank-map cache wholesale (Stage 3). Populated by
+   *  Persistence.loadPriorityRankMaps (schedule-data.mts) — this setter itself stays
+   *  ignorant of which plant the maps belong to; that freshness tracking lives on the
+   *  fetcher side as `Persistence._rankMapsPlant`, mirroring how `Persistence._currentLoadedPlant`
+   *  already tracks freshness for the sibling tasks/calendars cache rather than Store itself. */
+  setPriorityRankMaps(maps: PriorityRankMaps, source?: string): void {
+    this._state.priorityRankMaps = maps || {};
+    this.emit({ type: 'priority-rank-maps:updated', source });
   },
 
   /* ----- subscription ---------------------------------------------------- */

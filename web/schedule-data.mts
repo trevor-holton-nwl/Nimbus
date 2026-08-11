@@ -35,7 +35,7 @@
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps } from './types.mjs';
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
@@ -185,6 +185,13 @@ let _calendarService: CalendarService | null = null;
    ========================================================================== */
 export const Persistence = {
   _currentLoadedPlant: null as string | null,  // plant whose tasks are currently in Store (null = all plants)
+  // Stage 3: plant whose priority rank maps Store.priorityRankMaps currently reflects
+  // (null = none/unknown). Mirrors _currentLoadedPlant's own role for tasks/calendars —
+  // set only once a fetch actually resolves (never on a network failure), so a caller
+  // that needs freshness (e.g. OptimizerPreview.runWithPreview, Task 6) can compare this
+  // against the plant it's about to run against and await loadPriorityRankMaps again if
+  // they don't match, instead of racing a fire-and-forget fetch.
+  _rankMapsPlant: null as string | null,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
                               // these skip the optimistic-concurrency version check on save
@@ -243,6 +250,7 @@ export const Persistence = {
       stats.source = 'backend';
       Store.setTasks([], 'persistence');
       Persistence._currentLoadedPlant = null;
+      Persistence.loadPriorityRankMaps(null);
       return Promise.all([
         fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
         fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
@@ -301,7 +309,10 @@ export const Persistence = {
               }, 'persistence');
             }
           }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
-            .finally(() => { CalendarSync.fetchPlantConfig(plant).finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' })); });
+            .finally(() => {
+              Promise.all([CalendarSync.fetchPlantConfig(plant), Persistence.loadPriorityRankMaps(plant)])
+                .finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' }));
+            });
           return;
         }
 
@@ -425,8 +436,12 @@ export const Persistence = {
         }).finally(() => {
           // Backend is authoritative for this plant's calendars/blackouts — overlay
           // them on top of the localStorage restore that already ran. Runs after
-          // master-data so getPlantForLine/subnetwork resolve reliably.
-          CalendarSync.fetchPlantConfig(plant).finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' }));
+          // master-data so getPlantForLine/subnetwork resolve reliably. Priority rank
+          // maps (Stage 3) have no such ordering dependency but are fetched alongside
+          // for the same reason: keep the optimizer's cache current the moment its
+          // plant's tasks are (re)loaded.
+          Promise.all([CalendarSync.fetchPlantConfig(plant), Persistence.loadPriorityRankMaps(plant)])
+            .finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' }));
         });
       })
       .catch(err => {
@@ -1147,6 +1162,36 @@ export const Persistence = {
     const deps = Store.dependencies;
     for (const k of Object.keys(deps)) delete deps[k];
     return Persistence.load({ plant });
+  },
+
+  /** Fetch this plant's priority rank maps ({line_or_empty: {field_key: {VALUE:
+   *  RANK}}}) — the optimizer's Stage 3 hot-path tie-break source (GET
+   *  /priority-rank-maps, brain.py's in-memory PLANT_LISTS, no reshaping). Unlike
+   *  loadForPlant, this deliberately does NOT skip on "already loaded for this
+   *  plant" — Stage 2's upload/delete handlers (Plant._handleUploadResult /
+   *  Plant._confirmDeletePriorityList, plant-and-administration.mts) call this
+   *  directly to refresh the cache after a list changes while staying on the same
+   *  plant, and a dedup check would silently defeat that. Always returns (never
+   *  rejects) once Store.priorityRankMaps reflects the outcome, so a caller that
+   *  needs freshness (Task 6's OptimizerPreview.runWithPreview) can await it
+   *  instead of racing a fire-and-forget fetch — see `_rankMapsPlant` above. */
+  async loadPriorityRankMaps(plant: string | null): Promise<void> {
+    if (!plant) {
+      Persistence._rankMapsPlant = null;
+      Store.setPriorityRankMaps({});
+      return;
+    }
+    try {
+      const r = await fetch(`${Config.API_BASE}/priority-rank-maps?plant=${encodeURIComponent(plant)}`);
+      Store.setPriorityRankMaps(r.ok ? await r.json() as PriorityRankMaps : {});
+      // Only recorded on a resolved request (ok or not) — a network failure below
+      // leaves this untouched so a later freshness check still sees a mismatch
+      // and retries, mirroring _currentLoadedPlant's own success-only semantics.
+      Persistence._rankMapsPlant = plant;
+    } catch (e) {
+      ErrorLog.warn('persistence', `Priority rank maps fetch failed for ${plant}: ${(e as Error).message}`);
+      Store.setPriorityRankMaps({});
+    }
   },
 
   /** The plant the user last had selected, read straight from the cache so the

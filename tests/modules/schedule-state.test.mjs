@@ -41,6 +41,21 @@ test('Store.replaceBlocks/replaceCalendars/replacePlants/replacePlantBlocks/repl
   assert.deepEqual(events, ['blocks:replace', 'calendar:replace', 'plants:replace', 'plantBlocks:replace', 'fixed:replace']);
 });
 
+test('Store exposes priorityRankMaps state and setter', () => {
+  assert.deepEqual(Store.priorityRankMaps, {});
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
+  assert.deepEqual(Store.priorityRankMaps, { '': { colorWheel: { RED: 1 } } });
+});
+
+test('Store.setPriorityRankMaps emits priority-rank-maps:updated and null-guards its argument', () => {
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt.type));
+  Store.setPriorityRankMaps(null);
+  off();
+  assert.deepEqual(Store.priorityRankMaps, {});
+  assert.deepEqual(events, ['priority-rank-maps:updated']);
+});
+
 test('Store.setAllowedPlantsResolver scopes knownPlants()', () => {
   Store.setTasks([{ id: 't1', PRODUCTION_LINE: 'L1', RUN_TIME: '1' }], 'unit-test');
   Store.setAllowedPlantsResolver(() => ['5512']);
