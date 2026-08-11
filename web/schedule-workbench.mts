@@ -7464,15 +7464,20 @@ export const ColorWheelViewer = (() => {
 export const PriorityListViewer = (() => {
   let _plant: string | null = null;
   let _fieldKey: string | null = null;
+  let _line = '';
   let _entries: PriorityListEntry[] = [];
   let _search = '';
 
   const _esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) =>
     (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
 
-  function open(plant: string, fieldKey: string) {
+  // `line` (optional, defaults to '' = plant-wide) — a field card's per-line
+  // override rows carry a line, and previewing one without threading it
+  // through would always 404-fall-back to the plant-wide list (or "no list"
+  // if there isn't one), even though the override upload itself succeeded.
+  function open(plant: string, fieldKey: string, line: string = '') {
     if (fieldKey === 'colorWheel') { ColorWheelViewer.open(plant); return; }
-    _plant = plant; _fieldKey = fieldKey; _search = '';
+    _plant = plant; _fieldKey = fieldKey; _line = line; _search = '';
     const el = document.getElementById('modal-priority-viewer');
     if (!el) return;
     el.hidden = false;
@@ -7497,7 +7502,8 @@ export const PriorityListViewer = (() => {
     if (nameEl)  nameEl.textContent  = _plant || '—';
     if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading')}</div>`;
 
-    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}`,
+    const qs = _line ? `?line=${encodeURIComponent(_line)}` : '';
+    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}${qs}`,
           { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PriorityListResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {

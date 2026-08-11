@@ -266,15 +266,6 @@ export const CalendarUI = {
 /* =============================================================================
    PLANT — plant-level calendar UI (working hours, blackouts, lines roster).
    ========================================================================== */
-/** Cached color-wheel metadata for the Optimization tab's active-wheel card,
- *  keyed by plant name — the `GET /color-wheels` response shape. */
-interface ColorWheelMeta {
-  filename?: string;
-  row_count?: number;
-  uploaded_at?: string;
-  uploaded_by?: string;
-}
-
 /** One `Plant._pillFps` entry — the two Flatpickr instances backing a single
  *  day's start/end time inputs in the plant working-hours pill row. */
 interface PillFpPair {
@@ -294,8 +285,6 @@ interface ConstraintState {
 export const Plant = {
   _blocksCollapsed: true,
   _rosterCollapsed: true,
-  _cwMeta: {} as Record<string, ColorWheelMeta>,           // cached color wheel metadata: { [plant]: {filename, row_count, uploaded_at} }
-  _cwLoading: false,     // prevent concurrent fetches
   _priorityFields: [] as PriorityFieldMeta[],
   _priorityLists: {} as Record<string, PriorityListFieldSummary>,
   _missingMasterData: null as MissingMasterDataReport | null,
@@ -721,13 +710,25 @@ export const Plant = {
     const panel = document.getElementById('plant-opt-panel');
     if (!panel) return;
     const body = panel.querySelector('.panel-body');
+    if (!plantName) {
+      if (body) body.innerHTML = `<div class="cw-empty-hint">${Util.t('ui.select_plant_for_priority_lists')}</div>`;
+      return;
+    }
     if (body) body.innerHTML = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading')}</div>`;
-    if (!plantName) return;
 
+    // Util.fetchTraced (not bare fetch) — it auto-injects x-user-email/X-User,
+    // which these three reads need for two reasons: GET /priority-lists and
+    // GET /master-data/{plant}/missing-master-data resolve the caller's
+    // role-scoped allowed-plants list from that header (auth.
+    // get_allowed_plants_for_request) — an anonymous request resolves to
+    // None/unrestricted, silently bypassing a plant-restricted user's own
+    // role_plants scoping — and an r.ok check below needs a real response to
+    // check, not a 403 body that parses as if it were valid data.
+    const okJson = (r: Response) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`));
     Promise.all([
-      fetch(`${Config.API_BASE}/priority-fields`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()),
-      fetch(`${Config.API_BASE}/priority-lists?plant=${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()),
-      fetch(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName)}/missing-master-data`, { signal: AbortSignal.timeout(6000) }).then(r => r.json()).catch(() => null),
+      Util.fetchTraced(`${Config.API_BASE}/priority-fields`, { signal: AbortSignal.timeout(6000) }).then(okJson),
+      Util.fetchTraced(`${Config.API_BASE}/priority-lists?plant=${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(6000) }).then(okJson),
+      Util.fetchTraced(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName)}/missing-master-data`, { signal: AbortSignal.timeout(6000) }).then(okJson).catch(() => null),
     ])
       .then(([fieldsBody, listsBody, missingBody]) => {
         Plant._priorityFields = fieldsBody.fields || [];
@@ -788,7 +789,7 @@ export const Plant = {
               ${covHtml}
             </div>
             <div class="cw-active-actions">
-              <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}">👁 ${Util.t('btn.preview')}</button>
+              <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="">👁 ${Util.t('btn.preview')}</button>
               <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="">⌫ ${Util.t('btn.remove')}</button>
             </div>
           </div>
@@ -825,7 +826,7 @@ export const Plant = {
           <span class="pl-override-line">${esc(o.line)}</span>
           <span class="pl-override-meta">${o.row_count} ${Util.t('ui.values')} &middot; ${relTime(o.uploaded_at)}</span>
           ${lineCovHtml}
-          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}">👁</button>
+          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="${esc(o.line)}">👁</button>
           <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${esc(o.line)}">⌫</button>
         </div>`;
       }).join('');
@@ -888,7 +889,7 @@ export const Plant = {
 
     // Wire preview/delete buttons.
     body.querySelectorAll<HTMLElement>('[data-action="preview"]').forEach(btn => {
-      btn.addEventListener('click', () => PriorityListViewer.open(plantName!, btn.dataset.field!));
+      btn.addEventListener('click', () => PriorityListViewer.open(plantName!, btn.dataset.field!, btn.dataset.line || ''));
     });
     body.querySelectorAll<HTMLElement>('[data-action="delete"]').forEach(btn => {
       btn.addEventListener('click', () => Plant._confirmDeletePriorityList(plantName!, btn.dataset.field!, btn.dataset.line || ''));
@@ -910,6 +911,13 @@ export const Plant = {
         _mkCombobox(comboHost, lineNames, {
           placeholder: Util.t('ph.pick_a_line'),
           onSelect: (line: string) => {
+            // The combobox's own clear (×) button calls onSelect(''); since
+            // _uploadPriorityList only appends the `line` form field when
+            // truthy, an empty line here would silently persist PLANT-WIDE
+            // (overwriting the existing plant-wide list) while still
+            // reporting "uploaded" success — bail instead of opening the
+            // file dialog for a cleared/empty selection.
+            if (!line) return;
             (document.getElementById(`pl-override-file-${f.field_key}`) as HTMLInputElement).onchange = (e) => {
               const file = (e.target as HTMLInputElement).files![0];
               if (file) Plant._uploadPriorityList(plantName, f.field_key, file, line);
@@ -922,7 +930,25 @@ export const Plant = {
 
     // Wire missing-master-data panel actions.
     document.getElementById('pl-mmd-export')?.addEventListener('click', () => {
-      window.open(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName!)}/missing-master-data?format=csv`, '_blank');
+      // GET /master-data/{plant}/missing-master-data is `Depends(require_admin)` —
+      // window.open(url) sends no identity header, so the endpoint 403s and
+      // the "download" is really a raw JSON error body landing in a new tab.
+      // Route through Util.fetchTraced (identity header included) and turn
+      // the response into a real file download via a temporary <a>, matching
+      // the blob-download pattern already used by Printer.exportCsv /
+      // AdminCockpit's diagnostics-bundle export elsewhere in this codebase.
+      Util.fetchTraced(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName!)}/missing-master-data?format=csv`)
+        .then(r => r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(blob => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `missing-master-data-${plantName}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        })
+        .catch(e => Toast.show(Util.t('toast.export_failed', { msg: e.message }), 'error'));
     });
     document.getElementById('pl-mmd-resync')?.addEventListener('click', () => Plant._resyncOrderAttributes(plantName!));
   },
@@ -941,28 +967,37 @@ export const Plant = {
       }).then(r => r.json());
     };
 
+    const onNetworkError = (e: Error) => {
+      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: e.message }); status.className = 'admin-status error'; }
+    };
+
     post().then(body => {
       if (body.status === 'needs_mapping') {
         PriorityListMapping.open(body.headers, body.sample, (valueCol: string, rankCol: string) => {
-          post({ value_column: valueCol, rank_column: rankCol }).then(body2 => Plant._handleUploadResult(plantName, fieldKey, status, body2));
+          post({ value_column: valueCol, rank_column: rankCol })
+            .then(body2 => Plant._handleUploadResult(plantName, fieldKey, status, body2))
+            .catch(onNetworkError);
         });
         return;
       }
       Plant._handleUploadResult(plantName, fieldKey, status, body);
-    }).catch(e => {
-      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: e.message }); status.className = 'admin-status error'; }
-    });
+    }).catch(onNetworkError);
   },
 
-  _handleUploadResult(plantName: string | null, fieldKey: string, status: HTMLElement | null, body: { status: string; message?: string; row_count?: number; replaced?: boolean }): void {
+  _handleUploadResult(plantName: string | null, fieldKey: string, status: HTMLElement | null, body: { status: string; message?: string; detail?: string; row_count?: number; replaced?: boolean }): void {
     // Every field card header resolves its label via Util.t('constraint.' + fieldKey)
     // (see fieldCardHtml above) — toasts/modals must do the same, or a raw
     // camelCase key ("prt01 list uploaded for 5512") leaks through next to
     // polished card copy ("Prod. Resource Tool (01)").
     const label = Util.t(`constraint.${fieldKey}`);
     if (body.status !== 'ok') {
-      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: body.message || 'unknown' }); status.className = 'admin-status error'; }
-      ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${body.message}`, body);
+      // Every rejection from this endpoint is a FastAPI HTTPException, whose
+      // JSON body is {"detail": "..."}, not {"message": "..."} — reading
+      // body.message alone showed "upload failed: unknown" for every real
+      // failure (bad file format, unknown field key, empty file).
+      const errMsg = body.detail || body.message || 'unknown';
+      if (status) { status.textContent = Util.t('toast.upload_failed', { msg: errMsg }); status.className = 'admin-status error'; }
+      ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${errMsg}`, body);
       return;
     }
     const verb = body.replaced ? 'replaced' : 'uploaded';
@@ -1252,17 +1287,24 @@ export const Plant = {
 export const PriorityListMapping = (() => {
   let _onConfirm: ((valueCol: string, rankCol: string) => void) | null = null;
 
+  // headers/sample come straight from the uploaded spreadsheet's own column
+  // names and cell values — genuinely untrusted content (e.g. a header of
+  // `<img src=x onerror=...>` would otherwise execute in an admin's
+  // browser). Same escape regex this file uses everywhere else (see
+  // `_renderOptimization`'s local `esc`).
+  const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
+
   function open(headers: string[], sample: Record<string, unknown>[], onConfirm: (v: string, r: string) => void): void {
     _onConfirm = onConfirm;
     const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
     const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
-    valSel.innerHTML = headers.map(h => `<option value="${h}">${h}</option>`).join('');
+    valSel.innerHTML = headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
     rankSel.innerHTML = `<option value="">${Util.t('ui.mapping_rank_none')}</option>` +
-      headers.map(h => `<option value="${h}">${h}</option>`).join('');
+      headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
     const sampleEl = document.getElementById('pl-mapping-sample');
     if (sampleEl) {
-      sampleEl.innerHTML = `<table class="pl-sample-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${
-        sample.slice(0, 5).map(row => `<tr>${headers.map(h => `<td>${String(row[h] ?? '')}</td>`).join('')}</tr>`).join('')
+      sampleEl.innerHTML = `<table class="pl-sample-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${
+        sample.slice(0, 5).map(row => `<tr>${headers.map(h => `<td>${esc(row[h])}</td>`).join('')}</tr>`).join('')
       }</tbody></table>`;
     }
     const el = document.getElementById('modal-priority-mapping');
@@ -2945,9 +2987,14 @@ interface ComboboxOpts {
 // lived) so both call sites can reach it as a bare identifier.
 function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
   if (!containerEl) return;
+  // Options were previously always DB-backed plant/material names (BOM's two
+  // pickers); Task 12 added a third call site whose options list is line
+  // names, and the dropdown's own option-row rendering below never escaped
+  // `o` in the first place — cheap to close now rather than carry forward.
+  const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
   containerEl.innerHTML = `
     <div class="hps-combobox md-bom-combobox">
-      <input type="text" class="hps-input" placeholder="${placeholder}" autocomplete="off" spellcheck="false"
+      <input type="text" class="hps-input" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"
              aria-haspopup="listbox" aria-expanded="false">
       <button type="button" class="hps-clear" hidden>&times;</button>
       <div class="hps-dropdown" role="listbox" hidden></div>
@@ -2977,7 +3024,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
       return;
     }
     dropdown.innerHTML = filtered.map((o, i) =>
-      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${o}</div>`
+      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${esc(o)}</div>`
     ).join('');
     activeIdx = Math.max(0, filtered.indexOf(selected));
     highlight();
