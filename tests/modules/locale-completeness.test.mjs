@@ -1,0 +1,40 @@
+// New in Stage 2 of docs/scheduling_priority.md (N22) — no prior locale-
+// completeness test existed. Locale files are classic scripts (not ES
+// modules), so keys are extracted via regex on the raw source text rather
+// than importing them.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const LOCALES_DIR = join(__dirname, '..', '..', 'web', 'locales');
+const LOCALES = ['en', 'de', 'es', 'fr', 'pt'];
+const KEY_RE = /^\s*'([\w.]+)'\s*:/gm;
+
+function keysOf(locale) {
+  const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
+  const keys = new Set();
+  let m;
+  while ((m = KEY_RE.exec(text))) keys.add(m[1]);
+  return keys;
+}
+
+test('every constraint.<field> key exists in all 5 locales', () => {
+  const REQUIRED = ['constraint.colorWheel', 'constraint.prt01', 'constraint.prt02', 'constraint.productionVersion'];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
+test('en.js is the superset — no locale has a key en.js lacks', () => {
+  const en = keysOf('en');
+  for (const locale of LOCALES.filter(l => l !== 'en')) {
+    const extra = [...keysOf(locale)].filter(k => !en.has(k));
+    assert.deepEqual(extra, [], `${locale}.js has keys not present in en.js: ${extra.join(', ')}`);
+  }
+});
