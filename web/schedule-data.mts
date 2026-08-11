@@ -187,10 +187,12 @@ export const Persistence = {
   _currentLoadedPlant: null as string | null,  // plant whose tasks are currently in Store (null = all plants)
   // Stage 3: plant whose priority rank maps Store.priorityRankMaps currently reflects
   // (null = none/unknown). Mirrors _currentLoadedPlant's own role for tasks/calendars —
-  // set only once a fetch actually resolves (never on a network failure), so a caller
+  // set only on a TRUE success (2xx response), never on a network exception NOR a
+  // resolved-but-non-ok response (a transient 5xx on a single-replica restart, or a
+  // corp-proxy pre-roll response — both real scenarios in this codebase), so a caller
   // that needs freshness (e.g. OptimizerPreview.runWithPreview, Task 6) can compare this
   // against the plant it's about to run against and await loadPriorityRankMaps again if
-  // they don't match, instead of racing a fire-and-forget fetch.
+  // they don't match, instead of wrongly trusting an empty cache as "fresh".
   _rankMapsPlant: null as string | null,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
@@ -1183,11 +1185,19 @@ export const Persistence = {
     }
     try {
       const r = await fetch(`${Config.API_BASE}/priority-rank-maps?plant=${encodeURIComponent(plant)}`);
-      Store.setPriorityRankMaps(r.ok ? await r.json() as PriorityRankMaps : {});
-      // Only recorded on a resolved request (ok or not) — a network failure below
-      // leaves this untouched so a later freshness check still sees a mismatch
-      // and retries, mirroring _currentLoadedPlant's own success-only semantics.
-      Persistence._rankMapsPlant = plant;
+      if (r.ok) {
+        Store.setPriorityRankMaps(await r.json() as PriorityRankMaps);
+        // Only recorded on a TRUE success (2xx) — a non-ok response (transient
+        // 5xx on a single-replica restart, a corp-proxy pre-roll response) is
+        // treated the same as a thrown/rejected fetch below and leaves this
+        // untouched, so a later freshness check (`_rankMapsPlant !== plant`)
+        // still sees a mismatch and retries instead of wrongly trusting an
+        // empty cache as "fresh" — mirrors CalendarSync.fetchPlantConfig's own
+        // `r.ok ? r.json() : Promise.reject(...)` treatment of a non-ok status.
+        Persistence._rankMapsPlant = plant;
+      } else {
+        Store.setPriorityRankMaps({});
+      }
     } catch (e) {
       ErrorLog.warn('persistence', `Priority rank maps fetch failed for ${plant}: ${(e as Error).message}`);
       Store.setPriorityRankMaps({});

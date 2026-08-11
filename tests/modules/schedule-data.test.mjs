@@ -170,6 +170,24 @@ test('Persistence.loadPriorityRankMaps fetches GET /priority-rank-maps?plant= an
   }
 });
 
+test('Persistence.loadPriorityRankMaps does NOT mark a plant fresh on a resolved-but-non-ok response (e.g. a transient 502)', async () => {
+  // Regression guard: a resolved response with ok:false (unlike a thrown/rejected
+  // fetch) previously still set _rankMapsPlant = plant, which would make Task 6's
+  // freshness check (`_rankMapsPlant !== plant`) wrongly trust an empty cache as
+  // current — silently ranking every order at the 999999 default with no error.
+  Persistence._rankMapsPlant = null;
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    await Persistence.loadPriorityRankMaps('5512');
+    assert.deepEqual(Store.priorityRankMaps, {}, 'a non-ok response must not leave stale data lying around');
+    assert.notEqual(Persistence._rankMapsPlant, '5512', 'must NOT claim freshness for a plant whose response was resolved-but-not-ok');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('Persistence.loadPriorityRankMaps clears the cache but leaves the freshness marker stale on network failure, so a later check still retries', async () => {
   Persistence._rankMapsPlant = null;
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
