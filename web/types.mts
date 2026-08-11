@@ -127,8 +127,11 @@ export interface ConstraintConfig {
   children?: ConstraintConfig[];
 }
 
-/** {field_key: {line|'': {NORMALIZED_VALUE: RANK}}} — GET /priority-rank-maps
- *  response, cached on Store and read by Engine._sortTerms. */
+/** {line_or_empty: {field_key: {NORMALIZED_VALUE: RANK}}} — matches
+ *  brain.PLANT_LISTS' native shape verbatim (GET /priority-rank-maps does no
+ *  reshaping, since it's on the optimizer's hot path). Line-first because
+ *  Engine._valueOf's caller resolves "this order's line, else plant-wide"
+ *  before it knows which field it's looking up. */
 export type PriorityRankMaps = Record<string, Record<string, Record<string, number>>>;
 
 /** GET /priority-fields row. */
