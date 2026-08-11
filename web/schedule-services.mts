@@ -957,14 +957,44 @@ export const Engine = {
       desc: 'Sequence orders by color-wheel priority to minimize color changeovers.' },
   ] as Array<{ key: string; label: string; desc: string }>,
 
+  /** Local, static field_key -> description fallback. `GET /priority-fields`
+   *  (PriorityFieldMeta, web/types.mts) carries no description field — that's
+   *  deliberate; Stage 3 keeps descriptions an entirely frontend concern
+   *  rather than growing the backend contract for cosmetic copy. Same
+   *  hardcoded-default-object shape as `_fieldTaskFields` below, so
+   *  setConstraintCatalog has a real value to source `desc` from instead of
+   *  hardcoding `''` (which blanked the Scheduling Constraints UI's
+   *  per-field description text for every field once the registry started
+   *  driving the catalog). Never written to by a registry call — there is
+   *  nothing for the backend to merge in — so unlike `_fieldTaskFields` this
+   *  stays read-only after module init. */
+  _fieldDescriptions: {
+    colorWheel:        'Sequence orders by color-wheel priority to minimize color changeovers.',
+    prt01:             'Sequence orders by Prod. Resource Tool (01) priority.',
+    prt02:             'Sequence orders by Prod. Resource Tool (02) priority.',
+    productionVersion: 'Sequence orders by production-version priority.',
+  } as Record<string, string>,
+
   /** Called once at boot (after GET /priority-fields resolves) to replace the
    *  hardcoded single-entry fallback above with the real registry. Safe to
-   *  call multiple times (e.g. on /reload). */
+   *  call multiple times (e.g. on /reload). MERGES per-key over whatever
+   *  CONSTRAINT_CATALOG already holds (hardcoded default or a prior call's
+   *  result) rather than replacing the whole array — an empty or partial
+   *  response (a degraded /reload, or a future registry that only returns
+   *  a subset) must not wipe out entries for fields it simply doesn't
+   *  mention, mirroring setFieldTaskFields' merge semantics below. */
   setConstraintCatalog(fields: Array<{ field_key: string; default_label: string }>): void {
     if (!fields || !fields.length) return; // keep the offline fallback rather than emptying the list
-    Engine.CONSTRAINT_CATALOG = fields.map(f => ({
-      key: f.field_key, label: f.default_label, desc: '',
-    }));
+    const byKey = new Map(Engine.CONSTRAINT_CATALOG.map(c => [c.key, c] as const));
+    for (const f of fields) {
+      if (!f.field_key) continue;
+      byKey.set(f.field_key, {
+        key: f.field_key,
+        label: f.default_label,
+        desc: Engine._fieldDescriptions[f.field_key] || '',
+      });
+    }
+    Engine.CONSTRAINT_CATALOG = Array.from(byKey.values());
   },
 
   /** Ordered constraint config stored for a plant, or null if never configured. */

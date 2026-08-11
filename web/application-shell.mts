@@ -60,12 +60,12 @@
 // other now-same-file forward reference).
 import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
 import { Store } from './schedule-state.mjs';
-import { Alerts } from './schedule-services.mjs';
+import { Alerts, Engine } from './schedule-services.mjs';
 import { Persistence, Session } from './schedule-data.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from './schedule-workbench.mjs';
 import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-administration.mjs';
 import { MaterialGrids } from './master-data-grids.mjs';
-import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab } from './types.mjs';
+import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from './types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
 
@@ -2140,6 +2140,29 @@ const App = {
         try { AdminCockpit._startHealthPolling?.(); } catch {}
       }
     });
+
+    // Priority-field registry (Stage 3) — load once at boot, independent of
+    // plant selection, so Engine's scheduling-constraint catalog
+    // (Engine.CONSTRAINT_CATALOG) and task-field lookup
+    // (Engine._fieldTaskFields) reflect the real backend registry rather
+    // than their hardcoded single-entry (colorWheel) fallback BEFORE any
+    // optimize can run — not only once the Plant → Optimization tab happens
+    // to open (Plant._loadPriorityOptimizationData,
+    // plant-and-administration.mts:811, fetches the same endpoint for that
+    // tab's own render; the duplication here is deliberate, per Task 7's
+    // brief, since Engine needs the registry regardless of whether that tab
+    // is ever opened). Loading-state note (R8): until this resolves,
+    // CONSTRAINT_CATALOG stays the one-entry fallback — exactly today's
+    // synchronous behavior, so a plant opened before this completes sees no
+    // regression; the Scheduling Constraints pane re-renders once the fetch
+    // resolves (Task 8) if it's already open.
+    fetch(`${Config.API_BASE}/priority-fields`)
+      .then(r => r.ok ? r.json() : { fields: [] })
+      .then((body: { fields?: PriorityFieldMeta[] }) => {
+        Engine.setConstraintCatalog(body.fields || []);
+        Engine.setFieldTaskFields(body.fields || []);
+      })
+      .catch(() => {}); // offline fallback: Engine.CONSTRAINT_CATALOG's hardcoded colorWheel entry stands
   },
 
   // First tab (in nav order) the current role can see; 'home' if somehow none

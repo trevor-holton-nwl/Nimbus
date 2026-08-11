@@ -301,6 +301,99 @@ test('_sortTerms maps every registered priority key to its REAL task field, not 
   assert.equal(terms[1].get({ PRODUCTION_VERSION: 'v1', PRODUCTION_LINE: 'L1' }), '0000003|V1');
 });
 
+// ---------------------------------------------------------------------------
+// Task 7 — Engine.setConstraintCatalog / Engine.setFieldTaskFields. Both were
+// added in the prior task (Task 6) with zero direct test coverage; this
+// task's boot wiring (application-shell.mts's App.init(), calling both once
+// GET /priority-fields resolves) is their first real caller. Two behaviors
+// matter and are covered here: (a) a partial/empty registry response MERGES
+// over whatever the function already holds rather than replacing/clearing
+// it — the other three fields' known mappings/catalog entries must survive
+// — and (b) an empty/falsy `fields` array is a pure no-op. Each test
+// snapshots and restores module state in a finally, since Engine is a
+// shared singleton across this whole file.
+// ---------------------------------------------------------------------------
+
+test('setConstraintCatalog merges a partial response over existing entries, not wiping the other three', () => {
+  const before = Engine.CONSTRAINT_CATALOG.map(c => ({ ...c }));
+  try {
+    // Seed a full 4-entry catalog (mirrors a real GET /priority-fields
+    // response, which the backend always spreads from RANKABLE_FIELDS).
+    Engine.setConstraintCatalog([
+      { field_key: 'colorWheel', default_label: 'Color Wheel' },
+      { field_key: 'prt01', default_label: 'Prod. Resource Tool (01)' },
+      { field_key: 'prt02', default_label: 'Prod. Resource Tool (02)' },
+      { field_key: 'productionVersion', default_label: 'Production Version' },
+    ]);
+    assert.equal(Engine.CONSTRAINT_CATALOG.length, 4);
+
+    // A later PARTIAL response (e.g. a degraded /reload) mentions only one
+    // field — the other three must still be there afterward, unwiped.
+    Engine.setConstraintCatalog([{ field_key: 'colorWheel', default_label: 'Color Wheel (updated)' }]);
+    const keys = Engine.CONSTRAINT_CATALOG.map(c => c.key);
+    assert.ok(keys.includes('prt01'), 'partial response must not wipe prt01');
+    assert.ok(keys.includes('prt02'), 'partial response must not wipe prt02');
+    assert.ok(keys.includes('productionVersion'), 'partial response must not wipe productionVersion');
+    const cw = Engine.CONSTRAINT_CATALOG.find(c => c.key === 'colorWheel');
+    assert.equal(cw.label, 'Color Wheel (updated)', 'the field the partial response DID mention must still update');
+  } finally {
+    Engine.CONSTRAINT_CATALOG = before;
+  }
+});
+
+test('setConstraintCatalog fills desc from the local field_key -> description fallback (backend carries none)', () => {
+  // Regression coverage: the prior task's implementation hardcoded desc: ''
+  // for every entry once the registry started driving CONSTRAINT_CATALOG,
+  // blanking the Scheduling Constraints UI's per-field description text.
+  const before = Engine.CONSTRAINT_CATALOG.map(c => ({ ...c }));
+  try {
+    Engine.setConstraintCatalog([
+      { field_key: 'colorWheel', default_label: 'Color Wheel' },
+      { field_key: 'prt01', default_label: 'Prod. Resource Tool (01)' },
+    ]);
+    const cw = Engine.CONSTRAINT_CATALOG.find(c => c.key === 'colorWheel');
+    const prt01 = Engine.CONSTRAINT_CATALOG.find(c => c.key === 'prt01');
+    assert.ok(cw.desc, 'colorWheel must keep a non-empty description');
+    assert.ok(prt01.desc, 'prt01 must also get a non-empty description from the local fallback map');
+    assert.equal(cw.label, 'Color Wheel', 'label stays backend-authoritative — only desc is sourced locally');
+  } finally {
+    Engine.CONSTRAINT_CATALOG = before;
+  }
+});
+
+test('setConstraintCatalog with an empty/falsy fields array is a no-op', () => {
+  const before = Engine.CONSTRAINT_CATALOG;
+  Engine.setConstraintCatalog([]);
+  assert.equal(Engine.CONSTRAINT_CATALOG, before, 'empty array must leave the existing catalog untouched');
+  Engine.setConstraintCatalog(null);
+  assert.equal(Engine.CONSTRAINT_CATALOG, before, 'null must leave the existing catalog untouched');
+  Engine.setConstraintCatalog(undefined);
+  assert.equal(Engine.CONSTRAINT_CATALOG, before, 'undefined must leave the existing catalog untouched');
+});
+
+test('setFieldTaskFields merges a partial response over the hardcoded defaults, not wiping the other three', () => {
+  const before = { ...Engine._fieldTaskFields };
+  try {
+    Engine.setFieldTaskFields([{ field_key: 'colorWheel', task_field: 'COLOR_OVERRIDE' }]);
+    assert.equal(Engine._fieldTaskFields.colorWheel, 'COLOR_OVERRIDE', 'the mentioned field must update');
+    assert.equal(Engine._fieldTaskFields.prt01, 'PRT_01', 'a partial response must not wipe prt01\'s known mapping');
+    assert.equal(Engine._fieldTaskFields.prt02, 'PRT_02', 'a partial response must not wipe prt02\'s known mapping');
+    assert.equal(Engine._fieldTaskFields.productionVersion, 'PRODUCTION_VERSION', 'a partial response must not wipe productionVersion\'s known mapping');
+  } finally {
+    Engine._fieldTaskFields = before;
+  }
+});
+
+test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
+  const before = { ...Engine._fieldTaskFields };
+  Engine.setFieldTaskFields([]);
+  assert.deepEqual(Engine._fieldTaskFields, before, 'empty array must leave the existing defaults untouched');
+  Engine.setFieldTaskFields(null);
+  assert.deepEqual(Engine._fieldTaskFields, before, 'null must leave the existing defaults untouched');
+  Engine.setFieldTaskFields(undefined);
+  assert.deepEqual(Engine._fieldTaskFields, before, 'undefined must leave the existing defaults untouched');
+});
+
 test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
   // The one call site Task 0's audit flagged as silently breakable:
   // Alerts.applyFix's overload branch calls Engine.runAndApply('combined', {
