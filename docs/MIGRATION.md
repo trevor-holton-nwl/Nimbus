@@ -552,6 +552,26 @@ out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left be
   `RANKABLE_FIELDS`, so a direct API call can store an arbitrarily wide tree of arbitrary keys into the
   `plants.constraints` JSONB (the tree UI bounds both, but the UI is not the only writer).
 
+- **`Dashboard._nextChangeover` still hardcodes `COLOR`/`FORM_SIZE`** (`web/schedule-workbench.mts:4339`)
+  — the third and last changeover-detection surface, feeding the "Next CO" cell of the line-status
+  panel via `Dashboard._renderLineStatus` (`:4392`). On a plant that sequences by tooling it reports
+  the wrong next-changeover time (and "—" where a real PRT change is imminent), because a PRT-only
+  regrouping changes `PRT_01` while leaving color and form identical.
+
+  **Parked at Stage 3's final re-review (2026-08-11)**, after that wave generalized the other two
+  copies. Deliberate scope call, not an oversight: this is a **display-only** readout with no effect
+  on sequencing, unlike the two that were fixed — `Util.countChangeovers` backs the Optimizer
+  Preview's Apply/Discard KPI (a planner acts on it), and `AlertsUIAdapter`'s cell briefing sits on
+  the alert path. Parked rather than folded in because this stage runs exactly one fix wave.
+
+  Fix shape: one line. Replace the inline
+  `(t.COLOR||'') !== (ref.COLOR||'') || (t.FORM_SIZE||'') !== (ref.FORM_SIZE||'')` with
+  `Util.changeoverFields().some(f => (t[f]||'') !== (ref[f]||''))`, exactly as `countChangeovers`
+  (`web/application-foundation.mts:563`) and the cell briefing (`web/schedule-workbench.mts:7696`)
+  already do. `Util.changeoverFields()` is public and already resolves through the
+  `Engine.changeoverTaskFields` seam that wave installed, so no new plumbing is needed — hoist the
+  call above the loop, like both existing callers.
+
 ## Workstream 6 — Networking: same-origin reverse proxy
 
 Frontend nginx proxies `/api` → backend; **backend ingress = `internal`** (not publicly exposed). Eliminates CORS entirely (resolves the invalid `*`+credentials combo), makes auth/token flow clean, shrinks attack surface. `NIMBUS_API_BASE="/api"`. (Cross-origin + CORS only needed if the frontend later moves to a CDN/Static Web App.)
