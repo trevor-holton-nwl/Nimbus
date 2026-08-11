@@ -529,6 +529,29 @@ out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left be
     or an admin upload/delete refresh immediately before a switch. One-line remedy: apply the same
     monotonic-token pattern inside `loadPriorityRankMaps` itself.
 
+- **`POST /master-data/plants/{plant}/constraints` has no per-plant authorization gate.**
+  (`brain.py:2451`.) The route carries `Depends(require_api_key)` and `Depends(require_admin)`, but
+  neither it nor `master_data.set_plant_constraints` calls `md._assert_plant_allowed(plant,
+  allowed_plants)` the way every priority-list route does — so an admin whose `role_plants` scope is
+  limited to one plant can POST another plant's priority tree and silently change that plant's
+  optimizer precedence.
+
+  **Pre-existing, deliberately parked** at Stage 3's final review (2026-08-11) rather than folded into
+  its closing fix wave: the endpoint predates this feature and its only Stage 3 change was the
+  nested-`children` normalization, so this is broader than the stage and deserves its own scoped
+  change. What Stage 3 *did* change is the consequence — the route went from writing a largely dormant
+  list to writing live sequencing config — which is why it is recorded here instead of dropped. Note
+  the asymmetry it leaves behind: Task 10 closed the identical omission on `GET /priority-rank-maps`
+  on exactly this reasoning ("the only plant-scoped endpoint in its block without it"), so the two
+  sibling surfaces now disagree about whether plant scope is enforced.
+
+  Fix shape: add the same `_assert_plant_allowed` try/except (403 on `PlantNotAllowed`, 400 on
+  `ValueError`) the priority-list routes use, plus an `allowed_plants` dependency. Two related hardening
+  items in the same function while it is open — `master_data._normalize_constraint_tree` caps depth at 3
+  but bounds neither node count nor sibling breadth, and never validates `key` against
+  `RANKABLE_FIELDS`, so a direct API call can store an arbitrarily wide tree of arbitrary keys into the
+  `plants.constraints` JSONB (the tree UI bounds both, but the UI is not the only writer).
+
 ## Workstream 6 — Networking: same-origin reverse proxy
 
 Frontend nginx proxies `/api` → backend; **backend ingress = `internal`** (not publicly exposed). Eliminates CORS entirely (resolves the invalid `*`+credentials combo), makes auth/token flow clean, shrinks attack surface. `NIMBUS_API_BASE="/api"`. (Cross-origin + CORS only needed if the frontend later moves to a CDN/Static Web App.)

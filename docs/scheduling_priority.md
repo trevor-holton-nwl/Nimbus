@@ -93,7 +93,34 @@ ranks from `Store` state (the alert auto-fix path's mechanism), and the R11 wall
    `prt_01`/`prt_02` spelling mismatches degrading to all-999999) is now live rather than latent, and
    coverage is the only guard. Nobody has yet run the Stage 2 coverage readout against a real plant's
    tooling data with the optimizer depending on it.
-5. ~~**The Optimization tab's "not yet used in sequencing" badge was not removed**~~ **DONE** — the
+5. **The final whole-branch review (2026-08-11) found 3 Important + 6 Minor issues; 8 were fixed in
+   one closing wave, 1 parked.** All three Important ones were *cross-task* gaps — real in the union
+   of the tasks, invisible inside any single task's diff — which is the case for keeping that review
+   step: (a) **N11 was never implemented** (see the finding's own entry below): both inert-config
+   warnings were still `colorWheel`-only, so a plant sequencing purely on `prt01`/`prt02`/
+   `productionVersion` got no warning at all, including on an outright failed rank fetch;
+   (b) the **"Effective sequence" panel mis-attributed duplicated keys** — it credited the first
+   occurrence in tree order via `flat.includes(key)`, so a disabled duplicate ahead of an enabled one
+   was labelled effective while the enabled one read "(no effect)", inverted, in the one panel whose
+   job is honesty about the collapse. `Engine._walkPriorityTree` is now the single traversal behind
+   both `flattenConstraints` and the new `effectiveConstraintPaths`, so per-key and per-node answers
+   cannot diverge again; (c) **`Util.countChangeovers` was blind to the three new fields** while
+   backing the Optimizer Preview's Apply/Discard KPI, so a run that genuinely cut tooling changeovers
+   could show a flat-or-worse number — it now resolves its field set from
+   `Engine.changeoverTaskFields(plant)` through a new `Util.setChangeoverFieldsResolver` DI seam
+   (Foundation may not import Domain), and the alert cell-briefing's duplicate count shares it.
+   Minors fixed: `Store.setPriorityRankMaps` no longer `emit()`s (it was tripping
+   `Persistence.autosave`'s unfiltered subscriber on every rank load — the same rule
+   `setLastOptimize` already documents); an **empty line-override no longer shadows** a working
+   plant-wide list (`??` does not bridge `{}`); an unregistered constraint key no longer contributes a
+   constant dead sort term; the late-arriving `/priority-fields` registry now actually re-renders the
+   Scheduling Constraints pane via `Plant.onPriorityFieldsLoaded()` (a comment claimed this already
+   happened — it did not, and without it a slow/failed boot fetch left every add-field picker disabled
+   for the whole session with no recovery but a reload); and the stale "color -> form -> runHours ->
+   material" comment on the phase-2 comparator was corrected. **Parked deliberately:** the
+   `POST /master-data/plants/{plant}/constraints` per-plant RBAC gap — pre-existing, broader than this
+   stage, recorded in `docs/MIGRATION.md`.
+6. ~~**The Optimization tab's "not yet used in sequencing" badge was not removed**~~ **DONE** — the
    badge, its `.pl-inert-badge` CSS rule, and the `ui.not_yet_used_in_sequencing` key in all five
    locales were all deleted once the label became false. Note this removes a *warning*, so item 4's
    coverage caveat is now carried only here and by the Stage 2 coverage readout itself; a replacement
@@ -386,6 +413,22 @@ and delivery became staged.
 - **N11** — the tree must show "enabled but no list uploaded" per field, generalizing the existing
   `cons-warn` / `ui.constraint_no_wheel` hint. Harmless at runtime, but silently inert config is
   what people file bugs about.
+  **RESOLVED in Stage 3's final-review fix wave (2026-08-11), not in Task 8 as intended.** Stage 3
+  shipped both halves of this warning still hardcoded to `colorWheel` — the whole-branch review
+  caught it, since neither the task that built the tree nor the task that generalized
+  `hasPriorityRanks` could see the gap from inside its own scope. Now: `Engine.unrankedActiveFields(plant)`
+  (`web/schedule-services.mts`) is the one generic answer to "which active fields would rank
+  nothing", derived from `flattenConstraints` + `hasPriorityRanks`; the tree hint
+  (`ui.constraint_no_list`, replacing the colorWheel-only `ui.constraint_no_wheel`) renders per node
+  for any enabled field with no list; and `OptimizeDialog`'s pre-Run confirm
+  (`modal.no_priority_ranks_confirm_msg`, replacing `modal.no_color_wheel_confirm_msg`) fires when
+  **any** active field is unranked, naming them. Because `unrankedActiveFields` reads the same cache
+  the sort terms read, a failed/non-ok rank fetch surfaces as "every active field unranked" through
+  the same call — so the confirm now also covers "ranks unavailable", including the previously-parked
+  case where a failed *refetch* emptied the cache while `Persistence._rankMapsPlant` still matched
+  the plant (that combination used to run unranked and unannounced). The optimization_run audit row
+  gained `active_priority_fields` / `unranked_priority_fields` alongside the historical
+  colorWheel-only `wheel_used`.
 - **N14** — dissolved by N2b (`Sandbox` mutates the live Store, so it had the same staleness).
 
 **Stage boundaries — two of these were my own contradictions:**
