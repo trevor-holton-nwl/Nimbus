@@ -1886,11 +1886,14 @@ def list_priority_fields():
 def get_priority_rank_maps(
         plant: str = Query(..., min_length=1),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """In-memory rank-map read for the optimizer's hot path (Stage 3) — zero DB
-    hit, since brain.PLANT_LISTS is already kept current by every priority-list
-    upload/delete (Stage 2) and POST /reload. Shape: {line_or_empty:
-    {field_key: {VALUE: RANK}}} — the exact native shape of PLANT_LISTS, no
-    reshaping, since this runs on every optimize call and every alert auto-fix.
+    """In-memory rank-map read for the optimizer's hot path (Stage 3) — the
+    rank data itself is a zero-DB-hit read of brain.PLANT_LISTS (already kept
+    current by every priority-list upload/delete (Stage 2) and POST /reload);
+    the plant-authorization gate below does its own one-row user_security
+    lookup when an identity header is present, same as every sibling in this
+    block. Shape: {line_or_empty: {field_key: {VALUE: RANK}}} — the exact
+    native shape of PLANT_LISTS, no reshaping, since this runs on every
+    optimize call and every alert auto-fix.
 
     Plant-scoped like every sibling in this block (/priority-lists,
     /priority-list/{plant}/{field_key}, GET /tasks), so it carries the same

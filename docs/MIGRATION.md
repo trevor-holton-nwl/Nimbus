@@ -515,6 +515,19 @@ out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left be
   affects `_loadCache()` (`:893`) and `_loadDemo()` (`:1003`), which emit `schedule:hydrated` and never
   load rank maps at all. Full trace in
   `docs/superpowers/plans/2026-08-11-stage-3-sequencing-audit.md` §11.1.
+  **Two residual follow-ups from the final-review re-check of this fix (2026-08-11), neither blocking
+  — both degrade to the same safe "unranked" fallback, not to a wrong-plant sequence:**
+  - `_loadCache()`'s clear is unconditional, but its one caller is `load()`'s network-failure `.catch()`
+    — so a same-plant reload during a backend outage now needlessly wipes a still-valid rank cache
+    (pre-fix it would have kept it). Cheap symmetric fix available: gate on
+    `data.selectedPlant !== Persistence._rankMapsPlant`, same as `load()` itself. `_loadDemo()`'s
+    unconditional clear is correct as-is (synthetic orders belong to no plant).
+  - `loadPriorityRankMaps` has no generation/request token (unlike `_updatePlantBadge`'s own
+    `_wheelFetchToken`, which guards the *badge* but not the *Store write* it triggers). An in-flight
+    fetch for the outgoing plant can still resolve and repopulate the cache after the new plant's
+    clear, reopening a narrower version of the same window — reachable via a rapid double plant-switch,
+    or an admin upload/delete refresh immediately before a switch. One-line remedy: apply the same
+    monotonic-token pattern inside `loadPriorityRankMaps` itself.
 
 ## Workstream 6 — Networking: same-origin reverse proxy
 
