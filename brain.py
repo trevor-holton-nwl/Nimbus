@@ -661,6 +661,16 @@ def _cw_df_to_entries(cw_df) -> dict:
     }
 
 
+# Explicit "use row order, do NOT auto-detect a rank column" marker sent by the
+# mapping modal's "— use row order —" option (web/index.html
+# #pl-mapping-rank-col + PriorityListMapping.open in
+# web/plant-and-administration.mts). Must stay in sync with that <option>'s
+# value. A real spreadsheet header can't collide with it (dunder-wrapped), and
+# it is never persisted — _resolve_priority_list_columns strips it and stores
+# rank_column NULL.
+ROW_ORDER_SENTINEL = "__row_order__"
+
+
 def _resolve_priority_list_columns(
         df: pd.DataFrame, plant: str, spec: dict, *,
         explicit_line: str = "", explicit_value_col: str | None = None,
@@ -742,10 +752,18 @@ def _resolve_priority_list_columns(
             ]
             return {"status": "needs_mapping", "headers": headers, "sample": sample}
 
-    resolved_rank_col = explicit_rank_col
+    # An explicit ROW_ORDER_SENTINEL means the user picked the mapping modal's
+    # "— use row order —" option ON PURPOSE. That option used to have value ''
+    # which arrives here as a falsy string, indistinguishable from "the client
+    # sent no rank_column at all" — so it fell through to auto-detect and could
+    # rank by a column (e.g. ORDER) the user had explicitly declined, silently.
+    # Stage 3 sequences real orders off these ranks, so the two cases must not
+    # be conflated: the sentinel forces row order and skips auto-detect.
+    force_row_order = (explicit_rank_col or "").strip() == ROW_ORDER_SENTINEL
+    resolved_rank_col = None if force_row_order else explicit_rank_col
     if resolved_rank_col and resolved_rank_col not in headers:
         raise HTTPException(status_code=400, detail=f"Missing required column: {resolved_rank_col!r}")
-    if not resolved_rank_col:
+    if not resolved_rank_col and not force_row_order:
         # Deterministic priority (not "exactly one match") so a file that
         # happens to carry more than one rank-shaped column (e.g. both a real
         # ORDER_Y and an unrelated ORDER) still picks a rank column instead of
@@ -781,18 +799,31 @@ def _resolve_priority_list_columns(
 
 def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict, *,
                            line: str, value_col: str, rank_col: str | None,
-                           filename: str, row_count: int, user: str,
+                           filename: str, file_row_count: int, user: str,
                            legacy_action_names: bool = False) -> bool:
     """Shared upsert+audit+cache-reload step (Decision 9b) — this part was
     ALREADY byte-for-byte identical between the legacy and generic upload
     paths before consolidation; only the audit action-name family differs,
     controlled by legacy_action_names so /color-wheel/{plant}'s historical
     audit trail (color_wheel_upload/color_wheel_replace) doesn't fork into a
-    second naming scheme for the same route. Returns is_replace."""
+    second naming scheme for the same route. Returns is_replace.
+
+    `priority_list.row_count` stores len(entries) — the number of value/rank
+    pairs actually STORED — not the uploaded file's raw row count. Every
+    consumer of that column renders it as "N values" (the Stage 2 field card,
+    a line-override row, PriorityListViewer's meta line, the legacy
+    GET /color-wheels list), and _resolve_priority_list_columns drops blank
+    values and collapses duplicates, so a 500-row file with 40 distinct values
+    displayed "500 values" while only 40 could ever affect sequencing. This is
+    the single choke point for both upload routes, so the stored count can't
+    fork between them. The raw file row count is kept in the audit trail
+    (`file_row_count`) — that is where upload provenance belongs.
+    """
+    stored_count = len(entries)
     res = db.upsert_priority_list(
         plant, field_key, entries, line=line,
         source_column=spec["orders_column"], value_column=value_col,
-        rank_column=rank_col, filename=filename, row_count=row_count, uploaded_by=user,
+        rank_column=rank_col, filename=filename, row_count=stored_count, uploaded_by=user,
     )
     is_replace = not res["inserted"]
     if legacy_action_names:
@@ -802,7 +833,8 @@ def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict
     _cw_append_audit({
         "ts": datetime.utcnow().isoformat() + "Z", "user": user, "action": action, "plant": plant,
         "details": {"field_key": field_key, "line": line, "filename": filename,
-                    "row_count": row_count, "replaced": is_replace},
+                    "row_count": stored_count, "file_row_count": file_row_count,
+                    "replaced": is_replace},
     })
     _reload_one_plant_lists(plant)
     return is_replace
@@ -1857,7 +1889,16 @@ def get_priority_lists_for_plant(
     """Per-field metadata + coverage for one plant's Optimization tab (Stage 2).
     Groups the flat list_priority_lists_meta rows by field_key, splitting
     line='' (plant-wide) from everything else (line overrides), and merges in
-    priority_list_coverage's per-line ranked/distinct counts."""
+    priority_list_coverage's per-line ranked/distinct counts.
+
+    `fields[<key>].coverage` is passed through verbatim, so it carries BOTH the
+    per-line buckets (keyed by the line code, or '' for orders with no line)
+    and one true plant-wide roll-up keyed by db.PLANT_TOTAL_COVERAGE_KEY
+    ('__plant_total__'). The plant-wide card must read that reserved key — '' is
+    the no-production-line bucket, NOT a plant total, and reading '' left the
+    ratio blank on every plant whose orders all carry a line. Summing the
+    per-line buckets client-side is also wrong: they are per-line
+    COUNT(DISTINCT ...), so a value used on two lines would be counted twice."""
     try:
         md._assert_plant_allowed(plant, allowed_plants)
     except md.PlantNotAllowed as e:
@@ -1919,16 +1960,22 @@ async def upload_priority_list(
     if resolved["status"] == "needs_mapping":
         return resolved
 
-    row_count = len(df)
+    # row_count is the STORED entry count (what the UI renders as "N values"),
+    # not len(df) — blanks are dropped and duplicate values collapsed by
+    # _resolve_priority_list_columns, so the two differ on any real file. The
+    # raw file row count is still reported, separately and unambiguously named.
+    file_row_count = len(df)
+    row_count = len(resolved["entries"])
     user = request.headers.get("X-User", "system")
     fname = file.filename or "upload.xlsx"
 
     is_replace = await run_in_threadpool(
         _persist_priority_list, plant, field_key, spec, resolved["entries"],
         line=resolved["line"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
-        filename=fname, row_count=row_count, user=user, legacy_action_names=False,
+        filename=fname, file_row_count=file_row_count, user=user, legacy_action_names=False,
     )
-    return {"status": "ok", "row_count": row_count, "line": resolved["line"],
+    return {"status": "ok", "row_count": row_count, "file_row_count": file_row_count,
+            "line": resolved["line"],
             "action": "replace" if is_replace else "upload", "replaced": is_replace}
 
 
@@ -1943,6 +1990,8 @@ def get_priority_list_generic(
         md._assert_plant_allowed(plant, allowed_plants)
     except md.PlantNotAllowed as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if field_key not in md.RANKABLE_FIELDS:
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
     row = db.get_priority_list(plant, field_key, line=line)
@@ -1971,6 +2020,8 @@ def delete_priority_list_generic(
         md._assert_plant_allowed(plant, allowed_plants)
     except md.PlantNotAllowed as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if field_key not in md.RANKABLE_FIELDS:
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
     res = db.delete_priority_list(plant, field_key, line=line)
@@ -2042,17 +2093,24 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     if resolved["status"] == "needs_mapping":
         raise HTTPException(status_code=400, detail="Missing required columns: ['COLOR']")
 
-    row_count = len(df)
+    # This route's RESPONSE `row_count` stays len(df) (raw file rows) — its
+    # response shape is a pinned back-compat contract (see this class of tests
+    # in tests/test_priority_lists.py, which assert the exact dict). What gets
+    # PERSISTED to priority_list.row_count is len(entries), decided inside
+    # _persist_priority_list so both upload routes store the same thing; the
+    # two differ only for a file with blank or duplicated values, which a
+    # well-formed color wheel doesn't have.
+    file_row_count = len(df)
     user = request.headers.get("X-User", "system")
     fname = file.filename or "upload.xlsx"
 
     is_replace = await run_in_threadpool(
         _persist_priority_list, plant, "colorWheel", spec, resolved["entries"],
         line="", value_col=resolved["value_col"], rank_col=resolved["rank_col"],
-        filename=fname, row_count=row_count, user=user, legacy_action_names=True,
+        filename=fname, file_row_count=file_row_count, user=user, legacy_action_names=True,
     )
     action = "color_wheel_replace" if is_replace else "color_wheel_upload"
-    return {"status": "ok", "row_count": row_count, "action": action, "replaced": is_replace}
+    return {"status": "ok", "row_count": file_row_count, "action": action, "replaced": is_replace}
 
 
 @api.get("/color-wheel/{plant}")
@@ -2432,7 +2490,9 @@ def md_set_material_plant_attributes(request: Request, body: dict = Body(default
 
 
 @api.post("/master-data/resync-order-attributes", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def resync_order_attributes(request: Request, body: dict = Body(default={})):
+def resync_order_attributes(
+        request: Request, body: dict = Body(default={}),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Re-stamp one plant's orders.{color,prt_01,prt_02,production_version} from
     material_plants NOW, via seam 2 (db._stamp_order_attributes). This is the
@@ -2445,7 +2505,8 @@ def resync_order_attributes(request: Request, body: dict = Body(default={})):
     optimistic-concurrency base_version (db.py ROW_VERSION). Any planner's
     unsaved edit to an affected order is discarded on their next save
     (last-writer-loses reconciliation, R2) — run this at a quiet moment, not
-    mid-shift. Admin-gated for exactly that reason.
+    mid-shift. Admin-gated AND role_plants-scoped (_assert_plant_allowed below)
+    for exactly that reason.
 
     Payload: { plant: str }
     Response: { status, plant, unmatched_pairs, unmatched_orders, exceptions }
@@ -2456,6 +2517,22 @@ def resync_order_attributes(request: Request, body: dict = Body(default={})):
     plant = (body.get("plant") or "").strip()
     if not plant:
         raise HTTPException(status_code=400, detail="plant is required")
+
+    # require_admin alone is NOT enough here: it proves the caller is an admin,
+    # not that this plant is inside their role_plants scope. This route runs a
+    # real UPDATE orders, which bumps orders.xmin (= base_version) and so
+    # discards every planner's unsaved edit on the affected rows — a
+    # plant-restricted admin must not be able to do that to a plant they aren't
+    # assigned, whether from the Stage 2 "Resync Now" button or by hand-crafting
+    # the request. `plant` arrives in the JSON body here (not a path param), so
+    # the check runs after the body is unpacked, but is otherwise the same
+    # choke point every other plant-scoped route in this family uses.
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Note: this writes orders.* columns only — it never touches priority_list,
     # so no PLANT_LISTS cache refresh is needed (unlike the /color-wheel/*

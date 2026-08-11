@@ -127,6 +127,48 @@ def test_priority_fields_endpoint_lists_four_fields(client):
     }
 
 
+def test_row_order_sentinel_forces_row_order_over_an_auto_detectable_column():
+    """The mapping modal's "— use row order —" option used to send rank_column=''
+    which is falsy, so the backend fell through to auto-detection and could rank
+    by a column (here ORDER) the user had just explicitly declined — silently,
+    and Stage 3 sequences real orders off these ranks. The explicit sentinel must
+    suppress auto-detection entirely and use 1..N row order."""
+    import pandas as pd
+    spec = md.RANKABLE_FIELDS["colorWheel"]
+    df = pd.DataFrame({"COLOR": ["RED", "BLUE"], "ORDER": [90, 80]})
+
+    # Baseline: with no explicit rank column, ORDER is auto-detected.
+    auto = brain._resolve_priority_list_columns(df, "5512", spec)
+    assert auto["rank_col"] == "ORDER"
+    assert auto["entries"] == {"RED": 90.0, "BLUE": 80.0}
+
+    # Sentinel: auto-detection is skipped, ranks are row order, and the
+    # sentinel itself is never persisted as a column name.
+    forced = brain._resolve_priority_list_columns(
+        df, "5512", spec, explicit_rank_col=brain.ROW_ORDER_SENTINEL)
+    assert forced["rank_col"] is None
+    assert forced["entries"] == {"RED": 1.0, "BLUE": 2.0}
+
+
+def test_row_order_sentinel_value_matches_the_frontend_option():
+    """Must stay in sync with ROW_ORDER_SENTINEL in
+    web/plant-and-administration.mts and the static <option value> in
+    web/index.html's #pl-mapping-rank-col."""
+    assert brain.ROW_ORDER_SENTINEL == "__row_order__"
+
+
+def test_get_priority_list_maps_blank_plant_to_400_not_500(client):
+    """_assert_plant_allowed raises ValueError (not PlantNotAllowed) for a
+    blank/whitespace plant; this route caught only PlantNotAllowed, so the
+    ValueError escaped as an unhandled 500. Its sibling routes
+    (GET /priority-lists, POST /priority-list/...) already mapped it to 400.
+    DB-free: with no identity header the allowed-plants resolver short-circuits
+    and the plant check runs before any query."""
+    r = client.get("/priority-list/%20/colorWheel")
+    assert r.status_code == 400
+    assert "plant is required" in r.json()["detail"]
+
+
 @pytest.mark.pg
 def test_known_line_codes_for_plant_is_scoped(pg):
     with pg._pool.connection() as conn, conn.cursor() as cur:
@@ -489,10 +531,30 @@ class TestMissingMasterDataForPlant:
 @pytest.mark.pg
 def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
     plant = "ZZTEST_PLE_PLANT"
+    # Plant-wide list ranks RED only; L01's override ranks BLUE only.
     pg.upsert_priority_list(plant, "colorWheel", {"RED": 1.0}, line="",
                             source_column="color", filename="w.xlsx", row_count=1, uploaded_by="t")
     pg.upsert_priority_list(plant, "colorWheel", {"BLUE": 1.0}, line="L01",
                             source_column="color", filename="w2.xlsx", row_count=1, uploaded_by="t")
+    # Orders chosen so the plant total can't be confused with any single line's
+    # number AND can't be reproduced by summing the per-line numbers:
+    #   L01: RED, BLUE      -> 2 distinct, 1 ranked (L01's override has BLUE only)
+    #   L02: RED, GREEN     -> 2 distinct, 1 ranked (falls back to plant-wide RED)
+    # Plant total: {RED, BLUE, GREEN} = 3 distinct (NOT 2+2=4 — RED is shared),
+    # ranked = {RED (via L02/plant-wide), BLUE (via L01)} = 2.
+    orders = [
+        ("zzple1", "L01", "RED"), ("zzple2", "L01", "BLUE"),
+        ("zzple3", "L02", "RED"), ("zzple4", "L02", "GREEN"),
+    ]
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        for oid, line, color in orders:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, plant,"
+                " production_line, color, basic_start_date)"
+                " VALUES (%s,%s,%s,%s,%s,%s, NOW()) ON CONFLICT (id) DO NOTHING",
+                (oid, oid.upper(), "MAT-" + oid, plant, line, color),
+            )
+        conn.commit()
     try:
         r = client.get(f"/priority-lists?plant={plant}")
         assert r.status_code == 200
@@ -502,12 +564,30 @@ def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
         assert cw["plant_wide"]["filename"] == "w.xlsx"
         assert len(cw["line_overrides"]) == 1
         assert cw["line_overrides"][0]["line"] == "L01"
-        assert "coverage" in cw
+
+        cov = cw["coverage"]
+        # Per-line buckets, keyed by line code.
+        assert cov["L01"] == {"distinct_values": 2, "ranked_values": 1}
+        assert cov["L02"] == {"distinct_values": 2, "ranked_values": 1}
+        # The plant-wide roll-up lives under the reserved key, NOT under '' —
+        # '' means "orders with no production line", which is why the
+        # plant-wide field card used to render no ratio at all here.
+        assert "" not in cov, "'' must stay the no-production-line bucket, not a plant total"
+        total = cov[pg.PLANT_TOTAL_COVERAGE_KEY]
+        # De-duplicated across lines: 3, not 2+2=4. Distinct from either line's 2.
+        assert total == {"distinct_values": 3, "ranked_values": 2}
+        assert total["distinct_values"] > cov["L01"]["distinct_values"]
+        assert total["distinct_values"] != sum(
+            v["distinct_values"] for k, v in cov.items() if k != pg.PLANT_TOTAL_COVERAGE_KEY
+        ), "summing per-line distinct counts double-counts shared values — hence the dedicated total"
+
+        # A field with no list uploaded still reports its own coverage denominator.
         assert body["fields"]["prt01"]["plant_wide"] is None
         assert body["fields"]["prt01"]["line_overrides"] == []
     finally:
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM priority_list WHERE plant = %s", (plant,))
+            cur.execute("DELETE FROM orders WHERE plant = %s", (plant,))
             conn.commit()
 
 
@@ -619,6 +699,42 @@ class TestGenericPriorityListUpload:
                              data={"value_column": "PRT_01"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+    def test_row_count_is_stored_entries_not_file_rows(self, pg):
+        """Both display sites (the field card's "N values" and
+        PriorityListViewer's meta line) render priority_list.row_count, so it has
+        to be the number of value/rank pairs actually STORED, not the uploaded
+        file's raw row count — blanks are dropped and duplicate values collapsed,
+        so a file with 4 rows can persist only 2 entries. The raw count is still
+        reported separately as file_row_count."""
+        body = self._xlsx([
+            {"PRT_01": "DOG", "RANK": 1},
+            {"PRT_01": "", "RANK": 2},      # blank value -> dropped
+            {"PRT_01": "CAT", "RANK": 3},
+            {"PRT_01": "cat", "RANK": 3},   # duplicate (upper/trim) with the SAME rank -> collapsed
+        ])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "PRT_01", "rank_column": "RANK"})
+        assert r.status_code == 200
+        assert r.json()["row_count"] == 2       # DOG, CAT
+        assert r.json()["file_row_count"] == 4  # raw spreadsheet rows
+        row = pg.get_priority_list(self.PLANT, "prt01", line="")
+        assert row["entries"] == {"DOG": 1.0, "CAT": 3.0}
+        assert row["row_count"] == len(row["entries"]) == 2
+
+    def test_explicit_row_order_sentinel_beats_an_auto_detectable_rank_column(self, pg):
+        """End-to-end pin for the mapping modal's "— use row order —" pick: the
+        sentinel must reach _resolve_priority_list_columns as an explicit
+        "no rank column" instruction, not as a falsy value that lets ORDER win."""
+        body = self._xlsx([{"PRT_01": "DOG", "ORDER": 90}, {"PRT_01": "CAT", "ORDER": 80}])
+        r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
+                             files={"file": ("t.xlsx", body)},
+                             data={"value_column": "PRT_01", "rank_column": brain.ROW_ORDER_SENTINEL})
+        assert r.status_code == 200
+        row = pg.get_priority_list(self.PLANT, "prt01", line="")
+        assert row["entries"] == {"DOG": 1.0, "CAT": 2.0}
+        assert row["rank_column"] is None
 
     def test_ambiguous_columns_return_needs_mapping(self):
         body = self._xlsx([{"FOO": "DOG", "BAR": "CAT"}])

@@ -509,22 +509,12 @@
     {
       "file": "plant-and-administration.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.ColorWheelViewer.open('${esc(plantName)}')"
-    },
-    {
-      "file": "plant-and-administration.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.EditCalendar.open('${line}')"
     },
     {
       "file": "plant-and-administration.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
-    },
-    {
-      "file": "plant-and-administration.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant._confirmDeleteWheel('${esc(plantName)}')"
     },
     {
       "file": "plant-and-administration.mjs",

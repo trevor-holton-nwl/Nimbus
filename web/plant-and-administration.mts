@@ -63,6 +63,43 @@ export function setActiveTabResolvers(resolvers: Partial<ActiveTabResolvers>): v
   _activeTabResolvers = { ..._activeTabResolvers, ...resolvers };
 }
 
+/** Shared "reject non-2xx instead of parsing the error body as data" fetch step.
+ *  Without it a 403/500 JSON body (`{"detail": …}`) parses cleanly and takes the
+ *  success branch, producing a false success message with blank interpolations.
+ *  Used by every priority-list read/write in this file. */
+const _okJson = (r: Response) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`));
+
+/** Last-resort mirror of `master_data.RANKABLE_FIELDS` (the backend's single
+ *  source of truth, surfaced live via `GET /priority-fields`). Only used when
+ *  that fetch has never succeeded in this session — otherwise the Optimization
+ *  tab would render completely empty on a transient failure, with no dropzones
+ *  and therefore no way to upload anything. `default_label` is intentionally the
+ *  backend's own English default; the cards render `Util.t('constraint.<key>')`,
+ *  so these labels are never what the user actually sees. Keep the key list in
+ *  sync with RANKABLE_FIELDS if a field is added there. */
+const _FALLBACK_PRIORITY_FIELDS: PriorityFieldMeta[] = [
+  { field_key: 'colorWheel', mp_column: 'color', orders_column: 'color', task_field: 'COLOR', default_label: 'Color Wheel' },
+  { field_key: 'prt01', mp_column: 'prt_01', orders_column: 'prt_01', task_field: 'PRT_01', default_label: 'Prod. Resource Tool (01)' },
+  { field_key: 'prt02', mp_column: 'prt_02', orders_column: 'prt_02', task_field: 'PRT_02', default_label: 'Prod. Resource Tool (02)' },
+  { field_key: 'productionVersion', mp_column: 'default_production_version', orders_column: 'production_version', task_field: 'PRODUCTION_VERSION', default_label: 'Production Version' },
+];
+
+/** Reserved key in `PriorityListFieldSummary.coverage` holding the true
+ *  plant-wide roll-up — must match `db.PLANT_TOTAL_COVERAGE_KEY`. NOT `''`:
+ *  that key is the "orders with no production line" bucket, so reading it as a
+ *  plant total left the ratio silently blank on every plant whose orders all
+ *  carry a line. Summing the per-line buckets instead would double-count any
+ *  value used on more than one line (they are per-line COUNT(DISTINCT …)). */
+const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
+
+/** Value of the mapping modal's "— use row order —" rank-column option. Must
+ *  match `brain.ROW_ORDER_SENTINEL` and the static `<option>` in
+ *  `web/index.html`'s `#pl-mapping-rank-col`. An explicit sentinel (rather than
+ *  `''`) is what lets the backend tell "the user chose row order" apart from
+ *  "no rank_column was sent", instead of silently auto-detecting a column the
+ *  user just declined. */
+const ROW_ORDER_SENTINEL = '__row_order__';
+
 /* =============================================================================
    CALENDAR UI — blackout-block-tab UI remnant.
    CQ-1 Phase 2 Task 1 moved the capacity-math half of the old `Calendar`
@@ -288,6 +325,16 @@ export const Plant = {
   _priorityFields: [] as PriorityFieldMeta[],
   _priorityLists: {} as Record<string, PriorityListFieldSummary>,
   _missingMasterData: null as MissingMasterDataReport | null,
+  // Tracked SEPARATELY from _missingMasterData's content, because
+  // `_missingMasterData === null` alone cannot distinguish "the exception
+  // report failed to load" from "the report loaded and there are zero
+  // exceptions" — and the panel renders nothing at all in the zero case, so a
+  // silently-failed fetch would read to an admin as a clean bill of health.
+  _missingDataOk: false,
+  // Non-null when the last Optimization-tab load failed — surfaced as an
+  // inline banner so a 403/timeout/500 can't present as an empty tab with no
+  // dropzones and no explanation.
+  _priorityLoadError: null as string | null,
   _currentPlantTab: 'general',
   _pillFps: null as PillFpPair[] | null,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
@@ -329,6 +376,37 @@ export const Plant = {
     document.getElementById('modal-block-save-btn')?.addEventListener('click', () => CalendarUI.saveBlockFromModal());
     document.getElementById('modal-plant-block-save-btn')?.addEventListener('click', () => Plant.savePlantBlockFromModal());
     document.getElementById('modal-lines-block-save-btn')?.addEventListener('click', () => ProdLines.saveBlockFromModal());
+
+    // Stage 2's two new modals (#modal-priority-mapping, #modal-priority-viewer)
+    // were added with inline onclick=/oninput= attributes copied from an older
+    // modal's style, which moved CLAUDE.md's tracked static-inline-handler count
+    // (the precisely-quantified blocker to switching index.html's CSP meta tag
+    // from Report-Only to enforcing) the wrong way, and broke the
+    // cq1-legacy-surface contract snapshot. Wired here instead, same pattern as
+    // everything above. Both modals are always-present static markup, so a
+    // single boot-time wiring is sufficient. `PriorityListViewer` lives in
+    // schedule-workbench.mjs and is already imported at the top of this file;
+    // `PriorityListMapping` is defined below in this same module.
+    const mapModal = document.getElementById('modal-priority-mapping');
+    // Backdrop click, target-guarded exactly as the inline handler was — only a
+    // click on the backdrop itself dismisses, never one that bubbled up from the
+    // dialog's own content.
+    mapModal?.addEventListener('click', e => {
+      if (e.target === mapModal) PriorityListMapping.close();
+    });
+    document.getElementById('pl-mapping-close-btn')?.addEventListener('click', () => PriorityListMapping.close());
+    document.getElementById('pl-mapping-cancel-btn')?.addEventListener('click', () => PriorityListMapping.close());
+    document.getElementById('pl-mapping-confirm-btn')?.addEventListener('click', () => PriorityListMapping.confirm());
+
+    const viewModal = document.getElementById('modal-priority-viewer');
+    viewModal?.addEventListener('click', e => {
+      if (e.target === viewModal) PriorityListViewer.close();
+    });
+    document.getElementById('pl-viewer-close-x')?.addEventListener('click', () => PriorityListViewer.close());
+    document.getElementById('pl-viewer-close-btn')?.addEventListener('click', () => PriorityListViewer.close());
+    document.getElementById('pl-viewer-search')?.addEventListener('input', e => {
+      PriorityListViewer.search((e.target as HTMLInputElement).value);
+    });
   },
 
   render(): void {
@@ -724,22 +802,52 @@ export const Plant = {
     // None/unrestricted, silently bypassing a plant-restricted user's own
     // role_plants scoping — and an r.ok check below needs a real response to
     // check, not a 403 body that parses as if it were valid data.
-    const okJson = (r: Response) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`));
+    // The missing-master-data read is the only optional one of the three (the
+    // panel it feeds is supplementary), but its failure must still be
+    // DISTINGUISHABLE from a successful empty report — hence the {ok, data}
+    // envelope rather than the old `.catch(() => null)`, which collapsed both
+    // into the same `null`.
     Promise.all([
-      Util.fetchTraced(`${Config.API_BASE}/priority-fields`, { signal: AbortSignal.timeout(6000) }).then(okJson),
-      Util.fetchTraced(`${Config.API_BASE}/priority-lists?plant=${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(6000) }).then(okJson),
-      Util.fetchTraced(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName)}/missing-master-data`, { signal: AbortSignal.timeout(6000) }).then(okJson).catch(() => null),
+      Util.fetchTraced(`${Config.API_BASE}/priority-fields`, { signal: AbortSignal.timeout(6000) }).then(_okJson),
+      Util.fetchTraced(`${Config.API_BASE}/priority-lists?plant=${encodeURIComponent(plantName)}`, { signal: AbortSignal.timeout(6000) }).then(_okJson),
+      Util.fetchTraced(`${Config.API_BASE}/master-data/${encodeURIComponent(plantName)}/missing-master-data`, { signal: AbortSignal.timeout(6000) })
+        .then(_okJson)
+        .then((data: MissingMasterDataReport) => ({ ok: true, data }),
+              () => ({ ok: false, data: null as MissingMasterDataReport | null })),
     ])
-      .then(([fieldsBody, listsBody, missingBody]) => {
+      .then(([fieldsBody, listsBody, missing]) => {
+        // Staleness guard. `plantName` is the plant THIS call was issued for;
+        // Store.selectedPlant is the live selection. Switching plant A -> B -> A
+        // fans out three overlapping Promise.all flights against unkeyed module
+        // state, and a late A-response landing after B's render would leave the
+        // tab showing A's cards while every wired action closes over the plant
+        // the stale render painted — including Delete and Resync Now, the
+        // latter running a real UPDATE orders (xmin bump, planner data loss) on
+        // the wrong plant, and the line-override combobox offering the CURRENT
+        // plant's lines for an upload targeting the stale one. Bail before
+        // touching state or the DOM.
+        if (plantName !== Store.selectedPlant) return;
         Plant._priorityFields = fieldsBody.fields || [];
         Plant._priorityLists = listsBody.fields || {};
-        Plant._missingMasterData = missingBody;
+        Plant._missingMasterData = missing.ok ? missing.data : null;
+        Plant._missingDataOk = missing.ok;
+        Plant._priorityLoadError = null;
         Plant._renderOptimization(plantName);
       })
-      .catch(() => {
-        Plant._priorityFields = [];
+      .catch((e: Error) => {
+        if (plantName !== Store.selectedPlant) return;
+        // Do NOT blank the tab. Emptying _priorityFields on any failure left a
+        // completely inert panel — no dropzones, no cards, no error, no way to
+        // upload anything — a regression from the pre-Stage-2 empty state. The
+        // field registry is plant-independent (GET /priority-fields returns the
+        // same rows for every plant), so a previously-loaded copy is still
+        // valid; only fall back to the static registry when we've never had one.
+        if (!Plant._priorityFields.length) Plant._priorityFields = _FALLBACK_PRIORITY_FIELDS.map(f => ({ ...f }));
         Plant._priorityLists = {};
         Plant._missingMasterData = null;
+        Plant._missingDataOk = false;
+        Plant._priorityLoadError = e?.message || 'unknown';
+        ErrorLog.error('plant', `Priority-list load failed for ${plantName}: ${Plant._priorityLoadError}`);
         Plant._renderOptimization(plantName);
       });
   },
@@ -772,8 +880,12 @@ export const Plant = {
       const label = Util.t(`constraint.${f.field_key}`);
       const inertBadge = f.field_key === 'colorWheel' ? '' :
         `<span class="pl-inert-badge">${Util.t('ui.not_yet_used_in_sequencing')}</span>`;
-      const cov = summary.coverage[''] || null;
-      const covHtml = cov
+      // PLANT_TOTAL_COVERAGE_KEY, not '' — see that constant's comment. The
+      // ungrouped backend branch always returns a row for every field (0/0 for
+      // a plant with no orders), so gate on distinct_values rather than key
+      // presence to avoid rendering a meaningless "0/0 values ranked".
+      const cov = summary.coverage[PLANT_TOTAL_COVERAGE_KEY] || null;
+      const covHtml = cov && cov.distinct_values > 0
         ? `<div class="pl-coverage"><span class="pl-coverage-num">${cov.ranked_values}/${cov.distinct_values}</span> ${Util.t('ui.values_ranked')}</div>`
         : '';
 
@@ -844,7 +956,22 @@ export const Plant = {
         </div>`;
     };
 
-    const missingHtml = Plant._missingMasterData && Plant._missingMasterData.unmatched_pairs > 0 ? `
+    // Visible, persistent inline banner (not a toast that vanishes) — an admin
+    // must be able to tell "this plant genuinely has no lists uploaded" from
+    // "we couldn't reach the server". `admin-status error` is this file's
+    // established error-surfacing class (see _uploadPriorityList's status line).
+    const loadErrHtml = Plant._priorityLoadError
+      ? `<div class="admin-status error" style="margin-bottom:12px">${esc(Util.t('ui.priority_lists_load_error', { msg: Plant._priorityLoadError }))}</div>`
+      : '';
+    // Only claim to know the exception count when the report actually loaded.
+    // On failure say so, rather than letting the panel's absence read as "no
+    // gaps" (which is exactly what a zero-exception success looks like). Skipped
+    // when loadErrHtml is already up — that banner covers the whole-tab failure,
+    // so a second one about the sub-report would just be noise.
+    const missingErrHtml = (Plant._missingDataOk || Plant._priorityLoadError) ? '' :
+      `<div class="admin-status warn" style="margin-top:12px">${esc(Util.t('ui.mmd_load_error'))}</div>`;
+
+    const missingHtml = Plant._missingDataOk && Plant._missingMasterData && Plant._missingMasterData.unmatched_pairs > 0 ? `
       <div class="pl-mmd-panel">
         <div class="pl-mmd-head">
           <h4>${Util.t('ui.missing_master_data_title')}</h4>
@@ -864,7 +991,7 @@ export const Plant = {
         </div>
       </div>` : '';
 
-    body.innerHTML = fields.map(fieldCardHtml).join('') + missingHtml;
+    body.innerHTML = loadErrHtml + fields.map(fieldCardHtml).join('') + missingHtml + missingErrHtml;
 
     // Wire dropzones (one per field) — see Task pattern at the old single-wheel wiring.
     fields.forEach(f => {
@@ -901,11 +1028,17 @@ export const Plant = {
       if (!host) return;
       host.innerHTML = `<button class="btn btn-ghost sm" data-add-override="${f.field_key}">+ ${Util.t('ui.add_line_override')}</button>`;
       host.querySelector('button')!.addEventListener('click', () => {
-        // Store.linesForSelectedPlant() — the established O(1)-indexed read
-        // used throughout this file (e.g. :256, :596) and schedule-workbench.mts;
-        // correct here since the Optimization tab is already scoped to
-        // Store.selectedPlant, which equals plantName in this render pass.
-        const lineNames = Store.linesForSelectedPlant();
+        // Store.masterLinesForPlant(), NOT Store.linesForSelectedPlant(): this
+        // dropdown feeds a VALIDATED upload. The backend checks the chosen line
+        // against master_data.known_line_codes_for_plant(plant), which queries
+        // `production_lines` only — while linesForSelectedPlant() also includes
+        // line codes discovered on ORDER rows and in calendars/lineSettings, so
+        // it could offer a line that 400s the moment the user picks it. Same
+        // master-data-only source the Master Data grids use (see :2461, :2741).
+        const lineNames = Store.masterLinesForPlant(plantName)
+          .map(l => l.production_line)
+          .filter((l): l is string => !!l)
+          .sort();
         host.innerHTML = `<div class="pl-override-combo"></div><input type="file" id="pl-override-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">`;
         const comboHost = host.querySelector('.pl-override-combo') as HTMLElement;
         _mkCombobox(comboHost, lineNames, {
@@ -973,11 +1106,17 @@ export const Plant = {
 
     post().then(body => {
       if (body.status === 'needs_mapping') {
-        PriorityListMapping.open(body.headers, body.sample, (valueCol: string, rankCol: string) => {
-          post({ value_column: valueCol, rank_column: rankCol })
-            .then(body2 => Plant._handleUploadResult(plantName, fieldKey, status, body2))
-            .catch(onNetworkError);
-        });
+        PriorityListMapping.open(body.headers, body.sample,
+          (valueCol: string, rankCol: string) => {
+            post({ value_column: valueCol, rank_column: rankCol })
+              .then(body2 => Plant._handleUploadResult(plantName, fieldKey, status, body2))
+              .catch(onNetworkError);
+          },
+          // Cancelling the mapping modal ends the upload — clear the
+          // "Uploading <file>…" line this function set before the
+          // needs_mapping round-trip, which otherwise stayed on the card
+          // forever, falsely implying an in-flight upload.
+          () => { if (status) { status.textContent = ''; status.className = 'admin-status'; } });
         return;
       }
       Plant._handleUploadResult(plantName, fieldKey, status, body);
@@ -1000,9 +1139,15 @@ export const Plant = {
       ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${errMsg}`, body);
       return;
     }
-    const verb = body.replaced ? 'replaced' : 'uploaded';
-    Toast.show(Util.t('toast.priority_list_verb', { verb, field: label, plant: plantName! }), 'success');
-    ErrorLog.info('plant', `Priority list ${verb} for ${plantName}/${fieldKey}: ${body.row_count} values`);
+    // Two whole keys, not one key with a {{verb}} placeholder: interpolating the
+    // English literal 'uploaded'/'replaced' into a translated sentence produced
+    // a mixed-language toast in every non-en locale (de: "…-Liste uploaded für
+    // 5512"), and no language can be relied on to keep the verb in the same
+    // slot anyway. The ErrorLog line below stays English — it's a developer log,
+    // not user-visible copy.
+    const key = body.replaced ? 'toast.priority_list_replaced' : 'toast.priority_list_uploaded';
+    Toast.show(Util.t(key, { field: label, plant: plantName! }), 'success');
+    ErrorLog.info('plant', `Priority list ${body.replaced ? 'replaced' : 'uploaded'} for ${plantName}/${fieldKey}: ${body.row_count} values`);
     Plant._fetchAndRenderOptimization(plantName);
   },
 
@@ -1041,7 +1186,12 @@ export const Plant = {
       headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
       body: JSON.stringify({ plant: plantName }),
     })
-      .then(r => r.json())
+      // _okJson, not a bare r.json(): a 403 (not an admin / plant outside the
+      // caller's role_plants) or a 500 still returns parseable JSON, which took
+      // the success branch and showed "Resync complete — undefined materials
+      // (undefined orders)…" as a green toast. Route it to the existing
+      // toast.resync_failed path in .catch instead.
+      .then(_okJson)
       .then(body => {
         Toast.show(Util.t('toast.resync_done', { pairs: body.unmatched_pairs, orders: body.unmatched_orders }), 'success');
         Plant._fetchAndRenderOptimization(plantName);
@@ -1286,6 +1436,10 @@ export const Plant = {
  *  to whichever `onConfirm` callback the caller supplied. */
 export const PriorityListMapping = (() => {
   let _onConfirm: ((valueCol: string, rankCol: string) => void) | null = null;
+  // Fired only when the modal is DISMISSED (backdrop / × / Cancel), never when
+  // confirm() closes it — confirm() clears this first. Lets the caller undo the
+  // "Uploading <file>…" status line it set before the needs_mapping round-trip.
+  let _onCancel: (() => void) | null = null;
 
   // headers/sample come straight from the uploaded spreadsheet's own column
   // names and cell values — genuinely untrusted content (e.g. a header of
@@ -1294,12 +1448,19 @@ export const PriorityListMapping = (() => {
   // `_renderOptimization`'s local `esc`).
   const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
 
-  function open(headers: string[], sample: Record<string, unknown>[], onConfirm: (v: string, r: string) => void): void {
+  function open(headers: string[], sample: Record<string, unknown>[],
+                onConfirm: (v: string, r: string) => void, onCancel?: () => void): void {
     _onConfirm = onConfirm;
+    _onCancel = onCancel || null;
     const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
     const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
     valSel.innerHTML = headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
-    rankSel.innerHTML = `<option value="">${Util.t('ui.mapping_rank_none')}</option>` +
+    // ROW_ORDER_SENTINEL, not '' — an empty value is indistinguishable server-side
+    // from "the client sent no rank_column at all", so brain.py's
+    // _resolve_priority_list_columns fell through to auto-detection and could rank
+    // by a column (e.g. ORDER) the user had just explicitly declined. Must stay in
+    // sync with brain.ROW_ORDER_SENTINEL and index.html's static <option>.
+    rankSel.innerHTML = `<option value="${ROW_ORDER_SENTINEL}">${Util.t('ui.mapping_rank_none')}</option>` +
       headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
     const sampleEl = document.getElementById('pl-mapping-sample');
     if (sampleEl) {
@@ -1314,13 +1475,19 @@ export const PriorityListMapping = (() => {
   function close(): void {
     const el = document.getElementById('modal-priority-mapping');
     if (el) el.hidden = true;
+    const cancelled = _onCancel;
     _onConfirm = null;
+    _onCancel = null;
+    // confirm() nulls _onCancel before calling close(), so this only fires for a
+    // genuine dismissal.
+    if (cancelled) cancelled();
   }
 
   function confirm(): void {
     const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
     const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
     const cb = _onConfirm;
+    _onCancel = null;
     close();
     if (cb) cb(valSel.value, rankSel.value);
   }

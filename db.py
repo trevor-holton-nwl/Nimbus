@@ -2086,11 +2086,23 @@ def list_priority_lists_meta(plant: str | None = None, field_key: str | None = N
     return out, total
 
 
+# Reserved key in priority_list_coverage()'s per-field map for the true
+# plant-wide roll-up. Deliberately NOT '' — '' is already a real, different
+# bucket in that map (orders whose production_line is NULL/blank), and it is
+# also the plant-wide *scope* value in the priority_list table's `line`
+# column, so reusing it here conflated three distinct meanings and made the
+# plant-wide coverage ratio silently blank on every plant where every order
+# has a line. Production line codes can never collide with this token.
+PLANT_TOTAL_COVERAGE_KEY = "__plant_total__"
+
+
 def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
     """ONE aggregate query per plant (N3: 70 lines x 4 fields must not become up
-    to 280 separate lookups) — a UNION ALL of one SELECT per field, returning
-    for every production line with orders at this plant how many distinct
-    values that field has and how many of those are covered by a rank.
+    to 280 separate lookups) — a UNION ALL of two SELECTs per field, returning
+    (a) for every production line with orders at this plant how many distinct
+    values that field has and how many of those are covered by a rank, and
+    (b) one true plant-wide roll-up row per field under the reserved
+    PLANT_TOTAL_COVERAGE_KEY ('__plant_total__') key.
 
     `fields` is {field_key: source_column} — supplied by the caller
     (master_data.RANKABLE_FIELDS is the single source of truth for that
@@ -2105,16 +2117,31 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
     that case (every line falls back to the one plant-wide row) and needs no
     change once Stage 2 starts writing line-scoped rows.
 
-    Returns {field_key: {line_or_empty_string: {"distinct_values": int,
-    "ranked_values": int}}}. Caller should cache this (R12).
+    Why the plant total needs its own query branch rather than being summed
+    client-side from the per-line rows: the per-line numbers are
+    COUNT(DISTINCT ...) *within* a line, so adding them up double-counts every
+    value that appears on more than one line (with 70 lines per plant, that is
+    the common case, not an edge case). The '__plant_total__' branch drops the
+    GROUP BY entirely so COUNT(DISTINCT ...) de-duplicates across the whole
+    plant. Its `ranked_values` uses the SAME per-row COALESCE(line list, plant
+    list) resolution as the per-line rows, so a value counts as ranked when at
+    least one of its occurrences resolves to a rank under the resolution the
+    scheduler will actually use.
+
+    Note the ungrouped branch always returns exactly one row per field, even
+    for a plant with no orders at all (0/0) — callers that treat "no coverage
+    data" as a reason to hide a ratio should test distinct_values, not key
+    presence.
+
+    Returns {field_key: {line_or_empty_string_or___plant_total__:
+    {"distinct_values": int, "ranked_values": int}}}. Caller should cache this
+    (R12).
     """
     if not fields:
         return {}
-    parts, params = [], []
-    for field_key, source_column in fields.items():
-        parts.append(sql.SQL("""
-            SELECT %s AS field_key,
-                   COALESCE(o.production_line, '') AS line,
+    # Shared FROM/JOIN/WHERE tail — identical for the per-line and plant-total
+    # branches; only the SELECT's `line` expression and the GROUP BY differ.
+    body = sql.SQL("""
                    COUNT(DISTINCT UPPER(TRIM(o.{col}))) AS distinct_values,
                    COUNT(DISTINCT UPPER(TRIM(o.{col}))) FILTER (
                        WHERE COALESCE(pl_line.entries, pl_plant.entries, '{{}}'::jsonb)
@@ -2129,8 +2156,21 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
                AND pl_plant.field_key = %s
              WHERE o.plant = %s
                AND o.{col} IS NOT NULL AND o.{col} <> ''
-             GROUP BY COALESCE(o.production_line, '')
-        """).format(col=sql.Identifier(source_column)))
+    """)
+    parts, params = [], []
+    for field_key, source_column in fields.items():
+        col = sql.Identifier(source_column)
+        parts.append(
+            sql.SQL("SELECT %s AS field_key, COALESCE(o.production_line, '') AS line,")
+            + body.format(col=col)
+            + sql.SQL(" GROUP BY COALESCE(o.production_line, '')")
+        )
+        params.extend([field_key, field_key, field_key, plant])
+        parts.append(
+            sql.SQL("SELECT %s AS field_key, {total_key}::text AS line,").format(
+                total_key=sql.Literal(PLANT_TOTAL_COVERAGE_KEY))
+            + body.format(col=col)
+        )
         params.extend([field_key, field_key, field_key, plant])
 
     full_q = sql.SQL(" UNION ALL ").join(parts)

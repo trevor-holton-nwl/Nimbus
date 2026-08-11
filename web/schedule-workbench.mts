@@ -7524,6 +7524,12 @@ export const PriorityListViewer = (() => {
         _entries = body.entries || [];
         const metaEl = document.getElementById('pl-viewer-meta');
         const m = body.meta || {};
+        // meta.row_count is priority_list.row_count, which brain.
+        // _persist_priority_list now stores as len(entries) — the value/rank
+        // pairs actually STORED — so it agrees with the list rendered below it
+        // and with the field card's "N values". It used to be the uploaded
+        // file's raw row count, so a 500-row file with 40 distinct values read
+        // "500 values" above a 40-row list.
         if (metaEl) metaEl.textContent = m.filename
           ? `${m.filename} · ${m.row_count ?? _entries.length} values`
           : `${_entries.length} values`;

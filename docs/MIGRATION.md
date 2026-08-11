@@ -365,7 +365,7 @@ going forward, none blocking:
    onto `orders.production_version`) is deliberately the eventual join anchor for that rework, so
    when it lands, only `db._stamp_order_attributes`' query changes.
 
-### Priority lists Stage 2 (2026-08-10) — four more follow-ups
+### Priority lists Stage 2 (2026-08-10) — five more follow-ups
 
 Stage 2 of `docs/scheduling_priority.md` shipped the generic upload/column-mapping UI, per-field
 coverage, a generic list-preview viewer, and the missing-master-data admin panel on top of Stage 1's
@@ -374,7 +374,7 @@ per-process) is unaffected — Stage 2 adds read/CRUD surface, not a new caching
 still funnels through the existing `_reload_one_plant_lists`. **R17**'s three compat shims are if
 anything narrowed by item 3 below (the `/color-wheel/{plant}` rewrite consolidates onto shared
 helpers instead of adding a fourth shim) — though it surfaces one new naming-family nuance worth
-tracking on its own. Four more items, in addition to the three above:
+tracking on its own. Five more items, in addition to the three above:
 
 1. **`PriorityListMapping` and `PriorityListViewer` are new bridge-wired modules**, added to
    `schedule-workbench.mts` (bridged onto `window.__NIMBUS_WORKBENCH` per CQ-1's module bridge — see
@@ -401,11 +401,34 @@ tracking on its own. Four more items, in addition to the three above:
    400 on conflicting ranks, and no empty-file rejection) — see the `upload_color_wheel` docstring in
    `brain.py`. **Not yet verified against a real external caller** — a manual curl/Postman test with
    and without `ORDER_Y` is still on `docs/scheduling_priority.md`'s own pre-ship checklist.
-4. **`tests/contracts/cq1-legacy-surface.json` is stale.** Tasks 10-12 added new onclick handlers to
-   `web/index.html` for the mapping/viewer modals that the legacy-surface contract snapshot
-   (`tests/modules/legacy-surface.test.mjs`) doesn't yet know about, so that test currently fails.
-   Run `node scripts/legacy-surface.mjs --write` and commit the regenerated fixture before merge —
-   not a design problem, just a snapshot that needs regenerating after this stage's UI additions.
+4. **~~`tests/contracts/cq1-legacy-surface.json` is stale.~~ RESOLVED in the final fix pass.** Tasks
+   10-12 had added 6 inline `onclick`/`oninput` handlers to `web/index.html` for the mapping/viewer
+   modals, which both broke the legacy-surface contract snapshot and moved `CLAUDE.md`'s tracked
+   static-inline-handler count (the quantified blocker to switching `index.html`'s CSP meta tag from
+   Report-Only to enforcing) the *wrong* way. Rather than regenerate the snapshot around them, all 6
+   were removed and re-wired through the existing boot-time hook in
+   `web/plant-and-administration.mts` (`Plant`'s `_wireStaticHandlers`, the same place
+   CalendarUI/Plant/ProdLines' static markup is wired). The regenerated fixture is therefore a net
+   **removal** of 2 entries versus the pre-stage snapshot (the two color-wheel inline handlers this
+   stage's field-card rewrite deleted), with zero additions. One gotcha worth knowing: the
+   legacy-surface scanner greps `index.html`'s **raw text** for `Module._member`, so writing that
+   hook's name literally in an HTML comment adds a phantom `privateConsumers` row — the comments
+   there deliberately spell it without the dot.
+
+5. **The Optimization tab uploads colour through the STRICT validation path, on purpose — stricter
+   than what `POST /color-wheel/{plant}` still allows.** Every field card, colour included, posts to
+   `POST /priority-list/{plant}/{field_key}`, which runs `_resolve_priority_list_columns` with
+   `reject_conflicts=True` (a duplicate value carrying two different ranks is a 400) and rejects an
+   empty/header-only file. The legacy `POST /color-wheel/{plant}` route keeps the opposite posture
+   for backward compatibility (`reject_conflicts=False`, last-value-wins; no empty-file check — see
+   item 3 above and the `upload_color_wheel` docstring). So the same colour-wheel file can be
+   accepted by the legacy API route and rejected by the UI. **This divergence is deliberate and was
+   reviewed** — the choice was explicitly to keep the UI strict rather than special-case colour down
+   to legacy permissiveness, because a conflicting-rank or empty colour file is a data error worth
+   surfacing to the admin uploading it, and the UI has a mapping/error surface to surface it on
+   (external API callers do not). Do not "fix" the UI path to match the legacy route; if anything
+   converges later, it should be the legacy route tightening once no external caller depends on its
+   tolerance (item 3's unverified-external-caller note still applies).
 
 ## Workstream 6 — Networking: same-origin reverse proxy
 

@@ -2613,12 +2613,19 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <!-- =========================================================
      MODAL: Priority List Mapping
      ========================================================= -->
-<div class="modal-backdrop" id="modal-priority-mapping" hidden
-     onclick="if(event.target===this)NIMBUS.PriorityListMapping.close()">
+<!-- Handlers (backdrop dismiss, close/cancel/confirm) are wired by the plant
+     module's boot-time static-handler hook (`_wireStaticHandlers` in
+     plant-and-administration.mts) via addEventListener, NOT inline onclick= —
+     static inline handlers are the tracked blocker to enabling CSP
+     enforcement (CLAUDE.md → Architecture → Frontend). Note: naming that hook
+     as Module-dot-underscore-member in this comment would add a phantom row to
+     the cq1-legacy-surface privateConsumers inventory, which scans this file's
+     raw text. -->
+<div class="modal-backdrop" id="modal-priority-mapping" hidden>
   <div class="modal" style="max-width:520px">
     <div class="modal-head">
       <h3 data-i18n="ui.mapping_modal_title">Map columns</h3>
-      <button class="modal-close" onclick="NIMBUS.PriorityListMapping.close()">&times;</button>
+      <button class="modal-close" id="pl-mapping-close-btn">&times;</button>
     </div>
     <div class="modal-body">
       <p style="margin:0 0 12px;font-size:12.5px;color:var(--fg-mute)" data-i18n="ui.mapping_modal_sub">
@@ -2630,15 +2637,21 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="form-row">
         <label data-i18n="ui.mapping_rank_col">Rank column (optional — row order used if left blank)</label>
+        <!-- value MUST be the __row_order__ sentinel, matching
+             ROW_ORDER_SENTINEL in plant-and-administration.mts and
+             brain.ROW_ORDER_SENTINEL. An empty value is indistinguishable
+             server-side from "no rank_column sent" and silently fell through
+             to rank-column auto-detection. PriorityListMapping.open() rebuilds
+             this list at open time and re-emits the same sentinel. -->
         <select id="pl-mapping-rank-col" class="input">
-          <option value="" data-i18n="ui.mapping_rank_none">— use row order —</option>
+          <option value="__row_order__" data-i18n="ui.mapping_rank_none">— use row order —</option>
         </select>
       </div>
       <div id="pl-mapping-sample" class="pl-mapping-sample"></div>
     </div>
     <div class="modal-foot">
-      <button class="btn btn-ghost" onclick="NIMBUS.PriorityListMapping.close()" data-i18n="btn.cancel">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.PriorityListMapping.confirm()" data-i18n="btn.upload">Upload</button>
+      <button class="btn btn-ghost" id="pl-mapping-cancel-btn" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" id="pl-mapping-confirm-btn" data-i18n="btn.upload">Upload</button>
     </div>
   </div>
 </div>
@@ -2646,8 +2659,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <!-- =========================================================
      MODAL: Priority List Viewer (generic list)
      ========================================================= -->
-<div class="modal-backdrop cw-viewer-backdrop" id="modal-priority-viewer" hidden
-     onclick="if(event.target===this)NIMBUS.PriorityListViewer.close()">
+<!-- Handlers (backdrop dismiss, close ×, footer Close, search input) are wired
+     by the same boot-time static-handler hook via addEventListener, NOT inline
+     onclick=/oninput= — see the note on #modal-priority-mapping above. -->
+<div class="modal-backdrop cw-viewer-backdrop" id="modal-priority-viewer" hidden>
   <div class="cw-viewer-modal">
     <div class="opt-header">
       <div class="opt-header-icon">&#128203;</div>
@@ -2655,13 +2670,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-header-title"><span id="pl-viewer-field-label">&mdash;</span> &middot; <span id="pl-viewer-plant-name">&mdash;</span></div>
         <div class="opt-header-sub" id="pl-viewer-meta">&mdash;</div>
       </div>
-      <button class="opt-close" onclick="NIMBUS.PriorityListViewer.close()">&times;</button>
+      <button class="opt-close" id="pl-viewer-close-x">&times;</button>
     </div>
     <div class="cw-viewer-toolbar">
       <div class="cw-search-wrap">
         <span class="cw-search-icon">&#128269;</span>
-        <input type="search" id="pl-viewer-search" class="cw-search-input" data-i18n-placeholder="ph.search_values"
-               oninput="NIMBUS.PriorityListViewer.search(this.value)">
+        <input type="search" id="pl-viewer-search" class="cw-search-input" data-i18n-placeholder="ph.search_values">
       </div>
       <span class="cw-count-badge" id="pl-viewer-count"></span>
     </div>
@@ -2669,7 +2683,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="cw-loading"><span class="cw-spin"></span><span data-i18n="ui.loading">Loading&hellip;</span></div>
     </div>
     <div class="cw-viewer-footer">
-      <button class="btn btn-ghost" onclick="NIMBUS.PriorityListViewer.close()" data-i18n="btn.close">Close</button>
+      <button class="btn btn-ghost" id="pl-viewer-close-btn" data-i18n="btn.close">Close</button>
     </div>
   </div>
 </div>
