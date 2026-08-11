@@ -985,24 +985,44 @@ def ensure_material_plant_attributes() -> None:
         conn.commit()
 
 
+def _normalize_constraint_tree(nodes: list, depth: int = 1) -> list[dict]:
+    """Recursive normalize+validate for the priority tree (Stage 3). Depth
+    cap of 3 mirrors the UI's own cap (docs/scheduling_priority.md: with 4
+    registered fields the effective sequence saturates at 4 keys regardless
+    of nesting depth, so a deeper tree is never meaningful, not just
+    disallowed for its own sake)."""
+    if depth > 3:
+        raise ValueError(f"constraint tree depth exceeds 3 (Stage 3 cap)")
+    clean: list[dict] = []
+    for c in nodes:
+        if not isinstance(c, dict) or "key" not in c:
+            raise ValueError("each constraint requires a 'key'")
+        node = {
+            "key":     str(c["key"]),
+            "enabled": bool(c.get("enabled", False)),
+            "order":   int(c.get("order", 0)),
+        }
+        children = c.get("children")
+        if children:
+            if not isinstance(children, list):
+                raise ValueError("'children' must be a list")
+            node["children"] = _normalize_constraint_tree(children, depth + 1)
+        clean.append(node)
+    return clean
+
+
 def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
                           user_email: str | None = None) -> dict:
     """Persist a plant's ordered constraint config. Each entry is normalized to
-    {key:str, enabled:bool, order:int}. The plant row must already exist."""
+    {key:str, enabled:bool, order:int}, recursively preserving a 'children'
+    list (the Stage 3 priority tree, sub-sorting one field under another),
+    capped at depth 3. The plant row must already exist."""
     if not plant:
         raise ValueError("plant is required")
     if not isinstance(constraints, list):
         raise ValueError("constraints must be a list")
 
-    clean: list[dict] = []
-    for c in constraints:
-        if not isinstance(c, dict) or "key" not in c:
-            raise ValueError("each constraint requires a 'key'")
-        clean.append({
-            "key":     str(c["key"]),
-            "enabled": bool(c.get("enabled", False)),
-            "order":   int(c.get("order", 0)),
-        })
+    clean = _normalize_constraint_tree(constraints)
 
     params: list = [Jsonb(clean), plant]
     where = "plant = %s"

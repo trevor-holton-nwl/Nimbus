@@ -170,6 +170,45 @@ def test_get_priority_list_maps_blank_plant_to_400_not_500(client):
 
 
 @pytest.mark.pg
+def test_set_plant_constraints_preserves_nested_children(pg):
+    import master_data as md
+    sub, plant = "ZZTEST_TREE_SUB", "ZZTEST_TREE_PLANT"
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (sub, sub))
+        cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING", (sub, plant))
+        conn.commit()
+    try:
+        tree = [
+            {"key": "colorWheel", "enabled": True, "order": 1, "children": [
+                {"key": "prt01", "enabled": True, "order": 1},
+            ]},
+        ]
+        md.set_plant_constraints(subnetwork=sub, plant=plant, constraints=tree)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT constraints FROM plants WHERE plant = %s", (plant,))
+            stored = cur.fetchone()[0]
+        assert stored[0]["children"][0]["key"] == "prt01"
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM plants WHERE plant = %s", (plant,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (sub,))
+            conn.commit()
+
+
+def test_set_plant_constraints_rejects_depth_beyond_three():
+    import master_data as md
+    deep = {"key": "colorWheel", "enabled": True, "order": 1, "children": [
+        {"key": "prt01", "enabled": True, "order": 1, "children": [
+            {"key": "prt02", "enabled": True, "order": 1, "children": [
+                {"key": "productionVersion", "enabled": True, "order": 1},
+            ]},
+        ]},
+    ]}
+    with pytest.raises(ValueError, match="depth"):
+        md.set_plant_constraints(subnetwork="", plant="ZZANY", constraints=[deep])
+
+
+@pytest.mark.pg
 def test_known_line_codes_for_plant_is_scoped(pg):
     with pg._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO subnetworks (code, name) VALUES ('ZZTEST_SUB','ZZTEST_SUB') ON CONFLICT DO NOTHING")
