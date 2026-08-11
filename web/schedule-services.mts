@@ -1022,16 +1022,27 @@ export const Engine = {
    *  (schedule-workbench.mts) reads this directly and could nag or stay
    *  silent for the wrong tree.
    *
-   *  Semantics deliberately mirror flattenConstraints', so the two can never
-   *  disagree about whether a key is in effect:
+   *  Semantics mirror flattenConstraints', so for a CONFIGURED (non-empty)
+   *  tree the two are exactly equivalent —
+   *  `constraintEnabled(p, k) === flattenConstraints(p).includes(k)`:
    *    • a disabled node takes its ENTIRE subtree with it (an unreachable
    *      priority is off, not "half-configured");
    *    • with the key present more than once, ANY reachable enabled occurrence
    *      makes it enabled — exactly the occurrence flattenConstraints would
-   *      emit;
-   *    • only a key absent from the whole tree (or a plant with no stored
-   *      tree at all) falls through to the colorWheel-ON default, which is
-   *      the never-configured behavior this function has always had. */
+   *      emit, so the answer is position-independent;
+   *    • a key a configured tree does not mention AT ALL is off. It must not
+   *      fall through to the colorWheel default — doing so reproduced the very
+   *      same spurious-nag bug one level up, and it is reachable in practice:
+   *      removing the Color Wheel row in the tree UI leaves a non-empty tree
+   *      with no colorWheel node in it, where flattenConstraints correctly
+   *      reports colorWheel as not in effect.
+   *  The colorWheel-ON default therefore now applies to exactly one case: a
+   *  plant with no stored tree at all (null, or an empty array — which
+   *  flattenConstraints also treats as never-configured). That is also the only
+   *  branch on which flattenConstraints routes back through here, via its own
+   *  CONSTRAINT_CATALOG fallback, so there is no mutual recursion. (In that
+   *  one branch the equivalence above is bounded by the catalog, since
+   *  flattenConstraints can only emit keys the catalog lists.) */
   constraintEnabled(plant: string | null, key: string): boolean {
     const tree = Engine.constraintsFor(plant);
     if (!tree) return key === 'colorWheel';
@@ -1052,7 +1063,9 @@ export const Engine = {
       }
     };
     walk(tree, true);
-    return present ? effective : key === 'colorWheel';
+    // A configured tree is authoritative about what it omits; only a genuinely
+    // empty/never-configured one gets the historical default.
+    return present ? effective : (tree.length ? false : key === 'colorWheel');
   },
 
   /** Pre-order DFS flatten of the (possibly nested) constraint tree — a field

@@ -299,9 +299,52 @@ test('constraintEnabled preserves the flat top-level behavior it always had', ()
   ] }], lines: [] }, 'unit-test');
   assert.equal(Engine.constraintEnabled('CE5', 'colorWheel'), false, 'explicit top-level off stays off');
   assert.equal(Engine.constraintEnabled('CE5', 'prt01'), true, 'explicit top-level on stays on');
-  // A key absent from a stored tree still falls through to the documented
-  // colorWheel-ON / everything-else-OFF default — unchanged by the tree walk.
+  // A key a configured tree does not mention is off — it does NOT fall through
+  // to the everything-else-OFF default (same answer here, different reason).
   assert.equal(Engine.constraintEnabled('CE5', 'prt02'), false);
+});
+
+test('constraintEnabled: a configured tree that OMITS the key returns false, not the colorWheel default', () => {
+  // Reachable in practice: removing the Color Wheel row in the tree UI leaves a
+  // non-empty tree with no colorWheel node. Falling through to
+  // `key === 'colorWheel'` here would report colorWheel ON while
+  // flattenConstraints correctly reports it as not in effect — the same
+  // spurious-nag symptom the tree-walk fix closed, one level up.
+  Store.setMasterData({ plants: [{ plant: 'CE8', constraints: [
+    { key: 'prt01', enabled: true, order: 1 },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE8', 'colorWheel'), false,
+    'a configured tree is authoritative about what it omits');
+  assert.deepEqual(Engine.flattenConstraints('CE8'), ['prt01']);
+  assert.ok(!Engine.flattenConstraints('CE8').includes('colorWheel'),
+    'and flattenConstraints agrees — the equivalence the doc comment claims');
+  // Same for a nested-only tree that omits it.
+  Store.setMasterData({ plants: [{ plant: 'CE9', constraints: [
+    { key: 'prt01', enabled: true, order: 1, children: [{ key: 'prt02', enabled: true, order: 1 }] },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE9', 'colorWheel'), false);
+  assert.equal(Engine.constraintEnabled('CE9', 'productionVersion'), false);
+});
+
+test('constraintEnabled: duplicate root keys resolve position-independently, like flattenConstraints', () => {
+  // off-then-on and on-then-off must give the same answer: flattenConstraints
+  // emits the key as long as SOME reachable occurrence is enabled, regardless
+  // of order, so a positional find() (first match wins) would disagree.
+  for (const [label, constraints] of [
+    ['off then on', [{ key: 'colorWheel', enabled: false, order: 1 }, { key: 'colorWheel', enabled: true, order: 2 }]],
+    ['on then off', [{ key: 'colorWheel', enabled: true, order: 1 }, { key: 'colorWheel', enabled: false, order: 2 }]],
+  ]) {
+    Store.setMasterData({ plants: [{ plant: 'CE10', constraints }], lines: [] }, 'unit-test');
+    assert.equal(Engine.constraintEnabled('CE10', 'colorWheel'), true, `${label}: any enabled occurrence wins`);
+    assert.ok(Engine.flattenConstraints('CE10').includes('colorWheel'), `${label}: flattenConstraints agrees`);
+  }
+  // Both off -> off, in either arrangement.
+  Store.setMasterData({ plants: [{ plant: 'CE11', constraints: [
+    { key: 'colorWheel', enabled: false, order: 1 },
+    { key: 'colorWheel', enabled: false, order: 2 },
+  ] }], lines: [] }, 'unit-test');
+  assert.equal(Engine.constraintEnabled('CE11', 'colorWheel'), false);
+  assert.deepEqual(Engine.flattenConstraints('CE11'), []);
 });
 
 test('constraintEnabled preserves the never-configured default (colorWheel ON, rest OFF)', () => {
