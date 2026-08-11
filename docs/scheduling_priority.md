@@ -79,23 +79,26 @@ ranks from `Store` state (the alert auto-fix path's mechanism), and the R11 wall
    but SSL was required`) and carries Azure credentials, so the harness's collection-time guard skips
    them by design. The non-pg half — including Task 3's two `/priority-rank-maps` tests and Task 2's
    depth-cap test — does pass.
-3. **Two residual findings the implementation left open**, both traced in the audit doc §11 and
-   neither fixed by this stage: a **stale-plant window on the alert auto-fix path** (during a plant
-   switch, `Store.priorityRankMaps` still holds the *previous* plant's ranks until the master-data
-   fetch chain resolves, and auto-fix — unlike Optimize's Run — cannot await freshness), and
-   `GET /priority-rank-maps` being the **only** plant-scoped endpoint in its block with no
-   `allowed_plants` authorization check.
+3. ~~**Two residual findings the implementation left open**~~ **RESOLVED in a same-day fix round** —
+   Task 10's verification found three defects and all three were fixed rather than handed off (audit
+   doc §14): (a) the **stale-plant window on the alert auto-fix path** — `Persistence.load()`,
+   `_loadCache()` and `_loadDemo()` now drop `Store.priorityRankMaps` + `_rankMapsPlant` the moment a
+   plant change is detected, so the window degrades to "nothing ranked yet" instead of "ranked by the
+   previous plant"; (b) `GET /priority-rank-maps` **now carries the same `allowed_plants` gate** as
+   every sibling in its block, with `Persistence.loadPriorityRankMaps` switched from bare `fetch` to
+   `Util.fetchTraced` in the same change so the identity header the gate reads actually arrives (and
+   `x-request-id` correlation is restored); (c) the **"not yet used in sequencing" badge was removed**
+   now that all four fields really are used.
 4. **The non-color fields are wired but unproven against real values.** Risk 3 (free-text
    `prt_01`/`prt_02` spelling mismatches degrading to all-999999) is now live rather than latent, and
    coverage is the only guard. Nobody has yet run the Stage 2 coverage readout against a real plant's
    tooling data with the optimizer depending on it.
-5. **The Optimization tab's "not yet used in sequencing" badge was not removed** and is now a false
-   statement for `prt01`/`prt02`/`productionVersion` (`web/plant-and-administration.mts:878`,
-   `.pl-inert-badge`, the `ui.not_yet_used_in_sequencing` key in all five locales). `docs/MIGRATION.md`
-   flagged it as Stage-3-removable scaffolding; Stage 3 wired the fields and left the label up. Left
-   alone deliberately rather than deleted, because item 4 above means a *replacement* warning
-   ("newly used in sequencing — verify coverage") may be the better call than removal — that is a copy
-   decision, not a mechanical fix.
+5. ~~**The Optimization tab's "not yet used in sequencing" badge was not removed**~~ **DONE** — the
+   badge, its `.pl-inert-badge` CSS rule, and the `ui.not_yet_used_in_sequencing` key in all five
+   locales were all deleted once the label became false. Note this removes a *warning*, so item 4's
+   coverage caveat is now carried only here and by the Stage 2 coverage readout itself; a replacement
+   "verify your coverage" caution on the field card was considered and deliberately left as a separate
+   copy decision.
 
 ## Why
 

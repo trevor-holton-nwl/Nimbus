@@ -701,10 +701,26 @@ says `brain.py` exposes "~38 endpoints" (`CLAUDE.md`: ~77), still places the `Co
 line counts. R18's twin-drift warning has already come true. Out of scope here — resolving it means
 adjudicating 8 unrelated claims — but worth its own housekeeping pass.
 
-## 14. Three findings to hand off
+## 14. Three findings — all RESOLVED in a follow-up fix round
 
-**(1) The stale-plant window on the alert auto-fix path.** §11.1 in full. Needs a human decision on
-the mitigation, not a silent fix.
+> **Update (2026-08-11, same day):** all three were fixed in one round rather than handed off. The
+> user chose "clear the cache on plant switch" for finding 1 (not the reorder-the-load-sequence
+> alternative) and "just remove the false label" for finding 3 (no replacement copy). Each finding's
+> resolution is recorded inline below; the diagnoses are left intact because they are the reason the
+> fixes look the way they do.
+
+**(1) The stale-plant window on the alert auto-fix path.** §11.1 in full.
+**RESOLVED** — the cache is now dropped the instant a plant change is detected, in three places:
+`Persistence.load()` clears `Store.priorityRankMaps` + `Persistence._rankMapsPlant` at the top of the
+function (before `/tasks`, before the master-data `Promise.all`, and so long before the `:404`
+`schedule:hydrated` emit), conditional on `plant !== Persistence._rankMapsPlant` so a force-reload of
+the *same* plant keeps its good cache; and `_loadCache()` / `_loadDemo()` clear unconditionally, since
+neither ever loads rank maps at all. The failure mode is now "nothing ranked yet" — the state
+`OptimizeDialog.run()`'s existing `_rankMapsPlant !== plant` guard already detects and recovers from —
+rather than "ranked by the previously-selected plant". Four tests in
+`tests/modules/schedule-data.test.mjs`, all verified to fail with the three clears neutered and pass
+with them restored (the fourth, the same-plant-reload guard, correctly passes both ways since it
+asserts the cache is *kept*).
 
 **(2) `GET /priority-rank-maps` has no plant-authorization check** — `brain.py:1885-1892`. It is the
 **only** plant-scoped endpoint in that block without one: `/priority-lists` (`:1898`),
@@ -726,6 +742,20 @@ requires switching that call to `Util.fetchTraced` in the same change, or every 
 together. Using `fetchTraced` would also restore `x-request-id` correlation, which this fetch currently
 loses.
 
+**RESOLVED — both halves, in the same change, exactly because of that coupling.** `brain.py`'s
+`get_priority_rank_maps` now takes `allowed_plants: … = Depends(auth.get_allowed_plants_for_request)`
+and runs `md._assert_plant_allowed(plant, allowed_plants)` with the sibling routes' two-branch
+mapping (`PlantNotAllowed` → 403, `ValueError` → 400 — that second branch matters: a whitespace plant
+raises `ValueError`, and catching only `PlantNotAllowed` would let it escape as a 500, the exact trap
+`GET /priority-list/{plant}/{field_key}` already hit). `Persistence.loadPriorityRankMaps` now calls
+`Util.fetchTraced`. Unrestricted users are unaffected — no identity header still resolves to
+`allowed_plants = None` = unscoped. Five pytest tests (`tests/test_priority_lists.py`): out-of-scope →
+403 *and* no rank payload in the body, in-scope → 200 with the maps, whitespace plant → 400, plus the
+two pre-existing unscoped-200 tests as the backward-compat guard. Verified to fail with the gate
+removed (403 and 400 tests both flip). One `schedule-data.test.mjs` test asserts the client actually
+sends an identity header plus `x-request-id`, which is the only observable difference between the two
+call styles from the frontend side.
+
 **(3) The "not yet used in sequencing" badge is now a false statement, and Stage 3 left it up.**
 `web/plant-and-administration.mts:878` still renders `<span class="pl-inert-badge">` +
 `Util.t('ui.not_yet_used_in_sequencing')` for every field whose `field_key !== 'colorWheel'` — i.e. an
@@ -735,13 +765,20 @@ named the two grep strings to remove (`pl-inert-badge`, `not_yet_used_in_sequenc
 fields and did not do the removal. Three files carry it: the `.mts` above, `web/styles.css:3653`, and
 the `ui.not_yet_used_in_sequencing` key in all five `web/locales/*.js`.
 
-**Deliberately not fixed here, and the reason is not purely scope.** A blank deletion is one option, but
-there is a real argument for *replacing* rather than removing it: per §13 and the Stage 3 status
-paragraph in `docs/scheduling_priority.md`, nobody has yet validated real `prt_01`/`prt_02` values
-against a real uploaded list, and Risk 3 (free-text spelling mismatches degrading to all-999999) is now
-live. A label like "newly used in sequencing — verify coverage" would be both true *and* useful, where a
-bare deletion loses the warning. That is a copy/UX decision, not a mechanical correction.
+**RESOLVED by removal, per the user's call.** The badge (and the `inertBadge` local that built it) is
+gone from `web/plant-and-administration.mts`, `.pl-inert-badge` is gone from `web/styles.css`, and
+`ui.not_yet_used_in_sequencing` is gone from all five `web/locales/*.js` — checked first that no other
+surface rendered either the class or the key, and that `tests/modules/locale-completeness.test.mjs`
+does not require it (it pins `constraint.*` and the Stage 3 tree keys only). `npm run lint:errors`
+still reports exactly 47 `no-dupe-keys`, unchanged, so deleting one key per locale introduced no
+regression.
 
-None of the three findings was fixed by this task: all are code changes outside Task 10's file scope,
-and each involves a genuine trade-off rather than one objectively-correct answer — the stage's standing
-instruction is to surface those rather than decide them unilaterally.
+The alternative that was considered and **not** taken: replacing it with a "verify your coverage"
+caution, since per §13 nobody has validated real `prt_01`/`prt_02` values against a real uploaded list
+and Risk 3 is now live. That was judged a separate product/copy decision; the minimal honest fix is to
+stop asserting something false. The residual — that coverage still wants validating — is recorded in
+`docs/scheduling_priority.md`'s Stage 3 status item 4, which is the durable place for it.
+
+All three findings are therefore closed in code, not handed off. The one thing still genuinely open
+across this whole stage is the live-data verification in §9 and §13 — no browser, no Postgres, and
+Stage 1's pre-ship check #1 still waived.

@@ -875,8 +875,12 @@ export const Plant = {
       // NOT threaded through Util.t — it exists for API consumers that don't
       // have the locale bundle at all, not as an in-app i18n fallback.
       const label = Util.t(`constraint.${f.field_key}`);
-      const inertBadge = f.field_key === 'colorWheel' ? '' :
-        `<span class="pl-inert-badge">${Util.t('ui.not_yet_used_in_sequencing')}</span>`;
+      // The "not yet used in sequencing" badge that used to render here for every
+      // non-colorWheel field was removed once Stage 3 wired ALL FOUR registered
+      // fields into Engine._sortTerms (docs/scheduling_priority.md Stage 3) — it had
+      // become a false statement on the very screen where an admin configures the
+      // field. Deliberately removed rather than reworded: whether this card should
+      // instead carry a "verify your coverage" caution is a separate copy decision.
       // PLANT_TOTAL_COVERAGE_KEY, not '' — see that constant's comment. The
       // ungrouped backend branch always returns a row for every field (0/0 for
       // a plant with no orders), so gate on distinct_values rather than key
@@ -944,7 +948,6 @@ export const Plant = {
         <div class="pl-field-card" data-field="${f.field_key}">
           <div class="pl-field-card-head">
             <h4>${esc(label)}</h4>
-            ${inertBadge}
           </div>
           ${activeOrDrop}
           <div class="pl-overrides">${overridesHtml}</div>

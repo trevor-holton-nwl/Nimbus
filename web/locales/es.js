@@ -395,7 +395,6 @@ window.__NIMBUS_LOCALES.es = {
   'constraint.prt01':                  'Herramienta de Producción (01)',
   'constraint.prt02':                  'Herramienta de Producción (02)',
   'constraint.productionVersion':      'Versión de Producción',
-  'ui.not_yet_used_in_sequencing':     'Aún no se utiliza en la secuenciación',
   'ui.values_ranked':                  'valores clasificados',
   'ui.values':                         'valores',
   'ui.orders':                         'órdenes',

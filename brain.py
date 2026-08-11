@@ -1883,12 +1883,27 @@ def list_priority_fields():
 
 
 @api.get("/priority-rank-maps")
-def get_priority_rank_maps(plant: str = Query(..., min_length=1)):
+def get_priority_rank_maps(
+        plant: str = Query(..., min_length=1),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """In-memory rank-map read for the optimizer's hot path (Stage 3) — zero DB
     hit, since brain.PLANT_LISTS is already kept current by every priority-list
     upload/delete (Stage 2) and POST /reload. Shape: {line_or_empty:
     {field_key: {VALUE: RANK}}} — the exact native shape of PLANT_LISTS, no
-    reshaping, since this runs on every optimize call and every alert auto-fix."""
+    reshaping, since this runs on every optimize call and every alert auto-fix.
+
+    Plant-scoped like every sibling in this block (/priority-lists,
+    /priority-list/{plant}/{field_key}, GET /tasks), so it carries the same
+    per-user plant gate. NOTE for anyone touching the client: this endpoint is
+    read by Persistence.loadPriorityRankMaps, which MUST use Util.fetchTraced
+    (not bare fetch) or the x-user-email header this gate reads never arrives
+    and every load 403s for a plant-restricted user."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return PLANT_LISTS.get(plant, {})
 
 

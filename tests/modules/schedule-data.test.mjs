@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Persistence, CalendarSync, Session } from '../../web/schedule-data.mjs';
 import { Store } from '../../web/schedule-state.mjs';
+import { Config } from '../../web/application-foundation.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {
@@ -200,6 +201,114 @@ test('Persistence.loadPriorityRankMaps clears the cache but leaves the freshness
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+test('Persistence.loadPriorityRankMaps goes through Util.fetchTraced, so the plant-gate identity header is sent', async () => {
+  // GET /priority-rank-maps is plant-gated server-side (brain.py's
+  // _assert_plant_allowed). The actor identity that gate reads rides on the
+  // x-user-email header Util.fetchTraced attaches — a bare fetch() sends none and
+  // 403s for every plant-restricted user. Assert the header actually arrives, which
+  // is the only observable difference between the two call styles from here.
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    seen.push({ url: String(url), headers: init?.headers ?? null });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  };
+  try {
+    await Persistence.loadPriorityRankMaps('5512');
+    assert.equal(seen.length, 1);
+    const h = seen[0].headers;
+    assert.ok(h && typeof h.get === 'function', 'fetchTraced must pass a real Headers object');
+    assert.ok(h.has('x-request-id'), 'x-request-id must be attached (backend log correlation)');
+    assert.ok(h.has('x-user-email') || h.has('X-User'),
+      'an identity header must be attached or the server-side plant gate rejects the request');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Stage 3 fix — the rank cache must not survive a plant switch.
+//
+// The window this closes: load() calls Store.setTasks() and emits the FIRST
+// 'schedule:hydrated' (which triggers the alert recompute that renders auto-fix
+// buttons) long before loadPriorityRankMaps() runs for the new plant — that call
+// sits inside the master-data Promise.all's .finally(). Without an early clear,
+// the new plant's orders and alerts are on screen while Store.priorityRankMaps
+// still holds the OLD plant's ranks, and Alerts.applyFix's overload branch —
+// which cannot await freshness (schedule-services.mjs must not import
+// schedule-data.mjs) — would sequence against the wrong plant's priority lists.
+// ---------------------------------------------------------------------------
+
+test('Persistence.load drops the previous plant\'s rank maps immediately on a plant switch, before the new fetch resolves', () => {
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1, BLUE: 2 } } }, 'unit-test');
+  Persistence._rankMapsPlant = 'PLANT_A';
+
+  const origFetch = globalThis.fetch;
+  // Nothing ever settles: this pins the assertion to exactly the window between
+  // "load started for the new plant" and "the new plant's ranks arrived".
+  globalThis.fetch = () => new Promise(() => {});
+  try {
+    const p = Persistence.load({ plant: 'PLANT_B' });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+
+    assert.deepEqual(Store.priorityRankMaps, {},
+      'PLANT_A\'s ranks must be gone the moment a load for PLANT_B starts — otherwise an overload auto-fix in this window sequences PLANT_B\'s orders against PLANT_A\'s priority lists');
+    assert.equal(Persistence._rankMapsPlant, null,
+      'the freshness marker must read stale so OptimizeDialog.run()\'s guard re-fetches');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.load does NOT wipe a still-valid cache when reloading the SAME plant', () => {
+  // The clear is conditional on an actual change: a force-reload of the current
+  // plant must not needlessly discard good ranks and open a fresh unranked window.
+  const maps = { '': { colorWheel: { RED: 1 } } };
+  Store.setPriorityRankMaps(maps, 'unit-test');
+  Persistence._rankMapsPlant = 'PLANT_A';
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise(() => {});
+  try {
+    const p = Persistence.load({ plant: 'PLANT_A', force: true });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+
+    assert.deepEqual(Store.priorityRankMaps, maps, 'same-plant reload must keep the cache');
+    assert.equal(Persistence._rankMapsPlant, 'PLANT_A', 'same-plant reload must keep the freshness marker');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {
+  // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
+  // rehydrates whatever plant was last persisted, which need not be the plant the
+  // rank cache holds, and it emits schedule:hydrated regardless.
+  localStorage.setItem(Config.LS_KEY, JSON.stringify({
+    _schemaVersion: Config.SCHEMA_VERSION,
+    tasks: [],
+  }));
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
+  Persistence._rankMapsPlant = 'PLANT_A';
+  try {
+    assert.equal(Persistence._loadCache(), true, 'a schema-current cache must restore');
+    assert.deepEqual(Store.priorityRankMaps, {},
+      'ranks cannot be trusted to match a cache-restored board, so they must be dropped');
+    assert.equal(Persistence._rankMapsPlant, null);
+  } finally {
+    localStorage.removeItem(Config.LS_KEY);
+  }
+});
+
+test('Persistence._loadDemo clears the rank cache — it hydrates and emits schedule:hydrated but never loads rank maps', () => {
+  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
+  Persistence._rankMapsPlant = 'PLANT_A';
+  Persistence._loadDemo();
+  assert.deepEqual(Store.priorityRankMaps, {},
+    'demo orders belong to no real plant\'s priority lists, so any retained ranks are categorically wrong for them');
+  assert.equal(Persistence._rankMapsPlant, null);
 });
 
 test('Session exposes only the pure session/pref API (no DOM-rendering methods)', () => {

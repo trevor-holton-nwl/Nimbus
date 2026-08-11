@@ -1057,3 +1057,46 @@ def test_priority_rank_maps_endpoint_empty_for_unknown_plant(client):
     r = client.get("/priority-rank-maps?plant=ZZ_TOTALLY_UNKNOWN")
     assert r.status_code == 200
     assert r.json() == {}
+
+
+# --- GET /priority-rank-maps plant gate -----------------------------------
+# This route shipped without the per-user plant scope every sibling in its block
+# carries (GET /priority-lists, POST/GET/DELETE /priority-list/{plant}/{field_key},
+# GET /tasks), so a plant-restricted user could read any plant's rank maps. The
+# two tests above already cover the unrestricted case (no identity header ->
+# auth.get_allowed_plants(None) -> None -> unscoped), which is what keeps local
+# dev and the current pilot working; these three cover the scoped case.
+
+def test_priority_rank_maps_rejects_a_plant_outside_the_users_scope(client, monkeypatch):
+    """403, not a silent 200 with another plant's tooling ranks."""
+    import auth
+    monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["1006"])
+    monkeypatch.setitem(brain.PLANT_LISTS, "5512", {"": {"colorWheel": {"RED": 1.0}}})
+    r = client.get("/priority-rank-maps?plant=5512",
+                   headers={"x-user-email": "scoped.user@example.com"})
+    assert r.status_code == 403
+    # And the payload must not leak on the way out.
+    assert "RED" not in r.text
+
+
+def test_priority_rank_maps_allows_a_plant_inside_the_users_scope(client, monkeypatch):
+    """The gate must not break the legitimate case — regression guard for the
+    coupled frontend change: Persistence.loadPriorityRankMaps had to move from a
+    bare fetch() to Util.fetchTraced so the x-user-email header this reads is
+    actually sent. Without that, this path 403s for every scoped user."""
+    import auth
+    monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["5512", "1006"])
+    monkeypatch.setitem(brain.PLANT_LISTS, "5512", {"": {"colorWheel": {"RED": 1.0}}})
+    r = client.get("/priority-rank-maps?plant=5512",
+                   headers={"x-user-email": "scoped.user@example.com"})
+    assert r.status_code == 200
+    assert r.json() == {"": {"colorWheel": {"RED": 1.0}}}
+
+
+def test_priority_rank_maps_maps_a_blank_plant_to_400_not_500(client):
+    """_assert_plant_allowed raises ValueError (not PlantNotAllowed) for a
+    blank/whitespace plant — catch both, or the ValueError escapes as a 500.
+    Same trap the sibling GET /priority-list/{plant}/{field_key} already hit."""
+    r = client.get("/priority-rank-maps?plant=%20")
+    assert r.status_code == 400
+    assert "plant is required" in r.json()["detail"]

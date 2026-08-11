@@ -529,7 +529,6 @@ window.__NIMBUS_LOCALES.en = {
   'constraint.prt01':                  'Prod. Resource Tool (01)',
   'constraint.prt02':                  'Prod. Resource Tool (02)',
   'constraint.productionVersion':      'Production Version',
-  'ui.not_yet_used_in_sequencing':     'Not yet used in sequencing',
   'ui.values_ranked':                  'values ranked',
   'ui.values':                         'values',
   'ui.orders':                         'orders',

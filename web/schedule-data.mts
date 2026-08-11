@@ -243,6 +243,30 @@ export const Persistence = {
     };
     ErrorLog.info('persistence', `Load requested (force=${force}, plant=${plant ?? 'all'})`);
 
+    // Stage 3 fix: drop the OUTGOING plant's priority rank maps the instant we know
+    // the plant is changing — before /tasks, before the master-data Promise.all, and
+    // therefore long before loadPriorityRankMaps() runs for the new plant (which
+    // happens down in that Promise.all's .finally()).
+    //
+    // Why here and not there: Store.setTasks() and the FIRST 'schedule:hydrated' emit
+    // both happen well before the rank fetch even starts, and 'schedule:hydrated'
+    // triggers the alert recompute that renders the auto-fix buttons. Without this
+    // clear, that window has the NEW plant's tasks and alerts on screen while
+    // Store.priorityRankMaps still holds the OLD plant's ranks — so an overload
+    // auto-fix (which cannot await freshness: schedule-services.mts must not import
+    // this module) would produce a plausible-looking sequence built from the wrong
+    // plant's priority lists. Clearing converts that failure mode into the one the
+    // rest of the feature is already built around: nothing ranked yet, i.e. every
+    // order at 999999, which is also exactly what OptimizeDialog.run()'s
+    // `_rankMapsPlant !== plant` guard detects and recovers from.
+    //
+    // Conditional on an actual change so a force-reload of the SAME plant does not
+    // needlessly wipe a good cache (and open a fresh window for no reason).
+    if (plant !== Persistence._rankMapsPlant) {
+      Persistence._rankMapsPlant = null;
+      Store.setPriorityRankMaps({}, 'persistence');
+    }
+
     // A plant is the scaling unit — never request the whole order book. With no
     // plant selected we leave the board empty (each plant-scoped module renders its
     // own EmptyState "select a plant" prompt) and only load master data so the
@@ -871,6 +895,17 @@ export const Persistence = {
 
     try {
       const tasks = data.tasks.map(Persistence._prepTask);
+      // Stage 3 fix, same class as load()'s clear above: this path hydrates tasks and
+      // emits 'schedule:hydrated' (so alerts + their auto-fix buttons render) but
+      // NEVER calls loadPriorityRankMaps — it is the offline/backend-failed restore.
+      // The cache holds whatever plant was last persisted, which need not be the plant
+      // the rank cache holds, so after this runs the ranks cannot be trusted to match
+      // what is on screen. Cleared unconditionally: "nothing ranked yet" is the safe
+      // fallback the feature is built around, and OptimizeDialog.run()'s
+      // `_rankMapsPlant !== plant` guard re-fetches on demand the moment the user
+      // actually optimizes.
+      Persistence._rankMapsPlant = null;
+      Store.setPriorityRankMaps({}, 'persistence');
       // Restore all non-task state first so alerts compute with correct context
       Persistence._restoreNonTaskState(data);
       // Sync plant from task data for any lines not yet in lineSettings
@@ -948,6 +983,12 @@ export const Persistence = {
   },
 
   _loadDemo(): void {
+    // Stage 3 fix (see _loadCache/load): demo seeding also emits 'schedule:hydrated'
+    // without ever loading rank maps, and its synthetic orders belong to no real
+    // plant's priority lists at all — so any ranks left in the cache would be
+    // categorically wrong for them.
+    Persistence._rankMapsPlant = null;
+    Store.setPriorityRankMaps({}, 'persistence');
     const lines = ['Line 1', 'Line 2', 'Line 3', 'Line 4'];
     const colors = ['WHITE', 'IVORY', 'TAN', 'BROWN', 'CHARCOAL', 'BLACK'];
     const forms  = ['SM', 'MD', 'LG', 'XL'];
@@ -1184,7 +1225,14 @@ export const Persistence = {
       return;
     }
     try {
-      const r = await fetch(`${Config.API_BASE}/priority-rank-maps?plant=${encodeURIComponent(plant)}`);
+      // Util.fetchTraced, NOT bare fetch: GET /priority-rank-maps is plant-gated
+      // (brain.py's _assert_plant_allowed, same as its siblings), and the actor
+      // identity that gate reads travels on the x-user-email header fetchTraced
+      // attaches — a bare fetch 403s for any plant-restricted user. This is the
+      // same coupling that produced a production-only failure in Stage 2 (the
+      // missing-master-data fetch). Also restores x-request-id correlation, so a
+      // failing rank-map load can be tied to its backend log entry.
+      const r = await Util.fetchTraced(`${Config.API_BASE}/priority-rank-maps?plant=${encodeURIComponent(plant)}`);
       if (r.ok) {
         Store.setPriorityRankMaps(await r.json() as PriorityRankMaps);
         // Only recorded on a TRUE success (2xx) — a non-ok response (transient

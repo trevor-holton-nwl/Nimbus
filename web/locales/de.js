@@ -391,7 +391,6 @@ window.__NIMBUS_LOCALES.de = {
   'constraint.prt01':                  'Fertigungshilfsmittel (01)',
   'constraint.prt02':                  'Fertigungshilfsmittel (02)',
   'constraint.productionVersion':      'Fertigungsversion',
-  'ui.not_yet_used_in_sequencing':     'Noch nicht in der Sequenzierung verwendet',
   'ui.values_ranked':                  'Werte eingestuft',
   'ui.values':                         'Werte',
   'ui.orders':                         'Aufträge',

@@ -388,16 +388,18 @@ tracking on its own. Five more items, in addition to the three above:
    `pl-inert-badge` (CSS class, `web/styles.css`) and `not_yet_used_in_sequencing` (i18n key, all 5
    `web/locales/*.js`) to find every place it needs to come out once a field is actually wired into
    `Engine._sortTerms`.
-   **STILL OPEN, and now actively wrong (2026-08-11).** Stage 3 wired all four fields into
-   `Engine._sortTerms` and **did not** remove this badge, so
-   `web/plant-and-administration.mts:878` now tells an admin who has configured `prt01` that it is not
-   used in sequencing, on the same screen where it is. Three files carry it: that `.mts`,
-   `web/styles.css:3653`, and the `ui.not_yet_used_in_sequencing` key in all five locales. Note the
-   fix is not necessarily a deletion — nobody has validated real `prt_01`/`prt_02` values against a
-   real list yet (Risk 3 is now live), so a replacement like "newly used in sequencing — verify
-   coverage" would be both truthful and more useful than removing the warning outright. That makes it
-   a copy decision rather than a mechanical cleanup, which is why Stage 3's Task 10 flagged it instead
-   of silently changing it.
+   **DONE 2026-08-11.** Stage 3 wired all four fields into `Engine._sortTerms` but initially left the
+   badge up, making it a false statement on the very screen where an admin configures the field —
+   caught by Stage 3's Task 10 verification and removed in its fix round. All three carriers are gone:
+   the `inertBadge` local and its `<span>` in `web/plant-and-administration.mts`, the
+   `.pl-inert-badge` rule in `web/styles.css`, and `ui.not_yet_used_in_sequencing` in all five
+   `web/locales/*.js` (verified no other surface used either, and that `locale-completeness.test.mjs`
+   does not require the key; `lint:errors` still reports the same 47 pre-existing `no-dupe-keys`).
+   One thing to know if this ever comes back up: a *replacement* caution ("newly used in sequencing —
+   verify your coverage") was considered and deliberately not shipped, because nobody has yet
+   validated real `prt_01`/`prt_02` values against a real list (Risk 3 is live) — so this removal did
+   drop a warning, and that residual now lives only in `docs/scheduling_priority.md`'s Stage 3 status
+   and the Stage 2 coverage readout.
 3. **`POST /color-wheel/{plant}` was rewritten (Task 5, Decision 9b) onto the same
    `_resolve_priority_list_columns`/`_persist_priority_list` helpers** the new generic
    `POST /priority-list/{plant}/{field_key}` endpoint uses. One deliberate behavior change: a
@@ -474,8 +476,13 @@ out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left be
   `Store.priorityRankMaps` — so it sees per-line overrides, which the plant-wide-only endpoint never
   did. `ColorWheelViewer._load()` is now that endpoint's **only** frontend reader; everything else is
   external-API back-compat.
-- **NEW: `GET /priority-rank-maps` has no plant-authorization check, and its client uses bare
-  `fetch`.** It is the only plant-scoped endpoint in `brain.py`'s priority-list block without an
+- **~~NEW: `GET /priority-rank-maps` has no plant-authorization check, and its client uses bare
+  `fetch`.~~ FIXED 2026-08-11** — both halves in one change: the route now takes
+  `allowed_plants: … = Depends(auth.get_allowed_plants_for_request)` and runs `_assert_plant_allowed`
+  with the sibling routes' `PlantNotAllowed`→403 / `ValueError`→400 mapping, and
+  `Persistence.loadPriorityRankMaps` now uses `Util.fetchTraced`. Unrestricted users are unaffected
+  (no identity header still resolves to unscoped). Kept below because the *coupling* is the durable
+  lesson: it is the only plant-scoped endpoint in `brain.py`'s priority-list block without an
   `allowed_plants: … = Depends(auth.get_allowed_plants_for_request)` gate — `/priority-lists`,
   `/priority-list/{plant}/{field_key}` and `GET /tasks` all have one. A plant-restricted user can read
   any plant's rank maps (color names, tool codes, ranks). Low severity while actor identity still comes
@@ -486,7 +493,14 @@ out of the in-memory `PLANT_LISTS`. Re-checking the two items Stages 1-2 left be
   change would 403 every rank-map load for plant-restricted users. That is the same coupling that
   produced a production-only bug in Stage 2 (the missing-master-data fetch). Switching to `fetchTraced`
   also restores the `x-request-id` correlation this fetch currently loses.
-- **NEW: the alert auto-fix path can sequence against the previously-selected plant's ranks.**
+- **~~NEW: the alert auto-fix path can sequence against the previously-selected plant's ranks.~~
+  FIXED 2026-08-11** — `Persistence.load()` now clears `Store.priorityRankMaps` and `_rankMapsPlant`
+  at the top of the function whenever the requested plant differs from the one the cache holds (so
+  before `/tasks`, before the master-data `Promise.all`, and long before the `:404`
+  `schedule:hydrated` emit), and `_loadCache()`/`_loadDemo()` clear unconditionally since neither ever
+  loads rank maps. The window now degrades to "nothing ranked yet", which `OptimizeDialog.run()`'s
+  existing guard already recovers from. Same-plant force-reloads deliberately keep their cache.
+  Original diagnosis kept below, since it explains why the clear sits where it does:
   `Store.priorityRankMaps` is never cleared when the selected plant changes, and
   `Persistence.loadPriorityRankMaps(plant)` is only invoked inside the `.finally()` of `load()`'s
   master-data `Promise.all` (`web/schedule-data.mts:445`, whose fetches carry 5 s timeouts) — while

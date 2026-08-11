@@ -3648,13 +3648,9 @@ body.dark .cw-active-card {
 .pl-field-card-head h4 {
   margin: 0; font-size: 13px; font-weight: 600; color: var(--fg);
 }
-/* Soft-tint badge, not a colored side-stripe (DESIGN.md §6 Don'ts) — same
-   -soft/text-color pairing as Toasts/Badges (§5), using Signal Info. */
-.pl-inert-badge {
-  font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em;
-  padding: 2px 8px; border-radius: var(--r-sm);
-  background: var(--info-soft); color: var(--info);
-}
+/* `.pl-inert-badge` was removed in Stage 3 along with the "not yet used in
+   sequencing" label it styled — all four registered priority fields now feed
+   Engine._sortTerms, so the claim was false. See docs/scheduling_priority.md. */
 /* Mono-Means-Machine Rule (DESIGN.md §3) — coverage is a measured ratio. */
 .pl-coverage {
   font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute);
