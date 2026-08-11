@@ -31,6 +31,26 @@ test('every constraint.<field> key exists in all 5 locales', () => {
   }
 });
 
+test('Stage 3 priority-tree / effective-sequence ui.* keys exist in all 5 locales', () => {
+  // Task 9 of 2026-08-11-priority-lists-stage-3 — added by Task 8's tree UI
+  // (Plant ▸ Settings ▸ Scheduling Constraints): add/remove controls on the
+  // priority tree and the "Effective sequence" readout panel.
+  const REQUIRED_STAGE3 = [
+    'ui.no_effect',
+    'ui.no_constraints_configured',
+    'ui.add_sub_priority',
+    'ui.add_priority',
+    'ui.all_fields_used',
+    'ui.effective_sequence',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_STAGE3) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

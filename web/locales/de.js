@@ -369,6 +369,17 @@ window.__NIMBUS_LOCALES.de = {
   'ui.constraint_no_wheel':            'Kein Farbrad für dieses Werk hochgeladen — keine Wirkung, bis eines hinzugefügt wird.',
   'ui.move_up':                        'Nach oben',
   'ui.move_down':                      'Nach unten',
+
+  // Stufe 3 von docs/scheduling_priority.md — Steuerelemente zum Hinzufügen/
+  // Entfernen im Prioritätsbaum sowie die Anzeige „Effektive Reihenfolge“
+  // (Werk ▸ Einstellungen ▸ Planungseinschränkungen).
+  'ui.no_effect':                    'keine Wirkung',
+  'ui.no_constraints_configured':    'Keine Einschränkungen konfiguriert — Aufträge werden innerhalb jedes Tages in der Reihenfolge eingeplant, in der sie hochgeladen wurden.',
+  'ui.add_sub_priority':             'Unterpriorität hinzufügen',
+  'ui.add_priority':                 'Priorität hinzufügen',
+  'ui.all_fields_used':              'Alle einstufbaren Felder befinden sich bereits im Baum',
+  'ui.effective_sequence':           'Effektive Reihenfolge',
+
   'ui.alert_horizon_title':            'Warnungshorizont',
   'ui.conf_horizon_title':             'Vertrauens-Score-Horizont',
   'ui.show_alerts_within':             'Warnungen für die nächsten anzeigen',

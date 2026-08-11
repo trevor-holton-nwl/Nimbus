@@ -373,6 +373,17 @@ window.__NIMBUS_LOCALES.es = {
   'ui.constraint_no_wheel':            'No hay rueda de colores cargada para esta planta: sin efecto hasta que se agregue una.',
   'ui.move_up':                        'Subir',
   'ui.move_down':                      'Bajar',
+
+  // Etapa 3 de docs/scheduling_priority.md — controles de agregar/quitar del
+  // árbol de prioridades y el panel "Secuencia efectiva"
+  // (Planta ▸ Configuración ▸ Restricciones de Programación).
+  'ui.no_effect':                    'sin efecto',
+  'ui.no_constraints_configured':    'No hay restricciones configuradas — las órdenes se secuencian, dentro de cada día, en el orden en que se cargaron.',
+  'ui.add_sub_priority':             'Añadir subprioridad',
+  'ui.add_priority':                 'Añadir prioridad',
+  'ui.all_fields_used':              'Todos los campos clasificables ya están en el árbol',
+  'ui.effective_sequence':           'Secuencia efectiva',
+
   'ui.alert_horizon_title':            'Horizonte de Alertas',
   'ui.conf_horizon_title':             'Horizonte de Puntuación de Confianza',
   'ui.show_alerts_within':             'Mostrar alertas en los próximos',

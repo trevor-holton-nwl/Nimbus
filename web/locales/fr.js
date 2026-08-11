@@ -369,6 +369,17 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.constraint_no_wheel':            'Aucune roue chromatique chargée pour cette usine — sans effet tant qu\'aucune n\'est ajoutée.',
   'ui.move_up':                        'Monter',
   'ui.move_down':                      'Descendre',
+
+  // Étape 3 de docs/scheduling_priority.md — commandes d'ajout/suppression de
+  // l'arborescence des priorités et le panneau « Séquence effective »
+  // (Usine ▸ Paramètres ▸ Contraintes de Planification).
+  'ui.no_effect':                    'sans effet',
+  'ui.no_constraints_configured':    'Aucune contrainte configurée — les ordres sont séquencés, au sein de chaque jour, dans l\'ordre de chargement.',
+  'ui.add_sub_priority':             'Ajouter une sous-priorité',
+  'ui.add_priority':                 'Ajouter une priorité',
+  'ui.all_fields_used':              'Tous les champs classables sont déjà dans l\'arborescence',
+  'ui.effective_sequence':           'Séquence effective',
+
   'ui.alert_horizon_title':            'Horizon d\'Alertes',
   'ui.conf_horizon_title':             'Horizon du Score de Confiance',
   'ui.show_alerts_within':             'Afficher les alertes dans les prochains',

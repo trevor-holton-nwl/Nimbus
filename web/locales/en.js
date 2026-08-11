@@ -505,6 +505,16 @@ window.__NIMBUS_LOCALES.en = {
   'ui.constraint_no_wheel':            'No color wheel uploaded for this plant — no effect until one is added.',
   'ui.move_up':                        'Move up',
   'ui.move_down':                      'Move down',
+
+  // Stage 3 of docs/scheduling_priority.md — priority-tree add/remove controls
+  // and the "Effective sequence" readout (Plant ▸ Settings ▸ Scheduling Constraints).
+  'ui.no_effect':                    'no effect',
+  'ui.no_constraints_configured':    'No constraints configured — orders sequence in upload order within each day.',
+  'ui.add_sub_priority':             'Add sub-priority',
+  'ui.add_priority':                 'Add priority',
+  'ui.all_fields_used':              'All rankable fields are already in the tree',
+  'ui.effective_sequence':           'Effective sequence',
+
   'ui.system_settings_sub':            'Configure scheduling horizons for {{plant}}. Changes take effect immediately and are persisted to plant master data.',
   'ui.alert_horizon_title':            'Alert Horizon',
   'ui.conf_horizon_title':             'Confidence Score Horizon',
