@@ -22,6 +22,15 @@ multi-stage effort — update the stage table below as work lands, the same way
 Each stage is independently deployable. Staging exists so the risky data work settles on the pilot
 before anything about sequencing behavior depends on it.
 
+**Stage 3's pre-implementation sequencing-impact audit** —
+`docs/superpowers/plans/2026-08-11-stage-3-sequencing-audit.md` (2026-08-11) — re-verified this
+document's load-bearing claims against live code before any Stage 3 code was written. It confirmed
+that Stage 1+2 changed sequencing not at all and that `_dispatchDayIntegrity` needs zero changes, and
+it produced the corrections now folded into the sections below (Seam 1's map shape, R1, R6, R7, R8,
+R11, R19, N2, the xmin section's `db.py` line, and Stage 2's status item 2). Read it before
+implementing any Stage 3 task — it also records line-number drift in the Stage 3 plan's own file
+citations that would otherwise cause a blind edit to hit the wrong code.
+
 **Stage 1 status (2026-08-11):** all code from `docs/superpowers/plans/2026-08-10-priority-lists-stage-1.md`
 is written, tested at the pure-logic level, and both `npm run build`/`typecheck` and the Python test
 suite pass. **Not done:** the migration has not been applied to any database (local or Azure), and
@@ -31,7 +40,7 @@ tests in `tests/test_priority_lists.py` have not been executed against a live da
 Applying the migration and running that check remain open steps before this is genuinely "shipped."
 
 **Stage 2 status (2026-08-10):** all 15 implementation tasks land — backend (Tasks 1-8: `master_data.RANKABLE_FIELDS` default labels, `known_line_codes_for_plant`, `db.missing_master_data_for_plant`, the six new endpoints below, and `POST /color-wheel/{plant}` rewritten onto the shared `_resolve_priority_list_columns`/`_persist_priority_list` helpers per Decision 9b) and frontend (Tasks 9-15: new TS types, the mapping + generic viewer modals, `PriorityListMapping`, `PriorityListViewer` — which delegates to the untouched `ColorWheelViewer` for `colorWheel` only when no line override is requested — the rewritten per-field Optimization tab with its missing-master-data panel and Resync Now button, CSS, and i18n across all 5 locales). `npm run build`/`typecheck` are clean and the new `locale-completeness` test passes. Several real bugs were found and fixed during implementation, verified by code review at each step: a pandas-3 landmine where `Series.astype(str)` no longer stringifies `NaN` the way pandas 2 did (fixed throughout the new upload-parsing code via `.fillna("")` before `.astype(str)` — see `docs/MIGRATION.md`), two back-compat breaks on the rewritten `/color-wheel/{plant}` route that contradicted Decision 9b's own "no previously-valid file can start failing" principle (duplicate-value-conflict rejection and empty-file rejection, both restored for that route only), and a production-breaking bug where the new Optimization tab's missing-master-data fetch used bare `fetch()` instead of `Util.fetchTraced` against an admin-gated, plant-scoped endpoint — invisible locally (no auth), but it would have silently failed to render for real admin users on the Azure pilot and mis-scoped a plant-restricted user's request; both fixed.
-**Not done, and not to be treated as shipped until they are:** (1) the `@pytest.mark.pg` tests in `tests/test_priority_lists.py` were never executed against a real Postgres this session — this machine's `.env` currently points `PG_HOST` at the live Azure pilot DB, so the test harness's own collection-time guard (see `AGENTS.md`/`CLAUDE.md` → Database Setup) auto-skips the entire pg-marked suite; verification instead relied on careful manual code-tracing and, for the pandas-3 fix, empirically running equivalent snippets against the installed dependency versions. Run `PG_HOST=localhost NIMBUS_TEST_DB=1 python -m pytest tests/test_priority_lists.py -v` against working local credentials before calling this verified. (2) `tests/modules/legacy-surface.test.mjs`'s contract-snapshot test is currently failing because the new onclick handlers added in Tasks 10-12 aren't reflected in `tests/contracts/cq1-legacy-surface.json` yet — run `node scripts/legacy-surface.mjs --write` and commit the regenerated fixture before merge. (3) No task did a real browser/visual check of the new UI — the mapping modal against a genuinely ambiguous-column file (not just the pytest fixture), the upload flow end-to-end, and dark mode across all the new surfaces all remain to be done by hand. (4) `POST /color-wheel/{plant}` has no verified external-caller check — a manual curl/Postman test against a real `.xlsx` (with and without `ORDER_Y`) confirming the back-compat contract holds is still outstanding.
+**Not done, and not to be treated as shipped until they are:** (1) the `@pytest.mark.pg` tests in `tests/test_priority_lists.py` were never executed against a real Postgres this session — this machine's `.env` currently points `PG_HOST` at the live Azure pilot DB, so the test harness's own collection-time guard (see `AGENTS.md`/`CLAUDE.md` → Database Setup) auto-skips the entire pg-marked suite; verification instead relied on careful manual code-tracing and, for the pandas-3 fix, empirically running equivalent snippets against the installed dependency versions. Run `PG_HOST=localhost NIMBUS_TEST_DB=1 python -m pytest tests/test_priority_lists.py -v` against working local credentials before calling this verified. (2) ~~`tests/modules/legacy-surface.test.mjs`'s contract-snapshot test is currently failing because the new onclick handlers added in Tasks 10-12 aren't reflected in `tests/contracts/cq1-legacy-surface.json` yet — run `node scripts/legacy-surface.mjs --write` and commit the regenerated fixture before merge.~~ **DONE** — the fixture was regenerated in `f8e7269`; the test passes 10/10 (verified by running it, 2026-08-11, Stage 3 Task 0 audit). Note for Stage 3: its tree-UI task adds more inline handlers, so this fixture will need regenerating again — a failure there will be newly introduced, not this leftover. (3) No task did a real browser/visual check of the new UI — the mapping modal against a genuinely ambiguous-column file (not just the pytest fixture), the upload flow end-to-end, and dark mode across all the new surfaces all remain to be done by hand. (4) `POST /color-wheel/{plant}` has no verified external-caller check — a manual curl/Postman test against a real `.xlsx` (with and without `ORDER_Y`) confirming the back-compat contract holds is still outstanding.
 
 ## Why
 
@@ -66,7 +75,7 @@ findings themselves are in [Review findings](#review-findings).
 | Decision | Resolution | Why / what was rejected |
 |---|---|---|
 | **Sub-sort model** | **Nested UI, flat engine.** Build and see an indented tree; NIMBUS flattens it (pre-order DFS, duplicate keys dropped) and displays the effective sequence with duplicates marked "(no effect)". | A field nested under a field is *mathematically identical* to the next key in a lexicographic sort — a tree of fields flattens with no loss. Nesting would only differ if the sub-order varied **per value**. Rejected: per-value sub-orders (needs per-value config UI + storage) and weighted scoring (a real optimizer rewrite). The effective-sequence panel is what keeps the presentational tree honest rather than a fiction. |
-| **Vs. due dates** | **Priority sequences *inside* each calendar day**, exactly as color does now. Due-date tiering in `_dispatchDayIntegrity` keeps winning. | Preserves the v18/v19 day-integrity redesign. **Verified: zero dispatch changes needed** — both `seqCompare` and `rankForDay`'s `wheelFirst` already iterate `tieBreakTerms` generically. Rejected: letting a field cross day boundaries to hold a tool campaign together (weakens due-date adherence); hierarchy outranking due dates entirely. |
+| **Vs. due dates** | **Priority sequences *inside* each calendar day**, exactly as color does now. Due-date tiering in `_dispatchDayIntegrity` keeps winning. | Preserves the v18/v19 day-integrity redesign. **Verified: zero dispatch changes needed** — both `seqCompare` (`schedule-services.mts:1129-1135`) and `rankForDay`'s `wheelFirst` (`:1144-1154`) iterate `tieBreakTerms` generically, and `tieBreakTerms` is injected by the sole caller (`runAndApply`, `:1413-1415`, forwarding `_sortTerms`' own output). **Re-verified 2026-08-11 against current code** by Stage 3's Task 0 audit, reading the entire body — `:1069-1320`, not the `:1069-1230` earlier notes cited — and confirming no field name is hardcoded anywhere in it. Rejected: letting a field cross day boundaries to hold a tool campaign together (weakens due-date adherence); hierarchy outranking due dates entirely. |
 | **Attribute source** | **Materialized onto `orders` at ingest from `material_plants`.** No read-path join. Excel `COLOR` stops being a source. | User's call: *"rather than frequently doing joins we do a join on ingest based on mp.color and it sets that value… I'm trying to optimize and keep this clean."* Rejected: a `LEFT JOIN material_plants` on the `/tasks` hot path (the original draft). |
 | **Ranked value** | **The field's own values, at plant scope** (`{DOG:1, CAT:2}`) — not per material. | `material_plants` PK is `(material_id, plant)` — one `prt_01` per material per plant, and only one is being allowed for now. So material → tool is 1:1, and a per-material tool rank collapses to a per-material rank, making the ranked field redundant. If material priority is ever wanted it is a `MATERIAL_NUMBER` registry entry, **not** a compound key. |
 | **List scope** | **Plant-wide, with an optional per-line override.** Line row wins for that line; otherwise the plant row. Mirrors plant calendars/blackouts (`line: null` = whole plant). | Justified by the domain, not speculation: the coming PRT setup/teardown matrix is keyed by *workcenter/production line*, so PRT data is inherently line-scoped. |
@@ -91,11 +100,17 @@ place instead of many.
 
 Values materialize onto the order row at ingest: no hot-path join, and they display as Orders-grid
 columns. **Ranks never touch the order row.** They resolve on the client from per-plant rank maps
-(`{field_key: {line|'': {VALUE: RANK}}}`) loaded with plant state and refreshed after any upload.
+loaded with plant state and refreshed after any upload.
+
+The map shape is **line-first**: `{line|'': {field_key: {VALUE: RANK}}}`. That is the native shape of
+`brain.PLANT_LISTS` (`brain.py:123`) and `db.load_all_priority_lists()` (`db.py:2036`), and Stage 3's
+`GET /priority-rank-maps` returns it verbatim rather than transposing on the optimizer's hot path.
+*(Corrected 2026-08-11 by Stage 3's Task 0 audit — this paragraph previously stated the inner
+ordering field-first, which no code has ever produced.)*
 
 A rank is therefore always looked up against the order's **current** line — which is what makes
 line overrides survive a cross-line drag. `ORDER_Y` is still stamped server-side, for color
-compatibility only (the emitted row sort at `brain.py:823`, `ColorWheelViewer`, the coverage panel).
+compatibility only (the emitted row sort at `brain.py:1026`, `ColorWheelViewer`, the coverage panel).
 
 Why not the alternatives:
 - *Materializing ranks onto orders* would rewrite the whole `orders` table on every list upload,
@@ -134,11 +149,14 @@ them. `R*` = pass 1, `N*` = pass 2.
 
 **Would have shipped as bugs:**
 
-- **R1 — `Config.SCHEMA_VERSION` was never bumped** (`web/application-foundation.mts:137`, currently
+- **R1 — `Config.SCHEMA_VERSION` was never bumped** (`web/application-foundation.mts:137`, was
   `4` → must be `5`). The localStorage cache is discarded only on version mismatch
   (`schedule-data.mts:837`). Without the bump, returning users rehydrate old-shape tasks missing
   the new fields → every order ranks 999999 → every priority list silently ignored, no error. The
   worst class of bug: looks configured, does nothing.
+  **RESOLVED in Stage 1** — `Config.SCHEMA_VERSION` is now `5` (verified at
+  `web/application-foundation.mts:137` by Stage 3's Task 0 audit, 2026-08-11). Left in place because
+  N17 refers back to it.
 - **R2 — auto-propagating Material Plant edits into `orders` would destroy planner work.** See
   [the `xmin` hazard](#the-xmin-hazard-general). Dropped entirely.
 - **R3 — ledger-guard trap.** If the backfill migration runs before `material_plants` is populated,
@@ -152,16 +170,21 @@ them. `R*` = pass 1, `N*` = pass 2.
   are not selectable as Orders-grid columns. **Correction (2026-08-11):** the fourth materialized
   field is `production_version` (from `material_plants.default_production_version`), not
   `default_workcenter` — see the [Decisions](#decisions) table. `PRODUCTION_VERSION` needs no new
-  catalog entry; it already exists (dead) at `web/order-field-catalog.mjs:64`, one of the ~10 fields
+  catalog entry; it already exists (dead) at `web/order-field-catalog.mjs:78`, one of the ~10 fields
   `db.py` never writes — see [cross-cutting findings](#cross-cutting-findings-lift-these-out). This
   stage fixes that one entry rather than adding a new dead one for `default_workcenter`.
 - **R5** — SAP precedence must be stated (seam 2).
-- **R6** — the emitted row sort (`brain.py:823`, keyed on `ORDER_Y`) is **presentation and
+- **R6** — the emitted row sort (`brain.py:1026`, keyed on `ORDER_Y`) is **presentation and
   link-building order only**, never the optimizer's order. Documented so nobody "fixes" it by
   reading `plants.constraints` on the hot path for an ordering the optimizer overwrites anyway.
 - **R8** — `_renderSettingsPane`'s `initConstraints` is **synchronous** today
-  (`plant-and-administration.mts:1073`); sourcing the field list from a fetch needs a loading state
-  and a `CONSTRAINT_CATALOG` fallback, or a slow first paint renders an empty list.
+  (`plant-and-administration.mts:1416`); sourcing the field list from a fetch needs a loading state
+  and a `CONSTRAINT_CATALOG` fallback, or a slow first paint renders an empty list. **Sharpened by
+  Stage 3's Task 0 audit (2026-08-11):** a `CONSTRAINT_CATALOG` fallback is *not sufficient on its
+  own*, because the tree's keys come from the plant's stored `constraints` (`Store.masterData`), not
+  from the catalog — so the **field-key → task-field** map needs its own hardcoded fallback too, or a
+  plant with `prt01` configured resolves against a nonexistent task field and silently ranks every
+  order 999999. Never derive the task field as `key.toUpperCase()`: `prt01` → `PRT01`, not `PRT_01`.
 - **R9** — `column_metadata.display_label` is single-language, so de/es/fr/pt would show English.
   Resolve labels as `t('constraint.<field_key>')` with the DB label as fallback.
 - **R14** — reject a multi-file drop with two files targeting the same field+scope (otherwise silent
@@ -173,7 +196,7 @@ them. `R*` = pass 1, `N*` = pass 2.
 - **R10** — prune the new task fields from the `Compute` worker snapshot; the `postMessage`
   structured clone is the documented dominant main-thread compute cost and Alerts/Utilization never
   read ranks. *(Unverified: confirm the snapshot ships whole task objects.)*
-- **R11** — `tieBreakTerms.map()` runs per task **per calendar day** (`schedule-services.mts:1145`);
+- **R11** — `tieBreakTerms.map()` runs per task **per calendar day** (`schedule-services.mts:1154`);
   term count goes 4 → 7 with all fields enabled. Opt-in cost (terms are only added for configured
   fields), but it constrained the N12 encoding to a scalar key.
 - **R12** — coverage must not be one query per (line, field); see N3.
@@ -187,12 +210,18 @@ them. `R*` = pass 1, `N*` = pass 2.
   serving a differently-named table, and `ORDER_Y` aliasing the color rank. → `docs/MIGRATION.md`.
 - **R18** — `CLAUDE.md` and `AGENTS.md` are twins; both document this architecture and both must be
   updated or they drift.
-- **R19** — `tests/modules/schedule-services.test.mjs` will **break** on the `_sortTerms` signature
-  change; budget for updating it, not only for new tests.
+- **R19 — WRONG, corrected 2026-08-11 by Stage 3's Task 0 audit.** The claim was that
+  `tests/modules/schedule-services.test.mjs` will **break** on the `_sortTerms` signature change.
+  It will not: `grep -rn "colorMap\|_sortTerms\|_comparator" tests/` returns **zero matches** —
+  nothing in the test tree references any of the three. That file's Engine test
+  (`tests/modules/schedule-services.test.mjs:128-133`) makes only positive `typeof` assertions, so
+  adding methods won't break it either. The real situation is worse in a different way: **`_sortTerms`
+  has never had any test coverage at all**, so Stage 3's new tests are its first. Budget for new
+  tests, not for repairing old ones.
 
 **Corrected in pass 1:**
 
-- **R7 downgraded from risk to note.** `wheelFirst` (`schedule-services.mts:1135`) already spans
+- **R7 downgraded from risk to note.** `wheelFirst` (`schedule-services.mts:1144`) already spans
   `[color, FORM_SIZE, MATERIAL_NUMBER, runHours]`, so due date was *already* the last resort in
   `changeover`'s tier-2 and those three terms already discriminate nearly every pair. Extra PRT
   terms make due date matter marginally less often, not qualitatively less.
@@ -209,8 +238,18 @@ and delivery became staged.
   can be dragged **between lines**; `:1641` makes the Orders grid `PRODUCTION_LINE` column
   `editable: true`. Line changes are first-class through two surfaces, so a line-scoped rank stamped
   onto the order row is wrong the instant a planner moves that order. `OptimizeDialog` loads rank
-  maps and would self-correct, but the **alert auto-fix path** (`schedule-services.mts:697`) loads
+  maps and would self-correct, but the **alert auto-fix path** (`schedule-services.mts:706`) loads
   none and would sequence off the stale value. Plant-scoped color never had this failure mode.
+  **Re-verified 2026-08-11 (Stage 3 Task 0), with one narrowing:** that call site passes no `plant`
+  either, but `runAndApply` defaults `plant` to `Store.selectedPlant`
+  (`schedule-services.mts:1332`), so the *constraint tree* already resolves correctly there — only
+  the *rank map* is missing. Every `runAndApply` caller's effective plant is always
+  `Store.selectedPlant` (`OptimizeDialog.selectPlant` sets it at `schedule-workbench.mts:6197`),
+  which is why a single non-plant-keyed `Store.priorityRankMaps` cache is safe. **New risk found:**
+  `OptimizeDialog` today explicitly handles the "cache not filled yet" race with a synchronous
+  fallback fetch (`schedule-workbench.mts:6517-6539`); Stage 3 deletes that fetch, so an equivalent
+  guard must replace it or a Run clicked before the rank-map fetch resolves silently sequences at
+  999999-for-everything.
 - **N2b — resolution: drop the per-order rank payload entirely** (now [seam 1](#seam-1--values-on-the-order-ranks-on-the-client)).
   Adopted rather than offered because it is better on every axis: eliminates N1 and N2, eliminates
   N14, removes the worker-snapshot concern in R10, and shrinks the `/tasks` payload.
@@ -333,7 +372,7 @@ so the next person to touch `orders` finds them.
 ### The `xmin` hazard (general)
 
 `orders.xmin` is the optimistic-concurrency `base_version` surfaced as `ROW_VERSION`
-(`db.py:215`). **Any `UPDATE orders` bumps it** — including one that only touches an unrelated
+(`db.py:219`). **Any `UPDATE orders` bumps it** — including one that only touches an unrelated
 column. The affected ids then return in the `stale` list on the next `POST /tasks/update`, and the
 frontend reconciles with **last-writer-loses**: it discards the local edit and refetches server
 truth.
