@@ -517,9 +517,10 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
 
 def update_task_dates_bulk(items: list[dict]) -> dict:
     """
-    Persist a batch of start/end edits in a SINGLE transaction (one commit),
-    replacing the old commit-per-row path. Each item: {id, start, end} where
-    start/end are datetime|None.
+    Persist a batch of start/end and allowlisted order-attribute edits in a
+    SINGLE transaction (one commit), replacing the old commit-per-row path.
+    Each item: {id, start, end, PRT_01?, PRT_02?, PRODUCTION_VERSION?} where
+    start/end are datetime|None and supplied attributes may be None to clear.
 
     Inverted ranges are rejected by validating each edit against the row's
     *effective* current dates (so updating only start still checks against the
@@ -567,7 +568,12 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
-            if not tid or (start is None and end is None):
+            attrs = {
+                field: it[field]
+                for field in ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
+                if field in it
+            }
+            if not tid or (start is None and end is None and not attrs):
                 invalid_ids.append(tid)
                 continue
             if tid not in eff:
@@ -583,7 +589,7 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             if not it.get("force") and base_version is not None and base_version != cur_ver:
                 stale.append(tid)   # someone else wrote since the client's read
                 continue
-            update_rows.append((start, end, tid))
+            update_rows.append((start, end, Jsonb(attrs), tid))
 
         if update_rows:
             try:
@@ -591,14 +597,23 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                 # VALUES columns are required because an all-NULL column would otherwise be
                 # of unknown type. RETURNING o.xmin gives each row's post-write version, using
                 # the identical xmin::text::bigint expression as the /tasks read path.
-                placeholders = ", ".join(["(%s::timestamp, %s::timestamp, %s::text)"] * len(update_rows))
+                placeholders = ", ".join(["(%s::timestamp, %s::timestamp, %s::jsonb, %s::text)"] * len(update_rows))
                 params = [v for row in update_rows for v in row]
                 sql = f"""
                     UPDATE orders o
                     SET scheduled_start = COALESCE(v.s, o.scheduled_start),
                         scheduled_end   = COALESCE(v.e, o.scheduled_end),
+                        prt_01 = CASE WHEN v.attrs ? 'PRT_01'
+                                      THEN NULLIF(v.attrs->>'PRT_01', '')
+                                      ELSE o.prt_01 END,
+                        prt_02 = CASE WHEN v.attrs ? 'PRT_02'
+                                      THEN NULLIF(v.attrs->>'PRT_02', '')
+                                      ELSE o.prt_02 END,
+                        production_version = CASE WHEN v.attrs ? 'PRODUCTION_VERSION'
+                                                  THEN NULLIF(v.attrs->>'PRODUCTION_VERSION', '')
+                                                  ELSE o.production_version END,
                         updated_at      = NOW()
-                    FROM (VALUES {placeholders}) AS v(s, e, id)
+                    FROM (VALUES {placeholders}) AS v(s, e, attrs, id)
                     WHERE o.id = v.id
                     RETURNING o.id, o.xmin::text::bigint AS new_version
                 """

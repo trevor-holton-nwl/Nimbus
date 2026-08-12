@@ -1439,7 +1439,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
 class TaskDateUpdate(BaseModel):
-    """One task's optional start/end edit. Unknown fields are ignored.
+    """One task's optional schedule/attribute edit. Unknown fields are ignored.
 
     Optimistic concurrency: `base_version` is the xmin the client last saw for this
     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
@@ -1449,6 +1449,9 @@ class TaskDateUpdate(BaseModel):
     id: str
     start_date: str | None = None
     end_date: str | None = None
+    PRT_01: str | None = None
+    PRT_02: str | None = None
+    PRODUCTION_VERSION: str | None = None
     base_version: int | None = None
     force: bool = False
 
@@ -1463,9 +1466,9 @@ class TasksUpdatePayload(BaseModel):
 
 def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     """
-    Normalize start/end edits and persist them write-through to Postgres in a
-    single transaction (db.update_task_dates_bulk). No in-memory frame to mutate
-    anymore — the DB is the source of truth.
+    Normalize schedule/attribute edits and persist them write-through to Postgres
+    in a single transaction (db.update_task_dates_bulk). No in-memory frame to
+    mutate anymore — the DB is the source of truth.
 
     Single source of truth for /task/update, /tasks/update and /tasks/bulk_update.
     Inverted ranges are validated against each row's effective current dates and
@@ -1480,15 +1483,25 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     """
     norm: list[dict] = []
     invalid = 0
+    attribute_fields = ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
     for it in items:
         if not it.id:
             invalid += 1
             continue
         start_dt = _to_pydt(it.start_date) if it.start_date else None
         end_dt   = _to_pydt(it.end_date)   if it.end_date   else None
-        if start_dt is None and end_dt is None:
+        # Pydantic tracks explicitly supplied fields so an explicit null can
+        # clear an attribute, while omitted attributes remain untouched.
+        supplied = getattr(it, "model_fields_set", set())
+        attrs = {
+            field: (getattr(it, field).strip() if isinstance(getattr(it, field), str) else None)
+            for field in attribute_fields
+            if field in supplied
+        }
+        if start_dt is None and end_dt is None and not attrs:
             continue
         norm.append({"id": it.id, "start": start_dt, "end": end_dt,
+                     **attrs,
                      "base_version": it.base_version, "force": it.force})
 
     if not norm:
@@ -1501,7 +1514,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")
-        _log_event("error", "db", "Bulk task-date persist failed (transaction rolled back)",
+        _log_event("error", "db", "Bulk task update persist failed (transaction rolled back)",
                    exc=e, error_code=error_code, count=len(norm))
         # Honest body signal: the HTTP status stays 200 (per-row reporting
         # contract), but flag the hard failure + a stable cause so the frontend
@@ -1511,7 +1524,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
                 "invalid_ids": [], "not_found_ids": [],
                 "stale": [], "versions": {},
                 "status": "error", "error_code": error_code,
-                "cause": "Bulk task-date persist failed (transaction rolled back)"}
+                "cause": "Bulk task update persist failed (transaction rolled back)"}
     res["invalid"] = res.get("invalid", 0) + invalid
     return res
 
@@ -1519,8 +1532,9 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
 @api.post("/task/update", response_model=TaskUpdateResult)
 def update_task(task: TaskDateUpdate):
     """
-    Update a single task's start/end and persist to DB.
-    Payload: { id, start_date?, end_date?, base_version?, force? }
+    Update a single task's schedule/priority attributes and persist to DB.
+    Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
+               PRODUCTION_VERSION?, base_version?, force? }
     Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
     client can refetch and warn uniformly with the bulk path.
@@ -1560,8 +1574,10 @@ def update_task_note(payload: dict):
 @api.post("/tasks/update", response_model=BulkUpdateResult)
 def tasks_update(payload: TasksUpdatePayload):
     """
-    Bulk-update task dates and persist to DB (one transaction).
-    Payload: { tasks: [{ id, start_date?, end_date?, base_version?, force? }], blocks?, calendars? }
+    Bulk-update task dates/priority attributes and persist to DB (one transaction).
+    Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+                         PRODUCTION_VERSION?, base_version?, force? }],
+               blocks?, calendars? }
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions }
     """

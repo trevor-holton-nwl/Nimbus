@@ -201,6 +201,13 @@ export interface NimbusMasterPlant {
   /** Minutes; schema.sql: NOT NULL DEFAULT 20160. Confidence-score horizon
    *  (nimbus-intelligence.js's Confidence module — not read by this file). */
   conf_score_horizon?: number;
+  /** Human plant name, e.g. "Maryville" (admin-editable via Manage Data Tables; nullable). */
+  description?: string | null;
+  /** What the plant makes, e.g. "Injection-molded FoodSaver containers". */
+  product_focus?: string | null;
+  /** IANA zone, e.g. "America/Chicago". May be absent or invalid — all readers
+   *  must go through Util.plantNowParts's try/catch, never Intl directly. */
+  timezone?: string | null;
 }
 
 export interface NimbusMasterData {

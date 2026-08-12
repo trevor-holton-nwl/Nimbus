@@ -67,6 +67,41 @@ def test_bulk_update_result_round_trips_db_shape():
     assert out == sample
 
 
+def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch):
+    captured = {}
+
+    def fake_update(items):
+        captured["items"] = items
+        return {
+            "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
+            "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+            "stale": [], "versions": {"abc123": 43},
+        }
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    result = brain._apply_task_date_updates([
+        brain.TaskDateUpdate(
+            id="abc123",
+            PRT_01="MOLD-A",
+            PRT_02="MOLD-B",
+            PRODUCTION_VERSION="0001",
+            base_version=42,
+        )
+    ])
+
+    assert result["persisted"] == 1
+    assert captured["items"] == [{
+        "id": "abc123",
+        "start": None,
+        "end": None,
+        "PRT_01": "MOLD-A",
+        "PRT_02": "MOLD-B",
+        "PRODUCTION_VERSION": "0001",
+        "base_version": 42,
+        "force": False,
+    }]
+
+
 def test_openapi_schema_includes_new_components():
     schema = brain.api.openapi()
     names = set(schema.get("components", {}).get("schemas", {}).keys())
