@@ -6,6 +6,7 @@
 # Node / ESLint tooling
 node_modules/
 .eslintcache
+.worktrees/
 
 # TypeScript compiled output — compiled in place next to its .ts/.mts source
 # (see docs/typescript_migration.md). Listed by specific filename, not a blanket
