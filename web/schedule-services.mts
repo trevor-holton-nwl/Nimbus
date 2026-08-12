@@ -401,7 +401,9 @@ export const Calendar = {
    * intentionally weaker than `nextAvailable`: it is only used by the
    * documented continuous-bar exception for inherently overlong orders. */
   nextOperatingInstant(line: string, from: Date): Date | null {
-    let cur = Util.snap(new Date(from));
+    const startMs = from.getTime();
+    const roundedMs = startMs % Config.MS_MIN ? startMs + Config.MS_MIN - (startMs % Config.MS_MIN) : startMs;
+    let cur = new Date(roundedMs);
     const limit = new Date(cur);
     limit.setDate(limit.getDate() + 90);
     while (cur < limit) {
@@ -414,7 +416,11 @@ export const Calendar = {
       if (cur < win[0]) cur = new Date(win[0]);
       const blackout = Calendar._overlapsBlock(line, cur, new Date(cur.getTime() + Config.MS_MIN));
       if (blackout) {
-        cur = Util.snap(new Date(blackout.end));
+        const blackoutEnd = blackout.end.getTime();
+        const nextMinute = blackoutEnd % Config.MS_MIN
+          ? blackoutEnd + Config.MS_MIN - (blackoutEnd % Config.MS_MIN)
+          : blackoutEnd;
+        cur = new Date(nextMinute);
         continue;
       }
       return cur;

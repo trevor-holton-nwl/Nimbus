@@ -82,6 +82,13 @@ test('Calendar classifies an order longer than every nominal operating window as
   assert.equal(+result.start, +at('2026-08-12T08:00'));
 });
 
+test('Calendar keeps the requested operating minute for an overlong exception', () => {
+  seed();
+  const result = Calendar.findContiguousSlot(line, at('2026-08-12T08:01'), 9 * HOUR);
+  assert.equal(result.kind, 'overlong');
+  assert.equal(+result.start, +at('2026-08-12T08:01'));
+});
+
 test('Engine compresses backlogged gaps and stops at a future gap', () => {
   seed({
     tasks: [

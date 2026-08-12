@@ -144,6 +144,7 @@ import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
+import type { RemoveBacklogResult } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse } from './types.mjs';
 
@@ -6088,6 +6089,8 @@ export const OptimizeDialog = (() => {
   let _selectedLines = new Set<string>();    // line names when _scope === 'lines'
   let _lineSearch = '';              // current line-list filter text
   let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
+  let _startDirty = false;
+  let _endDirty = false;
 
   const PRESET_DAYS: Record<string, number> = { '2w': 14 }; // UI only exposes '2w' and 'custom'
 
@@ -6197,7 +6200,8 @@ export const OptimizeDialog = (() => {
     const srch = document.getElementById('opt-line-search') as HTMLInputElement | null;
     if (srch) srch.value = '';
     if (_scope === 'lines') _renderLines();
-    if (_preset === 'horizon') applyPreset('horizon');
+    if (_mode === 'backlog') _applyBacklogDefaults();
+    else if (_preset === 'horizon') applyPreset('horizon');
   }
 
   function setScope(scope: string) {
@@ -6208,6 +6212,7 @@ export const OptimizeDialog = (() => {
     const panel = document.getElementById('opt-lines-panel');
     if (panel) panel.hidden = _scope !== 'lines';
     if (_scope === 'lines') _renderLines();
+    if (_mode === 'backlog') _applyBacklogDefaults();
   }
 
   function _linesForPlant() {
@@ -6279,6 +6284,7 @@ export const OptimizeDialog = (() => {
       else _selectedLines.delete(l);
     }
     _renderLines();
+    if (_mode === 'backlog') _applyBacklogDefaults();
   }
 
   function _onLineToggle(line: string, checked: boolean) {
@@ -6287,6 +6293,64 @@ export const OptimizeDialog = (() => {
     const count = document.getElementById('opt-lines-count');
     const total = _linesForPlant().length;
     if (count) count.textContent = `${_selectedLines.size} of ${total} selected`;
+    if (_mode === 'backlog') _applyBacklogDefaults();
+  }
+
+  function _backlogNow(): Date {
+    const timezone = Store.masterData?.plants?.find(p => p.plant === _plant)?.timezone;
+    if (typeof timezone === 'string' && timezone.trim()) {
+      try { return Engine._plantWallNow(timezone, new Date()); }
+      catch { /* Run surfaces the configured-timezone error with an actionable message. */ }
+    }
+    // The engine still blocks this configuration at Run. This local fallback
+    // merely gives the planner usable editable fields while they configure the
+    // required plant timezone.
+    const local = new Date(); local.setSeconds(0, 0); return local;
+  }
+
+  function _addCalendarMonths(date: Date, months: number): Date {
+    const result = new Date(date);
+    const day = result.getDate();
+    result.setDate(1);
+    result.setMonth(result.getMonth() + months);
+    const last = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+    result.setDate(Math.min(day, last));
+    return result;
+  }
+
+  function _applyBacklogDefaults() {
+    if (!_plant) return;
+    const now = _backlogNow();
+    const scopedLines = _scope === 'lines' && _selectedLines.size ? _selectedLines : null;
+    const tasks = Store.tasksByPlant(_plant).filter(t => !scopedLines || scopedLines.has(t.PRODUCTION_LINE));
+    const pastStarts = tasks.map(t => t.start_date).filter((d): d is Date => !!d && d < now);
+    const latestEnds = tasks.map(t => t.end_date).filter((d): d is Date => !!d);
+    const computedStart = pastStarts.length ? new Date(Math.min(...pastStarts.map(d => d.getTime()))) : now;
+    let computedEnd = latestEnds.length
+      ? new Date(Math.min(Math.max(...latestEnds.map(d => d.getTime())), _addCalendarMonths(now, 4).getTime()))
+      : _addCalendarMonths(now, 4);
+    if (computedEnd < computedStart) computedEnd = _addCalendarMonths(computedStart, 4);
+    if (!_startDirty) _start = computedStart;
+    if (!_endDirty) _end = computedEnd;
+    _fpStart?.setDate(_start!, false);
+    _fpEnd?.setDate(_end!, false);
+    const sb = document.getElementById('opt-start-btn');
+    const eb = document.getElementById('opt-end-btn');
+    if (sb && _start) sb.textContent = _displayDate(_start);
+    if (eb && _end) eb.textContent = _displayDate(_end);
+    _updateSummary();
+  }
+
+  function _applyModeOptions() {
+    const backlog = _mode === 'backlog';
+    const fixed = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const calendar = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
+    if (fixed) fixed.disabled = backlog;
+    if (calendar) { calendar.checked = backlog || calendar.checked; calendar.disabled = backlog; }
+    const fixedLabel = document.getElementById('opt-fixed-label');
+    const calendarLabel = document.getElementById('opt-calendar-label');
+    if (fixedLabel) fixedLabel.title = backlog ? 'Fixed orders move when reached and remain fixed.' : '';
+    if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 
   function _displayDate(d: Date) {
@@ -6335,6 +6399,10 @@ export const OptimizeDialog = (() => {
       if (sb) sb.textContent = _displayDate(_start);
       if (eb) eb.textContent = _displayDate(_end);
     }
+    if (_mode === 'backlog' && key !== 'custom') {
+      _startDirty = true;
+      _endDirty = true;
+    }
     _updateSummary();
   }
 
@@ -6343,6 +6411,9 @@ export const OptimizeDialog = (() => {
     document.querySelectorAll<HTMLElement>('.opt-strategy-pill').forEach((c) =>
       c.classList.toggle('active', c.dataset.mode === mode)
     );
+    _applyModeOptions();
+    if (mode === 'backlog') _applyBacklogDefaults();
+    else _updatePlantBadge();
   }
 
   /** Does this plant have any colorWheel ranks the optimizer could apply?
@@ -6385,6 +6456,10 @@ export const OptimizeDialog = (() => {
       return;
     }
 
+    if (_mode === 'backlog') {
+      setBadge('none', '↪', 'Remove Backlog preserves the existing sequence and does not use priority lists.');
+      return;
+    }
     setBadge('loading', '', Util.t('ui.opt_badge_checking'));
     const token = ++_wheelFetchToken;
 
@@ -6442,6 +6517,8 @@ export const OptimizeDialog = (() => {
     const el = document.getElementById('modal-optimize');
     if (!el) return;
     el.hidden = false;
+    _startDirty = false;
+    _endDirty = false;
     // Seed from the user's saved optimizer defaults (pref('optimizerDefaults'))
     // when present, so the dialog opens pre-filled with their preferred strategy,
     // time window, and option toggles. Falls back to the historical defaults
@@ -6467,7 +6544,9 @@ export const OptimizeDialog = (() => {
     const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
     applyPreset(_seedPreset);
     const savedMode = _od?.mode;
-    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'combined'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
+    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'combined', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
+    _startDirty = false;
+    _endDirty = false;
     selectMode(_seedMode);
     // Reset the Run button HTML in case a previous session left it in the
     // "Optimizing…" state (e.g., Cancel mid-fetch).
@@ -6561,13 +6640,14 @@ export const OptimizeDialog = (() => {
     // was cheap; now the ranks are load-bearing, so it is better to wait for
     // them (loadPriorityRankMaps never rejects — a failing/non-ok response
     // returns promptly and falls into the `!ranksFresh` confirm below).
-    if (Persistence._rankMapsPlant !== plant) {
-      await Persistence.loadPriorityRankMaps(plant);
+    let wheelUsed = false;
+    let unrankedFields: string[] = [];
+    if (_mode !== 'backlog') {
+      if (Persistence._rankMapsPlant !== plant) await Persistence.loadPriorityRankMaps(plant);
+      const ranksFresh = Persistence._rankMapsPlant === plant;
+      wheelUsed = ranksFresh && _hasColorRanks();
+      unrankedFields = Engine.unrankedActiveFields(plant);
     }
-    const ranksFresh = Persistence._rankMapsPlant === plant;
-    // Kept for the audit payload's historical `wheel_used` field only — the
-    // gate below is no longer colorWheel-specific.
-    const wheelUsed = ranksFresh && _hasColorRanks();
 
     // Which of this plant's ACTIVE priority fields would rank nothing? Confirm
     // when ANY of them would, not just colorWheel (N11,
@@ -6584,7 +6664,6 @@ export const OptimizeDialog = (() => {
     // a failed REFETCH wiped the cache while _rankMapsPlant still matched:
     // ranksFresh was true, the old colorWheel probe found nothing, and the run
     // went ahead unranked and unannounced.
-    const unrankedFields = Engine.unrankedActiveFields(plant);
     if (unrankedFields.length && (_mode === 'changeover' || _mode === 'combined')) {
       const names = unrankedFields.map(k => Util.t(`constraint.${k}`)).join(', ');
       const ok = await Modal.confirm({
@@ -6600,7 +6679,8 @@ export const OptimizeDialog = (() => {
       startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
       endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
       respectFixed:    sfEl?.checked ?? true,
-      respectCalendar: scEl?.checked ?? true,
+      respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
+      runAt:           new Date(),
     };
 
     // Config modal was already hidden (close(true) above) before the rank-map
@@ -6615,7 +6695,7 @@ export const OptimizeDialog = (() => {
     }, 0));
 
     // Persist audit log entry
-    fetch(`${Config.API_BASE}/audit/log`, {
+    if (_mode !== 'backlog') fetch(`${Config.API_BASE}/audit/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
       body: JSON.stringify({
@@ -6646,6 +6726,7 @@ export const OptimizeDialog = (() => {
     const d = _fpStart && _fpStart.selectedDates[0];
     if (d) {
       _start = new Date(d);
+      _startDirty = true;
       if (_fpEnd && _start) _fpEnd.set('minDate', _start);
       const sb = document.getElementById('opt-start-btn');
       if (sb) sb.textContent = _displayDate(_start);
@@ -6666,6 +6747,7 @@ export const OptimizeDialog = (() => {
     const d = _fpEnd && _fpEnd.selectedDates[0];
     if (d) {
       _end = new Date(d);
+      _endDirty = true;
       const eb = document.getElementById('opt-end-btn');
       if (eb) eb.textContent = _displayDate(_end);
       _updateSummary();
@@ -6710,6 +6792,10 @@ export const OptimizerPreview = {
   _postKpis: null as OptimizerKpis | null,
   _mode:     null as OptimizerMode | null,
   _plant:    null as string | null,
+  _backlogResult: null as RemoveBacklogResult | null,
+  _backlogAudit: null as {
+    plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
+  } | null,
   active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
   _confSnapshot: null as unknown,   // Confidence.snapshot() taken just before the trial mutation
   _abandonGuardInstalled: false,
@@ -6832,6 +6918,15 @@ export const OptimizerPreview = {
         OptimizerPreview._postKpis = postKpis;
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
+        OptimizerPreview._backlogResult = mode === 'backlog' ? Engine.lastBacklogResult : null;
+        OptimizerPreview._backlogAudit = mode === 'backlog' ? {
+          plant,
+          lines: Array.isArray(opts.lines) ? opts.lines : null,
+          from: opts.startDate ?? null,
+          to: opts.endDate ?? null,
+          runAt: opts.runAt instanceof Date ? opts.runAt : null,
+          timezone: Store.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
+        } : null;
 
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._render();
@@ -6868,6 +6963,7 @@ export const OptimizerPreview = {
     if (!body) return;
     const pre  = OptimizerPreview._preKpis  || EMPTY_OPTIMIZER_KPIS;
     const post = OptimizerPreview._postKpis || EMPTY_OPTIMIZER_KPIS;
+    const backlog = OptimizerPreview._backlogResult?.diagnostics ?? null;
 
     // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
     // lowerIsBetter: true → decrease=better (green), increase=worse (red).
@@ -6943,6 +7039,28 @@ export const OptimizerPreview = {
 
     const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
       (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
+
+    const backlogHtml = (() => {
+      if (!backlog) return '';
+      const rows: Array<[string, string]> = [
+        ['Backlogged orders found', String(backlog.backlogFound)],
+        ['Orders moved', String(backlog.moved)],
+        ['Fixed orders moved', String(backlog.fixedMoved)],
+        ['Moved backlog runtime', `${backlog.movedRuntimeHours.toFixed(1)} h`],
+        ['Largest delay', `${backlog.largestDelayMinutes} min`],
+      ];
+      if (backlog.invalidRuntimeIds.length) rows.push(['Skipped invalid runtime', String(backlog.invalidRuntimeIds.length)]);
+      if (backlog.missingStartIds.length) rows.push(['Skipped missing start', String(backlog.missingStartIds.length)]);
+      if (backlog.overlongIds.length) rows.push(['Continuous overlong exceptions', String(backlog.overlongIds.length)]);
+      if (backlog.calendarSearchFailures.length) rows.push(['Calendar capacity failures', String(backlog.calendarSearchFailures.length)]);
+      const summary = backlog.backlogFound === 0 && backlog.moved === 0 && !backlog.invalidRuntimeIds.length && !backlog.missingStartIds.length
+        ? '<div class="opt-pv-backlog-empty">No eligible backlog was found in this window; the schedule is unchanged.</div>'
+        : '';
+      const boundary = backlog.boundaryConflicts.length
+        ? `<div class="opt-pv-backlog-warning"><strong>Boundary conflicts:</strong> ${backlog.boundaryConflicts.length} moved order(s) overlap protected work after To. Apply remains available so you can repair that period manually.</div>`
+        : '';
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">Remove Backlog results</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
+    })();
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
     const plant = OptimizerPreview._plant || '';
@@ -7021,6 +7139,8 @@ export const OptimizerPreview = {
           <div class="opt-pv-chip opt-pv-chip-time">⏱ ${esc(stamp)}</div>
         </div>
 
+        ${backlogHtml}
+
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
@@ -7068,6 +7188,26 @@ export const OptimizerPreview = {
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
     if (!snap) { Modal.close('modal-opt-preview'); return; }
+    if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
+      const audit = OptimizerPreview._backlogAudit;
+      const diagnostics = OptimizerPreview._backlogResult.diagnostics;
+      fetch(`${Config.API_BASE}/audit/log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
+        body: JSON.stringify({
+          action: 'optimization_run', plant: audit.plant,
+          details: {
+            mode: 'backlog', scope: audit.lines ? 'lines' : 'plant', lines: audit.lines,
+            from: audit.from?.toISOString() ?? null, to: audit.to?.toISOString() ?? null,
+            plant_timezone: audit.timezone, captured_run_at: audit.runAt?.toISOString() ?? null,
+            backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, fixed_moved: diagnostics.fixedMoved,
+            invalid_runtime: diagnostics.invalidRuntimeIds.length, missing_start: diagnostics.missingStartIds.length,
+            overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
+            boundary_conflicts: diagnostics.boundaryConflicts.length,
+            applied_with_boundary_conflicts: diagnostics.boundaryConflicts.length > 0,
+          },
+        }),
+      }).catch(() => {});
+    }
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
@@ -7099,6 +7239,8 @@ export const OptimizerPreview = {
     OptimizerPreview._postKpis = null;
     OptimizerPreview._mode     = null;
     OptimizerPreview._plant    = null;
+    OptimizerPreview._backlogResult = null;
+    OptimizerPreview._backlogAudit = null;
     OptimizerPreview.active       = false;
     OptimizerPreview._confSnapshot = null;
   },

@@ -294,6 +294,11 @@
     {
       "file": "index.html",
       "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectMode('backlog')"
+    },
+    {
+      "file": "index.html",
+      "attribute": "onclick",
       "expression": "NIMBUS.OptimizeDialog.selectMode('changeover')"
     },
     {

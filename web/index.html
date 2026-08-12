@@ -2472,6 +2472,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                     onclick="NIMBUS.OptimizeDialog.selectMode('combined')">
               <span class="osp-icon">✨</span><span>Smart</span>
             </button>
+            <button class="opt-strategy-pill" data-mode="backlog"
+                    title="Shift past scheduled orders forward without resequencing their line"
+                    onclick="NIMBUS.OptimizeDialog.selectMode('backlog')">
+              <span class="osp-icon">↪</span><span>Remove Backlog</span>
+            </button>
           </div>
         </div>
       </div>
@@ -2481,12 +2486,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-section-key">Options</div>
         <div class="opt-section-ctrl">
           <div class="opt-check-row">
-            <label class="opt-check">
+            <label class="opt-check" id="opt-fixed-label">
               <input type="checkbox" id="opt-chk-fixed" checked>
               <span class="opt-check-box"></span>
               <span>Respect fixed orders</span>
             </label>
-            <label class="opt-check">
+            <label class="opt-check" id="opt-calendar-label">
               <input type="checkbox" id="opt-chk-calendar" checked>
               <span class="opt-check-box"></span>
               <span>Respect calendar blackouts</span>

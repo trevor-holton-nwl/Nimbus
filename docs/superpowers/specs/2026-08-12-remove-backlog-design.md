@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-12
 
-**Status:** Approved design decisions; pending amended written-spec review
+**Status:** Implemented on `feature/remove-backlog` (2026-08-12); split-order follow-on remains separate.
 
 **Scope:** NIMBUS frontend scheduling engine and Optimize workflow
 

@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript ES modules, vanilla DOM, Node built-in test runner.
 
+**Implementation status (2026-08-12):** Complete. Focused verification: `npm run build`, `npm run typecheck`, changed-file ESLint, `tests/modules/remove-backlog.test.mjs`, the workbench module tests, and the legacy-surface contract test. The full suite retains one unrelated pre-existing `Engine.autoReflow` failure.
+
 ## Global Constraints
 
 - Run only after an explicit planner action. No time, ingest, or alert trigger may invoke it.

@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS plants (
     subnetwork         TEXT NOT NULL REFERENCES subnetworks(code)
                            ON DELETE CASCADE ON UPDATE CASCADE,
     plant              TEXT NOT NULL,
+    timezone           TEXT,
     alt_flag_horizon   INTEGER NOT NULL DEFAULT 43200,
     conf_score_horizon INTEGER NOT NULL DEFAULT 20160,
     created_at         TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -120,6 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_plants_subnetwork ON plants(subnetwork);
 -- Migrations for existing databases
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS alt_flag_horizon   INTEGER NOT NULL DEFAULT 43200;
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS conf_score_horizon INTEGER NOT NULL DEFAULT 20160;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone TEXT;
 -- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
 -- and NO LONGER re-run on apply.
 --
@@ -430,6 +432,7 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants',            'plant',                         'Plant',                        TRUE,  2),
     ('plants',            'alt_flag_horizon',              'Alert Flag Horizon (days)',    FALSE, 3),
     ('plants',            'conf_score_horizon',            'Conf Score Horizon (days)',    FALSE, 4),
+    ('plants',            'timezone',                       'Plant Timezone (IANA)',         FALSE, 5),
     ('production_lines',  'subnetwork',                    'Subnetwork',                   TRUE,  1),
     ('production_lines',  'plant',                         'Plant',                        TRUE,  2),
     ('production_lines',  'production_line',               'Production Line',              TRUE,  3),
@@ -625,6 +628,7 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants',           'plant',             'Plant',                   TRUE,  2),
     ('plants',           'alt_flag_horizon',  'Alert Flag Horizon (days)',  FALSE, 3),
     ('plants',           'conf_score_horizon','Conf Score Horizon (days)', FALSE, 4),
+    ('plants',           'timezone',          'Plant Timezone (IANA)',      FALSE, 5),
     ('production_lines', 'subnetwork',      'Subnetwork',      TRUE,  1),
     ('production_lines', 'plant',           'Plant',           TRUE,  2),
     ('production_lines', 'production_line', 'Production Line', TRUE,  3),
