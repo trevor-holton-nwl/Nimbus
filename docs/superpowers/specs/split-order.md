@@ -83,7 +83,7 @@ Basic dates seed the NIMBUS schedule only when an order first enters the system.
 - NIMBUS `start_date`, `end_date`, and any schedule segments are authoritative.
 - Changes to `BASIC_START_DATE` or `BASIC_FINISH_DATE` update reference fields only. They never reset NIMBUS schedule fields or segments.
 - Incoming source dates and ordinary attribute refreshes do not overwrite an existing NIMBUS schedule.
-- NIMBUS timing changes only through a planner's scheduling action, a scheduling heuristic, or timing-relevant master data such as `RUN_TIME`.
+- NIMBUS timing changes only through a planner's scheduling action, a scheduling heuristic, or a `RUN_TIME` change. In phase 1, `RUN_TIME` is the only ingested or master-data field that automatically regenerates order timing.
 
 When `RUN_TIME` changes, preserve the authoritative NIMBUS scheduled start and regenerate the complete schedule forward from that point using the assigned line, current effective calendar, plant split policy, and fixed 30-minute minimum. The order remains fixed if it was fixed; fixed status does not prevent this timing correction.
 
@@ -189,7 +189,7 @@ Display the effective policy read-only in optimization preview and record it in 
 
 ### `never`
 
-Use each strategy's existing continuous-placement behavior. This is the compatibility/off path and must not change results for the three existing optimization strategies. Remove Backlog retains its already-approved behavior for an inherently overlong order: start at the next valid operating instant, draw one continuous bar through closed time, and report the calendar exception.
+Use each strategy's existing continuous-placement behavior. This is the compatibility/off path and must not change results for the three existing optimization strategies. Remove Backlog retains its already-approved behavior for an inherently overlong order: start at the next valid operating instant, draw one continuous bar through closed time, and report the calendar exception. The full parent interval continues through legacy continuous-bar calculations, and normal closed-hours/calendar alerts expose the violation. Accurate productive-time accounting across the closure requires either `overlong_only` or `partial_allowed`; `never` must not create hidden segments solely for KPI calculations.
 
 ### `overlong_only`
 
@@ -292,6 +292,7 @@ Segments are NIMBUS schedule detail. Phase 1 has no SAP write-back contract and 
 - Multi-day allocation around weekends, plant blackouts, and line blackouts.
 - `never` exactly preserves legacy results for the three existing optimization strategies.
 - `never` retains Remove Backlog's reported continuous overlong exception.
+- `never` uses legacy continuous-bar accounting for that exception and raises the expected calendar diagnostics rather than creating hidden productive segments.
 - `overlong_only` splits an inherently overlong order but moves an ordinarily fittable order intact.
 - `partial_allowed` consumes a usable partial window and resumes later.
 - All four strategies preserve their sequencing semantics while honoring the plant policy during placement.
@@ -309,8 +310,8 @@ Segments are NIMBUS schedule detail. Phase 1 has no SAP write-back contract and 
 - Changeovers are not counted between segments of the same parent.
 - A policy change affects future regeneration but does not rewrite existing schedules.
 - Calendar changes alert without silently regenerating segments.
-- Basic-date refreshes do not overwrite authoritative NIMBUS dates or segments.
 - Runtime changes regenerate from the authoritative NIMBUS start; failed regeneration preserves the schedule and raises a critical mismatch.
+- Basic dates and all other ingested/master-data fields neither overwrite nor automatically regenerate authoritative NIMBUS timing in phase 1.
 - Remove Backlog may finish an eligible segmented order after `To` without moving an ineligible protected order.
 - Legacy continuous orders behave exactly as before.
 - Remove Backlog uses segments instead of its continuous-bar exception when the plant policy permits splitting.

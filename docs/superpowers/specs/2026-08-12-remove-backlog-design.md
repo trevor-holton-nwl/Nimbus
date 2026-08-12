@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-12
 
-**Status:** Approved design; ready for implementation planning
+**Status:** Approved design decisions; pending amended written-spec review
 
 **Scope:** NIMBUS frontend scheduling engine and Optimize workflow
 
@@ -13,6 +13,8 @@ Add a fourth production-scheduling heuristic, **Remove Backlog**, modeled on SAP
 This is a schedule-repair heuristic, not an optimizer. It must preserve the current sequence and line assignment. It does not consult priority lists, due dates, basic dates, setup attributes, or optimization sort terms.
 
 SAP describes backlog rescheduling as moving past operations on a selected resource to the next possible current or future date/time, with current date/time as the default earliest start. NIMBUS follows that core behavior while adding an explicit mutation window and preview diagnostics.
+
+Remove Backlog is planner-invoked only. NIMBUS must not run it automatically because time passes, an ingest completes, an alert is raised, or the application infers that backlog exists. There is no MES signal on which to base automatic execution; the planner decides when schedule repair is appropriate.
 
 Reference: [SAP Backlog Rescheduling](https://help.sap.com/docs/SAP_SUPPLY_CHAIN_MANAGEMENT/15f45255438149fa996da194295b132b/ec4cc95360267614e10000000a174cb4.html)
 
@@ -34,6 +36,7 @@ Reference: [SAP Backlog Rescheduling](https://help.sap.com/docs/SAP_SUPPLY_CHAIN
 - Changing an order's production line.
 - Consulting `BASIC_START_DATE`, `BASIC_FINISH_DATE`, priority lists, due dates, or changeover attributes.
 - Inferring whether an order is actually running; NIMBUS has no MES integration.
+- Automatically triggering backlog repair from the clock, ingest, alerts, or background processing.
 - Splitting one order into multiple Gantt intervals in this phase.
 - Repairing unrelated future calendar violations after the backlog delay has been absorbed.
 - Mutating orders outside the selected window.
@@ -203,7 +206,7 @@ The slot search must distinguish these conditions:
 3. **No operating interval exists:** skip the line and report it; there is no defensible start.
 4. **A normally fittable order finds no slot within the bounded search because of extended closures/blackouts:** stop the remaining cascade on that line and report the failure. Do not silently force-place it. Use one named 90-calendar-day search limit, matching the existing `Calendar.nextAvailable` safety bound.
 
-The overlong exception is temporary. It does not claim closed time as productive capacity in KPIs; the preview must identify it. True interruption-aware allocation is specified separately in `split-order.md`.
+The overlong exception is temporary and deliberately follows the legacy continuous-interval representation. Its full parent interval participates in existing continuous-bar calculations, while closed-hours and calendar alerts identify the violation and preview reports the exception. NIMBUS cannot truthfully account for 12 productive hours today plus 2 productive hours tomorrow without schedule segments. Accurate interruption-aware capacity accounting therefore requires a split-enabled plant policy from `split-order.md`.
 
 ## Fixed Orders
 
@@ -296,6 +299,7 @@ The heuristic performs one sort per selected line followed by a forward pass and
 - Boundary warnings allow Apply.
 - Apply, Discard, and Undo restore expected schedules.
 - Audit payload reflects the applied result.
+- Backlog detection alone, an ingest, and alert recomputation do not invoke Remove Backlog automatically.
 
 ## Acceptance Criteria
 
@@ -309,7 +313,8 @@ The heuristic performs one sort per selected line followed by a forward pass and
 8. Boundary conflicts are reported and may be knowingly applied.
 9. Overlong orders use the documented continuous-bar exception and are reported.
 10. Preview, persistence, discard, undo, and audit work through existing NIMBUS workflows.
+11. Remove Backlog runs only after an explicit planner action.
 
 ## Follow-on
 
-Implement interruption-aware scheduling from `docs/superpowers/specs/split-order.md`. Once available, Remove Backlog should allocate an overlong order across operating intervals instead of drawing one continuous bar through closed time.
+Implement interruption-aware scheduling from `docs/superpowers/specs/split-order.md`. Once available, Remove Backlog honors the plant's authoritative split policy: `never` retains the reported legacy continuous exception, `overlong_only` segments inherently overlong orders, and `partial_allowed` may consume partial operating windows for any eligible order. The policy changes placement representation, not Remove Backlog's sequence-preserving cascade or hard mutation boundary.
