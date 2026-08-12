@@ -1540,6 +1540,7 @@ const PlantSelector = {
   _filtered: [] as string[],
   _activeIdx: -1,
   _open:     false,
+  _measureCtx: null as CanvasRenderingContext2D | null,
 
   init(): void {
     PlantSelector._root     = document.getElementById('header-plant-selector');
@@ -1585,6 +1586,12 @@ const PlantSelector = {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'lineSettings:change') {
         PlantSelector._refreshOptions();
       }
+      if (evt.type === 'master-data-changed') {
+        // Descriptions may have just arrived (or been edited) — refresh the
+        // option list and the current-plant label so both pick up the name.
+        PlantSelector._refreshOptions();
+        PlantSelector._reflectSelection();
+      }
     }, 'PlantSelector');
 
     PlantSelector._refreshOptions();
@@ -1598,13 +1605,38 @@ const PlantSelector = {
   _reflectSelection(): void {
     const plant = Store.selectedPlant;
     const isSet = !!plant;
-    (PlantSelector._input as HTMLInputElement).value = isSet ? `${plant}` : '';
+    const label = isSet ? Store.plantLabel(plant) : '';
+    const input = PlantSelector._input as HTMLInputElement;
+    input.value = label;
+    // Ellipsis-truncated in CSS at this width — full label still readable on hover.
+    if (label) input.title = label; else input.removeAttribute('title');
     PlantSelector._combobox!.classList.toggle('has-value', isSet);
     PlantSelector._clearBtn!.hidden = !isSet;
+    PlantSelector._autosizeInput();
+  },
+
+  // Sizes the input to fit its current label (clamped to the CSS min/max-width
+  // rails) instead of a one-size-fits-all fixed width — plant descriptions
+  // range from a bare code up to a long site name, and a fixed width either
+  // wastes space or clips names, at any of the 50+ plants this is meant to scale to.
+  _autosizeInput(): void {
+    const input = PlantSelector._input as HTMLInputElement;
+    if (!PlantSelector._measureCtx) {
+      PlantSelector._measureCtx = document.createElement('canvas').getContext('2d');
+    }
+    const ctx = PlantSelector._measureCtx;
+    if (!ctx) return; // canvas unsupported — CSS min/max-width still bound the box
+    const text = input.value || input.getAttribute('placeholder') || '';
+    const cs = getComputedStyle(input);
+    ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const textWidth = ctx.measureText(text).width;
+    const clearBtnRoom = (PlantSelector._clearBtn && !PlantSelector._clearBtn.hidden) ? 22 : 0;
+    const chrome = 8 + 9 + 2 + clearBtnRoom + 4; // padding + border + clear (x) button + measurement fudge
+    input.style.width = Math.ceil(textWidth + chrome) + 'px';
   },
 
   _restoreLabel(): void {
-    // After blur, reset the typed query back to the canonical "Plant <id>" label.
+    // After blur, reset the typed query back to the canonical "<code> — <description>" label.
     PlantSelector._reflectSelection();
   },
 
@@ -1612,6 +1644,14 @@ const PlantSelector = {
     PlantSelector._dropdown!.hidden = false;
     PlantSelector._open = true;
     PlantSelector._input!.setAttribute('aria-expanded', 'true');
+    // The dropdown shares this input's positioning context (#hps-combobox),
+    // which is only as wide as the input itself — so a tightly autosized
+    // input (e.g. just "Select") starves option rows of room and their
+    // "<code> — <description>" wraps mid-label. Widen to the full rail while
+    // searching; _reflectSelection()/_autosizeInput() shrinks it back on
+    // close (blur, Escape, or picking an option all route through it).
+    const input = PlantSelector._input as HTMLInputElement;
+    input.style.width = getComputedStyle(input).maxWidth;
   },
   _closeDropdown(): void {
     PlantSelector._dropdown!.hidden = true;
@@ -1625,10 +1665,15 @@ const PlantSelector = {
     // If the input still holds the canonical plant label, do not use
     // it as a filter — show the full list.
     const looksLikeLabel = Store.selectedPlant
-      && query.trim().toLowerCase() === `${Store.selectedPlant}`.toLowerCase();
+      && query.trim().toLowerCase() === Store.plantLabel(Store.selectedPlant).toLowerCase();
     const filterQ = looksLikeLabel ? '' : q;
+    const matches = (p: string): boolean => {
+      if (p.toLowerCase().includes(filterQ)) return true;
+      const desc = (Store.masterPlant(p)?.description ?? '').toLowerCase();
+      return !!desc && desc.includes(filterQ);
+    };
     const base = filterQ
-      ? PlantSelector._options.filter(p => p.toLowerCase().includes(filterQ))
+      ? PlantSelector._options.filter(matches)
       : PlantSelector._options.slice();
 
     // Surface the user's pinned plants at the top (scale-safe quick access at
@@ -1642,16 +1687,18 @@ const PlantSelector = {
 
     if (!PlantSelector._filtered.length) {
       PlantSelector._dropdown!.innerHTML =
-        `<div class="hps-empty">${PlantSelector._options.length ? 'No matches' : 'No plant data loaded'}</div>`;
+        `<div class="hps-empty">${PlantSelector._options.length ? Util.t('ui.no_matches') : Util.t('ui.no_plant_data_loaded')}</div>`;
       PlantSelector._activeIdx = -1;
       return;
     }
     const sel = Store.selectedPlant;
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     const optHtml = (p: string, i: number): string => {
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
+      const desc = (Store.masterPlant(p)?.description ?? '').trim();
       return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
-        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span>${p}</span>
+        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${esc(p)}</span>${desc ? `<span class="hps-option-desc">${esc(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
     };
@@ -1725,6 +1772,11 @@ const App = {
   _laborSub: 'aggregate' as LaborSubTab,
   _pausables: new Set<{ pause?(): void; resume?(): void }>(),
   _drawerOpen: false,
+  // Minute-aligned tick chain for the drawer's plant-local clock; armed in
+  // _openDrawer, cleared in _closeDrawer so it never runs while the drawer is
+  // shut. Plain ReturnType<typeof setTimeout>, not setInterval — re-aligning
+  // to the next minute boundary on every tick keeps it from drifting.
+  _plantClockTimer: null as ReturnType<typeof setTimeout> | null,
   _prevTab: null as TopLevelTab | null,
   // Context-bar Lines combobox search text (mirrors ProdLines._lineSearch /
   // LaborPlanning's equivalent — same pattern, just owned by the persistent
@@ -1766,6 +1818,8 @@ const App = {
     document.addEventListener('keydown', App._onDrawerKeydown);
     const closeBtn = document.getElementById('nav-drawer-close');
     (closeBtn || drawer).focus();
+    App._renderDrawerPlantMeta();
+    App._armPlantClockTimer();
   },
 
   _closeDrawer(): void {
@@ -1779,7 +1833,20 @@ const App = {
     if (toggle) toggle.setAttribute('aria-expanded', 'false');
     document.body.style.overflow = '';
     document.removeEventListener('keydown', App._onDrawerKeydown);
+    if (App._plantClockTimer != null) { clearTimeout(App._plantClockTimer); App._plantClockTimer = null; }
     toggle?.focus();
+  },
+
+  // Re-arms itself on every tick, aligned to the next minute boundary, so the
+  // clock flips exactly on the minute instead of drifting off a fixed interval.
+  _armPlantClockTimer(): void {
+    if (App._plantClockTimer != null) clearTimeout(App._plantClockTimer);
+    const tick = (): void => {
+      if (!App._drawerOpen) return;
+      App._renderDrawerPlantMeta();
+      App._plantClockTimer = setTimeout(tick, 60000 - (Date.now() % 60000));
+    };
+    App._plantClockTimer = setTimeout(tick, 60000 - (Date.now() % 60000));
   },
 
   // ESC closes the drawer; Tab/Shift+Tab is a simple focus trap scoped to the
@@ -1834,7 +1901,12 @@ const App = {
     if (!list) return;
     const all = Store.knownPlants();
     const q = query.trim().toLowerCase();
-    const base = q ? all.filter(p => p.toLowerCase().includes(q)) : all.slice();
+    const matches = (p: string): boolean => {
+      if (p.toLowerCase().includes(q)) return true;
+      const desc = (Store.masterPlant(p)?.description ?? '').toLowerCase();
+      return !!desc && desc.includes(q);
+    };
+    const base = q ? all.filter(matches) : all.slice();
 
     let pinnedSet: Set<string>;
     try { pinnedSet = new Set((Store.pref('pinnedPlants') as string[] | undefined) ?? []); } catch { pinnedSet = new Set(); }
@@ -1843,18 +1915,20 @@ const App = {
     const filtered = [...pinned, ...rest];
 
     if (!filtered.length) {
-      list.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plant data loaded'}</div>`;
+      list.innerHTML = `<div class="hps-empty">${all.length ? Util.t('ui.no_matches') : Util.t('ui.no_plant_data_loaded')}</div>`;
       return;
     }
     const sel = Store.selectedPlant;
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     let html = '';
     filtered.forEach((p, i) => {
       if (pinned.length && i === 0) html += `<div class="hps-section">${Util.t('us.pinned_section')}</div>`;
       if (pinned.length && rest.length && i === pinned.length) html += `<div class="hps-section">${Util.t('us.all_plants_section')}</div>`;
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
+      const desc = (Store.masterPlant(p)?.description ?? '').trim();
       html += `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}">
-        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span>${p}</span>
+        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${esc(p)}</span>${desc ? `<span class="hps-option-desc">${esc(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
     });
@@ -1874,9 +1948,37 @@ const App = {
   // modal, or any other writer), not just this modal's own selections.
   _reflectDrawerPlantLabel(): void {
     const lbl = document.getElementById('nav-drawer-plant-current');
-    if (!lbl) return;
+    if (lbl) {
+      const plant = Store.selectedPlant;
+      lbl.textContent = plant ? Store.plantLabel(plant) : Util.t('ui.select_plant_label');
+    }
+    App._renderDrawerPlantMeta();
+  },
+
+  // Quiet secondary line under the plant name: what the plant makes, and its
+  // local clock. Both are optional per-plant — hidden individually when
+  // absent, and the whole row hides when neither is available. The clock
+  // only ever shows genuine plant-local time (Util.plantNowParts zoned:true);
+  // an empty/invalid timezone hides the clock rather than mislabeling viewer
+  // time as "plant time".
+  _renderDrawerPlantMeta(): void {
+    const row = document.getElementById('nav-drawer-plant-meta') as HTMLElement | null;
+    const focusEl = document.getElementById('nav-drawer-plant-focus') as HTMLElement | null;
+    const clockEl = document.getElementById('nav-drawer-plant-clock') as HTMLElement | null;
+    if (!row || !focusEl || !clockEl) return;
     const plant = Store.selectedPlant;
-    lbl.textContent = plant ? plant : Util.t('ui.select_plant_label');
+    const mp = plant ? Store.masterPlant(plant) : null;
+    const focus = (mp?.product_focus ?? '').trim();
+    focusEl.textContent = focus;
+    focusEl.hidden = !focus;
+    let clockText = '';
+    if (mp?.timezone) {
+      const t = Util.plantNowParts(mp.timezone);
+      if (t.zoned) clockText = Util.t('ui.plant_time', { time: t.hhmm });
+    }
+    clockEl.textContent = clockText;
+    clockEl.hidden = !clockText;
+    row.hidden = !focus && !clockText;
   },
 
   // Command-band active-section label — MUST be set via inline Util.t() on
@@ -1973,7 +2075,7 @@ const App = {
     });
     App._reflectDrawerPlantLabel();
     Store.subscribe(evt => {
-      if (evt.type === 'plant:selected') App._reflectDrawerPlantLabel();
+      if (evt.type === 'plant:selected' || evt.type === 'master-data-changed') App._reflectDrawerPlantLabel();
     }, 'NavDrawerPlantLabel');
 
     /* Lines combobox (context bar) — persistent, always-visible control next

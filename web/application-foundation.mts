@@ -614,6 +614,29 @@ export const Util = {
     return str;
   },
 
+  // Plant-local wall clock, shared by the dashboard greeting's time-of-day
+  // bucket and the nav-drawer plant clock. Intl.DateTimeFormat throws
+  // RangeError on an empty/invalid IANA zone — that catch IS the contract:
+  // callers get zoned:false and a viewer-local fallback rather than a crash.
+  plantNowParts(tz?: string | null): { hour: number; minute: number; hhmm: string; zoned: boolean } {
+    const now = new Date();
+    const z = (tz ?? '').trim();
+    if (z) {
+      try {
+        const parts = new Intl.DateTimeFormat('en-GB',
+          { timeZone: z, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(now);
+        const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+        const hh = get('hour'), mm = get('minute');
+        if (hh && mm) return { hour: (+hh) % 24, minute: +mm, hhmm: `${hh}:${mm}`, zoned: true };
+      } catch { /* invalid IANA zone — fall through to viewer-local */ }
+    }
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    return {
+      hour: now.getHours(), minute: now.getMinutes(),
+      hhmm: `${p2(now.getHours())}:${p2(now.getMinutes())}`, zoned: false,
+    };
+  },
+
   // Required DOM element getter — throws if element not found.
   reqEl(id: string): HTMLElement {
     const el = document.getElementById(id);

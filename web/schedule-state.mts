@@ -4,7 +4,7 @@
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
@@ -620,6 +620,20 @@ export const Store = {
     // not security; a stale/wide cache here still 403s server-side).
     const allowed = _allowedPlantsResolver();
     return allowed ? all.filter(p => allowed.includes(p)) : all;
+  },
+
+  /** Master-data row for a plant code; null when master data hasn't loaded
+   *  yet or the code is unknown. Not to be confused with Store.plants, the
+   *  separate calendar/work-hours map. */
+  masterPlant(code: string | null): NimbusMasterPlant | null {
+    if (!code) return null;
+    return (this._state.masterData?.plants ?? []).find(p => p.plant === code) ?? null;
+  },
+  /** "1006 — Maryville" when a description exists; bare "1006" otherwise. */
+  plantLabel(code: string | null): string {
+    if (!code) return '';
+    const d = (Store.masterPlant(code)?.description ?? '').trim();
+    return d ? `${code} — ${d}` : String(code);
   },
 
   /* ----- alerts ---------------------------------------------------------- */

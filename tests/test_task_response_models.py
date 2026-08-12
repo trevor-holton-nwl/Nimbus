@@ -81,16 +81,24 @@ def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch)
     monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
     result = brain._apply_task_date_updates([
         brain.TaskDateUpdate(
-            id="abc123", PRT_01="MOLD-A", PRT_02="MOLD-B",
-            PRODUCTION_VERSION="0001", base_version=42,
+            id="abc123",
+            PRT_01="MOLD-A",
+            PRT_02="MOLD-B",
+            PRODUCTION_VERSION="0001",
+            base_version=42,
         )
     ])
 
     assert result["persisted"] == 1
     assert captured["items"] == [{
-        "id": "abc123", "start": None, "end": None,
-        "PRT_01": "MOLD-A", "PRT_02": "MOLD-B",
-        "PRODUCTION_VERSION": "0001", "base_version": 42, "force": False,
+        "id": "abc123",
+        "start": None,
+        "end": None,
+        "PRT_01": "MOLD-A",
+        "PRT_02": "MOLD-B",
+        "PRODUCTION_VERSION": "0001",
+        "base_version": 42,
+        "force": False,
     }]
 
 

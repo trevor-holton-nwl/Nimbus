@@ -227,7 +227,7 @@ export interface paths {
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
          *     Payload: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
-         *     PRODUCTION_VERSION?, base_version?, force?]
+         *     PRODUCTION_VERSION?, base_version?, force? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
          *                 invalid_ids, not_found_ids, stale, versions }
          */

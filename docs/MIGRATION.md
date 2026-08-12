@@ -851,6 +851,38 @@ blocked on anything technical:
   that straddles midnight for no schedule-quality reason. Not meaningful to build before setup time itself
   exists.
 
+### Sequence-dependent setup is now designed (2026-08-11) — see `docs/changeover_matrix.md`
+
+The first bullet above ("Sequence-dependent setup-time modeling") has moved from *declined* to
+*designed but not implemented*. `docs/changeover_matrix.md` is the agreed design and staged migration
+plan; it chose the "full cost matrix" alternative over the per-plant scalar, but keyed on **attribute
+signatures** (an ordered subset of `master_data.RANKABLE_FIELDS` — `prt01`/`prt02`/`colorWheel`, chosen
+per plant) rather than on materials, which is what keeps the matrix populatable at enterprise scale.
+Three consequences worth knowing here rather than only in that doc:
+
+- **It rewrites `Engine._dispatchDayIntegrity`.** Phase 2's justifying invariant — "total duration is
+  order-independent" — is false once cost depends on adjacency, so admission and sequencing must merge
+  into a single cost-aware pass. This is the change that finally touches that 252-line body.
+- **It supersedes the `'changeover'` vs `'combined'` mode distinction**, which today is *only* a tier-2
+  ranking difference and is really a policy question in disguise (how much lateness may be traded for
+  setup savings). It becomes three named per-plant presets, defaulting to one that cannot make any
+  schedule later than today's engine would.
+- **The "setup-time-aware carryover across days" bullet above is partly answered and partly widened.**
+  The design attributes a transition block to its *successor*, which makes each day computable
+  left-to-right; but whether a changeover may straddle a shift close, or must run contiguously, is
+  explicitly deferred and blocks making the setup/teardown split anything other than presentational.
+
+Newly deferred by that design, recorded here so they aren't lost:
+
+- **Crew/labor constraints on changeover.** A changeover consumes people, and `labor_plan_line` already
+  exists. Narrower than (and complementary to) the "Labor-plan capacity integration" bullet above:
+  that one is about a line's *run* capacity, this is about whether the changeover itself is staffed.
+- **Material-pair exception rows.** The matrix schema carries a `key_kind` discriminator so a specific
+  material pair can override its signature pair, for costs no attribute set explains. Designed for,
+  not built.
+- **Sequence-dependent run *rate*** (as opposed to setup) — the same material may run slower after
+  certain predecessors. Not modeled, not designed.
+
 ## Timezone save corruption (fixed 2026-07-07)
 
 **The code path is fixed; historical rows saved before the fix may be shifted.**

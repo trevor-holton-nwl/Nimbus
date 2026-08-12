@@ -121,7 +121,11 @@ CREATE INDEX IF NOT EXISTS idx_plants_subnetwork ON plants(subnetwork);
 -- Migrations for existing databases
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS alt_flag_horizon   INTEGER NOT NULL DEFAULT 43200;
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS conf_score_horizon INTEGER NOT NULL DEFAULT 20160;
-ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone TEXT;
+-- Plant identity & personalization (2026-08-11): human name, product focus,
+-- IANA timezone. Additive, nullable — no schema_migrations ledger entry needed.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS description   TEXT;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS product_focus TEXT;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
 -- and NO LONGER re-run on apply.
 --
@@ -415,6 +419,12 @@ ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_workcenter TEXT;
 
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
     ('material_plants', 'default_workcenter', 'Default Workcenter', FALSE, 11)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('plants', 'description',   'Description',     FALSE, 5),
+    ('plants', 'product_focus', 'Product Focus',   FALSE, 6),
+    ('plants', 'timezone',      'Timezone (IANA)', FALSE, 7)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------

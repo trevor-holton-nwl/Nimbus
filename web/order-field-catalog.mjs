@@ -75,7 +75,7 @@ export const ORDER_FIELD_CATALOG = [
     // original spot in this list rather than moved up by the PRT_01/PRT_02
     // entries above.
     { key: 'PRODUCTION_VERSION', dbColumn: 'production_version', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: true, inspectorDefault: false,
         i18nGridKey: 'col.prod_version', i18nInspectorKey: 'ui.insp_prod_version' },
     { key: 'BOM_ALTERNATIVE', dbColumn: 'bom_alternative', type: 'integer',
         gridDefault: false, inspectorDefault: false,

@@ -700,6 +700,20 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
     inserted = updated = deleted = 0
 
     with _pool.connection() as conn, conn.cursor() as cur:
+        # Columns bulk_apply is allowed to WRITE — same boundary list_rows already
+        # enforces on READ (column_metadata JOIN information_schema.columns). Some
+        # tables' row dicts carry extra sidecar fields attached by list_rows for a
+        # different consumer (plants.constraints for the Settings pane/optimizer,
+        # roles.pages for the Security tab) — deliberately excluded from
+        # column_metadata so they never render as an editable grid column. The
+        # generic Master Data grid round-trips a row's cached shape wholesale on
+        # save (edit one cell, re-POST the whole cached row), so without this
+        # filter those sidecar fields ride along into the INSERT: `constraints`
+        # is a raw Python list with no Jsonb() wrapper (psycopg can't adapt it —
+        # unmapped sqlstate, surfaces as a generic 500), and `pages` isn't a real
+        # `roles` column at all (42703 undefined column, same generic 500).
+        allowed_cols = {m["column_name"] for m in _column_meta(cur, table)} if upserts else set()
+
         # --- Deletes first so upserts don't conflict with to-be-deleted rows ---
         for d in deletes:
             where = sql.SQL(" AND ").join(
@@ -719,8 +733,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
 
         # --- Upserts ---
         for row in upserts:
-            # Only pass columns that actually exist in the table (guard against stale client)
-            col_names = [c for c in row if c not in SYSTEM_COLUMNS
+            # Only pass columns actually registered as editable for this table
+            # (guards against stale clients AND against list_rows' sidecar fields).
+            col_names = [c for c in row if c in allowed_cols
                          and c not in GENERATED_COLUMNS.get(table, frozenset())]
             if not col_names:
                 continue

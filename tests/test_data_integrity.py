@@ -128,13 +128,21 @@ class TestBulkUpdateContract_203:
             cur.execute("SELECT xmin::text::bigint FROM orders WHERE id = %s", (oid,))
             base_version = int(cur.fetchone()[0])
         res = db.update_task_dates_bulk([{
-            "id": oid, "start": None, "end": None,
-            "PRT_01": "MOLD-A", "PRT_02": "MOLD-B",
-            "PRODUCTION_VERSION": "0001", "base_version": base_version,
+            "id": oid,
+            "start": None,
+            "end": None,
+            "PRT_01": "MOLD-A",
+            "PRT_02": "MOLD-B",
+            "PRODUCTION_VERSION": "0001",
+            "base_version": base_version,
         }])
         assert res["persisted"] == 1 and res["versions"][oid] != base_version
+
         with db._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT prt_01, prt_02, production_version FROM orders WHERE id = %s", (oid,))
+            cur.execute(
+                "SELECT prt_01, prt_02, production_version FROM orders WHERE id = %s",
+                (oid,),
+            )
             assert cur.fetchone() == ("MOLD-A", "MOLD-B", "0001")
 
     def test_priority_attribute_update_rejects_stale_version(self, pg):
@@ -144,8 +152,11 @@ class TestBulkUpdateContract_203:
             cur.execute("SELECT xmin::text::bigint FROM orders WHERE id = %s", (oid,))
             current_version = int(cur.fetchone()[0])
         res = db.update_task_dates_bulk([{
-            "id": oid, "start": None, "end": None,
-            "PRT_01": "SHOULD-NOT-WRITE", "base_version": current_version - 1,
+            "id": oid,
+            "start": None,
+            "end": None,
+            "PRT_01": "SHOULD-NOT-WRITE",
+            "base_version": current_version - 1,
         }])
         assert res["persisted"] == 0 and res["stale"] == [oid]
 

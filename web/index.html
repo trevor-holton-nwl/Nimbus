@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-08-11-a';</script>
-<link rel="stylesheet" href="styles.css?v=2026-08-11-a">
+<script>window.NIMBUS_BUILD_ID = '2026-08-11-d';</script>
+<link rel="stylesheet" href="styles.css?v=2026-08-11-d">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1178,7 +1178,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="work-header" id="work-header">
           <div class="wh-row">
             <div class="wh-context">
-              <span class="wh-greeting" data-i18n="ui.hero_heading">Welcome to NIMBUS 🧹</span>
+              <!-- No data-i18n: Dashboard._renderGreeting() owns this node from boot
+                   onward (plant name, time-of-day, situation state) and writes it via
+                   inline Util.t() — the one-shot [data-i18n] sweep must not fight it. -->
+              <span class="wh-greeting" id="wh-greeting">Welcome to NIMBUS</span>
               <span class="wh-sep">·</span>
               <span class="wh-situation" id="wh-situation"></span>
             </div>
@@ -1186,6 +1189,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span data-i18n="ui.open_schedule">Open schedule</span><span aria-hidden="true">→</span>
             </button>
           </div>
+          <div class="wh-plant-focus" id="wh-plant-focus" hidden></div>
 
           <div class="dash-filter-bar" id="dash-filter-bar">
             <span class="dash-filter-label" data-i18n="ui.filter_label">Filter</span>
@@ -2067,10 +2071,14 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </div>
 
   <div class="nav-drawer-section nav-drawer-plant">
-    <div class="nav-drawer-eyebrow">PLANT</div>
+    <div class="nav-drawer-eyebrow" data-i18n="ui.nav_drawer_plant_eyebrow">PLANT</div>
     <div class="nav-drawer-plant-row">
       <span class="nav-drawer-plant-label" id="nav-drawer-plant-current">No plant selected</span>
-      <button type="button" class="nav-drawer-plant-change-btn" id="nav-drawer-plant-btn">Change</button>
+      <button type="button" class="nav-drawer-plant-change-btn" id="nav-drawer-plant-btn" data-i18n="ui.change_plant">Change</button>
+    </div>
+    <div class="nav-drawer-plant-meta" id="nav-drawer-plant-meta" hidden>
+      <span id="nav-drawer-plant-focus"></span>
+      <span id="nav-drawer-plant-clock"></span>
     </div>
   </div>
 

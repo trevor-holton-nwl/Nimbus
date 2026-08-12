@@ -68,6 +68,9 @@ interface MasterLineRow {
 interface MasterPlantRow {
   subnetwork: string;
   plant: string;
+  description?: string | null;
+  product_focus?: string | null;
+  timezone?: string | null;
 }
 
 /** GET /health (brain.py) — only the fields this file reads are modeled;

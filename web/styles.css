@@ -308,6 +308,22 @@ h1, h2, h3, h4 {
 }
 .nav-drawer-plant-change-btn:hover { background: var(--chrome-panel); border-color: var(--chrome-accent); }
 
+/* Quiet secondary line under the plant name/code: what the plant makes, and
+   its local clock. Chrome mono eyebrow, mirroring .nav-drawer-eyebrow — both
+   are identifier-like labels on the dark band, not prose. */
+.nav-drawer-plant-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 0 12px 9px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--chrome-fg-faint);
+  text-transform: uppercase;
+}
+.nav-drawer-plant-meta > span:first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.nav-drawer-plant-meta > span:last-child { flex-shrink: 0; }
+
 .nav-drawer-footer {
   padding: 10px 20px;
   border-top: 1px solid var(--chrome-border);
@@ -613,6 +629,13 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .wh-situation.warn {
   color: var(--warn-text, var(--warn));
   font-weight: 600;
+}
+.wh-plant-focus {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-top: 2px;
 }
 .wh-cta {
   flex-shrink: 0;
@@ -4182,8 +4205,10 @@ body.dark .cw-active-card {
   align-items: center;
 }
 .hps-input {
-  width: 72px !important;
-  max-width: 72px !important;
+  /* Width is set inline by PlantSelector._autosizeInput() to fit the current
+     label; min/max here are just the floor/ceiling it's clamped between. */
+  min-width: 72px;
+  max-width: 260px;
   padding: 5px 9px 5px 8px !important;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -4192,7 +4217,10 @@ body.dark .cw-active-card {
   font-size: 12px;
   font-weight: 500;
   outline: none;
-  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), width var(--t-fast);
 }
 .hps-input::placeholder { color: var(--fg-faint); font-weight: 400; }
 .hps-input:focus {
@@ -4259,6 +4287,18 @@ body.dark .cw-active-card {
   color: var(--fg-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+/* Plant code is an identifier (Mono-Means-Machine rule); the description is
+   human-written copy, so it stays in the default sans face. */
+.hps-option-code {
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+}
+.hps-option-desc {
+  color: var(--fg-mute);
+}
+.hps-option-desc::before {
+  content: '— ';
+  color: var(--fg-faint);
 }
 .hps-empty {
   padding: 10px 14px;

@@ -3781,6 +3781,11 @@ export const Dashboard = {
   _latenessHorizon: 14,                  // days; toggled by 7/14/28 segment buttons
   _latenessDrillKey: null as string | null,     // 'LINE|YYYY-MM-DD' for the currently-drilled cell
 
+  // Set by _renderKPIs (single source, same pass that feeds _renderSituation)
+  // so the greeting's flavor (ok/attn) can never disagree with the counts in
+  // #wh-situation right next to it.
+  _lastSituation: null as { todayCount: number; attention: number } | null,
+
   _renderDebounced: null as ReturnType<typeof setTimeout> | null,
   init(): void {
     Store.subscribe(evt => {
@@ -3788,6 +3793,13 @@ export const Dashboard = {
         Dashboard._refreshLineDropdown();
         Dashboard._refreshFilterBtns();
         Dashboard.render();
+        return;
+      }
+      if (evt.type === 'master-data-changed') {
+        // Master data (plant description/product focus/timezone) loads async
+        // after plant:selected — re-render just the greeting when it lands,
+        // rather than the whole KPI/heatmap render.
+        Dashboard._renderGreeting();
         return;
       }
       if (evt.type === 'lines:selected') {
@@ -3857,6 +3869,13 @@ export const Dashboard = {
       Dashboard._resizeDebounced = setTimeout(() => Dashboard._syncLineStatusHeight(), 150);
     });
     setTimeout(() => Dashboard._buildFilterOptions(), 0);
+    // Bucket rollover (morning/afternoon/evening) for the greeting — only the
+    // time bucket can drift here; state/counts already re-render via the
+    // tasks:bulk/alerts:change paths above. Boot-lifetime interval, no
+    // cleanup needed (Dashboard is a boot-lifetime singleton).
+    setInterval(() => {
+      if (document.getElementById('home-tab')?.classList.contains('active')) Dashboard._renderGreeting();
+    }, 60_000);
   },
 
   _filteredTasks(): NimbusTask[] {
@@ -4027,6 +4046,8 @@ export const Dashboard = {
         });
       }
       if (situationEl) { situationEl.textContent = ''; situationEl.classList.remove('warn'); }
+      Dashboard._lastSituation = null;
+      Dashboard._renderGreeting();
       dataPanels.forEach(el => el.style.display = 'none');
     } else {
       if (overlay) overlay.remove();
@@ -4088,7 +4109,9 @@ export const Dashboard = {
         action: 'headroom' },
     ];
 
-    Dashboard._renderSituation({ todayCount: todayOrders.length, attention: conflictsToday + lateCount });
+    Dashboard._lastSituation = { todayCount: todayOrders.length, attention: conflictsToday + lateCount };
+    Dashboard._renderSituation(Dashboard._lastSituation);
+    Dashboard._renderGreeting();
 
     const stack = document.getElementById('kpi-stack');
     if (!stack) return;
@@ -4199,6 +4222,37 @@ export const Dashboard = {
       el.textContent = Util.t('ui.work_status_clear', { total: todayCount, totalPlural });
     }
     el.classList.toggle('warn', attention > 0);
+  },
+
+  // Dashboard greeting: plant-named, time-of-day, state-aware (never
+  // disagrees with #wh-situation right beside it — both read _lastSituation,
+  // set in the same _renderKPIs pass). Always via inline Util.t(): the
+  // #wh-greeting node carries no data-i18n, since this method owns it from
+  // boot onward (see the comment on that element in index.html).
+  _renderGreeting(): void {
+    const el = document.getElementById('wh-greeting');
+    const focusEl = document.getElementById('wh-plant-focus');
+    if (!el) return;
+    const plant = Store.selectedPlant;
+    if (!plant) {
+      el.textContent = Util.t('ui.hero_heading');
+      if (focusEl) focusEl.hidden = true;
+      return;
+    }
+    const mp = Store.masterPlant(plant);
+    const name = (mp?.description ?? '').trim() || `${Util.t('ui.plant_label')} ${plant}`;
+    const hour = Util.plantNowParts(mp?.timezone).hour;
+    const bucket = hour >= 5 && hour < 12 ? 'morning' : hour >= 12 && hour < 17 ? 'afternoon' : 'evening';
+    const state = (Dashboard._lastSituation?.attention ?? 0) > 0 ? 'attn' : 'ok';
+    const startOfYear = new Date(new Date().getFullYear(), 0, 0);
+    const dayOfYear = Math.floor((Date.now() - startOfYear.getTime()) / 86_400_000);
+    const variant = (dayOfYear % 2) + 1;
+    el.textContent = Util.t(`ui.greet_${bucket}_${state}_${variant}`, { plant: name });
+    if (focusEl) {
+      const focus = (mp?.product_focus ?? '').trim();
+      focusEl.textContent = focus;
+      focusEl.hidden = !focus;
+    }
   },
 
   _animateTicker(el: Element, from: number, to: number, toStr: string, dur: number): void {
