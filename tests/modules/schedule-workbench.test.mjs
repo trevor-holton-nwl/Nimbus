@@ -45,6 +45,7 @@ if (typeof globalThis.document === 'undefined') {
     body: { appendChild() {} },
   };
 }
+globalThis.window = globalThis.window || {};
 
 test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.init, 'function');
@@ -68,6 +69,13 @@ test('Table/Inspector/ContextMenu expose the documented public API', () => {
   assert.equal(typeof Inspector.show, 'function');
   assert.equal(typeof Inspector.clear, 'function');
   assert.equal(typeof ContextMenu.open, 'function');
+});
+
+test('Orders grid exposes editable priority fields instead of Form Size', () => {
+  const columns = Table._priorityColumns();
+  assert.deepEqual(columns.map(c => c.field), ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION']);
+  assert.ok(columns.every(c => c.editable === true), 'priority fields must be inline-editable');
+  assert.ok(!columns.some(c => c.field === 'FORM_SIZE'), 'Form Size must be removed from the Orders view');
 });
 
 test('Hierarchy exposes init/render', () => {

@@ -51,7 +51,7 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
   Store.setTasks([{
     id: 'pd1', PRODUCTION_LINE: 'L1', RUN_TIME: '1',
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
-    row_version: '5',
+    row_version: '5', PRT_01: 'MOLD-A', PRT_02: 'MOLD-B', PRODUCTION_VERSION: '0001',
   }], 'unit-test');
   Persistence._dirtyIds.add('pd1');
 
@@ -76,6 +76,9 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
     assert.ok('end_date' in t, 'task must have end_date');
     assert.ok('base_version' in t, 'task must carry base_version for optimistic concurrency');
     assert.ok('force' in t, 'task must carry force flag');
+    assert.equal(t.PRT_01, 'MOLD-A');
+    assert.equal(t.PRT_02, 'MOLD-B');
+    assert.equal(t.PRODUCTION_VERSION, '0001');
   } finally {
     globalThis.fetch = origFetch;
   }

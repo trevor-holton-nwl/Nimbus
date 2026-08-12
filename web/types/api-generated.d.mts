@@ -155,8 +155,9 @@ export interface paths {
         put?: never;
         /**
          * Update Task
-         * @description Update a single task's start/end and persist to DB.
-         *     Payload: { id, start_date?, end_date?, base_version?, force? }
+         * @description Update a single task's schedule/priority attributes and persist to DB.
+         *     Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
+         *     PRODUCTION_VERSION?, base_version?, force? }
          *     Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
          *     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
          *     client can refetch and warn uniformly with the bulk path.
@@ -200,8 +201,9 @@ export interface paths {
         put?: never;
         /**
          * Tasks Update
-         * @description Bulk-update task dates and persist to DB (one transaction).
-         *     Payload: { tasks: [{ id, start_date?, end_date?, base_version?, force? }], blocks?, calendars? }
+         * @description Bulk-update task dates/priority attributes and persist to DB (one transaction).
+         *     Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+         *     PRODUCTION_VERSION?, base_version?, force? }], blocks?, calendars? }
          *     Response: { status, updated, persisted, failed, invalid, not_found,
          *                 invalid_ids, not_found_ids, stale, versions }
          */
@@ -224,7 +226,8 @@ export interface paths {
         /**
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-         *     Payload: [{ id, start_date?, end_date?, base_version?, force? }]
+         *     Payload: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+         *     PRODUCTION_VERSION?, base_version?, force?]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
          *                 invalid_ids, not_found_ids, stale, versions }
          */
@@ -1636,7 +1639,7 @@ export interface components {
         };
         /**
          * TaskDateUpdate
-         * @description One task's optional start/end edit. Unknown fields are ignored.
+         * @description One task's optional schedule/attribute edit. Unknown fields are ignored.
          *
          *     Optimistic concurrency: `base_version` is the xmin the client last saw for this
          *     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
@@ -1650,6 +1653,12 @@ export interface components {
             start_date?: string | null;
             /** End Date */
             end_date?: string | null;
+            /** Prt 01 */
+            PRT_01?: string | null;
+            /** Prt 02 */
+            PRT_02?: string | null;
+            /** Production Version */
+            PRODUCTION_VERSION?: string | null;
             /** Base Version */
             base_version?: number | null;
             /**

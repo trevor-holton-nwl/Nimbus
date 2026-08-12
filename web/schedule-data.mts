@@ -1071,6 +1071,9 @@ export const Persistence = {
       // Mirrors _relayDueDateCorrections; see Util.toLocalSeconds.
       start_date:   Util.toLocalSeconds(t.start_date) as NaiveLocalTs,
       end_date:     Util.toLocalSeconds(t.end_date) as NaiveLocalTs,
+      PRT_01:       t.PRT_01,
+      PRT_02:       t.PRT_02,
+      PRODUCTION_VERSION: t.PRODUCTION_VERSION,
       base_version: t.row_version ?? null,
       force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
     }));

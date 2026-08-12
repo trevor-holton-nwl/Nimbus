@@ -49,17 +49,16 @@ export const ORDER_FIELD_CATALOG = [
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.firming', i18nInspectorKey: 'ui.insp_firming', gridWidth: 90 },
     // PRT_01/PRT_02 — materialized from material_plants at ingest, Stage 1 of
-    // docs/scheduling_priority.md. Default hidden until an admin opts in, same
-    // as the other optional attribute columns above.
+    // docs/scheduling_priority.md. Visible and editable in the Orders view.
     { key: 'PRT_01', dbColumn: 'prt_01', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: true, inspectorDefault: false,
         i18nGridKey: 'col.prt_01', i18nInspectorKey: 'ui.insp_prt_01' },
     { key: 'PRT_02', dbColumn: 'prt_02', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: true, inspectorDefault: false,
         i18nGridKey: 'col.prt_02', i18nInspectorKey: 'ui.insp_prt_02' },
     // 10 new SAP fields (COOIS extract) — default hidden until an admin opts in.
     { key: 'PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)', dbColumn: 'planned_order_initial_quantity', type: 'number',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: true, inspectorDefault: false,
         i18nGridKey: 'col.planned_init_qty', i18nInspectorKey: 'ui.insp_planned_init_qty' },
     { key: 'REDUCED_QUANTITY_(GMEIN)', dbColumn: 'reduced_quantity', type: 'number',
         gridDefault: false, inspectorDefault: false,

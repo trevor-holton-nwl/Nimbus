@@ -1586,6 +1586,15 @@ export const Table = {
     return true;
   },
 
+  /** Columns for the order attributes that schedulers may edit inline. */
+  _priorityColumns(): TableColDef[] {
+    return [
+      { headerName: Util.t('col.prt_01'), field: 'PRT_01', width: 130, flex: 0, editable: true },
+      { headerName: Util.t('col.prt_02'), field: 'PRT_02', width: 130, flex: 0, editable: true },
+      { headerName: Util.t('col.prod_version'), field: 'PRODUCTION_VERSION', width: 140, flex: 0, editable: true },
+    ];
+  },
+
   init(): void {
     const el = document.getElementById('ag-grid');
     if (!el || typeof agGrid === 'undefined') return;
@@ -1650,7 +1659,7 @@ export const Table = {
           }
         },
         { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false },
-        { headerName: Util.t('col.form'),  field: 'FORM_SIZE', width: 90, flex: 0, editable: false },
+        ...Table._priorityColumns(),
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
           cellClass: 'cell-num',
           valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
