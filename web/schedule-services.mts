@@ -69,6 +69,29 @@ interface CapacityBlockIndex {
   globalPlant: PlantCapRec[];
 }
 
+export interface RemoveBacklogDiagnostics {
+  backlogFound: number;
+  moved: number;
+  fixedMoved: number;
+  movedRuntimeHours: number;
+  largestDelayMinutes: number;
+  invalidRuntimeIds: string[];
+  missingStartIds: string[];
+  overlongIds: string[];
+  calendarSearchFailures: Array<{ line: string; taskId?: string; reason: 'no-operating-interval' | 'search-exhausted' }>;
+  boundaryConflicts: Array<{ line: string; movedTaskId: string; protectedTaskId?: string; type: 'overlap' }>;
+}
+
+export interface RemoveBacklogResult {
+  patches: Array<{ id: string; changes: Partial<NimbusTask> }>;
+  diagnostics: RemoveBacklogDiagnostics;
+}
+
+type BacklogSlot =
+  | { kind: 'slot'; start: Date }
+  | { kind: 'overlong'; start: Date }
+  | { kind: 'unavailable' | 'exhausted' };
+
 /** Fields common to both the ALERTS and UTILIZATION worker payloads (Compute._snap's return). */
 interface WorkerSnapshotBase {
   tasks: NimbusTask[];
@@ -364,6 +387,108 @@ export const Calendar = {
     ErrorLog.error('calendar', `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`);
     // fallback: return the original from; caller must handle
     return Util.snap(new Date(from));
+  },
+
+  /** True when a proposed range is entirely inside one effective operating
+   * interval and clear of both line and plant blackout blocks. */
+  fitsContinuous(line: string, start: Date, durationMs: number): boolean {
+    const win = Calendar.workWindow(line, start);
+    const end = new Date(start.getTime() + durationMs);
+    return !!win && start >= win[0] && end <= win[1] && !Calendar._overlapsBlock(line, start, end);
+  },
+
+  /** Find the first minute at or after `from` that is operating time. This is
+   * intentionally weaker than `nextAvailable`: it is only used by the
+   * documented continuous-bar exception for inherently overlong orders. */
+  nextOperatingInstant(line: string, from: Date): Date | null {
+    const startMs = from.getTime();
+    const roundedMs = startMs % Config.MS_MIN ? startMs + Config.MS_MIN - (startMs % Config.MS_MIN) : startMs;
+    let cur = new Date(roundedMs);
+    const limit = new Date(cur);
+    limit.setDate(limit.getDate() + 90);
+    while (cur < limit) {
+      const win = Calendar.workWindow(line, cur);
+      if (!win || cur >= win[1]) {
+        cur.setDate(cur.getDate() + 1);
+        cur.setHours(0, 0, 0, 0);
+        continue;
+      }
+      if (cur < win[0]) cur = new Date(win[0]);
+      const blackout = Calendar._overlapsBlock(line, cur, new Date(cur.getTime() + Config.MS_MIN));
+      if (blackout) {
+        const blackoutEnd = blackout.end.getTime();
+        const nextMinute = blackoutEnd % Config.MS_MIN
+          ? blackoutEnd + Config.MS_MIN - (blackoutEnd % Config.MS_MIN)
+          : blackoutEnd;
+        cur = new Date(nextMinute);
+        continue;
+      }
+      return cur;
+    }
+    return null;
+  },
+
+  /** Is there any nominal (hours-only) plant/line intersection in the next
+   * 90 calendar days large enough for this runtime? Dated blackouts are
+   * intentionally ignored: they can exhaust normal placement, but do not make
+   * a fundamentally fittable order "inherently overlong". */
+  hasNominalWindow(line: string, from: Date, durationMs: number): boolean {
+    const cur = new Date(from);
+    cur.setHours(0, 0, 0, 0);
+    for (let day = 0; day < 90; day++) {
+      const win = Calendar.workWindow(line, cur);
+      if (win && win[1].getTime() - win[0].getTime() >= durationMs) return true;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return false;
+  },
+
+  /** Backlog must preserve minute-level candidates: the established
+   * `nextAvailable` helper snaps to the application's coarser drag grid, which
+   * could turn an 08:01 request into 08:00 and incorrectly fit it before shift
+   * close. Keep that legacy behavior intact and use this exact-minute variant
+   * only for the new heuristic. */
+  _nextContiguousMinuteSlot(line: string, from: Date, durationMs: number): Date | null {
+    const ceilMinute = (date: Date): Date => {
+      const ms = date.getTime();
+      const remainder = ms % Config.MS_MIN;
+      return new Date(remainder ? ms + Config.MS_MIN - remainder : ms);
+    };
+    let cur = ceilMinute(new Date(from));
+    const limit = new Date(cur);
+    limit.setDate(limit.getDate() + 90);
+    while (cur < limit) {
+      const win = Calendar.workWindow(line, cur);
+      if (!win || cur >= win[1]) {
+        cur.setDate(cur.getDate() + 1);
+        cur.setHours(0, 0, 0, 0);
+        continue;
+      }
+      if (cur < win[0]) cur = new Date(win[0]);
+      const end = new Date(cur.getTime() + durationMs);
+      if (end > win[1]) {
+        cur.setDate(cur.getDate() + 1);
+        cur.setHours(0, 0, 0, 0);
+        continue;
+      }
+      const blackout = Calendar._overlapsBlock(line, cur, end);
+      if (blackout) {
+        cur = ceilMinute(new Date(blackout.end));
+        continue;
+      }
+      return cur;
+    }
+    return null;
+  },
+
+  /** Backlog-specific placement contract. Unlike legacy `nextAvailable`, its
+   * fallback is never accepted as a real ordinary slot. */
+  findContiguousSlot(line: string, from: Date, durationMs: number): BacklogSlot {
+    const operatingStart = Calendar.nextOperatingInstant(line, from);
+    if (!operatingStart) return { kind: 'unavailable' };
+    if (!Calendar.hasNominalWindow(line, from, durationMs)) return { kind: 'overlong', start: operatingStart };
+    const start = Calendar._nextContiguousMinuteSlot(line, from, durationMs);
+    return start ? { kind: 'slot', start } : { kind: 'exhausted' };
   },
 
   /** Find the first blackout block overlapping [start,end) on `line`, else null. */
@@ -942,6 +1067,145 @@ Store.subscribe(evt => {
    see the comment inline in runAndApply below).
    ========================================================================== */
 export const Engine = {
+  /** Structured result from the latest explicit Remove Backlog trial. The
+   * preview consumes it immediately after `runAndApply`; all other modes clear
+   * it so stale diagnostics cannot leak into their shared preview. */
+  lastBacklogResult: null as RemoveBacklogResult | null,
+
+  /** Convert a captured instant to the Date-as-naive-wall-clock convention
+   * NIMBUS already persists. Calendar methods intentionally use Date's local
+   * getters because task values are naive wall-clock values, so this adapter
+   * first projects the instant into the plant IANA zone, then recreates those
+   * wall-clock components for the existing calendar engine. */
+  _plantWallNow(timezone: string, runAt: Date): Date {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+        hourCycle: 'h23',
+      }).formatToParts(runAt);
+      const values: Record<string, number> = {};
+      for (const part of parts) {
+        if (part.type !== 'literal') values[part.type] = Number(part.value);
+      }
+      if (![values.year, values.month, values.day, values.hour, values.minute].every(Number.isFinite)) {
+        throw new Error('could not resolve plant-local clock');
+      }
+      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, 0, 0);
+    } catch (err) {
+      throw new Error(`Remove Backlog requires a valid IANA timezone for the selected plant (${timezone}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  },
+
+  /** Planner-invoked, sequence-preserving backlog repair. This deliberately
+   * has no priority, due-date, fixed-protection, or day-integrity branches. */
+  removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
+    const plant = (opts.plant as string | undefined) ?? Store.selectedPlant;
+    if (!plant) throw new Error('Remove Backlog requires a selected plant');
+    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const timezone = row?.timezone;
+    if (typeof timezone !== 'string' || !timezone.trim()) {
+      throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
+    }
+    const runAtInput = opts.runAt;
+    const runAtRaw = runAtInput instanceof Date
+      ? runAtInput
+      : (typeof runAtInput === 'string' || typeof runAtInput === 'number') ? new Date(runAtInput) : new Date();
+    const runAt = Number.isFinite(runAtRaw.getTime()) ? runAtRaw : new Date();
+    const now = Engine._plantWallNow(timezone, runAt);
+    const from = opts.startDate ? new Date(opts.startDate as string | number | Date) : new Date(now);
+    const to = opts.endDate ? new Date(opts.endDate as string | number | Date) : new Date(now.getTime() + 35 * Config.MS_DAY);
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+      throw new Error('Remove Backlog requires valid From and To dates');
+    }
+
+    const diagnostics: RemoveBacklogDiagnostics = {
+      backlogFound: 0, moved: 0, fixedMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
+      invalidRuntimeIds: [], missingStartIds: [], overlongIds: [], calendarSearchFailures: [], boundaryConflicts: [],
+    };
+    const lines = Array.isArray(opts.lines) && opts.lines.length
+      ? new Set((opts.lines as unknown[]).map(String))
+      : null;
+    const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
+    const scopedTasks = Store.tasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
+    for (const task of scopedTasks) {
+      if (!task.start_date) {
+        diagnostics.missingStartIds.push(task.id);
+        continue;
+      }
+      const snapshotStart = new Date(task.start_date);
+      if (snapshotStart < from || snapshotStart > to) continue;
+      const line = task.PRODUCTION_LINE || 'Unknown';
+      const list = grouped.get(line) || [];
+      list.push({ task, snapshotStart });
+      grouped.set(line, list);
+    }
+
+    const patches: RemoveBacklogResult['patches'] = [];
+    Calendar._beginRun(plant);
+    try {
+      for (const [line, items] of grouped) {
+        if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+        items.sort((a, b) => a.snapshotStart.getTime() - b.snapshotStart.getTime() || a.task.id.localeCompare(b.task.id));
+        const firstBacklog = items.findIndex(item => item.snapshotStart < now);
+        if (firstBacklog < 0) continue;
+        diagnostics.backlogFound += items.filter(item => item.snapshotStart < now).length;
+        let cursor = new Date(now);
+        for (let index = firstBacklog; index < items.length; index++) {
+          const item = items[index];
+          if (item.snapshotStart >= now && cursor <= item.snapshotStart) break;
+          const runtimeHours = Number(item.task.RUN_TIME);
+          if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
+            diagnostics.invalidRuntimeIds.push(item.task.id);
+            continue;
+          }
+          const runtimeMs = runtimeHours * Config.MS_HOUR;
+          const candidate = item.snapshotStart < now
+            ? cursor
+            : new Date(Math.max(item.snapshotStart.getTime(), cursor.getTime()));
+          const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
+          if (!('start' in slot)) {
+            diagnostics.calendarSearchFailures.push({
+              line, taskId: item.task.id,
+              reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
+            });
+            break;
+          }
+          const start = slot.start;
+          const end = new Date(start.getTime() + runtimeMs);
+          if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
+          cursor = end;
+          const currentStart = item.snapshotStart.getTime();
+          const currentEnd = item.task.end_date?.getTime() ?? NaN;
+          if (currentStart === start.getTime() && currentEnd === end.getTime()) continue;
+          patches.push({ id: item.task.id, changes: { start_date: start, end_date: end } });
+          diagnostics.moved++;
+          if (Store.isFixed(item.task.id)) diagnostics.fixedMoved++;
+          if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
+          diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
+            Math.round((start.getTime() - item.snapshotStart.getTime()) / Config.MS_MIN));
+        }
+      }
+    } finally {
+      Calendar._endRun();
+    }
+
+    const patchById = new Map(patches.map(patch => [patch.id, patch]));
+    for (const patch of patches) {
+      const movedStart = patch.changes.start_date!;
+      const movedEnd = patch.changes.end_date!;
+      const movedTask = Store.tasks[patch.id];
+      for (const protectedTask of scopedTasks) {
+        if (protectedTask.PRODUCTION_LINE !== movedTask?.PRODUCTION_LINE || !protectedTask.start_date || !protectedTask.end_date) continue;
+        if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
+        if (movedStart < protectedTask.end_date && movedEnd > protectedTask.start_date) {
+          diagnostics.boundaryConflicts.push({ line: movedTask.PRODUCTION_LINE, movedTaskId: patch.id, protectedTaskId: protectedTask.id, type: 'overlap' });
+        }
+      }
+    }
+    return { patches, diagnostics };
+  },
+
   /* ----- Per-plant switchable constraints (phased registry) -------------
      CONSTRAINT_CATALOG declares which fields are rankable; every enabled key
      gets an optimizer sort term generically (see _sortTerms). Per-plant config
@@ -1646,6 +1910,20 @@ export const Engine = {
       Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
       return;
     }
+    // Remove Backlog is a schedule-repair pass, not an optimizer. Dispatch it
+    // before priority-term creation so this path cannot accidentally read rank
+    // maps, fixed protection, or the day-integrity resequencer.
+    if (mode === 'backlog') {
+      const result = Engine.removeBacklog({ ...opts, plant });
+      Engine.lastBacklogResult = result;
+      if (result.patches.length) Store.updateMany(result.patches, 'engine-backlog');
+      Store.setLastOptimize(new Date(), 'engine-backlog');
+      Alerts.clearDismissed();
+      Alerts.scheduleRecompute();
+      PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
+      return;
+    }
+    Engine.lastBacklogResult = null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
