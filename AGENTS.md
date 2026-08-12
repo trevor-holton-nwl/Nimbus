@@ -1,4 +1,35 @@
-# AGENTS.md
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+NIMBUS combines a FastAPI/PostgreSQL backend with a directly served browser frontend. Core backend modules live at the repository root: `brain.py` defines the API, while `db.py`, `master_data.py`, `auth.py`, and `sap_sync.py` own data and integration concerns. Frontend source and static assets are under `web/`; Python and Node tests are under `tests/`. Keep schema evolution in `schema.sql` and `migrations/`, operational guidance in `docs/`, and example workbooks in `sample-data/`.
+
+## Build, Test, and Development Commands
+
+- `pip install -r requirements.txt` installs Python dependencies.
+- `uvicorn brain:api --port 8000 --reload` runs the API and frontend locally.
+- `pytest` runs Python tests; database tests require a safe local target and `NIMBUS_TEST_DB=1`.
+- `npm test` builds TypeScript and runs legacy plus module Node tests.
+- `npm run lint`, `npm run typecheck`, and `npm run build` run frontend quality gates and emit compiled modules.
+- `ruff check .` applies the configured Python lint rules.
+
+## Coding Style & Naming Conventions
+
+Use four-space indentation and `snake_case` for Python functions and modules; use `PascalCase` for classes. Ruff targets Python 3.10 with a 120-character line limit. Follow existing JavaScript/TypeScript conventions: camelCase functions, PascalCase modules/classes, and kebab-case static filenames. Run ESLint and TypeScript checks before submitting changes. Read `PRODUCT.md` and `DESIGN.md` before UI work.
+
+## Testing Guidelines
+
+Name Python tests `test_*.py`; Node tests use `*.test.js` or `*.test.mjs`. Add focused regression coverage for behavior changes and run the smallest relevant suite before the full gates. Never bypass the collection-time database safety guard or point tests at Azure/live PostgreSQL.
+
+## Commit & Pull Request Guidelines
+
+History uses short conventional subjects such as `fix:`, `docs:`, and `style:`. Keep commits focused and imperative. Pull requests should explain the problem and solution, list verification commands, link the relevant issue or plan, and include screenshots for visual changes. Call out schema migrations, environment changes, and deployment implications; bump `NIMBUS_BUILD_ID` when deploying static assets.
+
+## Security & Configuration
+
+Keep credentials in an untracked `.env`; never commit passwords, API keys, or production connection strings. Confirm the active database before DDL, maintenance, uploads, or tests.
+
+# Detailed NIMBUS Reference
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
