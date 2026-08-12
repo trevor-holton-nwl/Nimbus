@@ -193,6 +193,8 @@ export interface MissingMasterDataReport {
 export interface NimbusMasterPlant {
   subnetwork: string;
   plant: string;
+  /** Authoritative IANA timezone for plant-local scheduling decisions. */
+  timezone?: string;
   constraints?: ConstraintConfig[];
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
@@ -212,7 +214,7 @@ export interface NimbusMasterData {
 // §D — String-literal enum inventory
 // ---------------------------------------------------------------------------
 
-export type OptimizerMode = 'spt' | 'changeover' | 'combined';
+export type OptimizerMode = 'spt' | 'changeover' | 'combined' | 'backlog';
 
 export type AlertType =
   | 'overlap' | 'overload' | 'near-capacity' | 'closed'
