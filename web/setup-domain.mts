@@ -57,7 +57,7 @@ function statesEqual(left: SetupStateKey, right: SetupStateKey): boolean {
 }
 
 function validMinutes(value: number): boolean {
-  return Number.isFinite(value) && value >= 0;
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 0;
 }
 
 function matchingMatrixRow(
@@ -194,4 +194,90 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
   }
 
   return uncovered(signatureVersion);
+}
+
+/**
+ * Read-only Stage 0 measurement over an already-hydrated plant snapshot.
+ * This deliberately derives counts only: it never writes a task, Store, or
+ * persistence payload and it does not claim rendering/redraw performance.
+ */
+export function computeShadowDiagnostics(
+  snapshot: {
+    plant: string;
+    definition: SetupDefinition | null;
+    plant_rows: ReadonlyArray<SetupMatrixRow>;
+    line_rows: ReadonlyArray<SetupMatrixRow>;
+    overrides: ReadonlyArray<SetupOccurrenceOverride>;
+  },
+  tasks: ReadonlyArray<NimbusTask>,
+  policy: { percentile?: number } = {},
+): {
+  coveredTransitions: number;
+  uncoveredTransitions: number;
+  totalStandardMinutes: number;
+  distinctStates: { count: number; median: number; max: number; percentile: number };
+  taskCount: number;
+  derivationMs: number;
+} {
+  const started = globalThis.performance?.now?.() ?? Date.now();
+  const definition = snapshot.definition;
+  const percentile = Math.min(1, Math.max(0, policy.percentile ?? 0.95));
+  if (!definition) {
+    return { coveredTransitions: 0, uncoveredTransitions: 0, totalStandardMinutes: 0,
+      distinctStates: { count: 0, median: 0, max: 0, percentile: 0 }, taskCount: tasks.length,
+      derivationMs: (globalThis.performance?.now?.() ?? Date.now()) - started };
+  }
+
+  const byLine = new Map<string, NimbusTask[]>();
+  const density = new Map<string, Set<string>>();
+  for (const task of tasks) {
+    if (task.PLANT && task.PLANT !== snapshot.plant) continue;
+    const line = task.PRODUCTION_LINE;
+    if (!line) continue;
+    const state = stateForOrder(task, definition);
+    const stamp = task.start_date instanceof Date ? task.start_date : null;
+    if (state && stamp) {
+      const day = `${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, '0')}-${String(stamp.getDate()).padStart(2, '0')}`;
+      const key = `${line}\u0000${day}`;
+      const states = density.get(key) ?? new Set<string>();
+      states.add(JSON.stringify(state));
+      density.set(key, states);
+    }
+    const lineTasks = byLine.get(line) ?? [];
+    lineTasks.push(task);
+    byLine.set(line, lineTasks);
+  }
+
+  let coveredTransitions = 0;
+  let uncoveredTransitions = 0;
+  let totalStandardMinutes = 0;
+  for (const [line, lineTasks] of byLine) {
+    lineTasks.sort((left, right) => Number(left.start_date) - Number(right.start_date));
+    for (let index = 1; index < lineTasks.length; index += 1) {
+      const predecessor = lineTasks[index - 1];
+      const successor = lineTasks[index];
+      const predecessorState = stateForOrder(predecessor, definition);
+      const successorState = stateForOrder(successor, definition);
+      if (!predecessorState || !successorState) continue;
+      const result = resolveSetup({
+        definition, line, predecessorState, successorState,
+        predecessorOrderId: predecessor.id, successorOrderId: successor.id,
+        plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides,
+      });
+      if (result.covered) {
+        coveredTransitions += 1;
+        totalStandardMinutes += result.standardMin ?? 0;
+      } else {
+        uncoveredTransitions += 1;
+      }
+    }
+  }
+  const counts = [...density.values()].map(values => values.size).sort((left, right) => left - right);
+  const at = (ratio: number) => counts.length ? counts[Math.min(counts.length - 1, Math.floor((counts.length - 1) * ratio))] : 0;
+  return {
+    coveredTransitions, uncoveredTransitions, totalStandardMinutes,
+    distinctStates: { count: counts.reduce((sum, value) => sum + value, 0), median: at(0.5), max: counts.at(-1) ?? 0, percentile: at(percentile) },
+    taskCount: tasks.length,
+    derivationMs: (globalThis.performance?.now?.() ?? Date.now()) - started,
+  };
 }

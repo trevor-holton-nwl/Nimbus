@@ -6,6 +6,7 @@ state, and occurrence overrides only.  It never changes an order's schedule.
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from math import isfinite
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -635,3 +636,150 @@ def get_setup_snapshot(plant: str) -> dict:
             "plant_rows": [row for row in matrix if row["line"] == ""],
             "line_rows": [row for row in matrix if row["line"] != ""],
             "line_states": states, "overrides": overrides}
+
+
+# ---------------------------------------------------------------------------
+# Stage 0 shadow coverage.  These functions are intentionally pure: callers
+# supply their observed adjacency/state samples and receive diagnostics only.
+# They never write schedules, setup rows, or caches.
+
+def _coverage_state(definition: dict, value) -> list[dict[str, str]] | None:
+    """Return a complete canonical state suitable for coverage, else None."""
+    try:
+        state = canonical_state_key(definition["fields"], value)
+    except (KeyError, ValueError, TypeError):
+        return None
+    if definition.get("strict_blanks", True) and any(not item["value"] for item in state):
+        return None
+    return state
+
+
+def _state_token(state: list[dict[str, str]]) -> str:
+    return json.dumps(state, sort_keys=True, separators=(",", ":"))
+
+
+def _coverage_row(rows: list[dict], line: str, version: int, from_key: list[dict[str, str]],
+                  to_key: list[dict[str, str]]) -> dict | None:
+    """Resolve line scope before plant scope, mirroring the domain contract."""
+    for scope in (line, ""):
+        for row in rows:
+            if (row.get("line", "") == scope and row.get("signature_version") == version
+                    and row.get("from_key") == from_key and row.get("to_key") == to_key):
+                return row
+    return None
+
+
+def _coverage_pair(definition: dict, rows: list[dict], line: str, from_key, to_key) -> dict | None:
+    from_state = _coverage_state(definition, from_key)
+    to_state = _coverage_state(definition, to_key)
+    if from_state is None or to_state is None:
+        return None
+    row = _coverage_row(rows, line, definition["signature_version"], from_state, to_state)
+    scope = "line" if row and row.get("line") else "plant"
+    covered = row is not None or from_state == to_state
+    return {
+        "line": line,
+        "scope": scope,
+        "from_key": from_state,
+        "to_key": to_state,
+        "covered": covered,
+        "implicit_zero": row is None and from_state == to_state,
+    }
+
+
+def _coverage_summary(pairs: list[dict]) -> dict:
+    missing = [pair for pair in pairs if not pair["covered"]]
+    return {"total_pairs": len(pairs), "covered_pairs": len(pairs) - len(missing),
+            "missing_pairs": len(missing), "missing": missing}
+
+
+def build_setup_coverage(definition: dict, plant_rows: list[dict], line_rows: list[dict],
+                         observed_transitions: list[dict], reachable_states: dict[str, list]) -> dict:
+    """Build deduplicated observed/reachable coverage without mutating inputs.
+
+    `observed_transitions` supplies actual schedule adjacencies. `reachable_states`
+    supplies the valid state universe per line; its Cartesian product is the
+    prospective search surface. Explicit matrix rows win at line scope, then
+    plant scope, then a complete diagonal is implicitly covered at zero.
+    """
+    if not isinstance(definition, dict) or not isinstance(definition.get("signature_version"), int):
+        raise ValueError("A versioned setup definition is required")
+    rows = [*plant_rows, *line_rows]
+
+    def unique(items):
+        seen: set[tuple[str, str, str]] = set()
+        result: list[dict] = []
+        for item in items:
+            line = item.get("line")
+            if not isinstance(line, str) or not line:
+                continue
+            pair = _coverage_pair(definition, rows, line, item.get("from_key"), item.get("to_key"))
+            if pair is None:
+                continue
+            key = (line, _state_token(pair["from_key"]), _state_token(pair["to_key"]))
+            if key not in seen:
+                seen.add(key)
+                result.append(pair)
+        return result
+
+    observed = unique(observed_transitions)
+    reachable_candidates: list[dict] = []
+    for line in sorted(reachable_states):
+        valid: dict[str, list[dict[str, str]]] = {}
+        for state in reachable_states[line]:
+            canonical = _coverage_state(definition, state)
+            if canonical is not None:
+                valid.setdefault(_state_token(canonical), canonical)
+        for from_state in valid.values():
+            for to_state in valid.values():
+                reachable_candidates.append({"line": line, "from_key": from_state, "to_key": to_state})
+    reachable = unique(reachable_candidates)
+    return {"observed": _coverage_summary(observed), "reachable": _coverage_summary(reachable)}
+
+
+def page_missing_pairs(rows: list[dict], *, line: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+    """Return a bounded, stable page of missing pairs for UI and CSV callers."""
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a nonnegative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    filtered = [row for row in rows if line is None or row.get("line") == line]
+    return {"rows": filtered[offset:offset + limit],
+            "meta": {"total": len(filtered), "offset": offset, "limit": limit}}
+
+
+def get_setup_coverage(plant: str) -> dict:
+    """Measure one plant's current schedule transitions without mutating it."""
+    snapshot = get_setup_snapshot(plant)
+    definition = snapshot["definition"]
+    if definition is None:
+        return {"plant": plant, "definition": None,
+                "observed": _coverage_summary([]), "reachable": _coverage_summary([])}
+    # Every selected column is chosen from the registered, server-owned field
+    # catalog, never from an HTTP parameter.
+    columns = [RANKABLE_FIELDS[field]["orders_column"] for field in definition["fields"]]
+    select_attributes = ", ".join(columns)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT production_line, COALESCE(scheduled_start, basic_start_date),
+                       {select_attributes}
+                  FROM orders
+                 WHERE plant = %s AND production_line IS NOT NULL
+                 ORDER BY production_line, COALESCE(scheduled_start, basic_start_date), id""",
+            (plant,),
+        )
+        by_line: dict[str, list[list[dict[str, str]]]] = {}
+        for row in cur.fetchall():
+            line = row[0]
+            if not line:
+                continue
+            values = {field: row[index + 2] for index, field in enumerate(definition["fields"])}
+            state = _coverage_state(definition, values)
+            if state is not None:
+                by_line.setdefault(line, []).append(state)
+    transitions: list[dict] = []
+    for line, states in by_line.items():
+        transitions.extend({"line": line, "from_key": states[index - 1], "to_key": states[index]}
+                           for index in range(1, len(states)))
+    result = build_setup_coverage(definition, snapshot["plant_rows"], snapshot["line_rows"], transitions, by_line)
+    return {"plant": plant, "definition": definition, **result}

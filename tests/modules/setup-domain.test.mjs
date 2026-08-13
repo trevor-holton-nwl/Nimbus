@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSetup, stateForOrder } from '../../web/setup-domain.mjs';
+import { computeShadowDiagnostics, resolveSetup, stateForOrder } from '../../web/setup-domain.mjs';
 
 const definition = {
   plant: '5512',
@@ -183,4 +183,36 @@ test('stale matrix rows and overrides never resolve a transition', () => {
 
   assert.equal(result.covered, false);
   assert.equal(result.source, 'uncovered');
+});
+
+test('malformed fractional setup minutes do not create coverage', () => {
+  const result = resolveSetup({
+    definition, line: 'LINE-1', predecessorState: redTool, successorState: blueTool,
+    predecessorOrderId: 'a', successorOrderId: 'b', overrides: [], lineRows: [],
+    plantRows: [{ line: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 2.5 }],
+  });
+  assert.equal(result.covered, false);
+});
+
+test('shadow diagnostics count coverage and state density without mutating schedule inputs', () => {
+  const snapshot = {
+    plant: '5512', definition,
+    plant_rows: [{ line: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 12 }],
+    line_rows: [], overrides: [], line_states: [],
+  };
+  const tasks = [
+    { id: '1', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: 'Red', PRT_01: 'Tool A', start_date: new Date('2026-08-13T08:00:00Z'), scheduleSegments: [{ sequence: 1, startDate: new Date('2026-08-13T08:00:00Z'), endDate: new Date('2026-08-13T09:00:00Z') }] },
+    { id: '2', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: 'Blue', PRT_01: 'Tool A', start_date: new Date('2026-08-13T09:00:00Z') },
+    { id: '3', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: '', PRT_01: 'Tool A', start_date: new Date('2026-08-13T10:00:00Z') },
+  ];
+  const before = structuredClone({ snapshot, tasks });
+  const result = computeShadowDiagnostics(snapshot, tasks, { percentile: 0.95 });
+
+  assert.equal(result.coveredTransitions, 1);
+  assert.equal(result.uncoveredTransitions, 0);
+  assert.equal(result.totalStandardMinutes, 12);
+  assert.deepEqual(result.distinctStates, { count: 2, median: 2, max: 2, percentile: 2 });
+  assert.equal(result.taskCount, 3);
+  assert.equal(typeof result.derivationMs, 'number');
+  assert.deepEqual({ snapshot, tasks }, before);
 });

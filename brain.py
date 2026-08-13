@@ -2379,6 +2379,56 @@ def get_setup(plant: str, request: Request,
         raise _setup_error(exc) from exc
 
 
+def _setup_coverage_payload(result: dict, *, line: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+    """Keep coverage totals useful without embedding an unbounded missing-edge list."""
+    payload = {"plant": result["plant"], "signature_version": result.get("definition", {}).get("signature_version")
+               if result.get("definition") else None}
+    for kind in ("observed", "reachable"):
+        summary = result[kind]
+        page = setup_data.page_missing_pairs(summary["missing"], line=line, offset=offset, limit=limit)
+        payload[kind] = {key: value for key, value in summary.items() if key != "missing"}
+        payload[kind]["missing_page"] = page
+    return _setup_freshness(payload)
+
+
+@api.get("/setup/{plant}/coverage", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_coverage(plant: str, line: str | None = Query(default=None), offset: int = Query(default=0, ge=0),
+                       limit: int = Query(default=100, ge=1, le=500),
+                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Bounded Stage 0 transition coverage; this observes, never changes, schedules."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return _setup_coverage_payload(setup_data.get_setup_coverage(plant), line=line, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.get("/setup/{plant}/missing-pairs.csv", dependencies=[Depends(auth.require_authenticated)])
+def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed"), line: str | None = Query(default=None),
+                               offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Export one bounded, selectable page of missing canonical long-form pairs."""
+    _setup_plant_guard(plant, allowed_plants)
+    if kind not in {"observed", "reachable"}:
+        raise HTTPException(status_code=400, detail="kind must be observed or reachable")
+    try:
+        coverage = setup_data.get_setup_coverage(plant)
+        page = setup_data.page_missing_pairs(coverage[kind]["missing"], line=line, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Plant", "Line", "Scope", "Signature version", "From setup state", "To setup state"])
+    version = coverage.get("definition", {}).get("signature_version") if coverage.get("definition") else ""
+    for row in page["rows"]:
+        writer.writerow([plant, row["line"], row["scope"], version,
+                         json.dumps(row["from_key"], separators=(",", ":")),
+                         json.dumps(row["to_key"], separators=(",", ":"))])
+    headers = {"Content-Disposition": f'attachment; filename="setup-missing-{kind}-{plant}.csv"',
+               "X-Total-Count": str(page["meta"]["total"])}
+    return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
+
+
 @api.put("/setup/{plant}/definition", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                      Depends(require_admin)])
 def save_setup_definition(plant: str, request: Request, body: dict = Body(default={}),
