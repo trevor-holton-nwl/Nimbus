@@ -11,6 +11,7 @@ import { Engine } from './schedule-services.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
   NimbusBlock,
+  ConstraintConfig,
   NimbusLineSetting,
   NimbusMasterData,
   NimbusPlantBlock,
@@ -402,7 +403,14 @@ interface DueDateCandidate {
   feasible: boolean;
   patches: SchedulePatch[];
   score: number[];
+  /** Full lexicographic policy vector. `score[1]` is a compact diagnostic
+   * contribution; this preserves every configured priority tier without a
+   * lossy numeric encoding. */
+  policyKey: string;
   sequenceKey: string;
+  /** Orders deliberately deferred from this capacity-bounded fragment. They
+   * remain eligible for the next fragment after a fixed boundary. */
+  unadmitted: NimbusTask[];
   explanation: CandidateReason[];
   missingEdges: MissingSetupEdge[];
 }
@@ -433,6 +441,10 @@ interface FragmentContext {
   predecessorState: SetupStateKey;
   predecessorOrderId: string | null;
   nextFixed?: FixedBoundary;
+  /** An active override crossing a fixed boundary makes the named free order
+   * the exact first/last member of this obstacle-free fragment. */
+  requiredFirstOrderId?: string;
+  requiredLastOrderId?: string;
 }
 
 interface LineSearchResult {
@@ -444,6 +456,14 @@ interface LineSearchResult {
   method: 'due-date-first-exact' | 'due-date-first-greedy';
   termination: SearchRun['termination'];
   unchanged: boolean;
+}
+
+type FragmentMode = 'due-date-first' | 'spt';
+
+interface BoundaryOverrideLocks {
+  requiredFirstOrderId?: string;
+  requiredLastOrderId?: string;
+  issue?: MissingSetupEdge;
 }
 
 function timestamp(value: unknown): Date | null {
@@ -467,6 +487,101 @@ function taskId(task: NimbusTask): string {
 
 function stateKey(state: SetupStateKey): string {
   return JSON.stringify(state);
+}
+
+const PRIORITY_TASK_FIELDS: Readonly<Record<string, string>> = {
+  colorWheel: 'COLOR',
+  prt01: 'PRT_01',
+  prt02: 'PRT_02',
+  productionVersion: 'PRODUCTION_VERSION',
+};
+
+function normalizedPriorityValue(value: unknown): string {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+/** Mirrors the active, tree-aware priority order without reaching into Store.
+ * A detached candidate must consume only the master-data and rank snapshot it
+ * was supplied, otherwise a plant switch can make a private search compare
+ * against another plant's policy. */
+function activePriorityKeys(snapshot: Readonly<ScheduleSnapshot>, plant: string): string[] {
+  const tree = snapshot.masterData?.plants.find(row => row.plant === plant)?.constraints;
+  if (!tree?.length) return ['colorWheel'];
+
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  const walk = (nodes: ReadonlyArray<ConstraintConfig>): void => {
+    const indexed = nodes.map((node, index) => ({ node, index }));
+    indexed.sort((left, right) => (
+      (left.node.order ?? 99) - (right.node.order ?? 99) || left.index - right.index
+    ));
+    for (const { node } of indexed) {
+      if (!node.enabled) continue;
+      if (!seen.has(node.key)) {
+        seen.add(node.key);
+        keys.push(node.key);
+      }
+      if (node.children?.length) walk(node.children);
+    }
+  };
+  walk(tree);
+  return keys;
+}
+
+function rankForTask(
+  snapshot: Readonly<ScheduleSnapshot>,
+  fieldKey: string,
+  line: string,
+  task: NimbusTask,
+): number {
+  const taskField = PRIORITY_TASK_FIELDS[fieldKey];
+  if (!taskField) return 999999;
+  const value = normalizedPriorityValue((task as unknown as Record<string, unknown>)[taskField]);
+  const byLine = snapshot.priorityRankMaps ?? {};
+  const scoped = byLine[line]?.[fieldKey];
+  const map = scoped && Object.keys(scoped).length ? scoped : byLine['']?.[fieldKey];
+  const raw = map?.[value] ?? 999999;
+  return Number.isFinite(raw) ? Math.max(0, Math.min(9999999, Math.round(raw))) : 999999;
+}
+
+function policyKeyForTask(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, task: NimbusTask,
+): string {
+  return activePriorityKeys(snapshot, plant)
+    .map(fieldKey => String(rankForTask(snapshot, fieldKey, line, task)).padStart(7, '0'))
+    .join('|');
+}
+
+function policyKeyForSequence(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, sequence: ReadonlyArray<NimbusTask>,
+): string {
+  return sequence.map(task => policyKeyForTask(snapshot, plant, line, task)).join('\u0000');
+}
+
+function policyScore(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, sequence: ReadonlyArray<NimbusTask>,
+): number {
+  // Kept as a numeric score slot for preview consumers. Candidate comparison
+  // uses the full policyKey above, because a scalar sum cannot preserve a
+  // nested policy tree's lexicographic precedence.
+  const keys = activePriorityKeys(snapshot, plant);
+  if (!keys.length) return 0;
+  return sequence.reduce((total, task, position) => {
+    const taskScore = keys.reduce((rankTotal, fieldKey, depth) => (
+      rankTotal + rankForTask(snapshot, fieldKey, line, task) * (keys.length - depth)
+    ), 0);
+    return total + taskScore * (sequence.length - position);
+  }, 0);
+}
+
+function orderedByPolicyThenDue(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
+): NimbusTask[] {
+  return [...tasks].sort((left, right) => (
+    policyKeyForTask(snapshot, plant, line, left).localeCompare(policyKeyForTask(snapshot, plant, line, right))
+    || dueTimestamp(left) - dueTimestamp(right)
+    || taskId(left).localeCompare(taskId(right))
+  ));
 }
 
 /** An active occurrence override belongs to one physical adjacency. When a
@@ -496,12 +611,6 @@ function inactiveOverrideForTransition(
     }
   }
   return null;
-}
-
-function orderedByDue(tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
-  return [...tasks].sort((left, right) => (
-    dueTimestamp(left) - dueTimestamp(right) || taskId(left).localeCompare(taskId(right))
-  ));
 }
 
 function productiveRuntimeMinutes(task: NimbusTask): number {
@@ -602,7 +711,11 @@ function freeIntervalsFor(
 }
 
 function compareCandidate(left: DueDateCandidate, right: DueDateCandidate): number {
-  for (let index = 0; index < Math.max(left.score.length, right.score.length); index += 1) {
+  const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
+  if (hardConstraintDelta) return hardConstraintDelta;
+  const policyDelta = left.policyKey.localeCompare(right.policyKey);
+  if (policyDelta) return policyDelta;
+  for (let index = 2; index < Math.max(left.score.length, right.score.length); index += 1) {
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
   }
@@ -626,13 +739,45 @@ function candidateForSequence(
   let setupMinutes = 0;
   let lateCount = 0;
   let latenessMinutes = 0;
+  const unadmitted: NimbusTask[] = [];
 
-  for (const task of sequence) {
+  const constraintFailure = (edge: MissingSetupEdge): DueDateCandidate => ({
+    feasible: false,
+    patches: [],
+    score: [1, 0, 0, 0, 0, 0],
+    policyKey: '',
+    sequenceKey: '',
+    unadmitted: [],
+    explanation,
+    missingEdges: [...missingEdges, edge],
+  });
+
+  const firstOrderId = sequence.length ? taskId(sequence[0]) : null;
+  const lastOrderId = sequence.length ? taskId(sequence.at(-1)!) : null;
+  if (fragment.requiredFirstOrderId && firstOrderId !== fragment.requiredFirstOrderId) {
+    return constraintFailure({
+      line,
+      predecessorOrderId,
+      successorOrderId: fragment.requiredFirstOrderId,
+      reason: 'override-inactive',
+    });
+  }
+  if (fragment.requiredLastOrderId && lastOrderId !== fragment.requiredLastOrderId) {
+    return constraintFailure({
+      line,
+      predecessorOrderId: fragment.requiredLastOrderId,
+      successorOrderId: fragment.nextFixed ? taskId(fragment.nextFixed.task) : undefined,
+      reason: 'override-inactive',
+    });
+  }
+
+  for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
+    const task = sequence[taskIndex];
     const successorState = stateForOrder(task, definition);
     if (!successorState) {
       missingEdges.push({ line, predecessorOrderId, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
     const inactiveOverride = inactiveOverrideForTransition(
@@ -641,7 +786,7 @@ function candidateForSequence(
     if (inactiveOverride) {
       missingEdges.push(inactiveOverride);
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
     const resolved = resolveSetup({
@@ -663,7 +808,7 @@ function candidateForSequence(
         reason: resolved.reason,
       });
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
 
@@ -675,6 +820,27 @@ function candidateForSequence(
       freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, fragment.end),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
+      if (placement.kind === 'infeasible' && placement.reason === 'no-feasible-capacity') {
+        const deferred = sequence.slice(taskIndex);
+        if (deferred.some(candidate => (
+          taskId(candidate) === fragment.requiredFirstOrderId || taskId(candidate) === fragment.requiredLastOrderId
+        ))) {
+          return constraintFailure({
+            line,
+            predecessorOrderId,
+            successorOrderId: taskId(task),
+            reason: 'override-inactive',
+          });
+        }
+        unadmitted.push(...deferred);
+        explanation.push({
+          code: 'due-work-unadmitted',
+          message: `Deferred ${deferred.length} order(s) after available capacity ended in this fragment.`,
+          line,
+          taskId: taskId(task),
+        });
+        break;
+      }
       missingEdges.push({
         line,
         predecessorOrderId,
@@ -682,7 +848,7 @@ function candidateForSequence(
         reason: placement.kind === 'infeasible' ? placement.reason : 'no-feasible-capacity',
       });
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
 
@@ -726,7 +892,7 @@ function candidateForSequence(
     if (inactiveOverride) {
       missingEdges.push(inactiveOverride);
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
     const resolved = resolveSetup({
@@ -748,13 +914,15 @@ function candidateForSequence(
         reason: resolved.reason,
       });
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
     const setupStart = new Date(fixed.start.getTime() - resolved.effectiveMin * 60 * 1000);
-    const fitsIncomingSetup = setupStart >= cursor && freeIntervalsFor(
-      snapshot, line, bounds.setup.plant, cursor, fixed.start,
-    ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
+    const fitsIncomingSetup = resolved.effectiveMin === 0
+      ? cursor <= fixed.start
+      : setupStart >= cursor && freeIntervalsFor(
+        snapshot, line, bounds.setup.plant, cursor, fixed.start,
+      ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
     if (!fitsIncomingSetup) {
       missingEdges.push({
         line,
@@ -763,7 +931,7 @@ function candidateForSequence(
         reason: 'incoming-fixed-setup-infeasible',
       });
       return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], sequenceKey: '', explanation, missingEdges,
+        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
     setupMinutes += resolved.effectiveMin;
@@ -780,8 +948,10 @@ function candidateForSequence(
     patches,
     // Lower is better. The due-date objective intentionally remains ahead of
     // admitted work and setup consumption; the sequence key is the final tie.
-    score: [0, 0, lateCount, latenessMinutes, -patches.length, setupMinutes],
+    score: [0, policyScore(snapshot, bounds.setup.plant, line, sequence), lateCount, latenessMinutes, -patches.length, setupMinutes],
+    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence),
     sequenceKey: sequence.map(taskId).join('|'),
+    unadmitted,
     explanation,
     missingEdges,
   };
@@ -799,8 +969,12 @@ function exactSearch(
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
   const missingEdges: MissingSetupEdge[] = [];
-  const used = new Array(groups.length).fill(false);
-  const selected: DueDateGroup[] = [];
+  /** State groups remain the measured search dimension, but each occurrence
+   * can be selected independently. This allows BLUE(09) -> RED(10) ->
+  * BLUE(12), rather than flattening every BLUE order into one block. */
+  const remainingCounts = groups.map(group => group.tasks.length);
+  const totalTasks = remainingCounts.reduce((total, count) => total + count, 0);
+  const selected: NimbusTask[] = [];
 
   const visit = (): void => {
     if (bounds.clock() >= bounds.deadline) {
@@ -811,22 +985,22 @@ function exactSearch(
       termination = 'iteration-cap';
       return;
     }
-    if (selected.length === groups.length) {
+    if (selected.length === totalTasks) {
       candidateCount += 1;
       budget.remainingIterations -= 1;
-      const sequence = selected.flatMap(group => orderedByDue(group.tasks));
-      const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment);
+      const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment);
       if (candidate.feasible && (!winner || compareCandidate(candidate, winner) < 0)) winner = candidate;
       if (!candidate.feasible) missingEdges.push(...candidate.missingEdges);
       return;
     }
     for (let index = 0; index < groups.length; index += 1) {
-      if (used[index] || termination !== 'completed') continue;
-      used[index] = true;
-      selected.push(groups[index]);
+      if (!remainingCounts[index] || termination !== 'completed') continue;
+      const taskIndex = groups[index].tasks.length - remainingCounts[index];
+      remainingCounts[index] -= 1;
+      selected.push(groups[index].tasks[taskIndex]);
       visit();
       selected.pop();
-      used[index] = false;
+      remainingCounts[index] += 1;
     }
   };
   visit();
@@ -851,18 +1025,18 @@ function greedySearch(
       candidateCount: 0, method: 'due-date-first-greedy', termination: 'iteration-cap', winner: null, missingEdges: [],
     };
   }
-  const orderedGroups = [...groups].sort((left, right) => {
-    const leftDue = dueTimestamp(orderedByDue(left.tasks)[0]);
-    const rightDue = dueTimestamp(orderedByDue(right.tasks)[0]);
-    return leftDue - rightDue || left.key.localeCompare(right.key);
-  });
+  const orderedTasks = groups.flatMap(group => group.tasks).sort((left, right) => (
+    policyKeyForTask(snapshot, bounds.setup.plant, line, left).localeCompare(
+      policyKeyForTask(snapshot, bounds.setup.plant, line, right),
+    ) || dueTimestamp(left) - dueTimestamp(right) || taskId(left).localeCompare(taskId(right))
+  ));
   let candidateCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
   const missingEdges: MissingSetupEdge[] = [];
   const seen = new Set<string>();
 
-  const evaluate = (groupOrder: ReadonlyArray<DueDateGroup>): DueDateCandidate | null => {
+  const evaluate = (sequence: ReadonlyArray<NimbusTask>): DueDateCandidate | null => {
     if (bounds.clock() >= bounds.deadline) {
       termination = 'deadline';
       return null;
@@ -871,7 +1045,7 @@ function greedySearch(
       termination = 'iteration-cap';
       return null;
     }
-    const key = groupOrder.map(group => group.key).join('\u0000');
+    const key = sequence.map(taskId).join('\u0000');
     if (seen.has(key)) return null;
     seen.add(key);
     budget.remainingIterations -= 1;
@@ -880,7 +1054,7 @@ function greedySearch(
       snapshot,
       bounds,
       line,
-      groupOrder.flatMap(group => orderedByDue(group.tasks)),
+      sequence,
       fragment,
     );
     if (!candidate.feasible) {
@@ -891,7 +1065,7 @@ function greedySearch(
     return candidate;
   };
 
-  let currentOrder = orderedGroups;
+  let currentOrder = orderedTasks;
   let current = evaluate(currentOrder);
   let improved = true;
   while (improved && termination === 'completed') {
@@ -941,6 +1115,7 @@ function searchFragment(
   tasks: ReadonlyArray<NimbusTask>,
   fragment: Readonly<FragmentContext>,
   budget: SearchBudget,
+  mode: FragmentMode = 'due-date-first',
 ): SearchRun {
   const definition = bounds.setup.definition!;
   const groupsByState = new Map<string, DueDateGroup>();
@@ -965,7 +1140,36 @@ function searchFragment(
       missingEdges,
     };
   }
-  const groups = [...groupsByState.values()].sort((left, right) => left.key.localeCompare(right.key));
+  const groups = [...groupsByState.values()]
+    .map(group => ({
+      ...group,
+      tasks: mode === 'spt'
+        ? orderedByProductiveRuntime(group.tasks)
+        : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks),
+    }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+  if (mode === 'spt') {
+    if (bounds.clock() >= bounds.deadline) {
+      return {
+        candidateCount: 0, method: 'due-date-first-exact', termination: 'deadline', winner: null, missingEdges: [],
+      };
+    }
+    if (budget.remainingIterations <= 0) {
+      return {
+        candidateCount: 0, method: 'due-date-first-exact', termination: 'iteration-cap', winner: null, missingEdges: [],
+      };
+    }
+    budget.remainingIterations -= 1;
+    const sequence = orderedByProductiveRuntime(groups.flatMap(group => group.tasks));
+    const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment);
+    return {
+      candidateCount: 1,
+      method: 'due-date-first-exact',
+      termination: 'completed',
+      winner: candidate.feasible ? candidate : null,
+      missingEdges: candidate.feasible ? [] : candidate.missingEdges,
+    };
+  }
   return groups.length <= bounds.exactSearchThreshold
     ? exactSearch(snapshot, bounds, line, groups, fragment, budget)
     : greedySearch(snapshot, bounds, line, groups, fragment, budget);
@@ -989,6 +1193,84 @@ function unchangedLineResult(
   };
 }
 
+function initialStateForLine(
+  bounds: Readonly<DueDateFirstBounds>, line: string, signatureVersion: number,
+): { state: SetupStateKey | null; reason: 'initial-state-unknown' | 'signature-incompatible' } {
+  const lineStates = bounds.setup.line_states.filter(state => state.line === line);
+  const matching = lineStates.find(state => state.signature_version === signatureVersion);
+  if (matching) return { state: matching.state_key, reason: 'initial-state-unknown' };
+  return {
+    state: null,
+    reason: lineStates.length ? 'signature-incompatible' : 'initial-state-unknown',
+  };
+}
+
+function boundaryOverrideLocks(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  fixed: ReadonlyArray<FixedBoundary>,
+  free: ReadonlyArray<NimbusTask>,
+): ReadonlyMap<string, BoundaryOverrideLocks> {
+  const definition = bounds.setup.definition!;
+  const fixedById = new Map(fixed.map(boundary => [taskId(boundary.task), boundary]));
+  const freeById = new Map(free.map(task => [taskId(task), task]));
+  const locks = new Map<string, BoundaryOverrideLocks>();
+
+  const lockFor = (fixedId: string): BoundaryOverrideLocks => {
+    const existing = locks.get(fixedId);
+    if (existing) return existing;
+    const created: BoundaryOverrideLocks = {};
+    locks.set(fixedId, created);
+    return created;
+  };
+  const conflict = (fixedId: string, successorOrderId: string): void => {
+    const lock = lockFor(fixedId);
+    lock.issue = { line, successorOrderId, reason: 'override-inactive' };
+  };
+
+  for (const override of bounds.setup.overrides) {
+    if (override.status !== 'active' || override.line !== line || override.signature_version !== definition.signature_version) {
+      continue;
+    }
+    const successorFixed = fixedById.get(override.successor_order_id);
+    if (successorFixed && override.predecessor_order_id) {
+      const predecessor = freeById.get(override.predecessor_order_id);
+      if (!predecessor) {
+        conflict(taskId(successorFixed.task), override.successor_order_id);
+        continue;
+      }
+      const lock = lockFor(taskId(successorFixed.task));
+      if (lock.requiredLastOrderId && lock.requiredLastOrderId !== taskId(predecessor)) {
+        conflict(taskId(successorFixed.task), override.successor_order_id);
+      } else {
+        lock.requiredLastOrderId = taskId(predecessor);
+      }
+    }
+
+    const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
+    if (predecessorFixed) {
+      const successor = freeById.get(override.successor_order_id);
+      if (!successor) {
+        conflict(taskId(predecessorFixed.task), override.successor_order_id);
+        continue;
+      }
+      const lock = lockFor(taskId(predecessorFixed.task));
+      if (lock.requiredFirstOrderId && lock.requiredFirstOrderId !== taskId(successor)) {
+        conflict(taskId(predecessorFixed.task), override.successor_order_id);
+      } else {
+        lock.requiredFirstOrderId = taskId(successor);
+      }
+    }
+  }
+  return locks;
+}
+
+function belongsBeforeFixedBoundary(task: NimbusTask, boundary: FixedBoundary, mode: FragmentMode): boolean {
+  if (mode === 'due-date-first') return dueTimestamp(task) <= boundary.start.getTime();
+  const plannedEnd = timestamp(task.end_date);
+  return !!plannedEnd && plannedEnd <= boundary.start;
+}
+
 function evaluateLineWithFixedBoundaries(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
@@ -996,6 +1278,7 @@ function evaluateLineWithFixedBoundaries(
   tasks: ReadonlyArray<NimbusTask>,
   initialState: SetupStateKey,
   budget: SearchBudget,
+  mode: FragmentMode = 'due-date-first',
 ): LineSearchResult {
   const definition = bounds.setup.definition!;
   const fixed: FixedBoundary[] = [];
@@ -1016,10 +1299,12 @@ function evaluateLineWithFixedBoundaries(
   fixed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
 
   const free = tasks.filter(task => !taskIsFixed(snapshot, task));
+  const locks = boundaryOverrideLocks(bounds, line, fixed, free);
   let remaining = [...free];
   let fragmentStart = new Date(bounds.now);
   let predecessorState = initialState;
   let predecessorOrderId: string | null = null;
+  let requiredFirstOrderId: string | undefined;
   const patches: SchedulePatch[] = [];
   const score = [0, 0, 0, 0, 0, 0];
   const explanation: CandidateReason[] = [];
@@ -1028,21 +1313,22 @@ function evaluateLineWithFixedBoundaries(
   let method: LineSearchResult['method'] = 'due-date-first-exact';
   let termination: SearchRun['termination'] = 'completed';
 
-  const accept = (run: SearchRun): boolean => {
+  const accept = (run: SearchRun): DueDateCandidate | null => {
     candidateCount += run.candidateCount;
     if (run.method === 'due-date-first-greedy') method = run.method;
     if (run.termination !== 'completed') termination = run.termination;
     if (!run.winner) {
       missingEdges.push(...run.missingEdges);
-      return false;
+      return null;
     }
     patches.push(...run.winner.patches);
     explanation.push(...run.winner.explanation);
     for (let index = 0; index < score.length; index += 1) score[index] += run.winner.score[index] ?? 0;
-    return true;
+    return run.winner;
   };
 
-  for (const boundary of fixed) {
+  for (let boundaryIndex = 0; boundaryIndex < fixed.length; boundaryIndex += 1) {
+    const boundary = fixed[boundaryIndex];
     if (boundary.start < fragmentStart) {
       return unchangedLineResult(
         line,
@@ -1051,16 +1337,45 @@ function evaluateLineWithFixedBoundaries(
         [{ line, successorOrderId: taskId(boundary.task), reason: 'fixed-boundary-invalid' }],
       );
     }
-    const admitted = remaining.filter(task => dueTimestamp(task) <= boundary.start.getTime());
-    remaining = remaining.filter(task => dueTimestamp(task) > boundary.start.getTime());
+    const boundaryLock = locks.get(taskId(boundary.task));
+    if (boundaryLock?.issue) {
+      return unchangedLineResult(
+        line,
+        'override-inactive',
+        'An active occurrence override cannot bind a free order across this fixed boundary.',
+        [boundaryLock.issue],
+      );
+    }
+
+    const reservedForAnotherBoundary = new Set<string>();
+    for (let futureIndex = boundaryIndex; futureIndex < fixed.length; futureIndex += 1) {
+      const futureLock = locks.get(taskId(fixed[futureIndex].task));
+      if (futureLock?.requiredFirstOrderId) reservedForAnotherBoundary.add(futureLock.requiredFirstOrderId);
+      if (futureLock?.requiredLastOrderId && futureIndex !== boundaryIndex) {
+        reservedForAnotherBoundary.add(futureLock.requiredLastOrderId);
+      }
+    }
+    if (requiredFirstOrderId) reservedForAnotherBoundary.delete(requiredFirstOrderId);
+
+    const admitted = remaining.filter(task => {
+      const id = taskId(task);
+      if (id === requiredFirstOrderId || id === boundaryLock?.requiredLastOrderId) return true;
+      if (reservedForAnotherBoundary.has(id)) return false;
+      return belongsBeforeFixedBoundary(task, boundary, mode);
+    });
+    const admittedIds = new Set(admitted.map(taskId));
+    const later = remaining.filter(task => !admittedIds.has(taskId(task)));
     const run = searchFragment(snapshot, bounds, line, admitted, {
       start: fragmentStart,
       end: boundary.start,
       predecessorState,
       predecessorOrderId,
       nextFixed: boundary,
-    }, budget);
-    if (!accept(run)) {
+      requiredFirstOrderId,
+      requiredLastOrderId: boundaryLock?.requiredLastOrderId,
+    }, budget, mode);
+    const winner = accept(run);
+    if (!winner) {
       explanation.push({
         code: 'fixed-boundary-infeasible',
         message: `Cannot preserve the required incoming setup before fixed ${taskId(boundary.task)}.`,
@@ -1072,9 +1387,11 @@ function evaluateLineWithFixedBoundaries(
         candidateCount, method, termination, unchanged: true,
       };
     }
+    remaining = [...winner.unadmitted, ...later];
     fragmentStart = new Date(boundary.end);
     predecessorState = boundary.state;
     predecessorOrderId = taskId(boundary.task);
+    requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
   }
 
   const trailing = searchFragment(snapshot, bounds, line, remaining, {
@@ -1082,7 +1399,8 @@ function evaluateLineWithFixedBoundaries(
     end: bounds.horizonEnd,
     predecessorState,
     predecessorOrderId,
-  }, budget);
+    requiredFirstOrderId,
+  }, budget, mode);
   if (!accept(trailing)) {
     const incompatible = missingEdges.some(edge => edge.reason === 'successor-state-unknown');
     explanation.push(incompatible
@@ -1151,48 +1469,34 @@ export function evaluateSptWithSetup(
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       continue;
     }
-    if (tasks.some(task => taskIsFixed(snapshot, task))) {
+    const initial = initialStateForLine(bounds, line, definition.signature_version);
+    if (!initial.state) {
       unchangedLines.push(line);
-      explanation.push({ code: 'fixed-boundary', message: 'SPT line retained pending fixed-boundary evaluation.', line });
+      missingEdges.push({ line, predecessorOrderId: null, reason: initial.reason });
+      explanation.push({
+        code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
+        message: initial.reason === 'signature-incompatible'
+          ? 'The line state uses a different setup-signature version.'
+          : 'No usable current setup state is available for this line.',
+        line,
+      });
       continue;
     }
-    const initial = bounds.setup.line_states.find(state => (
-      state.line === line && state.signature_version === definition.signature_version
-    ));
-    if (!initial) {
+    const result = evaluateLineWithFixedBoundaries(
+      snapshot, bounds, line, tasks, initial.state, budget, 'spt',
+    );
+    candidateCount += result.candidateCount;
+    if (result.termination !== 'completed') termination = result.termination;
+    if (result.unchanged) {
       unchangedLines.push(line);
-      missingEdges.push({ line, predecessorOrderId: null, reason: 'initial-state-unknown' });
-      continue;
-    }
-    if (bounds.clock() >= bounds.deadline) {
-      termination = 'deadline';
-      unchangedLines.push(line);
-      continue;
-    }
-    if (budget.remainingIterations <= 0) {
-      termination = 'iteration-cap';
-      unchangedLines.push(line);
-      continue;
-    }
-    candidateCount += 1;
-    budget.remainingIterations -= 1;
-    const candidate = candidateForSequence(snapshot, bounds, line, orderedByProductiveRuntime(tasks), {
-      start: bounds.now,
-      end: bounds.horizonEnd,
-      predecessorState: initial.state_key,
-      predecessorOrderId: null,
-    });
-    if (!candidate.feasible) {
-      unchangedLines.push(line);
-      missingEdges.push(...candidate.missingEdges);
+      missingEdges.push(...result.missingEdges);
       explanation.push({ code: 'spt-sequence-infeasible', message: 'Pure SPT sequence has no covered feasible setup path.', line });
       continue;
     }
-    patches.push(...candidate.patches);
-    explanation.push(...candidate.explanation);
-    const setupMinutes = candidate.score[5] ?? 0;
-    score[4] -= candidate.patches.length;
-    score[5] += setupMinutes;
+    patches.push(...result.patches);
+    explanation.push(...result.explanation);
+    missingEdges.push(...result.missingEdges);
+    for (let index = 0; index < score.length; index += 1) score[index] += result.score[index] ?? 0;
   }
 
   return {
@@ -1252,16 +1556,21 @@ export function evaluateDueDateFirst(
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       continue;
     }
-    const initial = bounds.setup.line_states.find(state => (
-      state.line === line && state.signature_version === definition.signature_version
-    ));
-    if (!initial) {
+    const initial = initialStateForLine(bounds, line, definition.signature_version);
+    if (!initial.state) {
       unchangedLines.push(line);
-      missingEdges.push({ line, predecessorOrderId: null, reason: 'initial-state-unknown' });
+      missingEdges.push({ line, predecessorOrderId: null, reason: initial.reason });
+      explanation.push({
+        code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
+        message: initial.reason === 'signature-incompatible'
+          ? 'The line state uses a different setup-signature version.'
+          : 'No usable current setup state is available for this line.',
+        line,
+      });
       continue;
     }
 
-    const result = evaluateLineWithFixedBoundaries(snapshot, bounds, line, tasks, initial.state_key, budget);
+    const result = evaluateLineWithFixedBoundaries(snapshot, bounds, line, tasks, initial.state, budget);
     candidateCount += result.candidateCount;
     if (result.method === 'due-date-first-greedy') method = result.method;
     if (result.termination !== 'completed') termination = result.termination;

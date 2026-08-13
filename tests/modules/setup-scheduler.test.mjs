@@ -708,3 +708,156 @@ test('evaluateDueDateFirst excludes a line with an incomplete setup state before
   assert.equal(result.diagnostics.candidateCount, 1);
   assert.ok(result.explanation.some(reason => reason.line === 'L1' && reason.code === 'setup-incompatible'));
 });
+
+test('evaluateDueDateFirst retains policy tiers while allowing equal-tier due work to interleave states', () => {
+  // This fails if the state-group search flattens BLUE work contiguously or
+  // ignores the supplied priority-rank snapshot. Equal-tier BLUE(09),
+  // RED(10), BLUE(12) must remain eligible as BLUE -> RED -> BLUE instead of
+  // forcing all BLUE work ahead of the intervening due obligation.
+  const blueEarly = scheduledTask('tier-blue-early', 1, 'BLUE', '2026-08-03T09:00:00');
+  const redMiddle = scheduledTask('tier-red-middle', 1, 'RED', '2026-08-03T10:00:00');
+  const blueLate = scheduledTask('tier-blue-late', 1, 'BLUE', '2026-08-03T12:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0), setupRow('GREEN', 'RED', 0),
+    setupRow('BLUE', 'RED', 0), setupRow('RED', 'BLUE', 0),
+  ] });
+  const snapshot = setupSnapshot([blueLate, redMiddle, blueEarly]);
+  snapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 1, RED: 1 } } };
+
+  const equalTier = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+
+  assert.deepEqual(equalTier.patches.map(patch => patch.id), [
+    'tier-blue-early', 'tier-red-middle', 'tier-blue-late',
+  ]);
+
+  const rankedSnapshot = setupSnapshot([blueEarly, redMiddle]);
+  rankedSnapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 2, RED: 1 } } };
+  const ranked = SetupScheduler.evaluateDueDateFirst(rankedSnapshot, dueDateBounds(setup));
+
+  assert.deepEqual(ranked.patches.map(patch => patch.id), ['tier-red-middle', 'tier-blue-early'],
+    'the detached policy comparison must read priorityRankMaps before due score');
+});
+
+test('evaluateSptWithSetup solves free fragments around a fixed order without changing its pure runtime order', () => {
+  // This fails when SPT bypasses every line that contains fixed work instead
+  // of using the fixed order as the predecessor of its trailing fragment.
+  const fixed = scheduledTask(
+    'spt-fixed-blue', 1, 'BLUE', null, '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const longer = scheduledTask('spt-fixed-long-yellow', 2, 'YELLOW', null);
+  const shorter = scheduledTask('spt-fixed-short-red', 1, 'RED', null);
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('RED', 'YELLOW', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateSptWithSetup(
+    setupSnapshot([longer, fixed, shorter], { fixedIds: ['spt-fixed-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), ['spt-fixed-short-red', 'spt-fixed-long-yellow']);
+  assert.equal(patchFor(result, 'spt-fixed-short-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('evaluateDueDateFirst preserves active override adjacency across each fixed-boundary orientation', () => {
+  // This fails if free work is assigned solely by due timestamp and an active
+  // free -> fixed or fixed -> free override becomes incorrectly inactive.
+  const beforeFixed = scheduledTask('override-before-fixed-red', 1, 'RED', '2026-08-03T15:00:00');
+  const fixedBlue = scheduledTask(
+    'override-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const beforeSetup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0), setupRow('GREEN', 'BLUE', 0),
+  ], overrides: [{
+    id: 'override-before-fixed', line: 'L1', signature_version: 1,
+    predecessor_order_id: 'override-before-fixed-red', successor_order_id: 'override-fixed-blue',
+    predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+    standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected pre-fixed adjacency',
+  }] });
+
+  const beforeResult = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([beforeFixed, fixedBlue], { fixedIds: ['override-fixed-blue'] }),
+    dueDateBounds(beforeSetup),
+  );
+
+  assert.equal(patchFor(beforeResult, 'override-before-fixed-red').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.deepEqual(beforeResult.unchangedLines, []);
+
+  const fixedBlueAgain = scheduledTask(
+    'override-fixed-blue-again', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const afterFixed = scheduledTask('override-after-fixed-red', 1, 'RED', '2026-08-03T09:00:00');
+  const afterSetup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+  ], overrides: [{
+    id: 'override-after-fixed', line: 'L1', signature_version: 1,
+    predecessor_order_id: 'override-fixed-blue-again', successor_order_id: 'override-after-fixed-red',
+    predecessor_state_key: setupState('BLUE'), successor_state_key: setupState('RED'),
+    standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected post-fixed adjacency',
+  }] });
+
+  const afterResult = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([afterFixed, fixedBlueAgain], { fixedIds: ['override-fixed-blue-again'] }),
+    dueDateBounds(afterSetup),
+  );
+
+  assert.equal(patchFor(afterResult, 'override-after-fixed-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.deepEqual(afterResult.unchangedLines, []);
+});
+
+test('evaluateDueDateFirst admits a feasible pre-fixed due prefix and carries the remainder past the boundary', () => {
+  // This fails when an order that cannot fit before a fixed run makes the
+  // entire candidate infeasible instead of retaining the feasible due work
+  // and scheduling the remainder after the fixed outgoing state.
+  const red = scheduledTask('admitted-a-red', 1, 'RED', '2026-08-03T09:15:00');
+  const yellow = scheduledTask('admitted-b-yellow', 1, 'YELLOW', '2026-08-03T09:15:00');
+  const fixed = scheduledTask(
+    'admitted-fixed-blue', 1, 'BLUE', '2026-08-03T10:30:00', '2026-08-03T09:30:00', '2026-08-03T10:30:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'YELLOW', 0), setupRow('RED', 'YELLOW', 0),
+    setupRow('RED', 'BLUE', 0), setupRow('YELLOW', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([yellow, fixed, red], { fixedIds: ['admitted-fixed-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'admitted-a-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.equal(patchFor(result, 'admitted-b-yellow').changes.start_date.getTime(), at('2026-08-03T10:30:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('evaluateDueDateFirst accepts a zero-minute transition into a fixed run at the fragment boundary', () => {
+  // This fails when a zero-duration setup is incorrectly required to occupy a
+  // non-empty availability interval before a fixed production start.
+  const fixed = scheduledTask(
+    'zero-fixed-blue', 1, 'BLUE', '2026-08-03T09:00:00', '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([fixed], { fixedIds: ['zero-fixed-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'incoming-fixed-setup-infeasible'), false);
+});
+
+test('setup-aware evaluators exclude signature-incompatible line state without blocking other candidates', () => {
+  // This fails if a stale line-state version is reported as ordinary missing
+  // initial truth or allowed to mix with the active matrix signature.
+  const blue = scheduledTask('signature-incompatible-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  setup.line_states[0].signature_version = 2;
+
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([blue]), dueDateBounds(setup));
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.ok(result.missingEdges.some(edge => edge.reason === 'signature-incompatible'));
+});
