@@ -114,6 +114,7 @@ export const SetupAdmin = (() => {
   let _registeredFields = FALLBACK_REGISTERED_FIELDS.slice();
   let _linesByPlant: Record<string, string[]> = {};
   let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
+  let _coverageByPlant: Record<string, { observed?: { total_pairs: number; missing_pairs: number }; reachable?: { total_pairs: number; missing_pairs: number } }> = {};
   let _lineScope = '';
 
   const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
@@ -239,6 +240,17 @@ export const SetupAdmin = (() => {
     catch (error) { ErrorLog.warn('setup-admin', `Line compatibility unavailable: ${(error as Error).message}`); }
   }
 
+  async function loadCoverage(plant: string): Promise<void> {
+    if (_coverageByPlant[plant]) return;
+    const started = performance.now();
+    try {
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/coverage?limit=100`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      _coverageByPlant[plant] = await response.json();
+    } catch (error) { ErrorLog.warn('setup-admin', `Setup coverage unavailable: ${(error as Error).message}`); }
+    finally { PerfMonitor.record('setup.coverage.fetch', performance.now() - started); }
+  }
+
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
     if (!target) return;
     if (!plant) { target.innerHTML = `<div class="setup-empty">${esc(Util.t('toast.no_plant_selected'))}</div>`; return; }
@@ -250,7 +262,7 @@ export const SetupAdmin = (() => {
       });
       return;
     }
-    Promise.all([loadRegisteredFields(), loadScopeLines(plant)]).then(() => {
+    Promise.all([loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant)]).then(() => {
       if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
     });
     if (_lineScope) loadCompatibility(plant, _lineScope).then(() => { if (Store.selectedPlant === plant) renderSnapshot(target, snapshot); });
@@ -269,7 +281,9 @@ export const SetupAdmin = (() => {
     const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, line: _lineScope, version });
     const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
     const matrixVersion = rows.length ? version : null;
-    const status = activationStatus(definition, { matrixVersion });
+    const coverage = _coverageByPlant[snapshot.plant];
+    const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
+    const status = activationStatus(definition, { matrixVersion, coveragePass });
     const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
@@ -281,6 +295,7 @@ export const SetupAdmin = (() => {
           <span class="setup-version">v${version ?? '—'}</span>
         </header>
         <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
+        ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>Shadow coverage</strong><span>Observed: ${coverage.observed?.total_pairs ?? 0} transitions, ${coverage.observed?.missing_pairs ?? 0} missing</span><span>Reachable: ${coverage.reachable?.total_pairs ?? 0} pairs, ${coverage.reachable?.missing_pairs ?? 0} missing</span></div>` : ''}
         <div class="setup-toolbar">
           <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
           <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
