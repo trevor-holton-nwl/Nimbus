@@ -988,6 +988,26 @@ endpoint must go through `Util.fetchTraced`, never bare `fetch()`. The failure m
 with no auth, silently breaks or mis-scopes once real users/roles exist — is easy to miss in local
 dev and easy to reintroduce in a future feature that copies an older snippet using bare `fetch()`.
 
+## Changeover Matrix Stage 0 — apply and rollback (2026-08-13)
+
+Stage 0 adds observation-only setup truth: versioned definitions, matrix rows, physical line state,
+and occurrence overrides. It does **not** charge setup time, change order dates, or enable a
+setup-aware optimizer.
+
+1. Back up the target database and confirm it is the intended environment.
+2. Apply `migrations/2026-08-13-changeover-matrix-stage-0.sql`, then deploy the matching backend
+   and static frontend together. The same additive DDL is mirrored in `schema.sql`, so a normal
+   idempotent `schema.sql` application is also sufficient for a fresh environment.
+3. Verify `GET /setup/{plant}` for an authorized plant before importing a definition or matrix.
+   Definitions/matrix rows are versioned; changing the definition intentionally deactivates setup
+   activation and makes prior-version rows historical rather than rewriting them.
+
+Rollback is data-preserving by default: disable the setup editor/activation path and redeploy the
+previous application version; production schedules are unaffected because Stage 0 never persisted
+setup pseudo-orders or changed order dates. Do not drop the four setup tables as an operational
+rollback step—they contain audit-worthy matrix/state/override truth. A destructive schema rollback,
+if ever required, must be a separately reviewed backup-restoration decision.
+
 ## Multi-user real-time sync (planned)
 
 A design for near-real-time (seconds) freshness across concurrent schedulers on the same plant was
