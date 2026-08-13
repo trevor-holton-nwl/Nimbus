@@ -21,11 +21,18 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "schema.sql")
+SETUP_MIGRATION_PATH = os.path.join(ROOT, "migrations", "2026-08-13-changeover-matrix-stage-0.sql")
 
 
 def _schema_text() -> str:
     with open(SCHEMA_PATH, encoding="utf-8") as f:
         return f.read()
+
+
+def _setup_schema_texts() -> list[tuple[str, str]]:
+    """Both deployment paths must provide identical setup persistence guards."""
+    paths = (SCHEMA_PATH, SETUP_MIGRATION_PATH)
+    return [(path, open(path, encoding="utf-8").read()) for path in paths]
 
 
 def test_no_unguarded_horizon_multiply_statement():
@@ -47,6 +54,55 @@ def test_schema_migrations_ledger_present():
     assert "plants_horizon_minutes" in text, (
         "The horizon conversion must be recorded in the schema_migrations ledger."
     )
+
+
+def test_setup_schema_has_versioned_plant_and_line_scoped_keys():
+    """Breaking any setup identity key would permit cross-scope/version data collisions."""
+    for path, text in _setup_schema_texts():
+        assert re.search(
+            r"CREATE TABLE IF NOT EXISTS setup_definition \(.*plant\s+TEXT\s+PRIMARY KEY", text, re.DOTALL
+        ), path
+        assert re.search(
+            r"CREATE TABLE IF NOT EXISTS setup_matrix \(.*PRIMARY KEY \(plant, line, signature_version, from_key, to_key\)",
+            text,
+            re.DOTALL,
+        ), path
+        assert re.search(
+            r"CREATE TABLE IF NOT EXISTS line_setup_state \(.*PRIMARY KEY \(plant, line\)", text, re.DOTALL
+        ), path
+
+
+def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
+    """Dropping the partial unique index would allow conflicting active overrides."""
+    expected = (
+        r"CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency\s+"
+        r"ON setup_occurrence_override \(\s*plant, line, signature_version,\s+"
+        r"predecessor_order_id,\s+successor_order_id,\s+predecessor_state_key,\s+successor_state_key\s*\)\s+"
+        r"WHERE status = 'active'"
+    )
+    for path, text in _setup_schema_texts():
+        assert re.search(expected, text, re.DOTALL), path
+
+
+def test_setup_schema_enforces_bounded_minutes_and_controlled_values():
+    """Invalid setup duration, source, or override status must be rejected at the DB boundary."""
+    for path, text in _setup_schema_texts():
+        assert "CHECK (setup_min BETWEEN 0 AND 10080)" in text, path
+        assert "CHECK (standard_min BETWEEN 0 AND 10080)" in text, path
+        assert "CHECK (remaining_min BETWEEN 0 AND 10080)" in text, path
+        assert "CHECK (source IN ('manual', 'derived', 'actual'))" in text, path
+        assert "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))" in text, path
+
+
+def test_setup_schema_keeps_compatibility_separate_from_global_optimizer_exclusion():
+    """An incompatible line must opt out with a reason without mutating excl_optimizer."""
+    expected = (
+        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatible "
+        r"BOOLEAN NOT NULL DEFAULT TRUE;\s*"
+        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;"
+    )
+    for path, text in _setup_schema_texts():
+        assert re.search(expected, text), path
 
 
 @pytest.mark.pg
