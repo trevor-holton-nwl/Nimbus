@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 from db import _pool, _str_id
 import db
 import master_data as md
+import setup_data
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up).
 log = logging.getLogger("nimbus.sap")
@@ -688,6 +689,11 @@ def sync_object(object_key: str, *, user_email: str | None = None,
             result["rows_inserted"] = int(apply_res.get("inserted", 0))
             result["rows_updated"] = int(apply_res.get("updated", 0))
         else:  # orders
+            # Stage 0 observation seam.  Keep this immediately before the
+            # shared orders upsert; setup data remains read-only to scheduling.
+            setup_data.capture_setup_states_before_schedule_mutation(
+                actor=user_email or "system", reason="SAP order replacement"
+            )
             apply_res = db.upsert_orders(mapped, source="sap", batch_id=None,
                                          filename=None, raw_row_count=rows_read)
             result["rows_inserted"] = int(apply_res.get("inserted", 0))

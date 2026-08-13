@@ -55,6 +55,7 @@ import auth
 import db
 import master_data as md
 import sap_sync
+import setup_data
 from auth import require_admin
 
 
@@ -1814,6 +1815,12 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     offloaded to a worker thread so it doesn't block the event loop.
     """
     raw = await file.read()
+    # Stage 0 observation seam: capture only already-completed planned work
+    # before ingest can replace its source rows.  This never changes orders,
+    # dates, capacity, alerts, or optimizer behavior.
+    setup_data.capture_setup_states_before_schedule_mutation(
+        actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement"
+    )
     result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
                                      file.filename or "upload.xlsx")
     if result.get("status") != "ok":
@@ -1882,6 +1889,9 @@ def purge_orders(payload: dict):
         end   = datetime.fromisoformat(str(payload["end_date"]).replace("Z", ""))
     except (KeyError, ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid date range: {e}") from e
+    # This must remain adjacent to the DELETE below: a derived state may only
+    # observe the prior schedule while it still exists.
+    setup_data.capture_setup_states_before_schedule_mutation(reason="order purge")
     result = db.purge_orders_by_date(start, end)
     if result.get("status") == "ok":
         _log_event("info", "purge", "Orders purged by date range",
