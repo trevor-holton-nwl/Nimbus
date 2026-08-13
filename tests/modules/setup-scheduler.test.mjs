@@ -952,7 +952,10 @@ test('evaluateDueDateFirst accepts a zero-minute transition into a fixed run at 
 test('setup-aware evaluators exclude signature-incompatible line state without blocking other candidates', () => {
   // This fails if a stale line-state version is reported as ordinary missing
   // initial truth or allowed to mix with the active matrix signature.
-  const blue = scheduledTask('signature-incompatible-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const blue = scheduledTask(
+    'signature-incompatible-blue', 1, 'BLUE', '2026-08-03T10:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
   setup.line_states[0].signature_version = 2;
 
@@ -1298,7 +1301,7 @@ test('setup-aware evaluators discard all line patches when trailing capacity lea
   ]) {
     const result = evaluate(
       setupSnapshot([oldOverlap, fixed, firstTrailing, before], { fixedIds: ['terminal-fixed-blue'] }),
-      dueDateBounds(setup, { horizonEnd: at('2026-08-03T12:00:00') }),
+      dueDateBounds(setup, { horizonEnd: at('2026-08-03T11:30:00') }),
     );
 
     assert.deepEqual(result.patches, [], `${label} must not publish a trailing partial candidate`);
@@ -1442,4 +1445,208 @@ test('evaluateSptWithSetup keeps an active free-order override pair contiguous o
 
   assert.deepEqual(result.patches.map(patch => patch.id), ['spt-pair-long-red', 'spt-pair-short-blue']);
   assert.deepEqual(result.unchangedLines, []);
+});
+
+test('setup-aware evaluators defer an uncovered pre-fixed free transition to a covered fixed outgoing state', () => {
+  // This fails if a free RED due before fixed BLUE is tried only against the
+  // initial GREEN state. GREEN -> RED is deliberately uncovered, while
+  // GREEN -> BLUE and BLUE -> RED are covered; preserving the fixed run and
+  // evaluating RED after it is the only fully-covered sequence.
+  const red = scheduledTask('covered-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
+  const fixedBlue = scheduledTask(
+    'covered-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T09:00:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0),
+    setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([red, fixedBlue], { fixedIds: ['covered-fallback-fixed-blue'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.equal(patchFor(result, 'covered-fallback-fixed-blue'), undefined, `${label} never patches the fixed run`);
+    assert.equal(patchFor(result, 'covered-fallback-red').changes.start_date.getTime(), at('2026-08-03T10:00:00').getTime(),
+      `${label} evaluates the deferred RED order from fixed BLUE's outgoing state`);
+    assert.deepEqual(result.unchangedLines, []);
+  }
+});
+
+test('setup-aware evaluators preserve the earliest usable scheduled order when initial state is unknown', () => {
+  // This fails if an absent persisted line state makes the evaluator abandon
+  // all work. The earliest valid scheduled interval is the deterministic
+  // physical anchor: it is not patched, its incoming setup is reported as
+  // unknown, and its fully-known BLUE state drives later RED placement.
+  const anchor = scheduledTask(
+    'unknown-state-anchor-blue', 1, 'BLUE', '2026-08-03T09:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const later = scheduledTask('unknown-state-later-red', 1, 'RED', '2026-08-03T11:00:00');
+  const setup = setupTruth({
+    current: null,
+    rows: [setupRow('BLUE', 'RED', 0)],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([later, anchor]), dueDateBounds(setup));
+
+    assert.equal(patchFor(result, 'unknown-state-anchor-blue'), undefined, `${label} keeps the physical anchor immovable`);
+    assert.equal(patchFor(result, 'unknown-state-later-red').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime(),
+      `${label} schedules later work from the anchor state`);
+    assert.deepEqual(result.unchangedLines, []);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === null
+      && edge.successorOrderId === 'unknown-state-anchor-blue'
+      && edge.reason === 'initial-state-unknown'
+    )), `${label} retains the anchor's unknown incoming setup as a structured diagnostic`);
+  }
+});
+
+test('unknown-state anchor preservation never reopens capacity before the caller scheduling horizon', () => {
+  // This fails if an old preserved anchor makes post-anchor work start at the
+  // anchor's historical end instead of the caller's explicit `now` boundary.
+  const completedAnchor = scheduledTask(
+    'unknown-state-past-anchor-blue', 1, 'BLUE', '2026-08-03T10:00:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const later = scheduledTask('unknown-state-horizon-red', 1, 'RED', '2026-08-03T10:00:00');
+  const setup = setupTruth({ current: null, rows: [setupRow('BLUE', 'RED', 0)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([later, completedAnchor]),
+      dueDateBounds(setup, { now: at('2026-08-03T11:00:00') }),
+    );
+
+    assert.equal(patchFor(result, 'unknown-state-horizon-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
+      `${label} honors caller now after retaining an old physical anchor`);
+  }
+});
+
+test('setup-aware evaluators remain unchanged when unknown initial state has no usable scheduled anchor', () => {
+  // This fails if the preservation path invents a starting state from an
+  // unscheduled order. Without a valid interval and complete state there is
+  // no safe physical predecessor for later setup-aware scheduling.
+  const onlyUnscheduled = scheduledTask('unknown-state-no-anchor-red', 1, 'RED', '2026-08-03T10:00:00');
+  const setup = setupTruth({ current: null, rows: [setupRow('GREEN', 'RED', 0)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([onlyUnscheduled]), dueDateBounds(setup));
+
+    assert.deepEqual(result.patches, [], `${label} does not invent an initial state`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown'));
+  }
+});
+
+test('unknown-state preservation reports a stale deleted predecessor override while scheduling safely after the anchor', () => {
+  // This fails if the early no-current-state branch skips validation of an
+  // active override whose successor still exists but predecessor was deleted.
+  // The anchor makes later BLUE -> RED work safe, but the old binding must be
+  // surfaced as inactive rather than silently disappearing.
+  const anchor = scheduledTask(
+    'unknown-state-stale-anchor-blue', 1, 'BLUE', '2026-08-03T09:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const successor = scheduledTask('unknown-state-stale-successor-red', 1, 'RED', '2026-08-03T11:00:00');
+  const setup = setupTruth({
+    current: null,
+    rows: [setupRow('BLUE', 'RED', 0)],
+    overrides: [{
+      id: 'unknown-state-stale-predecessor', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'deleted-predecessor-green', successor_order_id: 'unknown-state-stale-successor-red',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'predecessor removed before planning',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([successor, anchor]), dueDateBounds(setup));
+
+    assert.equal(patchFor(result, 'unknown-state-stale-anchor-blue'), undefined, `${label} preserves the anchor`);
+    assert.equal(patchFor(result, 'unknown-state-stale-successor-red').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime());
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'deleted-predecessor-green'
+      && edge.successorOrderId === 'unknown-state-stale-successor-red'
+      && edge.reason === 'override-inactive'
+    )), `${label} retains the deleted-predecessor binding as inactive`);
+  }
+});
+
+test('setup-aware evaluators do not skip an earlier scheduled order with an unusable setup state to anchor a later order', () => {
+  // This fails if the preservation path filters state before finding the
+  // current first physical interval. A later BLUE order must not become the
+  // anchor while the earlier scheduled strict-blank order remains untouched;
+  // the only safe outcome is an unchanged line with initial state unknown.
+  const unusableFirst = scheduledTask(
+    'unknown-state-unusable-first', 1, '', '2026-08-03T09:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const laterKnown = scheduledTask(
+    'unknown-state-later-known-blue', 1, 'BLUE', '2026-08-03T10:00:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const setup = setupTruth({ current: null, rows: [setupRow('BLUE', 'BLUE', 0)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([laterKnown, unusableFirst]), dueDateBounds(setup));
+
+    assert.deepEqual(result.patches, [], `${label} must not bypass the true first scheduled order`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.successorOrderId === 'unknown-state-unusable-first'
+      && edge.reason === 'initial-state-unknown'
+    )), `${label} identifies the actual first scheduled order as the unresolved physical boundary`);
+  }
+});
+
+test('setup-aware evaluators retain a deleted-predecessor override diagnostic when no unknown-state anchor is usable', () => {
+  // This fails if the early no-anchor branch only inspects deleted successors.
+  // Even though no safe scheduling can continue, the active binding whose
+  // predecessor disappeared must remain visible as override-inactive.
+  const successor = scheduledTask('unknown-no-anchor-stale-successor-red', 1, 'RED', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    current: null,
+    overrides: [{
+      id: 'unknown-no-anchor-stale-predecessor', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'deleted-no-anchor-predecessor', successor_order_id: 'unknown-no-anchor-stale-successor-red',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'predecessor no longer exists',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([successor]), dueDateBounds(setup));
+
+    assert.deepEqual(result.patches, [], `${label} cannot schedule without a physical anchor`);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'deleted-no-anchor-predecessor'
+      && edge.successorOrderId === 'unknown-no-anchor-stale-successor-red'
+      && edge.reason === 'override-inactive'
+    )), `${label} retains the stale predecessor diagnostic without an anchor`);
+  }
 });

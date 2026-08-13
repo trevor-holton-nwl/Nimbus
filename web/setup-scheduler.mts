@@ -440,6 +440,14 @@ interface FragmentContext {
   end: Date;
   predecessorState: SetupStateKey;
   predecessorOrderId: string | null;
+  /** Every order still present on the immutable line snapshot, including a
+   * preserved unknown-state anchor that is deliberately absent from this
+   * fragment's mutable task list. */
+  lineOrderIds: ReadonlySet<string>;
+  /** Only the unknown-current-state preservation path can safely continue
+   * past a binding whose predecessor has been deleted; ordinary known-state
+   * evaluation retains the existing fail-closed override behavior. */
+  allowsDeletedPredecessorBinding?: boolean;
   nextFixed?: FixedBoundary;
   /** An active override crossing a fixed boundary makes the named free order
    * the exact first/last member of this obstacle-free fragment. */
@@ -466,6 +474,9 @@ interface BoundaryOverrideLocks {
   /** A persisted current line state can bind directly to the first fixed
    * order. In that case no free work may occupy the preceding fragment. */
   requiresInitialState?: boolean;
+  /** Like `requiresInitialState`, but the protected predecessor is a
+   * preserved current first order rather than persisted line state. */
+  requiresInitialPredecessorId?: string;
   /** A fixed predecessor and successor can be a protected occurrence too. The
    * successor fragment must remain empty so no free production breaks that
    * physical adjacency. */
@@ -481,6 +492,32 @@ interface BoundaryOverrideLocks {
 interface InitialFreeOverrideLock {
   requiredFirstOrderId?: string;
   issue?: MissingSetupEdge;
+}
+
+/** When persisted physical state is unavailable, the first usable scheduled
+ * order remains physical truth for this detached run. It is never patched;
+ * only its known successor state is used to plan later work. */
+interface PreservedInitialAnchor {
+  task: NimbusTask;
+  state: SetupStateKey;
+  start: Date;
+  end: Date;
+}
+
+interface InitialScheduledAnchor {
+  task: NimbusTask;
+  state: SetupStateKey | null;
+  start: Date;
+  end: Date;
+}
+
+interface LineInitialContext {
+  predecessorOrderId: string | null;
+  fragmentStart: Date;
+  /** Original line tasks are retained for override-binding diagnostics even
+   * when a preserved anchor is removed from the mutable candidate list. */
+  allTasks: ReadonlyArray<NimbusTask>;
+  preservedAnchor?: PreservedInitialAnchor;
 }
 
 /** Active occurrence overrides are physical adjacency constraints, not merely
@@ -624,6 +661,8 @@ function inactiveOverrideForTransition(
   successorState: SetupStateKey,
   predecessorOrderId: string | null,
   successorOrderId: string,
+  lineOrderIds: ReadonlySet<string>,
+  allowsDeletedPredecessorBinding = false,
 ): MissingSetupEdge | null {
   const definition = bounds.setup.definition!;
   const bound = bounds.setup.overrides.filter(override => (
@@ -633,6 +672,15 @@ function inactiveOverrideForTransition(
     && override.successor_order_id === successorOrderId
   ));
   for (const override of bound) {
+    // A binding to a deleted predecessor is already surfaced as an inactive
+    // diagnostic at line scope. It must not make otherwise safe later work
+    // unschedulable merely because the exact historical adjacency no longer
+    // exists in this immutable snapshot.
+    if (allowsDeletedPredecessorBinding
+      && override.predecessor_order_id !== null
+      && !lineOrderIds.has(String(override.predecessor_order_id))) {
+      continue;
+    }
     if (override.predecessor_order_id !== predecessorOrderId
       || stateKey(override.predecessor_state_key) !== stateKey(predecessorState)
       || stateKey(override.successor_state_key) !== stateKey(successorState)) {
@@ -684,11 +732,48 @@ function missingSuccessorOverrideReasons(
   }));
 }
 
+/** The inverse stale-binding case matters just as much as a removed
+ * successor: a still-present successor must not silently retain an active
+ * override that names an order no longer on this line. */
+function missingPredecessorOverrideEdges(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+): MissingSetupEdge[] {
+  const definition = bounds.setup.definition!;
+  const presentIds = new Set(tasks.map(taskId));
+  return bounds.setup.overrides.flatMap(override => {
+    if (override.status !== 'active'
+      || override.line !== line
+      || override.signature_version !== definition.signature_version
+      || override.predecessor_order_id === null) {
+      return [];
+    }
+    const predecessorOrderId = String(override.predecessor_order_id);
+    const successorOrderId = String(override.successor_order_id);
+    if (!presentIds.has(successorOrderId) || presentIds.has(predecessorOrderId)) return [];
+    return [inactiveOverrideEdge(line, predecessorOrderId, successorOrderId)];
+  });
+}
+
+function missingPredecessorOverrideReasons(
+  line: string,
+  edges: ReadonlyArray<MissingSetupEdge>,
+): CandidateReason[] {
+  return edges.map(edge => ({
+    code: 'override-inactive',
+    message: `Active override predecessor ${edge.predecessorOrderId ?? 'unknown'} is no longer on this line.`,
+    line,
+    taskId: edge.successorOrderId ?? undefined,
+  }));
+}
+
 function initialFreeOverrideLock(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   free: ReadonlyArray<NimbusTask>,
   initialState: SetupStateKey,
+  initialPredecessorOrderId: string | null,
 ): InitialFreeOverrideLock {
   const definition = bounds.setup.definition!;
   const freeById = new Map(free.map(task => [taskId(task), task]));
@@ -699,7 +784,7 @@ function initialFreeOverrideLock(
     if (override.status !== 'active'
       || override.line !== line
       || override.signature_version !== definition.signature_version
-      || override.predecessor_order_id !== null) {
+      || override.predecessor_order_id !== initialPredecessorOrderId) {
       continue;
     }
     const successorOrderId = String(override.successor_order_id);
@@ -712,7 +797,7 @@ function initialFreeOverrideLock(
       || stateKey(initialState) !== stateKey(override.predecessor_state_key)
       || stateKey(successorState) !== stateKey(override.successor_state_key)
       || (requiredFirstOrderId && requiredFirstOrderId !== successorOrderId)) {
-      issue ??= inactiveOverrideEdge(line, null, successorOrderId);
+      issue ??= inactiveOverrideEdge(line, initialPredecessorOrderId, successorOrderId);
       continue;
     }
     requiredFirstOrderId = successorOrderId;
@@ -768,7 +853,18 @@ function fragmentAdjacency(
     }
 
     const predecessor = byId.get(predecessorId);
-    if (!predecessor) continue;
+    if (!predecessor) {
+      // The immediate physical predecessor can be a fixed boundary or a
+      // preserved unknown-state anchor, so it is intentionally absent from
+      // this fragment's free list. A truly deleted predecessor is diagnosed
+      // at line scope and is not allowed to freeze unrelated later work.
+      if (predecessorId === fragment.predecessorOrderId
+        && stateKey(fragment.predecessorState) === stateKey(override.predecessor_state_key)
+        && (!requiredInitialSuccessorId || requiredInitialSuccessorId === successorId)) {
+        requiredInitialSuccessorId = successorId;
+      }
+      continue;
+    }
     const predecessorState = stateForOrder(predecessor, definition);
     if (!predecessorState || stateKey(predecessorState) !== stateKey(override.predecessor_state_key)) {
       markIssue(predecessorId, successorId);
@@ -1153,7 +1249,14 @@ function candidateForSequence(
       };
     }
     const inactiveOverride = inactiveOverrideForTransition(
-      bounds, line, predecessorState, successorState, predecessorOrderId, taskId(task),
+      bounds,
+      line,
+      predecessorState,
+      successorState,
+      predecessorOrderId,
+      taskId(task),
+      fragment.lineOrderIds,
+      fragment.allowsDeletedPredecessorBinding,
     );
     if (inactiveOverride) {
       missingEdges.push(inactiveOverride);
@@ -1261,7 +1364,14 @@ function candidateForSequence(
   if (fragment.nextFixed) {
     const fixed = fragment.nextFixed;
     const inactiveOverride = inactiveOverrideForTransition(
-      bounds, line, predecessorState, fixed.state, predecessorOrderId, taskId(fixed.task),
+      bounds,
+      line,
+      predecessorState,
+      fixed.state,
+      predecessorOrderId,
+      taskId(fixed.task),
+      fragment.lineOrderIds,
+      fragment.allowsDeletedPredecessorBinding,
     );
     if (inactiveOverride) {
       missingEdges.push(inactiveOverride);
@@ -1726,6 +1836,57 @@ function initialStateForLine(
   };
 }
 
+/** Select the physical first scheduled interval before considering its setup
+ * state. Ties are deterministic by end then task ID. We must never skip an
+ * earlier order with an unusable state to anchor a later order, because that
+ * would rewrite the physical predecessor rather than preserving it. */
+function initialScheduledAnchor(
+  tasks: ReadonlyArray<NimbusTask>,
+  definition: NonNullable<SetupTruthSnapshot['definition']>,
+): InitialScheduledAnchor | null {
+  const candidates = tasks.flatMap(task => {
+    const start = timestamp(task.start_date);
+    const end = timestamp(task.end_date);
+    if (!start || !end || end <= start) return [];
+    return [{ task, start, end }];
+  }).sort((left, right) => (
+    left.start.getTime() - right.start.getTime()
+    || left.end.getTime() - right.end.getTime()
+    || taskId(left.task).localeCompare(taskId(right.task))
+  ));
+  const current = candidates[0];
+  if (!current) return null;
+  return { ...current, state: stateForOrder(current.task, definition) };
+}
+
+function preservedInitialAnchor(selection: Readonly<InitialScheduledAnchor> | null): PreservedInitialAnchor | null {
+  return selection?.state ? { ...selection, state: selection.state } : null;
+}
+
+function unknownInitialStateEdge(
+  line: string,
+  task: Readonly<NimbusTask> | null | undefined,
+): MissingSetupEdge {
+  return {
+    line,
+    predecessorOrderId: null,
+    ...(task ? { successorOrderId: taskId(task) } : {}),
+    reason: 'initial-state-unknown',
+  };
+}
+
+function unknownInitialStateReason(line: string, task: Readonly<NimbusTask> | null | undefined): CandidateReason {
+  const id = task ? taskId(task) : undefined;
+  return {
+    code: 'initial-state-unknown',
+    message: id
+      ? `Preserved current first order ${id}; its incoming setup is unknown.`
+      : 'No usable current setup state or scheduled first order is available for this line.',
+    line,
+    ...(id ? { taskId: id } : {}),
+  };
+}
+
 /** Compatibility is snapshot-owned setup truth. An absent field intentionally
  * retains the legacy compatible behavior so older cached master-data payloads
  * cannot silently exclude a line. */
@@ -1745,6 +1906,7 @@ function boundaryOverrideLocks(
   fixed: ReadonlyArray<FixedBoundary>,
   free: ReadonlyArray<NimbusTask>,
   initialState: SetupStateKey,
+  initialPredecessorOrderId: string | null,
 ): ReadonlyMap<string, BoundaryOverrideLocks> {
   const definition = bounds.setup.definition!;
   const fixedById = new Map(fixed.map(boundary => [taskId(boundary.task), boundary]));
@@ -1771,7 +1933,7 @@ function boundaryOverrideLocks(
     const successorFixed = fixedById.get(override.successor_order_id);
     const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
 
-    if (successorFixed && override.predecessor_order_id == null) {
+    if (successorFixed && override.predecessor_order_id === initialPredecessorOrderId) {
       const successorId = taskId(successorFixed.task);
       const successorIndex = fixedIndexById.get(successorId);
       const lock = lockFor(successorId);
@@ -1782,7 +1944,8 @@ function boundaryOverrideLocks(
         || lock.requiredLastOrderId) {
         conflict(successorId, override.successor_order_id);
       } else {
-        lock.requiresInitialState = true;
+        if (initialPredecessorOrderId === null) lock.requiresInitialState = true;
+        else lock.requiresInitialPredecessorId = initialPredecessorOrderId;
       }
       continue;
     }
@@ -1854,17 +2017,80 @@ function belongsBeforeFixedBoundary(task: NimbusTask, boundary: FixedBoundary, m
   return true;
 }
 
+/** Identify free work that cannot make the current pre-fixed boundary from
+ * the fragment's actual predecessor, yet may be legal after the fixed order's
+ * outgoing state. This is deliberately conservative: only an uncovered setup
+ * resolution qualifies; a bad override, unknown state, or protected boundary
+ * pair remains a hard failure. An active free/free component moves together. */
+function uncoveredPreFixedFallbackIds(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  admitted: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlySet<string> | null {
+  if (!fragment.nextFixed || !admitted.length) return null;
+  const definition = bounds.setup.definition!;
+  const admittedIds = new Set(admitted.map(taskId));
+  const deferred = new Set<string>();
+
+  for (const task of admitted) {
+    const successorState = stateForOrder(task, definition);
+    if (!successorState) continue;
+    const overrideIssue = inactiveOverrideForTransition(
+      bounds,
+      line,
+      fragment.predecessorState,
+      successorState,
+      fragment.predecessorOrderId,
+      taskId(task),
+      fragment.lineOrderIds,
+      fragment.allowsDeletedPredecessorBinding,
+    );
+    if (overrideIssue) return null;
+    const resolved = resolveSetup({
+      definition,
+      line,
+      predecessorState: fragment.predecessorState,
+      successorState,
+      predecessorOrderId: fragment.predecessorOrderId,
+      successorOrderId: taskId(task),
+      plantRows: bounds.setup.plant_rows,
+      lineRows: bounds.setup.line_rows,
+      overrides: bounds.setup.overrides,
+    });
+    if (resolved.covered) continue;
+    const component = freeComponents.get(taskId(task)) ?? new Set([taskId(task)]);
+    const members = [...component];
+    // A fixed-boundary or initial protected endpoint cannot cross the fixed
+    // production run. Nor may one half of a protected free/free component.
+    if (members.some(member => !admittedIds.has(member))
+      || members.some(member => (
+        member === fragment.requiredFirstOrderId || member === fragment.requiredLastOrderId
+      ))) {
+      return null;
+    }
+    for (const member of members) deferred.add(member);
+  }
+  return deferred.size ? deferred : null;
+}
+
 function evaluateLineWithFixedBoundaries(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   tasks: ReadonlyArray<NimbusTask>,
   initialState: SetupStateKey,
+  initial: Readonly<LineInitialContext>,
   budget: SearchBudget,
   mode: FragmentMode = 'due-date-first',
 ): LineSearchResult {
   const definition = bounds.setup.definition!;
-  const missingSuccessorEdges = missingSuccessorOverrideEdges(bounds, line, tasks);
+  const lineOrderIds = new Set(initial.allTasks.map(taskId));
+  const missingSuccessorEdges = missingSuccessorOverrideEdges(bounds, line, initial.allTasks);
+  const missingPredecessorEdges = missingPredecessorOverrideEdges(bounds, line, initial.allTasks);
+  const initialEdges = initial.preservedAnchor ? [unknownInitialStateEdge(line, initial.preservedAnchor.task)] : [];
+  const initialReasons = initial.preservedAnchor ? [unknownInitialStateReason(line, initial.preservedAnchor.task)] : [];
   const fixed: FixedBoundary[] = [];
   for (const task of tasks.filter(task => taskIsFixed(snapshot, task))) {
     const start = timestamp(task.start_date);
@@ -1875,7 +2101,12 @@ function evaluateLineWithFixedBoundaries(
         line,
         'fixed-boundary-invalid',
         'A fixed order lacks a usable interval or setup state.',
-        [...missingSuccessorEdges, { line, successorOrderId: taskId(task), reason: 'fixed-boundary-invalid' }],
+        [
+          ...initialEdges,
+          ...missingSuccessorEdges,
+          ...missingPredecessorEdges,
+          { line, successorOrderId: taskId(task), reason: 'fixed-boundary-invalid' },
+        ],
       );
     }
     fixed.push({ task, state, start, end });
@@ -1883,14 +2114,16 @@ function evaluateLineWithFixedBoundaries(
   fixed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
 
   const free = tasks.filter(task => !taskIsFixed(snapshot, task));
-  const locks = boundaryOverrideLocks(bounds, line, fixed, free, initialState);
-  const initialFreeLock = initialFreeOverrideLock(bounds, line, free, initialState);
+  const locks = boundaryOverrideLocks(bounds, line, fixed, free, initialState, initial.predecessorOrderId);
+  const initialFreeLock = initialFreeOverrideLock(
+    bounds, line, free, initialState, initial.predecessorOrderId,
+  );
   if (initialFreeLock.issue) {
     return unchangedLineResult(
       line,
       'override-inactive',
       'An active occurrence override no longer matches the persisted initial state.',
-      [...missingSuccessorEdges, initialFreeLock.issue],
+      [...initialEdges, ...missingSuccessorEdges, ...missingPredecessorEdges, initialFreeLock.issue],
     );
   }
   if (initialFreeLock.requiredFirstOrderId
@@ -1901,32 +2134,38 @@ function evaluateLineWithFixedBoundaries(
       'override-inactive',
       'Multiple active overrides claim the persisted initial state.',
       [
+        ...initialEdges,
         ...missingSuccessorEdges,
-        inactiveOverrideEdge(line, null, initialFreeLock.requiredFirstOrderId),
+        ...missingPredecessorEdges,
+        inactiveOverrideEdge(line, initial.predecessorOrderId, initialFreeLock.requiredFirstOrderId),
       ],
     );
   }
   const freeComponents = freeOverrideComponents(bounds, line, free);
   const freeById = new Map(free.map(task => [taskId(task), task]));
   let remaining = [...free];
-  let fragmentStart = new Date(bounds.now);
+  let fragmentStart = new Date(initial.fragmentStart);
   let predecessorState = initialState;
-  let predecessorOrderId: string | null = null;
+  let predecessorOrderId: string | null = initial.predecessorOrderId;
   let requiredFirstOrderId: string | undefined = initialFreeLock.requiredFirstOrderId;
   const patches: SchedulePatch[] = [];
   const score = [0, 0, 0, 0, 0, 0];
-  const explanation: CandidateReason[] = missingSuccessorOverrideReasons(line, missingSuccessorEdges);
-  const missingEdges: MissingSetupEdge[] = [...missingSuccessorEdges];
+  const explanation: CandidateReason[] = [
+    ...initialReasons,
+    ...missingSuccessorOverrideReasons(line, missingSuccessorEdges),
+    ...missingPredecessorOverrideReasons(line, missingPredecessorEdges),
+  ];
+  const missingEdges: MissingSetupEdge[] = [...initialEdges, ...missingSuccessorEdges, ...missingPredecessorEdges];
   let candidateCount = 0;
   let method: LineSearchResult['method'] = 'due-date-first-exact';
   let termination: SearchRun['termination'] = 'completed';
 
-  const accept = (run: SearchRun): DueDateCandidate | null => {
+  const accept = (run: SearchRun, retainFailureDiagnostics = true): DueDateCandidate | null => {
     candidateCount += run.candidateCount;
     if (run.method === 'due-date-first-greedy') method = run.method;
     if (run.termination !== 'completed') termination = run.termination;
     if (!run.winner) {
-      missingEdges.push(...run.missingEdges);
+      if (retainFailureDiagnostics) missingEdges.push(...run.missingEdges);
       return null;
     }
     patches.push(...run.winner.patches);
@@ -1942,7 +2181,12 @@ function evaluateLineWithFixedBoundaries(
         line,
         'fixed-boundary-invalid',
         'Fixed boundaries overlap or precede the scheduling horizon.',
-        [{ line, successorOrderId: taskId(boundary.task), reason: 'fixed-boundary-invalid' }],
+        [
+          ...initialEdges,
+          ...missingSuccessorEdges,
+          ...missingPredecessorEdges,
+          { line, successorOrderId: taskId(boundary.task), reason: 'fixed-boundary-invalid' },
+        ],
       );
     }
     const boundaryLock = locks.get(taskId(boundary.task));
@@ -1981,6 +2225,20 @@ function evaluateLineWithFixedBoundaries(
         }],
       );
     }
+    if (boundaryLock?.requiresInitialPredecessorId
+      && predecessorOrderId !== boundaryLock.requiresInitialPredecessorId) {
+      return unchangedLineResult(
+        line,
+        'override-inactive',
+        'An active occurrence override no longer has its preserved first-order predecessor.',
+        [{
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(boundary.task),
+          reason: 'override-inactive',
+        }],
+      );
+    }
 
     const reservedForAnotherBoundary = new Set<string>();
     for (let futureIndex = boundaryIndex; futureIndex < fixed.length; futureIndex += 1) {
@@ -1993,7 +2251,9 @@ function evaluateLineWithFixedBoundaries(
     if (requiredFirstOrderId) reservedForAnotherBoundary.delete(requiredFirstOrderId);
 
     let componentConflict: MissingSetupEdge | null = null;
-    const admitted = boundaryLock?.requiresInitialState || boundaryLock?.requiredFixedPredecessorId
+    const admitted = boundaryLock?.requiresInitialState
+      || boundaryLock?.requiresInitialPredecessorId
+      || boundaryLock?.requiredFixedPredecessorId
       ? []
       : remaining.filter(task => {
         const id = taskId(task);
@@ -2027,17 +2287,44 @@ function evaluateLineWithFixedBoundaries(
     }
     const admittedIds = new Set(admitted.map(taskId));
     const later = remaining.filter(task => !admittedIds.has(taskId(task)));
-    const run = searchFragment(snapshot, bounds, line, admitted, {
+    const fragment: FragmentContext = {
       start: fragmentStart,
       end: boundary.start,
       predecessorState,
       predecessorOrderId,
+      lineOrderIds,
+      allowsDeletedPredecessorBinding: initial.preservedAnchor !== undefined,
       nextFixed: boundary,
       requiredFirstOrderId,
       requiredLastOrderId: boundaryLock?.requiredLastOrderId,
-    }, budget, mode);
-    const winner = accept(run);
+    };
+    const run = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode);
+    // Delay failure diagnostics briefly: when the *only* obstacle is an
+    // uncovered transition from the current predecessor into free work, that
+    // work may safely wait behind this fixed run and use its outgoing state.
+    // The original missing edge is not part of the accepted physical sequence.
+    let winner = accept(run, false);
+    let deferredAcrossFixed: NimbusTask[] = [];
+    let fallbackRun: SearchRun | null = null;
+    if (!winner && run.termination === 'completed') {
+      const fallbackIds = uncoveredPreFixedFallbackIds(bounds, line, admitted, fragment, freeComponents);
+      if (fallbackIds) {
+        const retained = admitted.filter(task => !fallbackIds.has(taskId(task)));
+        fallbackRun = searchFragment(snapshot, bounds, line, retained, fragment, budget, mode);
+        winner = accept(fallbackRun, false);
+        if (winner) {
+          deferredAcrossFixed = admitted.filter(task => fallbackIds.has(taskId(task)));
+          explanation.push({
+            code: 'covered-fixed-boundary-fallback',
+            message: `Deferred ${deferredAcrossFixed.length} order(s) past fixed ${taskId(boundary.task)} because the incoming free transition is uncovered.`,
+            line,
+            taskId: taskId(boundary.task),
+          });
+        }
+      }
+    }
     if (!winner) {
+      missingEdges.push(...run.missingEdges, ...(fallbackRun?.missingEdges ?? []));
       explanation.push({
         code: 'fixed-boundary-infeasible',
         message: `Cannot preserve the required incoming setup before fixed ${taskId(boundary.task)}.`,
@@ -2049,7 +2336,7 @@ function evaluateLineWithFixedBoundaries(
         candidateCount, method, termination, unchanged: true,
       };
     }
-    remaining = [...winner.unadmitted, ...later];
+    remaining = [...winner.unadmitted, ...deferredAcrossFixed, ...later];
     fragmentStart = new Date(boundary.end);
     predecessorState = boundary.state;
     predecessorOrderId = taskId(boundary.task);
@@ -2061,6 +2348,8 @@ function evaluateLineWithFixedBoundaries(
     end: bounds.horizonEnd,
     predecessorState,
     predecessorOrderId,
+    lineOrderIds,
+    allowsDeletedPredecessorBinding: initial.preservedAnchor !== undefined,
     requiredFirstOrderId,
   }, budget, mode);
   const trailingWinner = accept(trailing);
@@ -2149,11 +2438,17 @@ export function evaluateSptWithSetup(
     }
     const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
     const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
+    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
+    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       unchangedLines.push(line);
-      missingEdges.push(...missingSuccessorEdgesForLine, { line, reason: 'setup-compatibility-disabled' });
-      explanation.push(...missingSuccessorReasonsForLine);
+      missingEdges.push(
+        ...missingSuccessorEdgesForLine,
+        ...missingPredecessorEdgesForLine,
+        { line, reason: 'setup-compatibility-disabled' },
+      );
+      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
       explanation.push({
         code: 'setup-incompatible',
         message: compatibility.reason
@@ -2164,21 +2459,51 @@ export function evaluateSptWithSetup(
       continue;
     }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
-    if (!initial.state) {
+    // A stale signature is not merely unknown physical state: global setup
+    // safety rules require exclusion until the version mismatch is resolved.
+    const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
+      ? initialScheduledAnchor(tasks, definition)
+      : null;
+    const anchor = preservedInitialAnchor(initialScheduled);
+    if (!initial.state && !anchor) {
       unchangedLines.push(line);
-      missingEdges.push(...missingSuccessorEdgesForLine, { line, predecessorOrderId: null, reason: initial.reason });
-      explanation.push(...missingSuccessorReasonsForLine);
+      missingEdges.push(
+        ...missingSuccessorEdgesForLine,
+        ...missingPredecessorEdgesForLine,
+        initial.reason === 'initial-state-unknown'
+          ? unknownInitialStateEdge(line, initialScheduled?.task)
+          : { line, predecessorOrderId: null, reason: initial.reason },
+      );
+      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
       explanation.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'
           ? 'The line state uses a different setup-signature version.'
-          : 'No usable current setup state is available for this line.',
+          : unknownInitialStateReason(line, initialScheduled?.task).message,
         line,
+        ...(initial.reason === 'initial-state-unknown' && initialScheduled?.task
+          ? { taskId: taskId(initialScheduled.task) }
+          : {}),
       });
       continue;
     }
+    const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFixedBoundaries(
-      snapshot, bounds, line, tasks, initial.state, budget, 'spt',
+      snapshot,
+      bounds,
+      line,
+      candidateTasks,
+      initial.state ?? anchor!.state,
+      {
+        predecessorOrderId: anchor ? taskId(anchor.task) : null,
+        fragmentStart: anchor
+          ? new Date(Math.max(anchor.end.getTime(), bounds.now.getTime()))
+          : new Date(bounds.now),
+        allTasks: tasks,
+        ...(anchor ? { preservedAnchor: anchor } : {}),
+      },
+      budget,
+      'spt',
     );
     candidateCount += result.candidateCount;
     if (result.termination !== 'completed') termination = result.termination;
@@ -2253,11 +2578,17 @@ export function evaluateDueDateFirst(
     }
     const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
     const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
+    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
+    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       unchangedLines.push(line);
-      missingEdges.push(...missingSuccessorEdgesForLine, { line, reason: 'setup-compatibility-disabled' });
-      explanation.push(...missingSuccessorReasonsForLine);
+      missingEdges.push(
+        ...missingSuccessorEdgesForLine,
+        ...missingPredecessorEdgesForLine,
+        { line, reason: 'setup-compatibility-disabled' },
+      );
+      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
       explanation.push({
         code: 'setup-incompatible',
         message: compatibility.reason
@@ -2268,21 +2599,52 @@ export function evaluateDueDateFirst(
       continue;
     }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
-    if (!initial.state) {
+    // Preserve an anchor only for genuinely absent current state. A
+    // signature-incompatible state remains a hard detached-evaluation gate.
+    const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
+      ? initialScheduledAnchor(tasks, definition)
+      : null;
+    const anchor = preservedInitialAnchor(initialScheduled);
+    if (!initial.state && !anchor) {
       unchangedLines.push(line);
-      missingEdges.push(...missingSuccessorEdgesForLine, { line, predecessorOrderId: null, reason: initial.reason });
-      explanation.push(...missingSuccessorReasonsForLine);
+      missingEdges.push(
+        ...missingSuccessorEdgesForLine,
+        ...missingPredecessorEdgesForLine,
+        initial.reason === 'initial-state-unknown'
+          ? unknownInitialStateEdge(line, initialScheduled?.task)
+          : { line, predecessorOrderId: null, reason: initial.reason },
+      );
+      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
       explanation.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'
           ? 'The line state uses a different setup-signature version.'
-          : 'No usable current setup state is available for this line.',
+          : unknownInitialStateReason(line, initialScheduled?.task).message,
         line,
+        ...(initial.reason === 'initial-state-unknown' && initialScheduled?.task
+          ? { taskId: taskId(initialScheduled.task) }
+          : {}),
       });
       continue;
     }
+    const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
 
-    const result = evaluateLineWithFixedBoundaries(snapshot, bounds, line, tasks, initial.state, budget);
+    const result = evaluateLineWithFixedBoundaries(
+      snapshot,
+      bounds,
+      line,
+      candidateTasks,
+      initial.state ?? anchor!.state,
+      {
+        predecessorOrderId: anchor ? taskId(anchor.task) : null,
+        fragmentStart: anchor
+          ? new Date(Math.max(anchor.end.getTime(), bounds.now.getTime()))
+          : new Date(bounds.now),
+        allTasks: tasks,
+        ...(anchor ? { preservedAnchor: anchor } : {}),
+      },
+      budget,
+    );
     candidateCount += result.candidateCount;
     if (result.method === 'due-date-first-greedy') method = result.method;
     if (result.termination !== 'completed') termination = result.termination;
