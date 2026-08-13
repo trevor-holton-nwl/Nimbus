@@ -59,12 +59,22 @@ export interface CandidateReason {
   taskId?: string;
 }
 
+/** A non-persistent diagnostic produced while evaluating one detached candidate. */
+export interface CandidateDiagnostic {
+  level: 'warn' | 'error';
+  scope: string;
+  code: string;
+  message: string;
+  context: Readonly<Record<string, unknown>>;
+}
+
 export interface SearchDiagnostics {
   candidateCount: number;
   method: 'legacy-detached';
   termination: 'completed' | 'no-plant';
   runtimeMs: number;
   limitReached: boolean;
+  events: ReadonlyArray<CandidateDiagnostic>;
 }
 
 export interface MissingSetupEdge {

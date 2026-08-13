@@ -146,7 +146,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine, snapshotSchedule } from './schedule-services.mjs';
 import type { RemoveBacklogResult } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
-import type { CandidateResult } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy } from './types.mjs';
 
@@ -7071,6 +7071,7 @@ export const OptimizerPreview = {
   // candidate and wants Ctrl+Z. It is never used to roll a trial back.
   _snapshot: null as NimbusTask[] | null,
   _candidate: null as CandidateResult | null,
+  _previewDiagnostics: [] as CandidateDiagnostic[],
   _preKpis:  null as OptimizerKpis | null,
   _postKpis: null as OptimizerKpis | null,
   _mode:     null as OptimizerMode | null,
@@ -7132,6 +7133,7 @@ export const OptimizerPreview = {
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
   runWithPreview(mode: OptimizerMode = 'combined', opts: OptimizerRunOptions = {}) {
+    OptimizerPreview._previewDiagnostics = [];
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
@@ -7186,7 +7188,7 @@ export const OptimizerPreview = {
 
         // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
         const _preKpiT0 = performance.now();
-        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14);
+        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot);
         PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
 
         // Evaluate the established placement algorithm against a detached read
@@ -7196,12 +7198,13 @@ export const OptimizerPreview = {
         // Post-KPIs are calculated from detached patched task values.
         const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
         const _postKpiT0 = performance.now();
-        const postKpis  = Util.scheduleKpis(postTasks, 14);
+        const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot);
         PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
         OptimizerPreview._preKpis  = preKpis;
         OptimizerPreview._postKpis = postKpis;
         OptimizerPreview._candidate = candidate;
+        OptimizerPreview._previewDiagnostics = [...candidate.diagnostics.events];
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
         OptimizerPreview._splitOrderPolicy = Engine.splitOrderPolicyFor(plant);
@@ -7220,9 +7223,15 @@ export const OptimizerPreview = {
         OptimizerPreview._render();
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
-        ErrorLog.error('optimize-preview', errMsg || String(err));
+        OptimizerPreview._previewDiagnostics = [{
+          level: 'error',
+          scope: 'optimize-preview',
+          code: 'candidate-evaluation-failed',
+          message: errMsg || String(err),
+          context: { mode, plant },
+        }];
         // Evaluation is detached, so failures leave Store untouched.
-        OptimizerPreview._clear();
+        OptimizerPreview._clear(true);
         if (body) {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
@@ -7539,7 +7548,7 @@ export const OptimizerPreview = {
     Modal.close('modal-opt-preview');
   },
 
-  _clear() {
+  _clear(keepPreviewDiagnostics: boolean = false) {
     OptimizerPreview._snapshot = null;
     OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
@@ -7550,6 +7559,7 @@ export const OptimizerPreview = {
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
     OptimizerPreview._auditDetails = null;
+    if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];
     OptimizerPreview.active       = false;
   },
 };

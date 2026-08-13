@@ -26,7 +26,7 @@ type ActorResolver = () => string | undefined;
 // `.pct` off a matrix cell (see Util.scheduleKpis below), so it's typed to
 // exactly that shape rather than importing a type that doesn't exist yet.
 type UtilizationResolverFn = (
-  date: Date, days: number, tasks: NimbusTask[]
+  date: Date, days: number, tasks: NimbusTask[], context?: unknown
 ) => Record<string, Record<string, { pct?: number } | undefined>>;
 
 interface VirtualListOptions<T> {
@@ -583,7 +583,7 @@ export const Util = {
 
   // Composite KPIs for the optimizer preview. Pure: takes a task array, no Store access.
   // Returns { changeovers, span_h, late_count, late_h, peak_util_pct }.
-  scheduleKpis(tasks: NimbusTask[], horizonDays: number = 14): { changeovers: number; span_h: number; late_count: number; late_h: number; peak_util_pct: number } {
+  scheduleKpis(tasks: NimbusTask[], horizonDays: number = 14, utilizationContext?: unknown): { changeovers: number; span_h: number; late_count: number; late_h: number; peak_util_pct: number } {
     const changeovers = Util.countChangeovers(tasks);
     let minStart = Infinity, maxEnd = -Infinity;
     let lateCount = 0, lateH = 0;
@@ -599,7 +599,7 @@ export const Util = {
     let peak = 0;
     try {
       if (!_utilizationResolver) throw new Error('utilization resolver not wired');
-      const m = _utilizationResolver(new Date(), horizonDays, tasks);
+      const m = _utilizationResolver(new Date(), horizonDays, tasks, utilizationContext);
       for (const ln of Object.keys(m)) {
         for (const d of Object.keys(m[ln])) {
           const p = m[ln][d]?.pct || 0;

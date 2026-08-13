@@ -32,7 +32,7 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
-import type { CandidateResult, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateResult, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
@@ -181,6 +181,24 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 // control returns to the preview.  The existing placement algorithms below use
 // these accessors so the migration does not silently rewrite their behavior.
 let _candidateSnapshot: ScheduleSnapshot | null = null;
+let _candidateDiagnostics: CandidateDiagnostic[] | null = null;
+
+/** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
+ * Live optimizer and repair runs retain their existing ErrorLog behavior. */
+function reportSchedulerDiagnostic(
+  level: CandidateDiagnostic['level'],
+  scope: string,
+  code: string,
+  message: string,
+  context?: Readonly<Record<string, unknown>>,
+): void {
+  if (_candidateDiagnostics) {
+    _candidateDiagnostics.push({ level, scope, code, message, context: context ?? {} });
+    return;
+  }
+  if (level === 'error') ErrorLog.error(scope, message, context);
+  else ErrorLog.warn(scope, message, context);
+}
 
 function sourceTasks(): ReadonlyArray<NimbusTask> { return _candidateSnapshot?.tasks ?? Store.tasksArr; }
 function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSnapshot?.blocks ?? Store.blocks; }
@@ -260,6 +278,7 @@ function detachedCandidateResult(
       termination,
       runtimeMs: performance.now() - startedAt,
       limitReached: false,
+      events: _candidateDiagnostics ? [..._candidateDiagnostics] : [],
     },
     unchangedLines: [],
     missingEdges: [],
@@ -508,8 +527,13 @@ export const Calendar = {
       return cur;
     }
     // Loop exhausted: no feasible slot found within 90 days. Log for diagnostics.
-    const plant = Store.getPlantForLine(line);
-    ErrorLog.error('calendar', `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`);
+    const plant = sourceGetPlantForLine(line);
+    reportSchedulerDiagnostic(
+      'error',
+      'calendar',
+      'calendar.next-available-exhausted',
+      `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`,
+    );
     // fallback: return the original from; caller must handle
     return Util.snap(new Date(from));
   },
@@ -1196,28 +1220,57 @@ export const Utilization = {
    *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
    *  every Store mutation, so a cache hit always reflects current data. Subset calls
    *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
-  computeMatrix(startDate: Date, days: number = 7, srcTasks: NimbusTask[] | null = null): UtilizationMatrixResolved {
+  computeMatrix(
+    startDate: Date,
+    days: number = 7,
+    srcTasks: NimbusTask[] | null = null,
+    utilizationSnapshot: Readonly<ScheduleSnapshot> | null = null,
+  ): UtilizationMatrixResolved {
     const start = Util.startOfDay(startDate)!;
-    const cacheable = srcTasks === null;
+    const cacheable = srcTasks === null && !utilizationSnapshot;
     // Scope the memo key by selected plant. The worker prewarm (_prewarm) writes a
     // PLANT-SCOPED matrix; this sync path is otherwise GLOBAL. Without a plant
     // discriminator (and a matching line set) the two collide under one key and a
     // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
-    const scope = Store.selectedPlant || 'all';
-    const cacheKey = `${start.getTime()}|${days}|${Store.rev()}|${scope}`;
+    const selectedPlant = utilizationSnapshot ? utilizationSnapshot.selectedPlant : Store.selectedPlant;
+    const scope = selectedPlant || 'all';
+    const revision = utilizationSnapshot ? 'detached' : Store.rev();
+    const cacheKey = `${start.getTime()}|${days}|${revision}|${scope}`;
     if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
       return Utilization._cache.matrix;
     }
     const _pmT0u = performance.now();
-    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
+    const taskList = srcTasks !== null ? srcTasks : (utilizationSnapshot?.tasks ?? Store.tasksArr);
+    // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
+    // a preview, give it clones of the detached candidate context so that
+    // convenience normalization cannot mutate Store (or the candidate itself).
+    const lineSettings = utilizationSnapshot ? structuredClone(utilizationSnapshot.lineSettings) : Store.lineSettings;
+    const calendars = utilizationSnapshot ? structuredClone(utilizationSnapshot.calendars) : Store.calendars;
+    const plants = utilizationSnapshot ? structuredClone(utilizationSnapshot.plants) : Store.plants;
+    const blocks: NimbusBlock[] = utilizationSnapshot
+      ? structuredClone(Array.from(utilizationSnapshot.blocks))
+      : Store.blocks;
+    const plantBlocks: NimbusPlantBlock[] = utilizationSnapshot
+      ? structuredClone(Array.from(utilizationSnapshot.plantBlocks))
+      : Store.plantBlocks;
+    const masterData = utilizationSnapshot ? structuredClone(utilizationSnapshot.masterData) : Store.masterData;
+    const coreTasks: NimbusTask[] = utilizationSnapshot
+      ? structuredClone(Array.from(taskList))
+      : taskList as NimbusTask[];
 
     // Reproduce the exact line set the inline builder used: task lines, plus (when this
     // is NOT a filtered subset) either the selected plant's lines or every visited
     // calendar line. Passed explicitly so the core pins the same set.
     const lineSet = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
     if (srcTasks === null) {
-      if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
-      else Object.keys(Store.calendars).forEach(l => lineSet.add(l));
+      if (utilizationSnapshot && selectedPlant) {
+        for (const [line, settings] of Object.entries(lineSettings)) {
+          const mappedPlant = settings.plant
+            ?? masterData?.lines.find(row => row.production_line === line)?.plant;
+          if (mappedPlant === selectedPlant) lineSet.add(line);
+        }
+      } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
+      else Object.keys(calendars).forEach(l => lineSet.add(l));
     }
 
     // Delegate the matrix build to nimbus-compute-core — the single source of truth,
@@ -1225,13 +1278,13 @@ export const Utilization = {
     // (its worker contract); resolve them back to task OBJECTS here, which is what
     // computeMatrix's callers expect (they read task fields off the rows).
     const { matrix } = globalThis.NimbusComputeCore!.computeUtilization({
-      tasks:        taskList,
-      lineSettings: Store.lineSettings as any,
-      calendars:    Store.calendars,
-      plants:       Store.plants,
-      blocks:       Store.blocks,
-      plantBlocks:  Store.plantBlocks,
-      masterData:   Store.masterData as unknown as NimbusMasterData,
+      tasks:        coreTasks,
+      lineSettings: lineSettings as any,
+      calendars,
+      plants,
+      blocks,
+      plantBlocks,
+      masterData:   masterData as unknown as NimbusMasterData,
       startMs:      start.getTime(),
       days,
       lines:        [...lineSet],
@@ -1405,11 +1458,13 @@ export const Engine = {
   ): CandidateResult {
     if (_candidateSnapshot) throw new Error('Nested detached schedule evaluation is not supported');
     _candidateSnapshot = snapshot;
+    _candidateDiagnostics = [];
     try {
       return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
         ?? detachedCandidateResult([], performance.now());
     } finally {
       _candidateSnapshot = null;
+      _candidateDiagnostics = null;
     }
   },
 
@@ -1903,7 +1958,10 @@ export const Engine = {
     if (f) return f;
     // No known mapping: warn rather than guess a field name that will
     // silently resolve to undefined for every order.
-    ErrorLog.warn('engine', `No task field registered for priority field "${key}" — orders will not rank on it.`, { key });
+    reportSchedulerDiagnostic(
+      'warn', 'engine', 'engine.unknown-task-field',
+      `No task field registered for priority field "${key}" — orders will not rank on it.`, { key },
+    );
     return '';
   },
 
@@ -2296,9 +2354,11 @@ export const Engine = {
             if (cursor.getTime() === prevMs) break;
           }
           if (guard >= 200) {
-            ErrorLog.warn('engine',
+            reportSchedulerDiagnostic(
+              'warn', 'engine', 'engine.day-integrity-guard',
               `Day-integrity dispatch guard hit 200 iterations on "${line}" (day ${dayKeyD}) — schedule may be suboptimal; check fixed orders / blackouts on this line.`,
-              { line, day: dayKeyD });
+              { line, day: dayKeyD },
+            );
           }
           fixIdx = nextFixIdx(cursor, fixIdx);
           // Explicit day-wall check (covers respectCalendar === false, where
@@ -2342,9 +2402,11 @@ export const Engine = {
         const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
         const end   = new Date(start.getTime() + durMs);
         patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
-        ErrorLog.warn('engine',
+        reportSchedulerDiagnostic(
+          'warn', 'engine', 'engine.forced-placement',
           `Order "${t.text || t.id}" on "${line}" would never fit any working day (${FORCE_PLACE_AFTER_DAYS}-day search exhausted) — forced placement at ${Util.fmtDTReadable(start)}. Check RUN_TIME against available daily capacity.`,
-          { line, taskId: t.id });
+          { line, taskId: t.id },
+        );
         queue = queue.filter(x => x !== t);
         cursor = new Date(end);
         fixIdx = nextFixIdx(cursor, fixIdx);
@@ -2397,9 +2459,11 @@ export const Engine = {
       }
 
       if (!scheduled?.start_date || !scheduled.end_date) {
-        ErrorLog.warn('engine',
+        reportSchedulerDiagnostic(
+          'warn', 'engine', 'engine.allocation-exhausted',
           `Could not allocate order "${task.text || task.id}" on "${line}" within the 90-day calendar search; subsequent orders were left unchanged.`,
-          { line, taskId: task.id, policy });
+          { line, taskId: task.id, policy },
+        );
         // Do not schedule later parents around one that could not be allocated:
         // doing so would silently break the strategy-selected sequence.
         break;
@@ -2612,10 +2676,12 @@ export const Engine = {
         // so the condition isn't silently swallowed (previously a hard-to-diagnose "why
         // didn't this order move?" at scale).
         if (guard >= 200) {
-          ErrorLog.warn('engine',
+          reportSchedulerDiagnostic(
+            'warn', 'engine', 'engine.placement-guard',
             `Placement guard hit 200 iterations on "${line}" for order "${t.text || t.id}" — ` +
             `schedule may be suboptimal; check fixed orders / blackouts on this line.`,
-            { line, taskId: t.id });
+            { line, taskId: t.id },
+          );
         }
 
         const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);

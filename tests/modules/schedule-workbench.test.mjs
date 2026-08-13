@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
-import { Alerts } from '../../web/schedule-services.mjs';
+import { Util, ErrorLog } from '../../web/application-foundation.mjs';
+import { Alerts, Utilization } from '../../web/schedule-services.mjs';
+
+const require = createRequire(import.meta.url);
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
 // _refreshLineBtn/_buildLineDropdown DOM helpers, which reference bare
@@ -374,6 +378,111 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
     globalThis.fetch = priorFetch;
     Timeline._items = priorTimelineItems;
     Store.setTasks([], 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('OptimizerPreview computes KPI utilization against detached calendar and plant maps', () => {
+  // Removing the preview utilization context would let the production resolver
+  // pass Store.calendars/plants to compute core, which fills missing defaults.
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorPlants = structuredClone(Store.plants);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const scheduledStart = new Date();
+  scheduledStart.setHours(8, 0, 0, 0);
+  const scheduledEnd = new Date(scheduledStart.getTime() + 60 * 60 * 1000);
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Alerts.scheduleRecompute = () => {};
+  Util.setUtilizationResolver((from, days, tasks, snapshot) =>
+    Utilization.computeMatrix(from, days, tasks, snapshot));
+  Store.replaceCalendars({}, 'unit-test');
+  Store.replacePlants({}, 'unit-test');
+  Store.setLineSetting('KPI-DETACHED-LINE', { plant: 'KPI-DETACHED' }, 'unit-test');
+  Store.setTasks([{
+    id: 'kpi-detached-order', PLANT: 'KPI-DETACHED', PRODUCTION_LINE: 'KPI-DETACHED-LINE', RUN_TIME: 1,
+    start_date: scheduledStart, end_date: scheduledEnd,
+  }], 'unit-test');
+  Store.setSelectedPlant('KPI-DETACHED', 'unit-test');
+  const beforeCalendars = structuredClone(Store.calendars);
+  const beforePlants = structuredClone(Store.plants);
+
+  try {
+    OptimizerPreview.runWithPreview('spt', { plant: 'KPI-DETACHED', respectCalendar: false });
+
+    assert.ok(OptimizerPreview._candidate, 'the preview completes its detached KPI comparison');
+    assert.deepEqual(Store.calendars, beforeCalendars,
+      'KPI computation must not fill missing line calendars in Store before Apply');
+    assert.deepEqual(Store.plants, beforePlants,
+      'KPI computation must not fill missing plant calendars in Store before Apply');
+  } finally {
+    OptimizerPreview._clear();
+    Util.setUtilizationResolver(null);
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.replacePlants(priorPlants, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+    globalThis.NimbusComputeCore = priorCore;
+  }
+});
+
+test('OptimizerPreview keeps evaluation failures out of ErrorLog persistence', () => {
+  // Restoring ErrorLog.error() in the preview catch would persist an un-applied
+  // backlog candidate failure instead of retaining only ephemeral diagnostics.
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const beforeEntries = ErrorLog.entries();
+  const priorSave = ErrorLog._scheduleSave;
+  const priorShip = ErrorLog._scheduleShip;
+  let saveCalls = 0;
+  let shipCalls = 0;
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  ErrorLog._scheduleSave = () => { saveCalls++; };
+  ErrorLog._scheduleShip = () => { shipCalls++; };
+  Store.setMasterData({ plants: [{ plant: 'PREVIEW-FAIL' }], lines: [{ plant: 'PREVIEW-FAIL', production_line: 'FAIL-LINE' }] }, 'unit-test');
+  Store.setTasks([{ id: 'preview-fail', PLANT: 'PREVIEW-FAIL', PRODUCTION_LINE: 'FAIL-LINE', RUN_TIME: 1, start_date: new Date(), end_date: new Date() }], 'unit-test');
+  Store.setSelectedPlant('PREVIEW-FAIL', 'unit-test');
+
+  try {
+    OptimizerPreview.runWithPreview('backlog', { plant: 'PREVIEW-FAIL', respectCalendar: true });
+
+    assert.deepEqual(ErrorLog.entries(), beforeEntries,
+      'a preview evaluation failure must not enter the persistent error log');
+    assert.equal(saveCalls, 0, 'a preview evaluation failure must not schedule IndexedDB persistence');
+    assert.equal(shipCalls, 0, 'a preview evaluation failure must not schedule backend error shipping');
+    assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed',
+      'the failure remains structured in preview-local memory');
+  } finally {
+    OptimizerPreview._clear();
+    ErrorLog._entries = beforeEntries;
+    ErrorLog._scheduleSave = priorSave;
+    ErrorLog._scheduleShip = priorShip;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
     globalThis.requestAnimationFrame = priorRaf;
     globalThis.NIMBUS = priorNimbus;
