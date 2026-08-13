@@ -61,6 +61,16 @@ Correction verification:
 - `node --test tests/modules/locale-completeness.test.mjs` — 4 passed.
 - `.venv\\Scripts\\python.exe -m pytest tests/test_setup_endpoints.py -q` — 15 passed (existing deprecation/cache warnings only).
 
+## Pagination correction
+
+The setup line selector now follows `meta.total` through bounded
+`limit=100`/`offset=` requests for the selected plant. It never requests an
+unbounded catalog and stops defensively on an empty page. The focused UI test
+now pins multi-page collection (including a line beyond the first page).
+
+Verification: `npm run build` passed; `plant-and-administration` module tests
+passed 13/13; locale completeness passed 4/4.
+
 Running the two Node test files in one `node --test` command returned Windows
 `spawn EPERM`; each focused file succeeds independently. `NIMBUS_BUILD_ID` was
 not changed.

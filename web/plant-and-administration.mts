@@ -212,9 +212,24 @@ export const SetupAdmin = (() => {
     catch (error) { ErrorLog.warn('setup-admin', `Priority-field registry unavailable: ${(error as Error).message}`); }
   }
 
+  async function collectPagedLines(loadPage: (offset: number, limit: number) => Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>, pageSize = 100): Promise<string[]> {
+    const lines: string[] = []; let offset = 0; let total = Number.POSITIVE_INFINITY;
+    // Each request stays bounded. The server's filtered total controls
+    // continuation; an empty page is a defensive escape from a stale total.
+    while (offset < total) {
+      const page = await loadPage(offset, pageSize);
+      const rows = page.rows || [];
+      lines.push(...rows.map(row => row.production_line).filter(Boolean));
+      total = Number.isFinite(page.meta?.total) ? Math.max(0, Number(page.meta?.total)) : offset + rows.length;
+      offset += rows.length;
+      if (!rows.length) break;
+    }
+    return [...new Set(lines)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
   async function loadScopeLines(plant: string): Promise<void> {
     if (_linesByPlant[plant]) return;
-    try { const response = await Util.fetchTraced(`${API}/master-data/production_lines?plant=${encodeURIComponent(plant)}&limit=100&offset=0`); if (!response.ok) throw new Error(`HTTP ${response.status}`); const data = await response.json() as { rows?: Array<{ production_line: string }> }; _linesByPlant[plant] = (data.rows || []).map(row => row.production_line).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); }
+    try { _linesByPlant[plant] = await collectPagedLines(async (offset, limit) => { const response = await Util.fetchTraced(`${API}/master-data/production_lines?plant=${encodeURIComponent(plant)}&limit=${limit}&offset=${offset}`); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>; }); }
     catch (error) { ErrorLog.warn('setup-admin', `Plant line scope unavailable: ${(error as Error).message}`); _linesByPlant[plant] = []; }
   }
 
@@ -393,7 +408,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, registeredFields, parseLongFormCsv, render };
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, registeredFields, parseLongFormCsv, collectPagedLines, render };
 })();
 
 /* =============================================================================

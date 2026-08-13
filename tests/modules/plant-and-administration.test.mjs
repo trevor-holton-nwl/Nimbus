@@ -125,3 +125,17 @@ test('SetupAdmin reports pre-coverage activation truthfully until coverage is av
   const status = SetupAdmin.activationStatus({ active: false, signature_version: 4, fields: ['colorWheel'] }, { matrixVersion: 4 });
   assert.match(status.reason, /coverage has not been measured/i);
 });
+
+test('SetupAdmin loads every plant-line page without requesting an unbounded list', async () => {
+  // Regression target: the first 100 lines silently omitted every later line
+  // at scale, despite the server providing a paged total.
+  const calls = [];
+  const lines = await SetupAdmin.collectPagedLines(async (offset, limit) => {
+    calls.push({ offset, limit });
+    return offset === 0
+      ? { rows: [{ production_line: 'L-100' }, { production_line: 'L-001' }], meta: { total: 3 } }
+      : { rows: [{ production_line: 'L-250' }], meta: { total: 3 } };
+  }, 2);
+  assert.deepEqual(lines, ['L-001', 'L-100', 'L-250']);
+  assert.deepEqual(calls, [{ offset: 0, limit: 2 }, { offset: 2, limit: 2 }]);
+});
