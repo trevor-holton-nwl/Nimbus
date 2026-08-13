@@ -1085,6 +1085,103 @@ test('evaluateDueDateFirst keeps a caller-bounded high-occurrence exact search s
   assert.deepEqual(result.patches, []);
 });
 
+test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-state override', () => {
+  // This fails if boundary locking ignores a null predecessor_order_id: free
+  // RED then enters the pre-fixed fragment, breaks the persisted GREEN ->
+  // fixed BLUE adjacency, and makes the valid override look inactive.
+  const freeRed = scheduledTask('initial-override-free-red', 1, 'RED', '2026-08-03T09:00:00');
+  const fixedBlue = scheduledTask(
+    'initial-override-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    rows: [setupRow('BLUE', 'RED', 0)],
+    overrides: [{
+      id: 'initial-to-fixed-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: null, successor_order_id: 'initial-override-fixed-blue',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('BLUE'),
+      standard_min: 10, remaining_min: 10, status: 'active', reason: 'line is already staged for fixed run',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([freeRed, fixedBlue], { fixedIds: ['initial-override-fixed-blue'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.deepEqual(result.patches.map(patch => patch.id), ['initial-override-free-red'], `${label} moves free work after fixed`);
+    assert.equal(patchFor(result, 'initial-override-free-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+    assert.deepEqual(result.unchangedLines, []);
+    assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'fixed-incoming-setup'
+      && reason.taskId === 'initial-override-fixed-blue'
+      && reason.message.includes('10')
+    )), `${label} resolves the incoming fixed setup from the protected override`);
+  }
+});
+
+test('setup-aware evaluators reject invalid null-predecessor overrides on fixed boundaries', () => {
+  // This protects the new null-predecessor lock: it belongs only to the first
+  // fixed boundary and only when its predecessor state matches persisted line
+  // state. A later target or stale state must remain inactive, not reserve an
+  // unrelated fragment.
+  const firstFixed = scheduledTask(
+    'invalid-null-first-blue', 1, 'BLUE', null, '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const laterFixed = scheduledTask(
+    'invalid-null-later-yellow', 1, 'YELLOW', null, '2026-08-03T11:00:00', '2026-08-03T12:00:00',
+  );
+  const laterSetup = setupTruth({
+    rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0)],
+    overrides: [{
+      id: 'invalid-null-later', line: 'L1', signature_version: 1,
+      predecessor_order_id: null, successor_order_id: 'invalid-null-later-yellow',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('YELLOW'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'invalid later-boundary binding',
+    }],
+  });
+  const staleStateFixed = scheduledTask(
+    'invalid-null-state-blue', 1, 'BLUE', null, '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const staleStateSetup = setupTruth({
+    current: 'RED', rows: [setupRow('RED', 'BLUE', 0)],
+    overrides: [{
+      id: 'invalid-null-state', line: 'L1', signature_version: 1,
+      predecessor_order_id: null, successor_order_id: 'invalid-null-state-blue',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'stale initial-state binding',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    for (const [caseLabel, snapshot, setup] of [
+      [
+        'later fixed boundary',
+        setupSnapshot([firstFixed, laterFixed], { fixedIds: ['invalid-null-first-blue', 'invalid-null-later-yellow'] }),
+        laterSetup,
+      ],
+      [
+        'stale initial state',
+        setupSnapshot([staleStateFixed], { fixedIds: ['invalid-null-state-blue'] }),
+        staleStateSetup,
+      ],
+    ]) {
+      const result = evaluate(snapshot, dueDateBounds(setup));
+      assert.deepEqual(result.patches, [], `${label} ${caseLabel} makes no mutable candidate`);
+      assert.deepEqual(result.unchangedLines, ['L1']);
+      assert.ok(result.missingEdges.some(edge => edge.reason === 'override-inactive'));
+    }
+  }
+});
+
 test('evaluateSptWithSetup keeps an active free-order override pair contiguous over pure runtime order', () => {
   // This fails if the SPT path treats an active occurrence override as a
   // post-hoc validation instead of a hard physical adjacency constraint.

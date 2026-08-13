@@ -463,6 +463,9 @@ type FragmentMode = 'due-date-first' | 'spt';
 interface BoundaryOverrideLocks {
   requiredFirstOrderId?: string;
   requiredLastOrderId?: string;
+  /** A persisted current line state can bind directly to the first fixed
+   * order. In that case no free work may occupy the preceding fragment. */
+  requiresInitialState?: boolean;
   /** A fixed predecessor and successor can be a protected occurrence too. The
    * successor fragment must remain empty so no free production breaks that
    * physical adjacency. */
@@ -1649,6 +1652,7 @@ function boundaryOverrideLocks(
   line: string,
   fixed: ReadonlyArray<FixedBoundary>,
   free: ReadonlyArray<NimbusTask>,
+  initialState: SetupStateKey,
 ): ReadonlyMap<string, BoundaryOverrideLocks> {
   const definition = bounds.setup.definition!;
   const fixedById = new Map(fixed.map(boundary => [taskId(boundary.task), boundary]));
@@ -1674,6 +1678,22 @@ function boundaryOverrideLocks(
     }
     const successorFixed = fixedById.get(override.successor_order_id);
     const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
+
+    if (successorFixed && override.predecessor_order_id == null) {
+      const successorId = taskId(successorFixed.task);
+      const successorIndex = fixedIndexById.get(successorId);
+      const lock = lockFor(successorId);
+      if (successorIndex !== 0
+        || stateKey(override.predecessor_state_key) !== stateKey(initialState)
+        || stateKey(override.successor_state_key) !== stateKey(successorFixed.state)
+        || lock.requiredFixedPredecessorId
+        || lock.requiredLastOrderId) {
+        conflict(successorId, override.successor_order_id);
+      } else {
+        lock.requiresInitialState = true;
+      }
+      continue;
+    }
 
     if (predecessorFixed && successorFixed) {
       const predecessorId = taskId(predecessorFixed.task);
@@ -1704,7 +1724,8 @@ function boundaryOverrideLocks(
         continue;
       }
       const lock = lockFor(taskId(successorFixed.task));
-      if (lock.requiredFixedPredecessorId
+      if (lock.requiresInitialState
+        || lock.requiredFixedPredecessorId
         || (lock.requiredLastOrderId && lock.requiredLastOrderId !== taskId(predecessor))) {
         conflict(taskId(successorFixed.task), override.successor_order_id);
       } else {
@@ -1766,7 +1787,7 @@ function evaluateLineWithFixedBoundaries(
   fixed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
 
   const free = tasks.filter(task => !taskIsFixed(snapshot, task));
-  const locks = boundaryOverrideLocks(bounds, line, fixed, free);
+  const locks = boundaryOverrideLocks(bounds, line, fixed, free, initialState);
   const freeComponents = freeOverrideComponents(bounds, line, free);
   const freeById = new Map(free.map(task => [taskId(task), task]));
   let remaining = [...free];
@@ -1829,6 +1850,19 @@ function evaluateLineWithFixedBoundaries(
         }],
       );
     }
+    if (boundaryLock?.requiresInitialState && predecessorOrderId !== null) {
+      return unchangedLineResult(
+        line,
+        'override-inactive',
+        'An active occurrence override no longer has its persisted initial predecessor state.',
+        [{
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(boundary.task),
+          reason: 'override-inactive',
+        }],
+      );
+    }
 
     const reservedForAnotherBoundary = new Set<string>();
     for (let futureIndex = boundaryIndex; futureIndex < fixed.length; futureIndex += 1) {
@@ -1841,7 +1875,7 @@ function evaluateLineWithFixedBoundaries(
     if (requiredFirstOrderId) reservedForAnotherBoundary.delete(requiredFirstOrderId);
 
     let componentConflict: MissingSetupEdge | null = null;
-    const admitted = boundaryLock?.requiredFixedPredecessorId
+    const admitted = boundaryLock?.requiresInitialState || boundaryLock?.requiredFixedPredecessorId
       ? []
       : remaining.filter(task => {
         const id = taskId(task);
