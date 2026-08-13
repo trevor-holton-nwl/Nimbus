@@ -298,6 +298,25 @@ def delete_line_matrix_rows(plant, line, rows, signature_version, actor) -> dict
     return {"plant": plant, "line": line, "signature_version": signature_version, "deleted": deleted}
 
 
+def delete_plant_matrix_rows(plant, rows, signature_version, actor) -> dict:
+    """Delete specified plant-wide rows only; sparse line inheritance is untouched."""
+    plant = _required_text(plant, "Plant")
+    _required_text(actor, "Actor")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        definition = _require_definition(cur, plant, signature_version, lock=True)
+        normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
+        deleted = 0
+        for row in normalized:
+            cur.execute(
+                """DELETE FROM setup_matrix WHERE plant = %s AND line = '' AND signature_version = %s
+                   AND from_key = %s AND to_key = %s""",
+                (plant, signature_version, Jsonb(row["from_key"]), Jsonb(row["to_key"])),
+            )
+            deleted += cur.rowcount
+        conn.commit()
+    return {"plant": plant, "line": "", "signature_version": signature_version, "deleted": deleted}
+
+
 def _set_line_state_cur(cur, plant: str, line: str, state_key: list[dict[str, str]], signature_version: int,
                         observed_at: datetime, source: str, reason: str | None, actor: str,
                         physical_mold_id: str | None = None) -> bool:

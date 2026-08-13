@@ -577,11 +577,16 @@ _ADMIN_WRITE_OPERATIONS = {
     "/plant-calendar/line-hours": "calendar.line_hours_update",
     "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
     "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
+    "/setup/{plant}/definition": "setup.definition_write",
+    "/setup/{plant}/matrix/import": "setup.matrix_import",
+    "/setup/{plant}/matrix": "setup.matrix_delete",
+    "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
+    "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "table", "column", "object", "username"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "line", "override_id", "table", "column", "object", "username"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:
@@ -605,6 +610,39 @@ def _set_admin_log_details(request: Request, **details) -> None:
     current = getattr(request.state, "admin_log_details", {})
     current.update(details)
     request.state.admin_log_details = current
+
+
+def _setup_plant_guard(plant: str, allowed_plants: list[str] | None) -> None:
+    """Translate the shared plant scope choke point for setup routes."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _setup_error(exc: ValueError) -> HTTPException:
+    """Keep setup signature conflicts distinct from malformed request data."""
+    status = 409 if "signature version is stale" in str(exc).lower() else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _setup_freshness(result: dict) -> dict:
+    """Attach only a correlation token and current signature marker to responses."""
+    version = result.get("signature_version")
+    if version is None and isinstance(result.get("definition"), dict):
+        version = result["definition"].get("signature_version")
+    return {**result, "freshness": {"signature_version": version, "request_id": _current_rid()}}
+
+
+def _setup_observed_at(value) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("observed_at is required as an ISO datetime")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("observed_at is required as an ISO datetime") from exc
 
 
 def _warn(level, msg, **ctx):
@@ -2322,6 +2360,139 @@ def list_color_wheels(
     if limit is None and offset is None:
         return {"plants": plants}
     return {"plants": plants, "meta": {"total": total}}
+
+
+# =========================
+# SETUP MATRIX API — Stage 0 only: versioned observation/setup truth, never scheduling.
+# =========================
+
+@api.get("/setup/{plant}", dependencies=[Depends(auth.require_authenticated)])
+def get_setup(plant: str, request: Request,
+              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Return one authorized plant's complete setup snapshot, never a cross-plant aggregate."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return _setup_freshness(setup_data.get_setup_snapshot(plant))
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.put("/setup/{plant}/definition", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def save_setup_definition(plant: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_authenticated)):
+    """Master-data-owner write for a plant's ordered signature definition."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, field_count=len(body.get("fields", []))
+                           if isinstance(body.get("fields"), list) else 0)
+    try:
+        result = setup_data.save_definition(plant, body.get("fields"), body.get("strict_blanks"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"])
+    return _setup_freshness(result)
+
+
+@api.post("/setup/{plant}/matrix/import", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                         Depends(require_admin)])
+def import_setup_matrix(plant: str, request: Request, body: dict = Body(default={}),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                        actor: str = Depends(auth.require_authenticated)):
+    """Write canonical long-form plant rows or sparse rows for one owned line."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line", "")
+    rows = body.get("rows")
+    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    try:
+        if line:
+            result = setup_data.upsert_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        else:
+            result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], rows=result.get("rows", 0))
+    return _setup_freshness(result)
+
+
+@api.delete("/setup/{plant}/matrix", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(default={}),
+                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                             actor: str = Depends(auth.require_authenticated)):
+    """Delete only selected cells; a sparse line deletion exposes inherited plant truth."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line", "")
+    rows = body.get("rows")
+    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    try:
+        if line:
+            result = setup_data.delete_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        else:
+            result = setup_data.delete_plant_matrix_rows(plant, rows, body.get("signature_version"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], deleted=result.get("deleted", 0))
+    return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/lines/{line}/state", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def save_setup_line_state(plant: str, line: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_authenticated)):
+    """Authorized plant schedulers assert current physical state for an owned line."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, line=line)
+    try:
+        result = setup_data.set_line_state(
+            plant, line, body.get("values"), body.get("signature_version"),
+            _setup_observed_at(body.get("observed_at")), body.get("source"), body.get("reason"), actor,
+            body.get("physical_mold_id"),
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], accepted=result.get("accepted"))
+    return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def save_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                        actor: str = Depends(auth.require_authenticated)):
+    """Create/restate one occurrence-specific remaining-setup override for an owned line."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    try:
+        result = setup_data.upsert_occurrence_override(
+            plant, line, body.get("predecessor_order_id"), body.get("successor_order_id"),
+            body.get("predecessor_values"), body.get("successor_values"), body.get("standard_min"),
+            body.get("remaining_min"), body.get("signature_version"), body.get("reason"), actor,
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    # The stable URL id is an optimistic target supplied by the client; the service
+    # returns the persisted id so callers can reconcile a newly-created override.
+    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+                           persisted_override_id=result["id"])
+    return _setup_freshness(result)
+
+
+@api.delete("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def clear_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
+                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                         actor: str = Depends(auth.require_authenticated)):
+    """Clear an active occurrence override while retaining its audit reason and history."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    try:
+        result = setup_data.clear_occurrence_override(plant, line, override_id, actor, body.get("reason"))
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, line=result["line"], cleared=result["cleared"],
+                           signature_version=result.get("signature_version"))
+    return _setup_freshness(result)
 
 
 # =========================

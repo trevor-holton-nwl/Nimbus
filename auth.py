@@ -485,6 +485,20 @@ def _actor_email(request: Request) -> str | None:
     return raw.strip() if raw else None
 
 
+def require_authenticated(request: Request) -> str:
+    """Require a known user identity for mutable plant-scoped operations.
+
+    This deliberately has no bootstrap grace: setup state and standards are
+    operational truth, so an arbitrary spoofed-but-unknown header cannot write
+    them.  It remains the same temporary header-backed identity boundary used
+    by the rest of the pilot until Entra replaces ``_actor_email``.
+    """
+    email = _actor_email(request)
+    if not email or get_user_role(email) is None:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return email
+
+
 def require_admin(request: Request) -> str:
     """FastAPI dependency gating admin-only endpoints. Grace: open to
     anyone until the first admin user exists, so the bootstrap seed (or an
