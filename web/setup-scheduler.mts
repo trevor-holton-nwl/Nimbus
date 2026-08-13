@@ -463,6 +463,11 @@ type FragmentMode = 'due-date-first' | 'spt';
 interface BoundaryOverrideLocks {
   requiredFirstOrderId?: string;
   requiredLastOrderId?: string;
+  /** A fixed predecessor and successor can be a protected occurrence too. The
+   * successor fragment must remain empty so no free production breaks that
+   * physical adjacency. */
+  requiredFixedPredecessorId?: string;
+  requiredFixedSuccessorId?: string;
   issue?: MissingSetupEdge;
 }
 
@@ -981,13 +986,18 @@ function exactSearch(
       termination = 'deadline';
       return;
     }
-    if (budget.remainingIterations <= 0) {
-      termination = 'iteration-cap';
-      return;
-    }
     if (selected.length === totalTasks) {
+      // A zero-order fragment has no selected occurrence to charge as a
+      // traversal edge, but it still evaluates a fixed-boundary transition.
+      // Count it so fixed-only lines cannot evade the caller's run-wide cap.
+      if (totalTasks === 0) {
+        if (budget.remainingIterations <= 0) {
+          termination = 'iteration-cap';
+          return;
+        }
+        budget.remainingIterations -= 1;
+      }
       candidateCount += 1;
-      budget.remainingIterations -= 1;
       const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment);
       if (candidate.feasible && (!winner || compareCandidate(candidate, winner) < 0)) winner = candidate;
       if (!candidate.feasible) missingEdges.push(...candidate.missingEdges);
@@ -995,6 +1005,14 @@ function exactSearch(
     }
     for (let index = 0; index < groups.length; index += 1) {
       if (!remainingCounts[index] || termination !== 'completed') continue;
+      // Count every selected occurrence, not only completed permutations. A
+      // caller-supplied cap now bounds the recursion depth/work even when many
+      // orders share one setup state and the injected clock is fixed.
+      if (budget.remainingIterations <= 0) {
+        termination = 'iteration-cap';
+        return;
+      }
+      budget.remainingIterations -= 1;
       const taskIndex = groups[index].tasks.length - remainingCounts[index];
       remainingCounts[index] -= 1;
       selected.push(groups[index].tasks[taskIndex]);
@@ -1213,6 +1231,7 @@ function boundaryOverrideLocks(
 ): ReadonlyMap<string, BoundaryOverrideLocks> {
   const definition = bounds.setup.definition!;
   const fixedById = new Map(fixed.map(boundary => [taskId(boundary.task), boundary]));
+  const fixedIndexById = new Map(fixed.map((boundary, index) => [taskId(boundary.task), index]));
   const freeById = new Map(free.map(task => [taskId(task), task]));
   const locks = new Map<string, BoundaryOverrideLocks>();
 
@@ -1233,6 +1252,30 @@ function boundaryOverrideLocks(
       continue;
     }
     const successorFixed = fixedById.get(override.successor_order_id);
+    const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
+
+    if (predecessorFixed && successorFixed) {
+      const predecessorId = taskId(predecessorFixed.task);
+      const successorId = taskId(successorFixed.task);
+      const predecessorIndex = fixedIndexById.get(predecessorId);
+      const successorIndex = fixedIndexById.get(successorId);
+      const predecessorLock = lockFor(predecessorId);
+      const successorLock = lockFor(successorId);
+      if (predecessorIndex === undefined
+        || successorIndex !== predecessorIndex + 1
+        || predecessorLock.requiredFirstOrderId
+        || (predecessorLock.requiredFixedSuccessorId && predecessorLock.requiredFixedSuccessorId !== successorId)
+        || successorLock.requiredLastOrderId
+        || (successorLock.requiredFixedPredecessorId && successorLock.requiredFixedPredecessorId !== predecessorId)) {
+        conflict(predecessorId, override.successor_order_id);
+        conflict(successorId, override.successor_order_id);
+      } else {
+        predecessorLock.requiredFixedSuccessorId = successorId;
+        successorLock.requiredFixedPredecessorId = predecessorId;
+      }
+      continue;
+    }
+
     if (successorFixed && override.predecessor_order_id) {
       const predecessor = freeById.get(override.predecessor_order_id);
       if (!predecessor) {
@@ -1240,14 +1283,14 @@ function boundaryOverrideLocks(
         continue;
       }
       const lock = lockFor(taskId(successorFixed.task));
-      if (lock.requiredLastOrderId && lock.requiredLastOrderId !== taskId(predecessor)) {
+      if (lock.requiredFixedPredecessorId
+        || (lock.requiredLastOrderId && lock.requiredLastOrderId !== taskId(predecessor))) {
         conflict(taskId(successorFixed.task), override.successor_order_id);
       } else {
         lock.requiredLastOrderId = taskId(predecessor);
       }
     }
 
-    const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
     if (predecessorFixed) {
       const successor = freeById.get(override.successor_order_id);
       if (!successor) {
@@ -1255,7 +1298,8 @@ function boundaryOverrideLocks(
         continue;
       }
       const lock = lockFor(taskId(predecessorFixed.task));
-      if (lock.requiredFirstOrderId && lock.requiredFirstOrderId !== taskId(successor)) {
+      if (lock.requiredFixedSuccessorId
+        || (lock.requiredFirstOrderId && lock.requiredFirstOrderId !== taskId(successor))) {
         conflict(taskId(predecessorFixed.task), override.successor_order_id);
       } else {
         lock.requiredFirstOrderId = taskId(successor);
@@ -1267,8 +1311,10 @@ function boundaryOverrideLocks(
 
 function belongsBeforeFixedBoundary(task: NimbusTask, boundary: FixedBoundary, mode: FragmentMode): boolean {
   if (mode === 'due-date-first') return dueTimestamp(task) <= boundary.start.getTime();
-  const plannedEnd = timestamp(task.end_date);
-  return !!plannedEnd && plannedEnd <= boundary.start;
+  // Pure SPT is ordered only by productive runtime. A stale or null planned
+  // date must not pre-partition work behind the next fixed order; bounded
+  // fragment placement decides what capacity can actually be admitted first.
+  return true;
 }
 
 function evaluateLineWithFixedBoundaries(
@@ -1342,8 +1388,22 @@ function evaluateLineWithFixedBoundaries(
       return unchangedLineResult(
         line,
         'override-inactive',
-        'An active occurrence override cannot bind a free order across this fixed boundary.',
+        'An active occurrence override cannot be preserved at this fixed boundary.',
         [boundaryLock.issue],
+      );
+    }
+    if (boundaryLock?.requiredFixedPredecessorId
+      && predecessorOrderId !== boundaryLock.requiredFixedPredecessorId) {
+      return unchangedLineResult(
+        line,
+        'override-inactive',
+        'An active occurrence override no longer has its bound fixed predecessor.',
+        [{
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(boundary.task),
+          reason: 'override-inactive',
+        }],
       );
     }
 
@@ -1357,12 +1417,14 @@ function evaluateLineWithFixedBoundaries(
     }
     if (requiredFirstOrderId) reservedForAnotherBoundary.delete(requiredFirstOrderId);
 
-    const admitted = remaining.filter(task => {
-      const id = taskId(task);
-      if (id === requiredFirstOrderId || id === boundaryLock?.requiredLastOrderId) return true;
-      if (reservedForAnotherBoundary.has(id)) return false;
-      return belongsBeforeFixedBoundary(task, boundary, mode);
-    });
+    const admitted = boundaryLock?.requiredFixedPredecessorId
+      ? []
+      : remaining.filter(task => {
+        const id = taskId(task);
+        if (id === requiredFirstOrderId || id === boundaryLock?.requiredLastOrderId) return true;
+        if (reservedForAnotherBoundary.has(id)) return false;
+        return belongsBeforeFixedBoundary(task, boundary, mode);
+      });
     const admittedIds = new Set(admitted.map(taskId));
     const later = remaining.filter(task => !admittedIds.has(taskId(task)));
     const run = searchFragment(snapshot, bounds, line, admitted, {

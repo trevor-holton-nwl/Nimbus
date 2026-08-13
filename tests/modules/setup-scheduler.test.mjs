@@ -587,7 +587,7 @@ test('evaluateDueDateFirst is deterministic, eliminates duplicate state-group ca
   }
   const capped = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot(cappedTasks),
-    dueDateBounds(setupTruth({ rows: allEdges }), { iterationCap: 1 }),
+    dueDateBounds(setupTruth({ rows: allEdges }), { iterationCap: 3 }),
   );
   assert.equal(capped.diagnostics.candidateCount, 1);
   assert.equal(capped.diagnostics.termination, 'iteration-cap');
@@ -600,6 +600,43 @@ test('evaluateDueDateFirst is deterministic, eliminates duplicate state-group ca
   assert.equal(expired.diagnostics.termination, 'deadline');
   assert.equal(expired.diagnostics.limitReached, true);
   assert.deepEqual(expired.unchangedLines, ['L1']);
+});
+
+test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap same-state search can recurse deeply', () => {
+  // This fails if the cap is consumed only at completed leaves: one state group
+  // with many ordered occurrences can then recurse through every task even
+  // though the caller supplied a deliberately tiny bound and a fixed clock.
+  const manyRed = Array.from({ length: 10 }, (_, index) => (
+    scheduledTask(`traversal-red-${index}`, 0.5, 'RED', `2026-08-03T${10 + index}:00:00`)
+  ));
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0)] });
+  let lowCapClockCalls = 0;
+  const fixedClock = () => {
+    lowCapClockCalls += 1;
+    return 0;
+  };
+
+  const lowCap = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot(manyRed),
+    dueDateBounds(setup, { exactSearchThreshold: 1, iterationCap: 2, clock: fixedClock }),
+  );
+
+  assert.equal(lowCap.diagnostics.termination, 'iteration-cap');
+  assert.equal(lowCap.diagnostics.limitReached, true);
+  assert.equal(lowCap.diagnostics.candidateCount, 0,
+    'two bounded occurrence expansions cannot reach a ten-order leaf');
+  assert.ok(lowCapClockCalls <= 5,
+    'the fixed clock observes only the bounded path, not ten recursive occurrence visits');
+
+  const enoughCap = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot(manyRed),
+    dueDateBounds(setup, { exactSearchThreshold: 1, iterationCap: manyRed.length }),
+  );
+
+  assert.equal(enoughCap.diagnostics.termination, 'completed');
+  assert.equal(enoughCap.diagnostics.candidateCount, 1);
+  assert.equal(enoughCap.patches.length, manyRed.length,
+    'a caller that supplies enough explicit search work still receives the useful deterministic candidate');
 });
 
 test('evaluateDueDateFirst applies its caller iteration cap across every line in one candidate run', () => {
@@ -747,7 +784,8 @@ test('evaluateSptWithSetup solves free fragments around a fixed order without ch
   const longer = scheduledTask('spt-fixed-long-yellow', 2, 'YELLOW', null);
   const shorter = scheduledTask('spt-fixed-short-red', 1, 'RED', null);
   const setup = setupTruth({ rows: [
-    setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('RED', 'YELLOW', 0),
+    setupRow('GREEN', 'BLUE', 0), setupRow('GREEN', 'RED', 0), setupRow('BLUE', 'RED', 0), setupRow('RED', 'BLUE', 0),
+    setupRow('BLUE', 'YELLOW', 0), setupRow('RED', 'YELLOW', 0),
   ] });
 
   const result = SetupScheduler.evaluateSptWithSetup(
@@ -756,7 +794,36 @@ test('evaluateSptWithSetup solves free fragments around a fixed order without ch
   );
 
   assert.deepEqual(result.patches.map(patch => patch.id), ['spt-fixed-short-red', 'spt-fixed-long-yellow']);
-  assert.equal(patchFor(result, 'spt-fixed-short-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.equal(patchFor(result, 'spt-fixed-short-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('evaluateSptWithSetup admits unscheduled short-runtime work before a fixed boundary before carrying the remainder', () => {
+  // This fails if SPT decides a free task belongs after a fixed boundary from
+  // its stale/null planned end instead of its pure productive-runtime sequence
+  // and the actual available capacity in the preceding fragment.
+  const fixed = scheduledTask(
+    'spt-pre-fixed-blue', 1, 'BLUE', null, '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const short = scheduledTask('spt-pre-fixed-short-red', 0.5, 'RED', null);
+  const medium = scheduledTask('spt-pre-fixed-medium-yellow', 0.75, 'YELLOW', null);
+  const long = scheduledTask('spt-pre-fixed-long-red', 1, 'RED', null);
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('RED', 'YELLOW', 0), setupRow('YELLOW', 'BLUE', 0),
+    setupRow('YELLOW', 'RED', 0), setupRow('BLUE', 'RED', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateSptWithSetup(
+    setupSnapshot([long, fixed, medium, short], { fixedIds: ['spt-pre-fixed-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), [
+    'spt-pre-fixed-short-red', 'spt-pre-fixed-medium-yellow', 'spt-pre-fixed-long-red',
+  ]);
+  assert.equal(patchFor(result, 'spt-pre-fixed-short-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.equal(patchFor(result, 'spt-pre-fixed-medium-yellow').changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime());
+  assert.equal(patchFor(result, 'spt-pre-fixed-long-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
   assert.deepEqual(result.unchangedLines, []);
 });
 
@@ -804,6 +871,40 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
 
   assert.equal(patchFor(afterResult, 'override-after-fixed-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
   assert.deepEqual(afterResult.unchangedLines, []);
+});
+
+test('evaluateDueDateFirst honors an active override already bound between adjacent fixed orders', () => {
+  // This fails if fixed -> fixed is treated as an inactive binding merely
+  // because neither endpoint is free. The protected physical adjacency already
+  // exists and its override must resolve the incoming transition to the second
+  // fixed order without emitting override-inactive.
+  const fixedRed = scheduledTask(
+    'override-fixed-red', 1, 'RED', null, '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const fixedBlue = scheduledTask(
+    'override-fixed-blue', 1, 'BLUE', null, '2026-08-03T09:10:00', '2026-08-03T10:10:00',
+  );
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'RED', 0)],
+    overrides: [{
+      id: 'override-fixed-to-fixed', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'override-fixed-red', successor_order_id: 'override-fixed-blue',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 10, remaining_min: 10, status: 'active', reason: 'protected fixed adjacency',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([fixedBlue, fixedRed], { fixedIds: ['override-fixed-red', 'override-fixed-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'fixed-incoming-setup' && reason.taskId === 'override-fixed-blue' && reason.message.includes('10')
+  )), 'the bound override must resolve the transition into the second fixed production run');
 });
 
 test('evaluateDueDateFirst admits a feasible pre-fixed due prefix and carries the remainder past the boundary', () => {
