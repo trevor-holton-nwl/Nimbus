@@ -474,6 +474,15 @@ interface BoundaryOverrideLocks {
   issue?: MissingSetupEdge;
 }
 
+/** A persisted initial state can itself be the protected predecessor of a
+ * free order. Unlike an ordinary free/free pair, that successor must be the
+ * very first physical order in the plan and therefore belongs before the
+ * first fixed boundary even when its due date is later. */
+interface InitialFreeOverrideLock {
+  requiredFirstOrderId?: string;
+  issue?: MissingSetupEdge;
+}
+
 /** Active occurrence overrides are physical adjacency constraints, not merely
  * a preferred setup-duration lookup. These maps only contain pairs whose two
  * free orders belong to the fragment currently being searched; fixed-boundary
@@ -639,6 +648,76 @@ function inactiveOverrideEdge(
   successorOrderId: string | null | undefined,
 ): MissingSetupEdge {
   return { line, predecessorOrderId, successorOrderId, reason: 'override-inactive' };
+}
+
+/** A deleted successor cannot participate in any later fragment lookup, so
+ * detect it from the immutable line snapshot once and retain an auditable
+ * inactive-binding diagnostic while allowing unrelated work to continue. */
+function missingSuccessorOverrideEdges(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+): MissingSetupEdge[] {
+  const definition = bounds.setup.definition!;
+  const presentIds = new Set(tasks.map(taskId));
+  return bounds.setup.overrides.flatMap(override => {
+    if (override.status !== 'active'
+      || override.line !== line
+      || override.signature_version !== definition.signature_version) {
+      return [];
+    }
+    const successorOrderId = String(override.successor_order_id);
+    if (presentIds.has(successorOrderId)) return [];
+    return [inactiveOverrideEdge(line, override.predecessor_order_id, successorOrderId)];
+  });
+}
+
+function missingSuccessorOverrideReasons(
+  line: string,
+  edges: ReadonlyArray<MissingSetupEdge>,
+): CandidateReason[] {
+  return edges.map(edge => ({
+    code: 'override-inactive',
+    message: `Active override successor ${edge.successorOrderId ?? 'unknown'} is no longer on this line.`,
+    line,
+    taskId: edge.successorOrderId ?? undefined,
+  }));
+}
+
+function initialFreeOverrideLock(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  free: ReadonlyArray<NimbusTask>,
+  initialState: SetupStateKey,
+): InitialFreeOverrideLock {
+  const definition = bounds.setup.definition!;
+  const freeById = new Map(free.map(task => [taskId(task), task]));
+  let requiredFirstOrderId: string | undefined;
+  let issue: MissingSetupEdge | undefined;
+
+  for (const override of bounds.setup.overrides) {
+    if (override.status !== 'active'
+      || override.line !== line
+      || override.signature_version !== definition.signature_version
+      || override.predecessor_order_id !== null) {
+      continue;
+    }
+    const successorOrderId = String(override.successor_order_id);
+    const successor = freeById.get(successorOrderId);
+    // Fixed successors are validated by boundaryOverrideLocks. A missing
+    // successor has already been diagnosed without freezing this line.
+    if (!successor) continue;
+    const successorState = stateForOrder(successor, definition);
+    if (!successorState
+      || stateKey(initialState) !== stateKey(override.predecessor_state_key)
+      || stateKey(successorState) !== stateKey(override.successor_state_key)
+      || (requiredFirstOrderId && requiredFirstOrderId !== successorOrderId)) {
+      issue ??= inactiveOverrideEdge(line, null, successorOrderId);
+      continue;
+    }
+    requiredFirstOrderId = successorOrderId;
+  }
+  return { requiredFirstOrderId, issue };
 }
 
 /** Extract only fragment-local active overrides. A non-local free/fixed pair
@@ -1647,6 +1726,19 @@ function initialStateForLine(
   };
 }
 
+/** Compatibility is snapshot-owned setup truth. An absent field intentionally
+ * retains the legacy compatible behavior so older cached master-data payloads
+ * cannot silently exclude a line. */
+function setupCompatibilityForLine(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string,
+): { reason: string | null } | null {
+  const masterLine = snapshot.masterData?.lines.find(candidate => (
+    candidate.plant === plant && candidate.production_line === line
+  ));
+  if (masterLine?.setup_compatible !== false) return null;
+  return { reason: masterLine.setup_compatibility_reason ?? null };
+}
+
 function boundaryOverrideLocks(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
@@ -1736,6 +1828,9 @@ function boundaryOverrideLocks(
     if (predecessorFixed) {
       const successor = freeById.get(override.successor_order_id);
       if (!successor) {
+        // A removed successor is reported by missingSuccessorOverrideEdges;
+        // it does not justify freezing unrelated remaining work on the line.
+        if (!fixedById.has(override.successor_order_id)) continue;
         conflict(taskId(predecessorFixed.task), override.successor_order_id);
         continue;
       }
@@ -1769,6 +1864,7 @@ function evaluateLineWithFixedBoundaries(
   mode: FragmentMode = 'due-date-first',
 ): LineSearchResult {
   const definition = bounds.setup.definition!;
+  const missingSuccessorEdges = missingSuccessorOverrideEdges(bounds, line, tasks);
   const fixed: FixedBoundary[] = [];
   for (const task of tasks.filter(task => taskIsFixed(snapshot, task))) {
     const start = timestamp(task.start_date);
@@ -1779,7 +1875,7 @@ function evaluateLineWithFixedBoundaries(
         line,
         'fixed-boundary-invalid',
         'A fixed order lacks a usable interval or setup state.',
-        [{ line, successorOrderId: taskId(task), reason: 'fixed-boundary-invalid' }],
+        [...missingSuccessorEdges, { line, successorOrderId: taskId(task), reason: 'fixed-boundary-invalid' }],
       );
     }
     fixed.push({ task, state, start, end });
@@ -1788,17 +1884,39 @@ function evaluateLineWithFixedBoundaries(
 
   const free = tasks.filter(task => !taskIsFixed(snapshot, task));
   const locks = boundaryOverrideLocks(bounds, line, fixed, free, initialState);
+  const initialFreeLock = initialFreeOverrideLock(bounds, line, free, initialState);
+  if (initialFreeLock.issue) {
+    return unchangedLineResult(
+      line,
+      'override-inactive',
+      'An active occurrence override no longer matches the persisted initial state.',
+      [...missingSuccessorEdges, initialFreeLock.issue],
+    );
+  }
+  if (initialFreeLock.requiredFirstOrderId
+    && fixed.length
+    && locks.get(taskId(fixed[0].task))?.requiresInitialState) {
+    return unchangedLineResult(
+      line,
+      'override-inactive',
+      'Multiple active overrides claim the persisted initial state.',
+      [
+        ...missingSuccessorEdges,
+        inactiveOverrideEdge(line, null, initialFreeLock.requiredFirstOrderId),
+      ],
+    );
+  }
   const freeComponents = freeOverrideComponents(bounds, line, free);
   const freeById = new Map(free.map(task => [taskId(task), task]));
   let remaining = [...free];
   let fragmentStart = new Date(bounds.now);
   let predecessorState = initialState;
   let predecessorOrderId: string | null = null;
-  let requiredFirstOrderId: string | undefined;
+  let requiredFirstOrderId: string | undefined = initialFreeLock.requiredFirstOrderId;
   const patches: SchedulePatch[] = [];
   const score = [0, 0, 0, 0, 0, 0];
-  const explanation: CandidateReason[] = [];
-  const missingEdges: MissingSetupEdge[] = [];
+  const explanation: CandidateReason[] = missingSuccessorOverrideReasons(line, missingSuccessorEdges);
+  const missingEdges: MissingSetupEdge[] = [...missingSuccessorEdges];
   let candidateCount = 0;
   let method: LineSearchResult['method'] = 'due-date-first-exact';
   let termination: SearchRun['termination'] = 'completed';
@@ -1945,7 +2063,23 @@ function evaluateLineWithFixedBoundaries(
     predecessorOrderId,
     requiredFirstOrderId,
   }, budget, mode);
-  if (!accept(trailing)) {
+  const trailingWinner = accept(trailing);
+  if (!trailingWinner || trailingWinner.unadmitted.length) {
+    if (trailingWinner?.unadmitted.length) {
+      const firstUnadmitted = trailingWinner.unadmitted[0];
+      missingEdges.push({
+        line,
+        predecessorOrderId,
+        successorOrderId: taskId(firstUnadmitted),
+        reason: 'trailing-fragment-unadmitted',
+      });
+      explanation.push({
+        code: 'trailing-fragment-unadmitted',
+        message: 'Terminal capacity cannot safely apply a partial candidate; the line remains unchanged.',
+        line,
+        taskId: taskId(firstUnadmitted),
+      });
+    }
     const incompatible = missingEdges.some(edge => edge.reason === 'successor-state-unknown');
     explanation.push(incompatible
       ? { code: 'setup-incompatible', message: 'Line has an order without a complete setup state.', line }
@@ -2013,10 +2147,27 @@ export function evaluateSptWithSetup(
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       continue;
     }
+    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
+    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
+    const compatibility = setupCompatibilityForLine(snapshot, plant, line);
+    if (compatibility) {
+      unchangedLines.push(line);
+      missingEdges.push(...missingSuccessorEdgesForLine, { line, reason: 'setup-compatibility-disabled' });
+      explanation.push(...missingSuccessorReasonsForLine);
+      explanation.push({
+        code: 'setup-incompatible',
+        message: compatibility.reason
+          ? `This line is marked incompatible with the active setup signature: ${compatibility.reason}`
+          : 'This line is marked incompatible with the active setup signature.',
+        line,
+      });
+      continue;
+    }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
     if (!initial.state) {
       unchangedLines.push(line);
-      missingEdges.push({ line, predecessorOrderId: null, reason: initial.reason });
+      missingEdges.push(...missingSuccessorEdgesForLine, { line, predecessorOrderId: null, reason: initial.reason });
+      explanation.push(...missingSuccessorReasonsForLine);
       explanation.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'
@@ -2100,10 +2251,27 @@ export function evaluateDueDateFirst(
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       continue;
     }
+    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
+    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
+    const compatibility = setupCompatibilityForLine(snapshot, plant, line);
+    if (compatibility) {
+      unchangedLines.push(line);
+      missingEdges.push(...missingSuccessorEdgesForLine, { line, reason: 'setup-compatibility-disabled' });
+      explanation.push(...missingSuccessorReasonsForLine);
+      explanation.push({
+        code: 'setup-incompatible',
+        message: compatibility.reason
+          ? `This line is marked incompatible with the active setup signature: ${compatibility.reason}`
+          : 'This line is marked incompatible with the active setup signature.',
+        line,
+      });
+      continue;
+    }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
     if (!initial.state) {
       unchangedLines.push(line);
-      missingEdges.push({ line, predecessorOrderId: null, reason: initial.reason });
+      missingEdges.push(...missingSuccessorEdgesForLine, { line, predecessorOrderId: null, reason: initial.reason });
+      explanation.push(...missingSuccessorReasonsForLine);
       explanation.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'

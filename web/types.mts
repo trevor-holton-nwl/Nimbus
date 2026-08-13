@@ -127,6 +127,11 @@ export interface NimbusMasterLine {
   production_line: string;
   plant: string;
   pl_group?: string;
+  /** A line that cannot safely use the plant's active setup signature must
+   * opt out of detached setup-aware evaluation. Omitted preserves the legacy
+   * compatible behavior for cached/current snapshots. */
+  setup_compatible?: boolean;
+  setup_compatibility_reason?: string | null;
 }
 
 export interface ConstraintConfig {

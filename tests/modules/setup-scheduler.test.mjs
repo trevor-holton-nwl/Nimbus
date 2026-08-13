@@ -1182,6 +1182,241 @@ test('setup-aware evaluators reject invalid null-predecessor overrides on fixed 
   }
 });
 
+test('setup-aware evaluators admit an initial-state free override and its protected component before a later fixed boundary', () => {
+  // This fails if Due-date-first partitions free work only by due date: a
+  // valid persisted GREEN -> RED override with RED due after the fixed run
+  // must still make RED the first physical free order, carrying RED -> BLUE
+  // with it and never inserting unrelated YELLOW before RED.
+  const red = scheduledTask('initial-free-red', 0.5, 'RED', '2026-08-03T12:00:00');
+  const blue = scheduledTask('initial-free-blue', 0.5, 'BLUE', '2026-08-03T12:30:00');
+  const yellow = scheduledTask('initial-free-unrelated-yellow', 0.5, 'YELLOW', '2026-08-03T08:30:00');
+  const fixed = scheduledTask(
+    'initial-free-fixed-yellow', 1, 'YELLOW', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    rows: [setupRow('BLUE', 'YELLOW', 0), setupRow('GREEN', 'YELLOW', 0)],
+    overrides: [
+      {
+        id: 'initial-free-override', line: 'L1', signature_version: 1,
+        predecessor_order_id: null, successor_order_id: 'initial-free-red',
+        predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'line is staged for red',
+      },
+      {
+        id: 'initial-free-component-override', line: 'L1', signature_version: 1,
+        predecessor_order_id: 'initial-free-red', successor_order_id: 'initial-free-blue',
+        predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'red and blue are one physical setup occurrence',
+      },
+    ],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([yellow, fixed, blue, red], { fixedIds: ['initial-free-fixed-yellow'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.deepEqual(result.patches.map(patch => patch.id), [
+      'initial-free-red', 'initial-free-blue', 'initial-free-unrelated-yellow',
+    ], `${label} preserves the initial physical adjacency before the fixed run`);
+    assert.equal(patchFor(result, 'initial-free-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+    assert.equal(patchFor(result, 'initial-free-blue').changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime());
+    assert.equal(patchFor(result, 'initial-free-unrelated-yellow').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime());
+    assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false);
+  }
+});
+
+test('setup-aware evaluators leave an initial-state free override unchanged when its protected component cannot fit before fixed work', () => {
+  // This fails if a solver emits RED alone, defers BLUE through a fixed run,
+  // or otherwise breaks an initial-state protected component when there is not
+  // enough pre-fixed capacity for the whole physical adjacency.
+  const red = scheduledTask('initial-free-tight-red', 1, 'RED', '2026-08-03T12:00:00');
+  const blue = scheduledTask('initial-free-tight-blue', 1, 'BLUE', '2026-08-03T12:30:00');
+  const fixed = scheduledTask(
+    'initial-free-tight-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const setup = setupTruth({
+    rows: [setupRow('BLUE', 'YELLOW', 0)],
+    overrides: [
+      {
+        id: 'initial-free-tight-override', line: 'L1', signature_version: 1,
+        predecessor_order_id: null, successor_order_id: 'initial-free-tight-red',
+        predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'line is staged for red',
+      },
+      {
+        id: 'initial-free-tight-component', line: 'L1', signature_version: 1,
+        predecessor_order_id: 'initial-free-tight-red', successor_order_id: 'initial-free-tight-blue',
+        predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'red and blue are one occurrence',
+      },
+    ],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([blue, fixed, red], { fixedIds: ['initial-free-tight-fixed-yellow'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.deepEqual(result.patches, [], `${label} does not emit a partial protected component`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+  }
+});
+
+test('setup-aware evaluators discard all line patches when trailing capacity leaves work unadmitted', () => {
+  // This fails if the final fragment emits a new patch for one order while a
+  // later old schedule remains in place and overlaps it. It also proves that
+  // a pre-fixed patch cannot escape after terminal capacity rejection.
+  const before = scheduledTask('terminal-before-red', 1, 'RED', '2026-08-03T09:00:00');
+  const fixed = scheduledTask(
+    'terminal-fixed-blue', 1, 'BLUE', '2026-08-03T10:30:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const firstTrailing = scheduledTask('terminal-first-yellow', 1, 'YELLOW', '2026-08-03T11:30:00');
+  const oldOverlap = scheduledTask(
+    'terminal-old-overlap-red', 1, 'RED', '2026-08-03T12:00:00',
+    '2026-08-03T11:30:00', '2026-08-03T12:30:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+    setupRow('BLUE', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0), setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([oldOverlap, fixed, firstTrailing, before], { fixedIds: ['terminal-fixed-blue'] }),
+      dueDateBounds(setup, { horizonEnd: at('2026-08-03T12:00:00') }),
+    );
+
+    assert.deepEqual(result.patches, [], `${label} must not publish a trailing partial candidate`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    if (label === 'Due-date-first') {
+      assert.ok(result.explanation.some(reason => reason.code === 'trailing-fragment-unadmitted'));
+    }
+  }
+});
+
+test('setup-aware evaluators exclude an explicitly incompatible snapshot line without blocking a compatible line', () => {
+  // This fails if setup_compatible=false is ignored, read from live state, or
+  // allowed to consume detached candidate work before the compatible L2 line.
+  const incompatible = scheduledTask('compatibility-disabled-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const compatible = {
+    ...scheduledTask('compatibility-enabled-blue', 1, 'BLUE', '2026-08-03T10:00:00'),
+    PRODUCTION_LINE: 'L2',
+  };
+  const snapshot = setupSnapshot([incompatible, compatible]);
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1' }],
+    lines: [
+      {
+        plant: 'P1', production_line: 'L1', setup_compatible: false,
+        setup_compatibility_reason: 'Tooling signature differs on this line',
+      },
+      { plant: 'P1', production_line: 'L2' },
+    ],
+  };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  setup.line_states.push({
+    line: 'L2', state_key: setupState('GREEN'), signature_version: 1,
+    source: 'manual', reason: 'compatible second-line state',
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(snapshot, dueDateBounds(setup));
+
+    assert.deepEqual(result.patches.map(patch => patch.id), ['compatibility-enabled-blue'], `${label} still evaluates L2`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.line === 'L1' && edge.reason === 'setup-compatibility-disabled'
+    )));
+    assert.ok(result.explanation.some(reason => (
+      reason.line === 'L1'
+      && reason.code === 'setup-incompatible'
+      && reason.message.includes('Tooling signature differs on this line')
+    )));
+  }
+});
+
+test('evaluateDueDateFirst reports an active override whose successor no longer exists while scheduling unrelated work', () => {
+  // This fails if an active binding to a deleted successor silently vanishes.
+  // It must be inspectable as inactive without freezing unrelated remaining
+  // work on the same line.
+  const predecessor = scheduledTask('missing-successor-predecessor-red', 1, 'RED', '2026-08-03T09:00:00');
+  const unrelated = scheduledTask('missing-successor-unrelated-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0)],
+    overrides: [{
+      id: 'missing-successor-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'missing-successor-predecessor-red', successor_order_id: 'deleted-successor-blue',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'the successor was removed from this line',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([unrelated, predecessor]),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), [
+    'missing-successor-predecessor-red', 'missing-successor-unrelated-blue',
+  ]);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.missingEdges.some(edge => (
+    edge.line === 'L1'
+    && edge.predecessorOrderId === 'missing-successor-predecessor-red'
+    && edge.successorOrderId === 'deleted-successor-blue'
+    && edge.reason === 'override-inactive'
+  )));
+  assert.ok(result.explanation.some(reason => (
+    reason.line === 'L1' && reason.code === 'override-inactive' && reason.taskId === 'deleted-successor-blue'
+  )));
+});
+
+test('evaluateDueDateFirst retains a missing-successor override diagnostic when current line state is unavailable', () => {
+  // This fails if the early initial-state guard exits before surfacing an
+  // active override whose successor was deleted from the immutable line
+  // snapshot. The line remains unchanged, but the binding cannot disappear.
+  const remaining = scheduledTask('missing-successor-no-state-red', 1, 'RED', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    current: null,
+    overrides: [{
+      id: 'missing-successor-no-state-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'missing-successor-no-state-red', successor_order_id: 'deleted-successor-no-state-blue',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'the successor was removed from this line',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([remaining]), dueDateBounds(setup));
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.ok(result.missingEdges.some(edge => (
+    edge.successorOrderId === 'deleted-successor-no-state-blue' && edge.reason === 'override-inactive'
+  )));
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'override-inactive' && reason.taskId === 'deleted-successor-no-state-blue'
+  )));
+});
+
 test('evaluateSptWithSetup keeps an active free-order override pair contiguous over pure runtime order', () => {
   // This fails if the SPT path treats an active occurrence override as a
   // post-hoc validation instead of a hard physical adjacency constraint.
