@@ -962,3 +962,152 @@ test('setup-aware evaluators exclude signature-incompatible line state without b
   assert.deepEqual(result.unchangedLines, ['L1']);
   assert.ok(result.missingEdges.some(edge => edge.reason === 'signature-incompatible'));
 });
+
+test('evaluateDueDateFirst treats a same-state active override as an exact pair despite due inversion', () => {
+  // This fails if the one-state group's normal due ordering is treated as
+  // immutable: the active predecessor -> successor occurrence must remain
+  // physically adjacent even though the successor's due date is earlier.
+  const predecessor = scheduledTask('same-state-predecessor', 1, 'RED', '2026-08-03T12:00:00');
+  const successor = scheduledTask('same-state-successor', 1, 'RED', '2026-08-03T09:00:00');
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'RED', 0)],
+    overrides: [{
+      id: 'same-state-active-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'same-state-predecessor', successor_order_id: 'same-state-successor',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('RED'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected same-state occurrence',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([successor, predecessor]),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), ['same-state-predecessor', 'same-state-successor']);
+  assert.deepEqual(result.unchangedLines, []);
+
+  const greedyResult = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([successor, predecessor]),
+    dueDateBounds(setup, { exactSearchThreshold: 0 }),
+  );
+  assert.equal(greedyResult.diagnostics.method, 'due-date-first-greedy');
+  assert.deepEqual(greedyResult.patches.map(patch => patch.id), ['same-state-predecessor', 'same-state-successor']);
+});
+
+test('evaluateDueDateFirst rejects an orphaned protected predecessor when its successor cannot fit', () => {
+  // This fails if a capacity-bound fragment emits the override's predecessor
+  // then silently defers its successor, breaking the protected physical pair.
+  const predecessor = scheduledTask('capacity-pair-predecessor', 1, 'RED', '2026-08-03T09:00:00');
+  const successor = scheduledTask('capacity-pair-successor', 1, 'BLUE', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+      setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    ],
+    overrides: [{
+      id: 'capacity-pair-active-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'capacity-pair-predecessor', successor_order_id: 'capacity-pair-successor',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected capacity-bound occurrence',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([predecessor, successor]),
+    dueDateBounds(setup, { horizonEnd: at('2026-08-03T09:30:00') }),
+  );
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.ok(result.missingEdges.some(edge => (
+    edge.successorOrderId === 'capacity-pair-successor' && edge.reason === 'override-inactive'
+  )));
+});
+
+test('evaluateDueDateFirst keeps a free active override pair on one side of a fixed boundary', () => {
+  // This fails if due-based fragment partitioning puts the protected
+  // predecessor before fixed work and its successor after it. The pair must
+  // move together so no fixed production breaks their physical adjacency.
+  const predecessor = scheduledTask('cross-boundary-pair-predecessor', 0.5, 'RED', '2026-08-03T09:00:00');
+  const successor = scheduledTask('cross-boundary-pair-successor', 0.5, 'BLUE', '2026-08-03T12:00:00');
+  const fixed = scheduledTask(
+    'cross-boundary-fixed-yellow', 1, 'YELLOW', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0),
+      setupRow('RED', 'YELLOW', 0), setupRow('YELLOW', 'BLUE', 0),
+    ],
+    overrides: [{
+      id: 'cross-boundary-active-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'cross-boundary-pair-predecessor', successor_order_id: 'cross-boundary-pair-successor',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected across due partition',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([successor, fixed, predecessor], { fixedIds: ['cross-boundary-fixed-yellow'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), [
+    'cross-boundary-pair-predecessor', 'cross-boundary-pair-successor',
+  ]);
+  assert.equal(patchFor(result, 'cross-boundary-pair-successor').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('evaluateDueDateFirst keeps a caller-bounded high-occurrence exact search stack-safe', () => {
+  // This fails with a RangeError when exact traversal recurses once per
+  // occurrence: a caller cap that is lower than the fragment size must stop
+  // work without consuming the JavaScript call stack.
+  const taskCount = 25_001;
+  const manySameStateTasks = Array.from({ length: taskCount }, (_, index) => (
+    scheduledTask(`stack-safe-red-${index}`, 0.5, 'RED', null)
+  ));
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot(manySameStateTasks),
+    dueDateBounds(setup, {
+      exactSearchThreshold: 1,
+      iterationCap: taskCount - 1,
+      clock: () => 0,
+      deadline: 1,
+    }),
+  );
+
+  assert.equal(result.diagnostics.termination, 'iteration-cap');
+  assert.equal(result.diagnostics.limitReached, true);
+  assert.equal(result.diagnostics.candidateCount, 0);
+  assert.deepEqual(result.patches, []);
+});
+
+test('evaluateSptWithSetup keeps an active free-order override pair contiguous over pure runtime order', () => {
+  // This fails if the SPT path treats an active occurrence override as a
+  // post-hoc validation instead of a hard physical adjacency constraint.
+  const predecessor = scheduledTask('spt-pair-long-red', 2, 'RED', null);
+  const successor = scheduledTask('spt-pair-short-blue', 1, 'BLUE', null);
+  const setup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+      setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    ],
+    overrides: [{
+      id: 'spt-pair-active-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'spt-pair-long-red', successor_order_id: 'spt-pair-short-blue',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected SPT occurrence',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateSptWithSetup(
+    setupSnapshot([successor, predecessor]),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches.map(patch => patch.id), ['spt-pair-long-red', 'spt-pair-short-blue']);
+  assert.deepEqual(result.unchangedLines, []);
+});

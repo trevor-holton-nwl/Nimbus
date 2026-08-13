@@ -471,6 +471,18 @@ interface BoundaryOverrideLocks {
   issue?: MissingSetupEdge;
 }
 
+/** Active occurrence overrides are physical adjacency constraints, not merely
+ * a preferred setup-duration lookup. These maps only contain pairs whose two
+ * free orders belong to the fragment currently being searched; fixed-boundary
+ * pairs stay with BoundaryOverrideLocks. */
+interface FragmentAdjacency {
+  predecessorBySuccessor: ReadonlyMap<string, string>;
+  successorByPredecessor: ReadonlyMap<string, string>;
+  /** An override whose predecessor is the persisted current line state. */
+  requiredInitialSuccessorId?: string;
+  issue?: MissingSetupEdge;
+}
+
 function timestamp(value: unknown): Date | null {
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? new Date(value) : null;
   if (typeof value === 'string' || typeof value === 'number') {
@@ -618,6 +630,294 @@ function inactiveOverrideForTransition(
   return null;
 }
 
+function inactiveOverrideEdge(
+  line: string,
+  predecessorOrderId: string | null | undefined,
+  successorOrderId: string | null | undefined,
+): MissingSetupEdge {
+  return { line, predecessorOrderId, successorOrderId, reason: 'override-inactive' };
+}
+
+/** Extract only fragment-local active overrides. A non-local free/fixed pair
+ * is deliberately left to the fixed-boundary lock layer, where its physical
+ * boundary can be validated without letting the override follow an order. */
+function fragmentAdjacency(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+): FragmentAdjacency {
+  const definition = bounds.setup.definition!;
+  const byId = new Map(tasks.map(task => [taskId(task), task]));
+  const predecessorBySuccessor = new Map<string, string>();
+  const successorByPredecessor = new Map<string, string>();
+  let requiredInitialSuccessorId: string | undefined;
+  let issue: MissingSetupEdge | undefined;
+
+  const markIssue = (predecessorOrderId: string | null | undefined, successorOrderId: string | null | undefined): void => {
+    if (!issue) issue = inactiveOverrideEdge(line, predecessorOrderId, successorOrderId);
+  };
+
+  for (const override of bounds.setup.overrides) {
+    if (override.status !== 'active'
+      || override.line !== line
+      || override.signature_version !== definition.signature_version) {
+      continue;
+    }
+    const successorId = String(override.successor_order_id);
+    const successor = byId.get(successorId);
+    if (!successor) continue;
+    const successorState = stateForOrder(successor, definition);
+    if (!successorState || stateKey(successorState) !== stateKey(override.successor_state_key)) {
+      markIssue(override.predecessor_order_id, successorId);
+      continue;
+    }
+
+    const predecessorId = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
+    if (predecessorId === null) {
+      if (fragment.predecessorOrderId !== null
+        || stateKey(fragment.predecessorState) !== stateKey(override.predecessor_state_key)
+        || (requiredInitialSuccessorId && requiredInitialSuccessorId !== successorId)) {
+        markIssue(null, successorId);
+      } else {
+        requiredInitialSuccessorId = successorId;
+      }
+      continue;
+    }
+
+    const predecessor = byId.get(predecessorId);
+    if (!predecessor) continue;
+    const predecessorState = stateForOrder(predecessor, definition);
+    if (!predecessorState || stateKey(predecessorState) !== stateKey(override.predecessor_state_key)) {
+      markIssue(predecessorId, successorId);
+      continue;
+    }
+    const previousSuccessor = successorByPredecessor.get(predecessorId);
+    const previousPredecessor = predecessorBySuccessor.get(successorId);
+    if ((previousSuccessor && previousSuccessor !== successorId)
+      || (previousPredecessor && previousPredecessor !== predecessorId)) {
+      markIssue(predecessorId, successorId);
+      continue;
+    }
+    successorByPredecessor.set(predecessorId, successorId);
+    predecessorBySuccessor.set(successorId, predecessorId);
+  }
+
+  const requiredFirstOrderId = fragment.requiredFirstOrderId ?? requiredInitialSuccessorId;
+  if (fragment.requiredFirstOrderId && requiredInitialSuccessorId
+    && fragment.requiredFirstOrderId !== requiredInitialSuccessorId) {
+    markIssue(null, requiredInitialSuccessorId);
+  }
+  if (requiredFirstOrderId && predecessorBySuccessor.has(requiredFirstOrderId)) {
+    markIssue(predecessorBySuccessor.get(requiredFirstOrderId), requiredFirstOrderId);
+  }
+  if (fragment.requiredLastOrderId && successorByPredecessor.has(fragment.requiredLastOrderId)) {
+    markIssue(fragment.requiredLastOrderId, successorByPredecessor.get(fragment.requiredLastOrderId));
+  }
+
+  for (const origin of successorByPredecessor.keys()) {
+    const seen = new Set<string>();
+    let cursor = origin;
+    while (successorByPredecessor.has(cursor)) {
+      if (seen.has(cursor)) {
+        markIssue(cursor, successorByPredecessor.get(cursor));
+        break;
+      }
+      seen.add(cursor);
+      cursor = successorByPredecessor.get(cursor)!;
+    }
+  }
+
+  return { predecessorBySuccessor, successorByPredecessor, requiredInitialSuccessorId, issue };
+}
+
+/** Free/free active override chains are indivisible while assigning work to
+ * obstacle-free fragments. Without this, due-based partitioning can put one
+ * end before a fixed run and the other after it, even though both endpoints
+ * are individually valid. Fragment-local validation still owns the exact
+ * order/state binding; this helper only prevents the physical pair splitting. */
+function freeOverrideComponents(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  free: ReadonlyArray<NimbusTask>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const definition = bounds.setup.definition!;
+  const freeIds = new Set(free.map(taskId));
+  const links = new Map<string, Set<string>>();
+  const link = (left: string, right: string): void => {
+    const leftLinks = links.get(left) ?? new Set<string>();
+    leftLinks.add(right);
+    links.set(left, leftLinks);
+    const rightLinks = links.get(right) ?? new Set<string>();
+    rightLinks.add(left);
+    links.set(right, rightLinks);
+  };
+  for (const override of bounds.setup.overrides) {
+    const predecessorId = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
+    const successorId = String(override.successor_order_id);
+    if (override.status === 'active'
+      && override.line === line
+      && override.signature_version === definition.signature_version
+      && predecessorId
+      && freeIds.has(predecessorId)
+      && freeIds.has(successorId)) {
+      link(predecessorId, successorId);
+    }
+  }
+
+  const components = new Map<string, ReadonlySet<string>>();
+  const visited = new Set<string>();
+  for (const origin of links.keys()) {
+    if (visited.has(origin)) continue;
+    const component = new Set<string>();
+    const pending = [origin];
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      component.add(id);
+      for (const neighbor of links.get(id) ?? []) {
+        if (!visited.has(neighbor)) pending.push(neighbor);
+      }
+    }
+    for (const id of component) components.set(id, component);
+  }
+  return components;
+}
+
+function requiredFirstOrderId(fragment: Readonly<FragmentContext>, adjacency: Readonly<FragmentAdjacency>): string | undefined {
+  return fragment.requiredFirstOrderId ?? adjacency.requiredInitialSuccessorId;
+}
+
+function sequenceAdjacencyFailure(
+  line: string,
+  sequence: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): MissingSetupEdge | null {
+  if (adjacency.issue) return adjacency.issue;
+  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+  const firstId = sequence.length ? taskId(sequence[0]) : null;
+  const lastId = sequence.length ? taskId(sequence.at(-1)!) : null;
+  if (requiredFirst && firstId !== requiredFirst) {
+    return inactiveOverrideEdge(line, fragment.predecessorOrderId, requiredFirst);
+  }
+  if (fragment.requiredLastOrderId && lastId !== fragment.requiredLastOrderId) {
+    return inactiveOverrideEdge(
+      line,
+      fragment.requiredLastOrderId,
+      fragment.nextFixed ? taskId(fragment.nextFixed.task) : undefined,
+    );
+  }
+  for (let index = 0; index < sequence.length; index += 1) {
+    const id = taskId(sequence[index]);
+    const requiredSuccessor = adjacency.successorByPredecessor.get(id);
+    const next = sequence[index + 1];
+    if (requiredSuccessor && (!next || taskId(next) !== requiredSuccessor)) {
+      return inactiveOverrideEdge(line, id, requiredSuccessor);
+    }
+    const requiredPredecessor = adjacency.predecessorBySuccessor.get(id);
+    const previous = sequence[index - 1];
+    if (requiredPredecessor && (!previous || taskId(previous) !== requiredPredecessor)) {
+      return inactiveOverrideEdge(line, requiredPredecessor, id);
+    }
+  }
+  return null;
+}
+
+function sequenceSatisfiesAdjacency(
+  sequence: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): boolean {
+  if (adjacency.issue) return false;
+  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+  const first = sequence[0];
+  const last = sequence.at(-1);
+  if (requiredFirst && (!first || taskId(first) !== requiredFirst)) return false;
+  if (fragment.requiredLastOrderId && (!last || taskId(last) !== fragment.requiredLastOrderId)) return false;
+  for (let index = 0; index < sequence.length; index += 1) {
+    const id = taskId(sequence[index]);
+    const requiredSuccessor = adjacency.successorByPredecessor.get(id);
+    const next = sequence[index + 1];
+    if (requiredSuccessor && (!next || taskId(next) !== requiredSuccessor)) return false;
+    const requiredPredecessor = adjacency.predecessorBySuccessor.get(id);
+    const previous = sequence[index - 1];
+    if (requiredPredecessor && (!previous || taskId(previous) !== requiredPredecessor)) return false;
+  }
+  return true;
+}
+
+function deferredAdjacencyFailure(
+  line: string,
+  unadmitted: ReadonlyArray<NimbusTask>,
+  adjacency: Readonly<FragmentAdjacency>,
+): MissingSetupEdge | null {
+  const deferredIds = new Set(unadmitted.map(taskId));
+  for (const [predecessorOrderId, successorOrderId] of adjacency.successorByPredecessor) {
+    if (deferredIds.has(predecessorOrderId) !== deferredIds.has(successorOrderId)) {
+      return inactiveOverrideEdge(line, predecessorOrderId, successorOrderId);
+    }
+  }
+  return null;
+}
+
+/** Produce one deterministic policy/due (or SPT) sequence while enforcing
+ * active exact pairs. Unrelated tasks retain their base-order relationship;
+ * only an override can pull its predecessor ahead of a blocked successor. */
+function orderWithAdjacency(
+  baseOrder: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): NimbusTask[] | null {
+  if (adjacency.issue) return null;
+  const byId = new Map(baseOrder.map(task => [taskId(task), task]));
+  const selectedIds = new Set<string>();
+  const result: NimbusTask[] = [];
+  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+  let baseIndex = 0;
+
+  while (result.length < baseOrder.length) {
+    const previous = result.at(-1);
+    const expectedId = previous ? adjacency.successorByPredecessor.get(taskId(previous)) : undefined;
+    let selected: NimbusTask | undefined;
+    if (expectedId) {
+      selected = byId.get(expectedId);
+      if (!selected || selectedIds.has(expectedId)) return null;
+    } else if (result.length === 0 && requiredFirst) {
+      selected = byId.get(requiredFirst);
+      if (!selected || adjacency.predecessorBySuccessor.has(requiredFirst)) return null;
+    } else {
+      while (baseIndex < baseOrder.length) {
+        const candidate = baseOrder[baseIndex++];
+        const candidateId = taskId(candidate);
+        if (selectedIds.has(candidateId)
+          || adjacency.predecessorBySuccessor.has(candidateId)
+          || (fragment.requiredLastOrderId === candidateId && result.length !== baseOrder.length - 1)) {
+          continue;
+        }
+        selected = candidate;
+        break;
+      }
+      if (!selected && fragment.requiredLastOrderId && result.length === baseOrder.length - 1) {
+        const last = byId.get(fragment.requiredLastOrderId);
+        if (last && !selectedIds.has(taskId(last)) && !adjacency.predecessorBySuccessor.has(taskId(last))) {
+          selected = last;
+        }
+      }
+      if (!selected) return null;
+    }
+    const selectedId = taskId(selected);
+    if (selectedIds.has(selectedId)
+      || (fragment.requiredLastOrderId === selectedId && result.length !== baseOrder.length - 1)) {
+      return null;
+    }
+    selectedIds.add(selectedId);
+    result.push(selected);
+  }
+  return sequenceSatisfiesAdjacency(result, fragment, adjacency) ? result : null;
+}
+
 function productiveRuntimeMinutes(task: NimbusTask): number {
   const minutes = Math.round(Number(task.RUN_TIME) * 60);
   return Number.isFinite(minutes) && minutes >= 0 ? minutes : Number.MAX_SAFE_INTEGER;
@@ -733,6 +1033,7 @@ function candidateForSequence(
   line: string,
   sequence: ReadonlyArray<NimbusTask>,
   fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
 ): DueDateCandidate {
   const definition = bounds.setup.definition!;
   let predecessorState = fragment.predecessorState;
@@ -757,24 +1058,8 @@ function candidateForSequence(
     missingEdges: [...missingEdges, edge],
   });
 
-  const firstOrderId = sequence.length ? taskId(sequence[0]) : null;
-  const lastOrderId = sequence.length ? taskId(sequence.at(-1)!) : null;
-  if (fragment.requiredFirstOrderId && firstOrderId !== fragment.requiredFirstOrderId) {
-    return constraintFailure({
-      line,
-      predecessorOrderId,
-      successorOrderId: fragment.requiredFirstOrderId,
-      reason: 'override-inactive',
-    });
-  }
-  if (fragment.requiredLastOrderId && lastOrderId !== fragment.requiredLastOrderId) {
-    return constraintFailure({
-      line,
-      predecessorOrderId: fragment.requiredLastOrderId,
-      successorOrderId: fragment.nextFixed ? taskId(fragment.nextFixed.task) : undefined,
-      reason: 'override-inactive',
-    });
-  }
+  const adjacencyFailure = sequenceAdjacencyFailure(line, sequence, fragment, adjacency);
+  if (adjacencyFailure) return constraintFailure(adjacencyFailure);
 
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
@@ -838,6 +1123,8 @@ function candidateForSequence(
           });
         }
         unadmitted.push(...deferred);
+        const protectedPairFailure = deferredAdjacencyFailure(line, unadmitted, adjacency);
+        if (protectedPairFailure) return constraintFailure(protectedPairFailure);
         explanation.push({
           code: 'due-work-unadmitted',
           message: `Deferred ${deferred.length} order(s) after available capacity ended in this fragment.`,
@@ -968,8 +1255,18 @@ function exactSearch(
   line: string,
   groups: ReadonlyArray<DueDateGroup>,
   fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
   budget: SearchBudget,
 ): SearchRun {
+  if (adjacency.issue) {
+    return {
+      candidateCount: 0,
+      method: 'due-date-first-exact',
+      termination: 'completed',
+      winner: null,
+      missingEdges: [adjacency.issue],
+    };
+  }
   let candidateCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
@@ -980,48 +1277,132 @@ function exactSearch(
   const remainingCounts = groups.map(group => group.tasks.length);
   const totalTasks = remainingCounts.reduce((total, count) => total + count, 0);
   const selected: NimbusTask[] = [];
+  const selectedIds = new Set<string>();
+  const constrained = adjacency.predecessorBySuccessor.size > 0
+    || adjacency.requiredInitialSuccessorId !== undefined
+    || fragment.requiredFirstOrderId !== undefined
+    || fragment.requiredLastOrderId !== undefined;
+  /** A protected successor is never a normal group choice: it is selected only
+   * immediately after its predecessor. Keeping a cursor over the remaining
+   * normal occurrences makes a high-occurrence constrained fragment bounded
+   * by the caller's work cap rather than repeatedly scanning its full group. */
+  const normalTasks = constrained
+    ? groups.map(group => group.tasks.filter(task => !adjacency.predecessorBySuccessor.has(taskId(task))))
+    : [];
+  const normalCursors = groups.map(() => 0);
 
-  const visit = (): void => {
+  interface ExactChoice {
+    task: NimbusTask;
+    normalCursorAfter?: number;
+  }
+  const nextChoiceForGroup = (groupIndex: number): ExactChoice | null => {
+    const group = groups[groupIndex];
+    if (!remainingCounts[groupIndex]) return null;
+    if (!constrained) return { task: group.tasks[group.tasks.length - remainingCounts[groupIndex]] };
+
+    const previous = selected.at(-1);
+    const expectedId = previous ? adjacency.successorByPredecessor.get(taskId(previous)) : undefined;
+    if (expectedId) {
+      const task = group.tasks.find(candidate => taskId(candidate) === expectedId && !selectedIds.has(expectedId));
+      return task ? { task } : null;
+    }
+    const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+    if (selected.length === 0 && requiredFirst) {
+      const task = group.tasks.find(candidate => taskId(candidate) === requiredFirst && !selectedIds.has(requiredFirst));
+      return task ? { task } : null;
+    }
+    if (fragment.requiredLastOrderId && selected.length === totalTasks - 1) {
+      const task = group.tasks.find(candidate => (
+        taskId(candidate) === fragment.requiredLastOrderId && !selectedIds.has(fragment.requiredLastOrderId)
+      ));
+      return task ? { task } : null;
+    }
+    const candidates = normalTasks[groupIndex];
+    for (let cursor = normalCursors[groupIndex]; cursor < candidates.length; cursor += 1) {
+      const task = candidates[cursor];
+      const id = taskId(task);
+      if (selectedIds.has(id)
+        || fragment.requiredLastOrderId === id) {
+        continue;
+      }
+      return { task, normalCursorAfter: cursor + 1 };
+    }
+    return null;
+  };
+
+  interface ExactFrame {
+    choices: number[];
+    nextChoice: number;
+    selectedGroupIndex: number | null;
+    selectedTask: NimbusTask | null;
+    previousNormalCursor: number | null;
+  }
+  const makeFrame = (selectedGroupIndex: number | null, selectedTask: NimbusTask | null): ExactFrame => ({
+    choices: selected.length === totalTasks
+      ? []
+      : groups.flatMap((_, index) => nextChoiceForGroup(index) ? [index] : []),
+    nextChoice: 0,
+    selectedGroupIndex,
+    selectedTask,
+    previousNormalCursor: null,
+  });
+  const frames: ExactFrame[] = [makeFrame(null, null)];
+  const popFrame = (): void => {
+    const frame = frames.pop();
+    if (!frame?.selectedTask || frame.selectedGroupIndex === null) return;
+    selected.pop();
+    selectedIds.delete(taskId(frame.selectedTask));
+    remainingCounts[frame.selectedGroupIndex] += 1;
+    if (frame.previousNormalCursor !== null) normalCursors[frame.selectedGroupIndex] = frame.previousNormalCursor;
+  };
+
+  // An explicit DFS stack replaces recursion. A caller can legitimately
+  // choose an occurrence cap larger than JavaScript's call-stack limit; the
+  // cap still bounds selections, while this representation cannot overflow it.
+  while (frames.length && termination === 'completed') {
     if (bounds.clock() >= bounds.deadline) {
       termination = 'deadline';
-      return;
+      break;
     }
+    const frame = frames.at(-1)!;
     if (selected.length === totalTasks) {
       // A zero-order fragment has no selected occurrence to charge as a
       // traversal edge, but it still evaluates a fixed-boundary transition.
-      // Count it so fixed-only lines cannot evade the caller's run-wide cap.
       if (totalTasks === 0) {
         if (budget.remainingIterations <= 0) {
           termination = 'iteration-cap';
-          return;
+          break;
         }
         budget.remainingIterations -= 1;
       }
       candidateCount += 1;
-      const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment);
+      const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment, adjacency);
       if (candidate.feasible && (!winner || compareCandidate(candidate, winner) < 0)) winner = candidate;
       if (!candidate.feasible) missingEdges.push(...candidate.missingEdges);
-      return;
+      popFrame();
+      continue;
     }
-    for (let index = 0; index < groups.length; index += 1) {
-      if (!remainingCounts[index] || termination !== 'completed') continue;
-      // Count every selected occurrence, not only completed permutations. A
-      // caller-supplied cap now bounds the recursion depth/work even when many
-      // orders share one setup state and the injected clock is fixed.
-      if (budget.remainingIterations <= 0) {
-        termination = 'iteration-cap';
-        return;
-      }
-      budget.remainingIterations -= 1;
-      const taskIndex = groups[index].tasks.length - remainingCounts[index];
-      remainingCounts[index] -= 1;
-      selected.push(groups[index].tasks[taskIndex]);
-      visit();
-      selected.pop();
-      remainingCounts[index] += 1;
+    if (frame.nextChoice >= frame.choices.length) {
+      popFrame();
+      continue;
     }
-  };
-  visit();
+    const groupIndex = frame.choices[frame.nextChoice++];
+    const choice = nextChoiceForGroup(groupIndex);
+    if (!choice) continue;
+    if (budget.remainingIterations <= 0) {
+      termination = 'iteration-cap';
+      break;
+    }
+    budget.remainingIterations -= 1;
+    const previousNormalCursor = choice.normalCursorAfter === undefined ? null : normalCursors[groupIndex];
+    if (choice.normalCursorAfter !== undefined) normalCursors[groupIndex] = choice.normalCursorAfter;
+    remainingCounts[groupIndex] -= 1;
+    selected.push(choice.task);
+    selectedIds.add(taskId(choice.task));
+    const child = makeFrame(groupIndex, choice.task);
+    child.previousNormalCursor = previousNormalCursor;
+    frames.push(child);
+  }
   return { candidateCount, method: 'due-date-first-exact', termination, winner, missingEdges };
 }
 
@@ -1031,8 +1412,14 @@ function greedySearch(
   line: string,
   groups: ReadonlyArray<DueDateGroup>,
   fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
   budget: SearchBudget,
 ): SearchRun {
+  if (adjacency.issue) {
+    return {
+      candidateCount: 0, method: 'due-date-first-greedy', termination: 'completed', winner: null, missingEdges: [adjacency.issue],
+    };
+  }
   if (bounds.clock() >= bounds.deadline) {
     return {
       candidateCount: 0, method: 'due-date-first-greedy', termination: 'deadline', winner: null, missingEdges: [],
@@ -1074,6 +1461,7 @@ function greedySearch(
       line,
       sequence,
       fragment,
+      adjacency,
     );
     if (!candidate.feasible) {
       missingEdges.push(...candidate.missingEdges);
@@ -1083,7 +1471,17 @@ function greedySearch(
     return candidate;
   };
 
-  let currentOrder = orderedTasks;
+  const protectedOrder = orderWithAdjacency(orderedTasks, fragment, adjacency);
+  if (!protectedOrder) {
+    return {
+      candidateCount: 0,
+      method: 'due-date-first-greedy',
+      termination: 'completed',
+      winner: null,
+      missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
+    };
+  }
+  let currentOrder = protectedOrder;
   let current = evaluate(currentOrder);
   let improved = true;
   while (improved && termination === 'completed') {
@@ -1158,6 +1556,16 @@ function searchFragment(
       missingEdges,
     };
   }
+  const adjacency = fragmentAdjacency(bounds, line, tasks, fragment);
+  if (adjacency.issue) {
+    return {
+      candidateCount: 0,
+      method: 'due-date-first-exact',
+      termination: 'completed',
+      winner: null,
+      missingEdges: [adjacency.issue],
+    };
+  }
   const groups = [...groupsByState.values()]
     .map(group => ({
       ...group,
@@ -1178,8 +1586,21 @@ function searchFragment(
       };
     }
     budget.remainingIterations -= 1;
-    const sequence = orderedByProductiveRuntime(groups.flatMap(group => group.tasks));
-    const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment);
+    const sequence = orderWithAdjacency(
+      orderedByProductiveRuntime(groups.flatMap(group => group.tasks)),
+      fragment,
+      adjacency,
+    );
+    if (!sequence) {
+      return {
+        candidateCount: 0,
+        method: 'due-date-first-exact',
+        termination: 'completed',
+        winner: null,
+        missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
+      };
+    }
+    const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
     return {
       candidateCount: 1,
       method: 'due-date-first-exact',
@@ -1189,8 +1610,8 @@ function searchFragment(
     };
   }
   return groups.length <= bounds.exactSearchThreshold
-    ? exactSearch(snapshot, bounds, line, groups, fragment, budget)
-    : greedySearch(snapshot, bounds, line, groups, fragment, budget);
+    ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget)
+    : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget);
 }
 
 function unchangedLineResult(
@@ -1346,6 +1767,8 @@ function evaluateLineWithFixedBoundaries(
 
   const free = tasks.filter(task => !taskIsFixed(snapshot, task));
   const locks = boundaryOverrideLocks(bounds, line, fixed, free);
+  const freeComponents = freeOverrideComponents(bounds, line, free);
+  const freeById = new Map(free.map(task => [taskId(task), task]));
   let remaining = [...free];
   let fragmentStart = new Date(bounds.now);
   let predecessorState = initialState;
@@ -1417,14 +1840,39 @@ function evaluateLineWithFixedBoundaries(
     }
     if (requiredFirstOrderId) reservedForAnotherBoundary.delete(requiredFirstOrderId);
 
+    let componentConflict: MissingSetupEdge | null = null;
     const admitted = boundaryLock?.requiredFixedPredecessorId
       ? []
       : remaining.filter(task => {
         const id = taskId(task);
-        if (id === requiredFirstOrderId || id === boundaryLock?.requiredLastOrderId) return true;
-        if (reservedForAnotherBoundary.has(id)) return false;
-        return belongsBeforeFixedBoundary(task, boundary, mode);
+        const component = freeComponents.get(id) ?? new Set([id]);
+        const members = [...component];
+        const needsThisFragment = members.some(member => (
+          member === requiredFirstOrderId || member === boundaryLock?.requiredLastOrderId
+        ));
+        const reservedForFutureFragment = members.some(member => reservedForAnotherBoundary.has(member));
+        if (needsThisFragment && reservedForFutureFragment) {
+          if (!componentConflict) {
+            componentConflict = inactiveOverrideEdge(
+              line,
+              members.find(member => member === requiredFirstOrderId || member === boundaryLock?.requiredLastOrderId),
+              members.find(member => reservedForAnotherBoundary.has(member)),
+            );
+          }
+          return false;
+        }
+        if (needsThisFragment) return true;
+        if (reservedForFutureFragment) return false;
+        return members.some(member => belongsBeforeFixedBoundary(freeById.get(member)!, boundary, mode));
       });
+    if (componentConflict) {
+      return unchangedLineResult(
+        line,
+        'override-inactive',
+        'An active occurrence override cannot remain adjacent across fixed boundaries.',
+        [componentConflict],
+      );
+    }
     const admittedIds = new Set(admitted.map(taskId));
     const later = remaining.filter(task => !admittedIds.has(taskId(task)));
     const run = searchFragment(snapshot, bounds, line, admitted, {
