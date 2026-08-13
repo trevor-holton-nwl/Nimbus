@@ -287,6 +287,19 @@ export interface SetupOccurrenceOverride {
   reason: string;
 }
 
+/** One authorized plant's complete setup truth, returned by GET /setup/{plant}.
+ * This remains separate from persisted schedule state: it is read-only
+ * observation data for the changeover matrix rollout. */
+export interface SetupSnapshot {
+  plant: string;
+  definition: SetupDefinition | null;
+  plant_rows: SetupMatrixRow[];
+  line_rows: SetupMatrixRow[];
+  line_states: LineSetupState[];
+  overrides: SetupOccurrenceOverride[];
+  freshness?: { signature_version: number | null; request_id: string };
+}
+
 export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'uncovered';
 
 export interface ResolvedSetup {
@@ -352,6 +365,7 @@ export type StoreEventType =
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
+  | 'setup-snapshot:replace'
   // NOTE: no 'priority-rank-maps:updated' member. Store.setPriorityRankMaps
   // deliberately does not emit (see its comment in schedule-state.mts), and the
   // late-arriving /priority-fields registry re-render is a direct

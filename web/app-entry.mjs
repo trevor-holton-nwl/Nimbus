@@ -15,6 +15,9 @@ import * as workbench from './schedule-workbench.mjs';
 import * as plantAdmin from './plant-and-administration.mjs';
 import * as shell from './application-shell.mjs';
 import * as materialGrids from './master-data-grids.mjs';
+// Stage 0 setup resolution is a pure module. Keep it in the static module
+// graph for build/runtime validation, without exposing a classic-script bridge.
+import './setup-domain.mjs';
 
 export function bootEntry({ window: win = (typeof window !== 'undefined' ? window : undefined), loadScript } = {}) {
   if (!win) return Promise.reject(new Error('NIMBUS boot error: no window available for bootEntry'));

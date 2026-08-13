@@ -69,6 +69,23 @@ test('Store.setPriorityRankMaps null-guards its argument and deliberately emits 
   Store.setPriorityRankMaps({}, 'unit-test'); // reset
 });
 
+test('Store.replaceSetupSnapshot replaces the active plant snapshot and publishes the replacement', () => {
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt));
+  const snapshot = {
+    plant: '5512', definition: null, plant_rows: [], line_rows: [], line_states: [], overrides: [],
+    freshness: { signature_version: null, request_id: 'state-test' },
+  };
+  Store.replaceSetupSnapshot(snapshot, 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  off();
+
+  assert.equal(Store.setupSnapshot, null);
+  assert.deepEqual(events.map(evt => evt.type), ['setup-snapshot:replace', 'setup-snapshot:replace']);
+  assert.equal(events[0].snapshot, snapshot);
+  assert.equal(events[1].snapshot, null);
+});
+
 test('Store.setAllowedPlantsResolver scopes knownPlants()', () => {
   Store.setTasks([{ id: 't1', PRODUCTION_LINE: 'L1', RUN_TIME: '1' }], 'unit-test');
   Store.setAllowedPlantsResolver(() => ['5512']);
