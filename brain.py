@@ -1818,7 +1818,8 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     # Stage 0 observation seam: capture only already-completed planned work
     # before ingest can replace its source rows.  This never changes orders,
     # dates, capacity, alerts, or optimizer behavior.
-    setup_data.capture_setup_states_before_schedule_mutation(
+    await run_in_threadpool(
+        setup_data.capture_setup_states_before_schedule_mutation,
         actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement"
     )
     result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
@@ -1877,7 +1878,7 @@ async def upload_bom(request: Request, file: UploadFile = File(...)):
 
 
 @api.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def purge_orders(payload: dict):
+def purge_orders(payload: dict, request: Request):
     """
     payload: { start_date: ISO, end_date: ISO } — both inclusive.
     Deletes orders where effective end date falls in the range. Stateless:
@@ -1891,7 +1892,9 @@ def purge_orders(payload: dict):
         raise HTTPException(status_code=400, detail=f"Invalid date range: {e}") from e
     # This must remain adjacent to the DELETE below: a derived state may only
     # observe the prior schedule while it still exists.
-    setup_data.capture_setup_states_before_schedule_mutation(reason="order purge")
+    setup_data.capture_setup_states_before_schedule_mutation(
+        actor=request.headers.get("x-user-email") or "system", reason="order purge"
+    )
     result = db.purge_orders_by_date(start, end)
     if result.get("status") == "ok":
         _log_event("info", "purge", "Orders purged by date range",

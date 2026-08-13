@@ -134,8 +134,8 @@ def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
             "successor_order_id   TEXT NOT NULL",
             "predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array')",
             "successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array')",
-            "standard_min         INTEGER NOT NULL CHECK (standard_min BETWEEN 0 AND 10080)",
-            "remaining_min        INTEGER NOT NULL CHECK (remaining_min BETWEEN 0 AND 10080)",
+            "standard_min         INTEGER NOT NULL CHECK (standard_min >= 0)",
+            "remaining_min        INTEGER NOT NULL CHECK (remaining_min >= 0)",
             "status               TEXT NOT NULL DEFAULT 'active'",
             "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))",
             "reason               TEXT",
@@ -159,12 +159,12 @@ def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
         assert re.search(expected, text, re.DOTALL), path
 
 
-def test_setup_schema_enforces_bounded_minutes_and_controlled_values():
-    """Invalid setup duration, source, or override status must be rejected at the DB boundary."""
+def test_setup_schema_enforces_matrix_bound_and_unbounded_override_minutes():
+    """Only standards use the seven-day cap; physical remaining work stays nonnegative but unbounded."""
     for path, text in _setup_schema_texts():
         assert "CHECK (setup_min BETWEEN 0 AND 10080)" in text, path
-        assert "CHECK (standard_min BETWEEN 0 AND 10080)" in text, path
-        assert "CHECK (remaining_min BETWEEN 0 AND 10080)" in text, path
+        assert "CHECK (standard_min >= 0)" in text, path
+        assert "CHECK (remaining_min >= 0)" in text, path
         assert "CHECK (source IN ('manual', 'derived', 'actual'))" in text, path
         assert "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))" in text, path
 

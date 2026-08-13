@@ -78,21 +78,33 @@ def canonical_state_key(fields, values) -> list[dict[str, str]]:
 
 
 def validate_setup_minutes(value) -> int:
-    """Validate the finite, whole-minute Stage 0 matrix/override contract."""
+    """Validate a finite, whole-minute setup-matrix standard (maximum seven days)."""
+    minutes = _validate_nonnegative_integer(value, "Setup minutes")
+    if minutes > MAX_SETUP_MINUTES:
+        raise ValueError(f"Setup minutes must be between 0 and {MAX_SETUP_MINUTES}")
+    return minutes
+
+
+def validate_override_minutes(value) -> int:
+    """Validate a finite, whole-minute physical override without a seven-day cap."""
+    return _validate_nonnegative_integer(value, "Override minutes")
+
+
+def _validate_nonnegative_integer(value, label: str) -> int:
     if isinstance(value, bool):
-        raise ValueError("Setup minutes must be a finite integer")
+        raise ValueError(f"{label} must be a finite integer")
     if isinstance(value, float):
         if not isfinite(value) or not value.is_integer():
-            raise ValueError("Setup minutes must be a finite integer")
+            raise ValueError(f"{label} must be a finite integer")
         value = int(value)
     elif isinstance(value, str):
         if not value.strip().isdigit():
-            raise ValueError("Setup minutes must be a finite integer")
+            raise ValueError(f"{label} must be a finite integer")
         value = int(value.strip())
     elif not isinstance(value, int):
-        raise ValueError("Setup minutes must be a finite integer")
-    if value < 0 or value > MAX_SETUP_MINUTES:
-        raise ValueError(f"Setup minutes must be between 0 and {MAX_SETUP_MINUTES}")
+        raise ValueError(f"{label} must be a finite integer")
+    if value < 0:
+        raise ValueError(f"{label} must be nonnegative")
     return value
 
 
@@ -316,6 +328,8 @@ def set_line_state(plant, line, values, signature_version, observed_at, source, 
     actor = _required_text(actor, "Actor")
     if source not in _STATE_SOURCES:
         raise ValueError(f"Unknown line-state source: {source!r}")
+    if source == "manual":
+        reason = _required_text(reason, "Manual line-state reason")
     if not isinstance(observed_at, datetime):
         raise ValueError("observed_at must be a datetime")
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -404,13 +418,26 @@ def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reas
     """Capture each existing setup-defined line immediately before a schedule mutation."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT DISTINCT o.plant, o.production_line FROM orders o
+            """SELECT DISTINCT o.plant, p.timezone, o.production_line FROM orders o
                  JOIN setup_definition d ON d.plant = o.plant
+                 JOIN production_lines pl ON pl.plant = o.plant AND pl.production_line = o.production_line
+                 LEFT JOIN plants p ON p.plant = o.plant
                 WHERE o.plant IS NOT NULL AND o.production_line IS NOT NULL"""
         )
         pairs = cur.fetchall()
-    return [derive_line_state_before_replacement(plant, line, actor=actor, reason=reason)
-            for plant, line in pairs]
+    captures: dict[str, datetime] = {}
+    results = []
+    for plant, timezone_name, line in pairs:
+        if plant not in captures:
+            try:
+                captures[plant] = (datetime.now(ZoneInfo(timezone_name)).replace(tzinfo=None)
+                                   if timezone_name else datetime.now())
+            except ZoneInfoNotFoundError:
+                captures[plant] = datetime.now()
+        results.append(derive_line_state_before_replacement(
+            plant, line, captured_at=captures[plant], actor=actor, reason=reason
+        ))
+    return results
 
 
 def upsert_occurrence_override(plant, line, predecessor_order_id, successor_order_id, predecessor_values,
@@ -418,6 +445,7 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
     plant = _required_text(plant, "Plant")
     line = _required_text(line, "Line")
     actor = _required_text(actor, "Actor")
+    reason = _required_text(reason, "Occurrence override reason")
     predecessor_order_id = _required_text(predecessor_order_id, "Predecessor order id")
     successor_order_id = _required_text(successor_order_id, "Successor order id")
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -427,8 +455,8 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
         successor_key = canonical_state_key(definition["fields"], successor_values)
         if definition["strict_blanks"] and any(not item["value"] for item in predecessor_key + successor_key):
             raise ValueError("Blank setup-state values are not allowed by this definition")
-        standard = validate_setup_minutes(standard_min)
-        remaining = validate_setup_minutes(remaining_min)
+        standard = validate_override_minutes(standard_min)
+        remaining = validate_override_minutes(remaining_min)
         cur.execute(
             """UPDATE setup_occurrence_override SET status = 'replaced', updated_by = %s, updated_at = NOW()
                  WHERE plant = %s AND line = %s AND signature_version = %s

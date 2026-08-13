@@ -42,6 +42,18 @@ def test_validate_minutes_accepts_integer_boundary_and_rejects_more_than_seven_d
         setup_data.validate_setup_minutes(10081)
 
 
+def test_validate_override_minutes_accepts_unbounded_nonnegative_integer():
+    """A long-running physical override must not be limited by the matrix's seven-day standard cap."""
+    assert setup_data.validate_override_minutes(100_081) == 100_081
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, nan, inf, "4.2", True])
+def test_validate_override_minutes_rejects_non_finite_or_non_integer_values(value):
+    """Only finite, whole, nonnegative override duration is meaningful operational truth."""
+    with pytest.raises(ValueError):
+        setup_data.validate_override_minutes(value)
+
+
 def test_validate_matrix_rows_rejects_duplicate_canonical_transition():
     """Two spellings of one canonical transition must not make import order decide the duration."""
     fields = ["colorWheel"]
@@ -68,6 +80,33 @@ def test_should_replace_derived_state_never_overwrites_newer_manual_or_actual_st
     assert not setup_data.should_replace_line_state(older_actual, captured, "derived")
 
 
+def test_manual_line_state_requires_a_nonblank_reason_before_database_access(monkeypatch):
+    """An unauditable manual floor assertion must be rejected before it can be persisted."""
+    monkeypatch.setattr(setup_data, "_pool", _FailPool())
+    with pytest.raises(ValueError, match="reason"):
+        setup_data.set_line_state("5512", "LINE-1", {"colorWheel": "RED"}, 1,
+                                  datetime(2026, 8, 13, 10), "manual", " ", "owner@example.com")
+
+
+def test_override_requires_a_nonblank_reason_before_database_access(monkeypatch):
+    """A remaining-duration override is physical truth and must retain its explanation."""
+    monkeypatch.setattr(setup_data, "_pool", _FailPool())
+    with pytest.raises(ValueError, match="reason"):
+        setup_data.upsert_occurrence_override(
+            "5512", "LINE-1", "before", "after", {"colorWheel": "RED"},
+            {"colorWheel": "BLUE"}, 12, 100_081, 1, "", "owner@example.com"
+        )
+
+
+def test_public_line_matrix_write_rejects_line_outside_plant(monkeypatch):
+    """Sparse line setup values cannot be written under a plant that does not own the line."""
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MissingLineCursor()))
+    with pytest.raises(ValueError, match="does not belong"):
+        setup_data.upsert_line_matrix_rows(
+            "5512", "OTHER-PLANT-LINE", [], 1, "owner@example.com"
+        )
+
+
 def test_last_completed_order_excludes_future_planned_work_at_snapshot_time():
     """A pre-replacement snapshot must not treat a future planned order as physical state."""
     at = datetime(2026, 8, 13, 10, 0)
@@ -78,15 +117,15 @@ def test_last_completed_order_excludes_future_planned_work_at_snapshot_time():
     assert setup_data.last_completed_order(rows, at)["id"] == "done"
 
 
-def test_last_completed_order_returns_none_when_everything_is_future():
-    """Failed replacement flows cannot advance state from future work."""
+def test_failed_ingest_or_purge_snapshot_cannot_advance_from_future_work():
+    """Even when the following mutation fails, a snapshot cannot use future planned work."""
     at = datetime(2026, 8, 13, 10, 0)
     assert setup_data.last_completed_order(
         [{"id": "future", "completed_at": datetime(2026, 8, 13, 10, 1)}], at
     ) is None
 
 
-def test_purge_captures_observation_before_deleting_source_schedule(monkeypatch):
+def test_purge_captures_observation_before_deleting_source_schedule_with_actor(monkeypatch):
     """A purge must preserve only a pre-mutation observation, never schedule-changing setup work."""
     import brain
 
@@ -95,9 +134,11 @@ def test_purge_captures_observation_before_deleting_source_schedule(monkeypatch)
                         lambda **kwargs: calls.append(("snapshot", kwargs)))
     monkeypatch.setattr(brain.db, "purge_orders_by_date",
                         lambda start, end: calls.append(("purge", start, end)) or {"status": "ok", "deleted": 1})
-    result = brain.purge_orders({"start_date": "2026-08-01", "end_date": "2026-08-02"})
+    request = type("Request", (), {"headers": {"x-user-email": "scheduler@example.com"}})()
+    result = brain.purge_orders({"start_date": "2026-08-01", "end_date": "2026-08-02"}, request)
     assert result["deleted"] == 1
     assert [call[0] for call in calls] == ["snapshot", "purge"]
+    assert calls[0][1]["actor"] == "scheduler@example.com"
 
 
 def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
@@ -108,8 +149,10 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
     monkeypatch.setattr(brain.setup_data, "capture_setup_states_before_schedule_mutation",
                         lambda **kwargs: calls.append(("snapshot", kwargs)))
 
-    async def fake_threadpool(fn, *args):
-        calls.append(("ingest", args))
+    async def fake_threadpool(fn, *args, **kwargs):
+        calls.append(("snapshot" if fn is brain.setup_data.capture_setup_states_before_schedule_mutation else "ingest", args, kwargs))
+        if fn is brain.setup_data.capture_setup_states_before_schedule_mutation:
+            return None
         return {"status": "ok", "inserted": 1, "updated": 0, "raw_row_count": 1,
                 "warnings": [], "lines": []}
 
@@ -123,6 +166,7 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
     result = asyncio.run(brain.upload_orders(request, upload))
     assert result["inserted"] == 1
     assert [call[0] for call in calls] == ["snapshot", "ingest"]
+    assert calls[0][2] == {"actor": "scheduler@example.com", "reason": "Excel upload replacement"}
 
 
 async def _async_bytes(value):
@@ -167,15 +211,21 @@ def test_definition_edit_versions_and_deactivates_without_rewriting_prior_matrix
     assert "UPDATE setup_matrix" not in statements
 
 
-def test_capture_coordinator_uses_each_plants_local_capture_clock(monkeypatch):
-    """A server-local timestamp must not be mislabeled as a plant-local snapshot."""
+def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(monkeypatch):
+    """A plant replacement snapshot is one instant shared by every line at that plant."""
     cursor = _PairsCursor()
     monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
     calls = []
     monkeypatch.setattr(setup_data, "derive_line_state_before_replacement",
                         lambda plant, line, **kwargs: calls.append((plant, line, kwargs)) or {})
     setup_data.capture_setup_states_before_schedule_mutation(actor="system", reason="purge")
-    assert calls == [("5512", "LINE-1", {"actor": "system", "reason": "purge"})]
+    assert [(plant, line) for plant, line, _kwargs in calls] == [("5512", "LINE-1"), ("5512", "LINE-2")]
+    first_capture = calls[0][2]["captured_at"]
+    assert first_capture == calls[1][2]["captured_at"]
+    assert first_capture.tzinfo is None
+    assert all(kwargs["actor"] == "system" and kwargs["reason"] == "purge" for _, _, kwargs in calls)
+    query, _params = cursor.executed[0]
+    assert "JOIN production_lines" in query
 
 
 class _DefinitionCursor:
@@ -198,7 +248,17 @@ class _DefinitionCursor:
 
 class _PairsCursor(_DefinitionCursor):
     def fetchall(self):
-        return [("5512", "LINE-1")]
+        return [("5512", "America/New_York", "LINE-1"), ("5512", "America/New_York", "LINE-2")]
+
+
+class _MissingLineCursor(_DefinitionCursor):
+    def fetchone(self):
+        return None
+
+
+class _FailPool:
+    def connection(self):
+        raise AssertionError("validation should reject before opening a database connection")
 
 
 class _Connection:

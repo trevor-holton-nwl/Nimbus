@@ -1035,8 +1035,8 @@ CREATE TABLE IF NOT EXISTS setup_occurrence_override (
     successor_order_id   TEXT NOT NULL,
     predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array'),
     successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array'),
-    standard_min         INTEGER NOT NULL CHECK (standard_min BETWEEN 0 AND 10080),
-    remaining_min        INTEGER NOT NULL CHECK (remaining_min BETWEEN 0 AND 10080),
+    standard_min         INTEGER NOT NULL CHECK (standard_min >= 0),
+    remaining_min        INTEGER NOT NULL CHECK (remaining_min >= 0),
     status               TEXT NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active', 'inactive', 'cleared', 'replaced')),
     reason               TEXT,
@@ -1053,6 +1053,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency
     WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_setup_occurrence_override_plant_line
     ON setup_occurrence_override (plant, line, signature_version);
+
+-- Occurrence overrides represent remaining physical work, which need not fit
+-- the setup-matrix seven-day standard cap. Existing Stage 0 databases may
+-- retain the earlier named CHECK constraints, so replace them idempotently.
+ALTER TABLE setup_occurrence_override
+    DROP CONSTRAINT IF EXISTS setup_occurrence_override_standard_min_check;
+ALTER TABLE setup_occurrence_override
+    DROP CONSTRAINT IF EXISTS setup_occurrence_override_remaining_min_check;
+ALTER TABLE setup_occurrence_override
+    ADD CONSTRAINT setup_occurrence_override_standard_min_check CHECK (standard_min >= 0);
+ALTER TABLE setup_occurrence_override
+    ADD CONSTRAINT setup_occurrence_override_remaining_min_check CHECK (remaining_min >= 0);
 
 -- ----------------------------------------------------------------------------
 -- One-time CONVENIENCE backfill of orders.{color,prt_01,prt_02,
