@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Calendar, Compute, Alerts, Utilization, Engine } from '../../web/schedule-services.mjs';
+import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 
 const require = createRequire(import.meta.url);
@@ -136,6 +136,68 @@ test('Engine.runAndApply no-ops with a toast when there are no tasks', () => {
   Store.setTasks([], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
   assert.doesNotThrow(() => Engine.runAndApply('spt'));
+});
+
+test('Engine.evaluateSchedule snapshots the live read model without publishing a candidate', () => {
+  Store.setTasks([
+    { id: 'detached-long', PRODUCTION_LINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '5', start_date: null, end_date: null },
+    { id: 'detached-short', PRODUCTION_LINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '1', start_date: null, end_date: null },
+  ], 'unit-test');
+  Store.setSelectedPlant('DETACHED', 'unit-test');
+  Store.setFixed('detached-long', true, 'unit-test');
+  Store.setAlerts([{ id: 'detached-alert', type: 'overlap', sev: 'err' }], 'unit-test');
+  const beforeRev = Store.rev();
+  const beforeTasks = structuredClone(Store.tasks);
+  const beforeFixed = Array.from(Store.fixedIds).sort();
+  const beforeAlerts = structuredClone(Store.alerts);
+  let publications = 0;
+  const unsubscribe = Store.subscribe(() => { publications++; }, 'unit-test-autosave');
+
+  try {
+    const candidate = Engine.evaluateSchedule('spt', {
+      respectCalendar: false,
+      now: new Date('2026-08-03T08:00:00'),
+    });
+    assert.deepEqual(candidate.patches.map(patch => patch.id), ['detached-short'],
+      'fixed work remains an immutable candidate boundary');
+    assert.equal(Store.rev(), beforeRev);
+    assert.deepEqual(Store.tasks, beforeTasks);
+    assert.deepEqual(Array.from(Store.fixedIds).sort(), beforeFixed);
+    assert.deepEqual(Store.alerts, beforeAlerts);
+    assert.equal(publications, 0, 'candidate evaluation must not wake autosave-style subscribers');
+
+    const captured = snapshotSchedule();
+    captured.tasks[0].RUN_TIME = '999';
+    assert.equal(Store.tasks['detached-long'].RUN_TIME, '5', 'snapshot values must not alias Store task objects');
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
+  const startDate = new Date('2035-08-06T08:00:00');
+  Store.setTasks([
+    { id: 'parity-blue-long', PRODUCTION_LINE: 'L1', PLANT: 'PARITY', COLOR: 'BLUE', FORM_SIZE: 'B', RUN_TIME: '5', start_date: null, end_date: null },
+    { id: 'parity-red-short', PRODUCTION_LINE: 'L1', PLANT: 'PARITY', COLOR: 'RED', FORM_SIZE: 'A', RUN_TIME: '1', start_date: null, end_date: null },
+    { id: 'parity-blue-short', PRODUCTION_LINE: 'L1', PLANT: 'PARITY', COLOR: 'BLUE', FORM_SIZE: 'A', RUN_TIME: '1', start_date: null, end_date: null },
+  ], 'unit-test');
+  Store.setSelectedPlant('PARITY', 'unit-test');
+  const options = { startDate, respectFixed: true, respectCalendar: false };
+  const candidate = Engine.evaluateSchedule('combined', options);
+
+  Engine.runAndApply('combined', options);
+  const committed = candidate.patches.map(patch => ({
+    id: patch.id,
+    start: patch.changes.start_date?.getTime(),
+    end: patch.changes.end_date?.getTime(),
+  }));
+  const legacy = candidate.patches.map(patch => ({
+    id: patch.id,
+    start: Store.tasks[patch.id].start_date?.getTime(),
+    end: Store.tasks[patch.id].end_date?.getTime(),
+  }));
+  assert.deepEqual(committed, legacy,
+    'detached evaluation must reuse the same combined/day-integrity placement as the live legacy path');
 });
 
 test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending run-hours', () => {

@@ -143,8 +143,10 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule } from './schedule-services.mjs';
 import type { RemoveBacklogResult } from './schedule-services.mjs';
+import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
+import type { CandidateResult } from './setup-scheduler.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy } from './types.mjs';
 
@@ -6338,6 +6340,17 @@ interface OptimizerDefaults {
  *  reads defensively via individual `as` casts), so this needs the same index
  *  signature to stay assignable at that call site — same "known fields + open
  *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
+interface OptimizationAuditDetails {
+  mode: OptimizerMode;
+  wheelUsed: boolean;
+  taskCount: number;
+  scope: 'plant' | 'lines';
+  lines: string[] | null;
+  activePriorityFields: string[];
+  unrankedPriorityFields: string[];
+  splitOrderPolicy: SplitOrderPolicy;
+}
+
 interface OptimizerRunOptions {
   plant?: string | null;
   lines?: string[] | null;
@@ -6345,6 +6358,7 @@ interface OptimizerRunOptions {
   endDate?: Date;
   respectFixed?: boolean;
   respectCalendar?: boolean;
+  auditDetails?: OptimizationAuditDetails;
   [key: string]: unknown;
 }
 
@@ -6954,6 +6968,16 @@ export const OptimizeDialog = (() => {
       respectFixed:    sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
       runAt:           new Date(),
+      auditDetails: _mode === 'backlog' ? undefined : {
+        mode: _mode,
+        wheelUsed,
+        taskCount: Store.tasksArr.length,
+        scope: _scope,
+        lines: linesScope || null,
+        activePriorityFields: Engine.activeConstraintKeys(plant),
+        unrankedPriorityFields: unrankedFields,
+        splitOrderPolicy: Engine.splitOrderPolicyFor(plant),
+      },
     };
 
     // Config modal was already hidden (close(true) above) before the rank-map
@@ -6967,24 +6991,6 @@ export const OptimizeDialog = (() => {
       OptimizerPreview.runWithPreview(_mode, optsForEngine);
     }, 0));
 
-    // Persist audit log entry
-    if (_mode !== 'backlog') fetch(`${Config.API_BASE}/audit/log`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
-      body: JSON.stringify({
-        action: 'optimization_run', plant,
-        details: {
-          mode: _mode, wheel_used: wheelUsed, task_count: Store.tasksArr.length,
-          scope: _scope, lines: linesScope || null,
-          // `wheel_used` above is a colorWheel-only fact kept for continuity with
-          // existing audit rows; these two record what the run actually had to
-          // work with across ALL priority fields.
-          active_priority_fields: Engine.activeConstraintKeys(plant),
-          unranked_priority_fields: unrankedFields,
-          split_order_policy: Engine.splitOrderPolicyFor(plant),
-        },
-      }),
-    }).catch(() => {});
   }
 
   function openFromPicker() {
@@ -7061,7 +7067,10 @@ interface OptimizerPreviewCard {
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
-  _snapshot: null as NimbusTask[] | null,   // deep-cloned tasks taken before the run
+  // A detached pre-run copy is needed only if the planner later applies the
+  // candidate and wants Ctrl+Z. It is never used to roll a trial back.
+  _snapshot: null as NimbusTask[] | null,
+  _candidate: null as CandidateResult | null,
   _preKpis:  null as OptimizerKpis | null,
   _postKpis: null as OptimizerKpis | null,
   _mode:     null as OptimizerMode | null,
@@ -7071,8 +7080,8 @@ export const OptimizerPreview = {
   _backlogAudit: null as {
     plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
   } | null,
-  active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
-  _confSnapshot: null as unknown,   // Confidence.snapshot() taken just before the trial mutation
+  _auditDetails: null as OptimizationAuditDetails | null,
+  active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
@@ -7108,8 +7117,8 @@ export const OptimizerPreview = {
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
    *  to close on an outside click, bypassing discard()/apply() entirely (app.js's
    *  boot-time '.modal-backdrop' click handler calls Modal.close() directly). Left
-   *  alone, that would abandon a live trial with no revert AND leave `active` stuck
-   *  true, freezing Confidence forever. Treat any non-apply/discard hide as a discard. */
+   *  alone, that would leave detached candidate details and `active` stuck true.
+   *  Treat any non-apply/discard hide as a discard. */
   _installAbandonGuard() {
     if (OptimizerPreview._abandonGuardInstalled) return;
     OptimizerPreview._abandonGuardInstalled = true;
@@ -7147,17 +7156,17 @@ export const OptimizerPreview = {
         // Snapshot every task in the plant — the optimizer may touch any of
         // them transitively (auto-reflow can ripple beyond the chosen window
         // / lines), so the undo snapshot must stay unfiltered.
-        const scopedTasks = Store.tasksByPlant(plant);
-        const ids = scopedTasks.map(t => t.id);
+        const candidateSnapshot = snapshotSchedule();
+        const scopedTasks = candidateSnapshot.tasks.filter(task => {
+          const mappedPlant = candidateSnapshot.lineSettings[task.PRODUCTION_LINE]?.plant
+            ?? candidateSnapshot.masterData?.lines.find(row => row.production_line === task.PRODUCTION_LINE)?.plant;
+          return (task.PLANT || mappedPlant) === plant;
+        });
         const _snapT0 = performance.now();
-        snapshot = UndoStack.snapshotTasks(ids);
-        // Publish the snapshot BEFORE mutating the Store (R6) so a mid-run throw can
-        // be rolled back in the catch — Engine.runAndApply mutates in place.
+        snapshot = structuredClone(scopedTasks);
+        // Keep this detached copy only for the Undo entry if the planner applies.
         OptimizerPreview._snapshot = snapshot;
-        // Freeze Confidence for the whole trial window (through Apply/Discard) and
-        // snapshot it so a Discard can roll back without leaving any trace.
         OptimizerPreview.active = true;
-        OptimizerPreview._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
         PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
         // KPI inputs are scoped to what the user actually selected on screen 1 —
@@ -7180,45 +7189,39 @@ export const OptimizerPreview = {
         const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14);
         PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
 
-        // Run the optimizer in place.
-        Engine.runAndApply(mode, opts);
+        // Evaluate the established placement algorithm against a detached read
+        // model. Store changes only if the planner applies this candidate.
+        const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts });
 
-        // Post-KPIs from the now-mutated Store, filtered to the same scope.
-        const postTasks = Store.tasksByPlant(plant).filter(inScope);
+        // Post-KPIs are calculated from detached patched task values.
+        const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
         const _postKpiT0 = performance.now();
         const postKpis  = Util.scheduleKpis(postTasks, 14);
         PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
         OptimizerPreview._preKpis  = preKpis;
         OptimizerPreview._postKpis = postKpis;
+        OptimizerPreview._candidate = candidate;
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
         OptimizerPreview._splitOrderPolicy = Engine.splitOrderPolicyFor(plant);
-        OptimizerPreview._backlogResult = mode === 'backlog' ? Engine.lastBacklogResult : null;
+        OptimizerPreview._backlogResult = mode === 'backlog' ? candidate.backlogResult ?? null : null;
         OptimizerPreview._backlogAudit = mode === 'backlog' ? {
           plant,
           lines: Array.isArray(opts.lines) ? opts.lines : null,
           from: opts.startDate ?? null,
           to: opts.endDate ?? null,
           runAt: opts.runAt instanceof Date ? opts.runAt : null,
-          timezone: Store.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
+          timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
+        OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
 
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._render();
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
         ErrorLog.error('optimize-preview', errMsg || String(err));
-        // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
-        // the schedule partially mutated otherwise, with no undo path.
-        if (snapshot) {
-          try {
-            UndoStack.restoreTasks(snapshot);
-            if (NIMBUS!.Confidence && OptimizerPreview._confSnapshot) NIMBUS!.Confidence!.restore!(OptimizerPreview._confSnapshot);
-            Alerts.scheduleRecompute();
-          }
-          catch { ErrorLog.error('optimize-preview', `revert failed`); }
-        }
+        // Evaluation is detached, so failures leave Store untouched.
         OptimizerPreview._clear();
         if (body) {
           body.innerHTML =
@@ -7439,7 +7442,7 @@ export const OptimizerPreview = {
         <div class="opt-pv-grid">${cardsHtml}</div>
 
         <div class="opt-pv-footer-note">
-          <strong>Apply</strong> keeps the new schedule (still undoable via Ctrl+Z). <strong>Discard</strong> reverts every order to its pre-optimization position.
+          <strong>Apply</strong> commits the candidate schedule (still undoable via Ctrl+Z). <strong>Discard</strong> drops this candidate without changing the current schedule.
         </div>
       </div>`;
 
@@ -7468,9 +7471,29 @@ export const OptimizerPreview = {
 
   apply() {
     const snap = OptimizerPreview._snapshot;
+    const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
-    if (!snap) { Modal.close('modal-opt-preview'); return; }
+    const auditDetails = OptimizerPreview._auditDetails;
+    if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
+    if (auditDetails && plant) {
+      fetch(`${Config.API_BASE}/audit/log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
+        body: JSON.stringify({
+          action: 'optimization_run', plant,
+          details: {
+            mode: auditDetails.mode,
+            wheel_used: auditDetails.wheelUsed,
+            task_count: auditDetails.taskCount,
+            scope: auditDetails.scope,
+            lines: auditDetails.lines,
+            active_priority_fields: auditDetails.activePriorityFields,
+            unranked_priority_fields: auditDetails.unrankedPriorityFields,
+            split_order_policy: auditDetails.splitOrderPolicy,
+          },
+        }),
+      }).catch(() => {});
+    }
     if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
       const audit = OptimizerPreview._backlogAudit;
       const diagnostics = OptimizerPreview._backlogResult.diagnostics;
@@ -7492,6 +7515,10 @@ export const OptimizerPreview = {
         }),
       }).catch(() => {});
     }
+    // This is the sole schedule-state commit for a preview candidate.
+    Engine.applySchedulePatches(candidate.patches);
+    Store.setLastOptimize(new Date(), 'engine');
+    Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
@@ -7505,12 +7532,7 @@ export const OptimizerPreview = {
   },
 
   discard() {
-    const snap = OptimizerPreview._snapshot;
-    const confSnap = OptimizerPreview._confSnapshot;
-    if (snap) {
-      UndoStack.restoreTasks(snap);
-      if (NIMBUS!.Confidence && confSnap) NIMBUS!.Confidence!.restore!(confSnap);
-      Alerts.scheduleRecompute();
+    if (OptimizerPreview._candidate) {
       Toast.show(Util.t('toast.opt_discarded'), 'info');
     }
     OptimizerPreview._clear();
@@ -7519,6 +7541,7 @@ export const OptimizerPreview = {
 
   _clear() {
     OptimizerPreview._snapshot = null;
+    OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
     OptimizerPreview._postKpis = null;
     OptimizerPreview._mode     = null;
@@ -7526,8 +7549,8 @@ export const OptimizerPreview = {
     OptimizerPreview._splitOrderPolicy = 'never';
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
+    OptimizerPreview._auditDetails = null;
     OptimizerPreview.active       = false;
-    OptimizerPreview._confSnapshot = null;
   },
 };
 

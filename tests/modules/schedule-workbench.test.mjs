@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
+import { Alerts } from '../../web/schedule-services.mjs';
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
 // _refreshLineBtn/_buildLineDropdown DOM helpers, which reference bare
@@ -300,6 +301,83 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');
   assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
+});
+
+test('OptimizerPreview keeps trial patches detached until Apply, then commits them once', () => {
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorTimelineItems = Timeline._items;
+  const priorPlant = Store.selectedPlant;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorFetch = globalThis.fetch;
+  const timelineUpdates = [];
+  const publications = [];
+  const auditRequests = [];
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  Timeline._items = { update(items) { timelineUpdates.push(...items); } };
+  Alerts.scheduleRecompute = () => {};
+  globalThis.fetch = (...args) => {
+    auditRequests.push(args);
+    return Promise.resolve({ ok: true });
+  };
+  Store.setTasks([
+    { id: 'preview-long', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 5, start_date: null, end_date: null },
+    { id: 'preview-short', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null },
+  ], 'unit-test');
+  Store.setSelectedPlant('PREVIEW', 'unit-test');
+  const beforeRevision = Store.rev();
+  const beforeTasks = structuredClone(Store.tasks);
+  const unsubscribe = Store.subscribe(event => { publications.push(event.type); }, 'unit-test-autosave');
+
+  try {
+    const previewOptions = {
+      plant: 'PREVIEW', respectCalendar: false, now: new Date('2026-08-03T08:00:00'),
+      auditDetails: {
+        mode: 'spt', wheelUsed: false, taskCount: 2, scope: 'plant', lines: null,
+        activePriorityFields: [], unrankedPriorityFields: [], splitOrderPolicy: 'never',
+      },
+    };
+    OptimizerPreview.runWithPreview('spt', previewOptions);
+
+    assert.ok(OptimizerPreview._candidate, 'the preview retains a detached candidate for Apply');
+    assert.equal(Store.rev(), beforeRevision, 'opening a preview must not publish trial schedule state');
+    assert.deepEqual(Store.tasks, beforeTasks, 'opening a preview must not alter live task values');
+    assert.deepEqual(timelineUpdates, [], 'a detached preview must not issue timeline item updates');
+    assert.deepEqual(publications, [], 'autosave-like Store subscribers must stay idle before Apply');
+    assert.deepEqual(auditRequests, [], 'a detached candidate must not persist an audit row before Apply');
+
+    OptimizerPreview.discard();
+
+    assert.equal(OptimizerPreview._candidate, null, 'Discard destroys the detached candidate');
+    assert.equal(Store.rev(), beforeRevision, 'Discard must not roll back through Store because Store never changed');
+    assert.deepEqual(Store.tasks, beforeTasks, 'Discard leaves the live schedule untouched');
+    assert.deepEqual(publications, [], 'Discard must not wake autosave-like subscribers');
+    assert.deepEqual(auditRequests, [], 'Discard must not persist an audit row');
+
+    OptimizerPreview.runWithPreview('spt', previewOptions);
+
+    OptimizerPreview.apply();
+
+    assert.ok(Store.tasks['preview-short'].start_date, 'Apply commits the selected candidate patch set');
+    assert.equal(publications.filter(type => type === 'tasks:bulkUpdate').length, 1,
+      'Apply performs exactly one schedule task commit');
+    assert.equal(auditRequests.length, 1, 'Apply emits the deferred audit row');
+    assert.equal(timelineUpdates.length, 0, 'the evaluator itself never writes Timeline items');
+  } finally {
+    unsubscribe();
+    OptimizerPreview._clear();
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    globalThis.fetch = priorFetch;
+    Timeline._items = priorTimelineItems;
+    Store.setTasks([], 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+  }
 });
 
 test('EditCalendar/ColorWheelViewer/Printer/SandboxAdapter/AlertsUIAdapter expose their documented public API', () => {

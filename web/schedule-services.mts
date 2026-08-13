@@ -32,6 +32,7 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
+import type { CandidateResult, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
@@ -148,6 +149,124 @@ interface SortTerm {
   cmp(a: any, b: any): number;
 }
 
+/** Capture the complete read model for one optimizer candidate.  Every member
+ * is cloned at the Store boundary so candidate scheduling cannot hold a live
+ * reference that a later Store mutation could alter while it is evaluating. */
+export function snapshotSchedule(): ScheduleSnapshot {
+  return {
+    tasks: structuredClone(Store.tasksArr),
+    fixedIds: Array.from(Store.fixedIds),
+    alerts: structuredClone(Store.alerts),
+    selectedPlant: Store.selectedPlant,
+    blocks: structuredClone(Store.blocks),
+    plantBlocks: structuredClone(Store.plantBlocks),
+    calendars: structuredClone(Store.calendars),
+    plants: structuredClone(Store.plants),
+    lineSettings: structuredClone(Store.lineSettings),
+    masterData: structuredClone(Store.masterData),
+    priorityRankMaps: structuredClone(Store.priorityRankMaps),
+  };
+}
+
+/** The only bridge from a detached candidate into live schedule state.  Keep
+ * this as one Store.updateMany call: candidates never publish intermediate
+ * task, alert, autosave, or Timeline changes. */
+export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
+  if (patches.length) Store.updateMany(Array.from(patches), 'engine');
+}
+
+// One synchronous candidate evaluation may temporarily select this immutable,
+// deep-cloned read model.  It is deliberately module-private: no Store field is
+// swapped, no listener can observe it, and it is cleared in finally{} before
+// control returns to the preview.  The existing placement algorithms below use
+// these accessors so the migration does not silently rewrite their behavior.
+let _candidateSnapshot: ScheduleSnapshot | null = null;
+
+function sourceTasks(): ReadonlyArray<NimbusTask> { return _candidateSnapshot?.tasks ?? Store.tasksArr; }
+function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSnapshot?.blocks ?? Store.blocks; }
+function sourcePlantBlocks(): ReadonlyArray<NimbusPlantBlock> { return _candidateSnapshot?.plantBlocks ?? Store.plantBlocks; }
+function sourceLineSettings(): Readonly<Record<string, NimbusLineSetting>> { return _candidateSnapshot?.lineSettings ?? Store.lineSettings; }
+function sourceMasterData(): NimbusMasterData | null { return _candidateSnapshot?.masterData ?? Store.masterData; }
+function sourcePriorityRankMaps() { return _candidateSnapshot?.priorityRankMaps ?? Store.priorityRankMaps; }
+function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selectedPlant ?? Store.selectedPlant; }
+
+function sourceGetPlantForLine(line: string): string | null {
+  if (!_candidateSnapshot) return Store.getPlantForLine(line);
+  return _candidateSnapshot.lineSettings[line]?.plant
+    ?? _candidateSnapshot.masterData?.lines.find(row => row.production_line === line)?.plant
+    ?? null;
+}
+
+function sourceTasksByPlant(plant: string | null): NimbusTask[] {
+  if (!_candidateSnapshot) return Store.tasksByPlant(plant);
+  if (!plant) return [];
+  return _candidateSnapshot.tasks.filter(task => (task.PLANT || sourceGetPlantForLine(task.PRODUCTION_LINE)) === plant);
+}
+
+function sourceTask(id: string): NimbusTask | undefined {
+  return _candidateSnapshot ? _candidateSnapshot.tasks.find(task => String(task.id) === String(id)) : Store.tasks[id];
+}
+
+function isFixedIdSet(fixed: readonly string[] | ReadonlySet<string>): fixed is ReadonlySet<string> {
+  return !Array.isArray(fixed);
+}
+
+function sourceIsFixed(id: string | number): boolean {
+  if (!_candidateSnapshot) return Store.isFixed(id);
+  const fixed = _candidateSnapshot.fixedIds;
+  if (isFixedIdSet(fixed)) return fixed.has(String(id));
+  return fixed.map(String).includes(String(id));
+}
+
+function candidateDefaultWorkHours(): WorkHours {
+  const workHours: WorkHours = {};
+  for (let day = 0; day < 7; day++) {
+    workHours[day] = Config.WEEKEND_OFF && (day === 0 || day === 6)
+      ? null
+      : [Config.DEFAULT_SHIFT[0], Config.DEFAULT_SHIFT[1]];
+  }
+  return workHours;
+}
+
+function sourceLineWorkHours(line: string): WorkHours {
+  if (!_candidateSnapshot) {
+    Store.ensureCalendar(line);
+    return Store.calendars[line].workHours;
+  }
+  return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+}
+
+function sourcePlantWorkHours(plant: string): WorkHours {
+  if (!_candidateSnapshot) {
+    Store.ensurePlant(plant);
+    return Store.plants[plant].workHours;
+  }
+  return _candidateSnapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+}
+
+function detachedCandidateResult(
+  patches: ReadonlyArray<SchedulePatch>,
+  startedAt: number,
+  termination: 'completed' | 'no-plant' = 'completed',
+  backlogResult?: RemoveBacklogResult,
+): CandidateResult {
+  return {
+    patches,
+    score: [0, 0, 0, 0, 0, patches.length],
+    explanation: [],
+    diagnostics: {
+      candidateCount: termination === 'completed' ? 1 : 0,
+      method: 'legacy-detached',
+      termination,
+      runtimeMs: performance.now() - startedAt,
+      limitReached: false,
+    },
+    unchangedLines: [],
+    missingEdges: [],
+    ...(backlogResult ? { backlogResult } : {}),
+  };
+}
+
 /* =============================================================================
    CALENDAR — capacity math only (working hours, blackout-block availability).
    All functions operate on a `line` (string) + Date objects. The blackout-
@@ -178,7 +297,7 @@ export const Calendar = {
   /** Parse every blackout block once and bucket by line / plant for O(1) lookup. */
   _indexBlocks(plant: string | null): RunBlocksIndex {
     const byLine = new Map<string, BlockRec[]>();
-    for (const b of Store.blocks) {
+    for (const b of sourceBlocks()) {
       // A block applies only within its own plant (line:null = all lines in that
       // plant). Un-stamped legacy blocks (no b.plant) fall back to global behavior.
       if (b.plant && plant && b.plant !== plant) continue;
@@ -190,7 +309,7 @@ export const Calendar = {
       arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
     }
     const byPlant = new Map<string, BlockRec[]>();
-    for (const b of Store.plantBlocks) {
+    for (const b of sourcePlantBlocks()) {
       if (b.plant && plant && b.plant !== plant) continue;
       const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
       if (!s || !e) continue;
@@ -221,18 +340,16 @@ export const Calendar = {
       if (rc.ww.has(key)) return rc.ww.get(key)!;
     }
 
-    Store.ensureCalendar(line);
-    const lineWin = Calendar._dayWindow(Store.calendars[line].workHours, date);
+    const lineWin = Calendar._dayWindow(sourceLineWorkHours(line), date);
     if (!lineWin) {
       if (rc) rc.ww.set(key, null);
       return null;
     }
 
-    const plant = Store.getPlantForLine(line);
+    const plant = sourceGetPlantForLine(line);
     let result: [Date, Date];
     if (plant) {
-      Store.ensurePlant(plant);
-      const plantWin = Calendar._dayWindow(Store.plants[plant].workHours, date);
+      const plantWin = Calendar._dayWindow(sourcePlantWorkHours(plant), date);
       if (!plantWin) {
         if (rc) rc.ww.set(key, null);
         return null;
@@ -525,18 +642,18 @@ export const Calendar = {
     if (cached) {
       for (const block of cached.byLine.get(line) || []) add(block.startDate, block.endDate);
       for (const block of cached.byLine.get('__any__') || []) add(block.startDate, block.endDate);
-      const plant = Store.getPlantForLine(line);
+      const plant = sourceGetPlantForLine(line);
       if (plant) for (const block of cached.byPlant.get(plant) || []) add(block.startDate, block.endDate);
       for (const block of cached.byPlant.get('__any__') || []) add(block.startDate, block.endDate);
     } else {
-      const plant = Store.getPlantForLine(line);
-      for (const block of Store.blocks) {
+      const plant = sourceGetPlantForLine(line);
+      for (const block of sourceBlocks()) {
         if (block.plant && block.plant !== plant) continue;
         if (block.line && block.line !== line) continue;
         const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
         if (s && e) add(s, e);
       }
-      for (const block of Store.plantBlocks) {
+      for (const block of sourcePlantBlocks()) {
         if (block.plant && block.plant !== plant) continue;
         const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
         if (s && e) add(s, e);
@@ -677,7 +794,7 @@ export const Calendar = {
           if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
         }
       }
-      const plant = Store.getPlantForLine(line);
+      const plant = sourceGetPlantForLine(line);
       const scanPlant = plant ? rb.byPlant.get(plant) : null;
       if (scanPlant) {
         for (const b of scanPlant) {
@@ -693,15 +810,15 @@ export const Calendar = {
       return null;
     }
 
-    const plant = Store.getPlantForLine(line);
-    for (const b of Store.blocks) {
+    const plant = sourceGetPlantForLine(line);
+    for (const b of sourceBlocks()) {
       if (b.plant && b.plant !== plant) continue;
       if (b.line && b.line !== line) continue;
       const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
       if (!bs || !be) continue;
       if (start < be && end > bs) return { start: bs, end: be };
     }
-    for (const b of Store.plantBlocks) {
+    for (const b of sourcePlantBlocks()) {
       if (b.plant && b.plant !== plant) continue;
       const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
       if (!bs || !be) continue;
@@ -1278,10 +1395,35 @@ export const Engine = {
    * it so stale diagnostics cannot leak into their shared preview. */
   lastBacklogResult: null as RemoveBacklogResult | null,
 
+  /** Evaluate the established legacy placement algorithm against a deep,
+   * detached snapshot. This is synchronous, so the private source selector is
+   * always cleared before another caller can observe it. */
+  evaluateSchedule(
+    mode: OptimizerMode = 'combined',
+    opts: Record<string, unknown> = {},
+    snapshot: ScheduleSnapshot = snapshotSchedule(),
+  ): CandidateResult {
+    if (_candidateSnapshot) throw new Error('Nested detached schedule evaluation is not supported');
+    _candidateSnapshot = snapshot;
+    try {
+      return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
+        ?? detachedCandidateResult([], performance.now());
+    } finally {
+      _candidateSnapshot = null;
+    }
+  },
+
+  /** Apply a selected candidate exactly once.  Preview callers use this rather
+   * than calling Store.updateMany themselves so the mutation boundary remains
+   * visible and auditable. */
+  applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
+    applySchedulePatches(patches);
+  },
+
   /** Plant-level behavior only; an absent/malformed value deliberately keeps
    * the established continuous-order scheduler unchanged. */
   splitOrderPolicyFor(plant: string | null): SplitOrderPolicy {
-    const value = Store.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.split_order_policy;
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
   },
 
@@ -1289,7 +1431,7 @@ export const Engine = {
    * are never shifted independently; a one-piece result explicitly clears an
    * obsolete child aggregate. */
   schedulePatchFor(task: NimbusTask, line: string, requestedStart: Date,
-                   policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line))): Partial<NimbusTask> | null {
+                   policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(sourceGetPlantForLine(line))): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
     if (policy === 'never') {
@@ -1309,7 +1451,7 @@ export const Engine = {
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    const plant = Store.getPlantForLine(line) ?? task.PLANT ?? Store.selectedPlant;
+    const plant = sourceGetPlantForLine(line) ?? task.PLANT ?? sourceSelectedPlant();
     const policy = Engine.splitOrderPolicyFor(plant);
     if (policy === 'never') {
       const start = Util.snap(requestedStart);
@@ -1398,10 +1540,10 @@ export const Engine = {
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
    * has no priority, due-date, fixed-protection, or day-integrity branches. */
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
-    const plant = (opts.plant as string | undefined) ?? Store.selectedPlant;
+    const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
     const splitPolicy = Engine.splitOrderPolicyFor(plant);
-    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const row = sourceMasterData()?.plants?.find(p => p.plant === plant);
     const timezone = row?.timezone;
     if (typeof timezone !== 'string' || !timezone.trim()) {
       throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
@@ -1426,7 +1568,7 @@ export const Engine = {
       ? new Set((opts.lines as unknown[]).map(String))
       : null;
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
-    const scopedTasks = Store.tasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
+    const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
     for (const task of scopedTasks) {
       if (!task.start_date) {
         diagnostics.missingStartIds.push(task.id);
@@ -1444,7 +1586,7 @@ export const Engine = {
     Calendar._beginRun(plant);
     try {
       for (const [line, items] of grouped) {
-        if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+        if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
         items.sort((a, b) => a.snapshotStart.getTime() - b.snapshotStart.getTime() || a.task.id.localeCompare(b.task.id));
         const firstBacklog = items.findIndex(item => item.snapshotStart < now);
         if (firstBacklog < 0) continue;
@@ -1506,7 +1648,7 @@ export const Engine = {
           if (scheduleSegments !== undefined) changes.scheduleSegments = scheduleSegments;
           patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
-          if (Store.isFixed(item.task.id)) diagnostics.fixedMoved++;
+          if (sourceIsFixed(item.task.id)) diagnostics.fixedMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
           diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
             Math.round((start.getTime() - item.snapshotStart.getTime()) / Config.MS_MIN));
@@ -1520,7 +1662,7 @@ export const Engine = {
     for (const patch of patches) {
       const movedStart = patch.changes.start_date!;
       const movedEnd = patch.changes.end_date!;
-      const movedTask = Store.tasks[patch.id];
+      const movedTask = sourceTask(patch.id);
       for (const protectedTask of scopedTasks) {
         if (protectedTask.PRODUCTION_LINE !== movedTask?.PRODUCTION_LINE || !protectedTask.start_date || !protectedTask.end_date) continue;
         if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
@@ -1589,7 +1731,7 @@ export const Engine = {
 
   /** Ordered constraint config stored for a plant, or null if never configured. */
   constraintsFor(plant: string | null): ConstraintConfig[] | null {
-    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const row = sourceMasterData()?.plants?.find(p => p.plant === plant);
     const list = row && row.constraints;
     return Array.isArray(list) ? list : null;
   },
@@ -1788,7 +1930,7 @@ export const Engine = {
    *  `Store.selectedPlant`, which is why this single non-plant-keyed cache is
    *  safe to read without a plant argument. */
   hasPriorityRanks(fieldKey: string): boolean {
-    const byLine = Store.priorityRankMaps || {};
+    const byLine = sourcePriorityRankMaps() || {};
     for (const line of Object.keys(byLine)) {
       const m = byLine[line]?.[fieldKey];
       if (m && Object.keys(m).length > 0) return true;
@@ -1883,7 +2025,7 @@ export const Engine = {
         terms.push({
           get: (t: NimbusTask): string => {
             const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
-            const byLine = Store.priorityRankMaps || {};
+            const byLine = sourcePriorityRankMaps() || {};
             const line = t.PRODUCTION_LINE || '';
             // An EMPTY line-scoped map must fall through to the plant-wide list,
             // not shadow it: `??` only bridges null/undefined, and a stored
@@ -2274,20 +2416,25 @@ export const Engine = {
    *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
    *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
    *  and every caller's effective plant IS Store.selectedPlant. */
-  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): void {
+  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
+    const candidateRun = opts.__candidateRun === true;
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
-    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
-    const plant: string | null = (opts.plant as string | null | undefined) ?? Store.selectedPlant;
+    if (!sourceTasks().length) {
+      if (!candidateRun) Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
+      return candidateRun ? detachedCandidateResult([], _pmT0e) : undefined;
+    }
+    const plant: string | null = (opts.plant as string | null | undefined) ?? sourceSelectedPlant();
     if (!plant) {
-      Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
-      return;
+      if (!candidateRun) Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
+      return candidateRun ? detachedCandidateResult([], _pmT0e, 'no-plant') : undefined;
     }
     // Remove Backlog is a schedule-repair pass, not an optimizer. Dispatch it
     // before priority-term creation so this path cannot accidentally read rank
     // maps, fixed protection, or the day-integrity resequencer.
     if (mode === 'backlog') {
       const result = Engine.removeBacklog({ ...opts, plant });
+      if (candidateRun) return detachedCandidateResult(result.patches, _pmT0e, 'completed', result);
       Engine.lastBacklogResult = result;
       if (result.patches.length) Store.updateMany(result.patches, 'engine-backlog');
       Store.setLastOptimize(new Date(), 'engine-backlog');
@@ -2296,7 +2443,7 @@ export const Engine = {
       PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
       return;
     }
-    Engine.lastBacklogResult = null;
+    if (!candidateRun) Engine.lastBacklogResult = null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
@@ -2312,9 +2459,10 @@ export const Engine = {
     const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
     const sortTerms = Engine._sortTerms(mode, { plant });
 
+    const injectedNow = candidateRun && opts.now instanceof Date ? opts.now : null;
     const horizonStart = opts.startDate
       ? new Date(opts.startDate as string | number | Date)
-      : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
+      : (() => { const d = injectedNow ? new Date(injectedNow) : new Date(); d.setSeconds(0, 0); return d; })();
     const horizonEnd   = opts.endDate   ? new Date(opts.endDate as string | number | Date) : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
@@ -2329,7 +2477,7 @@ export const Engine = {
     // Skip non-allowed lines at insertion when a line filter is supplied so we don't
     // pay for grouping work that will just be discarded.
     const groups: Record<string, { line: string; tasks: NimbusTask[] }> = {};
-    for (const t of Store.tasksByPlant(plant)) {
+    for (const t of sourceTasksByPlant(plant)) {
       const line = t.PRODUCTION_LINE || 'Unknown';
       if (allowed && !allowed.has(line)) continue;
       (groups[line] ||= { line, tasks: [] }).tasks.push(t);
@@ -2344,14 +2492,14 @@ export const Engine = {
     try {
 
     for (const line of Object.keys(groups)) {
-      if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+      if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
       const { tasks } = groups[line];
 
       const fixedTasks = tasks.filter(t =>
-        (respectFixed && Store.isFixed(t.id)) || isAged(t) || isOutOfWin(t)
+        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFixed && Store.isFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
+        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
       );
 
       fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
@@ -2359,7 +2507,7 @@ export const Engine = {
       // Cursor floor is max(horizonStart, now): extending "From" backwards
       // widens eligibility (older orders become free to move) but never
       // schedules anything in the literal past.
-      const now = new Date();
+      const now = injectedNow ? new Date(injectedNow) : new Date();
       now.setSeconds(0, 0);
       const cursorFloor = horizonStart.getTime() > now.getTime() ? horizonStart : now;
 
@@ -2481,7 +2629,9 @@ export const Engine = {
       Calendar._endRun();
     }
 
-    if (patches.length) Store.updateMany(patches, 'engine');
+    if (candidateRun) return detachedCandidateResult(patches, _pmT0e);
+
+    applySchedulePatches(patches);
     Store.setLastOptimize(new Date(), 'engine');
     Alerts.clearDismissed();
     // Route through the adaptive debounce instead of a direct synchronous recompute:
