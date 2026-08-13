@@ -174,6 +174,43 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
   }
 });
 
+test('Engine.evaluateSetupAware forwards only an explicit detached setup request', () => {
+  // This fails if Task 3 leaves the pure evaluator unreachable from the
+  // Engine seam, or if the seam falls back to Store setup state rather than
+  // requiring the caller-supplied setup truth and bounds.
+  assert.equal(typeof Engine.evaluateSetupAware, 'function');
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const snapshot = {
+    tasks: [{
+      id: 'engine-setup-blue', PLANT: 'ENGINE_SETUP', PRODUCTION_LINE: 'L1', COLOR: 'BLUE', RUN_TIME: 1,
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-03T10:00:00'),
+    }],
+    fixedIds: [], alerts: [], selectedPlant: 'ENGINE_SETUP', blocks: [], plantBlocks: [],
+    calendars: { L1: { workHours: hours } }, plants: { ENGINE_SETUP: { workHours: hours } },
+    lineSettings: {}, masterData: { plants: [{ plant: 'ENGINE_SETUP' }], lines: [{ plant: 'ENGINE_SETUP', production_line: 'L1' }] },
+    priorityRankMaps: {},
+  };
+  const bounds = {
+    setup: {
+      plant: 'ENGINE_SETUP',
+      definition: { plant: 'ENGINE_SETUP', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+      line_rows: [],
+      line_states: [{ line: 'L1', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+      overrides: [],
+    },
+    exactSearchThreshold: 2, iterationCap: 2, clock: () => 0, deadline: 1,
+    now: new Date('2026-08-03T08:00:00'), horizonEnd: new Date('2026-08-03T18:00:00'),
+  };
+  const beforeRev = Store.rev();
+
+  const result = Engine.evaluateSetupAware('due-date-first', bounds, snapshot);
+
+  assert.equal(result.patches[0].changes.start_date.getTime(), new Date('2026-08-03T08:05:00').getTime());
+  assert.equal(Store.rev(), beforeRev, 'explicit setup candidate routing must not publish to Store');
+});
+
 test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([

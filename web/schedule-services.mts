@@ -32,10 +32,15 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
-import { placeWithSetup as placeWithSetupPure } from './setup-scheduler.mjs';
+import {
+  placeWithSetup as placeWithSetupPure,
+  evaluateDueDateFirst as evaluateDueDateFirstPure,
+  evaluateSptWithSetup as evaluateSptWithSetupPure,
+} from './setup-scheduler.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
+  DueDateFirstBounds,
   PlacementResult,
   PlaceWithSetupRequest,
   SchedulePatch,
@@ -1493,6 +1498,19 @@ export const Engine = {
       _candidateSnapshot = null;
       _candidateDiagnostics = null;
     }
+  },
+
+  /** Explicit detached setup-aware seam. Existing runAndApply/UI calls do
+   * not route here; a caller must supply both the immutable snapshot and the
+   * measured search bounds/setup truth before any setup-aware candidate exists. */
+  evaluateSetupAware(
+    mode: 'due-date-first' | 'spt',
+    bounds: Readonly<DueDateFirstBounds>,
+    snapshot: ScheduleSnapshot = snapshotSchedule(),
+  ): CandidateResult {
+    return mode === 'due-date-first'
+      ? evaluateDueDateFirstPure(snapshot, bounds)
+      : evaluateSptWithSetupPure(snapshot, bounds);
   },
 
   /** Apply a selected candidate exactly once.  Preview callers use this rather
