@@ -54,12 +54,20 @@ test('Plant exposes the generalized priority-list optimization API', () => {
 test('SetupAdmin keeps read, copy, and export available to non-writers', () => {
   // Regression target: hiding the entire matrix UI from a scheduler/preview
   // user would remove the inspection and export access Stage 0 requires.
-  assert.deepEqual(SetupAdmin.permissionsFor({ isAdmin: false, isScheduler: false }), {
+  assert.deepEqual(SetupAdmin.permissionsFor({ isAdmin: false, setupScheduler: false, plantAllowed: false }), {
     read: true, copy: true, export: true, definitionWrite: false, matrixWrite: false, stateWrite: false,
   });
-  assert.deepEqual(SetupAdmin.permissionsFor({ isAdmin: false, isScheduler: true }), {
+  assert.deepEqual(SetupAdmin.permissionsFor({ isAdmin: false, setupScheduler: true, plantAllowed: true }), {
     read: true, copy: true, export: true, definitionWrite: false, matrixWrite: false, stateWrite: true,
   });
+});
+
+test('SetupAdmin only grants state writes to an explicitly scoped setup scheduler', () => {
+  // Regression target: treating any authenticated non-admin as a scheduler
+  // would show a write control that the server must reject.
+  assert.equal(SetupAdmin.permissionsFor({ isAdmin: false, setupScheduler: true, plantAllowed: true }).stateWrite, true);
+  assert.equal(SetupAdmin.permissionsFor({ isAdmin: false, setupScheduler: false, plantAllowed: true }).stateWrite, false);
+  assert.equal(SetupAdmin.permissionsFor({ isAdmin: false, setupScheduler: true, plantAllowed: false }).stateWrite, false);
 });
 
 test('SetupAdmin resolves sparse line rows over inherited plant rows and deletes only the override', () => {
@@ -95,4 +103,25 @@ test('SetupAdmin exports canonical long-form columns with plant, line, and versi
   assert.deepEqual(SetupAdmin.csvColumns(), [
     'Plant', 'Line', 'Signature version', 'From setup state', 'To setup state', 'Setup minutes',
   ]);
+});
+
+test('SetupAdmin uses registered setup keys and reversibly parses canonical long-form CSV', () => {
+  // Regression target: task DTO names (COLOR) would be rejected by the
+  // backend, while delimiter-joined values could not be imported safely.
+  assert.deepEqual(SetupAdmin.registeredFields([{ field_key: 'colorWheel' }, { field_key: 'prt01' }]), ['colorWheel', 'prt01']);
+  const csv = [
+    'Plant,Line,Signature version,From setup state,To setup state,Setup minutes',
+    '5512,LINE-1,4,"[{""fieldKey"":""colorWheel"",""value"":""A|B""}]","[{""fieldKey"":""colorWheel"",""value"":""C,D""}]",12',
+  ].join('\r\n');
+  assert.deepEqual(SetupAdmin.parseLongFormCsv(csv), {
+    plant: '5512', line: 'LINE-1', signature_version: 4,
+    rows: [{ from: [{ fieldKey: 'colorWheel', value: 'A|B' }], to: [{ fieldKey: 'colorWheel', value: 'C,D' }], setup_min: 12 }],
+  });
+});
+
+test('SetupAdmin reports pre-coverage activation truthfully until coverage is available', () => {
+  // Regression target: a hardcoded false coverage result falsely claims a
+  // coverage failure before Task 7 exposes the coverage API.
+  const status = SetupAdmin.activationStatus({ active: false, signature_version: 4, fields: ['colorWheel'] }, { matrixVersion: 4 });
+  assert.match(status.reason, /coverage has not been measured/i);
 });

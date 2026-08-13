@@ -581,6 +581,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/setup/{plant}/matrix/import": "setup.matrix_import",
     "/setup/{plant}/matrix": "setup.matrix_delete",
     "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
+    "/setup/{plant}/lines/{line}/compatibility": "setup.line_compatibility_write",
     "/setup/{plant}/overrides": "setup.override_create",
     "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
@@ -2457,6 +2458,32 @@ def save_setup_line_state(plant: str, line: str, request: Request, body: dict = 
         raise _setup_error(exc) from exc
     _set_admin_log_details(request, signature_version=result["signature_version"], accepted=result.get("accepted"))
     return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                                      Depends(require_admin)])
+def save_setup_line_compatibility(plant: str, line: str, request: Request, body: dict = Body(default={}),
+                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                                  actor: str = Depends(auth.require_authenticated)):
+    """Admin-only setup-signature opt-out, distinct from global optimizer exclusion."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, line=line)
+    try:
+        result = md.set_setup_line_compatibility(plant, line, body.get("setup_compatible"), body.get("reason"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, setup_compatible=result["setup_compatible"])
+    return result
+
+
+@api.get("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_line_compatibility(plant: str, line: str,
+                                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return md.get_setup_line_compatibility(plant, line)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
 
 
 @api.post("/setup/{plant}/overrides", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])

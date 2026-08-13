@@ -1082,6 +1082,54 @@ def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
     return {"status": "ok", "plant": plant, "constraints": clean}
 
 
+def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason: str | None,
+                                 user_email: str | None = None) -> dict:
+    """Persist the setup-only line opt-out without touching excl_optimizer.
+
+    This deliberately has its own narrow write path: generic production-line
+    bulk writes cannot enforce the required incompatibility reason and would
+    make it too easy to conflate this setup signature exception with the
+    existing global optimizer exclusion flag.
+    """
+    if not isinstance(compatible, bool):
+        raise ValueError("setup_compatible must be boolean")
+    plant = str(plant or "").strip()
+    line = str(line or "").strip()
+    reason = str(reason or "").strip() or None
+    if not plant or not line:
+        raise ValueError("plant and line are required")
+    if not compatible and not reason:
+        raise ValueError("Setup compatibility reason is required when incompatible")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE production_lines
+                   SET setup_compatible = %s, setup_compatibility_reason = %s
+                 WHERE plant = %s AND production_line = %s""",
+            (compatible, None if compatible else reason, plant, line),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES (%s, %s, %s, %s)",
+            ("production_lines", "set_setup_compatibility",
+             Jsonb({"plant": plant, "line": line, "setup_compatible": compatible,
+                    "setup_compatibility_reason": None if compatible else reason}), user_email),
+        )
+        conn.commit()
+    return {"plant": plant, "line": line, "setup_compatible": compatible,
+            "setup_compatibility_reason": None if compatible else reason}
+
+
+def get_setup_line_compatibility(plant: str, line: str) -> dict:
+    """Return one line's setup-only compatibility, never a plant-wide line list."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_compatible, setup_compatibility_reason FROM production_lines WHERE plant = %s AND production_line = %s", (plant, line))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+    return {"plant": plant, "line": line, "setup_compatible": bool(row[0]), "setup_compatibility_reason": row[1]}
+
+
 def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,
                                  user_email: str | None = None) -> dict:
     """Persist the plant's allocation policy after a strict server-side

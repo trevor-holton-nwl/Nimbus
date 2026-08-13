@@ -1325,4 +1325,5 @@ window.__NIMBUS_LOCALES.en = {
   'btn.setup_update_state':          'Update state',
   'toast.setup_saved':               'Setup administration saved',
   'toast.setup_copied':              'Setup rows copied',
+  'ui.setup_import_csv':             'Import CSV',
 };

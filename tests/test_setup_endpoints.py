@@ -98,6 +98,24 @@ class _SetupService:
             raise ValueError("Setup signature version is stale")
 
 
+def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, monkeypatch):
+    """A setup-only opt-out cannot be silently stored without an operator reason."""
+    calls = []
+    def save(plant, line, compatible, reason, actor):
+        calls.append((plant, line, compatible, reason, actor))
+        if not compatible and not reason:
+            raise ValueError("Setup compatibility reason is required when incompatible")
+        return {"plant": plant, "line": line, "setup_compatible": compatible,
+                "setup_compatibility_reason": reason}
+    monkeypatch.setattr(brain.md, "set_setup_line_compatibility", save, raising=False)
+    rejected = tc.put("/setup/5512/lines/LINE-1/compatibility", json={"setup_compatible": False, "reason": ""})
+    saved = tc.put("/setup/5512/lines/LINE-1/compatibility", json={"setup_compatible": False, "reason": "Tooling differs"})
+    assert rejected.status_code == 400
+    assert saved.status_code == 200
+    assert saved.json()["setup_compatibility_reason"] == "Tooling differs"
+    assert calls[-1][:4] == ("5512", "LINE-1", False, "Tooling differs")
+
+
 @pytest.fixture
 def tc(monkeypatch):
     service = _SetupService()

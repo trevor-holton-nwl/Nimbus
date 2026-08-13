@@ -110,7 +110,10 @@ type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPla
  */
 export const SetupAdmin = (() => {
   const API = Config.API_BASE;
-  const REGISTERED_FIELDS = ['COLOR', 'FORM_SIZE', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION'];
+  const FALLBACK_REGISTERED_FIELDS = ['colorWheel', 'prt01', 'prt02', 'productionVersion'];
+  let _registeredFields = FALLBACK_REGISTERED_FIELDS.slice();
+  let _linesByPlant: Record<string, string[]> = {};
+  let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
   let _lineScope = '';
 
   const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
@@ -119,8 +122,9 @@ export const SetupAdmin = (() => {
   const keyId = (row: Pick<SetupMatrixRow, 'from_key' | 'to_key'>): string => `${JSON.stringify(row.from_key)}→${JSON.stringify(row.to_key)}`;
   const headers = (): HeadersInit => ({ 'content-type': 'application/json', 'x-user-email': Session.actor() });
 
-  function permissionsFor({ isAdmin, isScheduler }: { isAdmin: boolean; isScheduler: boolean }): SetupPermissions {
-    return { read: true, copy: true, export: true, definitionWrite: isAdmin, matrixWrite: isAdmin, stateWrite: isAdmin || isScheduler };
+  function permissionsFor({ isAdmin, setupScheduler, plantAllowed }: { isAdmin: boolean; setupScheduler: boolean; plantAllowed: boolean }): SetupPermissions {
+    return { read: true, copy: true, export: true, definitionWrite: isAdmin, matrixWrite: isAdmin,
+      stateWrite: isAdmin || (setupScheduler && plantAllowed) };
   }
 
   function canWriteVersion(candidate: number | null | undefined, current: number | null | undefined): boolean {
@@ -132,6 +136,7 @@ export const SetupAdmin = (() => {
     if (checks.matrixVersion !== definition.signature_version) {
       return { active: false, reason: 'Activation is disabled: a version-matched matrix is required after a definition change.' };
     }
+    if (checks.coveragePass === undefined) return { active: false, reason: 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).' };
     if (!checks.coveragePass) return { active: false, reason: 'Activation is disabled: the reachable coverage pass is required.' };
     return definition.active
       ? { active: true, reason: 'Active for approved setup-aware optimization.' }
@@ -164,13 +169,59 @@ export const SetupAdmin = (() => {
 
   function csvFor(plant: string, rows: EffectiveSetupRow[]): string {
     const quote = (value: unknown): string => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    return [csvColumns(), ...rows.map(row => [plant, row.line || '', row.signature_version, keyText(row.from_key), keyText(row.to_key), row.setup_min])]
+    return [csvColumns(), ...rows.map(row => [plant, row.line || '', row.signature_version, JSON.stringify(row.from_key), JSON.stringify(row.to_key), row.setup_min])]
       .map(row => row.map(quote).join(',')).join('\r\n');
   }
 
-  function scopeLines(plant: string): string[] {
-    return (Store.masterData?.lines || []).filter(line => line.plant === plant).map(line => line.production_line)
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  function registeredFields(fields: Array<{ field_key: string }> | null | undefined): string[] {
+    return (fields || []).map(field => field.field_key).filter(Boolean);
+  }
+
+  function parseCsv(text: string): string[][] {
+    const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (quoted && char === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (char === '"') quoted = !quoted;
+      else if (!quoted && char === ',') { row.push(cell); cell = ''; }
+      else if (!quoted && (char === '\n' || char === '\r')) { if (char === '\r' && text[i + 1] === '\n') i++; row.push(cell); if (row.some(value => value !== '')) rows.push(row); row = []; cell = ''; }
+      else cell += char;
+    }
+    if (quoted) throw new Error('CSV contains an unclosed quote');
+    row.push(cell); if (row.some(value => value !== '')) rows.push(row);
+    return rows;
+  }
+
+  function parseLongFormCsv(text: string): { plant: string; line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> } {
+    const csv = parseCsv(text); const expected = csvColumns();
+    if (!csv.length || expected.some((name, index) => csv[0][index] !== name)) throw new Error('CSV must use the canonical setup-matrix columns');
+    if (csv.length < 2) throw new Error('CSV has no matrix rows');
+    const first = csv[1]; const plant = first[0]; const line = first[1]; const signature_version = Number(first[2]);
+    if (!plant || !Number.isInteger(signature_version)) throw new Error('CSV requires Plant and integer Signature version');
+    const rows = csv.slice(1).map(values => {
+      if (values.length !== expected.length || values[0] !== plant || values[1] !== line || Number(values[2]) !== signature_version) throw new Error('CSV rows must use one plant, line scope, and signature version');
+      const from = JSON.parse(values[3]); const to = JSON.parse(values[4]); const setup_min = Number(values[5]);
+      if (!Array.isArray(from) || !Array.isArray(to) || !Number.isInteger(setup_min) || setup_min < 0) throw new Error('CSV has invalid setup-state JSON or minutes');
+      return { from, to, setup_min };
+    });
+    return { plant, line, signature_version, rows };
+  }
+
+  async function loadRegisteredFields(): Promise<void> {
+    try { const response = await Util.fetchTraced(`${API}/priority-fields`); if (!response.ok) throw new Error(`HTTP ${response.status}`); const data = await response.json() as { fields?: Array<{ field_key: string }> }; const fields = registeredFields(data.fields); if (fields.length) _registeredFields = fields; }
+    catch (error) { ErrorLog.warn('setup-admin', `Priority-field registry unavailable: ${(error as Error).message}`); }
+  }
+
+  async function loadScopeLines(plant: string): Promise<void> {
+    if (_linesByPlant[plant]) return;
+    try { const response = await Util.fetchTraced(`${API}/master-data/production_lines?plant=${encodeURIComponent(plant)}&limit=100&offset=0`); if (!response.ok) throw new Error(`HTTP ${response.status}`); const data = await response.json() as { rows?: Array<{ production_line: string }> }; _linesByPlant[plant] = (data.rows || []).map(row => row.production_line).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); }
+    catch (error) { ErrorLog.warn('setup-admin', `Plant line scope unavailable: ${(error as Error).message}`); _linesByPlant[plant] = []; }
+  }
+
+  async function loadCompatibility(plant: string, line: string): Promise<void> {
+    const cacheKey = `${plant}\u0000${line}`; if (_compatibilityByLine[cacheKey]) return;
+    try { const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/lines/${encodeURIComponent(line)}/compatibility`); if (!response.ok) throw new Error(`HTTP ${response.status}`); _compatibilityByLine[cacheKey] = await response.json(); }
+    catch (error) { ErrorLog.warn('setup-admin', `Line compatibility unavailable: ${(error as Error).message}`); }
   }
 
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
@@ -184,18 +235,26 @@ export const SetupAdmin = (() => {
       });
       return;
     }
+    Promise.all([loadRegisteredFields(), loadScopeLines(plant)]).then(() => {
+      if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
+    });
+    if (_lineScope) loadCompatibility(plant, _lineScope).then(() => { if (Store.selectedPlant === plant) renderSnapshot(target, snapshot); });
     renderSnapshot(target, snapshot);
   }
 
   function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
     const definition = snapshot.definition;
     const version = definition?.signature_version ?? null;
-    const permissions = permissionsFor({ isAdmin: Session.isAdmin(), isScheduler: !Session.isAdmin() && !!Session.currentUser() });
-    const lines = scopeLines(snapshot.plant);
+    const session = Session.currentUser();
+    const settings = session?.role_settings?.permissions as Record<string, unknown> | undefined;
+    const plantAllowed = Session.isAdmin() || session?.allowed_plants?.includes(snapshot.plant) === true;
+    const permissions = permissionsFor({ isAdmin: Session.isAdmin(), setupScheduler: settings?.setup_scheduler === true, plantAllowed });
+    const lines = _linesByPlant[snapshot.plant] || [];
     if (_lineScope && !lines.includes(_lineScope)) _lineScope = '';
     const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, line: _lineScope, version });
+    const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
     const matrixVersion = rows.length ? version : null;
-    const status = activationStatus(definition, { matrixVersion, coveragePass: false });
+    const status = activationStatus(definition, { matrixVersion });
     const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
@@ -215,16 +274,21 @@ export const SetupAdmin = (() => {
           <button class="btn btn-ghost sm" data-setup-export ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_csv'))}</button>
         </div>
         <div class="setup-definition panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_definition'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-          <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definition ? definition.fields.map((field, index) => `<label><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${REGISTERED_FIELDS.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select></label>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_definition'))}</span>`}</div>
-            ${definition ? `<label class="setup-check"><input type="checkbox" data-setup-strict ${definition.strict_blanks ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>` : ''}
+          <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<label><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select></label>`).join('')}</div>
+            ${!definition ? `<p class="setup-help">${esc(Util.t('ui.setup_no_definition'))}</p>` : ''}
+            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
             ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
             <p class="setup-help">${esc(Util.t('ui.setup_activation_requirements'))}</p></div></div>
-        <div class="setup-matrix panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_matrix_rows'))}: ${esc(sourceLabel)}</h4>${permissions.matrixWrite && definition ? `<button class="btn btn-ghost sm" data-setup-add-row>${esc(Util.t('btn.add'))}</button>` : ''}</div>
+        <div class="setup-matrix panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_matrix_rows'))}: ${esc(sourceLabel)}</h4>${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}</div>
           <div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_from_state'))}</th><th>${esc(Util.t('ui.setup_to_state'))}</th><th>${esc(Util.t('ui.setup_minutes'))}</th><th>${esc(Util.t('ui.setup_source'))}</th><th></th></tr></thead><tbody>${rows.length ? rows.map(row => `<tr class="${row.inherited ? 'inherited' : ''}" data-setup-row="${esc(keyId(row))}"><td>${esc(keyText(row.from_key))}</td><td>${esc(keyText(row.to_key))}</td><td class="setup-num">${row.setup_min}</td><td>${row.inherited ? esc(Util.t('ui.setup_inherited')) : esc(row.source || 'manual')}</td><td>${row.line && !row.inherited && permissions.matrixWrite ? `<button class="btn btn-ghost sm" data-setup-delete-row="${esc(keyId(row))}">${esc(Util.t('btn.setup_delete_override'))}</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5" class="setup-empty">${esc(Util.t('ui.setup_no_rows'))}</td></tr>`}</tbody></table></div></div>
         ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
         <div class="setup-audit panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_override_audit'))}</h4></div><div class="panel-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} · ${esc(keyText(override.predecessor_state_key))} → ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_overrides'))}</span>`}</div></div>
       </section>`;
-    _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => { _lineScope = value; renderSnapshot(target, snapshot); } });
+    _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => {
+      _lineScope = value;
+      if (value) loadCompatibility(snapshot.plant, value).then(() => renderSnapshot(target, snapshot));
+      else renderSnapshot(target, snapshot);
+    } });
     wire(target, snapshot, permissions, rows);
   }
 
@@ -241,14 +305,14 @@ export const SetupAdmin = (() => {
     });
     target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
-      const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= REGISTERED_FIELDS.length) return;
+      const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
       const index = holder.querySelectorAll('select').length;
-      holder.insertAdjacentHTML('beforeend', `<label><span>${index + 1}</span><select data-setup-field="${index}">${REGISTERED_FIELDS.map(option => `<option value="${option}">${option}</option>`).join('')}</select></label>`);
+      holder.insertAdjacentHTML('beforeend', `<label><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${option}</option>`).join('')}</select></label>`);
     });
     target.querySelectorAll<HTMLButtonElement>('[data-setup-delete-row]').forEach(button => button.addEventListener('click', () => {
       const row = rows.find(item => keyId(item) === button.dataset.setupDeleteRow); if (row) deleteRow(target, snapshot, row);
     }));
-    target.querySelector<HTMLButtonElement>('[data-setup-add-row]')?.addEventListener('click', () => Toast.show(Util.t('ui.setup_import_long_form'), 'info'));
+    target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
     target.querySelector<HTMLButtonElement>('[data-setup-edit-state]')?.addEventListener('click', () => editState(target, snapshot));
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
   }
@@ -265,39 +329,60 @@ export const SetupAdmin = (() => {
     await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, 'DELETE', deleteRequest(row));
   }
 
+  async function importMatrix(target: HTMLElement, snapshot: SetupSnapshot, input: HTMLInputElement): Promise<void> {
+    const file = input.files?.[0]; if (!file) return;
+    try {
+      const parsed = parseLongFormCsv(await file.text());
+      if (parsed.plant !== snapshot.plant || !canWriteVersion(parsed.signature_version, snapshot.definition?.signature_version)) throw new Error(Util.t('ui.setup_version_mismatch'));
+      if (parsed.line !== _lineScope) throw new Error('CSV line scope must match the selected setup scope');
+      await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, 'POST', {
+        line: parsed.line, signature_version: parsed.signature_version, rows: parsed.rows,
+      });
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+    finally { input.value = ''; }
+  }
+
   async function editState(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
     const definition = snapshot.definition; if (!_lineScope || !definition) return;
     const current = snapshot.line_states.find(state => state.line === _lineScope);
-    const values = window.prompt(Util.t('ui.setup_state_prompt'), current ? keyText(current.state_key) : '');
-    if (values === null) return;
-    const pairs = values.split('|').map(part => part.trim()).filter(Boolean).map(part => { const [fieldKey, ...rest] = part.split('='); return { fieldKey: fieldKey.trim(), value: rest.join('=').trim() }; });
-    if (pairs.length !== definition.fields.length) { Toast.show(Util.t('ui.setup_state_fields_required'), 'error'); return; }
-    const observed = document.createElement('input'); observed.type = 'text';
-    const fp = Util.fpDatetime(observed); fp.setDate(new Date(), false); const observedAt = observed.value; fp.destroy();
-    await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/state`, 'PUT', { values: pairs, signature_version: definition.signature_version, observed_at: observedAt, source: 'manual', reason: Util.t('ui.setup_state_manual_reason') });
+    const panel = target.querySelector('.setup-state .panel-body'); if (!panel || panel.querySelector('[data-setup-state-editor]')) return;
+    const initial = new Map((current?.state_key || []).map(pair => [pair.fieldKey, pair.value]));
+    const editor = document.createElement('div'); editor.className = 'setup-state-editor'; editor.dataset.setupStateEditor = 'true';
+    editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
+    panel.appendChild(editor);
+    const observed = editor.querySelector<HTMLInputElement>('[data-setup-observed-at]')!;
+    const fp = Util.fpDatetime(observed); fp.setDate(new Date(), false);
+    editor.querySelector<HTMLButtonElement>('[data-setup-save-state]')!.addEventListener('click', async () => {
+      const values = definition.fields.map(field => ({ fieldKey: field, value: editor.querySelector<HTMLInputElement>(`[data-setup-state-field="${CSS.escape(field)}"]`)?.value.trim() || '' }));
+      if (values.some(pair => !pair.value)) { Toast.show(Util.t('ui.setup_state_fields_required'), 'error'); return; }
+      fp.destroy();
+      await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/state`, 'PUT', { values, signature_version: definition.signature_version, observed_at: observed.value, source: 'manual', reason: Util.t('ui.setup_state_manual_reason') });
+    });
   }
 
   async function wireCompatibility(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
-    const line = (Store.masterData?.lines || []).find(item => item.plant === snapshot.plant && item.production_line === _lineScope) as (NimbusMasterLine & { setup_compatible?: boolean; setup_compatibility_reason?: string | null; subnetwork?: string }) | undefined;
-    const compatible = line?.setup_compatible !== false;
+    const cacheKey = `${snapshot.plant}\u0000${_lineScope}`;
+    const saved = _compatibilityByLine[cacheKey];
+    const compatible = saved?.setup_compatible !== false;
     const statePanel = target.querySelector('.setup-state .panel-body');
     if (!statePanel) return;
     const compat = document.createElement('div'); compat.className = 'setup-compatibility';
-    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${esc(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${esc(Util.t('ui.setup_compatibility_reason'))}" value="${esc(line?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><p>${esc(Util.t('ui.setup_not_global_exclusion'))}</p>`;
+    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${esc(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${esc(Util.t('ui.setup_compatibility_reason'))}" value="${esc(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${esc(Util.t('btn.save'))}</button><p>${esc(Util.t('ui.setup_not_global_exclusion'))}</p>`;
     statePanel.appendChild(compat);
     const checkbox = compat.querySelector<HTMLInputElement>('[data-setup-compatible]')!;
     const reason = compat.querySelector<HTMLInputElement>('[data-setup-compatibility-reason]')!;
-    checkbox.addEventListener('change', async () => {
-      if (!checkbox.checked && !reason.value.trim()) { checkbox.checked = true; Toast.show(Util.t('ui.setup_reason_required'), 'error'); return; }
+    const save = compat.querySelector<HTMLButtonElement>('[data-setup-save-compatibility]')!;
+    const persist = async () => {
+      if (!checkbox.checked && !reason.value.trim()) { reason.disabled = false; reason.focus(); Toast.show(Util.t('ui.setup_reason_required'), 'error'); return; }
       reason.disabled = checkbox.checked;
-      if (!line) { Toast.show(Util.t('ui.setup_line_metadata_unavailable'), 'error'); return; }
-      const payload = { ...line, setup_compatible: checkbox.checked, setup_compatibility_reason: checkbox.checked ? null : reason.value.trim() };
       try {
-        const response = await Util.fetchTraced(`${API}/master-data/production_lines/bulk`, { method: 'POST', headers: headers(), body: JSON.stringify({ upserts: [payload], deletes: [] }) });
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/compatibility`, { method: 'PUT', headers: headers(), body: JSON.stringify({ setup_compatible: checkbox.checked, reason: reason.value.trim() }) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        Object.assign(line, payload); Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        _compatibilityByLine[cacheKey] = { setup_compatible: checkbox.checked, setup_compatibility_reason: checkbox.checked ? null : reason.value.trim() }; Toast.show(Util.t('toast.line_settings_updated'), 'success');
       } catch (error) { checkbox.checked = compatible; reason.disabled = compatible; Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
-    });
+    };
+    checkbox.addEventListener('change', () => { reason.disabled = checkbox.checked; save.disabled = checkbox.checked; if (!checkbox.checked) reason.focus(); });
+    save.addEventListener('click', persist);
   }
 
   async function writeAndRefresh(target: HTMLElement, plant: string, url: string, method: string, body: unknown): Promise<void> {
@@ -308,7 +393,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, render };
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, registeredFields, parseLongFormCsv, render };
 })();
 
 /* =============================================================================

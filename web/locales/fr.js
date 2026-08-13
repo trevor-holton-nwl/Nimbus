@@ -1251,4 +1251,5 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_line_metadata_unavailable': 'Métadonnées de ligne indisponibles ; actualisez avant de modifier la compatibilité.',
   'btn.setup_export_csv': 'Exporter CSV', 'btn.setup_delete_override': 'Supprimer le remplacement', 'btn.setup_add_field': 'Ajouter un champ', 'btn.setup_update_state': 'Mettre à jour l’état',
   'toast.setup_saved': 'Administration de réglage enregistrée', 'toast.setup_copied': 'Lignes de réglage copiées',
+  'ui.setup_import_csv': 'Importer CSV',
 };

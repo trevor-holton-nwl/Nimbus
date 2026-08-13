@@ -39,6 +39,7 @@ test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
     'ui.setup_matrix_title', 'ui.setup_matrix_observation', 'ui.setup_line_scope',
     'ui.setup_inherited', 'ui.setup_activation_inactive', 'ui.setup_activation_requirements',
     'ui.setup_compatibility', 'ui.setup_compatibility_reason', 'ui.setup_not_global_exclusion',
+    'ui.setup_import_csv',
     'btn.setup_export_csv', 'btn.setup_delete_override', 'ui.setup_state_source',
     'ui.setup_observed_at', 'ui.setup_override_audit',
   ];
