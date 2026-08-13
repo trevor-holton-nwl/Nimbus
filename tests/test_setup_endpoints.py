@@ -26,7 +26,8 @@ class _SetupService:
             "overrides": [{"id": 7, "line": "LINE-1", "status": "inactive"}],
         }
 
-    def save_definition(self, plant, fields, strict_blanks, actor):
+    def save_definition(self, plant, fields, strict_blanks, actor, expected_signature_version):
+        self._check_version(expected_signature_version)
         self.version += 1
         return {"plant": plant, "fields": fields, "strict_blanks": strict_blanks,
                 "signature_version": self.version, "active": False}
@@ -70,9 +71,20 @@ class _SetupService:
         return {"id": 9, "plant": plant, "line": line, "signature_version": self.version,
                 "standard_min": standard_min, "remaining_min": remaining_min, "status": "active"}
 
-    def clear_occurrence_override(self, plant, line, override_id, actor, reason):
+    def update_occurrence_override(self, plant, line, override_id, standard_min, remaining_min,
+                                   signature_version, reason, actor):
         if line != "LINE-1":
             raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        if override_id != 9:
+            raise ValueError("Setup override does not belong to this plant and line")
+        self._check_version(signature_version)
+        if remaining_min < 0:
+            raise ValueError("Override minutes must be nonnegative")
+        return {"id": override_id, "plant": plant, "line": line, "remaining_min": remaining_min,
+                "signature_version": self.version, "status": "active"}
+
+    def clear_occurrence_override(self, plant, line, override_id, signature_version, actor, reason):
+        self.update_occurrence_override(plant, line, override_id, 0, 0, signature_version, reason, actor)
         return {"id": override_id, "plant": plant, "line": line, "cleared": True,
                 "signature_version": self.version}
 
@@ -92,15 +104,16 @@ def tc(monkeypatch):
     for name in (
         "get_setup_snapshot", "save_definition", "replace_plant_matrix", "upsert_line_matrix_rows",
         "delete_plant_matrix_rows", "delete_line_matrix_rows", "set_line_state",
-        "upsert_occurrence_override", "clear_occurrence_override",
+        "upsert_occurrence_override", "update_occurrence_override", "clear_occurrence_override",
     ):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
     monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[brain.require_admin] = lambda: "owner@example.com"
-    authenticated = getattr(auth, "require_authenticated", None)
-    if authenticated is not None:
-        brain.api.dependency_overrides[authenticated] = lambda: "scheduler@example.com"
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "scheduler@example.com"
+    scheduler = getattr(auth, "require_setup_scheduler", None)
+    if scheduler is not None:
+        brain.api.dependency_overrides[scheduler] = lambda: "scheduler@example.com"
     brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["5512"]
     try:
         yield TestClient(brain.api)
@@ -148,6 +161,36 @@ def test_setup_write_requires_authenticated_actor(monkeypatch):
     assert response.status_code == 401
 
 
+def test_plant_scheduler_write_requires_explicit_scheduler_permission(monkeypatch):
+    """A merely authenticated plant user cannot assert floor setup state without the named role policy."""
+    scheduler = getattr(auth, "require_setup_scheduler", None)
+    assert scheduler is not None, "setup scheduler writes require an explicit role permission dependency"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[scheduler] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Setup scheduler permission required")
+    )
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["5512"]
+    try:
+        response = TestClient(brain.api).put(
+            "/setup/5512/lines/LINE-1/state",
+            json={"values": {"colorWheel": "RED"}, "signature_version": 4,
+                  "observed_at": "2026-08-13T10:00:00", "source": "manual", "reason": "floor check"},
+        )
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 403
+
+
+def test_named_scheduler_permission_rejects_a_role_without_explicit_opt_in(monkeypatch):
+    """Role existence and a plant assignment alone cannot silently grant setup-write authority."""
+    request = type("Request", (), {"headers": {"x-user-email": "planner@example.com"}})()
+    monkeypatch.setattr(auth, "require_authenticated", lambda _request: "planner@example.com")
+    monkeypatch.setattr(auth, "get_user_role", lambda _email: "planner")
+    monkeypatch.setattr(auth, "get_role_settings", lambda _role: {"permissions": {}})
+    with pytest.raises(brain.HTTPException, match="Setup scheduler permission required"):
+        auth.require_setup_scheduler(request)
+
+
 def test_definition_write_requires_master_data_owner(tc, monkeypatch):
     """A scheduler cannot edit a plant's shared signature definition."""
     brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
@@ -169,16 +212,35 @@ def test_matrix_import_enforces_stale_versions_invalid_minutes_and_line_ownershi
     assert wrong_line.status_code == 400
 
 
-def test_successful_setup_writes_return_new_versioned_freshness(tc):
+def test_matrix_delete_rejects_stale_version_and_returns_freshness_for_the_selected_scope(tc):
+    """Deleting one canonical matrix row is version-checked and never implies a broad matrix replacement."""
+    stale = tc.request("DELETE", "/setup/5512/matrix", json={
+        "line": "LINE-1", "signature_version": 3, "rows": [_matrix_row()],
+    })
+    deleted = tc.request("DELETE", "/setup/5512/matrix", headers={"x-request-id": "matrix-delete"}, json={
+        "line": "LINE-1", "signature_version": 4, "rows": [_matrix_row()],
+    })
+    assert stale.status_code == 409
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == 1
+    assert deleted.json()["freshness"] == {"signature_version": 4, "request_id": "matrix-delete"}
+
+
+def test_definition_write_requires_expected_current_version_and_returns_freshness(tc):
     """Every successful setup mutation returns the signature version and request freshness."""
     definition = tc.put(
         "/setup/5512/definition", headers={"x-request-id": "setup-write"},
-        json={"fields": ["colorWheel"], "strict_blanks": True},
+        json={"fields": ["colorWheel"], "strict_blanks": True, "expected_signature_version": 4},
     )
     assert definition.status_code == 200
     body = definition.json()
     assert body["signature_version"] == 5
     assert body["freshness"] == {"signature_version": 5, "request_id": "setup-write"}
+
+    stale = tc.put("/setup/5512/definition", json={
+        "fields": ["colorWheel"], "strict_blanks": True, "expected_signature_version": 3,
+    })
+    assert stale.status_code == 409
 
 
 def test_line_state_and_override_reject_wrong_line_and_invalid_remaining_minutes(tc):
@@ -188,12 +250,57 @@ def test_line_state_and_override_reject_wrong_line_and_invalid_remaining_minutes
         "observed_at": "2026-08-13T10:00:00", "source": "manual", "reason": "floor check",
     })
     override = tc.put("/setup/5512/overrides/9", json={
-        "line": "LINE-1", "predecessor_order_id": "before", "successor_order_id": "after",
-        "predecessor_values": {"colorWheel": "RED"}, "successor_values": {"colorWheel": "BLUE"},
-        "standard_min": 12, "remaining_min": -1, "signature_version": 4, "reason": "actual work",
+        "line": "LINE-1", "standard_min": 12, "remaining_min": -1,
+        "signature_version": 4, "reason": "actual work",
     })
     assert state.status_code == 400
     assert override.status_code == 400
+
+
+def test_override_update_and_delete_bind_url_identity_and_require_current_version(tc):
+    """The override URL identifies the exact persisted resource; stale/mismatched targets never mutate it."""
+    mismatch = tc.put("/setup/5512/overrides/8", json={
+        "line": "LINE-1", "standard_min": 12, "remaining_min": 4,
+        "signature_version": 4, "reason": "confirmed remaining work",
+    })
+    stale_delete = tc.request("DELETE", "/setup/5512/overrides/9", json={
+        "line": "LINE-1", "signature_version": 3, "reason": "completed on floor",
+    })
+    updated = tc.put("/setup/5512/overrides/9", headers={"x-request-id": "override-write"}, json={
+        "line": "LINE-1", "standard_min": 12, "remaining_min": 4,
+        "signature_version": 4, "reason": "confirmed remaining work",
+    })
+    assert mismatch.status_code == 400
+    assert stale_delete.status_code == 409
+    assert updated.status_code == 200
+    assert updated.json()["id"] == 9
+    assert updated.json()["freshness"] == {"signature_version": 4, "request_id": "override-write"}
+
+
+def test_override_creation_uses_a_server_assigned_resource_identity(tc):
+    """Creation is distinct from URL-identified PUT so a client cannot silently replace another override."""
+    created = tc.post("/setup/5512/overrides", json={
+        "line": "LINE-1", "predecessor_order_id": "before", "successor_order_id": "after",
+        "predecessor_values": {"colorWheel": "RED"}, "successor_values": {"colorWheel": "BLUE"},
+        "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "confirmed work",
+    })
+    assert created.status_code == 200
+    assert created.json()["id"] == 9
+
+
+def test_setup_writes_reject_missing_api_key(monkeypatch):
+    """The API-key guard remains active even when a scheduler identity is otherwise authorized."""
+    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "required-key")
+    brain.api.dependency_overrides[auth.require_setup_scheduler] = lambda: "scheduler@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["5512"]
+    try:
+        response = TestClient(brain.api).put("/setup/5512/lines/LINE-1/state", json={
+            "values": {"colorWheel": "RED"}, "signature_version": 4,
+            "observed_at": "2026-08-13T10:00:00", "source": "manual", "reason": "floor check",
+        })
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 401
 
 
 def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id(tc):
@@ -202,7 +309,8 @@ def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id
     response = tc.put(
         "/setup/5512/definition",
         headers={"x-user-email": "owner@example.com", "x-request-id": "setup-audit"},
-        json={"fields": ["colorWheel"], "strict_blanks": True, "file_content": "never-log-me"},
+        json={"fields": ["colorWheel"], "strict_blanks": True, "expected_signature_version": 4,
+              "file_content": "never-log-me"},
     )
     assert response.status_code == 200
     event = brain._BACKEND_LOG[-1]

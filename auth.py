@@ -499,6 +499,31 @@ def require_authenticated(request: Request) -> str:
     return email
 
 
+def require_setup_scheduler(request: Request) -> str:
+    """Require the explicit role permission to record plant setup truth.
+
+    Non-admin roles must opt in with ``roles.settings.permissions`` containing
+    ``{"setup_scheduler": true}`` *and* have at least one assigned
+    ``role_plants`` row.  This keeps the legacy unscoped-role compatibility
+    used by older routes from accidentally granting a new operational write
+    permission.  Admin is the sole intentionally plant-unrestricted role.
+    """
+    email = require_authenticated(request)
+    role = get_user_role(email)
+    if role == "admin":
+        return email
+    settings = get_role_settings(role)
+    permissions = settings.get("permissions") if isinstance(settings, dict) else None
+    if not isinstance(permissions, dict) or permissions.get("setup_scheduler") is not True:
+        raise HTTPException(status_code=403, detail="Setup scheduler permission required")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM role_plants WHERE role = %s LIMIT 1", (role,))
+        assigned = cur.fetchone() is not None
+    if not assigned:
+        raise HTTPException(status_code=403, detail="Setup scheduler requires assigned plants")
+    return email
+
+
 def require_admin(request: Request) -> str:
     """FastAPI dependency gating admin-only endpoints. Grace: open to
     anyone until the first admin user exists, so the bootstrap seed (or an

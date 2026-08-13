@@ -581,6 +581,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/setup/{plant}/matrix/import": "setup.matrix_import",
     "/setup/{plant}/matrix": "setup.matrix_delete",
     "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
+    "/setup/{plant}/overrides": "setup.override_create",
     "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
@@ -2387,7 +2388,10 @@ def save_setup_definition(plant: str, request: Request, body: dict = Body(defaul
     _set_admin_log_details(request, plant=plant, field_count=len(body.get("fields", []))
                            if isinstance(body.get("fields"), list) else 0)
     try:
-        result = setup_data.save_definition(plant, body.get("fields"), body.get("strict_blanks"), actor)
+        result = setup_data.save_definition(
+            plant, body.get("fields"), body.get("strict_blanks"), actor,
+            expected_signature_version=body.get("expected_signature_version"),
+        )
     except ValueError as exc:
         raise _setup_error(exc) from exc
     _set_admin_log_details(request, signature_version=result["signature_version"])
@@ -2436,10 +2440,10 @@ def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(def
     return _setup_freshness(result)
 
 
-@api.put("/setup/{plant}/lines/{line}/state", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+@api.put("/setup/{plant}/lines/{line}/state", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def save_setup_line_state(plant: str, line: str, request: Request, body: dict = Body(default={}),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
-                          actor: str = Depends(auth.require_authenticated)):
+                          actor: str = Depends(auth.require_setup_scheduler)):
     """Authorized plant schedulers assert current physical state for an owned line."""
     _setup_plant_guard(plant, allowed_plants)
     _set_admin_log_details(request, plant=plant, line=line)
@@ -2455,14 +2459,14 @@ def save_setup_line_state(plant: str, line: str, request: Request, body: dict = 
     return _setup_freshness(result)
 
 
-@api.put("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
-def save_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
-                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
-                        actor: str = Depends(auth.require_authenticated)):
-    """Create/restate one occurrence-specific remaining-setup override for an owned line."""
+@api.post("/setup/{plant}/overrides", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def create_setup_override(plant: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_setup_scheduler)):
+    """Create one occurrence-specific override; its stable resource ID is server-assigned."""
     _setup_plant_guard(plant, allowed_plants)
     line = body.get("line")
-    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    _set_admin_log_details(request, plant=plant, line=line)
     try:
         result = setup_data.upsert_occurrence_override(
             plant, line, body.get("predecessor_order_id"), body.get("successor_order_id"),
@@ -2471,23 +2475,43 @@ def save_setup_override(plant: str, override_id: int, request: Request, body: di
         )
     except ValueError as exc:
         raise _setup_error(exc) from exc
-    # The stable URL id is an optimistic target supplied by the client; the service
-    # returns the persisted id so callers can reconcile a newly-created override.
     _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
                            persisted_override_id=result["id"])
     return _setup_freshness(result)
 
 
-@api.delete("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+@api.put("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def save_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                        actor: str = Depends(auth.require_setup_scheduler)):
+    """Update the exact occurrence override identified by the URL; never rebind its adjacency."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    try:
+        result = setup_data.update_occurrence_override(
+            plant, line, override_id, body.get("standard_min"), body.get("remaining_min"),
+            body.get("signature_version"), body.get("reason"), actor,
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+                           persisted_override_id=result["id"])
+    return _setup_freshness(result)
+
+
+@api.delete("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def clear_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
-                         actor: str = Depends(auth.require_authenticated)):
+                         actor: str = Depends(auth.require_setup_scheduler)):
     """Clear an active occurrence override while retaining its audit reason and history."""
     _setup_plant_guard(plant, allowed_plants)
     line = body.get("line")
     _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
     try:
-        result = setup_data.clear_occurrence_override(plant, line, override_id, actor, body.get("reason"))
+        result = setup_data.clear_occurrence_override(
+            plant, line, override_id, body.get("signature_version"), actor, body.get("reason")
+        )
     except ValueError as exc:
         raise _setup_error(exc) from exc
     _set_admin_log_details(request, line=result["line"], cleared=result["cleared"],

@@ -102,7 +102,7 @@ def test_clear_override_requires_nonblank_reason_before_database_access(monkeypa
     """Clearing physical setup truth must retain an auditable explanation too."""
     monkeypatch.setattr(setup_data, "_pool", _FailPool())
     with pytest.raises(ValueError, match="reason"):
-        setup_data.clear_occurrence_override("5512", "LINE-1", 7, "owner@example.com", " ")
+        setup_data.clear_occurrence_override("5512", "LINE-1", 7, 1, "owner@example.com", " ")
 
 
 def test_clear_override_persists_its_reason(monkeypatch):
@@ -110,9 +110,10 @@ def test_clear_override_persists_its_reason(monkeypatch):
     cursor = _ClearCursor()
     monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
     result = setup_data.clear_occurrence_override(
-        "5512", "LINE-1", 7, "owner@example.com", "completed on floor"
+        "5512", "LINE-1", 7, 1, "owner@example.com", "completed on floor"
     )
-    assert result == {"id": 7, "plant": "5512", "line": "LINE-1", "cleared": True}
+    assert result == {"id": 7, "plant": "5512", "line": "LINE-1", "cleared": True,
+                      "signature_version": 1}
     update_sql, update_params = cursor.executed[-1]
     assert "reason = %s" in update_sql
     assert update_params == ("completed on floor", "owner@example.com", 7, "5512", "LINE-1")
@@ -219,7 +220,9 @@ def test_definition_edit_versions_and_deactivates_without_rewriting_prior_matrix
     """Changing a signature invalidates old keys instead of corrupting their historical meaning."""
     cursor = _DefinitionCursor()
     monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
-    saved = setup_data.save_definition("5512", ["prt01", "colorWheel"], True, "owner@example.com")
+    saved = setup_data.save_definition(
+        "5512", ["prt01", "colorWheel"], True, "owner@example.com", expected_signature_version=2
+    )
     assert saved == {
         "plant": "5512", "fields": ["prt01", "colorWheel"], "signature_version": 3,
         "strict_blanks": True, "active": False,
@@ -229,6 +232,21 @@ def test_definition_edit_versions_and_deactivates_without_rewriting_prior_matrix
     assert "signature_version = %s" in statements
     assert "DELETE FROM setup_matrix" not in statements
     assert "UPDATE setup_matrix" not in statements
+
+
+def test_snapshot_reads_only_one_current_signature_version_in_a_repeatable_transaction(monkeypatch):
+    """A setup hydration never combines historical rows with a newer definition's effective truth."""
+    cursor = _SnapshotCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    snapshot = setup_data.get_setup_snapshot("5512")
+    assert snapshot["definition"]["signature_version"] == 4
+    assert snapshot["plant_rows"][0]["signature_version"] == 4
+    assert snapshot["line_states"][0]["signature_version"] == 4
+    assert snapshot["overrides"][0]["signature_version"] == 4
+    statements = "\n".join(sql for sql, _params in cursor.executed)
+    assert "REPEATABLE READ READ ONLY" in statements
+    assert statements.count("signature_version = %s") >= 3
+    assert "status IN ('active', 'inactive')" in statements
 
 
 def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(monkeypatch):
@@ -271,6 +289,24 @@ class _PairsCursor(_DefinitionCursor):
         return [("5512", "America/New_York", "LINE-1"), ("5512", "America/New_York", "LINE-2")]
 
 
+class _SnapshotCursor(_DefinitionCursor):
+    def fetchone(self):
+        if "SELECT fields" in self.executed[-1][0]:
+            return (["colorWheel"], 4, True, False)
+        return None
+
+    def fetchall(self):
+        query = self.executed[-1][0]
+        if "FROM setup_matrix" in query:
+            return [("", 4, [], [], 12, "manual", {}, None, "owner", None, "owner", None)]
+        if "FROM line_setup_state" in query:
+            return [("LINE-1", [], 4, None, None, "manual", "floor", "owner", None, "owner", None)]
+        if "FROM setup_occurrence_override" in query:
+            return [(9, "LINE-1", 4, "before", "after", [], [], 12, 4, "active", "floor", "owner", None,
+                     "owner", None)]
+        return []
+
+
 class _MissingLineCursor(_DefinitionCursor):
     def fetchone(self):
         return None
@@ -278,6 +314,9 @@ class _MissingLineCursor(_DefinitionCursor):
 
 class _ClearCursor(_DefinitionCursor):
     def fetchone(self):
+        query = self.executed[-1][0]
+        if "SELECT fields" in query:
+            return (["colorWheel"], 1, True, True)
         return (1,)
 
     def execute(self, sql, params=()):

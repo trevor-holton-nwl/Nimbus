@@ -197,7 +197,7 @@ def _assert_line_owned(cur, plant: str, line: str) -> None:
         raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
 
 
-def save_definition(plant, fields, strict_blanks, actor) -> dict:
+def save_definition(plant, fields, strict_blanks, actor, *, expected_signature_version=None) -> dict:
     """Create or edit a definition without rewriting any old-version keys."""
     plant = _required_text(plant, "Plant")
     actor = _required_text(actor, "Actor")
@@ -207,6 +207,8 @@ def save_definition(plant, fields, strict_blanks, actor) -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         current = _definition(cur, plant, lock=True)
         if current is None:
+            if expected_signature_version is not None:
+                raise ValueError("No setup definition exists for the expected signature version")
             version = 1
             active = False
             cur.execute(
@@ -215,10 +217,14 @@ def save_definition(plant, fields, strict_blanks, actor) -> dict:
                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                 (plant, Jsonb(field_keys), version, strict_blanks, active, actor, actor),
             )
-        elif current["fields"] == field_keys and current["strict_blanks"] == strict_blanks:
+        else:
+            if expected_signature_version is None:
+                raise ValueError("An expected signature version is required")
+            validate_signature_version(current["signature_version"], expected_signature_version)
+        if current is not None and current["fields"] == field_keys and current["strict_blanks"] == strict_blanks:
             version = current["signature_version"]
             active = current["active"]
-        else:
+        elif current is not None:
             version = current["signature_version"] + 1
             active = False
             cur.execute(
@@ -500,7 +506,42 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
             "standard_min": standard, "remaining_min": remaining, "status": "active"}
 
 
-def clear_occurrence_override(plant, line, override_id, actor, reason) -> dict:
+def update_occurrence_override(plant, line, override_id, standard_min, remaining_min,
+                               signature_version, reason, actor) -> dict:
+    """Update the identified active override without changing its bound adjacency."""
+    plant = _required_text(plant, "Plant")
+    line = _required_text(line, "Line")
+    actor = _required_text(actor, "Actor")
+    reason = _required_text(reason, "Occurrence override reason")
+    if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
+        raise ValueError("A positive override id is required")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        _assert_line_owned(cur, plant, line)
+        definition = _require_definition(cur, plant, signature_version, lock=True)
+        cur.execute(
+            """SELECT signature_version, status FROM setup_occurrence_override
+                 WHERE id = %s AND plant = %s AND line = %s FOR UPDATE""",
+            (override_id, plant, line),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            raise ValueError("Setup override does not belong to this plant and line")
+        if int(existing[0]) != definition["signature_version"]:
+            raise ValueError("Setup override signature version is stale")
+        standard = validate_override_minutes(standard_min)
+        remaining = validate_override_minutes(remaining_min)
+        cur.execute(
+            """UPDATE setup_occurrence_override
+                 SET standard_min = %s, remaining_min = %s, reason = %s, updated_by = %s, updated_at = NOW()
+                 WHERE id = %s AND plant = %s AND line = %s""",
+            (standard, remaining, reason, actor, override_id, plant, line),
+        )
+        conn.commit()
+    return {"id": override_id, "plant": plant, "line": line, "signature_version": signature_version,
+            "standard_min": standard, "remaining_min": remaining, "status": existing[1]}
+
+
+def clear_occurrence_override(plant, line, override_id, signature_version, actor, reason) -> dict:
     plant = _required_text(plant, "Plant")
     line = _required_text(line, "Line")
     actor = _required_text(actor, "Actor")
@@ -509,6 +550,17 @@ def clear_occurrence_override(plant, line, override_id, actor, reason) -> dict:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
         _assert_line_owned(cur, plant, line)
+        definition = _require_definition(cur, plant, signature_version, lock=True)
+        cur.execute(
+            """SELECT signature_version FROM setup_occurrence_override
+                 WHERE id = %s AND plant = %s AND line = %s FOR UPDATE""",
+            (override_id, plant, line),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            raise ValueError("Setup override does not belong to this plant and line")
+        if int(existing[0]) != definition["signature_version"]:
+            raise ValueError("Setup override signature version is stale")
         cur.execute(
             """UPDATE setup_occurrence_override
                  SET status = 'cleared', reason = %s, updated_by = %s, updated_at = NOW()
@@ -517,7 +569,8 @@ def clear_occurrence_override(plant, line, override_id, actor, reason) -> dict:
         )
         cleared = cur.rowcount == 1
         conn.commit()
-    return {"id": override_id, "plant": plant, "line": line, "cleared": cleared}
+    return {"id": override_id, "plant": plant, "line": line, "cleared": cleared,
+            "signature_version": signature_version}
 
 
 def _iso(value):
@@ -528,14 +581,19 @@ def get_setup_snapshot(plant: str) -> dict:
     """Return exactly one plant's versioned setup truth; no cross-plant rows leak."""
     plant = _required_text(plant, "Plant")
     with _pool.connection() as conn, conn.cursor() as cur:
+        # One repeatable-read transaction prevents a definition edit from
+        # interleaving with its version-filtered dependent rows mid-snapshot.
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         definition = _definition(cur, plant)
         if definition is None:
             return {"plant": plant, "definition": None, "plant_rows": [], "line_rows": [],
                     "line_states": [], "overrides": []}
+        version = definition["signature_version"]
         cur.execute(
             """SELECT line, signature_version, from_key, to_key, setup_min, source, source_metadata,
                       source_reference, created_by, created_at, updated_by, updated_at
-                 FROM setup_matrix WHERE plant = %s ORDER BY line, from_key, to_key""", (plant,)
+                 FROM setup_matrix WHERE plant = %s AND signature_version = %s ORDER BY line, from_key, to_key""",
+            (plant, version),
         )
         matrix = [
             {"line": r[0], "signature_version": int(r[1]), "from_key": r[2], "to_key": r[3],
@@ -546,7 +604,7 @@ def get_setup_snapshot(plant: str) -> dict:
         cur.execute(
             """SELECT line, state_key, signature_version, physical_mold_id, observed_at, source, reason,
                       created_by, created_at, updated_by, updated_at
-                 FROM line_setup_state WHERE plant = %s ORDER BY line""", (plant,)
+                 FROM line_setup_state WHERE plant = %s AND signature_version = %s ORDER BY line""", (plant, version)
         )
         states = [
             {"line": r[0], "state_key": r[1], "signature_version": int(r[2]), "physical_mold_id": r[3],
@@ -558,7 +616,9 @@ def get_setup_snapshot(plant: str) -> dict:
             """SELECT id, line, signature_version, predecessor_order_id, successor_order_id,
                       predecessor_state_key, successor_state_key, standard_min, remaining_min, status, reason,
                       created_by, created_at, updated_by, updated_at
-                 FROM setup_occurrence_override WHERE plant = %s ORDER BY id""", (plant,)
+                 FROM setup_occurrence_override
+                WHERE plant = %s AND signature_version = %s AND status IN ('active', 'inactive') ORDER BY id""",
+            (plant, version),
         )
         overrides = [
             {"id": int(r[0]), "line": r[1], "signature_version": int(r[2]),
