@@ -32,7 +32,22 @@ def _schema_text() -> str:
 def _setup_schema_texts() -> list[tuple[str, str]]:
     """Both deployment paths must provide identical setup persistence guards."""
     paths = (SCHEMA_PATH, SETUP_MIGRATION_PATH)
-    return [(path, open(path, encoding="utf-8").read()) for path in paths]
+    texts = []
+    for path in paths:
+        with open(path, encoding="utf-8") as schema_file:
+            texts.append((path, schema_file.read()))
+    return texts
+
+
+def _table_block(text: str, table: str) -> str:
+    """Return one CREATE TABLE body so each contract stays table-specific."""
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table} \((?P<body>.*?)\n\);",
+        text,
+        re.DOTALL,
+    )
+    assert match is not None, f"missing CREATE TABLE IF NOT EXISTS {table}"
+    return match.group("body")
 
 
 def test_no_unguarded_horizon_multiply_statement():
@@ -56,20 +71,80 @@ def test_schema_migrations_ledger_present():
     )
 
 
-def test_setup_schema_has_versioned_plant_and_line_scoped_keys():
-    """Breaking any setup identity key would permit cross-scope/version data collisions."""
+def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
+    """Each setup table must retain its own scope, state, audit, and validation contract."""
     for path, text in _setup_schema_texts():
-        assert re.search(
-            r"CREATE TABLE IF NOT EXISTS setup_definition \(.*plant\s+TEXT\s+PRIMARY KEY", text, re.DOTALL
-        ), path
-        assert re.search(
-            r"CREATE TABLE IF NOT EXISTS setup_matrix \(.*PRIMARY KEY \(plant, line, signature_version, from_key, to_key\)",
-            text,
-            re.DOTALL,
-        ), path
-        assert re.search(
-            r"CREATE TABLE IF NOT EXISTS line_setup_state \(.*PRIMARY KEY \(plant, line\)", text, re.DOTALL
-        ), path
+        definition = _table_block(text, "setup_definition")
+        for required in (
+            "plant             TEXT PRIMARY KEY",
+            "fields            JSONB NOT NULL CHECK (jsonb_typeof(fields) = 'array')",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "strict_blanks     BOOLEAN NOT NULL DEFAULT TRUE",
+            "active            BOOLEAN NOT NULL DEFAULT FALSE",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+        ):
+            assert required in definition, f"{path}: setup_definition missing {required}"
+
+        matrix = _table_block(text, "setup_matrix")
+        for required in (
+            "plant             TEXT NOT NULL",
+            "line              TEXT NOT NULL DEFAULT ''",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "from_key          JSONB NOT NULL CHECK (jsonb_typeof(from_key) = 'array')",
+            "to_key            JSONB NOT NULL CHECK (jsonb_typeof(to_key) = 'array')",
+            "setup_min         INTEGER NOT NULL CHECK (setup_min BETWEEN 0 AND 10080)",
+            "source            TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'derived', 'actual'))",
+            "source_metadata   JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "PRIMARY KEY (plant, line, signature_version, from_key, to_key)",
+        ):
+            assert required in matrix, f"{path}: setup_matrix missing {required}"
+
+        line_state = _table_block(text, "line_setup_state")
+        for required in (
+            "plant             TEXT NOT NULL",
+            "line              TEXT NOT NULL",
+            "state_key         JSONB NOT NULL CHECK (jsonb_typeof(state_key) = 'array')",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "physical_mold_id  TEXT",
+            "observed_at       TIMESTAMP NOT NULL DEFAULT NOW()",
+            "source            TEXT NOT NULL CHECK (source IN ('manual', 'derived', 'actual'))",
+            "reason            TEXT",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "PRIMARY KEY (plant, line)",
+        ):
+            assert required in line_state, f"{path}: line_setup_state missing {required}"
+
+        occurrence = _table_block(text, "setup_occurrence_override")
+        for required in (
+            "id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
+            "plant                TEXT NOT NULL",
+            "line                 TEXT NOT NULL",
+            "signature_version    INTEGER NOT NULL CHECK (signature_version > 0)",
+            "predecessor_order_id TEXT NOT NULL",
+            "successor_order_id   TEXT NOT NULL",
+            "predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array')",
+            "successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array')",
+            "standard_min         INTEGER NOT NULL CHECK (standard_min BETWEEN 0 AND 10080)",
+            "remaining_min        INTEGER NOT NULL CHECK (remaining_min BETWEEN 0 AND 10080)",
+            "status               TEXT NOT NULL DEFAULT 'active'",
+            "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))",
+            "reason               TEXT",
+            "created_by           TEXT",
+            "created_at           TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by           TEXT",
+            "updated_at           TIMESTAMP NOT NULL DEFAULT NOW()",
+        ):
+            assert required in occurrence, f"{path}: setup_occurrence_override missing {required}"
 
 
 def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
