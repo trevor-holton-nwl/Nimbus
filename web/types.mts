@@ -234,6 +234,86 @@ export interface NimbusMasterData {
 }
 
 // ---------------------------------------------------------------------------
+// Setup-transition domain contracts (Changeover Matrix Stage 0)
+// ---------------------------------------------------------------------------
+
+/** A canonical, ordered setup signature. It is not delimiter-joined because
+ * values may themselves contain delimiter characters. */
+export type SetupStateKey = ReadonlyArray<{ fieldKey: string; value: string }>;
+
+/** Plant-scoped setup-signature definition as returned by GET /setup/{plant}. */
+export interface SetupDefinition {
+  plant: string;
+  fields: ReadonlyArray<string>;
+  signature_version: number;
+  strict_blanks: boolean;
+  active: boolean;
+}
+
+/** A long-form setup-matrix row. `line === ''` represents the plant default. */
+export interface SetupMatrixRow {
+  line: string;
+  signature_version: number;
+  from_key: SetupStateKey;
+  to_key: SetupStateKey;
+  setup_min: number;
+  source?: string;
+  source_metadata?: Record<string, unknown>;
+  source_reference?: string | null;
+}
+
+export interface LineSetupState {
+  line: string;
+  state_key: SetupStateKey;
+  signature_version: number;
+  physical_mold_id?: string | null;
+  observed_at?: string | null;
+  source: 'manual' | 'derived' | 'actual';
+  reason: string;
+}
+
+/** An exact, remaining-work override for one predecessor/successor occurrence. */
+export interface SetupOccurrenceOverride {
+  id: string | number;
+  line: string;
+  signature_version: number;
+  predecessor_order_id: string | null;
+  successor_order_id: string;
+  predecessor_state_key: SetupStateKey;
+  successor_state_key: SetupStateKey;
+  standard_min: number;
+  remaining_min: number;
+  status: 'active' | 'inactive' | 'cleared' | 'replaced';
+  reason: string;
+}
+
+export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'uncovered';
+
+export interface ResolvedSetup {
+  covered: boolean;
+  requiredMin: number | null;
+  effectiveMin: number | null;
+  standardMin: number | null;
+  source: SetupResolutionSource;
+  reason: string;
+  signatureVersion: number;
+  overrideId?: string;
+}
+
+/** Pure setup-resolution input; callers supply only the selected plant's snapshot. */
+export interface ResolveSetupInput {
+  definition: SetupDefinition;
+  line: string;
+  predecessorState: SetupStateKey | null;
+  successorState: SetupStateKey | null;
+  predecessorOrderId?: string | null;
+  successorOrderId: string;
+  plantRows: ReadonlyArray<SetupMatrixRow>;
+  lineRows: ReadonlyArray<SetupMatrixRow>;
+  overrides: ReadonlyArray<SetupOccurrenceOverride>;
+}
+
+// ---------------------------------------------------------------------------
 // §D — String-literal enum inventory
 // ---------------------------------------------------------------------------
 
