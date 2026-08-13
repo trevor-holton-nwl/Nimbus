@@ -134,7 +134,7 @@ export const Config = {
   WARN_THRESHOLD:     0.8,
   SHOW_NEAR_CAPACITY_ALERTS: false,           // set true to re-enable near-capacity warnings
   LS_KEY:             'nimbus.state.v3',          // do NOT bump for shape changes — use SCHEMA_VERSION
-  SCHEMA_VERSION:     5,                          // bump whenever _saveCache snapshot fields change
+  SCHEMA_VERSION:     6,                          // bump whenever _saveCache snapshot fields change
   BUILD_ID:           (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || 'dev',
   DEFAULT_PLANT:      null,
   KNOWN_PLANTS:       ['5512', '1006'],
@@ -396,6 +396,16 @@ export const Util = {
   runHours(task: NimbusTask): number {
     const v = parseFloat(task?.RUN_TIME as string);
     return isNaN(v) ? 0 : v;
+  },
+
+  /** Single browser-facing reader for productive order intervals. The UMD core
+   * owns the implementation so workers, Node tests, and the main thread agree. */
+  scheduleIntervals(task: NimbusTask): Array<{ sequence: number; start: Date; end: Date }> {
+    const core = globalThis.NimbusComputeCore;
+    if (core?.scheduleIntervals) return core.scheduleIntervals(task);
+    const start = Util.parseDate(task?.start_date);
+    const end = Util.parseDate(task?.end_date);
+    return start && end && end > start ? [{ sequence: 1, start, end }] : [];
   },
 
   // Start of local day.

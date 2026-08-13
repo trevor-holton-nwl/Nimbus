@@ -71,6 +71,28 @@
     return isNaN(v) ? 0 : v;
   }
 
+  // The explicit child collection is the productive schedule.  A parent with
+  // fewer than two valid children remains a legacy continuous order, so we do
+  // not accidentally turn one old bar into a persisted segment representation.
+  function scheduleIntervals(task) {
+    const explicit = Array.isArray(task?.scheduleSegments) ? task.scheduleSegments : [];
+    const segments = explicit
+      .map((segment, index) => {
+        const start = parseDate(segment?.startDate ?? segment?.start_date);
+        const end = parseDate(segment?.endDate ?? segment?.end_date);
+        return start && end && end > start
+          ? { sequence: Number(segment?.sequence) || index + 1, start: new Date(+start), end: new Date(+end) }
+          : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start - b.start || a.sequence - b.sequence);
+    if (segments.length >= 2) return segments;
+
+    const start = parseDate(task?.start_date);
+    const end = parseDate(task?.end_date);
+    return start && end && end > start ? [{ sequence: 1, start: new Date(+start), end: new Date(+end) }] : [];
+  }
+
   function mergedOverlapHours(win, intervals) {
     if (!win || !intervals?.length) return 0;
     const w0 = win[0] instanceof Date ? win[0].getTime() : +win[0];
@@ -318,20 +340,21 @@
     /* 1. OVERLAPS */
     const byLine = {};
     for (const t of activeTasks) {
-      if (!t.start_date || !t.end_date) continue;
       const line = t.PRODUCTION_LINE || 'Unknown';
-      (byLine[line] ||= []).push(t);
+      for (const interval of scheduleIntervals(t)) {
+        (byLine[line] ||= []).push({ task: t, start: interval.start, end: interval.end });
+      }
     }
     for (const line of Object.keys(byLine)) {
-      const arr = byLine[line].slice().sort((a, b) => a.start_date - b.start_date);
+      const arr = byLine[line].slice().sort((a, b) => a.start - b.start);
       for (let i = 1; i < arr.length; i++) {
         const prev = arr[i-1], cur = arr[i];
-        if (cur.start_date < prev.end_date) {
+        if (prev.task.id !== cur.task.id && cur.start < prev.end) {
           alerts.push({
-            id:  `ovl-${prev.id}-${cur.id}`,
+            id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
-            msg: `Orders "${prev.text || prev.id}" and "${cur.text || cur.id}" overlap on ${line}.`,
-            taskId: cur.id, line, time: cur.start_date
+            msg: `Orders "${prev.task.text || prev.task.id}" and "${cur.task.text || cur.task.id}" overlap on ${line}.`,
+            taskId: cur.task.id, line, time: cur.start
           });
         }
       }
@@ -340,12 +363,31 @@
     /* 2. OVERLOAD / CLOSED */
     const byLineDay = {};
     for (const t of activeTasks) {
-      if (!t.start_date) continue;
       const line = t.PRODUCTION_LINE || 'Unknown';
-      const day  = dayKey(t.start_date);
-      (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-      byLineDay[`${line}|${day}`].hours += runHours(t);
-      byLineDay[`${line}|${day}`].tasks.push(t);
+      const intervals = scheduleIntervals(t);
+      if (intervals.length >= 2) {
+        for (const interval of intervals) {
+          let cursor = startOfDay(interval.start);
+          while (cursor && cursor < interval.end) {
+            const nextDay = new Date(cursor); nextDay.setDate(nextDay.getDate() + 1);
+            const overlapHours = (Math.min(+interval.end, +nextDay) - Math.max(+interval.start, +cursor)) / MS_HOUR;
+            if (overlapHours > 0) {
+              const day = dayKey(cursor);
+              const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
+              row.hours += overlapHours;
+              row.tasks.push(t);
+            }
+            cursor = nextDay;
+          }
+        }
+      } else if (t.start_date) {
+        // Preserve the legacy continuous-order accounting exactly under the
+        // default policy; only explicit child schedules use productive pieces.
+        const day = dayKey(t.start_date);
+        const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
+        row.hours += runHours(t);
+        row.tasks.push(t);
+      }
     }
     // Bucket the already-parsed blocks (zero re-parse) for the per-(line,day) capacity calls.
     const _capIdx = { lineBlocks: new Map(), globalLine: [], plantBlocks: new Map(), globalPlant: [] };
@@ -422,60 +464,93 @@
 
     /* 3. BLACKOUT VIOLATION */
     for (const t of activeTasks) {
-      if (!t.start_date || !t.end_date) continue;
       const line  = t.PRODUCTION_LINE || 'Unknown';
       const plant = plantOf(line);
       let conflict = false;
-      for (const b of parsedBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        if (b.line && b.line !== line) continue;
-        if (t.start_date < b.e && t.end_date > b.s) { conflict = true; break; }
-      }
-      if (!conflict) {
+      let conflictTime = t.start_date;
+      for (const interval of scheduleIntervals(t)) {
+        for (const b of parsedBlocks) {
+          if (b.plant && b.plant !== plant) continue;
+          if (b.line && b.line !== line) continue;
+          if (interval.start < b.e && interval.end > b.s) {
+            conflict = true; conflictTime = interval.start; break;
+          }
+        }
+        if (conflict) break;
         for (const b of parsedPlantBlocks) {
           if (b.plant && b.plant !== plant) continue;
-          if (t.start_date < b.e && t.end_date > b.s) { conflict = true; break; }
+          if (interval.start < b.e && interval.end > b.s) {
+            conflict = true; conflictTime = interval.start; break;
+          }
         }
+        if (conflict) break;
       }
       if (conflict) {
         alerts.push({
           id:  `blk-${t.id}`, sev: 'err', type: 'blackout',
           msg: `Order "${t.text || t.id}" overlaps a blackout block on ${line}.`,
-          taskId: t.id, line, time: t.start_date
+          taskId: t.id, line, time: conflictTime
         });
       }
     }
 
     /* 4. FIXED-BUT-ON-CLOSED-DAY */
     for (const t of activeTasks) {
-      if (!t.fixed || !t.start_date) continue;
+      if (!t.fixed) continue;
       const line = t.PRODUCTION_LINE || 'Unknown';
-      const win  = workWindow(line, t.start_date, calendars, plants, lineSettings, masterData);
-      if (!win) {
+      const badInterval = scheduleIntervals(t).find(interval =>
+        !workWindow(line, interval.start, calendars, plants, lineSettings, masterData));
+      if (badInterval) {
         alerts.push({
           id:  `fixclosed-${t.id}`, sev: 'warn', type: 'fixed-closed',
           msg: `Fixed order "${t.text || t.id}" is on a day the ${line} calendar is closed.`,
-          taskId: t.id, line, time: t.start_date
+          taskId: t.id, line, time: badInterval.start
         });
       }
     }
 
     /* 5. FIXED-OUT-OF-HOURS */
     for (const t of activeTasks) {
-      if (!t.fixed || !t.start_date || !t.end_date) continue;
+      if (!t.fixed) continue;
       const line = t.PRODUCTION_LINE || 'Unknown';
-      const winS = workWindow(line, t.start_date, calendars, plants, lineSettings, masterData);
-      const winE = workWindow(line, t.end_date,   calendars, plants, lineSettings, masterData);
       const parts = [];
-      if (winS && t.start_date < winS[0]) parts.push(`starts before ${line} opens (${fmtDTReadable(winS[0])})`);
-      if (winE && t.end_date   > winE[1]) parts.push(`ends after ${line} closes (${fmtDTReadable(winE[1])})`);
+      let alertTime = t.start_date;
+      for (const interval of scheduleIntervals(t)) {
+        const winS = workWindow(line, interval.start, calendars, plants, lineSettings, masterData);
+        const winE = workWindow(line, interval.end,   calendars, plants, lineSettings, masterData);
+        if (winS && interval.start < winS[0]) {
+          parts.push(`starts before ${line} opens (${fmtDTReadable(winS[0])})`);
+          alertTime = interval.start;
+        }
+        if (winE && interval.end > winE[1]) {
+          parts.push(`ends after ${line} closes (${fmtDTReadable(winE[1])})`);
+          alertTime = interval.start;
+        }
+      }
       if (parts.length) {
         alerts.push({
           id:  `fixhours-${t.id}`, sev: 'warn', type: 'fixed-out-of-hours',
           msg: `Fixed order "${t.text || t.id}" ${parts.join(' and ')}.`,
-          taskId: t.id, line, time: t.start_date
+          taskId: t.id, line, time: alertTime
         });
       }
+    }
+
+    // A runtime/schedule mismatch is an authoritative schedule-integrity
+    // exception, not a horizon-only capacity signal. It must remain visible
+    // after its prior envelope moves into the past, until an aggregate repair
+    // succeeds (while respecting an incremental line scope when supplied).
+    const mismatchTasks = onlyLines
+      ? tasks.filter(t => onlyLines.has(t.PRODUCTION_LINE || 'Unknown'))
+      : tasks;
+    for (const t of mismatchTasks) {
+      if (!t.runtime_schedule_mismatch) continue;
+      const line = t.PRODUCTION_LINE || 'Unknown';
+      alerts.push({
+        id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
+        msg: `Order "${t.text || t.id}" has a runtime that no longer matches its saved schedule.`,
+        taskId: t.id, line, time: t.start_date || new Date(),
+      });
     }
 
     _wwCache = null;
@@ -527,6 +602,27 @@
       const line = t.PRODUCTION_LINE || 'Unknown';
       if (!matrix[line]) continue;
 
+      const intervals = scheduleIntervals(t);
+      if (intervals.length >= 2) {
+        const lineRows = matrix[line];
+        for (const interval of intervals) {
+          const intervalStartMs = interval.start.getTime();
+          const intervalEndMs = interval.end.getTime();
+          for (const key of Object.keys(lineRows)) {
+            const row = lineRows[key];
+            const dayStartMs = row.date.getTime();
+            const dayEndMs = dayStartMs + MS_DAY;
+            if (intervalEndMs <= dayStartMs || intervalStartMs >= dayEndMs) continue;
+            const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
+            if (contribution > 0) {
+              row.scheduled += contribution;
+              if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
+            }
+          }
+        }
+        continue;
+      }
+
       if (!t.end_date) {
         const key = dayKey(t.start_date);
         if (matrix[line][key]) {
@@ -575,7 +671,7 @@
     // constants
     MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     // date/time helpers
-    parseDate, dayKey, startOfDay, runHours, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
+    parseDate, dayKey, startOfDay, runHours, scheduleIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, workWindow,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,

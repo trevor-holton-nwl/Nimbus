@@ -505,8 +505,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const horizon = now2 + 48 * 3600000;
         const bkts = Store.blocks.concat(Store.plantBlocks).filter(b => b.start > now2 && b.start < horizon);
         if (bkts.length) {
-          blackoutRisk = tasks.filter(t => t.end_date && bkts.some(b =>
-            t.end_date.getTime() > b.start && (t.start_date?.getTime() ?? 0) < b.end
+          blackoutRisk = tasks.filter(t => Util.scheduleIntervals(t).some(interval =>
+            bkts.some(b => interval.end.getTime() > b.start && interval.start.getTime() < b.end)
           )).length;
         }
       } catch (e) {
@@ -1142,15 +1142,32 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           const patches = ids
             .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
             .map(id => {
-              const t = Store.tasks[id];
+              const order = Store.tasks[id];
+              const requestedStart = new Date(order.start_date.getTime() + 3600000);
+              const plant = Store.getPlantForLine(order.PRODUCTION_LINE || 'Unknown')
+                || order.PLANT || Store.selectedPlant;
+              const policy = NIMBUS.Engine?.splitOrderPolicyFor?.(plant);
+              const needsAggregate = (order.scheduleSegments?.length ?? 0) >= 2
+                || (policy && policy !== 'never');
+              if (needsAggregate) {
+                const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
+                  order, order.PRODUCTION_LINE || 'Unknown', requestedStart);
+                return changes ? { id, changes } : null;
+              }
               return { id, changes: {
-                start_date: new Date(t.start_date.getTime() + 3600000),
-                end_date:   new Date(t.end_date.getTime()   + 3600000),
+                start_date: requestedStart,
+                end_date: new Date(order.end_date.getTime() + 3600000),
               }};
-            });
-          if (patches.length) Store.updateMany(patches, 'cmd-palette');
+            })
+            .filter(Boolean);
+          if (patches.length) {
+            Store.updateMany(patches, 'cmd-palette');
+          }
           Alerts.scheduleRecompute();
-          Toast.show(t('toast.pushed_orders', { count: n }), 'success', 1400);
+          Toast.show(
+            patches.length ? t('toast.pushed_orders', { count: patches.length }) :
+              'No selected orders could be moved into the calendar.',
+            patches.length ? 'success' : 'warn', patches.length ? 1400 : 3000);
         }
       });
 
@@ -1162,11 +1179,18 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   'Remove start/end times from all selected orders',
         run() {
           CommandPalette.close();
-          NIMBUS.UndoStack?.push?.(`Unschedule ${n} orders`, () => {});
-          const unschPatches = ids.map(id => ({ id, changes: { start_date: null, end_date: null } }));
+          // Clearing only a parent envelope would leave its child aggregate
+          // behind. Full unscheduling is a separate persistence behavior, so
+          // leave split parents untouched rather than creating a partial edit.
+          const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
+          NIMBUS.UndoStack?.push?.(`Unschedule ${eligibleIds.length} orders`, () => {});
+          const unschPatches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
           if (unschPatches.length) Store.updateMany(unschPatches, 'cmd-palette');
           Alerts.scheduleRecompute();
-          Toast.show(t('toast.unscheduled_bulk', { count: n }), 'success', 1400);
+          Toast.show(
+            eligibleIds.length ? t('toast.unscheduled_bulk', { count: eligibleIds.length }) :
+              'Split orders must be rescheduled as a whole.',
+            eligibleIds.length ? 'success' : 'warn', eligibleIds.length ? 1400 : 3000);
         }
       });
 

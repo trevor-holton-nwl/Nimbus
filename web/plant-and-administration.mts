@@ -1284,6 +1284,22 @@ export const Plant = {
           </div>
 
           <div class="panel">
+            <header class="panel-head"><h3>Split-order allocation</h3></header>
+            <div class="panel-body split-policy-body">
+              <p class="split-policy-copy">Choose how future scheduling actions use valid operating intervals. Existing schedules are never rewritten by changing this plant setting.</p>
+              <label class="split-policy-control" for="sys-split-order-policy">
+                <span>Allocation policy</span>
+                <select id="sys-split-order-policy" class="form-input" aria-describedby="sys-split-order-policy-help">
+                  <option value="never">Never split orders</option>
+                  <option value="overlong_only">Split inherently overlong orders only</option>
+                  <option value="partial_allowed">Allow partial orders across operating intervals</option>
+                </select>
+              </label>
+              <p id="sys-split-order-policy-help" class="split-policy-help">Generated segments are planner-visible, remain one logical order, and are never shorter than 30 minutes.</p>
+            </div>
+          </div>
+
+          <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.constraints_title')}</h3></header>
             <div class="panel-body">
               <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">${Util.t('ui.constraints_sub')}</p>
@@ -1305,9 +1321,13 @@ export const Plant = {
 
     const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
+    const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
+    const savedSplitPolicy = plantRow?.split_order_policy;
+    splitPolicySelect.value = savedSplitPolicy === 'overlong_only' || savedSplitPolicy === 'partial_allowed'
+      ? savedSplitPolicy : 'never';
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -1364,6 +1384,39 @@ export const Plant = {
 
     alertDaysInp.addEventListener('change', saveAlert);
     confDaysInp.addEventListener('change', saveConf);
+
+    splitPolicySelect.addEventListener('change', async () => {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previous = plantRow.split_order_policy === 'overlong_only' || plantRow.split_order_policy === 'partial_allowed'
+        ? plantRow.split_order_policy : 'never';
+      const next = splitPolicySelect.value;
+      if (!['never', 'overlong_only', 'partial_allowed'].includes(next)) {
+        splitPolicySelect.value = previous;
+        return;
+      }
+      splitPolicySelect.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/split-order-policy`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, split_order_policy: next }),
+          },
+        );
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${response.status}`);
+        }
+        plantRow.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed';
+        Toast.show('Split-order policy saved for this plant.', 'success');
+      } catch (error) {
+        splitPolicySelect.value = previous;
+        Toast.show(`Could not save split-order policy: ${(error as Error).message}`, 'error');
+      } finally {
+        splitPolicySelect.disabled = false;
+      }
+    });
 
     // --- Scheduling constraints (per-plant PRIORITY TREE) -------------------
     // Stage 3 of docs/scheduling_priority.md rebuilt this from a flat on/off
@@ -3405,6 +3458,7 @@ interface PlantRow extends MasterDataRow {
   plant: string;
   alt_flag_horizon?: number;
   conf_score_horizon?: number;
+  split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
   /** Attached by master_data.py's get_table_data for the 'plants' table only. */
   constraints?: ConstraintConfig[] | null;
 }

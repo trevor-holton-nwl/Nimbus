@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS orders (
     scheduled_start       TIMESTAMP,
     scheduled_end         TIMESTAMP,
     run_time              NUMERIC,
+    -- Set only when an authoritative source RUN_TIME changes after a NIMBUS
+    -- schedule exists. The browser clears it by persisting a regenerated
+    -- complete parent aggregate; source dates alone never rewrite that plan.
+    runtime_schedule_mismatch BOOLEAN NOT NULL DEFAULT FALSE,
     color                 TEXT,
     order_quantity        NUMERIC,
     form_size             TEXT,
@@ -74,10 +78,25 @@ ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
     CHECK (scheduled_start IS NULL OR scheduled_end IS NULL OR scheduled_end > scheduled_start)
     NOT VALID;
 
+-- Productive schedule pieces for a logical order. No segment is individually
+-- addressable by the API: callers replace the complete ordered aggregate while
+-- the parent orders.xmin remains the optimistic-concurrency token.
+CREATE TABLE IF NOT EXISTS order_schedule_segments (
+    order_id         TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    segment_no       INTEGER NOT NULL CHECK (segment_no > 0),
+    scheduled_start  TIMESTAMP NOT NULL,
+    scheduled_end    TIMESTAMP NOT NULL,
+    PRIMARY KEY (order_id, segment_no),
+    CHECK (scheduled_end > scheduled_start)
+);
+CREATE INDEX IF NOT EXISTS idx_order_schedule_segments_order_start
+    ON order_schedule_segments(order_id, scheduled_start);
+
 -- Migration for databases created before firming_indicator existed. db.py both
 -- reads (query_orders SELECT) and writes (ingest upsert) this column; without it
 -- GET /tasks fails with UndefinedColumn. ADD COLUMN IF NOT EXISTS is idempotent.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS firming_indicator TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS runtime_schedule_mismatch BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
@@ -126,6 +145,10 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS conf_score_horizon INTEGER NOT NULL 
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS description   TEXT;
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS product_focus TEXT;
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
+-- Kept separate from the ordered priority constraint tree: this is an
+-- allocation policy, not a priority term. Existing plants default to exact
+-- legacy behavior until an admin deliberately opts in.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
 -- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
 -- and NO LONGER re-run on apply.
 --

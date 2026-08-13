@@ -32,7 +32,7 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 interface CalendarEntry {
@@ -91,6 +91,14 @@ type BacklogSlot =
   | { kind: 'slot'; start: Date }
   | { kind: 'overlong'; start: Date }
   | { kind: 'unavailable' | 'exhausted' };
+
+export type RuntimeAllocation =
+  | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
+  | { kind: 'unavailable' | 'exhausted' };
+
+/** Phase-1 policy decision: segment minimum is deliberately fixed system-wide,
+ * not a per-plant option. Keep allocator arithmetic on this named boundary. */
+const MIN_SPLIT_SEGMENT_MINUTES = 30;
 
 /** Fields common to both the ALERTS and UTILIZATION worker payloads (Compute._snap's return). */
 interface WorkerSnapshotBase {
@@ -491,6 +499,166 @@ export const Calendar = {
     return start ? { kind: 'slot', start } : { kind: 'exhausted' };
   },
 
+  _ceilMinute(date: Date): Date {
+    const ms = date.getTime();
+    const remainder = ms % Config.MS_MIN;
+    return new Date(remainder ? ms + Config.MS_MIN - remainder : ms);
+  },
+
+  _floorMinute(date: Date): Date {
+    return new Date(date.getTime() - (date.getTime() % Config.MS_MIN));
+  },
+
+  /** All blackout intervals applicable to one concrete parent range, merged so
+   * overlapping line/plant blocks never create a false productive gap. */
+  _blockingIntervals(line: string, start: Date, end: Date): Array<{ start: Date; end: Date }> {
+    const intervals: Array<{ start: Date; end: Date }> = [];
+    const add = (s: Date, e: Date): void => {
+      if (s < end && e > start) {
+        intervals.push({
+          start: new Date(Math.max(s.getTime(), start.getTime())),
+          end: new Date(Math.min(e.getTime(), end.getTime())),
+        });
+      }
+    };
+    const cached = Calendar._runBlocks;
+    if (cached) {
+      for (const block of cached.byLine.get(line) || []) add(block.startDate, block.endDate);
+      for (const block of cached.byLine.get('__any__') || []) add(block.startDate, block.endDate);
+      const plant = Store.getPlantForLine(line);
+      if (plant) for (const block of cached.byPlant.get(plant) || []) add(block.startDate, block.endDate);
+      for (const block of cached.byPlant.get('__any__') || []) add(block.startDate, block.endDate);
+    } else {
+      const plant = Store.getPlantForLine(line);
+      for (const block of Store.blocks) {
+        if (block.plant && block.plant !== plant) continue;
+        if (block.line && block.line !== line) continue;
+        const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
+        if (s && e) add(s, e);
+      }
+      for (const block of Store.plantBlocks) {
+        if (block.plant && block.plant !== plant) continue;
+        const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
+        if (s && e) add(s, e);
+      }
+    }
+    intervals.sort((a, b) => a.start.getTime() - b.start.getTime());
+    const merged: Array<{ start: Date; end: Date }> = [];
+    for (const interval of intervals) {
+      const prior = merged[merged.length - 1];
+      if (prior && interval.start <= prior.end) {
+        if (interval.end > prior.end) prior.end = interval.end;
+      } else {
+        merged.push({ start: new Date(interval.start), end: new Date(interval.end) });
+      }
+    }
+    return merged;
+  },
+
+  /** Enumerate effective operating fragments without mutating task or calendar
+   * state. The 90-day cap is shared with the existing slot search. */
+  _freeIntervals(line: string, from: Date): Array<{ start: Date; end: Date }> {
+    const earliest = Calendar._ceilMinute(new Date(from));
+    const day = new Date(earliest); day.setHours(0, 0, 0, 0);
+    const out: Array<{ start: Date; end: Date }> = [];
+    for (let offset = 0; offset < 90; offset++) {
+      const date = new Date(day); date.setDate(day.getDate() + offset);
+      const win = Calendar.workWindow(line, date);
+      if (!win) continue;
+      let cursor = Calendar._ceilMinute(new Date(Math.max(win[0].getTime(), earliest.getTime())));
+      const windowEnd = Calendar._floorMinute(win[1]);
+      if (cursor >= windowEnd) continue;
+      for (const block of Calendar._blockingIntervals(line, cursor, windowEnd)) {
+        const freeEnd = Calendar._floorMinute(block.start);
+        if (freeEnd > cursor) out.push({ start: new Date(cursor), end: freeEnd });
+        const next = Calendar._ceilMinute(block.end);
+        if (next > cursor) cursor = next;
+        if (cursor >= windowEnd) break;
+      }
+      if (cursor < windowEnd) out.push({ start: new Date(cursor), end: new Date(windowEnd) });
+    }
+    return out;
+  },
+
+  _hasNominalOperatingWindow(line: string, from: Date): boolean {
+    const day = new Date(from); day.setHours(0, 0, 0, 0);
+    for (let offset = 0; offset < 90; offset++) {
+      const date = new Date(day); date.setDate(day.getDate() + offset);
+      const win = Calendar.workWindow(line, date);
+      if (win && win[1] > win[0]) return true;
+    }
+    return false;
+  },
+
+  /** Allocate canonical runtime minutes under the selected plant policy. This
+   * is deliberately task-store pure: callers receive a complete parent patch
+   * or a bounded failure and decide when to mutate/preview/persist it. */
+  allocateRuntime(line: string, earliestStart: Date, runtimeMinutes: number,
+                  policy: SplitOrderPolicy = 'never'): RuntimeAllocation {
+    const totalMinutes = Math.round(Number(runtimeMinutes));
+    if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return { kind: 'exhausted' };
+    const durationMs = totalMinutes * Config.MS_MIN;
+    const from = Calendar._ceilMinute(new Date(earliestStart));
+    const normalizedPolicy: SplitOrderPolicy =
+      policy === 'overlong_only' || policy === 'partial_allowed' ? policy : 'never';
+
+    if (normalizedPolicy === 'never') {
+      const slot = Calendar.findContiguousSlot(line, from, durationMs);
+      if (!('start' in slot)) return { kind: slot.kind };
+      return {
+        kind: 'allocated', start: slot.start,
+        end: new Date(slot.start.getTime() + durationMs), scheduleSegments: [],
+      };
+    }
+
+    const inherentlyOverlong = !Calendar.hasNominalWindow(line, from, durationMs);
+    if (normalizedPolicy === 'overlong_only' && !inherentlyOverlong) {
+      const start = Calendar._nextContiguousMinuteSlot(line, from, durationMs);
+      return start
+        ? { kind: 'allocated', start, end: new Date(start.getTime() + durationMs), scheduleSegments: [] }
+        : { kind: 'exhausted' };
+    }
+    if (!Calendar._hasNominalOperatingWindow(line, from)) return { kind: 'unavailable' };
+
+    const pieces: Array<{ start: Date; end: Date }> = [];
+    let remaining = totalMinutes;
+    for (const free of Calendar._freeIntervals(line, from)) {
+      const capacity = Math.floor((free.end.getTime() - free.start.getTime()) / Config.MS_MIN);
+      if (capacity <= 0) continue;
+      let take = Math.min(remaining, capacity);
+      if (remaining > take && remaining - take < MIN_SPLIT_SEGMENT_MINUTES) {
+        take = remaining - MIN_SPLIT_SEGMENT_MINUTES;
+      }
+      // A partial piece must never be smaller than the fixed 30-minute policy.
+      // Skip a tiny fragment and continue the bounded search for a usable one.
+      if (take < MIN_SPLIT_SEGMENT_MINUTES
+          && !(pieces.length === 0 && remaining === totalMinutes
+               && totalMinutes < MIN_SPLIT_SEGMENT_MINUTES && take === totalMinutes)) {
+        continue;
+      }
+      const end = new Date(free.start.getTime() + take * Config.MS_MIN);
+      pieces.push({ start: new Date(free.start), end });
+      remaining -= take;
+      if (remaining === 0) break;
+    }
+    if (remaining !== 0 || !pieces.length) return { kind: 'exhausted' };
+
+    const merged: Array<{ start: Date; end: Date }> = [];
+    for (const piece of pieces) {
+      const prior = merged[merged.length - 1];
+      if (prior && prior.end.getTime() === piece.start.getTime()) prior.end = piece.end;
+      else merged.push({ start: new Date(piece.start), end: new Date(piece.end) });
+    }
+    const start = merged[0].start;
+    const end = merged[merged.length - 1].end;
+    return {
+      kind: 'allocated', start, end,
+      scheduleSegments: merged.length >= 2
+        ? merged.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
+        : [],
+    };
+  },
+
   /** Find the first blackout block overlapping [start,end) on `line`, else null. */
   _overlapsBlock(line: string, start: Date, end: Date): { start: Date; end: Date } | null {
     const rb = Calendar._runBlocks;
@@ -791,6 +959,7 @@ export const Alerts = {
       const task = Store.tasks[a.taskId!];
       if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
       const line = task.PRODUCTION_LINE || 'Unknown';
+      const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
       // For overlap: start searching from end of the overlapping peer
@@ -803,9 +972,28 @@ export const Alerts = {
       }
 
       const snap = UndoStack.snapshotTasks([task.id]);
-      const newStart = Calendar.nextAvailable(line, searchFrom, dur);
-      const newEnd   = new Date(newStart.getTime() + dur);
-      Store.updateTask(task.id, { start_date: newStart, end_date: newEnd }, 'alerts');
+      let newStart: Date;
+      let changes: Partial<NimbusTask>;
+      if (splitPolicy === 'never') {
+        newStart = Calendar.nextAvailable(line, searchFrom, dur);
+        const newEnd = new Date(newStart.getTime() + dur);
+        changes = { start_date: newStart, end_date: newEnd };
+        if (task.scheduleSegments?.length && task.scheduleSegments.length >= 2) changes.scheduleSegments = [];
+      } else {
+        const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
+        Calendar._beginRun(plant);
+        try {
+          changes = Engine.schedulePatchFor(task, line, searchFrom, splitPolicy) || {};
+        } finally {
+          Calendar._endRun();
+        }
+        if (!changes.start_date || !changes.end_date) {
+          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          return;
+        }
+        newStart = changes.start_date;
+      }
+      Store.updateTask(task.id, changes, 'alerts');
       try { Engine.autoReflow(task.id); } catch {}
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
       Alerts.dismiss(alertId);
@@ -986,6 +1174,24 @@ export const Utilization = {
         for (const t of taskList) {
           if ((t.PRODUCTION_LINE || 'Unknown') !== line) continue;
           if (!t.start_date) continue;
+          const intervals = Util.scheduleIntervals(t);
+          if (intervals.length >= 2) {
+            for (const interval of intervals) {
+              const tStartMs = interval.start.getTime();
+              const tEndMs = interval.end.getTime();
+              if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
+              const workingHrs = Util.mergedOverlapHours(workWin, [{ s: interval.start, e: interval.end }]);
+              if (workingHrs <= 0) continue;
+              const blackoutsClipped = blackouts
+                .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
+                .map(b => ({
+                  s: new Date(Math.max(b.s.getTime(), tStartMs)),
+                  e: new Date(Math.min(b.e.getTime(), tEndMs))
+                }));
+              sched += Math.max(0, workingHrs - Util.mergedOverlapHours(workWin, blackoutsClipped));
+            }
+            continue;
+          }
           if (!t.end_date) {
             if (Util.dayKey(t.start_date) === dayKeyTarget) sched += Util.runHours(t);
             continue;
@@ -1072,6 +1278,98 @@ export const Engine = {
    * it so stale diagnostics cannot leak into their shared preview. */
   lastBacklogResult: null as RemoveBacklogResult | null,
 
+  /** Plant-level behavior only; an absent/malformed value deliberately keeps
+   * the established continuous-order scheduler unchanged. */
+  splitOrderPolicyFor(plant: string | null): SplitOrderPolicy {
+    const value = Store.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
+    return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+  },
+
+  /** Regenerate one logical order from its requested parent start. Segments
+   * are never shifted independently; a one-piece result explicitly clears an
+   * obsolete child aggregate. */
+  schedulePatchFor(task: NimbusTask, line: string, requestedStart: Date,
+                   policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line))): Partial<NimbusTask> | null {
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
+    if (policy === 'never') {
+      const start = Calendar.nextAvailable(line, requestedStart, runtimeMinutes * Config.MS_MIN);
+      return { start_date: start, end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN), scheduleSegments: [] };
+    }
+    const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy);
+    return allocation.kind === 'allocated'
+      ? { start_date: allocation.start, end_date: allocation.end, scheduleSegments: allocation.scheduleSegments }
+      : null;
+  },
+
+  /** Apply a planner-requested parent start/line edit without ever treating a
+   * child interval as an independently movable order.  `never` deliberately
+   * retains the established direct, continuous edit behavior; enabled plants
+   * derive a complete productive aggregate from the requested parent start. */
+  manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
+    const plant = Store.getPlantForLine(line) ?? task.PLANT ?? Store.selectedPlant;
+    const policy = Engine.splitOrderPolicyFor(plant);
+    if (policy === 'never') {
+      const start = Util.snap(requestedStart);
+      return {
+        start_date: start,
+        end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN),
+        PRODUCTION_LINE: line,
+        scheduleSegments: [],
+      };
+    }
+    Calendar._beginRun(plant);
+    try {
+      const patch = Engine.schedulePatchFor(task, line, requestedStart, policy);
+      return patch ? { ...patch, PRODUCTION_LINE: line } : null;
+    } finally {
+      Calendar._endRun();
+    }
+  },
+
+  /** Repair schedules whose authoritative runtime changed after their last
+   * valid aggregate was persisted. The existing parent start is the anchor;
+   * failures intentionally leave the previous valid intervals and their
+   * critical mismatch flag in place. Fixed is parent-level only and does not
+   * suppress this required runtime correction. */
+  reconcileRuntimeSchedules(plant: string | null): void {
+    if (!plant) return;
+    const policy = Engine.splitOrderPolicyFor(plant);
+    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    Calendar._beginRun(plant);
+    try {
+      for (const task of Store.tasksByPlant(plant)) {
+        if (!task.runtime_schedule_mismatch || !task.start_date) continue;
+        const line = task.PRODUCTION_LINE || 'Unknown';
+        const changes = Engine.schedulePatchFor(task, line, task.start_date, policy);
+        if (!changes?.start_date || !changes.end_date) {
+          ErrorLog.warn('engine',
+            `Runtime changed for order "${task.text || task.id}", but its schedule could not be regenerated within the 90-day calendar search.`,
+            { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+          continue;
+        }
+        changes.runtime_schedule_mismatch = false;
+        patches.push({ id: task.id, changes });
+      }
+    } finally {
+      Calendar._endRun();
+    }
+    if (patches.length) Store.updateMany(patches, 'engine-runtime-reconcile');
+  },
+
+  _sameScheduleSegments(a: OrderScheduleSegment[] | undefined, b: OrderScheduleSegment[]): boolean {
+    const left = Array.isArray(a) ? a : [];
+    if (left.length !== b.length) return false;
+    return left.every((segment, index) => {
+      const other = b[index];
+      return !!other && segment.sequence === other.sequence
+        && segment.startDate?.getTime() === other.startDate.getTime()
+        && segment.endDate?.getTime() === other.endDate.getTime();
+    });
+  },
+
   /** Convert a captured instant to the Date-as-naive-wall-clock convention
    * NIMBUS already persists. Calendar methods intentionally use Date's local
    * getters because task values are naive wall-clock values, so this adapter
@@ -1102,6 +1400,7 @@ export const Engine = {
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
     const plant = (opts.plant as string | undefined) ?? Store.selectedPlant;
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
+    const splitPolicy = Engine.splitOrderPolicyFor(plant);
     const row = Store.masterData?.plants?.find(p => p.plant === plant);
     const timezone = row?.timezone;
     if (typeof timezone !== 'string' || !timezone.trim()) {
@@ -1163,22 +1462,49 @@ export const Engine = {
           const candidate = item.snapshotStart < now
             ? cursor
             : new Date(Math.max(item.snapshotStart.getTime(), cursor.getTime()));
-          const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
-          if (!('start' in slot)) {
-            diagnostics.calendarSearchFailures.push({
-              line, taskId: item.task.id,
-              reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
-            });
-            break;
+          let start: Date;
+          let end: Date;
+          let scheduleSegments: OrderScheduleSegment[] | undefined;
+          if (splitPolicy === 'never') {
+            // Preserve the existing continuous-bar contract exactly for legacy
+            // schedules. A split schedule that is explicitly regenerated under
+            // this policy is cleared below as one atomic parent aggregate.
+            const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
+            if (!('start' in slot)) {
+              diagnostics.calendarSearchFailures.push({
+                line, taskId: item.task.id,
+                reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
+              });
+              break;
+            }
+            start = slot.start;
+            end = new Date(start.getTime() + runtimeMs);
+            if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
+            if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
+          } else {
+            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), splitPolicy);
+            if (allocation.kind !== 'allocated') {
+              diagnostics.calendarSearchFailures.push({
+                line, taskId: item.task.id,
+                reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
+              });
+              break;
+            }
+            start = allocation.start;
+            end = allocation.end;
+            // Always include the full child aggregate, including [], so a
+            // regenerated continuous parent removes obsolete child rows.
+            scheduleSegments = allocation.scheduleSegments;
           }
-          const start = slot.start;
-          const end = new Date(start.getTime() + runtimeMs);
-          if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
           cursor = end;
           const currentStart = item.snapshotStart.getTime();
           const currentEnd = item.task.end_date?.getTime() ?? NaN;
-          if (currentStart === start.getTime() && currentEnd === end.getTime()) continue;
-          patches.push({ id: item.task.id, changes: { start_date: start, end_date: end } });
+          const segmentsChanged = scheduleSegments !== undefined
+            && !Engine._sameScheduleSegments(item.task.scheduleSegments, scheduleSegments);
+          if (currentStart === start.getTime() && currentEnd === end.getTime() && !segmentsChanged) continue;
+          const changes: Partial<NimbusTask> = { start_date: start, end_date: end };
+          if (scheduleSegments !== undefined) changes.scheduleSegments = scheduleSegments;
+          patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
           if (Store.isFixed(item.task.id)) diagnostics.fixedMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
@@ -1895,6 +2221,53 @@ export const Engine = {
     return patches;
   },
 
+  /** Allocate a sequence already selected by an optimizer strategy. The
+   * selection/order remains the strategy's responsibility; this pass only
+   * turns each selected logical parent into its calendar-valid aggregate.
+   * Fixed parents are treated as atomic envelope obstacles so no free order is
+   * interleaved between the productive pieces of another logical order. */
+  _dispatchPolicyAware(
+    line: string,
+    orderedTasks: NimbusTask[],
+    fixedTasks: NimbusTask[],
+    cursorInit: Date,
+    policy: Exclude<SplitOrderPolicy, 'never'>,
+  ): Array<{ id: string; changes: Partial<NimbusTask> }> {
+    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    let cursor = new Date(cursorInit);
+
+    for (const task of orderedTasks) {
+      const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+      if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) continue;
+
+      let requested = new Date(cursor);
+      let scheduled: Partial<NimbusTask> | null = null;
+      for (let guard = 0; guard < 200; guard++) {
+        const candidate = Engine.schedulePatchFor(task, line, requested, policy);
+        if (!candidate?.start_date || !candidate.end_date) break;
+        const blocker = fixedTasks.find(f => f.start_date && f.end_date
+          && candidate.start_date! < f.end_date && candidate.end_date! > f.start_date);
+        if (!blocker?.end_date) {
+          scheduled = candidate;
+          break;
+        }
+        requested = new Date(blocker.end_date);
+      }
+
+      if (!scheduled?.start_date || !scheduled.end_date) {
+        ErrorLog.warn('engine',
+          `Could not allocate order "${task.text || task.id}" on "${line}" within the 90-day calendar search; subsequent orders were left unchanged.`,
+          { line, taskId: task.id, policy });
+        // Do not schedule later parents around one that could not be allocated:
+        // doing so would silently break the strategy-selected sequence.
+        break;
+      }
+      patches.push({ id: task.id, changes: scheduled });
+      cursor = new Date(scheduled.end_date);
+    }
+    return patches;
+  },
+
   /** Main optimiser. Groups by line, optionally respects fixed + calendar.
    *  Writes results through Store.
    *  opts.plant restricts to lines belonging to that plant. Priority ranks are
@@ -1933,6 +2306,10 @@ export const Engine = {
     // behavior exactly, while making Engine genuinely DOM-free.
     const respectFixed    = (opts.respectFixed as boolean | undefined)    ?? true;
     const respectCalendar = (opts.respectCalendar as boolean | undefined) ?? true;
+    // An explicit "ignore calendar" run remains continuous: there is no
+    // effective availability map from which to derive productive pieces. The
+    // plant setting takes effect on normal calendar-respecting scheduling.
+    const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
     const sortTerms = Engine._sortTerms(mode, { plant });
 
     const horizonStart = opts.startDate
@@ -1994,6 +2371,33 @@ export const Engine = {
           : new Date(cursorFloor);
       } else {
         cursor = new Date(cursorFloor);
+      }
+
+      if (splitPolicy !== 'never') {
+        let selectedOrder: NimbusTask[];
+        if (mode === 'combined' || mode === 'changeover') {
+          // Let the established tiered dispatcher choose the parent sequence
+          // first, then replace only its continuous placement phase. This keeps
+          // due-date admission / priority / changeover ordering intact while
+          // allowing a selected parent to span valid operating intervals.
+          const legacySequence = Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
+            respectCalendar, tieBreakTerms: sortTerms, mode,
+          });
+          const byId = new Map(freeTasks.map(task => [task.id, task]));
+          selectedOrder = legacySequence.map(patch => byId.get(patch.id)).filter((task): task is NimbusTask => !!task);
+        } else {
+          const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
+          decorated.sort((a, b) => {
+            for (let i = 0; i < sortTerms.length; i++) {
+              const c = sortTerms[i].cmp(a.k[i], b.k[i]);
+              if (c) return c;
+            }
+            return 0;
+          });
+          selectedOrder = decorated.map(d => d.t);
+        }
+        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, fixedTasks, cursor, splitPolicy));
+        continue;
       }
 
       if (mode === 'combined' || mode === 'changeover') {
@@ -2098,6 +2502,7 @@ export const Engine = {
     const _horizonStart = Util.startOfDay(new Date())!;
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.PRODUCTION_LINE || 'Unknown';
+    const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
 
     const peers = Store.tasksByPlant(Store.selectedPlant)
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
@@ -2109,6 +2514,34 @@ export const Engine = {
     // peer that starts before cursor to cursor (preserving duration).
     let cursor = new Date(changed.end_date);
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    if (splitPolicy !== 'never') {
+      const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
+      Calendar._beginRun(plant);
+      try {
+        for (const p of peers) {
+          if (p.end_date! <= changed.start_date) continue;
+          if (p.start_date! >= cursor) { cursor = new Date(p.end_date!); continue; }
+          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
+            cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+            continue;
+          }
+          const changes = Engine.schedulePatchFor(p, line, cursor, splitPolicy);
+          if (!changes?.start_date || !changes.end_date) {
+            ErrorLog.warn('engine',
+              `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
+              { line, taskId: p.id, policy: splitPolicy });
+            break;
+          }
+          patches.push({ id: p.id, changes });
+          cursor = new Date(changes.end_date);
+        }
+      } finally {
+        Calendar._endRun();
+      }
+      if (patches.length) Store.updateMany(patches, 'engine');
+      Alerts.scheduleRecomputeLines(new Set([line]));
+      return;
+    }
     for (const p of peers) {
       // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
       if (p.end_date! <= changed.start_date) continue;
@@ -2121,7 +2554,9 @@ export const Engine = {
       const dur = p.end_date!.getTime() - p.start_date!.getTime();
       const newStart = Calendar.nextAvailable(line, cursor, dur);
       const newEnd   = new Date(newStart.getTime() + dur);
-      patches.push({ id: p.id, changes: { start_date: newStart, end_date: newEnd } });
+      const changes: Partial<NimbusTask> = { start_date: newStart, end_date: newEnd };
+      if (p.scheduleSegments?.length && p.scheduleSegments.length >= 2) changes.scheduleSegments = [];
+      patches.push({ id: p.id, changes });
       cursor = new Date(newEnd);
     }
     if (patches.length) Store.updateMany(patches, 'engine');
@@ -2129,3 +2564,24 @@ export const Engine = {
     Alerts.scheduleRecomputeLines(new Set([line]));
   }
 };
+
+// CalendarSync emits this only after its authoritative plant hours and blackout
+// slices have landed. Reconciliation is intentionally *not* subscribed to
+// ordinary calendar edits or policy changes: those must alert existing schedules
+// rather than silently rewrite them. A remote task refresh also retries a
+// mismatch that arrived after the calendar was already hydrated.
+Store.subscribe(evt => {
+  if (evt.type === 'calendar:change' && evt.source === 'calendar-sync') {
+    Engine.reconcileRuntimeSchedules(typeof evt.plant === 'string' ? evt.plant : Store.selectedPlant);
+    return;
+  }
+  if (evt.type === 'tasks:bulkUpdate' && evt.source === 'refresh' && Array.isArray(evt.ids)) {
+    const plants = new Set<string>();
+    for (const id of evt.ids) {
+      const task = Store.tasks[String(id)];
+      const plant = task ? Store.getPlantForLine(task.PRODUCTION_LINE) : null;
+      if (plant) plants.add(plant);
+    }
+    for (const plant of plants) Engine.reconcileRuntimeSchedules(plant);
+  }
+}, 'schedule-services.runtime-reconcile');

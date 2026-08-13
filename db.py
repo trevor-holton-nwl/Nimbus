@@ -14,6 +14,7 @@ import io
 import logging
 import os
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -187,6 +188,136 @@ _EFF_END_SQL = (
     "basic_finish_date)"
 )
 
+# A parent order owns a complete, ordered segment aggregate.  The lateral
+# projection keeps the hot /tasks read path to one query and, importantly,
+# resolves the visible parent envelope from the children when they exist.
+_SCHEDULE_SEGMENTS_LATERAL_SQL = """
+    LEFT JOIN LATERAL (
+        SELECT
+            COUNT(*) AS segment_count,
+            MIN(s.scheduled_start) AS first_start,
+            MAX(s.scheduled_end) AS last_end,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'sequence', s.segment_no,
+                        'start_date', s.scheduled_start,
+                        'end_date', s.scheduled_end
+                    ) ORDER BY s.segment_no
+                ),
+                '[]'::jsonb
+            ) AS schedule_segments,
+            COALESCE(
+                SUM(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start)) / 60.0),
+                0
+            ) AS productive_minutes
+        FROM order_schedule_segments s
+        WHERE s.order_id = o.id
+    ) seg ON TRUE
+"""
+
+_SCHEDULE_RUNTIME_MISMATCH_SQL = """
+    (COALESCE(o.runtime_schedule_mismatch, FALSE)
+     OR (seg.segment_count >= 2
+         AND o.run_time IS NOT NULL
+         AND seg.productive_minutes <> ROUND(o.run_time * 60)))
+"""
+
+# When an ingest just changed RUN_TIME, retain the pre-existing scheduled end
+# while the browser either regenerates the authoritative parent aggregate or
+# exposes the mismatch. Outside that narrow state, retain the established
+# runtime-derived effective-end behavior for legacy continuous orders.
+_EFF_END_WITH_RUNTIME_MISMATCH_SQL = (
+    "COALESCE("
+    "CASE WHEN COALESCE(o.runtime_schedule_mismatch, FALSE) "
+    "THEN o.scheduled_end END, "
+    f"{_EFF_END_SQL})"
+)
+
+MIN_SEGMENT_MINUTES = 30
+
+
+def _canonical_runtime_minutes(value) -> int | None:
+    """Return the scheduling runtime in integral minutes, or None when absent.
+
+    Decimal is deliberate: a binary float must not turn a 30-minute segment
+    into 29.999999 minutes at the database boundary.
+    """
+    if value is None:
+        return None
+    try:
+        minutes = (Decimal(str(value)) * Decimal("60")).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+        return int(minutes)
+    except (InvalidOperation, ValueError, OverflowError):
+        return None
+
+
+def _validate_schedule_segments(segments: list[dict], runtime_value) -> tuple[list[dict], object, object] | None:
+    """Validate and normalize a caller-supplied parent aggregate.
+
+    The caller supplies only values (never child row identities).  We rebuild
+    segment numbers from their ordered boundaries, which prevents a stale or
+    malicious client from addressing a child independently of its parent.
+    """
+    runtime_minutes = _canonical_runtime_minutes(runtime_value)
+    if runtime_minutes is None or runtime_minutes <= 0:
+        return None
+
+    clean: list[dict] = []
+    for expected_sequence, raw in enumerate(segments, start=1):
+        if not isinstance(raw, dict):
+            return None
+        # A full aggregate is ordered at the wire boundary too.  We do not
+        # silently re-order a caller's pieces: that would turn an out-of-order
+        # or stale aggregate into a different schedule than the planner sent.
+        sequence = raw.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool)
+                or sequence != expected_sequence):
+            return None
+        start, end = raw.get("start"), raw.get("end")
+        if start is None or end is None or end <= start:
+            return None
+        if any((getattr(start, "second", 0), getattr(start, "microsecond", 0),
+                getattr(end, "second", 0), getattr(end, "microsecond", 0))):
+            return None
+        minutes = int((end - start).total_seconds() // 60)
+        if minutes <= 0 or (end - start).total_seconds() != minutes * 60:
+            return None
+        if clean and start < clean[-1]["end"]:
+            return None
+        # Adjacent productive pieces have no meaningful interruption.  Collapse
+        # them before persistence, so the aggregate stays in the compatible
+        # one-parent shape whenever allocation is actually continuous.
+        if clean and start == clean[-1]["end"]:
+            clean[-1]["end"] = end
+            clean[-1]["minutes"] += minutes
+        else:
+            clean.append({"start": start, "end": end, "minutes": minutes})
+
+    total_minutes = sum(item["minutes"] for item in clean)
+    if total_minutes != runtime_minutes:
+        return None
+
+    # One productive interval is deliberately stored as the legacy continuous
+    # parent shape.  It is exempt from the 30-minute child minimum because a
+    # genuinely short order has no "partial" segment to protect.
+    if len(clean) == 1:
+        only = clean[0]
+        return [], only["start"], only["end"]
+
+    if len(clean) >= 2 and any(item["minutes"] < MIN_SEGMENT_MINUTES for item in clean):
+        return None
+
+    normalized = [
+        {"sequence": index, "start": item["start"], "end": item["end"]}
+        for index, item in enumerate(clean, start=1)
+    ]
+    if not normalized:
+        return [], None, None
+    return normalized, normalized[0]["start"], normalized[-1]["end"]
+
 # Shared projection for the orders read path. Column aliases are the contract the
 # frontend/brain.py rely on; user scheduling overrides take precedence over the
 # SAP-source dates via COALESCE so callers only ever see one start/end per order.
@@ -198,11 +329,11 @@ _ORDERS_SELECT = f"""
         material_description  AS "MATERIAL_DESCRIPTION",
         o.production_line     AS "PRODUCTION_LINE",
         o.plant               AS "PLANT",
-        COALESCE(scheduled_start, basic_start_date) AS "BASIC_START_DATE",
-        {_EFF_END_SQL} AS "BASIC_FINISH_DATE",
+        COALESCE(seg.first_start, scheduled_start, basic_start_date) AS "BASIC_START_DATE",
+        COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS "BASIC_FINISH_DATE",
         basic_start_date      AS "ORIGINAL_START_DATE",
         basic_finish_date     AS "ORIGINAL_END_DATE",
-        (scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
+        (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
         run_time              AS "RUN_TIME",
         color                 AS "COLOR",
         prt_01                AS "PRT_01",
@@ -216,8 +347,11 @@ _ORDERS_SELECT = f"""
         -- it changes on every UPDATE, gives exact integer equality (no timestamp
         -- precision/tz fragility), and needs no schema column. Cast via text because
         -- xmin's native type (xid) has no direct bigint cast.
-        o.xmin::text::bigint  AS "ROW_VERSION"
+        o.xmin::text::bigint  AS "ROW_VERSION",
+        seg.schedule_segments AS "SCHEDULE_SEGMENTS",
+        {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS "RUNTIME_SCHEDULE_MISMATCH"
     FROM orders o
+    {_SCHEDULE_SEGMENTS_LATERAL_SQL}
 """
 
 
@@ -265,7 +399,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
         params.append(allowed_plants)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += '\n    ORDER BY o.production_line, COALESCE(scheduled_start, basic_start_date)'
+    sql += '\n    ORDER BY o.production_line, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
     if limit is not None:
         sql += " LIMIT %s"
         params.append(int(limit))
@@ -429,11 +563,15 @@ def get_task_versions(ids: list[str]) -> list[dict]:
     if not ids:
         return []
     sql = f"""
-        SELECT id,
-               COALESCE(scheduled_start, basic_start_date)  AS eff_start,
-               {_EFF_END_SQL} AS eff_end,
-               xmin::text::bigint                           AS row_version
-        FROM orders WHERE id = ANY(%s)
+        SELECT o.id,
+               COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) AS eff_start,
+               COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS eff_end,
+               o.xmin::text::bigint AS row_version,
+               seg.schedule_segments,
+               {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch
+        FROM orders o
+        {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+        WHERE o.id = ANY(%s)
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, (ids,))
@@ -444,6 +582,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "start_date": r[1].strftime("%Y-%m-%dT%H:%M:%S") if r[1] else None,
             "end_date":   r[2].strftime("%Y-%m-%dT%H:%M:%S") if r[2] else None,
             "row_version": int(r[3]) if r[3] is not None else None,
+            "schedule_segments": r[4] or [],
+            "runtime_schedule_mismatch": bool(r[5]),
         }
         for r in rows
     ]
@@ -517,10 +657,10 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
 
 def update_task_dates_bulk(items: list[dict]) -> dict:
     """
-    Persist a batch of start/end and allowlisted order-attribute edits in a
-    SINGLE transaction (one commit), replacing the old commit-per-row path.
-    Each item: {id, start, end, PRT_01?, PRT_02?, PRODUCTION_VERSION?} where
-    start/end are datetime|None and supplied attributes may be None to clear.
+    Persist parent schedule aggregates and allowlisted order attributes in one
+    transaction.  A schedule_segments field is an all-or-nothing replacement
+    of that parent's child set; its parent row's xmin is the only concurrency
+    token.  Child rows are never addressed independently.
 
     Inverted ranges are rejected by validating each edit against the row's
     *effective* current dates (so updating only start still checks against the
@@ -553,18 +693,29 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT id,
-                   COALESCE(scheduled_start, basic_start_date)  AS eff_start,
-                   {_EFF_END_SQL} AS eff_end,
-                   xmin::text::bigint                           AS row_version
-            FROM orders WHERE id = ANY(%s)
-            FOR UPDATE
+            SELECT o.id,
+                   COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) AS eff_start,
+                   COALESCE(seg.last_end, {_EFF_END_SQL}) AS eff_end,
+                   o.run_time,
+                   o.xmin::text::bigint AS row_version,
+                   seg.segment_count
+            FROM orders o
+            {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+            WHERE o.id = ANY(%s)
+            FOR UPDATE OF o
             """,
             (ids,),
         )
-        eff = {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
+        eff = {
+            r[0]: {
+                "start": r[1], "end": r[2], "run_time": r[3],
+                "row_version": r[4], "segment_count": int(r[5] or 0),
+            }
+            for r in cur.fetchall()
+        }
 
-        update_rows = []
+        update_rows: list[dict] = []
+        seen_ids: set[str] = set()
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
@@ -573,53 +724,129 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                 for field in ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
                 if field in it
             }
-            if not tid or (start is None and end is None and not attrs):
+            has_segments = "schedule_segments" in it
+            has_runtime = "RUN_TIME" in it
+            if (not tid or tid in seen_ids or
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime)):
                 invalid_ids.append(tid)
                 continue
+            seen_ids.add(tid)
             if tid not in eff:
                 not_found_ids.append(tid)
                 continue
-            cur_start, cur_end, cur_ver = eff[tid]
+            current = eff[tid]
+            cur_start, cur_end, cur_ver = current["start"], current["end"], current["row_version"]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
-            if new_start is not None and new_end is not None and new_end <= new_start:
-                invalid_ids.append(tid)
-                continue
             base_version = it.get("base_version")
             if not it.get("force") and base_version is not None and base_version != cur_ver:
                 stale.append(tid)   # someone else wrote since the client's read
                 continue
-            update_rows.append((start, end, Jsonb(attrs), tid))
+
+            current_runtime_minutes = _canonical_runtime_minutes(current["run_time"])
+            requested_runtime = it.get("RUN_TIME") if has_runtime else current["run_time"]
+            requested_runtime_minutes = _canonical_runtime_minutes(requested_runtime)
+            runtime_changed = has_runtime and requested_runtime_minutes != current_runtime_minutes
+            segment_rows: list[dict] | None = None
+
+            if has_segments:
+                raw_segments = it.get("schedule_segments")
+                if not isinstance(raw_segments, list):
+                    invalid_ids.append(tid)
+                    continue
+                if raw_segments:
+                    validated = _validate_schedule_segments(raw_segments, requested_runtime)
+                    if validated is None:
+                        invalid_ids.append(tid)
+                        continue
+                    segment_rows, segment_start, segment_end = validated
+                    # A supplied parent boundary must agree with the child
+                    # aggregate; silently accepting a conflict would make the
+                    # API return a different schedule than the caller saved.
+                    if ((start is not None and start != segment_start) or
+                            (end is not None and end != segment_end)):
+                        invalid_ids.append(tid)
+                        continue
+                    new_start, new_end = segment_start, segment_end
+                else:
+                    # [] explicitly removes obsolete children.  Preserve the
+                    # caller's supplied parent envelope (or current envelope)
+                    # and make the delete part of this same parent write.
+                    segment_rows = []
+            elif current["segment_count"] >= 2 and (start is not None or end is not None or runtime_changed):
+                # A direct parent move/runtime change would orphan the visible
+                # child schedule.  The browser must send the regenerated full
+                # aggregate; ingest remains the sole exception and surfaces a
+                # runtime mismatch instead of mutating planner timing.
+                invalid_ids.append(tid)
+                continue
+
+            if new_start is not None and new_end is not None and new_end <= new_start:
+                invalid_ids.append(tid)
+                continue
+
+            update_rows.append({
+                "id": tid,
+                "start": new_start if has_segments else start,
+                "end": new_end if has_segments else end,
+                "attrs": attrs,
+                "run_time": requested_runtime,
+                "has_runtime": has_runtime,
+                "segments": segment_rows,
+                "clear_runtime_mismatch": has_segments or start is not None or end is not None,
+            })
 
         if update_rows:
             try:
-                # Single statement: COALESCE keeps the unedited field; explicit casts on the
-                # VALUES columns are required because an all-NULL column would otherwise be
-                # of unknown type. RETURNING o.xmin gives each row's post-write version, using
-                # the identical xmin::text::bigint expression as the /tasks read path.
-                placeholders = ", ".join(["(%s::timestamp, %s::timestamp, %s::jsonb, %s::text)"] * len(update_rows))
-                params = [v for row in update_rows for v in row]
-                sql = f"""
-                    UPDATE orders o
-                    SET scheduled_start = COALESCE(v.s, o.scheduled_start),
-                        scheduled_end   = COALESCE(v.e, o.scheduled_end),
-                        prt_01 = CASE WHEN v.attrs ? 'PRT_01'
-                                      THEN NULLIF(v.attrs->>'PRT_01', '')
-                                      ELSE o.prt_01 END,
-                        prt_02 = CASE WHEN v.attrs ? 'PRT_02'
-                                      THEN NULLIF(v.attrs->>'PRT_02', '')
-                                      ELSE o.prt_02 END,
-                        production_version = CASE WHEN v.attrs ? 'PRODUCTION_VERSION'
-                                                  THEN NULLIF(v.attrs->>'PRODUCTION_VERSION', '')
-                                                  ELSE o.production_version END,
-                        updated_at      = NOW()
-                    FROM (VALUES {placeholders}) AS v(s, e, attrs, id)
-                    WHERE o.id = v.id
-                    RETURNING o.id, o.xmin::text::bigint AS new_version
-                """
-                cur.execute(sql, params)
-                for rid, rver in cur.fetchall():
+                for row in update_rows:
+                    sets: list[str] = []
+                    params: list = []
+                    if row["start"] is not None:
+                        sets.append("scheduled_start = %s")
+                        params.append(row["start"])
+                    if row["end"] is not None:
+                        sets.append("scheduled_end = %s")
+                        params.append(row["end"])
+                    if row["has_runtime"]:
+                        sets.append("run_time = %s")
+                        params.append(row["run_time"])
+                    if row["clear_runtime_mismatch"]:
+                        sets.append("runtime_schedule_mismatch = FALSE")
+                    attr_columns = {
+                        "PRT_01": "prt_01",
+                        "PRT_02": "prt_02",
+                        "PRODUCTION_VERSION": "production_version",
+                    }
+                    for field, column in attr_columns.items():
+                        if field in row["attrs"]:
+                            sets.append(f"{column} = NULLIF(%s, '')")
+                            params.append(row["attrs"][field])
+                    # A child replacement still must touch the parent row so
+                    # xmin remains the aggregate's one optimistic-lock token.
+                    sets.append("updated_at = NOW()")
+                    params.append(row["id"])
+                    cur.execute(
+                        f"UPDATE orders SET {', '.join(sets)} WHERE id = %s "
+                        "RETURNING id, xmin::text::bigint AS new_version",
+                        params,
+                    )
+                    rid, rver = cur.fetchone()
                     versions[rid] = int(rver)
+
+                    if row["segments"] is not None:
+                        cur.execute("DELETE FROM order_schedule_segments WHERE order_id = %s", (row["id"],))
+                        if row["segments"]:
+                            cur.executemany(
+                                """
+                                INSERT INTO order_schedule_segments
+                                    (order_id, segment_no, scheduled_start, scheduled_end)
+                                VALUES (%s, %s, %s, %s)
+                                """,
+                                [
+                                    (row["id"], segment["sequence"], segment["start"], segment["end"])
+                                    for segment in row["segments"]
+                                ],
+                            )
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
@@ -1254,6 +1481,15 @@ _UPSERT_SQL = """
         END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
+        -- Source timing never overwrites an established NIMBUS schedule. If
+        -- its runtime changed, retain that aggregate and require the client to
+        -- regenerate it from the authoritative scheduled start.
+        runtime_schedule_mismatch = CASE
+            WHEN EXCLUDED.run_time IS DISTINCT FROM orders.run_time
+                 AND orders.scheduled_start IS NOT NULL
+            THEN TRUE
+            ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE)
+        END,
         run_time              = EXCLUDED.run_time,
         color                 = EXCLUDED.color,
         -- prt_01/prt_02/production_version: written from the uploaded row like color
@@ -1946,6 +2182,32 @@ def list_color_wheels_meta(limit: int | None = None,
 # =========================
 # PRIORITY LISTS (docs/scheduling_priority.md — Stage 1: data plumbing only)
 # =========================
+# Split-order persistence is a normalized child aggregate. Keep this startup
+# hook alongside the other idempotent schema guards so a deployed app cannot
+# serve the new /tasks projection before its additive table exists.
+def ensure_order_schedule_segments_table() -> None:
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS order_schedule_segments (
+                order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+                segment_no INTEGER NOT NULL CHECK (segment_no > 0),
+                scheduled_start TIMESTAMP NOT NULL,
+                scheduled_end TIMESTAMP NOT NULL,
+                PRIMARY KEY (order_id, segment_no),
+                CHECK (scheduled_end > scheduled_start)
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_schedule_segments_order_start "
+            "ON order_schedule_segments(order_id, scheduled_start)"
+        )
+        cur.execute(
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS runtime_schedule_mismatch "
+            "BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        conn.commit()
+
+
 # Generalizes color_wheel to any field in master_data.RANKABLE_FIELDS. One row
 # per (plant, line, field_key); line = '' means plant-wide, a specific
 # production_line overrides the plant-wide list for that line only (mirrors

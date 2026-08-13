@@ -1111,6 +1111,27 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.lc-8 { background: var(--l8); border-color: var(--l8); }
 .vis-item.lc-9 { background: var(--l9); border-color: var(--l9); }
 
+/* One logical order may occupy multiple productive intervals. Keep the line
+   * color intact, then use a shared inner keyline and compact continuation
+   * marker so pieces read as one parent without looking like separate orders. */
+.vis-item.split-order-segment {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.62);
+}
+.vis-item.fixed-order.split-order-segment {
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.85), inset 0 0 0 3px rgba(255,255,255,0.42);
+}
+.vis-item.split-order-segment-continuation {
+  border-left: 2px dashed rgba(255,255,255,0.82) !important;
+}
+.vis-item.split-order-segment-last {
+  border-right: 2px solid rgba(255,255,255,0.82) !important;
+}
+.split-order-part {
+  display: block; padding: 0 4px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 10px;
+  font-weight: 600; letter-spacing: .02em;
+}
+
 /* Custom vis background areas for blackout blocks */
 .vis-item.blackout {
   background: repeating-linear-gradient(
@@ -1386,6 +1407,16 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 .insp-row .insp-val input:hover, .insp-row .insp-val select:hover { border-color: var(--line); background: var(--bg-elev); }
 .insp-row .insp-val input:focus, .insp-row .insp-val select:focus { background: var(--bg-elev); }
+.insp-split-summary-note { color: var(--fg-mute); font-size: 11px; line-height: 1.4; margin: -2px 0 8px; }
+.insp-split-segments { border-top: 1px dashed var(--line); }
+.insp-split-segment {
+  display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 7px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px dashed var(--line); font: 10.5px/1.35 'JetBrains Mono', monospace;
+}
+.insp-split-segment:last-child { border-bottom: none; }
+.insp-split-segment span:first-child { color: var(--accent); font-weight: 700; }
+.insp-split-segment span:nth-child(2) { min-width: 0; color: var(--fg); }
+.insp-split-segment span:last-child { color: var(--fg-mute); white-space: nowrap; }
 
 .insp-notes-wrap textarea {
   width: 100%; resize: vertical; min-height: 62px;
@@ -5696,6 +5727,16 @@ body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--war
 .lp-input-hint  { font-size: 11px; color: var(--fg-mute); max-width: 340px; padding-top: 5px; line-height: 1.5; }
 
 /* Scheduling constraints (per-plant switchable list — Plant ▸ Settings) */
+/* Plant split-order policy: scoped configuration, not a per-run override. */
+.split-policy-body { max-width: 640px; }
+.split-policy-copy { margin: 0 0 14px; color: var(--fg-mute); font-size: 13px; line-height: 1.5; }
+.split-policy-control { display: grid; grid-template-columns: minmax(136px, 1fr) minmax(280px, 2fr); align-items: center; gap: 12px; font-size: 13px; font-weight: 600; color: var(--fg); }
+.split-policy-control select { width: 100%; min-width: 0; }
+.split-policy-help { margin: 9px 0 0; color: var(--fg-mute); font-size: 11.5px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+@media (max-width: 620px) {
+  .split-policy-control { grid-template-columns: 1fr; gap: 6px; }
+}
+
 .constraint-list { display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
 .constraint-row {
   display: flex; align-items: center; gap: 12px; padding: 10px 12px;

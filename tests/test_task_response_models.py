@@ -11,6 +11,7 @@ round-tripped key set is unchanged — so a field silently dropped by the model
 fails this test immediately, without needing a live database.
 """
 import os
+from datetime import datetime
 
 import pytest
 
@@ -43,6 +44,11 @@ SAMPLE_TASK_ROW = {
     "notes": None,
     "firmed": False,
     "row_version": 42,
+    "schedule_segments": [
+        {"sequence": 1, "start_date": "2026-08-01T07:00:00", "end_date": "2026-08-01T15:00:00"},
+        {"sequence": 2, "start_date": "2026-08-02T07:00:00", "end_date": "2026-08-02T09:00:00"},
+    ],
+    "runtime_schedule_mismatch": False,
 }
 
 
@@ -100,6 +106,58 @@ def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch)
         "base_version": 42,
         "force": False,
     }]
+
+
+def test_split_schedule_update_is_forwarded_as_an_explicit_aggregate(monkeypatch):
+    captured = {}
+
+    def fake_update(items):
+        captured["items"] = items
+        return {
+            "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
+            "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+            "stale": [], "versions": {"abc123": 43},
+        }
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    result = brain._apply_task_date_updates([
+        brain.TaskDateUpdate(
+            id="abc123", RUN_TIME=10,
+            schedule_segments=[
+                {"sequence": 1, "start_date": "2026-08-01T07:00:00", "end_date": "2026-08-01T15:00:00"},
+                {"sequence": 2, "start_date": "2026-08-02T07:00:00", "end_date": "2026-08-02T09:00:00"},
+            ],
+            base_version=42,
+        )
+    ])
+
+    assert result["persisted"] == 1
+    assert captured["items"] == [{
+        "id": "abc123", "start": None, "end": None, "RUN_TIME": 10.0,
+        "schedule_segments": [
+            {"sequence": 1, "start": brain._to_pydt("2026-08-01T07:00:00"), "end": brain._to_pydt("2026-08-01T15:00:00")},
+            {"sequence": 2, "start": brain._to_pydt("2026-08-02T07:00:00"), "end": brain._to_pydt("2026-08-02T09:00:00")},
+        ],
+        "base_version": 42, "force": False,
+    }]
+
+
+def test_segment_aggregate_rejects_out_of_order_or_overlapping_children():
+    def at(value):
+        return datetime.fromisoformat(value)
+
+    assert brain.db._validate_schedule_segments([
+        {"sequence": 1, "start": at("2026-08-01T07:00:00"), "end": at("2026-08-01T15:00:00")},
+        {"sequence": 2, "start": at("2026-08-02T07:00:00"), "end": at("2026-08-02T09:00:00")},
+    ], 10) is not None
+    assert brain.db._validate_schedule_segments([
+        {"sequence": 2, "start": at("2026-08-01T07:00:00"), "end": at("2026-08-01T15:00:00")},
+        {"sequence": 1, "start": at("2026-08-02T07:00:00"), "end": at("2026-08-02T09:00:00")},
+    ], 10) is None
+    assert brain.db._validate_schedule_segments([
+        {"sequence": 1, "start": at("2026-08-01T07:00:00"), "end": at("2026-08-01T15:00:00")},
+        {"sequence": 2, "start": at("2026-08-01T14:30:00"), "end": at("2026-08-01T16:30:00")},
+    ], 10) is None
 
 
 def test_openapi_schema_includes_new_components():

@@ -1579,6 +1579,24 @@ export interface components {
             /** Type */
             type: string;
         };
+        /** ScheduleSegmentDTO */
+        ScheduleSegmentDTO: {
+            /** Sequence */
+            sequence: number;
+            /** Start Date */
+            start_date: string;
+            /** End Date */
+            end_date: string;
+        };
+        /** ScheduleSegmentInput */
+        ScheduleSegmentInput: {
+            /** Sequence */
+            sequence: number;
+            /** Start Date */
+            start_date: string;
+            /** End Date */
+            end_date: string;
+        };
         /**
          * TaskDTO
          * @description One row of GET /tasks's `data` array. Field set mirrors the dict literal
@@ -1636,6 +1654,10 @@ export interface components {
             firmed: boolean;
             /** Row Version */
             row_version?: number | null;
+            /** Schedule Segments */
+            schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
+            /** Runtime Schedule Mismatch */
+            runtime_schedule_mismatch?: boolean;
         };
         /**
          * TaskDateUpdate
@@ -1659,6 +1681,10 @@ export interface components {
             PRT_02?: string | null;
             /** Production Version */
             PRODUCTION_VERSION?: string | null;
+            /** Run Time */
+            RUN_TIME?: number | null;
+            /** Schedule Segments */
+            schedule_segments?: components["schemas"]["ScheduleSegmentInput"][] | null;
             /** Base Version */
             base_version?: number | null;
             /**
@@ -1712,6 +1738,10 @@ export interface components {
             end_date?: string | null;
             /** Row Version */
             row_version?: number | null;
+            /** Schedule Segments */
+            schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
+            /** Runtime Schedule Mismatch */
+            runtime_schedule_mismatch?: boolean;
         };
         /** TasksRefreshResponse */
         TasksRefreshResponse: {

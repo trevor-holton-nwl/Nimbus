@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-12
 
-**Status:** Approved design decisions; pending written-spec review and a separate implementation plan
+**Status:** Implemented on `feature/split-order`; focused validation is recorded in the implementation handoff. Live PostgreSQL integration/cascade coverage was deliberately deferred for the requested non-exhaustive validation scope.
 
 **Relationship:** Adds a policy-controlled segmented alternative to Remove Backlog's temporary overlong continuous-bar exception; the `never` policy deliberately retains that exception
 

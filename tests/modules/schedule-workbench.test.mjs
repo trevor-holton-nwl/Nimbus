@@ -54,6 +54,24 @@ test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.gotoLineDay, 'function');
 });
 
+test('Timeline renders split schedules as multiple parent-mapped timeline items', () => {
+  const task = {
+    id: 'timeline-split', PRODUCTION_LINE: 'L-SPLIT', RUN_TIME: 14,
+    start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-12T08:00:00'), endDate: new Date('2026-08-12T20:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-13T08:00:00'), endDate: new Date('2026-08-13T10:00:00') },
+    ],
+  };
+
+  const items = Timeline._itemsForTask(task);
+  assert.equal(items.length, 2);
+  assert.ok(items.every(item => item.parentId === task.id));
+  assert.notEqual(items[0].id, items[1].id);
+  assert.equal(items[0].start.getTime(), task.scheduleSegments[0].startDate.getTime());
+  assert.equal(items[1].end.getTime(), task.scheduleSegments[1].endDate.getTime());
+});
+
 test('TimelineNav exposes init/render', () => {
   assert.equal(typeof TimelineNav.init, 'function');
   assert.equal(typeof TimelineNav.render, 'function');
@@ -92,6 +110,46 @@ test('GanttFilter.selectedLines/isolateLine/restoreAllLines/activeFilter are the
   assert.ok(GanttFilter.selectedLines().has('L1'));
   GanttFilter.restoreAllLines();
   assert.equal(GanttFilter.selectedLines().size, 0);
+});
+
+test('GanttFilter applies dimming to every visual piece of a split order', () => {
+  const task = {
+    id: 'filter-split', PLANT: 'P-SPLIT', PRODUCTION_LINE: 'L-SPLIT', text: 'matched nowhere', RUN_TIME: 14,
+    start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-12T08:00:00'), endDate: new Date('2026-08-12T20:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-13T08:00:00'), endDate: new Date('2026-08-13T10:00:00') },
+    ],
+  };
+  const firstId = 'order-segment:filter-split:1';
+  const secondId = 'order-segment:filter-split:2';
+  const items = new Map([[firstId, { id: firstId, className: 'task' }], [secondId, { id: secondId, className: 'task' }]]);
+  const updates = [];
+  const oldItems = Timeline._items;
+  const oldIds = Timeline._itemIdsByTask;
+  const oldActive = GanttFilter._active;
+  const oldPlant = Store.selectedPlant;
+  try {
+    Store.setTasks([task], 'unit-test');
+    Store.setSelectedPlant('P-SPLIT', 'unit-test');
+    Timeline._itemIdsByTask = { 'filter-split': [firstId, secondId] };
+    Timeline._items = {
+      get(id) { return items.get(id); },
+      update(next) { updates.push(...next); },
+    };
+    GanttFilter._active = { text: 'does not match' };
+
+    GanttFilter._doApply();
+
+    assert.deepEqual(updates.map(update => update.id), [firstId, secondId]);
+    assert.ok(updates.every(update => update.className === 'task dimmed'));
+  } finally {
+    Timeline._items = oldItems;
+    Timeline._itemIdsByTask = oldIds;
+    GanttFilter._active = oldActive;
+    Store.setTasks([], 'unit-test');
+    Store.setSelectedPlant(oldPlant, 'unit-test');
+  }
 });
 
 test('Dashboard exposes init/render', () => {

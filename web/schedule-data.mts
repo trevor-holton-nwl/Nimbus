@@ -35,7 +35,7 @@
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, OrderScheduleSegment } from './types.mjs';
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
@@ -71,6 +71,7 @@ interface MasterPlantRow {
   description?: string | null;
   product_focus?: string | null;
   timezone?: string | null;
+  split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
 }
 
 /** GET /health (brain.py) — only the fields this file reads are modeled;
@@ -534,6 +535,8 @@ export const Persistence = {
   },
 
   _prepTask(raw: Record<string, unknown>): NimbusTask {
+    raw.scheduleSegments = Persistence._segmentsFromRaw(raw);
+    delete raw.schedule_segments;
     // Coerce date-like string fields to Date.
     for (const k of Object.keys(raw)) {
       if (k.toLowerCase().includes('date') && typeof raw[k] === 'string') {
@@ -541,6 +544,26 @@ export const Persistence = {
       }
     }
     return raw as unknown as NimbusTask;
+  },
+
+  /** Convert either the API's snake_case wire collection or a cache-restored
+   *  camelCase collection into the one in-memory segment representation. */
+  _segmentsFromRaw(raw: Record<string, unknown>): OrderScheduleSegment[] {
+    const source = Array.isArray(raw.schedule_segments)
+      ? raw.schedule_segments
+      : (Array.isArray(raw.scheduleSegments) ? raw.scheduleSegments : []);
+    const segments = source.map((candidate, index) => {
+      if (!candidate || typeof candidate !== 'object') return null;
+      const segment = candidate as Record<string, unknown>;
+      const start = Util.parseDate(segment.start_date ?? segment.startDate);
+      const end = Util.parseDate(segment.end_date ?? segment.endDate);
+      const sequence = Number(segment.sequence);
+      return start instanceof Date && end instanceof Date && end > start
+        ? { sequence: Number.isFinite(sequence) && sequence > 0 ? sequence : index + 1, startDate: start, endDate: end }
+        : null;
+    }).filter((segment): segment is OrderScheduleSegment => segment !== null)
+      .sort((a, b) => a.startDate.getTime() - b.startDate.getTime() || a.sequence - b.sequence);
+    return segments.length >= 2 ? segments : [];
   },
 
   // Apply user-explicitly-moved positions from the localStorage cache back onto
@@ -561,6 +584,7 @@ export const Persistence = {
       t.start_date = cs;
       t.end_date   = ce;
       t.original_start_date = cos;
+      t.scheduleSegments = Persistence._segmentsFromRaw(cached);
       const coe = Util.parseDate(cached.original_end_date);
       if (coe instanceof Date) t.original_end_date = coe;
     }
@@ -616,7 +640,7 @@ export const Persistence = {
         const durationMs = t.end_date.getTime() - t.start_date.getTime();
         if (durationMs <= 0) continue;
 
-        if (t.fixed) continue;
+        if (t.fixed || (t.scheduleSegments?.length ?? 0) >= 2 || t.runtime_schedule_mismatch) continue;
 
         // Backend has a scheduled_start/end persisted for this task — the user
         // owns its position. Never re-snap on load; alerts will flag any
@@ -1077,6 +1101,12 @@ export const Persistence = {
       PRT_01:       t.PRT_01,
       PRT_02:       t.PRT_02,
       PRODUCTION_VERSION: t.PRODUCTION_VERSION,
+      RUN_TIME:      t.RUN_TIME,
+      schedule_segments: (t.scheduleSegments || []).map(segment => ({
+        sequence: segment.sequence,
+        start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,
+        end_date: Util.toLocalSeconds(segment.endDate) as NaiveLocalTs,
+      })),
       base_version: t.row_version ?? null,
       force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
     }));
@@ -1184,6 +1214,8 @@ export const Persistence = {
           if (!tk) continue;
           tk.start_date  = Util.parseDate(row.start_date);
           tk.end_date    = Util.parseDate(row.end_date);
+          tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
+          tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
@@ -1510,9 +1542,9 @@ export const CalendarSync = {
       }
       // Notify subscribers + refresh the offline cache with backend truth. These
       // emits fire while _hydrating=true, so no POST-back to the backend.
-      Store.emit({ type: 'calendar:change',    source: 'calendar-sync' });
-      Store.emit({ type: 'blocks:change',      source: 'calendar-sync' });
-      Store.emit({ type: 'plantBlocks:change', source: 'calendar-sync' });
+      Store.emit({ type: 'calendar:change',    source: 'calendar-sync', plant });
+      Store.emit({ type: 'blocks:change',      source: 'calendar-sync', plant });
+      Store.emit({ type: 'plantBlocks:change', source: 'calendar-sync', plant });
     } finally {
       this._hydrating = false;
     }

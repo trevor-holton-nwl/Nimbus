@@ -34,14 +34,14 @@ function task(id, start, hours, extra = {}) {
   };
 }
 
-function seed({ tasks = [], hours = allDays(8, 16), lineName = line } = {}) {
+function seed({ tasks = [], hours = allDays(8, 16), lineName = line, splitOrderPolicy = 'never' } = {}) {
   Store.replaceBlocks([], 'test');
   Store.replacePlantBlocks([], 'test');
   Store.replaceCalendars({}, 'test');
   Store.replacePlants({}, 'test');
   Store.replaceFixedIds(new Set(), 'test');
   Store.setMasterData({
-    plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York' }],
+    plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: splitOrderPolicy }],
     lines: [{ production_line: lineName, plant }],
   }, 'test');
   Store.setLineSetting(lineName, { plant, excludeFromOpt: false }, 'test');
@@ -111,6 +111,24 @@ test('Engine uses RUN_TIME and moves a fixed order without clearing its fixed st
   assert.equal(+change.end_date - +change.start_date, 3 * HOUR);
   assert.ok(Store.fixedIds.has('fixed-past'));
   assert.equal(result.diagnostics.fixedMoved, 1);
+});
+
+test('Engine allocates backlog runtime as productive segments when the plant permits partial orders', () => {
+  seed({
+    tasks: [task('split-past', '2026-08-12T06:00', 14)],
+    hours: allDays(8, 20),
+    splitOrderPolicy: 'partial_allowed',
+  });
+
+  const result = Engine.removeBacklog(opts());
+  const change = patch(result, 'split-past').changes;
+
+  assert.deepEqual(change.scheduleSegments.map(segment => [
+    segment.startDate.getHours(), segment.endDate.getHours(),
+  ]), [
+    [8, 20], [8, 10],
+  ]);
+  assert.equal(+change.end_date, +at('2026-08-13T10:00'));
 });
 
 test('Engine leaves a protected task after To untouched and reports a boundary conflict', () => {

@@ -44,6 +44,10 @@ PLANT_SCOPED_TABLES = frozenset({'plants', 'production_lines', 'material_plants'
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
+# This setting is deliberately a narrow plant-level allowlist rather than an
+# arbitrary optimizer option supplied by the browser.
+SPLIT_ORDER_POLICIES = frozenset({'never', 'overlong_only', 'partial_allowed'})
+
 COLUMN_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 
 # System columns the UI must never see or touch.
@@ -291,8 +295,8 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         else:
             total = len(rows)
 
-        # Plants carry a JSONB `constraints` column (per-plant switchable
-        # constraint config). It is intentionally NOT registered in
+        # Plants carry sidecar optimization settings (`constraints` and the
+        # split-order allocation policy). They are intentionally NOT registered in
         # column_metadata, so it never appears as an editable grid column — but
         # we attach it to each row dict so the frontend (Settings pane +
         # optimizer) can read it alongside the visible columns. Scope the fetch
@@ -303,12 +307,17 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints FROM plants WHERE plant = ANY(%s)",
+                        "SELECT subnetwork, plant, constraints, split_order_policy "
+                        "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3]) for r in cur.fetchall()}
                     for row in rows:
-                        row['constraints'] = cmap.get((row.get('subnetwork'), row.get('plant')))
+                        constraints, policy = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never')
+                        )
+                        row['constraints'] = constraints
+                        row['split_order_policy'] = policy or 'never'
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -969,6 +978,17 @@ def ensure_plant_constraints_column() -> None:
         conn.commit()
 
 
+def ensure_plant_split_order_policy_column() -> None:
+    """Idempotent plant-only allocation policy. It stays out of the generic
+    Master Data grid and is changed only through the validated settings route."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy "
+            "TEXT NOT NULL DEFAULT 'never'"
+        )
+        conn.commit()
+
+
 def ensure_material_plant_attributes() -> None:
     """Idempotent: add material_plants.prt_01/prt_02/color/default_workcenter +
     their column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
@@ -1060,6 +1080,39 @@ def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
         conn.commit()
 
     return {"status": "ok", "plant": plant, "constraints": clean}
+
+
+def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,
+                                 user_email: str | None = None) -> dict:
+    """Persist the plant's allocation policy after a strict server-side
+    allowlist check. No caller can submit arbitrary optimizer configuration."""
+    if not plant:
+        raise ValueError("plant is required")
+    clean = str(policy or '').strip().lower()
+    if clean not in SPLIT_ORDER_POLICIES:
+        raise ValueError("split_order_policy must be never, overlong_only, or partial_allowed")
+
+    params: list = [clean, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET split_order_policy = %s, updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_split_order_policy', %s, %s)",
+            (Jsonb({"plant": plant, "split_order_policy": clean}), user_email),
+        )
+        conn.commit()
+
+    return {"status": "ok", "plant": plant, "split_order_policy": clean}
 
 
 # Top-level pages a role's access can be toggled for. Must mirror the frontend

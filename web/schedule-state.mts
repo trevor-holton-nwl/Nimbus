@@ -4,7 +4,7 @@
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
@@ -724,6 +724,22 @@ export const Store = {
     }
     if (task.start_date) task.start_date = Util.snap(task.start_date);
     if (task.end_date)   task.end_date   = Util.snap(task.end_date);
+    const rawSegments = Array.isArray(task.scheduleSegments) ? task.scheduleSegments : [];
+    const segments = rawSegments.map((segment, index) => {
+      const startDate = Util.parseDate(segment?.startDate);
+      const endDate = Util.parseDate(segment?.endDate);
+      return startDate instanceof Date && endDate instanceof Date && endDate > startDate
+        ? { sequence: Number(segment?.sequence) || index + 1, startDate: Util.snap(startDate), endDate: Util.snap(endDate) }
+        : null;
+    }).filter((segment): segment is OrderScheduleSegment => segment !== null)
+      .sort((a, b) => a.startDate.getTime() - b.startDate.getTime() || a.sequence - b.sequence);
+    task.scheduleSegments = segments.length >= 2
+      ? segments.map((segment, index) => ({ ...segment, sequence: index + 1 }))
+      : [];
+    if (task.scheduleSegments.length >= 2) {
+      task.start_date = new Date(task.scheduleSegments[0].startDate);
+      task.end_date = new Date(task.scheduleSegments[task.scheduleSegments.length - 1].endDate);
+    }
     // To re-enable SAP firmed→fixed mapping: change the line below back to:
     //   task.fixed = !!task.fixed || !!task.firmed;
     task.fixed = !!task.fixed;

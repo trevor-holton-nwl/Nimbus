@@ -25,7 +25,7 @@ declare global {
   interface NimbusAlert {
     id: string;
     sev: 'err' | 'warn';
-    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours';
+    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours' | 'runtime-schedule-mismatch';
     msg: string;
     taskId?: string;
     line: string;
@@ -40,6 +40,14 @@ declare global {
     start_date?: Date | null;
     end_date?: Date | null;
     fixed?: boolean;
+    runtime_schedule_mismatch?: boolean;
+    scheduleSegments?: Array<{
+      sequence: number;
+      startDate?: Date | null;
+      endDate?: Date | null;
+      start_date?: Date | null;
+      end_date?: Date | null;
+    }>;
   }
 
   interface NimbusBlock {
@@ -134,6 +142,7 @@ declare global {
     dayKey(d: unknown): string;
     startOfDay(d: unknown): Date | null;
     runHours(task: NimbusTask): number;
+    scheduleIntervals(task: NimbusTask): Array<{ sequence: number; start: Date; end: Date }>;
     mergedOverlapHours(win: [Date | number, Date | number] | null, intervals: Array<{ s: Date | number; e: Date | number }>): number;
     fmtDTReadable(d: unknown): string;
     toLocalSeconds(d: unknown): string;

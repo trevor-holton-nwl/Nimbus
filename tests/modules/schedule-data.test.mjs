@@ -84,6 +84,38 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
   }
 });
 
+test('Persistence.saveAll sends the full split aggregate in naive-local form', () => {
+  Store.setTasks([{
+    id: 'split-save', PRODUCTION_LINE: 'L1', RUN_TIME: '10',
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-04T10:00:00'),
+    row_version: '5',
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-03T08:00:00'), endDate: new Date('2026-08-03T16:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-04T08:00:00'), endDate: new Date('2026-08-04T10:00:00') },
+    ],
+  }], 'unit-test');
+  Persistence._dirtyIds.add('split-save');
+
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ versions: {}, stale: [], persisted: 1, updated: 1 }) });
+  };
+  try {
+    Persistence.saveAll();
+    const saveCall = calls.find(c => c.url.includes('/tasks/update'));
+    const task = JSON.parse(saveCall.opts.body).tasks.find(x => x.id === 'split-save');
+    assert.equal(task.RUN_TIME, '10');
+    assert.deepEqual(task.schedule_segments, [
+      { sequence: 1, start_date: '2026-08-03T08:00:00', end_date: '2026-08-03T16:00:00' },
+      { sequence: 2, start_date: '2026-08-04T08:00:00', end_date: '2026-08-04T10:00:00' },
+    ]);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they stop being retried forever', async () => {
   // Regression guard for a latent client↔server contract bug: the backend's
   // /tasks/update forwards invalid_ids/not_found_ids (terminal rejections — inverted

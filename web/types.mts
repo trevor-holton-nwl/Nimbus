@@ -69,9 +69,24 @@ export interface NimbusTask {
    *  note editors write `null` (not `''`) to explicitly clear a note. */
   notes?: string | null;
   user_scheduled?: boolean;
+  /** Two or more productive child intervals. An absent/empty list means the
+   *  parent is a legacy continuous schedule; this is never a manually edited
+   *  collection. */
+  scheduleSegments?: OrderScheduleSegment[];
+  /** Backend-derived diagnostic after a runtime ingest changes a persisted
+   *  schedule aggregate; the planner regenerates it from the current parent start. */
+  runtime_schedule_mismatch?: boolean;
   /** Open SAP bag — real rows carry additional raw columns not modeled above. */
   [key: string]: unknown;
 }
+
+export interface OrderScheduleSegment {
+  sequence: number;
+  startDate: Date;
+  endDate: Date;
+}
+
+export type SplitOrderPolicy = 'never' | 'overlong_only' | 'partial_allowed';
 
 export interface NimbusBlock {
   id: string;
@@ -194,6 +209,9 @@ export interface NimbusMasterPlant {
   subnetwork: string;
   plant: string;
   constraints?: ConstraintConfig[];
+  /** Plant-only allocation behavior; missing values intentionally preserve
+   *  legacy continuous scheduling. */
+  split_order_policy?: SplitOrderPolicy | null;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */
@@ -223,7 +241,8 @@ export type OptimizerMode = 'spt' | 'changeover' | 'combined' | 'backlog';
 
 export type AlertType =
   | 'overlap' | 'overload' | 'near-capacity' | 'closed'
-  | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours';
+  | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours'
+  | 'runtime-schedule-mismatch';
 
 export type AlertSev = 'err' | 'warn';
 

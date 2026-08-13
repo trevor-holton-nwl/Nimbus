@@ -186,12 +186,14 @@ async def lifespan(app: FastAPI):
     _migrate_audit_log()
     db.ensure_color_wheel_table()
     db.ensure_priority_list_table()
+    db.ensure_order_schedule_segments_table()
     if CW_BACKFILL_FROM_DISK:
         _backfill_color_wheels_from_disk()
     load_priority_lists()
     md.ensure_labor_plan_table()
     md.ensure_labor_plan_line_table()
     md.ensure_plant_constraints_column()
+    md.ensure_plant_split_order_policy_column()
     md.ensure_work_hours_columns()
     md.ensure_line_calendar_table()
     md.ensure_line_blackout_table()
@@ -558,6 +560,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/{table}/columns": "master_data.column_write",
     "/master-data/{table}/columns/{column}": "master_data.column_write",
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
+    "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
     "/master-data/resync-order-attributes": "material_plants.resync_order_attributes",
@@ -1050,6 +1053,32 @@ def _to_pydt(val):
     return ts.to_pydatetime().replace(tzinfo=None)
 
 
+def _schedule_segments_to_wire(raw) -> list[dict]:
+    """Normalize the JSONB child aggregate into the API's naive-local date
+    contract. Bad legacy data is skipped rather than allowed through a strict
+    response model as a malformed schedule."""
+    if not isinstance(raw, list):
+        return []
+    clean: list[dict] = []
+    for index, segment in enumerate(raw, start=1):
+        if not isinstance(segment, dict):
+            continue
+        start = _to_pydt(segment.get("start_date"))
+        end = _to_pydt(segment.get("end_date"))
+        if start is None or end is None or end <= start:
+            continue
+        try:
+            sequence = int(segment.get("sequence", index))
+        except (TypeError, ValueError):
+            sequence = index
+        clean.append({
+            "sequence": sequence,
+            "start_date": start.strftime("%Y-%m-%dT%H:%M:%S"),
+            "end_date": end.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+    return clean
+
+
 # =========================
 # Response models (Phase 4 Task 1 — response_model= additions)
 # =========================
@@ -1059,6 +1088,13 @@ class LinkDTO(BaseModel):
     source: str
     target: str
     type: str
+
+
+class ScheduleSegmentDTO(BaseModel):
+    """One productive child interval of a logical production order."""
+    sequence: int
+    start_date: str
+    end_date: str
 
 
 class TaskDTO(BaseModel):
@@ -1094,6 +1130,8 @@ class TaskDTO(BaseModel):
     notes: str | None = None
     firmed: bool
     row_version: int | None = None
+    schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
+    runtime_schedule_mismatch: bool = False
 
 
 class TasksResponse(BaseModel):
@@ -1146,6 +1184,8 @@ class TaskVersionRow(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     row_version: int | None = None
+    schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
+    runtime_schedule_mismatch: bool = False
 
 
 class TasksRefreshResponse(BaseModel):
@@ -1409,6 +1449,8 @@ def get_tasks(plant: str | None = None, line: str | None = None,
                 # Optimistic-concurrency token (Postgres xmin). The client echoes it
                 # back on edit so the server can reject writes computed from stale data.
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
+                "schedule_segments": _schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
+                "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
             })
 
             if prev_task_id:
@@ -1438,6 +1480,16 @@ def get_tasks(plant: str | None = None, line: str | None = None,
 # ---------------------------------------------------------------------------
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
+class ScheduleSegmentInput(BaseModel):
+    """A value-only child interval. Extra keys are rejected so callers cannot
+    smuggle child identities or unrelated writable fields into the aggregate."""
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int
+    start_date: str
+    end_date: str
+
+
 class TaskDateUpdate(BaseModel):
     """One task's optional schedule/attribute edit. Unknown fields are ignored.
 
@@ -1452,6 +1504,8 @@ class TaskDateUpdate(BaseModel):
     PRT_01: str | None = None
     PRT_02: str | None = None
     PRODUCTION_VERSION: str | None = None
+    RUN_TIME: float | None = None
+    schedule_segments: list[ScheduleSegmentInput] | None = None
     base_version: int | None = None
     force: bool = False
 
@@ -1498,11 +1552,42 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
             for field in attribute_fields
             if field in supplied
         }
-        if start_dt is None and end_dt is None and not attrs:
+        has_runtime = "RUN_TIME" in supplied
+        has_segments = "schedule_segments" in supplied
+        segments: list[dict] | None = None
+        if has_segments:
+            # An aggregate replacement is deliberately explicit.  Treating a
+            # JSON null as [] would let a malformed client erase all durable
+            # productive pieces without supplying the parent schedule it meant
+            # to replace.
+            if it.schedule_segments is None:
+                invalid += 1
+                continue
+            segments = []
+            for segment in it.schedule_segments:
+                segment_start = _to_pydt(segment.start_date)
+                segment_end = _to_pydt(segment.end_date)
+                if segment_start is None or segment_end is None:
+                    invalid += 1
+                    segments = None
+                    break
+                segments.append({
+                    "sequence": segment.sequence,
+                    "start": segment_start,
+                    "end": segment_end,
+                })
+            if segments is None:
+                continue
+        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_segments:
             continue
-        norm.append({"id": it.id, "start": start_dt, "end": end_dt,
-                     **attrs,
-                     "base_version": it.base_version, "force": it.force})
+        item = {"id": it.id, "start": start_dt, "end": end_dt,
+                **attrs,
+                "base_version": it.base_version, "force": it.force}
+        if has_runtime:
+            item["RUN_TIME"] = it.RUN_TIME
+        if has_segments:
+            item["schedule_segments"] = segments
+        norm.append(item)
 
     if not norm:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
@@ -1657,7 +1742,10 @@ def tasks_refresh(payload: TaskRefreshPayload):
     Payload: { ids: [str] }
     Response: { data: [{ id, start_date, end_date, row_version }] }
     """
-    return {"data": db.get_task_versions(payload.ids)}
+    rows = db.get_task_versions(payload.ids)
+    for row in rows:
+        row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
+    return {"data": rows}
 
 
 class DueDateCorrection(BaseModel):
@@ -2476,6 +2564,24 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             constraints=body.get("constraints", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/plants/{plant}/split-order-policy", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_split_order_policy(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist one validated plant-level split-order allocation policy.
+
+    Payload: { subnetwork?, split_order_policy: never|overlong_only|partial_allowed }.
+    This is intentionally separate from the nested priority constraint tree.
+    """
+    try:
+        return md.set_plant_split_order_policy(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            policy=body.get("split_order_policy", ""),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

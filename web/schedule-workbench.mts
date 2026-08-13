@@ -146,7 +146,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
 import type { RemoveBacklogResult } from './schedule-services.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -161,6 +161,11 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, Ut
 interface TimelineVisItem {
   id: string;
   group: string;
+  /** Every displayed item resolves back to this one logical order. Segment
+   * pieces use an internal item id but never become their own business IDs. */
+  parentId?: string;
+  segmentNumber?: number;
+  segmentCount?: number;
   /** Absent on the synthetic background bands (past-zone, alert-horizon-zone,
    *  alertcell) built inline in Timeline.rebuild() — only order/blackout items
    *  (built by _itemForTask/_itemForBlock) set this. */
@@ -223,6 +228,7 @@ export const Timeline = {
   _cachedRowH:  null as number | null,
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
+  _itemIdsByTask: {} as Record<string, string[]>,
 
   init(): void {
     const container = document.getElementById('vis-timeline');
@@ -354,7 +360,15 @@ export const Timeline = {
   /** Handle store updates: refresh vis-timeline WITHOUT echoing back. */
   _onStore(evt: StoreEvent): void {
     // Ignore our own mutations — we already applied them visually.
-    if (evt.source === 'timeline') return;
+    if (evt.source === 'timeline') {
+      const ids = evt.type === 'tasks:bulkUpdate'
+        ? ((evt.ids as Array<string | number> | undefined) ?? []).map(String)
+        : evt.type === 'task:update' && evt.id != null ? [String(evt.id)] : [];
+      if (ids.some(id => Timeline.hasMultipleItemsForTask(id)) && Timeline._ganttActive()) {
+        Timeline._scheduleRebuild();
+      }
+      return;
+    }
 
     if (evt.type === 'plant:selected') {
       if (Timeline._ganttActive()) {
@@ -386,6 +400,10 @@ export const Timeline = {
         const _pmT0patch = performance.now();
         const patches: TimelineVisItem[] = [];
         const ids = (evt.ids as Array<string | number> | undefined) ?? [];
+        if (ids.some(id => Timeline.hasMultipleItemsForTask(id))) {
+          Timeline._scheduleRebuild();
+          return;
+        }
         for (const id of ids) {
           const sid = String(id);
           if (filtered) {
@@ -428,10 +446,14 @@ export const Timeline = {
   _itemPatchFor(id: string): TimelineVisItem | null {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date) return null;
-    return Timeline._itemForTask(t);
+    return Timeline._itemsForTask(t)[0] || null;
   },
 
   _applyTaskPatch(id: string): void {
+    if (Timeline.hasMultipleItemsForTask(id)) {
+      Timeline._scheduleRebuild();
+      return;
+    }
     const patch = Timeline._itemPatchFor(id);
     if (!patch) return;
     Timeline._suppressEvents = true;
@@ -453,6 +475,67 @@ export const Timeline = {
       Timeline._conflictSet = s;
     }
     return Timeline._conflictSet!;
+  },
+
+  _segmentItemId(taskId: string, sequence: number): string {
+    return `order-segment:${encodeURIComponent(taskId)}:${sequence}`;
+  },
+
+  /** Resolve any internal vis item ID back to the logical parent order. */
+  parentTaskIdForItem(itemId: string | number): string {
+    const id = String(itemId);
+    const dataSet = Timeline._items as (NimbusVendor.VisDataSet<TimelineVisItem> | { get?: (id: string) => TimelineVisItem | null | undefined } | null);
+    const item = (typeof dataSet?.get === 'function' ? dataSet.get(id) : null) as TimelineVisItem | null | undefined;
+    return item?.parentId || id;
+  },
+
+  /** Item IDs currently representing one logical parent. The derived fallback
+   * keeps focus/selection correct before a fresh rebuild updates the cache. */
+  itemIdsForTask(taskId: string | number): string[] {
+    const id = String(taskId);
+    const cached = Timeline._itemIdsByTask[id];
+    if (cached?.length) return [...cached];
+    const task = Store.tasks[id];
+    if (task?.scheduleSegments && task.scheduleSegments.length >= 2) {
+      return task.scheduleSegments.map(segment => Timeline._segmentItemId(id, segment.sequence));
+    }
+    return [id];
+  },
+
+  hasMultipleItemsForTask(taskId: string | number): boolean {
+    const id = String(taskId);
+    return (Timeline._itemIdsByTask[id]?.length || Store.tasks[id]?.scheduleSegments?.length || 1) >= 2;
+  },
+
+  /** Build one visual item per productive interval while retaining a parent
+   * mapping on every item. Continuous legacy orders still produce one item. */
+  _itemsForTask(t: NimbusTask): TimelineVisItem[] {
+    const base = Timeline._itemForTask(t);
+    const parentId = String(t.id);
+    const segments = Array.isArray(t.scheduleSegments) && t.scheduleSegments.length >= 2
+      ? t.scheduleSegments : null;
+    if (!segments) {
+      return [{ ...base, parentId }];
+    }
+    const count = segments.length;
+    return segments.map((segment, index) => {
+      const durationHours = (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_HOUR;
+      const classNames = [base.className || '', 'split-order-segment'];
+      classNames.push(index === 0 ? 'split-order-segment-first' : 'split-order-segment-continuation');
+      if (index === count - 1) classNames.push('split-order-segment-last');
+      return {
+        ...base,
+        id: Timeline._segmentItemId(parentId, segment.sequence),
+        parentId,
+        segmentNumber: index + 1,
+        segmentCount: count,
+        start: segment.startDate,
+        end: segment.endDate,
+        className: classNames.filter(Boolean).join(' '),
+        content: index === 0 ? base.content : `<span class="split-order-part">${index + 1}/${count}</span>`,
+        title: `Segment ${index + 1} of ${count} - ${durationHours.toFixed(2)}h productive\\n${Util.fmtDTReadable(segment.startDate)} → ${Util.fmtDTReadable(segment.endDate)}`,
+      };
+    });
   },
 
   /** Build an item object for a task. */
@@ -566,15 +649,20 @@ export const Timeline = {
     /* ---- desired items ---------------------------------------------------- */
     const _pmT0desired = performance.now();
     const desired = new Map<string, TimelineVisItem>();
+    const itemIdsByTask: Record<string, string[]> = {};
     for (const t of scopedTasks) {
-      const item = Timeline._itemForTask(t);
-      // Apply the pre-computed conflict flag without walking alerts again.
-      if (conflictIds.has(String(t.id))) {
-        const cls = (item.className || '').split(' ').filter(Boolean);
-        if (!cls.includes('conflict-order')) cls.push('conflict-order');
-        item.className = cls.join(' ');
+      const taskId = String(t.id);
+      const items = Timeline._itemsForTask(t);
+      itemIdsByTask[taskId] = items.map(item => String(item.id));
+      for (const item of items) {
+        // Apply the pre-computed conflict flag without walking alerts again.
+        if (conflictIds.has(taskId)) {
+          const cls = (item.className || '').split(' ').filter(Boolean);
+          if (!cls.includes('conflict-order')) cls.push('conflict-order');
+          item.className = cls.join(' ');
+        }
+        desired.set(String(item.id), item);
       }
-      desired.set(String(item.id), item);
     }
     // Line blackout blocks — one per line for global blocks, one per assigned line otherwise.
     for (const b of Store.blocks) {
@@ -714,13 +802,14 @@ export const Timeline = {
     } finally {
       Timeline._suppressEvents = false;
     }
+    Timeline._itemIdsByTask = itemIdsByTask;
     PerfMonitor.record('Timeline.rebuild.dsFlush', performance.now() - _pmT0flush);
 
     // Re-sync selection with what still exists. Guard for pre-install rebuilds.
     if (typeof Selection !== 'undefined') {
-      const keep = Selection.ids().filter(id => desired.has(id));
+      const keep = Selection.ids().filter(id => Timeline.itemIdsForTask(id).some(itemId => desired.has(itemId)));
       if (keep.length !== Selection.size()) Selection.set(keep);
-      Timeline._tl!.setSelection(keep);
+      Timeline._tl!.setSelection(keep.flatMap(id => Timeline.itemIdsForTask(id)).filter(itemId => desired.has(itemId)));
       if (NIMBUS!.Interaction && NIMBUS!.Interaction!.DEBUG) {
         ErrorLog.info('timeline',
           `diff-rebuild: +${toAdd.length} ~${toUpdate.length} -${toRemove.length} (kept sel: ${keep.length})`);
@@ -762,13 +851,14 @@ export const Timeline = {
   focus(id: string): void {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date || !Timeline._tl) return;
+    const itemIds = Timeline.itemIdsForTask(id);
     // Force the target into the sliding DataView window first — see
     // _syncViewWindow's doc comment for why vis-timeline's own focus()/
     // setSelection() otherwise silently no-op for out-of-window items.
     Timeline._syncViewWindow(t.start_date.getTime(), t.end_date.getTime());
     // vis-timeline's focus() scrolls both horizontally (time) and vertically (line row).
-    Timeline._tl.focus(String(id), { animation: { duration: 300 } });
-    Timeline._tl.setSelection([String(id)]);
+    Timeline._tl.focus(itemIds[0] || String(id), { animation: { duration: 300 } });
+    Timeline._tl.setSelection(itemIds);
     NIMBUS!.Inspector!.show!(t);
   },
 
@@ -2302,20 +2392,24 @@ export const Table = {
     const field = p.colDef.field;
     const id = String(p.data.id);
     const changes: Partial<NimbusTask> = {};
+    let requestedStart: Date | null = null;
+    let requestedLine: string | null = null;
+    let scheduleTask = p.data;
 
     if (field === 'start_date') {
       const d = Util.parseDate(p.newValue);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
       changes.start_date = Util.snap(d);
-      // recompute end based on RUN_TIME
-      const dur = Util.runHours(p.data) * Config.MS_HOUR;
-      if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
+      requestedStart = changes.start_date;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(String(p.newValue)) || 0;
       changes.RUN_TIME = h;
-      if (p.data.start_date) {
-        changes.end_date = new Date(p.data.start_date.getTime() + h * Config.MS_HOUR);
-      }
+      scheduleTask = { ...p.data, RUN_TIME: h };
+      requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+    } else if (field === 'PRODUCTION_LINE') {
+      changes.PRODUCTION_LINE = String(p.newValue || 'Unknown');
+      requestedLine = changes.PRODUCTION_LINE;
+      requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       changes[field] = parseFloat(String(p.newValue)) || 0;
     } else if (field === 'notes') {
@@ -2327,6 +2421,17 @@ export const Table = {
       return;
     } else {
       changes[field!] = p.newValue;
+    }
+
+    if (requestedStart) {
+      const targetLine = requestedLine || p.data.PRODUCTION_LINE || 'Unknown';
+      const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      if (!schedule?.start_date || !schedule.end_date) {
+        Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+        Table._api!.refreshCells({ rowNodes: [p.node] });
+        return;
+      }
+      Object.assign(changes, schedule);
     }
 
     Store.updateTask(id, changes, 'table');
@@ -2429,15 +2534,13 @@ export const Table = {
     const alsoFix  = fixEl.checked;
     if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
 
-    const dur = Util.runHours(t) * Config.MS_HOUR;
-    const snapped = Util.snap(newStart);
-    const newEnd = new Date(snapped.getTime() + dur);
+    const schedule = Engine.manualSchedulePatchFor(t, newLine, newStart);
+    if (!schedule?.start_date || !schedule.end_date) {
+      Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+      return;
+    }
 
-    Store.updateTask(id, {
-      start_date: snapped,
-      end_date: newEnd,
-      PRODUCTION_LINE: newLine
-    }, 'table');
+    Store.updateTask(id, schedule, 'table');
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
     if (alsoFix !== Store.isFixed(id)) Store.setFixed([id], alsoFix, 'table');
 
@@ -2852,6 +2955,8 @@ export const Inspector = {
     const fixed = Store.isFixed(task.id);
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
+    const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
+      ? task.scheduleSegments : [];
     // Display-only derived Orig Start (due date minus RUN_TIME) — see
     // Util.impliedOriginalStart. Never reads/writes the raw
     // original_start_date field directly for display.
@@ -2910,6 +3015,21 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
           <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}"></div></div>
       </div>
+
+      ${scheduleSegments.length ? `<div class="insp-card insp-split-summary">
+        <h4>Productive schedule</h4>
+        <div class="insp-split-summary-note">${scheduleSegments.length} calendar-valid pieces; parent timing remains authoritative.</div>
+        <div class="insp-split-segments">
+          ${scheduleSegments.map((segment, index) => {
+            const hours = (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_HOUR;
+            return `<div class="insp-split-segment">
+              <span>Part ${index + 1}</span>
+              <span>${Util.fmtDTReadable(segment.startDate)} → ${Util.fmtDTReadable(segment.endDate)}</span>
+              <span>${hours.toFixed(2)}h</span>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>` : ''}
 
       <div class="insp-actions">
         ${fixed
@@ -2974,16 +3094,19 @@ export const Inspector = {
     const t  = Store.tasks[id];
     if (!t) return;
     const changes: Partial<NimbusTask> = {};
+    let requestedStart: Date | null = null;
+    let requestedLine: string | null = null;
+    let scheduleTask = t;
     if (field === 'start_date') {
       const d = Util.parseDate(value);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
       changes.start_date = Util.snap(d);
-      const dur = Util.runHours(t) * Config.MS_HOUR;
-      if (dur > 0) changes.end_date = new Date(changes.start_date.getTime() + dur);
+      requestedStart = changes.start_date;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
-      if (t.start_date) changes.end_date = new Date(t.start_date.getTime() + h * Config.MS_HOUR);
+      scheduleTask = { ...t, RUN_TIME: h };
+      requestedStart = t.start_date ? new Date(t.start_date) : null;
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
@@ -2993,6 +3116,20 @@ export const Inspector = {
       return;
     } else {
       changes[field] = value;
+      if (field === 'PRODUCTION_LINE') {
+        requestedLine = value || 'Unknown';
+        requestedStart = t.start_date ? new Date(t.start_date) : null;
+      }
+    }
+    if (requestedStart) {
+      const targetLine = requestedLine || t.PRODUCTION_LINE || 'Unknown';
+      const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      if (!schedule?.start_date || !schedule.end_date) {
+        Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+        Inspector._render(t);
+        return;
+      }
+      Object.assign(changes, schedule);
     }
     Store.updateTask(id, changes, 'inspector');
     if (field === 'start_date' || field === 'RUN_TIME' || field === 'PRODUCTION_LINE') {
@@ -3672,12 +3809,17 @@ export const GanttFilter = {
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
-      const item = Timeline._items.get(id) as TimelineVisItem | null;
-      if (!item) continue;
       const shouldDim = active && !GanttFilter.matches(task);
-      const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
-      const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
-      if (newClass !== item.className) updates.push({ id, className: newClass });
+      // A split logical order has one visual item per productive interval;
+      // filtering must update every piece rather than looking up only the
+      // parent id (which intentionally has no visual item in that case).
+      for (const itemId of Timeline.itemIdsForTask(id)) {
+        const item = Timeline._items.get(itemId) as TimelineVisItem | null;
+        if (!item) continue;
+        const baseClass = (item.className || '').split(' ').filter(c => c !== 'dimmed').join(' ');
+        const newClass  = shouldDim ? baseClass + ' dimmed' : baseClass;
+        if (newClass !== item.className) updates.push({ id: itemId, className: newClass });
+      }
     }
     if (updates.length) {
       Timeline._suppressEvents = true;
@@ -5040,7 +5182,7 @@ export const Interaction = {
         const p = Timeline._tl!.getEventProperties(e);
         e.preventDefault();
         if (p.what === 'item' && p.item != null) {
-          const id = String(p.item);
+          const id = Timeline.parentTaskIdForItem(p.item);
           // If right-click target is not currently selected, replace selection with it.
           if (!Selection.has(id)) Selection.set([id]);
           if (ContextMenu && typeof ContextMenu.open === 'function') {
@@ -5087,7 +5229,7 @@ export const Interaction = {
     /* ----- Selection → vis-timeline + Inspector sync (one-way, write) --- */
     Selection.on(evt => {
       Timeline._suppressEvents = true;
-      try { Timeline._tl!.setSelection(evt.ids); }
+      try { Timeline._tl!.setSelection(evt.ids.flatMap(id => Timeline.itemIdsForTask(id))); }
       finally { Timeline._suppressEvents = false; }
 
       // Preserve the original UX: opening the right sidebar when a single
@@ -5313,15 +5455,16 @@ export const Interaction = {
       Timeline._tl!.on('itemover', (rawProps: unknown) => {
         const props = rawProps as NimbusVendor.VisEventProperties | null;
         if (!props || props.item == null) return;
-        const id = String(props.item);
-        if (!isOrderId(id)) return;
+        const itemId = String(props.item);
+        if (!isOrderId(itemId)) return;
+        const id = Timeline.parentTaskIdForItem(itemId);
         // Suppress during active drag or marquee — the user is doing something.
         if (Interaction._isDragging || Interaction._marquee) return;
 
         clearTimeout(showTimer ?? undefined);
-        activeId = id;
+        activeId = itemId;
         showTimer = setTimeout(() => {
-          if (activeId !== id) return;
+          if (activeId !== itemId) return;
           if (Interaction._isDragging || Interaction._marquee) return;
           card.innerHTML = renderCard(id);
           card.hidden = false;
@@ -5454,7 +5597,7 @@ export const Interaction = {
       }
       s.lastHits = hits;
       const next = new Set(s.baseIds);
-      for (const h of hits) next.add(h);
+      for (const h of hits) next.add(Timeline.parentTaskIdForItem(h));
       Selection.set([...next]);
     };
 
@@ -5612,7 +5755,7 @@ export const Interaction = {
       return;
     }
 
-    const id = String(props.item);
+    const id = Timeline.parentTaskIdForItem(props.item);
 
     // Refuse to "select" a blackout block — they're decorative.
     if (id.startsWith('blk-')) { Selection.clear(); return; }
@@ -5629,7 +5772,7 @@ export const Interaction = {
         && !Interaction._isDragging
         && (Date.now() - (Interaction._lastDragEndTs || 0)) > 400) {
       // zoom:false → pan only; preserves the current time window width.
-      Timeline._tl.focus(String(id), { animation: { duration: 300 }, zoom: false });
+      Timeline._tl.focus(Timeline.itemIdsForTask(id)[0] || String(id), { animation: { duration: 300 }, zoom: false });
     }
     // --- END center-on-click ---
 
@@ -5646,7 +5789,7 @@ export const Interaction = {
     this._dblTimer = setTimeout(() => { this._justDoubleClicked = false; },
                                 this.DBLCLICK_SUPPRESS_MS);
 
-    const id = String(props.item);
+    const id = Timeline.parentTaskIdForItem(props.item);
     if (id.startsWith('blk-')) return;
     const t = Store.tasks[id];
     if (!t) return;
@@ -5657,17 +5800,29 @@ export const Interaction = {
     if (Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') (Modal as ModalWithOpenEdit).openEdit!(t);
   },
 
+  _dragRequiresRegeneration(task: NimbusTask, targetLine: string): boolean {
+    const policy = Engine.splitOrderPolicyFor(Store.getPlantForLine(targetLine) ?? task.PLANT ?? Store.selectedPlant);
+    return policy !== 'never' || !!(task.scheduleSegments && task.scheduleSegments.length >= 2);
+  },
+
+  _regenerateDragPatch(task: NimbusTask, targetLine: string, requestedStart: Date): Partial<NimbusTask> | null {
+    return Engine.manualSchedulePatchFor(task, targetLine, requestedStart);
+  },
+
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a fixed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
   _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
     for (const rawId of props.items) {
-      const id = String(rawId);
-      const v = Timeline._items!.get(id) as TimelineVisItem | null;
+      const itemId = String(rawId);
+      const id = Timeline.parentTaskIdForItem(itemId);
+      const v = Timeline._items!.get(itemId) as TimelineVisItem | null;
       if (!v) continue;
       const t = Store.tasks[id];
       if (!t) continue;
+      const expectedItem = Timeline._itemsForTask(t).find(item => item.id === itemId)
+        || Timeline._itemForTask(t);
 
       /* ----- Fixed-order protection ------------------------------------
        * If the task is fixed, revert any real drag before it hits the Store.
@@ -5682,7 +5837,7 @@ export const Interaction = {
         const currentStart = Util.snap(new Date(v.start));
         const currentGroup = v.group || t.PRODUCTION_LINE;
         const noActualChange = t.start_date &&
-          currentStart.getTime() === t.start_date.getTime() &&
+          currentStart.getTime() === expectedItem.start.getTime() &&
           currentGroup === t.PRODUCTION_LINE;
 
         if (noActualChange) {
@@ -5696,8 +5851,8 @@ export const Interaction = {
       const newEnd   = Util.snap(new Date(v.end));
       const newLine  = v.group || t.PRODUCTION_LINE;
 
-      const moved = (!t.start_date || newStart.getTime() !== t.start_date.getTime())
-                 || (!t.end_date   || newEnd.getTime()   !== t.end_date.getTime())
+      const moved = newStart.getTime() !== expectedItem.start.getTime()
+                 || newEnd.getTime()   !== expectedItem.end.getTime()
                  || newLine !== t.PRODUCTION_LINE;
 
       if (!moved) {
@@ -5714,6 +5869,45 @@ export const Interaction = {
       // Stamp drag-recency so a trailing vis 'click' at drag-end can't trigger the
       // CENTER_ON_CLICK focus() pan that would revert this commit (see _onClick).
       this._lastDragEndTs = Date.now();
+
+      if (Interaction._dragRequiresRegeneration(t, newLine)
+          || Selection.ids().some(selectedId => {
+            const selected = Store.tasks[selectedId];
+            return !!selected && Interaction._dragRequiresRegeneration(
+              selected, newLine !== t.PRODUCTION_LINE ? newLine : (selected.PRODUCTION_LINE || 'Unknown')
+            );
+          })) {
+        const deltaMs = newStart.getTime() - expectedItem.start.getTime();
+        const companionIds = Selection.ids().filter(sid => sid !== id && !Store.isFixed(sid));
+        const allIds = [id, ...companionIds];
+        const snap = UndoStack.snapshotTasks(allIds);
+        const regenerationPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+        for (const taskId of allIds) {
+          const parent = Store.tasks[taskId];
+          if (!parent?.start_date) continue;
+          const targetLine = taskId === id
+            ? newLine
+            : (newLine !== t.PRODUCTION_LINE ? newLine : (parent.PRODUCTION_LINE || 'Unknown'));
+          // A segment drag explicitly establishes the new FIRST start for its
+          // parent. Companion parents retain the user's relative drag delta.
+          const requestedStart = taskId === id
+            ? newStart
+            : new Date(parent.start_date.getTime() + deltaMs);
+          const changes = Interaction._regenerateDragPatch(parent, targetLine, requestedStart);
+          if (!changes?.start_date || !changes.end_date) {
+            Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+            Timeline._scheduleRebuild();
+            return;
+          }
+          regenerationPatches.push({ id: taskId, changes });
+        }
+        if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
+        Timeline._scheduleRebuild();
+        UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
+          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
+        this._clearGhosts();
+        return;
+      }
 
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-fixed selected items by the same time + line delta.
@@ -5812,8 +6006,9 @@ export const Interaction = {
   /** Fires at 60fps during drag — show ghost positions for companion items. */
   _onTimeChange(props: VisTimeChangeProps): void {
     if (!props || !props.id || Timeline._suppressEvents) return;
-    const dragId = String(props.id);
-    if (dragId.startsWith('blk-')) return;
+    const dragItemId = String(props.id);
+    if (dragItemId.startsWith('blk-')) return;
+    const dragId = Timeline.parentTaskIdForItem(dragItemId);
 
     this._isDragging = true;
     this._startEdgeScroll();
@@ -5823,6 +6018,10 @@ export const Interaction = {
 
     const selIds = Selection.ids().filter(sid => sid !== dragId);
     if (!selIds.length) return;
+
+    // A segmented parent regenerates its full aggregate on drop. Do not show
+    // a wall-clock ghost that implies its old nonproductive gaps will move.
+    if (Timeline.hasMultipleItemsForTask(dragId) || selIds.some(id => Timeline.hasMultipleItemsForTask(id))) return;
 
     const t = Store.tasks[dragId];
     if (!t || !t.start_date) return;
@@ -5975,12 +6174,23 @@ export const Interaction = {
   _unscheduleSelected(): void {
     const ids = Selection.ids().filter(id => !Store.isFixed(id));
     if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_fixed'), 'warn'); return; }
-    const snap = UndoStack.snapshotTasks(ids);
-    const patches = ids.map(id => ({ id, changes: { start_date: null, end_date: null } }));
+    // An explicit segment aggregate is atomic. Do not clear just its parent
+    // envelope, which Store would correctly reconstruct from its children.
+    const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
+    if (!eligibleIds.length) {
+      Toast.show('Split orders must be rescheduled as a whole.', 'warn');
+      return;
+    }
+    const snap = UndoStack.snapshotTasks(eligibleIds);
+    const patches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
     Store.updateMany(patches, 'interaction');
-    UndoStack.push(`Unschedule ${ids.length} order(s)`,
+    UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
                    () => UndoStack.restoreTasks(snap));
-    Toast.show(Util.t('toast.unscheduled_orders', { count: ids.length }), 'success');
+    Toast.show(
+      eligibleIds.length === ids.length
+        ? Util.t('toast.unscheduled_orders', { count: eligibleIds.length })
+        : `${eligibleIds.length} order(s) unscheduled; split orders were left intact.`,
+      eligibleIds.length === ids.length ? 'success' : 'warn');
   },
 
   _navigateSelection(key: ArrowKey): void {
@@ -6771,6 +6981,7 @@ export const OptimizeDialog = (() => {
           // work with across ALL priority fields.
           active_priority_fields: Engine.activeConstraintKeys(plant),
           unranked_priority_fields: unrankedFields,
+          split_order_policy: Engine.splitOrderPolicyFor(plant),
         },
       }),
     }).catch(() => {});
@@ -6855,6 +7066,7 @@ export const OptimizerPreview = {
   _postKpis: null as OptimizerKpis | null,
   _mode:     null as OptimizerMode | null,
   _plant:    null as string | null,
+  _splitOrderPolicy: 'never' as SplitOrderPolicy,
   _backlogResult: null as RemoveBacklogResult | null,
   _backlogAudit: null as {
     plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
@@ -6981,6 +7193,7 @@ export const OptimizerPreview = {
         OptimizerPreview._postKpis = postKpis;
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
+        OptimizerPreview._splitOrderPolicy = Engine.splitOrderPolicyFor(plant);
         OptimizerPreview._backlogResult = mode === 'backlog' ? Engine.lastBacklogResult : null;
         OptimizerPreview._backlogAudit = mode === 'backlog' ? {
           plant,
@@ -7127,6 +7340,12 @@ export const OptimizerPreview = {
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
     const plant = OptimizerPreview._plant || '';
+    const splitPolicyLabel: Record<SplitOrderPolicy, string> = {
+      never: 'No splitting',
+      overlong_only: 'Split overlong only',
+      partial_allowed: 'Partial orders allowed',
+    };
+    const splitPolicy = OptimizerPreview._splitOrderPolicy;
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     // Per-card markup
@@ -7199,6 +7418,7 @@ export const OptimizerPreview = {
         <div class="opt-pv-header">
           <div class="opt-pv-chip opt-pv-chip-mode">${esc(modeLabel)}</div>
           <div class="opt-pv-chip opt-pv-chip-plant" title="Plant scope">📍 ${esc(plant)}</div>
+          <div class="opt-pv-chip opt-pv-chip-policy" title="Plant-level split-order allocation policy">${esc(splitPolicyLabel[splitPolicy])}</div>
           <div class="opt-pv-chip opt-pv-chip-time">⏱ ${esc(stamp)}</div>
         </div>
 
@@ -7267,6 +7487,7 @@ export const OptimizerPreview = {
             overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
             boundary_conflicts: diagnostics.boundaryConflicts.length,
             applied_with_boundary_conflicts: diagnostics.boundaryConflicts.length > 0,
+            split_order_policy: Engine.splitOrderPolicyFor(audit.plant),
           },
         }),
       }).catch(() => {});
@@ -7302,6 +7523,7 @@ export const OptimizerPreview = {
     OptimizerPreview._postKpis = null;
     OptimizerPreview._mode     = null;
     OptimizerPreview._plant    = null;
+    OptimizerPreview._splitOrderPolicy = 'never';
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
     OptimizerPreview.active       = false;
@@ -7896,11 +8118,33 @@ export const AlertsUIAdapter = {
       (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
 
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
-    const cellTasks = Store.tasksArr
-      .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
-                && t.start_date && Util.dayKey(t.start_date) === dayKey)
-      .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-    const scheduledH = cellTasks.reduce((s, t) => s + Util.runHours(t), 0);
+    const dayStart = Util.startOfDay(day)!;
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const cellEntries: Array<{ task: NimbusTask; scheduledHours: number; sortAt: Date }> = [];
+    for (const task of Store.tasksArr) {
+      if ((task.PRODUCTION_LINE || 'Unknown') !== line) continue;
+      const isSplit = (task.scheduleSegments?.length ?? 0) >= 2;
+      if (!isSplit) {
+        // Preserve legacy continuous-order accounting in Never mode.
+        if (task.start_date && Util.dayKey(task.start_date) === dayKey) {
+          cellEntries.push({ task, scheduledHours: Util.runHours(task), sortAt: task.start_date });
+        }
+        continue;
+      }
+      const intervals = Util.scheduleIntervals(task)
+        .filter(interval => interval.start < dayEnd && interval.end > dayStart);
+      if (!intervals.length) continue;
+      const scheduledHours = intervals.reduce((sum, interval) => {
+        const start = Math.max(interval.start.getTime(), dayStart.getTime());
+        const end = Math.min(interval.end.getTime(), dayEnd.getTime());
+        return sum + (end - start) / Config.MS_HOUR;
+      }, 0);
+      cellEntries.push({ task, scheduledHours, sortAt: intervals[0].start });
+    }
+    cellEntries.sort((a, b) => a.sortAt.getTime() - b.sortAt.getTime());
+    const cellTasks = cellEntries.map(entry => entry.task);
+    const scheduledH = cellEntries.reduce((sum, entry) => sum + entry.scheduledHours, 0);
     const effCap   = Calendar.effectiveCapacityHours(line, day) || 0;
     const utilPct  = effCap > 0 ? scheduledH / effCap : 0;
     // Same field set as Util.countChangeovers / Engine._sortTerms — was a second
@@ -7924,6 +8168,7 @@ export const AlertsUIAdapter = {
       closed:               'calendar',
       'fixed-closed':       'calendar',
       'fixed-out-of-hours': 'calendar',
+      'runtime-schedule-mismatch': 'exceptions',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
     for (const a of matches) byCat[CAT_MAP[a.type] || 'exceptions'].push(a);
@@ -7956,7 +8201,8 @@ export const AlertsUIAdapter = {
         headline = 'Overloaded';
         num = `<span class="ac-card-num over">${(utilPct * 100).toFixed(0)}%</span>`;
         // Show the top contributing orders by run hours.
-        const top = cellTasks.slice().sort((x,y) => Util.runHours(y) - Util.runHours(x)).slice(0, 4);
+        const top = cellEntries.slice().sort((x, y) => y.scheduledHours - x.scheduledHours)
+          .slice(0, 4).map(entry => entry.task);
         if (top.length) chipsHtml = `<div class="ac-chips">${top.map(t => renderChip(t.id)).join('')}</div>`;
       } else if (a.type === 'overlap') {
         headline = 'Order overlap';
