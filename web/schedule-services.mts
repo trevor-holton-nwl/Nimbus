@@ -32,7 +32,15 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
-import type { CandidateDiagnostic, CandidateResult, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
+import { placeWithSetup as placeWithSetupPure } from './setup-scheduler.mjs';
+import type {
+  CandidateDiagnostic,
+  CandidateResult,
+  PlacementResult,
+  PlaceWithSetupRequest,
+  SchedulePatch,
+  ScheduleSnapshot,
+} from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
@@ -798,6 +806,25 @@ export const Calendar = {
         ? merged.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
         : [],
     };
+  },
+
+  /** Adapter for the pure setup-placement primitive. It gathers the same
+   * effective operating fragments the existing allocator uses, including
+   * line/plant hours and blackouts, but never reads setup state or mutates a
+   * task. Setup-aware Engine activation remains intentionally deferred. */
+  placeWithSetup(
+    line: string,
+    request: Omit<PlaceWithSetupRequest, 'freeIntervals' | 'isInherentlyOverlong'>,
+  ): PlacementResult {
+    const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
+    const durationMs = runtimeMinutes * Config.MS_MIN;
+    const isInherentlyOverlong = Number.isFinite(runtimeMinutes) && runtimeMinutes > 0
+      && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs);
+    return placeWithSetupPure({
+      ...request,
+      freeIntervals: Calendar._freeIntervals(line, request.earliestStart),
+      isInherentlyOverlong,
+    });
   },
 
   /** Find the first blackout block overlapping [start,end) on `line`, else null. */

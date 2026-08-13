@@ -127,6 +127,50 @@ test('overlong_only keeps ordinary orders whole and adjusts a short split tail t
   }
 });
 
+test('Calendar.placeWithSetup uses effective calendar fragments and keeps setup out of productive segments', () => {
+  // This fails if the adapter bypasses Calendar's blackout-aware windows, puts
+  // setup alone at shift end, or turns a setup occurrence into a persisted
+  // productive child segment.
+  const plant = 'P-SETUP-ADAPTER';
+  const line = 'L-SETUP-ADAPTER';
+  const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 10]]));
+  Store.replaceBlocks([{
+    id: 'setup-tail', plant, line,
+    start: new Date('2026-08-12T08:45:00'), end: new Date('2026-08-12T10:00:00'), reason: 'test',
+  }], 'test');
+  Store.replacePlantBlocks([], 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.replacePlants({}, 'test');
+  Store.setMasterData({
+    plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
+    lines: [{ production_line: line, plant }],
+  }, 'test');
+  Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
+  Store.setCalendar(line, workHours, 'test');
+  for (const day of Object.keys(workHours).map(Number)) Store.setPlantWorkHours(plant, day, workHours[day], 'test');
+
+  assert.equal(typeof Calendar.placeWithSetup, 'function');
+  Calendar._beginRun(plant);
+  try {
+    const result = Calendar.placeWithSetup(line, {
+      earliestStart: new Date('2026-08-12T08:00:00'),
+      runtimeMinutes: 40,
+      setup: { kind: 'resolved', minutes: 20 },
+      policy: 'partial_allowed',
+    });
+    assert.equal(result.kind, 'placed');
+    assert.equal(+result.setup.start, +new Date('2026-08-13T08:00:00'));
+    assert.equal(+result.setup.end, +new Date('2026-08-13T08:20:00'));
+    assert.deepEqual(result.productiveSegments.map(segment => [segment.start, segment.end]), [[
+      new Date('2026-08-13T08:20:00'), new Date('2026-08-13T09:00:00'),
+    ]]);
+    assert.equal(result.productiveSegments[0].scheduleSegments, undefined,
+      'setup placement must not alter the persisted order_schedule_segments child shape');
+  } finally {
+    Calendar._endRun();
+  }
+});
+
 test('standard scheduling regenerates a logical parent as one split aggregate', () => {
   const plant = 'P-STRATEGY-SPLIT';
   const line = 'L-STRATEGY-SPLIT';
