@@ -98,6 +98,26 @@ def test_override_requires_a_nonblank_reason_before_database_access(monkeypatch)
         )
 
 
+def test_clear_override_requires_nonblank_reason_before_database_access(monkeypatch):
+    """Clearing physical setup truth must retain an auditable explanation too."""
+    monkeypatch.setattr(setup_data, "_pool", _FailPool())
+    with pytest.raises(ValueError, match="reason"):
+        setup_data.clear_occurrence_override("5512", "LINE-1", 7, "owner@example.com", " ")
+
+
+def test_clear_override_persists_its_reason(monkeypatch):
+    """A valid clear records why the remaining-duration override stopped applying."""
+    cursor = _ClearCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.clear_occurrence_override(
+        "5512", "LINE-1", 7, "owner@example.com", "completed on floor"
+    )
+    assert result == {"id": 7, "plant": "5512", "line": "LINE-1", "cleared": True}
+    update_sql, update_params = cursor.executed[-1]
+    assert "reason = %s" in update_sql
+    assert update_params == ("completed on floor", "owner@example.com", 7, "5512", "LINE-1")
+
+
 def test_public_line_matrix_write_rejects_line_outside_plant(monkeypatch):
     """Sparse line setup values cannot be written under a plant that does not own the line."""
     monkeypatch.setattr(setup_data, "_pool", _Pool(_MissingLineCursor()))
@@ -254,6 +274,16 @@ class _PairsCursor(_DefinitionCursor):
 class _MissingLineCursor(_DefinitionCursor):
     def fetchone(self):
         return None
+
+
+class _ClearCursor(_DefinitionCursor):
+    def fetchone(self):
+        return (1,)
+
+    def execute(self, sql, params=()):
+        super().execute(sql, params)
+        if "UPDATE setup_occurrence_override" in sql:
+            self.rowcount = 1
 
 
 class _FailPool:

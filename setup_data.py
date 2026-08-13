@@ -481,18 +481,20 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
             "standard_min": standard, "remaining_min": remaining, "status": "active"}
 
 
-def clear_occurrence_override(plant, line, override_id, actor) -> dict:
+def clear_occurrence_override(plant, line, override_id, actor, reason) -> dict:
     plant = _required_text(plant, "Plant")
     line = _required_text(line, "Line")
     actor = _required_text(actor, "Actor")
+    reason = _required_text(reason, "Occurrence override clear reason")
     if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
         _assert_line_owned(cur, plant, line)
         cur.execute(
-            """UPDATE setup_occurrence_override SET status = 'cleared', updated_by = %s, updated_at = NOW()
+            """UPDATE setup_occurrence_override
+                 SET status = 'cleared', reason = %s, updated_by = %s, updated_at = NOW()
                  WHERE id = %s AND plant = %s AND line = %s AND status = 'active'""",
-            (actor, override_id, plant, line),
+            (reason, actor, override_id, plant, line),
         )
         cleared = cur.rowcount == 1
         conn.commit()
