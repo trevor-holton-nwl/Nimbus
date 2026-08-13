@@ -249,6 +249,17 @@ def test_snapshot_reads_only_one_current_signature_version_in_a_repeatable_trans
     assert "status IN ('active', 'inactive')" in statements
 
 
+def test_identified_override_update_rejects_cleared_history_before_writing(monkeypatch):
+    """A URL-bound override update cannot resurrect or alter cleared/replaced historical truth."""
+    cursor = _InactiveOverrideCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    with pytest.raises(ValueError, match="not active"):
+        setup_data.update_occurrence_override(
+            "5512", "LINE-1", 7, 12, 4, 1, "confirmed work", "owner@example.com"
+        )
+    assert not any("UPDATE setup_occurrence_override" in sql for sql, _params in cursor.executed)
+
+
 def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(monkeypatch):
     """A plant replacement snapshot is one instant shared by every line at that plant."""
     cursor = _PairsCursor()
@@ -305,6 +316,18 @@ class _SnapshotCursor(_DefinitionCursor):
             return [(9, "LINE-1", 4, "before", "after", [], [], 12, 4, "active", "floor", "owner", None,
                      "owner", None)]
         return []
+
+
+class _InactiveOverrideCursor(_DefinitionCursor):
+    def fetchone(self):
+        query = self.executed[-1][0]
+        if "SELECT 1 FROM production_lines" in query:
+            return (1,)
+        if "SELECT fields" in query:
+            return (["colorWheel"], 1, True, False)
+        if "SELECT signature_version, status FROM setup_occurrence_override" in query:
+            return (1, "cleared")
+        return None
 
 
 class _MissingLineCursor(_DefinitionCursor):

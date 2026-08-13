@@ -528,12 +528,14 @@ def update_occurrence_override(plant, line, override_id, standard_min, remaining
             raise ValueError("Setup override does not belong to this plant and line")
         if int(existing[0]) != definition["signature_version"]:
             raise ValueError("Setup override signature version is stale")
+        if existing[1] != "active":
+            raise ValueError("Setup override is not active")
         standard = validate_override_minutes(standard_min)
         remaining = validate_override_minutes(remaining_min)
         cur.execute(
             """UPDATE setup_occurrence_override
                  SET standard_min = %s, remaining_min = %s, reason = %s, updated_by = %s, updated_at = NOW()
-                 WHERE id = %s AND plant = %s AND line = %s""",
+                 WHERE id = %s AND plant = %s AND line = %s AND status = 'active'""",
             (standard, remaining, reason, actor, override_id, plant, line),
         )
         conn.commit()
