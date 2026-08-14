@@ -25,7 +25,8 @@ declare global {
   interface NimbusAlert {
     id: string;
     sev: 'err' | 'warn';
-    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours' | 'runtime-schedule-mismatch';
+    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours' | 'runtime-schedule-mismatch'
+      | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
     msg: string;
     taskId?: string;
     line: string;

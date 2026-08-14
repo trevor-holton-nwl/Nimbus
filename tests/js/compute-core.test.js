@@ -161,6 +161,15 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
   ]);
 });
 
+test('computeAlerts ignores malformed setup diagnostics', () => {
+  // This fails if an invalid observation payload can crash the normal alert
+  // path instead of remaining fail-safe and diagnostic-only.
+  assert.doesNotThrow(() => Core.computeAlerts({
+    tasks: [], blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {}, masterData: noPlant,
+    dismissed: [], opts: {}, setup: { intervals: [], diagnostics: {} },
+  }));
+});
+
 // ── Reconciliation guards: brought the core UP to app.js's behavior so app.js can
 // delegate to it. These pin the differences vs the old (drifted) worker copy. ──
 

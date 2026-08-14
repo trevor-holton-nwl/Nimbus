@@ -8204,7 +8204,9 @@ export const AlertsUIAdapter = {
       'runtime-schedule-mismatch': 'exceptions',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    for (const a of matches) byCat[CAT_MAP[a.type] || 'exceptions'].push(a);
+    // Setup diagnostics are intentionally not given a UI category in this
+    // Stage-1 task; they retain the existing exceptions fallback.
+    for (const a of matches) byCat[CAT_MAP[a.type as AlertType] || 'exceptions'].push(a);
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;

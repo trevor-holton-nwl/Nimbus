@@ -321,6 +321,67 @@ test('deriveSetupObservation never projects one plant setup truth onto another p
   assert.deepEqual(observation, { intervals: [], diagnostics: [] });
 });
 
+test('deriveSetupObservation emits current-state-diverged when asserted state conflicts with the observed plan', () => {
+  // This fails if the projection never compares a real asserted line state to
+  // the planned state that completed before its observed-at timestamp.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-DIVERGED',
+    definition: { plant: 'P-DIVERGED', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [],
+    line_states: [{
+      line: 'L-DIVERGED', state_key: state('RED'), signature_version: 1, source: 'actual',
+      observed_at: '2026-08-03T12:00:00Z', reason: 'line walk',
+    }], overrides: [],
+  }, [{
+    id: 'planned-blue', PLANT: 'P-DIVERGED', PRODUCTION_LINE: 'L-DIVERGED', COLOR: 'BLUE', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T08:00:00Z'), end_date: new Date('2026-08-03T10:00:00Z'),
+  }]);
+
+  assert.ok(observation.diagnostics.some(diagnostic => diagnostic.type === 'current-state-diverged'));
+});
+
+test('deriveSetupObservation marks an active override inactive when its line has no scheduled intervals', () => {
+  // This fails if override checks only iterate lines that happened to have a
+  // scheduled task, leaving orphaned active bindings invisible.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-ORPHAN',
+    definition: { plant: 'P-ORPHAN', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [], line_states: [],
+    overrides: [{
+      id: 'orphan', line: 'L-ORPHAN', signature_version: 1,
+      predecessor_order_id: 'gone', successor_order_id: 'also-gone', predecessor_state_key: state('GREEN'), successor_state_key: state('RED'),
+      standard_min: 30, remaining_min: 30, status: 'active', reason: 'unit test',
+    }],
+  }, []);
+
+  assert.deepEqual(observation.diagnostics.map(diagnostic => diagnostic.type), ['override-inactive']);
+});
+
+test('deriveSetupObservation measures setup availability against a preceding blackout', () => {
+  // This fails if availability is the raw predecessor-to-successor wall time
+  // instead of the contiguous operating time immediately before production.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-BLOCK',
+    definition: { plant: 'P-BLOCK', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 90 }],
+    line_rows: [],
+    line_states: [{ line: 'L-BLOCK', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }], overrides: [],
+  }, [{
+    id: 'blocked-successor', PLANT: 'P-BLOCK', PRODUCTION_LINE: 'L-BLOCK', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00'),
+  }], undefined, {
+    calendars: { 'L-BLOCK': { workHours: hours } }, plants: { 'P-BLOCK': { workHours: hours } },
+    lineSettings: { 'L-BLOCK': { plant: 'P-BLOCK' } }, masterData: { lines: [{ production_line: 'L-BLOCK', plant: 'P-BLOCK' }] },
+    blocks: [{ line: 'L-BLOCK', plant: 'P-BLOCK', start: new Date('2026-08-03T09:30:00'), end: new Date('2026-08-03T10:00:00') }], plantBlocks: [],
+  });
+
+  assert.equal(observation.intervals[0].availableMinutes, 0);
+});
+
 test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([

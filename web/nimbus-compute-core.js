@@ -593,7 +593,8 @@
     const diagnosticTypes = new Set([
       'setup-uncovered', 'initial-state-unknown', 'current-state-diverged', 'override-inactive',
     ]);
-    for (const diagnostic of setup?.diagnostics || []) {
+    const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
+    for (const diagnostic of setupDiagnostics) {
       if (!diagnosticTypes.has(diagnostic?.type) || !inScope(diagnostic.line)) continue;
       // A missing matrix transition is a pair/scope problem, not one alert per
       // order occurrence. Other diagnostics remain occurrence-specific.

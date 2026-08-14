@@ -220,12 +220,72 @@ export interface SetupObservation {
   diagnostics: SetupComputeDiagnostic[];
 }
 
+interface SetupAvailabilityContext {
+  calendars: Record<string, CalendarEntry>;
+  plants: Record<string, CalendarEntry>;
+  lineSettings: Record<string, NimbusLineSetting>;
+  masterData: NimbusMasterData | null;
+  blocks: ReadonlyArray<NimbusBlock>;
+  plantBlocks: ReadonlyArray<NimbusPlantBlock>;
+}
+
 function setupStateKey(state: SetupStateKey | null): string {
   return state ? JSON.stringify(state.map(({ fieldKey, value }) => [fieldKey, value])) : 'unknown';
 }
 
 function setupOrderIntervals(task: NimbusTask): Array<{ start: Date; end: Date }> {
   return globalThis.NimbusComputeCore!.scheduleIntervals(task).map(interval => ({ start: interval.start, end: interval.end }));
+}
+
+function observedAt(value: unknown): Date | null {
+  const date = value ? new Date(String(value)) : null;
+  return date && Number.isFinite(date.getTime()) ? date : null;
+}
+
+function setupAvailabilityMinutes(
+  context: SetupAvailabilityContext | undefined,
+  line: string,
+  plant: string,
+  successorOrderId: string,
+  end: Date,
+  orders: ReadonlyArray<{ task: NimbusTask; start: Date; end: Date }>,
+  fallbackStart: Date | null,
+): number {
+  if (!context) return fallbackStart ? Math.max(0, (end.getTime() - fallbackStart.getTime()) / (60 * 1000)) : 0;
+  const mappedPlant = context.lineSettings[line]?.plant
+    ?? context.masterData?.lines?.find(row => row.production_line === line)?.plant
+    ?? plant;
+  const workHours = context.calendars[line]?.workHours ?? context.plants[mappedPlant]?.workHours;
+  const probe = new Date(end.getTime() - 1);
+  const window = workHours ? globalThis.NimbusComputeCore!._dayWindow(workHours, probe) : null;
+  if (!window || end > window[1] || end <= window[0]) return 0;
+  let lower = window[0].getTime();
+  const applyBlock = (block: NimbusBlock | NimbusPlantBlock): boolean => {
+    const start = globalThis.NimbusComputeCore!.parseDate(block.start);
+    const blockEnd = globalThis.NimbusComputeCore!.parseDate(block.end);
+    if (!start || !blockEnd || start >= end || blockEnd <= new Date(lower)) return false;
+    if (blockEnd >= end) return true;
+    lower = Math.max(lower, blockEnd.getTime());
+    return false;
+  };
+  for (const block of context.blocks) {
+    if (block.plant && block.plant !== mappedPlant) continue;
+    if (block.line && block.line !== line) continue;
+    if (applyBlock(block)) return 0;
+  }
+  for (const block of context.plantBlocks) {
+    if (block.plant && block.plant !== mappedPlant) continue;
+    if (applyBlock(block)) return 0;
+  }
+  for (const order of orders) {
+    if (String(order.task.id) === successorOrderId) continue;
+    for (const interval of setupOrderIntervals(order.task)) {
+      if (interval.start >= end || interval.end <= new Date(lower)) continue;
+      if (interval.end >= end) return 0;
+      lower = Math.max(lower, interval.end.getTime());
+    }
+  }
+  return Math.max(0, (end.getTime() - lower) / (60 * 1000));
 }
 
 /**
@@ -237,6 +297,7 @@ export function deriveSetupObservation(
   setup: SetupSnapshot | null | undefined,
   tasks: ReadonlyArray<NimbusTask>,
   scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
 ): SetupObservation {
   const observation: SetupObservation = { intervals: [], diagnostics: [] };
   const definition = setup?.definition;
@@ -244,7 +305,7 @@ export function deriveSetupObservation(
 
   const stateForLine = new Map(setup.line_states
     .filter(state => state.signature_version === definition.signature_version)
-    .map(state => [state.line, state.state_key]));
+    .map(state => [state.line, state]));
   const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
   for (const task of tasks) {
     if (task.PLANT && task.PLANT !== setup.plant) continue;
@@ -258,11 +319,28 @@ export function deriveSetupObservation(
     byLine.set(line, list);
   }
 
-  for (const [line, orders] of byLine) {
+  const lines = new Set(byLine.keys());
+  for (const override of setup.overrides) {
+    if (override.status === 'active' && (!scopedLines || scopedLines.has(override.line))) lines.add(override.line);
+  }
+  for (const line of lines) {
+    const orders = byLine.get(line) || [];
     orders.sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
     const scope = `${setup.plant}/${line}`;
     const resolvedEdges = new Set<string>();
-    let predecessorState = stateForLine.get(line) || null;
+    const assertedState = stateForLine.get(line);
+    const observationTime = observedAt(assertedState?.observed_at);
+    if (assertedState && observationTime) {
+      const planned = orders.filter(order => order.end <= observationTime).at(-1);
+      const plannedState = planned ? stateForOrder(planned.task, definition) : null;
+      if (plannedState && setupStateKey(plannedState) !== setupStateKey(assertedState.state_key)) {
+        observation.diagnostics.push({
+          type: 'current-state-diverged', line, scope, successorOrderId: String(planned!.task.id), time: observationTime,
+          message: `Asserted state on ${line} differs from the state planned by ${String(planned!.task.id)} at observation time.`,
+        });
+      }
+    }
+    let predecessorState = assertedState?.state_key || null;
     let predecessorOrderId: string | null = null;
     let predecessorEnd: Date | null = null;
     for (const order of orders) {
@@ -292,9 +370,9 @@ export function deriveSetupObservation(
           resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
           const end = new Date(order.start);
           const start = new Date(end.getTime() - resolved.effectiveMin * 60 * 1000);
-          const availableMinutes = predecessorEnd
-            ? Math.max(0, (end.getTime() - predecessorEnd.getTime()) / (60 * 1000))
-            : resolved.effectiveMin;
+          const availableMinutes = setupAvailabilityMinutes(
+            availability, line, setup.plant, String(order.task.id), end, orders, predecessorEnd,
+          );
           observation.intervals.push({
             line, scope, predecessorOrderId, successorOrderId: String(order.task.id), start, end,
             requiredMinutes: resolved.effectiveMin, availableMinutes,
@@ -1125,7 +1203,10 @@ export const Compute = (() => {
         plants:       Store._state.plants,
         lineSettings: Store._state.lineSettings,
         masterData:   Store._state.masterData,
-        setup:        deriveSetupObservation(Store.setupSnapshot, tasks),
+        setup:        deriveSetupObservation(Store.setupSnapshot, tasks, undefined, {
+          calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
+          masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
+        }),
       };
     }
     // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
@@ -1150,7 +1231,12 @@ export const Compute = (() => {
       plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
       lineSettings: pick(Store._state.lineSettings),
       masterData:   Store._state.masterData,
-      setup:        deriveSetupObservation(Store.setupSnapshot, tasks, lines),
+      setup:        deriveSetupObservation(Store.setupSnapshot, tasks, lines, {
+        calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+        lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
+        blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
+        plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+      }),
     };
   }
 
@@ -1238,7 +1324,10 @@ export const Alerts = {
       plants:       Store.plants,
       lineSettings: Store.lineSettings as any,
       masterData:   Store.masterData as unknown as NimbusMasterData,
-      setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined),
+      setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined, {
+        calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+        masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+      }),
       dismissed:    [...Alerts._dismissed],
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
@@ -1452,7 +1541,9 @@ export const Utilization = {
     // and hand the core only the resulting plant/line-scoped observations.
     const setup = utilizationSnapshot
       ? { intervals: [], diagnostics: [] }
-      : deriveSetupObservation(Store.setupSnapshot, coreTasks, lineSet);
+      : deriveSetupObservation(Store.setupSnapshot, coreTasks, lineSet, {
+        calendars, plants, lineSettings, masterData, blocks, plantBlocks,
+      });
 
     // Delegate the matrix build to nimbus-compute-core — the single source of truth,
     // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
