@@ -5219,6 +5219,19 @@ export const Interaction = {
     return Interaction._businessOrderIdForItem(itemId) != null;
   },
 
+  /** Alert-cell backgrounds are presentation zones, not business orders. A
+   * real alertcell class is sufficient even on legacy items without `kind`. */
+  _onAlertCellClick(props: Pick<NimbusVendor.VisEventProperties, 'item' | 'group' | 'time'>): void {
+    if (!props.group || !props.time) return;
+    if (props.item && Interaction._isBusinessTimelineItem(props.item)) return;
+    const item = props.item != null ? Timeline._items!.get(String(props.item)) as TimelineVisItem | null : null;
+    if (item && !item.className?.includes('alertcell-')) return;
+    const dayKey = Util.dayKey(props.time);
+    const cellId = `alertcell-${props.group}-${dayKey}`;
+    if (!Timeline._items!.get(cellId)) return;
+    NIMBUS!.AlertsUIAdapter!.showForCell!(String(props.group), dayKey);
+  },
+
   trace(): InteractionTraceEntry[] { return this._trace.slice(-50); },
   _log(type: string, data: Record<string, unknown>): void {
     const entry: InteractionTraceEntry = { t: Date.now(), type, ...data };
@@ -5333,17 +5346,7 @@ export const Interaction = {
         if (!Timeline._tl) return;
         if (Interaction._panDuringGesture) return; // panned during this gesture — not a real click
         const p = Timeline._tl.getEventProperties(e);
-        if (!p || !p.group || !p.time) return;
-        // If the click is on a real foreground item (an order), let normal
-        // selection handle it — don't hijack order clicks because the cell
-        // happens to be tinted.
-        if (p.item && Interaction._isBusinessTimelineItem(p.item)) return;
-        const item = p.item != null ? Timeline._items!.get(String(p.item)) as TimelineVisItem | null : null;
-        if (item && (item.kind !== 'zone' || !item.className?.includes('alertcell-'))) return;
-        const dayKey = Util.dayKey(p.time);
-        const cellId = `alertcell-${p.group}-${dayKey}`;
-        if (!Timeline._items!.get(cellId)) return; // no alert highlight here
-        NIMBUS!.AlertsUIAdapter!.showForCell!(String(p.group), dayKey);
+        Interaction._onAlertCellClick(p);
       });
     }
 

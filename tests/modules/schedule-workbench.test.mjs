@@ -196,6 +196,29 @@ test('alert-cell foreground dispatch treats setup items as non-business items', 
   } finally { Timeline._items = priorItems; }
 });
 
+test('delegated alert-cell click opens a real alert cell but leaves setup items inert', () => {
+  const priorItems = Timeline._items;
+  const priorNimbus = globalThis.NIMBUS;
+  const opened = [];
+  const setupId = 'setup:SETUP-L6:successor';
+  const alertId = 'alertcell-SETUP-L6-2026-08-14';
+  try {
+    globalThis.NIMBUS = { AlertsUIAdapter: { showForCell(line, day) { opened.push([line, day]); } } };
+    Timeline._items = { get: id => {
+      if (String(id) === setupId) return { id: setupId, kind: 'setup', group: 'SETUP-L6', start: new Date(), end: new Date(), editable: false };
+      if (String(id) === alertId) return { id: alertId, group: 'SETUP-L6', start: new Date(), end: new Date(), className: 'alertcell-err', editable: false };
+      return null;
+    } };
+    const time = new Date('2026-08-14T08:00:00');
+    Interaction._onAlertCellClick({ item: alertId, group: 'SETUP-L6', time });
+    Interaction._onAlertCellClick({ item: setupId, group: 'SETUP-L6', time });
+    assert.deepEqual(opened, [['SETUP-L6', '2026-08-14']]);
+  } finally {
+    Timeline._items = priorItems;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
 test('TimelineNav exposes init/render', () => {
   assert.equal(typeof TimelineNav.init, 'function');
   assert.equal(typeof TimelineNav.render, 'function');
