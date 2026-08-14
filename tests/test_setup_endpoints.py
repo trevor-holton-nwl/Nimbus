@@ -306,6 +306,22 @@ def test_override_creation_uses_a_server_assigned_resource_identity(tc):
     assert created.json()["id"] == 9
 
 
+def test_override_creation_requires_an_explicit_predecessor_key_for_initial_state(tc):
+    """An initial override must send predecessor_order_id: null, not omit the binding."""
+    missing = tc.post("/setup/5512/overrides", json={
+        "line": "LINE-1", "successor_order_id": "after",
+        "predecessor_values": {"colorWheel": "GREEN"}, "successor_values": {"colorWheel": "BLUE"},
+        "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "initial state",
+    })
+    explicit_null = tc.post("/setup/5512/overrides", json={
+        "line": "LINE-1", "predecessor_order_id": None, "successor_order_id": "after",
+        "predecessor_values": {"colorWheel": "GREEN"}, "successor_values": {"colorWheel": "BLUE"},
+        "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "initial state",
+    })
+    assert missing.status_code == 400
+    assert explicit_null.status_code == 200
+
+
 def test_setup_writes_reject_missing_api_key(monkeypatch):
     """The API-key guard remains active even when a scheduler identity is otherwise authorized."""
     monkeypatch.setattr(brain, "NIMBUS_API_KEY", "required-key")

@@ -762,9 +762,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), where),
                     vals,
                 )
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
             deleted += cur.rowcount
 
         # --- Upserts ---
@@ -809,9 +809,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                 )
             try:
                 cur.execute(q, [row[c] for c in col_names])
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1
@@ -1054,7 +1054,7 @@ def _normalize_constraint_tree(nodes: list, depth: int = 1) -> list[dict]:
     of nesting depth, so a deeper tree is never meaningful, not just
     disallowed for its own sake)."""
     if depth > 3:
-        raise ValueError(f"constraint tree depth exceeds 3 (Stage 3 cap)")
+        raise ValueError("constraint tree depth exceeds 3 (Stage 3 cap)")
     clean: list[dict] = []
     for c in nodes:
         if not isinstance(c, dict) or "key" not in c:

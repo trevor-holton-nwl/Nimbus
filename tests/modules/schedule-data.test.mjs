@@ -415,7 +415,7 @@ test('Persistence._loadCache clears the rank cache — the offline restore hydra
   // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
   // rehydrates whatever plant was last persisted, which need not be the plant the
   // rank cache holds, and it emits schedule:hydrated regardless.
-  localStorage.setItem(Config.LS_KEY, JSON.stringify({
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
     _schemaVersion: Config.SCHEMA_VERSION,
     tasks: [],
   }));
@@ -427,7 +427,7 @@ test('Persistence._loadCache clears the rank cache — the offline restore hydra
       'ranks cannot be trusted to match a cache-restored board, so they must be dropped');
     assert.equal(Persistence._rankMapsPlant, null);
   } finally {
-    localStorage.removeItem(Config.LS_KEY);
+    globalThis.localStorage.removeItem(Config.LS_KEY);
   }
 });
 

@@ -59,9 +59,8 @@ def _pg_available() -> bool:
         with psycopg.connect(
             host=db.PG_HOST, port=db.PG_PORT, dbname=db.PG_DB,
             user=db.PG_USER, password=db.PG_PASS, connect_timeout=2,
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
+        ) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
         return True
     except Exception:
         return False

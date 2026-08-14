@@ -962,7 +962,7 @@ def _reload_one_plant_lists(plant: str) -> None:
     the whole plant (all lines/fields) since Stage 1 has no per-(line, field)
     upload endpoint yet; Stage 2 can narrow this once it does.
     """
-    global PLANT_LISTS, CW_LOADED_AT
+    global CW_LOADED_AT
     try:
         all_lists = db.load_all_priority_lists()
         if plant in all_lists:
@@ -1318,7 +1318,7 @@ def get_diagnostics_deep():
         wheel_colors = {
             color
             for by_line in PLANT_LISTS.values()
-            for color in (by_line.get("") or {}).get("colorWheel", {}).keys()
+            for color in (by_line.get("") or {}).get("colorWheel", {})
         }
         if order_colors:
             missed = order_colors - wheel_colors
@@ -2606,6 +2606,8 @@ def create_setup_override(plant: str, request: Request, body: dict = Body(defaul
                           actor: str = Depends(auth.require_setup_scheduler)):
     """Create one occurrence-specific override; its stable resource ID is server-assigned."""
     _setup_plant_guard(plant, allowed_plants)
+    if "predecessor_order_id" not in body:
+        raise _setup_error(ValueError("Predecessor order id is required; use null for initial state"))
     line = body.get("line")
     _set_admin_log_details(request, plant=plant, line=line)
     try:

@@ -98,6 +98,22 @@ def test_override_requires_a_nonblank_reason_before_database_access(monkeypatch)
         )
 
 
+def test_initial_override_preserves_an_explicit_null_predecessor(monkeypatch):
+    """The first setup transition is bound to no prior order, not to an empty id."""
+    cursor = _InitialOverrideCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.upsert_occurrence_override(
+        "5512", "LINE-1", None, "after", {"colorWheel": "GREEN"},
+        {"colorWheel": "BLUE"}, 12, 4, 1, "initial floor state", "owner@example.com"
+    )
+    assert result["id"] == 42
+    update_sql, _ = cursor.executed[-2]
+    insert_sql, insert_params = cursor.executed[-1]
+    assert "IS NOT DISTINCT FROM %s" in update_sql
+    assert "predecessor_order_id" in insert_sql
+    assert insert_params[3] is None
+
+
 def test_clear_override_requires_nonblank_reason_before_database_access(monkeypatch):
     """Clearing physical setup truth must retain an auditable explanation too."""
     monkeypatch.setattr(setup_data, "_pool", _FailPool())
@@ -293,6 +309,18 @@ class _DefinitionCursor:
 
     def fetchone(self):
         return (["colorWheel"], 2, True, True)
+
+
+class _InitialOverrideCursor(_DefinitionCursor):
+    def fetchone(self):
+        query = self.executed[-1][0]
+        if "SELECT 1 FROM production_lines" in query:
+            return (1,)
+        if "SELECT fields" in query:
+            return (["colorWheel"], 1, True, True)
+        if "RETURNING id" in query:
+            return (42,)
+        return None
 
 
 class _PairsCursor(_DefinitionCursor):

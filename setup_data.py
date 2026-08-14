@@ -27,6 +27,13 @@ def _required_text(value, label: str) -> str:
     return value.strip()
 
 
+def _optional_text(value, label: str) -> str | None:
+    """Normalize an optional persisted identifier without turning null into an empty id."""
+    if value is None:
+        return None
+    return _required_text(value, label)
+
+
 def _normalise_fields(fields) -> list[str]:
     if not isinstance(fields, list) or not fields:
         raise ValueError("At least one registered setup field is required")
@@ -472,7 +479,10 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
     line = _required_text(line, "Line")
     actor = _required_text(actor, "Actor")
     reason = _required_text(reason, "Occurrence override reason")
-    predecessor_order_id = _required_text(predecessor_order_id, "Predecessor order id")
+    # ``None`` is the meaningful initial-state predecessor.  The API layer
+    # rejects an omitted key separately; once the key is present, preserve its
+    # explicit JSON null all the way through the parameterized INSERT.
+    predecessor_order_id = _optional_text(predecessor_order_id, "Predecessor order id")
     successor_order_id = _required_text(successor_order_id, "Successor order id")
     with _pool.connection() as conn, conn.cursor() as cur:
         _assert_line_owned(cur, plant, line)
@@ -486,7 +496,7 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
         cur.execute(
             """UPDATE setup_occurrence_override SET status = 'replaced', updated_by = %s, updated_at = NOW()
                  WHERE plant = %s AND line = %s AND signature_version = %s
-                   AND predecessor_order_id = %s AND successor_order_id = %s
+                   AND predecessor_order_id IS NOT DISTINCT FROM %s AND successor_order_id = %s
                    AND predecessor_state_key = %s AND successor_state_key = %s AND status = 'active'""",
             (actor, plant, line, signature_version, predecessor_order_id, successor_order_id,
              Jsonb(predecessor_key), Jsonb(successor_key)),

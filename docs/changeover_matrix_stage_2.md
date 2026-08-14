@@ -237,6 +237,34 @@ export interface SetupPolicyConfig {
 only. Do not enable any setup policy or deploy this work until every external
 gate above is recorded as passed.
 
+### Release-readiness completion pass (2026-08-14)
+
+The activation gate is now persisted and server-authoritative, but it remains
+fail-closed until real evidence is recorded:
+
+- `88520e8` adds the plant-scoped `setup_release_evidence` JSONB sidecar,
+  optimistic versioning, admin audit metadata, GET/PUT routes, and a server
+  check requiring all seven evidence flags plus owner email, approval time, and
+  notes before any policy mode can be enabled.
+- `cf9d97f` hydrates the evidence sidecar on plant switch, adds the
+  permission-aware evidence editor and policy controls, and keeps switches
+  disabled until the server-visible evidence is complete. Focused UI,
+  hydration, locale, build, and typecheck checks pass.
+- Null-predecessor initial overrides now preserve explicit JSON `null` through
+  validation, null-safe replacement matching, and parameterized SQL. The
+  schema/migration allow the nullable initial binding and use `NULLS NOT
+  DISTINCT` for active-adjacency uniqueness; omitted predecessor keys are
+  rejected. Static schema contracts and Python compilation pass.
+- `ruff check .` passes with no findings. `npm run lint` passes with zero
+  errors (31 inherited warnings). `npm test` remains at 312 passing / 1
+  inherited CQ-1 snapshot failure.
+
+The following release blockers are still intentionally unresolved because this
+workspace has neither a safe local PostgreSQL target nor a controllable browser
+session: local-DB schema/round-trip verification, browser/performance UAT,
+representative-plant replay, scheduling-owner approval, and recording the
+corresponding evidence flags. No policy activation or deployment was performed.
+
 ## Recovery / Token-Limit Handoff
 
 On a new session, read only:

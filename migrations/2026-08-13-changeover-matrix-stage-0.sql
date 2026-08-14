@@ -78,7 +78,9 @@ CREATE TABLE IF NOT EXISTS setup_occurrence_override (
     plant                TEXT NOT NULL,
     line                 TEXT NOT NULL,
     signature_version    INTEGER NOT NULL CHECK (signature_version > 0),
-    predecessor_order_id TEXT NOT NULL,
+    -- NULL is the explicit initial-state predecessor; an omitted API key is
+    -- rejected before this column is reached.
+    predecessor_order_id TEXT,
     successor_order_id   TEXT NOT NULL,
     predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array'),
     successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array'),
@@ -92,11 +94,15 @@ CREATE TABLE IF NOT EXISTS setup_occurrence_override (
     updated_by           TEXT,
     updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE setup_occurrence_override
+    ALTER COLUMN predecessor_order_id DROP NOT NULL;
+DROP INDEX IF EXISTS uq_setup_occurrence_override_active_adjacency;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency
     ON setup_occurrence_override (
         plant, line, signature_version, predecessor_order_id, successor_order_id,
         predecessor_state_key, successor_state_key
     )
+    NULLS NOT DISTINCT
     WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_setup_occurrence_override_plant_line
     ON setup_occurrence_override (plant, line, signature_version);

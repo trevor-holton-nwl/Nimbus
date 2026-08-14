@@ -243,9 +243,9 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
                     " RETURNING (xmax = 0)",
                     (username, row.get("role"), first_name, last_name, has_first, has_last),
                 )
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Role {row.get('role')!r} does not exist")
+                raise ValueError(f"Role {row.get('role')!r} does not exist") from exc
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1

@@ -130,7 +130,7 @@ def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
             "plant                TEXT NOT NULL",
             "line                 TEXT NOT NULL",
             "signature_version    INTEGER NOT NULL CHECK (signature_version > 0)",
-            "predecessor_order_id TEXT NOT NULL",
+            "predecessor_order_id TEXT",
             "successor_order_id   TEXT NOT NULL",
             "predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array')",
             "successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array')",
@@ -153,7 +153,7 @@ def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
         r"CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency\s+"
         r"ON setup_occurrence_override \(\s*plant, line, signature_version,\s+"
         r"predecessor_order_id,\s+successor_order_id,\s+predecessor_state_key,\s+successor_state_key\s*\)\s+"
-        r"WHERE status = 'active'"
+        r"NULLS NOT DISTINCT\s+WHERE status = 'active'"
     )
     for path, text in _setup_schema_texts():
         assert re.search(expected, text, re.DOTALL), path
