@@ -224,8 +224,9 @@ export interface SetupPolicyConfig {
 **External evidence not available in this environment — activation blocked**
 
 - The configured `PG_HOST` is `pgdb-nimbus-dev.postgres.database.azure.com`.
-  No local target was confirmed, so no schema action and no
-  `NIMBUS_TEST_DB=1` test was run.
+  A loopback PostgreSQL listener is accepting connections, but no safe local
+  credential was available (`psql -w` rejected the connection), so no schema
+  action and no `NIMBUS_TEST_DB=1` test was run.
 - No controllable browser session was available, so permission/hydration,
   plant-switch, keyboard, dark-mode, safe-disable, and screenshot UAT have
   not been performed.
