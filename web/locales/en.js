@@ -1330,4 +1330,5 @@ window.__NIMBUS_LOCALES.en = {
   'ui.setup_predecessor_state':      'Predecessor state',
   'ui.setup_required':               'Required setup', 'ui.setup_effective': 'Effective setup', 'ui.setup_standard': 'Standard setup',
   'ui.setup_override':               'Occurrence override', 'ui.setup_missing': 'Setup detail unavailable',
+  'ui.setup_capacity_shortfall':      'Capacity shortfall: {{available}} min available; {{required}} min required; {{short}} min short.',
 };

@@ -1255,4 +1255,5 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_predecessor_state': 'Estado predecessor',
   'ui.setup_required': 'Preparação necessária', 'ui.setup_effective': 'Preparação efetiva', 'ui.setup_standard': 'Preparação padrão',
   'ui.setup_override': 'Substituição da ocorrência', 'ui.setup_missing': 'Detalhe da preparação indisponível',
+  'ui.setup_capacity_shortfall': 'Falta de capacidade: {{available}} min disponíveis; {{required}} min necessários; faltam {{short}} min.',
 };

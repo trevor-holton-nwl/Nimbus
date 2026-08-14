@@ -180,6 +180,20 @@ test('Inspector exposes keyboard-equivalent setup detail on the successor, inclu
   assert.equal(detail.source, 'occurrence');
   assert.equal(detail.overrideStatus, 'active');
   assert.equal(detail.missingDetail, 'Matrix row missing.');
+  assert.equal(detail.shortMinutes, 15);
+  assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
+    'the successor detail must state available, required, and short capacity in text');
+});
+
+test('alert-cell foreground dispatch treats setup items as non-business items', () => {
+  const setupId = 'setup:SETUP-L5:successor';
+  const priorItems = Timeline._items;
+  try {
+    Timeline._items = { get: id => String(id) === setupId
+      ? { id: setupId, kind: 'setup', group: 'SETUP-L5', start: new Date(), end: new Date(), editable: false }
+      : null };
+    assert.equal(Interaction._isBusinessTimelineItem(setupId), false);
+  } finally { Timeline._items = priorItems; }
 });
 
 test('TimelineNav exposes init/render', () => {

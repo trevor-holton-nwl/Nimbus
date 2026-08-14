@@ -193,6 +193,7 @@ interface SetupPresentationDetail {
   source: string;
   overrideStatus: string | null;
   availableMinutes: number | null;
+  shortMinutes: number | null;
   missingDetail: string | null;
 }
 
@@ -632,7 +633,10 @@ export const Timeline = {
       effectiveMinutes: Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
       standardMinutes: Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
       source: entry.source || 'resolved', overrideStatus: entry.overrideStatus || null,
-      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null, missingDetail,
+      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
+      shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
+        ? entry.requiredMinutes - entry.availableMinutes : null,
+      missingDetail,
     });
     for (const interval of observation.intervals || []) {
       const required = Number(interval.requiredMinutes);
@@ -3076,8 +3080,19 @@ export const Inspector = {
       standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
       source: resolved?.source ?? (entry.source || 'resolved'), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
+      shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
+        ? entry.requiredMinutes - entry.availableMinutes : null,
       missingDetail: diagnostic?.message || null,
     };
+  },
+
+  _setupCapacityConflictText(detail: SetupPresentationDetail): string | null {
+    if (detail.shortMinutes == null || detail.availableMinutes == null || detail.requiredMinutes == null) return null;
+    const fallback = `Capacity shortfall: ${detail.availableMinutes} min available; ${detail.requiredMinutes} min required; ${detail.shortMinutes} min short.`;
+    const translated = Util.t('ui.setup_capacity_shortfall', {
+      available: detail.availableMinutes, required: detail.requiredMinutes, short: detail.shortMinutes,
+    });
+    return translated === 'ui.setup_capacity_shortfall' ? fallback : translated;
   },
 
   _render(task: NimbusTask): void {
@@ -3097,6 +3112,7 @@ export const Inspector = {
     // original_start_date field directly for display.
     const impliedOrigStart = Util.impliedOriginalStart(task);
     const setupDetail = Inspector._setupDetailForTask(task);
+    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
@@ -3176,6 +3192,7 @@ export const Inspector = {
         <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? 'â€”' : `${setupDetail.standardMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source)}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || 'â€”')}</div></div>
+        ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
         ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
       </div>` : ''}
 
@@ -5198,6 +5215,10 @@ export const Interaction = {
     return Timeline.businessOrderIdForItem(itemId);
   },
 
+  _isBusinessTimelineItem(itemId: string | number): boolean {
+    return Interaction._businessOrderIdForItem(itemId) != null;
+  },
+
   trace(): InteractionTraceEntry[] { return this._trace.slice(-50); },
   _log(type: string, data: Record<string, unknown>): void {
     const entry: InteractionTraceEntry = { t: Date.now(), type, ...data };
@@ -5274,14 +5295,14 @@ export const Interaction = {
         // this flag see an unconsumed verdict for the CURRENT gesture.
         Interaction._panDuringGesture = false;
         const p = Timeline._tl && Timeline._tl.getEventProperties(e);
-        const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
-        if (onRealItem) {
+        const onBusinessItem = !!(p && p.item != null && Interaction._isBusinessTimelineItem(p.item));
+        if (onBusinessItem) {
           // Mousedown started on an order item — this is an item-drag
           // gesture, not a canvas pan. Don't arm the peak tracker: order
           // drags routinely exceed 8px and must not be mistaken for a
           // canvas pan (that would wrongly suppress the trailing click's
-          // Selection.set after a drag). Mirrors the alertcell-id-prefix
-          // check in the click handler below.
+          // Selection.set after a drag). The same semantic business-item check
+          // is used by the click handler below.
           _downX = _downY = null;
         } else {
           _downX = e.clientX; _downY = e.clientY;
@@ -5316,7 +5337,9 @@ export const Interaction = {
         // If the click is on a real foreground item (an order), let normal
         // selection handle it — don't hijack order clicks because the cell
         // happens to be tinted.
-        if (p.item && !String(p.item).startsWith('alertcell-')) return;
+        if (p.item && Interaction._isBusinessTimelineItem(p.item)) return;
+        const item = p.item != null ? Timeline._items!.get(String(p.item)) as TimelineVisItem | null : null;
+        if (item && (item.kind !== 'zone' || !item.className?.includes('alertcell-'))) return;
         const dayKey = Util.dayKey(p.time);
         const cellId = `alertcell-${p.group}-${dayKey}`;
         if (!Timeline._items!.get(cellId)) return; // no alert highlight here
