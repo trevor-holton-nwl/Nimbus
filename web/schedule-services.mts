@@ -3024,6 +3024,21 @@ export const Engine = {
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.PRODUCTION_LINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
+    const setup = Store.setupSnapshot;
+    const definition = setup?.definition;
+    const setupActive = !!(setup && definition?.active && setup.plant === (changed.PLANT || Store.selectedPlant));
+    const setupMinutes = (predecessor: NimbusTask, successor: NimbusTask): number => {
+      if (!setupActive || !setup || !definition) return 0;
+      const predecessorState = stateForOrder(predecessor, definition);
+      const successorState = stateForOrder(successor, definition);
+      if (!predecessorState || !successorState) return 0;
+      const resolved = resolveSetup({
+        definition, line, predecessorState, successorState,
+        predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
+        plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+      });
+      return resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0;
+    };
 
     const peers = Store.tasksByPlant(Store.selectedPlant)
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
@@ -3031,9 +3046,10 @@ export const Engine = {
                 && t.id !== changedId)
       .sort((a,b) => Number(a.start_date) - Number(b.start_date));
 
-    // Walk forward from the changed task's end, pushing any overlapping unfixed
-    // peer that starts before cursor to cursor (preserving duration).
+    // One deterministic forward walk: the direct drop stays untouched, then
+    // covered setup is reserved before each permitted downstream peer.
     let cursor = new Date(changed.end_date);
+    let predecessor = changed;
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
     if (splitPolicy !== 'never') {
       const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
@@ -3041,12 +3057,23 @@ export const Engine = {
       try {
         for (const p of peers) {
           if (p.end_date! <= changed.start_date) continue;
-          if (p.start_date! >= cursor) { cursor = new Date(p.end_date!); continue; }
-          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
-            cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
-            continue;
-          }
-          const changes = Engine.schedulePatchFor(p, line, cursor, splitPolicy);
+          const requiredSetupMinutes = setupMinutes(predecessor, p);
+          const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
+          if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
+          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) break;
+          const placement = Calendar.placeWithSetup(line, {
+            earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+            setup: { kind: 'resolved', minutes: requiredSetupMinutes },
+          });
+          const changes: Partial<NimbusTask> | null = placement.kind === 'placed' && placement.productiveSegments.length
+            ? {
+              start_date: placement.productiveSegments[0].start,
+              end_date: placement.productiveSegments.at(-1)!.end,
+              scheduleSegments: placement.productiveSegments.length >= 2
+                ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
+                : [],
+            }
+            : null;
           if (!changes?.start_date || !changes.end_date) {
             ErrorLog.warn('engine',
               `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
@@ -3055,6 +3082,7 @@ export const Engine = {
           }
           patches.push({ id: p.id, changes });
           cursor = new Date(changes.end_date);
+          predecessor = { ...p, ...changes };
         }
       } finally {
         Calendar._endRun();
@@ -3066,19 +3094,28 @@ export const Engine = {
     for (const p of peers) {
       // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
       if (p.end_date! <= changed.start_date) continue;
-      if (p.start_date! >= cursor) { cursor = new Date(p.end_date!); continue; }
+      const requiredSetupMinutes = setupMinutes(predecessor, p);
+      const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
+      if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
       if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
         // Fixed or aged orders don't move — if there's a conflict, an alert will fire.
-        cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
-        continue;
+        break;
       }
-      const dur = p.end_date!.getTime() - p.start_date!.getTime();
-      const newStart = Calendar.nextAvailable(line, cursor, dur);
-      const newEnd   = new Date(newStart.getTime() + dur);
-      const changes: Partial<NimbusTask> = { start_date: newStart, end_date: newEnd };
-      if (p.scheduleSegments?.length && p.scheduleSegments.length >= 2) changes.scheduleSegments = [];
+      const placement = Calendar.placeWithSetup(line, {
+        earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+        setup: { kind: 'resolved', minutes: requiredSetupMinutes },
+      });
+      if (placement.kind !== 'placed' || !placement.productiveSegments.length) break;
+      const changes: Partial<NimbusTask> = {
+        start_date: placement.productiveSegments[0].start,
+        end_date: placement.productiveSegments.at(-1)!.end,
+        scheduleSegments: placement.productiveSegments.length >= 2
+          ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
+          : [],
+      };
       patches.push({ id: p.id, changes });
-      cursor = new Date(newEnd);
+      cursor = new Date(changes.end_date!);
+      predecessor = { ...p, ...changes };
     }
     if (patches.length) Store.updateMany(patches, 'engine');
     // Reflow only ever shifts dates within `line`, so scope the alert recompute to it.

@@ -138,6 +138,42 @@ test('Engine.runAndApply no-ops with a toast when there are no tasks', () => {
   assert.doesNotThrow(() => Engine.runAndApply('spt'));
 });
 
+test('Engine.autoReflow reserves a covered incoming setup before moving a downstream peer', () => {
+  // This fails if reflow only protects productive runtime: the blue successor
+  // would land at 09:00 instead of leaving the required red->blue setup slot.
+  const line = 'SETUP-REFLOW-LINE';
+  const plant = 'SETUP-REFLOW-PLANT';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1,
+      from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+    line_rows: [], line_states: [], overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'reflow-red', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'reflow-blue', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:15:00'), end_date: new Date('2026-08-17T10:15:00') },
+  ], 'unit-test');
+  try {
+    Engine.autoReflow('reflow-red');
+    assert.equal(Store.tasks['reflow-red'].end_date.getTime(), new Date('2026-08-17T09:00:00').getTime(),
+      'the manually dropped production order remains exactly where the user put it');
+    assert.equal(Store.tasks['reflow-blue'].start_date.getTime(), new Date('2026-08-17T09:30:00').getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Engine.evaluateSchedule snapshots the live read model without publishing a candidate', () => {
   Store.setTasks([
     { id: 'detached-long', PRODUCTION_LINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '5', start_date: null, end_date: null },

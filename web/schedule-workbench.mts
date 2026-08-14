@@ -181,6 +181,7 @@ interface TimelineVisItem {
   type?: 'background';
   title?: string;
   setup?: SetupPresentationDetail;
+  style?: string;
 }
 
 interface SetupPresentationDetail {
@@ -674,6 +675,63 @@ export const Timeline = {
       });
     }
     return items;
+  },
+
+  /** A move invalidates adjacency-derived setup on only its source/target
+   * lines; production patching remains owned by the Store subscriber. */
+  rebuildSetupForLines(lines: ReadonlySet<string>): void {
+    if (!Timeline._items || typeof Timeline._items.getIds !== 'function' || !lines.size) return;
+    const _deriveT0 = performance.now();
+    const tasks = Store.tasksForSelectedPlant().filter(task => (
+      lines.has(task.PRODUCTION_LINE || 'Unknown') && task.start_date && task.end_date
+    ));
+    const desired = new Map(Timeline._setupItemsForObservation(tasks, Timeline._setupObservation(tasks))
+      .map(item => [String(item.id), item] as const));
+    PerfMonitor.record('Timeline.setup.derive', performance.now() - _deriveT0);
+    const _diffT0 = performance.now();
+    const current = Timeline._items.getIds().map(String).filter(id => {
+      const item = Timeline._items!.get(id) as TimelineVisItem | null;
+      return item?.kind === 'setup' && lines.has(item.group);
+    });
+    const currentIds = new Set(current);
+    const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
+    for (const [id, item] of desired) (currentIds.has(id) ? update : add).push(item);
+    for (const id of current) if (!desired.has(id)) remove.push(id);
+    PerfMonitor.record('Timeline.setup.diff', performance.now() - _diffT0);
+    const _redrawT0 = performance.now();
+    Timeline._suppressEvents = true;
+    try {
+      if (remove.length) Timeline._items.remove(remove);
+      if (update.length) Timeline._items.update(update);
+      if (add.length) Timeline._items.add(add);
+    } finally { Timeline._suppressEvents = false; }
+    Timeline._tl?.redraw();
+    PerfMonitor.record('Timeline.setup.redraw', performance.now() - _redrawT0);
+  },
+
+  _dragSetupLines: new Set<string>(),
+  /** Presentation-only: called from vis' per-frame drag callback. */
+  dimSetupForDrag(lines: ReadonlySet<string>): void {
+    if (!Timeline._items || typeof Timeline._items.getIds !== 'function') return;
+    const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
+    if (!newlyAffected.size) return;
+    for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
+    const updates = Timeline._items.getIds().map(String).flatMap(id => {
+      const item = Timeline._items!.get(id) as TimelineVisItem | null;
+      return item?.kind === 'setup' && newlyAffected.has(item.group)
+        ? [{ id, className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }]
+        : [];
+    });
+    if (!updates.length) return;
+    Timeline._suppressEvents = true;
+    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
+  },
+
+  finishSetupDrag(extraLines: ReadonlySet<string> = new Set()): void {
+    const lines = new Set(Timeline._dragSetupLines);
+    for (const line of extraLines) lines.add(line);
+    Timeline._dragSetupLines.clear();
+    Timeline.rebuildSetupForLines(lines);
   },
   /** Coalesce data-event-driven rebuilds into a single requestAnimationFrame so
    *  multiple Store emits in one tick (e.g. tasks:bulkUpdate then alerts:change from
@@ -6082,6 +6140,7 @@ export const Interaction = {
           regenerationPatches.push({ id: taskId, changes });
         }
         if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
+        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
         Timeline._scheduleRebuild();
         UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
           () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
@@ -6123,6 +6182,7 @@ export const Interaction = {
           } finally { Timeline._suppressEvents = false; }
         }
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
+        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
 
         if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
 
@@ -6140,6 +6200,8 @@ export const Interaction = {
         end_date:        newEnd,
         PRODUCTION_LINE: newLine
       }, 'timeline');
+      Engine.autoReflow(id);
+      Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
                      () => UndoStack.restoreTasks(snap));
@@ -6196,6 +6258,11 @@ export const Interaction = {
     const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
     if (_tip) _tip.style.display = 'none';
 
+    const dragTask = Store.tasks[dragId];
+    if (dragTask) Timeline.dimSetupForDrag(new Set([
+      dragTask.PRODUCTION_LINE || 'Unknown',
+      props.group == null ? (dragTask.PRODUCTION_LINE || 'Unknown') : String(props.group),
+    ]));
     const selIds = Selection.ids().filter(sid => sid !== dragId);
     if (!selIds.length) return;
 
@@ -6286,6 +6353,7 @@ export const Interaction = {
       finally { Timeline._suppressEvents = false; }
     }
     this._ghostDragId = null;
+    Timeline.finishSetupDrag();
   },
 
   _onKeyDown(e: KeyboardEvent): void {

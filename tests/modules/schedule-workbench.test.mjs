@@ -59,6 +59,42 @@ test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.gotoLineDay, 'function');
 });
 
+test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {
+  // This fails if setup changes route through full Timeline.rebuild(), if the
+  // public line-scoped batch seam is removed, or if a stale setup bar survives.
+  const priorItems = Timeline._items;
+  const priorSetup = Store.setupSnapshot;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const calls = { add: 0, update: 0, remove: 0 };
+  const records = new Map([
+    ['setup:old', { id: 'setup:old', kind: 'setup', group: 'SETUP-BATCH-LINE', start: new Date(), end: new Date() }],
+    ['setup:other', { id: 'setup:other', kind: 'setup', group: 'OTHER-LINE', start: new Date(), end: new Date() }],
+  ]);
+  Timeline._items = {
+    getIds: () => [...records.keys()],
+    get: id => records.get(String(id)),
+    add: items => { calls.add++; for (const item of items) records.set(item.id, item); },
+    update: items => { calls.update++; for (const item of items) records.set(item.id, item); },
+    remove: ids => { calls.remove++; for (const id of ids) records.delete(String(id)); },
+  };
+  Store.setSelectedPlant('SETUP-BATCH-PLANT', 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  Store.setTasks([], 'unit-test');
+  try {
+    Timeline.rebuildSetupForLines(new Set(['SETUP-BATCH-LINE']));
+    assert.equal(calls.remove, 1, 'the affected line is removed in one batch');
+    assert.equal(calls.add, 0);
+    assert.equal(calls.update, 0);
+    assert.ok(records.has('setup:other'), 'unaffected-line setup stays untouched');
+  } finally {
+    Timeline._items = priorItems;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Timeline renders split schedules as multiple parent-mapped timeline items', () => {
   const task = {
     id: 'timeline-split', PRODUCTION_LINE: 'L-SPLIT', RUN_TIME: 14,
