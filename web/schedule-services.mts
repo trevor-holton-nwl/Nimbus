@@ -37,6 +37,7 @@ import {
   evaluateDueDateFirst as evaluateDueDateFirstPure,
   evaluateSptWithSetup as evaluateSptWithSetupPure,
 } from './setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
@@ -46,7 +47,7 @@ import type {
   SchedulePatch,
   ScheduleSnapshot,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 interface CalendarEntry {
@@ -123,6 +124,7 @@ interface WorkerSnapshotBase {
   plants: Record<string, CalendarEntry>;
   lineSettings: Record<string, NimbusLineSetting>;
   masterData: NimbusMasterData | null;
+  setup: SetupObservation;
 }
 
 /** Utilization.computeMatrix's row shape — tasks RESOLVED to objects (see T-8 in
@@ -186,6 +188,136 @@ export function snapshotSchedule(): ScheduleSnapshot {
  * task, alert, autosave, or Timeline changes. */
 export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
   if (patches.length) Store.updateMany(Array.from(patches), 'engine');
+}
+
+/** Resolved setup is observation data for capacity/alerts, never a task or a
+ * persisted link.  This is the sole main-thread projection sent to the core
+ * and worker; they must not receive raw setup rows or re-resolve transitions. */
+export interface SetupComputeInterval {
+  line: string;
+  scope: string;
+  predecessorOrderId: string | null;
+  successorOrderId: string;
+  start: Date;
+  end: Date;
+  requiredMinutes: number;
+  availableMinutes: number;
+}
+
+export interface SetupComputeDiagnostic {
+  type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+  line: string;
+  scope: string;
+  pairKey?: string;
+  predecessorOrderId?: string | null;
+  successorOrderId?: string;
+  time?: Date;
+  message?: string;
+}
+
+export interface SetupObservation {
+  intervals: SetupComputeInterval[];
+  diagnostics: SetupComputeDiagnostic[];
+}
+
+function setupStateKey(state: SetupStateKey | null): string {
+  return state ? JSON.stringify(state.map(({ fieldKey, value }) => [fieldKey, value])) : 'unknown';
+}
+
+function setupOrderIntervals(task: NimbusTask): Array<{ start: Date; end: Date }> {
+  return globalThis.NimbusComputeCore!.scheduleIntervals(task).map(interval => ({ start: interval.start, end: interval.end }));
+}
+
+/**
+ * Resolve scheduled setup occurrences exactly once, before either compute path
+ * runs. This pure projection neither mutates Store nor invokes Engine; both
+ * core callers receive its output as opaque interval/diagnostic facts.
+ */
+export function deriveSetupObservation(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+): SetupObservation {
+  const observation: SetupObservation = { intervals: [], diagnostics: [] };
+  const definition = setup?.definition;
+  if (!setup || !definition || !definition.active) return observation;
+
+  const stateForLine = new Map(setup.line_states
+    .filter(state => state.signature_version === definition.signature_version)
+    .map(state => [state.line, state.state_key]));
+  const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
+  for (const task of tasks) {
+    if (task.PLANT && task.PLANT !== setup.plant) continue;
+    const line = task.PRODUCTION_LINE || 'Unknown';
+    if (scopedLines && !scopedLines.has(line)) continue;
+    const intervals = setupOrderIntervals(task);
+    if (!intervals.length) continue;
+    const first = intervals[0], last = intervals.at(-1)!;
+    const list = byLine.get(line) || [];
+    list.push({ task, start: first.start, end: last.end });
+    byLine.set(line, list);
+  }
+
+  for (const [line, orders] of byLine) {
+    orders.sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
+    const scope = `${setup.plant}/${line}`;
+    const resolvedEdges = new Set<string>();
+    let predecessorState = stateForLine.get(line) || null;
+    let predecessorOrderId: string | null = null;
+    let predecessorEnd: Date | null = null;
+    for (const order of orders) {
+      const successorState = stateForOrder(order.task, definition);
+      if (!predecessorState) {
+        observation.diagnostics.push({
+          type: 'initial-state-unknown', line, scope, successorOrderId: String(order.task.id), time: order.start,
+          message: `The setup state before ${String(order.task.id)} on ${line} is unknown.`,
+        });
+      } else if (!successorState) {
+        observation.diagnostics.push({
+          type: 'setup-uncovered', line, scope,
+          pairKey: `${setupStateKey(predecessorState)}->unknown`, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+        });
+      } else {
+        const resolved = resolveSetup({
+          definition, line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
+          plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+        });
+        if (!resolved.covered || resolved.effectiveMin == null) {
+          observation.diagnostics.push({
+            type: 'setup-uncovered', line, scope,
+            pairKey: `${setupStateKey(predecessorState)}->${setupStateKey(successorState)}`,
+            predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+          });
+        } else if (resolved.effectiveMin > 0) {
+          resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
+          const end = new Date(order.start);
+          const start = new Date(end.getTime() - resolved.effectiveMin * 60 * 1000);
+          const availableMinutes = predecessorEnd
+            ? Math.max(0, (end.getTime() - predecessorEnd.getTime()) / (60 * 1000))
+            : resolved.effectiveMin;
+          observation.intervals.push({
+            line, scope, predecessorOrderId, successorOrderId: String(order.task.id), start, end,
+            requiredMinutes: resolved.effectiveMin, availableMinutes,
+          });
+        } else {
+          resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
+        }
+      }
+      predecessorState = successorState;
+      predecessorOrderId = String(order.task.id);
+      predecessorEnd = order.end;
+    }
+
+    for (const override of setup.overrides.filter(override => override.status === 'active' && override.line === line)) {
+      const key = `${override.predecessor_order_id ?? 'initial'}|${override.successor_order_id}`;
+      if (!resolvedEdges.has(key)) observation.diagnostics.push({
+        type: 'override-inactive', line, scope, predecessorOrderId: override.predecessor_order_id,
+        successorOrderId: override.successor_order_id, time: orders[0]?.start,
+        message: `Active setup override ${key} no longer matches the scheduled adjacency on ${line}.`,
+      });
+    }
+  }
+  return observation;
 }
 
 // One synchronous candidate evaluation may temporarily select this immutable,
@@ -959,6 +1091,12 @@ export const Compute = (() => {
     return new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject });
+      // Diagnostic-only measurement: setup stays scoped and has no activation gate.
+      if (payload.setup) {
+        const _setupCloneT0 = performance.now();
+        structuredClone(payload.setup);
+        PerfMonitor.record('Worker.setupClone:' + type, performance.now() - _setupCloneT0);
+      }
       const _cloneT0 = performance.now();
       w.postMessage({ type, id, payload });
       PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
@@ -977,15 +1115,17 @@ export const Compute = (() => {
   function _snap(): WorkerSnapshotBase {
     const plant = Store.selectedPlant;
     if (!plant) {
+      const tasks = Store.tasksArr.map(_stripPriorityFields);
       // No plant selected — nothing is rendered; fall back to the global snapshot.
       return {
-        tasks:        Store.tasksArr.map(_stripPriorityFields),
+        tasks,
         blocks:       Store._state.blocks,
         plantBlocks:  Store._state.plantBlocks,
         calendars:    Store._state.calendars,
         plants:       Store._state.plants,
         lineSettings: Store._state.lineSettings,
         masterData:   Store._state.masterData,
+        setup:        deriveSetupObservation(Store.setupSnapshot, tasks),
       };
     }
     // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
@@ -1001,14 +1141,16 @@ export const Compute = (() => {
       for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
       return out;
     };
+    const tasks = Store.tasksByPlant(plant).map(_stripPriorityFields);
     return {
-      tasks:        Store.tasksByPlant(plant).map(_stripPriorityFields),
+      tasks,
       blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
       plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
       calendars:    pick(Store._state.calendars),
       plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
       lineSettings: pick(Store._state.lineSettings),
       masterData:   Store._state.masterData,
+      setup:        deriveSetupObservation(Store.setupSnapshot, tasks, lines),
     };
   }
 
@@ -1096,6 +1238,7 @@ export const Alerts = {
       plants:       Store.plants,
       lineSettings: Store.lineSettings as any,
       masterData:   Store.masterData as unknown as NimbusMasterData,
+      setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined),
       dismissed:    [...Alerts._dismissed],
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
@@ -1304,6 +1447,12 @@ export const Utilization = {
       } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
       else Object.keys(calendars).forEach(l => lineSet.add(l));
     }
+    // Detached candidate snapshots deliberately do not retain setup truth;
+    // never reach back into Store while rendering one. Live paths resolve once
+    // and hand the core only the resulting plant/line-scoped observations.
+    const setup = utilizationSnapshot
+      ? { intervals: [], diagnostics: [] }
+      : deriveSetupObservation(Store.setupSnapshot, coreTasks, lineSet);
 
     // Delegate the matrix build to nimbus-compute-core — the single source of truth,
     // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
@@ -1320,6 +1469,7 @@ export const Utilization = {
       startMs:      start.getTime(),
       days,
       lines:        [...lineSet],
+      setup,
     });
     const byId = new Map(taskList.map(t => [t.id, t]));
     for (const line of Object.keys(matrix)) {

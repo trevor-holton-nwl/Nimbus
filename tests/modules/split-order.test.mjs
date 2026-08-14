@@ -62,6 +62,41 @@ test('split pieces consume capacity without making the parent gap overlap anothe
   assert.equal(alerts.filter(alert => alert.type === 'overlap').length, 0);
 });
 
+test('a setup interval before a split successor occupies capacity and reports a fixed-boundary shortfall', () => {
+  const first = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  first.setHours(8, 0, 0, 0);
+  const predecessorEnd = new Date(first); predecessorEnd.setHours(9, 0, 0, 0);
+  const successorStart = new Date(first); successorStart.setHours(10, 0, 0, 0);
+  const successorFirstEnd = new Date(first); successorFirstEnd.setHours(12, 0, 0, 0);
+  const second = new Date(first); second.setDate(second.getDate() + 1); second.setHours(8, 0, 0, 0);
+  const successorEnd = new Date(second); successorEnd.setHours(10, 0, 0, 0);
+  const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const base = {
+    lineSettings: { L: { plant: null } }, calendars: { L: { workHours } }, plants: {},
+    blocks: [], plantBlocks: [], masterData: { lines: [] },
+    setup: {
+      intervals: [{
+        line: 'L', scope: 'P/L', predecessorOrderId: 'fixed-predecessor', successorOrderId: 'split-successor',
+        start: new Date(successorStart.getTime() - 90 * 60000), end: successorStart, requiredMinutes: 90, availableMinutes: 60,
+      }], diagnostics: [],
+    },
+  };
+  const predecessor = { id: 'fixed-predecessor', fixed: true, PRODUCTION_LINE: 'L', RUN_TIME: 1, start_date: first, end_date: predecessorEnd };
+  const successor = {
+    id: 'split-successor', PRODUCTION_LINE: 'L', RUN_TIME: 4, start_date: successorStart, end_date: successorEnd,
+    scheduleSegments: [
+      { sequence: 1, startDate: successorStart, endDate: successorFirstEnd },
+      { sequence: 2, startDate: second, endDate: successorEnd },
+    ],
+  };
+  const { matrix } = Core.computeUtilization({ ...base, tasks: [predecessor, successor], startMs: first.getTime(), days: 2 });
+  const alerts = Core.computeAlerts({ ...base, tasks: [predecessor, successor], dismissed: [], opts: {} }).alerts;
+
+  assert.equal(matrix.L[Core.dayKey(first)].scheduled, 4.5);
+  assert.equal(matrix.L[Core.dayKey(second)].scheduled, 2);
+  assert.deepEqual(alerts.filter(alert => alert.type === 'setup-violated').map(alert => alert.shortMinutes), [30]);
+});
+
 test('partial_allowed allocates a 14-hour order into today plus tomorrow', () => {
   const plant = 'P-SPLIT';
   const line = 'L-SPLIT';

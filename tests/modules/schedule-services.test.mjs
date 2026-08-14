@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule } from '../../web/schedule-services.mjs';
+import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 
 const require = createRequire(import.meta.url);
@@ -211,6 +211,116 @@ test('Engine.evaluateSetupAware forwards only an explicit detached setup request
   assert.equal(Store.rev(), beforeRev, 'explicit setup candidate routing must not publish to Store');
 });
 
+test('deriveSetupObservation resolves one scoped override interval without invoking Engine', () => {
+  // This fails if the worker-facing setup observation is unavailable, resolves
+  // an override as its matrix standard, or routes through Engine.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-OBSERVE',
+    definition: { plant: 'P-OBSERVE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [
+      { line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 0 },
+      { line: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 60 },
+    ],
+    line_rows: [],
+    line_states: [{ line: 'L-OBSERVE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [{
+      id: 'override-1', line: 'L-OBSERVE', signature_version: 1,
+      predecessor_order_id: 'red', successor_order_id: 'blue', predecessor_state_key: state('RED'), successor_state_key: state('BLUE'),
+      standard_min: 60, remaining_min: 20, status: 'active', reason: 'already started',
+    }],
+  }, [
+    { id: 'red', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+  ], new Set(['L-OBSERVE']));
+
+  assert.deepEqual(observation.intervals.map(interval => ({
+    line: interval.line, predecessorOrderId: interval.predecessorOrderId, successorOrderId: interval.successorOrderId,
+    start: interval.start.toISOString(), end: interval.end.toISOString(), requiredMinutes: interval.requiredMinutes,
+    availableMinutes: interval.availableMinutes,
+  })), [{
+    line: 'L-OBSERVE', predecessorOrderId: 'red', successorOrderId: 'blue',
+    start: '2026-08-03T13:40:00.000Z', end: '2026-08-03T14:00:00.000Z', requiredMinutes: 20, availableMinutes: 60,
+  }]);
+  assert.deepEqual(observation.diagnostics, []);
+});
+
+test('Alerts publishes scoped setup observations without invoking Engine, including Fix It', () => {
+  // This fails if alerts bypass the shared setup projection, resolve matrices in
+  // the core, or make a setup diagnostic recursively optimize on Fix It.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  Store.setTasks([{
+    id: 'uncovered-order', PLANT: 'P-ALERT', PRODUCTION_LINE: 'L-ALERT', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
+  }], 'unit-test');
+  Store.setSelectedPlant('P-ALERT', 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant: 'P-ALERT',
+    definition: { plant: 'P-ALERT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [],
+    line_states: [{ line: 'L-ALERT', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const originalRun = Engine.runAndApply;
+  let engineRuns = 0;
+  Engine.runAndApply = (...args) => { engineRuns++; return originalRun.apply(Engine, args); };
+  try {
+    Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
+    const setupAlert = Store.alerts.find(alert => alert.type === 'setup-uncovered');
+    assert.ok(setupAlert, 'the scoped worker/core payload must include the unresolved setup observation');
+    Alerts.applyFix(setupAlert.id);
+    Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
+    assert.equal(engineRuns, 0, 'setup observation alerts must never invoke Engine, even after explicit Fix It');
+  } finally {
+    Engine.runAndApply = originalRun;
+  }
+});
+
+test('deriveSetupObservation keeps a covered zero-minute override active', () => {
+  // This fails if override validity is inferred from visible positive bars
+  // instead of the resolved adjacency (zero setup intentionally has no bar).
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-ZERO',
+    definition: { plant: 'P-ZERO', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [
+      { line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 0 },
+      { line: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 30 },
+    ], line_rows: [],
+    line_states: [{ line: 'L-ZERO', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [{
+      id: 'zero-override', line: 'L-ZERO', signature_version: 1,
+      predecessor_order_id: 'red', successor_order_id: 'blue', predecessor_state_key: state('RED'), successor_state_key: state('BLUE'),
+      standard_min: 30, remaining_min: 0, status: 'active', reason: 'complete',
+    }],
+  }, [
+    { id: 'red', PRODUCTION_LINE: 'L-ZERO', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PRODUCTION_LINE: 'L-ZERO', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+  ]);
+
+  assert.deepEqual(observation.intervals, []);
+  assert.deepEqual(observation.diagnostics, []);
+});
+
+test('deriveSetupObservation never projects one plant setup truth onto another plant', () => {
+  // This fails if a stale selected-plant snapshot leaks setup capacity or
+  // diagnostics onto a task that explicitly belongs to another plant.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-ONE',
+    definition: { plant: 'P-ONE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'REUSED-LINE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, [{
+    id: 'other-plant-order', PLANT: 'P-TWO', PRODUCTION_LINE: 'REUSED-LINE', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
+  }]);
+
+  assert.deepEqual(observation, { intervals: [], diagnostics: [] });
+});
+
 test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([
@@ -255,10 +365,15 @@ test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending
 });
 
 test('Engine.autoReflow pushes an overlapping unfixed downstream peer forward on the same line', () => {
-  const start1 = new Date('2026-08-03T08:00:00'); // Monday
-  const end1   = new Date('2026-08-03T10:00:00'); // changed task now ends 10:00
-  const start2 = new Date('2026-08-03T09:00:00'); // peer overlaps [08:00,10:00)
-  const end2   = new Date('2026-08-03T11:00:00');
+  // Keep this calendar-aware regression in the future: aged orders are
+  // intentionally excluded from reflow, and the previous fixed 2026 date is
+  // now historical. Pick the next Monday to avoid a default weekend closure.
+  const start1 = new Date();
+  start1.setDate(start1.getDate() + ((8 - start1.getDay()) % 7 || 7));
+  start1.setHours(8, 0, 0, 0);
+  const end1 = new Date(start1); end1.setHours(10, 0, 0, 0);
+  const start2 = new Date(start1); start2.setHours(9, 0, 0, 0);
+  const end2 = new Date(start1); end2.setHours(11, 0, 0, 0);
   Store.setTasks([
     { id: 'r1', PRODUCTION_LINE: 'L2', PLANT: '5512', RUN_TIME: '2', start_date: start1, end_date: end1 },
     { id: 'r2', PRODUCTION_LINE: 'L2', PLANT: '5512', RUN_TIME: '2', start_date: start2, end_date: end2 },

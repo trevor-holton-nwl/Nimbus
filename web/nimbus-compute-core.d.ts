@@ -30,6 +30,9 @@ declare global {
     taskId?: string;
     line: string;
     time: Date;
+    requiredMinutes?: number;
+    availableMinutes?: number;
+    shortMinutes?: number;
   }
 
   interface NimbusTask {
@@ -102,6 +105,35 @@ declare global {
     };
   }
 
+  /** Pre-resolved, plant/line-scoped setup observation. Compute code consumes
+   * these facts only; raw setup rows deliberately never cross this boundary. */
+  interface NimbusSetupInterval {
+    line: string;
+    scope?: string;
+    predecessorOrderId?: string | null;
+    successorOrderId?: string;
+    start: Date;
+    end: Date;
+    requiredMinutes: number;
+    availableMinutes?: number;
+  }
+
+  interface NimbusSetupDiagnostic {
+    type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+    line: string;
+    scope?: string;
+    pairKey?: string;
+    predecessorOrderId?: string | null;
+    successorOrderId?: string;
+    time?: Date;
+    message?: string;
+  }
+
+  interface NimbusSetupObservation {
+    intervals: NimbusSetupInterval[];
+    diagnostics: NimbusSetupDiagnostic[];
+  }
+
   interface ComputeAlertsPayload {
     tasks: NimbusTask[];
     blocks: NimbusBlock[];
@@ -112,6 +144,7 @@ declare global {
     masterData: NimbusMasterData;
     dismissed: string[];
     opts?: { lines?: string[] | null };
+    setup?: NimbusSetupObservation;
   }
 
   interface ComputeUtilizationPayload {
@@ -125,6 +158,7 @@ declare global {
     startMs: number;
     days: number;
     lines?: string[];
+    setup?: NimbusSetupObservation;
   }
 
   interface NimbusComputeCoreApi {
@@ -143,6 +177,7 @@ declare global {
     startOfDay(d: unknown): Date | null;
     runHours(task: NimbusTask): number;
     scheduleIntervals(task: NimbusTask): Array<{ sequence: number; start: Date; end: Date }>;
+    setupIntervals(setup?: NimbusSetupObservation): NimbusSetupInterval[];
     mergedOverlapHours(win: [Date | number, Date | number] | null, intervals: Array<{ s: Date | number; e: Date | number }>): number;
     fmtDTReadable(d: unknown): string;
     toLocalSeconds(d: unknown): string;
