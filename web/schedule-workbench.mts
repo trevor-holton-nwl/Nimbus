@@ -616,8 +616,15 @@ export const Timeline = {
     };
   },
 
+  // Same availability context Alerts._recomputeSync passes: without it,
+  // setupAvailabilityMinutes' no-context fallback measures from the
+  // predecessor's end, which is null for a line's first order and renders a
+  // false "setup-conflict" on every line's first setup with no alert to match.
   _setupObservation(tasks: ReadonlyArray<NimbusTask>): SetupObservation {
-    return deriveSetupObservation(Store.setupSnapshot, tasks);
+    return deriveSetupObservation(Store.setupSnapshot, tasks, undefined, {
+      calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+      masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+    });
   },
 
   /** Render Task 4's immutable setup facts only. This code never calls Engine

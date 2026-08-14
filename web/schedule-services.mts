@@ -1218,7 +1218,16 @@ export const Compute = (() => {
   function _snap(): WorkerSnapshotBase {
     const plant = Store.selectedPlant;
     if (!plant) {
-      const tasks = Store.tasksArr.map(_stripPriorityFields);
+      // Setup state must be resolved from the un-stripped source: stateForOrder
+      // reads PRT_01/PRT_02/PRODUCTION_VERSION, and _stripPriorityFields deletes
+      // exactly those before transport. Deriving from the stripped copy would
+      // silently blank every state for any definition using those fields.
+      const src = Store.tasksArr;
+      const setup = deriveSetupObservation(Store.setupSnapshot, src, undefined, {
+        calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
+        masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
+      });
+      const tasks = src.map(_stripPriorityFields);
       // No plant selected — nothing is rendered; fall back to the global snapshot.
       return {
         tasks,
@@ -1228,10 +1237,7 @@ export const Compute = (() => {
         plants:       Store._state.plants,
         lineSettings: Store._state.lineSettings,
         masterData:   Store._state.masterData,
-        setup:        deriveSetupObservation(Store.setupSnapshot, tasks, undefined, {
-          calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
-          masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
-        }),
+        setup,
       };
     }
     // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
@@ -1247,7 +1253,16 @@ export const Compute = (() => {
       for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
       return out;
     };
-    const tasks = Store.tasksByPlant(plant).map(_stripPriorityFields);
+    // Same rule as the no-plant branch above: derive from the un-stripped
+    // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
+    const src = Store.tasksByPlant(plant);
+    const setup = deriveSetupObservation(Store.setupSnapshot, src, lines, {
+      calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+      lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
+      blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
+      plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+    });
+    const tasks = src.map(_stripPriorityFields);
     return {
       tasks,
       blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
@@ -1256,12 +1271,7 @@ export const Compute = (() => {
       plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
       lineSettings: pick(Store._state.lineSettings),
       masterData:   Store._state.masterData,
-      setup:        deriveSetupObservation(Store.setupSnapshot, tasks, lines, {
-        calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-        lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
-        blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-        plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-      }),
+      setup,
     };
   }
 
@@ -3074,7 +3084,14 @@ export const Engine = {
           const requiredSetupMinutes = setupMinutes(predecessor, p);
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) break;
+          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
+            // Fixed or aged orders don't move — if there's a conflict, an alert
+            // will fire — but later unfixed peers must still be de-overlapped,
+            // and the immovable order becomes the setup predecessor they pay for.
+            cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+            predecessor = p;
+            continue;
+          }
           const placement = Calendar.placeWithSetup(line, {
             earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
             setup: { kind: 'resolved', minutes: requiredSetupMinutes },
@@ -3112,14 +3129,23 @@ export const Engine = {
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
       if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
-        // Fixed or aged orders don't move — if there's a conflict, an alert will fire.
-        break;
+        // Fixed or aged orders don't move — if there's a conflict, an alert
+        // will fire — but later unfixed peers must still be de-overlapped, and
+        // the immovable order becomes the setup predecessor they pay for.
+        cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+        predecessor = p;
+        continue;
       }
       const placement = Calendar.placeWithSetup(line, {
         earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
         setup: { kind: 'resolved', minutes: requiredSetupMinutes },
       });
-      if (placement.kind !== 'placed' || !placement.productiveSegments.length) break;
+      if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
+        ErrorLog.warn('engine',
+          `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
+          { line, taskId: p.id, policy: splitPolicy });
+        break;
+      }
       const changes: Partial<NimbusTask> = {
         start_date: placement.productiveSegments[0].start,
         end_date: placement.productiveSegments.at(-1)!.end,
