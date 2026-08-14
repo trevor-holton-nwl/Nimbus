@@ -1034,3 +1034,15 @@ entry only — see the spec for the full architecture.
 - **Future (not yet planned):** swap cursor polling for an SSE transport if proxy constraints ease
   (today all users sit behind a corp proxy that mangles streaming responses — memory:
   nimbus-deploy-verify-http-cache); soft per-line claims if collision friction remains after Phase 3.
+# Setup policy activation and rollback
+
+Stage 2 setup policies are stored per plant in `plants.setup_policy_config` and
+default to disabled. Do not enable Due-date first, Min Changeover, or Throughput
+until a safe-local database migration has been verified, null-predecessor
+override persistence is fixed, representative-plant performance/browser UAT is
+recorded, and scheduling owners approve the configured savings/slip limits.
+
+To roll back, set all three `*Enabled` fields to `false` through the
+plant-scoped setup policy endpoint. This prevents new setup-aware policy runs;
+it intentionally does not alter existing orders, derived setup bars, setup
+truth, diagnostics, or alerts.
