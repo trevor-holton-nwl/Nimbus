@@ -1129,6 +1129,8 @@ def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason
                     "setup_compatibility_reason": None if compatible else reason}), user_email),
         )
         conn.commit()
+    return {"plant": plant, "line": line, "setup_compatible": compatible,
+            "setup_compatibility_reason": None if compatible else reason}
 
 
 def _normalize_setup_policy_config(config: dict | None) -> dict:
@@ -1205,8 +1207,6 @@ def set_setup_policy_config(plant: str, config: dict, expected_version: int,
         )
         conn.commit()
     return {'plant': plant, **clean}
-    return {"plant": plant, "line": line, "setup_compatible": compatible,
-            "setup_compatibility_reason": None if compatible else reason}
 
 
 def get_setup_line_compatibility(plant: str, line: str) -> dict:
