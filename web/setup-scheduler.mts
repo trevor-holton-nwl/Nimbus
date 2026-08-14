@@ -2117,33 +2117,38 @@ function boundaryOverrideLocks(
   return locks;
 }
 
+interface OutOfHorizonFixedOverrideAudit {
+  protectedEdges: MissingSetupEdge[];
+  inactiveEdges: MissingSetupEdge[];
+}
+
 /** A hard candidate horizon may omit ordinary future fixed production, but it
- * cannot erase an active exact relation to that production. If either side of
- * a valid override is a strictly post-horizon fixed order, no detached plan
- * can preserve the pair without scheduling through the caller's bound. Fail
- * closed for the line and report the constraint without mislabeling a valid
- * binding as inactive. */
-function protectedOutOfHorizonFixedOverrideEdges(
+ * cannot erase an active exact relation to that production. A valid matching
+ * pair must fail closed because the detached plan cannot preserve it without
+ * scheduling through the caller's bound. A stale or missing pair is instead
+ * retained as an inactive diagnostic, never silently dropped or protected. */
+function auditOutOfHorizonFixedOverrides(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   initialState: SetupStateKey,
   initial: Readonly<LineInitialContext>,
-): MissingSetupEdge[] {
+): OutOfHorizonFixedOverrideAudit {
   const definition = bounds.setup.definition!;
   const tasksById = new Map(initial.allTasks.map(task => [taskId(task), task]));
   const postHorizonFixedIds = new Set(initial.allTasks.flatMap(task => {
     const start = timestamp(task.start_date);
     return taskIsFixed(snapshot, task) && start && start > bounds.horizonEnd ? [taskId(task)] : [];
   }));
-  if (!postHorizonFixedIds.size) return [];
+  if (!postHorizonFixedIds.size) return { protectedEdges: [], inactiveEdges: [] };
 
   const stateForEndpoint = (orderId: string | null): SetupStateKey | null => {
     if (orderId === null) return initial.predecessorOrderId === null ? initialState : null;
     const task = tasksById.get(orderId);
     return task ? stateForOrder(task, definition) : null;
   };
-  const edges: MissingSetupEdge[] = [];
+  const protectedEdges: MissingSetupEdge[] = [];
+  const inactiveEdges: MissingSetupEdge[] = [];
   for (const override of bounds.setup.overrides) {
     if (override.status !== 'active'
       || override.line !== line
@@ -2163,20 +2168,24 @@ function protectedOutOfHorizonFixedOverrideEdges(
     if (!predecessorState || !successorState
       || stateKey(predecessorState) !== stateKey(override.predecessor_state_key)
       || stateKey(successorState) !== stateKey(override.successor_state_key)) {
+      inactiveEdges.push(inactiveOverrideEdge(line, predecessorOrderId, successorOrderId));
       continue;
     }
-    edges.push({
+    protectedEdges.push({
       line,
       predecessorOrderId,
       successorOrderId,
       reason: PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
     });
   }
-  return uniqueMissingEdges(edges).sort((left, right) => (
-    [left.predecessorOrderId ?? '', left.successorOrderId ?? ''].join('\u0000').localeCompare(
-      [right.predecessorOrderId ?? '', right.successorOrderId ?? ''].join('\u0000'),
-    )
-  ));
+  const sortEdges = (edges: ReadonlyArray<MissingSetupEdge>): MissingSetupEdge[] => (
+    uniqueMissingEdges(edges).sort((left, right) => (
+      [left.predecessorOrderId ?? '', left.successorOrderId ?? ''].join('\u0000').localeCompare(
+        [right.predecessorOrderId ?? '', right.successorOrderId ?? ''].join('\u0000'),
+      )
+    ))
+  );
+  return { protectedEdges: sortEdges(protectedEdges), inactiveEdges: sortEdges(inactiveEdges) };
 }
 
 function protectedOutOfHorizonFixedBoundaryReasons(
@@ -2186,6 +2195,18 @@ function protectedOutOfHorizonFixedBoundaryReasons(
   return edges.map(edge => ({
     code: PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
     message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} crosses a fixed boundary outside the caller horizon.`,
+    line,
+    taskId: edge.successorOrderId ?? undefined,
+  }));
+}
+
+function inactiveOutOfHorizonFixedOverrideReasons(
+  line: string,
+  edges: ReadonlyArray<MissingSetupEdge>,
+): CandidateReason[] {
+  return edges.map(edge => ({
+    code: 'override-inactive',
+    message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} no longer matches a fixed boundary outside the caller horizon.`,
     line,
     taskId: edge.successorOrderId ?? undefined,
   }));
@@ -2218,12 +2239,16 @@ function supportsBoundaryFallback(run: Readonly<SearchRun>): boolean {
   ));
 }
 
-/** Build bounded whole-component alternatives for a failed pre-fixed search.
- * Due-date-first considers every removable single component as well as the
- * established cumulative suffixes, then lets its normal fragment search score
- * each retained set. SPT keeps only its pure-order suffix behavior; it must
- * not use setup coverage to select a different productive-time ordering. */
-function boundaryFallbackOptions(
+interface BoundaryFallbackComponentPlan {
+  components: string[][];
+  removable: boolean[];
+}
+
+/** Resolve the deterministic ordered free components eligible for a local
+ * fixed-boundary fallback. A component is atomic: active free/free overrides
+ * may never be split across a boundary, and required boundary endpoints can
+ * never be deferred. */
+function boundaryFallbackComponentPlan(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
@@ -2231,21 +2256,19 @@ function boundaryFallbackOptions(
   fragment: Readonly<FragmentContext>,
   freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
   mode: FragmentMode,
-): BoundaryFallbackOption[] {
-  if (!fragment.nextFixed || !admitted.length) return [];
+): BoundaryFallbackComponentPlan | null {
+  if (!fragment.nextFixed || !admitted.length) return null;
   const baseOrder = mode === 'spt'
     ? orderedByProductiveRuntime(admitted)
     : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted);
   const adjacency = fragmentAdjacency(bounds, line, admitted, fragment);
   const sequence = orderWithAdjacency(baseOrder, fragment, adjacency);
-  if (!sequence) return [];
+  if (!sequence) return null;
   const admittedIds = new Set(admitted.map(taskId));
   const protectedIds = new Set([
     fragment.requiredFirstOrderId,
     fragment.requiredLastOrderId,
   ].filter((id): id is string => Boolean(id)));
-  const options: BoundaryFallbackOption[] = [];
-  const seenOptionKeys = new Set<string>();
   const seenComponents = new Set<string>();
   const components: string[][] = [];
 
@@ -2259,36 +2282,127 @@ function boundaryFallbackOptions(
     components.push(members);
   }
 
-  const removable = (members: ReadonlyArray<string>): boolean => (
-    members.every(member => admittedIds.has(member) && !protectedIds.has(member))
-  );
-  const addOption = (deferredIds: ReadonlySet<string>): void => {
-    if (!deferredIds.size) return;
-    const key = [...deferredIds].sort().join('\u0000');
-    if (seenOptionKeys.has(key)) return;
-    seenOptionKeys.add(key);
-    const retained = admitted.filter(task => !deferredIds.has(taskId(task)));
-    const deferred = admitted.filter(task => deferredIds.has(taskId(task)));
-    if (deferred.length) options.push({ retained, deferred });
+  return {
+    components,
+    removable: components.map(members => (
+      members.every(member => admittedIds.has(member) && !protectedIds.has(member))
+    )),
   };
+}
 
-  if (mode === 'due-date-first') {
-    for (const members of components) {
-      if (removable(members)) addOption(new Set(members));
-    }
-  }
+function fallbackOptionForDeferredIds(
+  admitted: ReadonlyArray<NimbusTask>,
+  deferredIds: ReadonlySet<string>,
+): BoundaryFallbackOption | null {
+  if (!deferredIds.size) return null;
+  const retained = admitted.filter(task => !deferredIds.has(taskId(task)));
+  const deferred = admitted.filter(task => deferredIds.has(taskId(task)));
+  return deferred.length ? { retained, deferred } : null;
+}
+
+/** Pure SPT remains limited to its established deterministic suffix fallback:
+ * productive runtime selected the sequence, so setup coverage cannot introduce
+ * a hidden alternate-order objective. */
+function sptBoundaryFallbackOptions(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  admitted: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
+): BoundaryFallbackOption[] {
+  const plan = boundaryFallbackComponentPlan(
+    snapshot, bounds, line, admitted, fragment, freeComponents, 'spt',
+  );
+  if (!plan) return [];
+  const options: BoundaryFallbackOption[] = [];
 
   const suffixDeferredIds = new Set<string>();
-  for (let index = components.length - 1; index >= 0; index -= 1) {
-    const members = components[index];
+  for (let index = plan.components.length - 1; index >= 0; index -= 1) {
+    const members = plan.components[index];
     // A component that already straddles a boundary or contains a required
-    // endpoint cannot participate in a cumulative suffix. Single-component
-    // due-date alternatives above may still safely defer unrelated work.
-    if (!removable(members)) break;
+    // endpoint cannot participate in a cumulative suffix.
+    if (!plan.removable[index]) break;
     for (const member of members) suffixDeferredIds.add(member);
-    addOption(suffixDeferredIds);
+    const option = fallbackOptionForDeferredIds(admitted, suffixDeferredIds);
+    if (option) options.push(option);
   }
   return options;
+}
+
+interface BoundaryFallbackCursor {
+  next(): BoundaryFallbackOption | null;
+  readonly termination: SearchRun['termination'];
+}
+
+/** Enumerate every non-empty subset of removable Due-date-first components
+ * lazily in deterministic cardinality/sequence order. One unit of the shared
+ * search budget is charged before each subset, so an exponential combination
+ * space cannot escape the caller's existing cap or deadline. */
+function dueDateBoundaryFallbackCursor(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  admitted: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
+  budget: SearchBudget,
+): BoundaryFallbackCursor {
+  const plan = boundaryFallbackComponentPlan(
+    snapshot, bounds, line, admitted, fragment, freeComponents, 'due-date-first',
+  );
+  const removableComponents = plan
+    ? plan.components.filter((_, index) => plan.removable[index])
+    : [];
+  let subsetSize = removableComponents.length ? 1 : 0;
+  let subsetIndexes = subsetSize ? [0] : [];
+  let exhausted = !subsetSize;
+  let termination: SearchRun['termination'] = 'completed';
+
+  const advance = (): void => {
+    for (let index = subsetIndexes.length - 1; index >= 0; index -= 1) {
+      const maxIndex = removableComponents.length - subsetIndexes.length + index;
+      if (subsetIndexes[index] < maxIndex) {
+        subsetIndexes[index] += 1;
+        for (let trailing = index + 1; trailing < subsetIndexes.length; trailing += 1) {
+          subsetIndexes[trailing] = subsetIndexes[trailing - 1] + 1;
+        }
+        return;
+      }
+    }
+    subsetSize += 1;
+    if (subsetSize > removableComponents.length) {
+      exhausted = true;
+      return;
+    }
+    subsetIndexes = Array.from({ length: subsetSize }, (_, index) => index);
+  };
+
+  return {
+    get termination(): SearchRun['termination'] {
+      return termination;
+    },
+    next(): BoundaryFallbackOption | null {
+      if (exhausted) return null;
+      if (bounds.clock() >= bounds.deadline) {
+        termination = 'deadline';
+        exhausted = true;
+        return null;
+      }
+      if (budget.remainingIterations <= 0) {
+        termination = 'iteration-cap';
+        exhausted = true;
+        return null;
+      }
+      budget.remainingIterations -= 1;
+      const deferredIds = new Set<string>();
+      for (const index of subsetIndexes) {
+        for (const id of removableComponents[index]) deferredIds.add(id);
+      }
+      advance();
+      return fallbackOptionForDeferredIds(admitted, deferredIds);
+    },
+  };
 }
 
 interface EvaluatedBoundaryFallback {
@@ -2362,28 +2476,34 @@ function evaluateLineWithFixedBoundaries(
   const initialEdges = initial.preservedAnchor ? [unknownInitialStateEdge(line, initial.preservedAnchor.task)] : [];
   const initialReasons = initial.preservedAnchor ? [unknownInitialStateReason(line, initial.preservedAnchor.task)] : [];
   const preservedAnchorEdges = preservedAnchorOverrideEdges(bounds, line, initial.preservedAnchor);
-  const baseMissingEdges = [
+  const ordinaryBaseMissingEdges = [
     ...initialEdges,
     ...missingSuccessorEdges,
     ...missingPredecessorEdges,
     ...preservedAnchorEdges,
   ];
+  const postHorizonOverrideAudit = auditOutOfHorizonFixedOverrides(
+    snapshot, bounds, line, initialState, initial,
+  );
+  const ordinaryEdgeKeys = new Set(ordinaryBaseMissingEdges.map(missingEdgeKey));
+  const additionalInactivePostHorizonEdges = postHorizonOverrideAudit.inactiveEdges.filter(edge => (
+    !ordinaryEdgeKeys.has(missingEdgeKey(edge))
+  ));
+  const baseMissingEdges = [...ordinaryBaseMissingEdges, ...additionalInactivePostHorizonEdges];
   const baseExplanation = [
     ...initialReasons,
     ...missingSuccessorOverrideReasons(line, missingSuccessorEdges),
     ...missingPredecessorOverrideReasons(line, missingPredecessorEdges),
     ...missingPredecessorOverrideReasons(line, preservedAnchorEdges),
+    ...inactiveOutOfHorizonFixedOverrideReasons(line, additionalInactivePostHorizonEdges),
   ];
-  const postHorizonProtectedEdges = protectedOutOfHorizonFixedOverrideEdges(
-    snapshot, bounds, line, initialState, initial,
-  );
-  if (postHorizonProtectedEdges.length) {
+  if (postHorizonOverrideAudit.protectedEdges.length) {
     return unchangedLineResult(
       line,
       PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
       'An active fixed-boundary override cannot be preserved inside the caller scheduling horizon.',
-      [...baseMissingEdges, ...postHorizonProtectedEdges],
-      [...baseExplanation, ...protectedOutOfHorizonFixedBoundaryReasons(line, postHorizonProtectedEdges)],
+      [...baseMissingEdges, ...postHorizonOverrideAudit.protectedEdges],
+      [...baseExplanation, ...protectedOutOfHorizonFixedBoundaryReasons(line, postHorizonOverrideAudit.protectedEdges)],
     );
   }
   const fixed: FixedBoundary[] = [];
@@ -2618,11 +2738,13 @@ function evaluateLineWithFixedBoundaries(
     const fallbackRuns: SearchRun[] = [];
     const continuationRuns: SearchRun[] = [];
     if (!winner && run.termination === 'completed' && supportsBoundaryFallback(run)) {
-      const fallbackOptions = boundaryFallbackOptions(snapshot, bounds, line, admitted, fragment, freeComponents, mode);
       if (mode === 'spt') {
         // SPT retains its established deterministic suffix fallback: productive
         // runtime selected this order already, so coverage must not become a
         // hidden alternate-order comparator.
+        const fallbackOptions = sptBoundaryFallbackOptions(
+          snapshot, bounds, line, admitted, fragment, freeComponents,
+        );
         for (const option of fallbackOptions) {
           const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
           fallbackRuns.push(fallbackRun);
@@ -2646,8 +2768,11 @@ function evaluateLineWithFixedBoundaries(
         // changing planner architecture: each option is extended through the
         // one remaining free fragment, yielding a complete candidate.
         const completeFallbacks: EvaluatedBoundaryFallback[] = [];
+        const fallbackCursor = dueDateBoundaryFallbackCursor(
+          snapshot, bounds, line, admitted, fragment, freeComponents, budget,
+        );
         let completeEnumeration = true;
-        for (const option of fallbackOptions) {
+        for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
           const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
@@ -2684,6 +2809,10 @@ function evaluateLineWithFixedBoundaries(
               snapshot, bounds, line, freeById, fallbackRun.winner, continuation.winner,
             ),
           });
+        }
+        if (fallbackCursor.termination !== 'completed') {
+          completeEnumeration = false;
+          termination = fallbackCursor.termination;
         }
         if (!completeEnumeration) {
           missingEdges.push(
@@ -2731,8 +2860,11 @@ function evaluateLineWithFixedBoundaries(
         // there is more than one (or the shared budget stops enumeration), fail
         // closed instead of inventing a local admission-first objective.
         const feasibleFallbacks: EvaluatedBoundaryFallback[] = [];
+        const fallbackCursor = dueDateBoundaryFallbackCursor(
+          snapshot, bounds, line, admitted, fragment, freeComponents, budget,
+        );
         let completeEnumeration = true;
-        for (const option of fallbackOptions) {
+        for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
           const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
@@ -2744,6 +2876,10 @@ function evaluateLineWithFixedBoundaries(
             completeEnumeration = false;
             break;
           }
+        }
+        if (fallbackCursor.termination !== 'completed') {
+          completeEnumeration = false;
+          termination = fallbackCursor.termination;
         }
         if (!completeEnumeration || feasibleFallbacks.length > 1) {
           missingEdges.push(...run.missingEdges, ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges));

@@ -2024,6 +2024,35 @@ test('due-date final-boundary fallback compares complete candidates before local
   assert.deepEqual(result.unchangedLines, []);
 });
 
+test('due-date final-boundary fallback considers non-contiguous component deferrals', () => {
+  // This fails when the fallback considers only singleton and suffix
+  // deferrals. Only BLUE can reach fixed YELLOW, while RED and ORANGE must
+  // wait together after it; retaining BLUE avoids one otherwise late order.
+  const red = scheduledTask('non-contiguous-fallback-red', 0.5, 'RED', '2026-08-03T08:30:00');
+  const blue = scheduledTask('non-contiguous-fallback-blue', 0.5, 'BLUE', '2026-08-03T09:30:00');
+  const orange = scheduledTask('non-contiguous-fallback-orange', 0.5, 'ORANGE', '2026-08-03T09:45:00');
+  const fixedYellow = scheduledTask(
+    'non-contiguous-fallback-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0), setupRow('GREEN', 'YELLOW', 0),
+    setupRow('YELLOW', 'RED', 0), setupRow('RED', 'ORANGE', 0), setupRow('ORANGE', 'BLUE', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([red, fixedYellow, blue, orange], { fixedIds: ['non-contiguous-fallback-fixed-yellow'] }),
+    dueDateBounds(setup, { iterationCap: 512 }),
+  );
+
+  assert.equal(patchFor(result, 'non-contiguous-fallback-fixed-yellow'), undefined, 'fixed YELLOW remains immutable');
+  assert.equal(patchFor(result, 'non-contiguous-fallback-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'BLUE remains before fixed YELLOW while the non-contiguous RED/ORANGE pair defers');
+  assert.equal(patchFor(result, 'non-contiguous-fallback-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.equal(patchFor(result, 'non-contiguous-fallback-orange').changes.start_date.getTime(), at('2026-08-03T11:30:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
 test('due-date earlier fixed-boundary fallback fails closed when multiple local routes are feasible', () => {
   // Each one-order prefix can enter the first fixed YELLOW run, but later
   // fixed boundaries make it unsafe to rank those local prefixes without a
@@ -2184,6 +2213,77 @@ test('setup-aware evaluators preserve active relations crossing a strictly post-
         && edge.successorOrderId === fixture.successorOrderId
         && edge.reason === 'override-inactive'
       )), false, `${mode} does not mislabel the valid protected pair inactive`);
+    }
+  }
+});
+
+test('setup-aware evaluators diagnose stale post-horizon override bindings as inactive', () => {
+  // These bindings name a fixed order beyond the detached horizon, but no
+  // longer describe its real physical relation. They must remain visible as
+  // inactive diagnostics rather than being mistaken for protected work.
+  const cases = [
+    {
+      label: 'state-mismatched fixed endpoint',
+      predecessorOrderId: 'post-horizon-stale-blue',
+      successorOrderId: 'post-horizon-stale-fixed-yellow',
+      predecessorState: 'BLUE',
+      successorState: 'PURPLE',
+      tasks: [
+        scheduledTask('post-horizon-stale-blue', 0.5, 'BLUE', '2026-08-03T08:30:00'),
+        scheduledTask(
+          'post-horizon-stale-fixed-yellow', 1, 'YELLOW', '2026-08-03T13:00:00',
+          '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+        ),
+      ],
+      fixedId: 'post-horizon-stale-fixed-yellow',
+    },
+    {
+      label: 'missing counterpart',
+      predecessorOrderId: 'post-horizon-missing-fixed-yellow',
+      successorOrderId: 'post-horizon-missing-deleted-red',
+      predecessorState: 'YELLOW',
+      successorState: 'RED',
+      tasks: [
+        scheduledTask('post-horizon-missing-blue', 0.5, 'BLUE', '2026-08-03T08:30:00'),
+        scheduledTask(
+          'post-horizon-missing-fixed-yellow', 1, 'YELLOW', '2026-08-03T13:00:00',
+          '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+        ),
+      ],
+      fixedId: 'post-horizon-missing-fixed-yellow',
+    },
+  ];
+
+  for (const fixture of cases) {
+    const setup = setupTruth({
+      rows: [setupRow('GREEN', 'BLUE', 0)],
+      overrides: [{
+        id: `post-horizon-stale-${fixture.label}`, line: 'L1', signature_version: 1,
+        predecessor_order_id: fixture.predecessorOrderId, successor_order_id: fixture.successorOrderId,
+        predecessor_state_key: setupState(fixture.predecessorState), successor_state_key: setupState(fixture.successorState),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'stale post-horizon fixture',
+      }],
+    });
+    for (const [mode, evaluate] of [
+      ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+      ['SPT', SetupScheduler.evaluateSptWithSetup],
+    ]) {
+      const result = evaluate(
+        setupSnapshot(fixture.tasks, { fixedIds: [fixture.fixedId] }),
+        dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
+      );
+
+      assert.deepEqual(result.unchangedLines, [], `${mode} keeps unrelated mutable work eligible for ${fixture.label}`);
+      assert.ok(result.missingEdges.some(edge => (
+        edge.predecessorOrderId === fixture.predecessorOrderId
+        && edge.successorOrderId === fixture.successorOrderId
+        && edge.reason === 'override-inactive'
+      )), `${mode} exposes ${fixture.label} as an inactive override`);
+      assert.equal(result.missingEdges.some(edge => (
+        edge.predecessorOrderId === fixture.predecessorOrderId
+        && edge.successorOrderId === fixture.successorOrderId
+        && edge.reason === 'protected-fixed-boundary-outside-horizon'
+      )), false, `${mode} does not protect a stale ${fixture.label} binding`);
     }
   }
 });
