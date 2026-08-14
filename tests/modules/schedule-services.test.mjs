@@ -287,6 +287,37 @@ test('Engine.evaluateSetupAware forwards only an explicit detached setup request
   assert.equal(Store.rev(), beforeRev, 'explicit setup candidate routing must not publish to Store');
 });
 
+test('Engine.evaluateSetupAware refuses candidates when setup activation is disabled', () => {
+  // This fails if a false activation flag can still reach either setup-aware
+  // evaluator and produce patches from observation-only setup data.
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const snapshot = {
+    tasks: [{
+      id: 'disabled-setup-blue', PLANT: 'DISABLED_SETUP', PRODUCTION_LINE: 'L1', COLOR: 'BLUE', RUN_TIME: 1,
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-03T10:00:00'),
+    }],
+    fixedIds: [], alerts: [], selectedPlant: 'DISABLED_SETUP', blocks: [], plantBlocks: [],
+    calendars: { L1: { workHours: hours } }, plants: { DISABLED_SETUP: { workHours: hours } },
+    lineSettings: {}, masterData: { plants: [{ plant: 'DISABLED_SETUP' }], lines: [{ plant: 'DISABLED_SETUP', production_line: 'L1' }] },
+    priorityRankMaps: {},
+  };
+  const bounds = {
+    setup: {
+      plant: 'DISABLED_SETUP',
+      definition: { plant: 'DISABLED_SETUP', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: false },
+      plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+      line_rows: [],
+      line_states: [{ line: 'L1', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+      overrides: [],
+    },
+    exactSearchThreshold: 2, iterationCap: 2, clock: () => 0, deadline: 1,
+    now: new Date('2026-08-03T08:00:00'), horizonEnd: new Date('2026-08-03T18:00:00'),
+  };
+
+  assert.throws(() => Engine.evaluateSetupAware('due-date-first', bounds, snapshot), /disabled/i);
+});
+
 test('deriveSetupObservation resolves one scoped override interval without invoking Engine', () => {
   // This fails if the worker-facing setup observation is unavailable, resolves
   // an override as its matrix standard, or routes through Engine.
@@ -516,6 +547,34 @@ test('deriveSetupObservation intersects line and plant hours when measuring setu
   });
 
   assert.equal(observation.intervals[0].availableMinutes, 0);
+});
+
+test('deriveSetupObservation uses the setup snapshot plant for a reused line capacity window', () => {
+  // This fails if a same-named line's first master-data/line-settings plant
+  // overrides the explicit setup snapshot plant while measuring capacity.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const lineHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-SNAPSHOT',
+    definition: { plant: 'P-SNAPSHOT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'REUSED-LINE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }], overrides: [],
+  }, [{
+    id: 'snapshot-successor', PLANT: 'P-SNAPSHOT', PRODUCTION_LINE: 'REUSED-LINE', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00'),
+  }], undefined, {
+    calendars: { 'REUSED-LINE': { workHours: lineHours } },
+    plants: {
+      'P-SNAPSHOT': { workHours: Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [9, 10]])) },
+      'P-OTHER': { workHours: lineHours },
+    },
+    lineSettings: { 'REUSED-LINE': { plant: 'P-OTHER' } },
+    masterData: { lines: [{ production_line: 'REUSED-LINE', plant: 'P-OTHER' }, { production_line: 'REUSED-LINE', plant: 'P-SNAPSHOT' }] },
+    blocks: [], plantBlocks: [],
+  });
+
+  assert.equal(observation.intervals[0].availableMinutes, 60);
 });
 
 test('deriveSetupObservation uses the core default line calendar when its record is absent', () => {

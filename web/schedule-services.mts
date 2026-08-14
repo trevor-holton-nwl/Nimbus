@@ -262,9 +262,9 @@ function setupAvailabilityMinutes(
   fallbackStart: Date | null,
 ): number {
   if (!context) return fallbackStart ? Math.max(0, (end.getTime() - fallbackStart.getTime()) / (60 * 1000)) : 0;
-  const mappedPlant = context.lineSettings[line]?.plant
-    ?? context.masterData?.lines?.find(row => row.production_line === line)?.plant
-    ?? plant;
+  // Setup observations are already scoped by the setup snapshot plant. A line
+  // code may be reused at another plant, so master-data lookup is unsafe here.
+  const mappedPlant = plant;
   const probe = new Date(end.getTime() - 1);
   const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
   const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, probe);
@@ -1771,6 +1771,9 @@ export const Engine = {
     bounds: Readonly<DueDateFirstBounds>,
     snapshot: ScheduleSnapshot = snapshotSchedule(),
   ): CandidateResult {
+    if (!bounds.setup.definition?.active) {
+      throw new Error('Setup-aware evaluation is disabled for this plant');
+    }
     return mode === 'due-date-first'
       ? evaluateDueDateFirstPure(snapshot, bounds)
       : evaluateSptWithSetupPure(snapshot, bounds);
