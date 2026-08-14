@@ -406,6 +406,52 @@ test('deriveSetupObservation intersects line and plant hours when measuring setu
   assert.equal(observation.intervals[0].availableMinutes, 0);
 });
 
+test('deriveSetupObservation uses the core default line calendar when its record is absent', () => {
+  // Core capacity supplies the standard 07:00â€“19:00 weekday line calendar for
+  // an absent entry, then intersects it with the stored plant window.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const plantHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 16]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-DEFAULT-LINE',
+    definition: { plant: 'P-DEFAULT-LINE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'L-DEFAULT-LINE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }], overrides: [],
+  }, [{
+    id: 'default-line-successor', PLANT: 'P-DEFAULT-LINE', PRODUCTION_LINE: 'L-DEFAULT-LINE', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00'),
+  }], undefined, {
+    calendars: {}, plants: { 'P-DEFAULT-LINE': { workHours: plantHours } },
+    lineSettings: { 'L-DEFAULT-LINE': { plant: 'P-DEFAULT-LINE' } }, masterData: { lines: [{ production_line: 'L-DEFAULT-LINE', plant: 'P-DEFAULT-LINE' }] },
+    blocks: [], plantBlocks: [],
+  });
+
+  assert.equal(observation.intervals[0].availableMinutes, 120);
+});
+
+test('deriveSetupObservation uses the core default plant calendar when its record is absent', () => {
+  // Core capacity supplies the standard 07:00â€“19:00 weekday plant calendar for
+  // an absent entry, then intersects it with the stored line window.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const lineHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-DEFAULT-PLANT',
+    definition: { plant: 'P-DEFAULT-PLANT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'L-DEFAULT-PLANT', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }], overrides: [],
+  }, [{
+    id: 'default-plant-successor', PLANT: 'P-DEFAULT-PLANT', PRODUCTION_LINE: 'L-DEFAULT-PLANT', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00'),
+  }], undefined, {
+    calendars: { 'L-DEFAULT-PLANT': { workHours: lineHours } }, plants: {},
+    lineSettings: { 'L-DEFAULT-PLANT': { plant: 'P-DEFAULT-PLANT' } }, masterData: { lines: [{ production_line: 'L-DEFAULT-PLANT', plant: 'P-DEFAULT-PLANT' }] },
+    blocks: [], plantBlocks: [],
+  });
+
+  assert.equal(observation.intervals[0].availableMinutes, 120);
+});
+
 test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([

@@ -242,6 +242,16 @@ function observedAt(value: unknown): Date | null {
   return date && Number.isFinite(date.getTime()) ? date : null;
 }
 
+/** Match the core's ensureCalendar/ensurePlant fallback without mutating Store-owned maps. */
+function setupDefaultWorkHours(): WorkHours {
+  const core = globalThis.NimbusComputeCore!;
+  const workHours: WorkHours = {};
+  for (let day = 0; day < 7; day++) {
+    workHours[day] = core.WEEKEND_OFF && (day === 0 || day === 6) ? null : [...core.DEFAULT_SHIFT];
+  }
+  return workHours;
+}
+
 function setupAvailabilityMinutes(
   context: SetupAvailabilityContext | undefined,
   line: string,
@@ -256,11 +266,11 @@ function setupAvailabilityMinutes(
     ?? context.masterData?.lines?.find(row => row.production_line === line)?.plant
     ?? plant;
   const probe = new Date(end.getTime() - 1);
-  const lineHours = context.calendars[line]?.workHours;
-  const lineWindow = lineHours ? globalThis.NimbusComputeCore!._dayWindow(lineHours, probe) : null;
+  const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
+  const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, probe);
   if (!lineWindow) return 0;
-  const plantHours = context.plants[mappedPlant]?.workHours;
-  const plantWindow = plantHours ? globalThis.NimbusComputeCore!._dayWindow(plantHours, probe) : null;
+  const plantHours = context.plants[mappedPlant]?.workHours ?? setupDefaultWorkHours();
+  const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, probe);
   if (!plantWindow) return 0;
   const window = [
     new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
