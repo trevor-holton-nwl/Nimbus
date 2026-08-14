@@ -301,7 +301,7 @@ const NIMBUS = (function () {
   window.t = (key, vars) => Util.t(key, vars);
   Util.setPreferenceResolver(key => Store.pref(key));
   Util.setActorResolver(() => Session.actor());
-  Util.setUtilizationResolver((from, days, tasks) => Utilization.computeMatrix(from, days, tasks));
+  Util.setUtilizationResolver((from, days, tasks, snapshot) => Utilization.computeMatrix(from, days, tasks, snapshot));
   // What counts as a changeover follows the plant's OWN active priority fields
   // (Stage 3), not a hardcoded COLOR/FORM_SIZE pair — so the Optimizer Preview's
   // changeover KPI measures the same thing Engine._sortTerms sequences on.

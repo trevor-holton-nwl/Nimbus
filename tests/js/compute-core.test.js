@@ -98,6 +98,78 @@ test('computeUtilization buckets scheduled hours onto the task line/day', () => 
   assert.ok(matrix.L[key].tasks.includes('x'));
 });
 
+test('computeUtilization counts supplied positive setup intervals without charging zero or missing setup', () => {
+  // This fails if setup capacity is ignored, if a zero setup is accidentally
+  // counted, or if the core tries to resolve matrix rows itself.
+  const day = new Date(2026, 6, 7);
+  const workHours = allDays([0, 24]);
+  const task = {
+    id: 'setup-successor', PRODUCTION_LINE: 'L-SETUP', RUN_TIME: 2,
+    start_date: new Date(2026, 6, 7, 10), end_date: new Date(2026, 6, 7, 12),
+  };
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: { 'L-SETUP': { plant: null } },
+    calendars: { 'L-SETUP': { workHours } }, plants: {}, blocks: [], plantBlocks: [], masterData: noPlant,
+    startMs: day.getTime(), days: 1,
+    setup: {
+      intervals: [
+        { line: 'L-SETUP', predecessorOrderId: 'previous', successorOrderId: 'setup-successor',
+          start: new Date(2026, 6, 7, 8), end: new Date(2026, 6, 7, 10), requiredMinutes: 120 },
+        { line: 'L-SETUP', predecessorOrderId: 'setup-successor', successorOrderId: 'zero',
+          start: new Date(2026, 6, 7, 12), end: new Date(2026, 6, 7, 12), requiredMinutes: 0 },
+      ],
+      diagnostics: [],
+    },
+  });
+
+  assert.equal(matrix['L-SETUP'][Core.dayKey(day)].scheduled, 4);
+  assert.deepEqual(matrix['L-SETUP'][Core.dayKey(day)].tasks, ['setup-successor']);
+});
+
+test('computeAlerts reports resolved setup violations and de-duplicates supplied state diagnostics by pair and scope', () => {
+  // This fails if computeAlerts re-resolves setup truth, omits the shortfall
+  // detail, or publishes the same uncovered pair twice.
+  const time = new Date(Date.now() + 24 * 3600000);
+  const workHours = allDays([0, 24]);
+  const { alerts } = Core.computeAlerts({
+    tasks: [], blocks: [], plantBlocks: [], calendars: { L: { workHours } }, plants: {},
+    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ production_line: 'L', plant: 'P' }] },
+    dismissed: [], opts: {},
+    setup: {
+      intervals: [{
+        line: 'L', predecessorOrderId: 'previous', successorOrderId: 'next', scope: 'P/L',
+        start: time, end: new Date(time.getTime() + 60 * 60000), requiredMinutes: 60, availableMinutes: 20,
+      }],
+      diagnostics: [
+        { type: 'setup-uncovered', line: 'L', scope: 'P/L', pairKey: 'RED->BLUE', successorOrderId: 'later-blue', time },
+        { type: 'setup-uncovered', line: 'L', scope: 'P/L', pairKey: 'RED->BLUE', time },
+        { type: 'initial-state-unknown', line: 'L', scope: 'P/L', successorOrderId: 'next', time },
+        { type: 'current-state-diverged', line: 'L', scope: 'P/L', successorOrderId: 'next', time },
+        { type: 'override-inactive', line: 'L', scope: 'P/L', successorOrderId: 'next', time },
+      ],
+    },
+  });
+
+  const violation = alerts.find(alert => alert.type === 'setup-violated');
+  assert.deepEqual(
+    { requiredMinutes: violation?.requiredMinutes, availableMinutes: violation?.availableMinutes, shortMinutes: violation?.shortMinutes },
+    { requiredMinutes: 60, availableMinutes: 20, shortMinutes: 40 },
+  );
+  assert.equal(alerts.filter(alert => alert.type === 'setup-uncovered').length, 1);
+  assert.deepEqual(alerts.filter(alert => alert.type !== 'setup-violated' && alert.type !== 'setup-uncovered').map(alert => alert.type).sort(), [
+    'current-state-diverged', 'initial-state-unknown', 'override-inactive',
+  ]);
+});
+
+test('computeAlerts ignores malformed setup diagnostics', () => {
+  // This fails if an invalid observation payload can crash the normal alert
+  // path instead of remaining fail-safe and diagnostic-only.
+  assert.doesNotThrow(() => Core.computeAlerts({
+    tasks: [], blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {}, masterData: noPlant,
+    dismissed: [], opts: {}, setup: { intervals: [], diagnostics: {} },
+  }));
+});
+
 // ── Reconciliation guards: brought the core UP to app.js's behavior so app.js can
 // delegate to it. These pin the differences vs the old (drifted) worker copy. ──
 

@@ -988,6 +988,26 @@ endpoint must go through `Util.fetchTraced`, never bare `fetch()`. The failure m
 with no auth, silently breaks or mis-scopes once real users/roles exist — is easy to miss in local
 dev and easy to reintroduce in a future feature that copies an older snippet using bare `fetch()`.
 
+## Changeover Matrix Stage 0 — apply and rollback (2026-08-13)
+
+Stage 0 adds observation-only setup truth: versioned definitions, matrix rows, physical line state,
+and occurrence overrides. It does **not** charge setup time, change order dates, or enable a
+setup-aware optimizer.
+
+1. Back up the target database and confirm it is the intended environment.
+2. Apply `migrations/2026-08-13-changeover-matrix-stage-0.sql`, then deploy the matching backend
+   and static frontend together. The same additive DDL is mirrored in `schema.sql`, so a normal
+   idempotent `schema.sql` application is also sufficient for a fresh environment.
+3. Verify `GET /setup/{plant}` for an authorized plant before importing a definition or matrix.
+   Definitions/matrix rows are versioned; changing the definition intentionally deactivates setup
+   activation and makes prior-version rows historical rather than rewriting them.
+
+Rollback is data-preserving by default: disable the setup editor/activation path and redeploy the
+previous application version; production schedules are unaffected because Stage 0 never persisted
+setup pseudo-orders or changed order dates. Do not drop the four setup tables as an operational
+rollback step—they contain audit-worthy matrix/state/override truth. A destructive schema rollback,
+if ever required, must be a separately reviewed backup-restoration decision.
+
 ## Multi-user real-time sync (planned)
 
 A design for near-real-time (seconds) freshness across concurrent schedulers on the same plant was
@@ -1014,3 +1034,22 @@ entry only — see the spec for the full architecture.
 - **Future (not yet planned):** swap cursor polling for an SSE transport if proxy constraints ease
   (today all users sit behind a corp proxy that mangles streaming responses — memory:
   nimbus-deploy-verify-http-cache); soft per-line claims if collision friction remains after Phase 3.
+# Setup policy activation and rollback
+
+Stage 2 setup policies are stored per plant in `plants.setup_policy_config` and
+default to disabled. Do not enable Due-date first, Min Changeover, or Throughput
+until a safe-local database migration has been verified, null-predecessor
+override persistence is fixed, representative-plant performance/browser UAT is
+recorded, and scheduling owners approve the configured savings/slip limits.
+
+To roll back, set all three `*Enabled` fields to `false` through the
+plant-scoped setup policy endpoint. This prevents new setup-aware policy runs;
+it intentionally does not alter existing orders, derived setup bars, setup
+truth, diagnostics, or alerts.
+
+**2026-08-14 evidence status:** policy controls and detached threshold checks
+are implemented, but activation remains blocked. The current environment is
+configured for Azure PostgreSQL, so it is not a valid local DB verification
+target; browser/performance UAT, representative-plant replay, owner approval,
+and null-predecessor override persistence are also outstanding. Do not deploy
+or enable policies based on automated checks alone.

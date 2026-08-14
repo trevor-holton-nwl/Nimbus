@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
+import { Util, ErrorLog } from '../../web/application-foundation.mjs';
+import { Alerts, Utilization } from '../../web/schedule-services.mjs';
+import { Persistence } from '../../web/schedule-data.mjs';
+
+const require = createRequire(import.meta.url);
 
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
 // _refreshLineBtn/_buildLineDropdown DOM helpers, which reference bare
@@ -54,6 +60,91 @@ test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.gotoLineDay, 'function');
 });
 
+test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {
+  // This fails if setup changes route through full Timeline.rebuild(), if the
+  // public line-scoped batch seam is removed, or if a stale setup bar survives.
+  const priorItems = Timeline._items;
+  const priorSetup = Store.setupSnapshot;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const calls = { add: 0, update: 0, remove: 0 };
+  const records = new Map([
+    ['setup:old', { id: 'setup:old', kind: 'setup', group: 'SETUP-BATCH-LINE', start: new Date(), end: new Date() }],
+    ['setup:other', { id: 'setup:other', kind: 'setup', group: 'OTHER-LINE', start: new Date(), end: new Date() }],
+  ]);
+  Timeline._items = {
+    getIds: () => [...records.keys()],
+    get: id => records.get(String(id)),
+    add: items => { calls.add++; for (const item of items) records.set(item.id, item); },
+    update: items => { calls.update++; for (const item of items) records.set(item.id, item); },
+    remove: ids => { calls.remove++; for (const id of ids) records.delete(String(id)); },
+  };
+  Store.setSelectedPlant('SETUP-BATCH-PLANT', 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  Store.setTasks([], 'unit-test');
+  try {
+    Timeline.rebuildSetupForLines(new Set(['SETUP-BATCH-LINE']));
+    assert.equal(calls.remove, 1, 'the affected line is removed in one batch');
+    assert.equal(calls.add, 0);
+    assert.equal(calls.update, 0);
+    assert.ok(records.has('setup:other'), 'unaffected-line setup stays untouched');
+  } finally {
+    Timeline._items = priorItems;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancelled drag', () => {
+  // This fails if a normal DataSet update omits style: vis-data retains the
+  // drag opacity, leaving a valid setup bar dimmed after cancellation.
+  const line = 'SETUP-CANCEL-LINE';
+  const plant = 'SETUP-CANCEL-PLANT';
+  const setupId = 'setup:SETUP-CANCEL-LINE:cancel-red:cancel-blue';
+  const priorItems = Timeline._items;
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorSetup = Store.setupSnapshot;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const records = new Map([[setupId, {
+    id: setupId, kind: 'setup', group: line,
+    start: new Date('2026-08-17T09:00:00'), end: new Date('2026-08-17T09:30:00'),
+    className: 'setup-item setup-drag-dim', style: 'opacity:0.18;',
+  }]]);
+  Timeline._items = {
+    getIds: () => [...records.keys()], get: id => records.get(String(id)),
+    add(items) { for (const item of items) records.set(item.id, item); },
+    update(items) { for (const item of items) records.set(item.id, { ...records.get(item.id), ...item }); },
+    remove(ids) { for (const id of ids) records.delete(String(id)); },
+  };
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+    line_rows: [], line_states: [], overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'cancel-red', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'cancel-blue', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') },
+  ], 'unit-test');
+  Timeline._dragSetupLines.add(line);
+  try {
+    Timeline.finishSetupDrag();
+    assert.equal(records.get(setupId).style, '', 'the retained item explicitly clears drag style');
+    assert.doesNotMatch(records.get(setupId).className, /setup-drag-dim/);
+  } finally {
+    Timeline._dragSetupLines.clear();
+    Timeline._items = priorItems;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Timeline renders split schedules as multiple parent-mapped timeline items', () => {
   const task = {
     id: 'timeline-split', PRODUCTION_LINE: 'L-SPLIT', RUN_TIME: 14,
@@ -70,6 +161,148 @@ test('Timeline renders split schedules as multiple parent-mapped timeline items'
   assert.notEqual(items[0].id, items[1].id);
   assert.equal(items[0].start.getTime(), task.scheduleSegments[0].startDate.getTime());
   assert.equal(items[1].end.getTime(), task.scheduleSegments[1].endDate.getTime());
+});
+
+test('Timeline derives exact setup bars before successor processing, including the first split segment', () => {
+  const successor = {
+    id: 'setup-successor', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 3,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T11:00:00'),
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-14T08:00:00'), endDate: new Date('2026-08-14T09:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-14T10:00:00'), endDate: new Date('2026-08-14T12:00:00') },
+    ],
+  };
+  const items = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L1', predecessorOrderId: 'setup-predecessor', successorOrderId: 'setup-successor',
+      start: new Date('2026-08-14T07:40:00'), end: new Date('2026-08-14T08:00:00'), requiredMinutes: 20, availableMinutes: 20 }],
+    diagnostics: [],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'setup');
+  assert.equal(items[0].start.getTime(), new Date('2026-08-14T07:40:00').getTime());
+  assert.equal(items[0].end.getTime(), successor.scheduleSegments[0].startDate.getTime());
+  assert.equal(items[0].editable, false);
+  assert.match(items[0].title, /20 min/);
+});
+
+test('Timeline omits zero setup but renders a leading-edge marker for missing setup detail', () => {
+  const successor = { id: 'missing-successor', PRODUCTION_LINE: 'SETUP-L2', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const zero = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L2', successorOrderId: 'missing-successor', start: new Date('2026-08-14T08:00:00'), end: new Date('2026-08-14T08:00:00'), requiredMinutes: 0, availableMinutes: 0 }], diagnostics: [],
+  });
+  assert.deepEqual(zero, []);
+  const missing = Timeline._setupItemsForObservation([successor], {
+    intervals: [], diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L2', successorOrderId: 'missing-successor', time: successor.start_date }],
+  });
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].kind, 'setup');
+  assert.match(missing[0].className, /setup-missing/);
+  assert.equal(missing[0].end.getTime(), successor.start_date.getTime());
+});
+
+test('Timeline preserves the full required setup duration when capacity conflicts', () => {
+  const successor = { id: 'conflict-successor', PRODUCTION_LINE: 'SETUP-L3', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const [item] = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L3', successorOrderId: 'conflict-successor', start: new Date('2026-08-14T07:20:00'), end: successor.start_date,
+      requiredMinutes: 40, availableMinutes: 10 }], diagnostics: [],
+  });
+  assert.equal(item.end.getTime() - item.start.getTime(), 40 * 60 * 1000);
+  assert.match(item.className, /setup-conflict/);
+});
+
+test('setup timeline items never resolve to a business order across interaction guards', () => {
+  const setupItem = { id: 'setup:SETUP-L1:successor', kind: 'setup', group: 'SETUP-L1', start: new Date(), end: new Date(), editable: false };
+  const priorItems = Timeline._items;
+  try {
+    Timeline._items = { get: id => String(id) === setupItem.id ? setupItem : null };
+    assert.equal(Timeline.businessOrderIdForItem(setupItem.id), null);
+    assert.equal(Interaction._businessOrderIdForItem(setupItem.id), null);
+  } finally { Timeline._items = priorItems; }
+});
+
+test('setup items are ignored by click, double-click, drag, ghost, selection, focus, dependency, hover, marquee, and context dispatch', () => {
+  const setupId = 'setup:SETUP-L1:successor';
+  const setupItem = { id: setupId, kind: 'setup', group: 'SETUP-L1', start: new Date('2026-08-14T07:30:00'), end: new Date('2026-08-14T08:00:00'), editable: false };
+  const order = { id: 'guard-order', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const priorItems = Timeline._items;
+  const priorTl = Timeline._tl;
+  try {
+    Store.setTasks([order], 'unit-test');
+    Selection.clear();
+    Timeline._items = { get: id => String(id) === setupId ? setupItem : null };
+    Timeline._tl = { focus() { throw new Error('setup must not focus'); } };
+    Interaction._onClick({ what: 'item', item: setupId, event: {} });
+    Interaction._onDoubleClick({ what: 'item', item: setupId });
+    Interaction._onDataSetUpdate({ items: [setupId] });
+    Interaction._onTimeChange({ id: setupId, time: new Date() });
+    assert.deepEqual(Selection.ids(), []);
+    assert.equal(Interaction._ghostDragId, null);
+    assert.equal(Timeline.businessOrderIdForItem(setupId), null, 'shared semantic dispatch gates hover, marquee, context, focus, and dependency routes');
+  } finally {
+    Timeline._items = priorItems;
+    Timeline._tl = priorTl;
+    Store.setTasks([], 'unit-test');
+    Selection.clear();
+  }
+});
+
+test('Inspector exposes keyboard-equivalent setup detail on the successor, including override and missing states', () => {
+  const task = { id: 'detail-successor', PRODUCTION_LINE: 'SETUP-L4', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const detail = Inspector._setupDetailForTask(task, {
+    intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
+      start: new Date('2026-08-14T07:30:00'), end: task.start_date, requiredMinutes: 30, availableMinutes: 15,
+      predecessorState: 'COLOR=RED', standardMinutes: 45, source: 'occurrence', overrideStatus: 'active' }],
+    diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L4', successorOrderId: 'detail-successor', message: 'Matrix row missing.' }],
+  });
+  assert.equal(detail.predecessorOrderId, 'detail-predecessor');
+  assert.equal(detail.predecessorState, 'COLOR=RED');
+  assert.equal(detail.requiredMinutes, 30);
+  assert.equal(detail.effectiveMinutes, 30);
+  assert.equal(detail.standardMinutes, 45);
+  assert.equal(detail.source, 'occurrence');
+  assert.equal(detail.overrideStatus, 'active');
+  assert.equal(detail.missingDetail, 'Matrix row missing.');
+  assert.equal(detail.shortMinutes, 15);
+  assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
+    'the successor detail must state available, required, and short capacity in text');
+});
+
+test('alert-cell foreground dispatch treats setup items as non-business items', () => {
+  const setupId = 'setup:SETUP-L5:successor';
+  const priorItems = Timeline._items;
+  try {
+    Timeline._items = { get: id => String(id) === setupId
+      ? { id: setupId, kind: 'setup', group: 'SETUP-L5', start: new Date(), end: new Date(), editable: false }
+      : null };
+    assert.equal(Interaction._isBusinessTimelineItem(setupId), false);
+  } finally { Timeline._items = priorItems; }
+});
+
+test('delegated alert-cell click opens a real alert cell but leaves setup items inert', () => {
+  const priorItems = Timeline._items;
+  const priorNimbus = globalThis.NIMBUS;
+  const opened = [];
+  const setupId = 'setup:SETUP-L6:successor';
+  const alertId = 'alertcell-SETUP-L6-2026-08-14';
+  try {
+    globalThis.NIMBUS = { AlertsUIAdapter: { showForCell(line, day) { opened.push([line, day]); } } };
+    Timeline._items = { get: id => {
+      if (String(id) === setupId) return { id: setupId, kind: 'setup', group: 'SETUP-L6', start: new Date(), end: new Date(), editable: false };
+      if (String(id) === alertId) return { id: alertId, group: 'SETUP-L6', start: new Date(), end: new Date(), className: 'alertcell-err', editable: false };
+      return null;
+    } };
+    const time = new Date('2026-08-14T08:00:00');
+    Interaction._onAlertCellClick({ item: alertId, group: 'SETUP-L6', time });
+    Interaction._onAlertCellClick({ item: setupId, group: 'SETUP-L6', time });
+    assert.deepEqual(opened, [['SETUP-L6', '2026-08-14']]);
+  } finally {
+    Timeline._items = priorItems;
+    globalThis.NIMBUS = priorNimbus;
+  }
 });
 
 test('TimelineNav exposes init/render', () => {
@@ -300,6 +533,267 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');
   assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
+});
+
+test('OptimizerPreview retains only a bounded candidate explanation and drops it on discard', () => {
+  // Regression target: retaining raw candidate schedules/reasons would make a
+  // long preview unbounded and leave setup explanation data after Discard.
+  const candidate = {
+    patches: [{ id: 'changed-1', changes: { start_date: new Date('2026-08-14T08:00:00') } }],
+    explanation: Array.from({ length: 14 }, (_, index) => ({ code: `reason-${index}`, message: `Reason ${index}`, line: 'L-1' })),
+    diagnostics: { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false, events: [] },
+    unchangedLines: ['L-2', 'L-3'],
+    missingEdges: Array.from({ length: 16 }, (_, index) => ({ line: 'L-1', predecessorOrderId: `before-${index}`, successorOrderId: `after-${index}`, reason: 'matrix-missing' })),
+  };
+  const explanation = OptimizerPreview.summarizeCandidate(candidate, {
+    productionBefore: 10, productionAfter: 10, preKpis: { changeovers: 8, span_h: 20, late_count: 4, late_h: 6, peak_util_pct: 92 },
+    postKpis: { changeovers: 6, span_h: 18, late_count: 2, late_h: 3, peak_util_pct: 88 },
+  });
+  assert.equal(explanation.reasons.length, 8, 'the UI explanation caps candidate reasons');
+  assert.equal(explanation.missingPairs.length, 12, 'the UI explanation caps missing setup pairs');
+  assert.deepEqual(explanation.search, { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false });
+  assert.equal(Object.hasOwn(explanation, 'tasks'), false, 'the compact explanation never retains a schedule snapshot');
+
+  OptimizerPreview._explanation = explanation;
+  OptimizerPreview.active = true;
+  OptimizerPreview.discard();
+  assert.equal(OptimizerPreview._explanation, null, 'Discard destroys the in-memory explanation');
+});
+
+test('OptimizerPreview derives and exports real setup states for bounded missing pairs', () => {
+  // Regression target: displaying order IDs in From/To (and exporting no
+  // states) prevents a matrix editor from acting on the reported pair.
+  const candidate = {
+    patches: [], explanation: [], diagnostics: { candidateCount: 1, method: 'spt-detached', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] },
+    unchangedLines: [], missingEdges: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', reason: 'matrix-missing' }],
+  };
+  const setup = {
+    plant: '5512', definition: { plant: '5512', fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false },
+    plant_rows: [], line_rows: [], line_states: [], overrides: [],
+  };
+  const pairs = OptimizerPreview.describeMissingPairs(candidate, [
+    { id: 'red-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'RED' },
+    { id: 'blue-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'BLUE' },
+  ], setup);
+  assert.deepEqual(pairs, [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing' }]);
+  const csv = OptimizerPreview.missingPairsCsv(pairs);
+  assert.match(csv, /From setup state,To setup state/);
+  assert.match(csv, /colorWheel=RED/);
+  assert.match(csv, /colorWheel=BLUE/);
+});
+
+test('Persistence setup writes stale an open preview without applying or rerunning it', () => {
+  // Regression target: a successful matrix/state/override write must require
+  // an explicit preview rerun instead of applying or recomputing silently.
+  const priorFetch = globalThis.fetch;
+  const candidate = { patches: [], explanation: [], diagnostics: { candidateCount: 1, method: 'spt-detached', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] }, unchangedLines: [], missingEdges: [] };
+  let requests = 0;
+  globalThis.fetch = () => { requests++; return Promise.resolve({ ok: true }); };
+  OptimizerPreview._snapshot = [];
+  OptimizerPreview._candidate = candidate;
+  OptimizerPreview._explanation = OptimizerPreview.summarizeCandidate(candidate, { productionBefore: 1, productionAfter: 1, preKpis: { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 }, postKpis: { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 } });
+  OptimizerPreview._plant = 'STALE';
+  OptimizerPreview.active = true;
+  try {
+    for (const kind of ['definition', 'matrix', 'state', 'override']) {
+      OptimizerPreview.stale = false;
+      Persistence.noteSetupWrite('STALE', kind);
+      assert.equal(OptimizerPreview.stale, true, `${kind} writes stale an open preview`);
+      assert.equal(OptimizerPreview.canApply(), false, 'stale previews cannot apply');
+    }
+    OptimizerPreview.apply();
+    assert.equal(OptimizerPreview._candidate, candidate, 'Apply leaves a stale candidate intact for explicit rerun or discard');
+    assert.equal(requests, 0, 'staling and blocked Apply never write an audit row or rerun optimization');
+  } finally {
+    OptimizerPreview._clear();
+    globalThis.fetch = priorFetch;
+  }
+});
+
+test('OptimizerPreview keeps trial patches detached until Apply, then commits them once', () => {
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorTimelineItems = Timeline._items;
+  const priorPlant = Store.selectedPlant;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorFetch = globalThis.fetch;
+  const timelineUpdates = [];
+  const publications = [];
+  const auditRequests = [];
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  Timeline._items = { update(items) { timelineUpdates.push(...items); } };
+  Alerts.scheduleRecompute = () => {};
+  globalThis.fetch = (...args) => {
+    auditRequests.push(args);
+    return Promise.resolve({ ok: true });
+  };
+  Store.setTasks([
+    { id: 'preview-long', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 5, start_date: null, end_date: null },
+    { id: 'preview-short', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null },
+  ], 'unit-test');
+  Store.setSelectedPlant('PREVIEW', 'unit-test');
+  const beforeRevision = Store.rev();
+  const beforeTasks = structuredClone(Store.tasks);
+  const unsubscribe = Store.subscribe(event => { publications.push(event.type); }, 'unit-test-autosave');
+
+  try {
+    const previewOptions = {
+      plant: 'PREVIEW', respectCalendar: false, now: new Date('2026-08-03T08:00:00'),
+      auditDetails: {
+        mode: 'spt', wheelUsed: false, taskCount: 2, scope: 'plant', lines: null,
+        activePriorityFields: [], unrankedPriorityFields: [], splitOrderPolicy: 'never',
+      },
+    };
+    OptimizerPreview.runWithPreview('spt', previewOptions);
+
+    assert.ok(OptimizerPreview._candidate, 'the preview retains a detached candidate for Apply');
+    assert.equal(Store.rev(), beforeRevision, 'opening a preview must not publish trial schedule state');
+    assert.deepEqual(Store.tasks, beforeTasks, 'opening a preview must not alter live task values');
+    assert.deepEqual(timelineUpdates, [], 'a detached preview must not issue timeline item updates');
+    assert.deepEqual(publications, [], 'autosave-like Store subscribers must stay idle before Apply');
+    assert.deepEqual(auditRequests, [], 'a detached candidate must not persist an audit row before Apply');
+
+    OptimizerPreview.discard();
+
+    assert.equal(OptimizerPreview._candidate, null, 'Discard destroys the detached candidate');
+    assert.equal(OptimizerPreview._explanation, null, 'Discard destroys the compact explanation with the candidate');
+    assert.equal(Store.rev(), beforeRevision, 'Discard must not roll back through Store because Store never changed');
+    assert.deepEqual(Store.tasks, beforeTasks, 'Discard leaves the live schedule untouched');
+    assert.deepEqual(publications, [], 'Discard must not wake autosave-like subscribers');
+    assert.deepEqual(auditRequests, [], 'Discard must not persist an audit row');
+
+    OptimizerPreview.runWithPreview('spt', previewOptions);
+
+    OptimizerPreview.apply();
+
+    assert.ok(Store.tasks['preview-short'].start_date, 'Apply commits the selected candidate patch set');
+    assert.equal(OptimizerPreview._explanation, null, 'Apply destroys the explanation after committing its candidate');
+    assert.equal(publications.filter(type => type === 'tasks:bulkUpdate').length, 1,
+      'Apply performs exactly one schedule task commit');
+    assert.equal(auditRequests.length, 1, 'Apply emits the deferred audit row');
+    assert.doesNotMatch(JSON.stringify(auditRequests), /explanation/i,
+      'the applied optimization audit never persists preview explanation data');
+    assert.equal(timelineUpdates.length, 0, 'the evaluator itself never writes Timeline items');
+  } finally {
+    unsubscribe();
+    OptimizerPreview._clear();
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    globalThis.fetch = priorFetch;
+    Timeline._items = priorTimelineItems;
+    Store.setTasks([], 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('OptimizerPreview computes KPI utilization against detached calendar and plant maps', () => {
+  // Removing the preview utilization context would let the production resolver
+  // pass Store.calendars/plants to compute core, which fills missing defaults.
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorPlants = structuredClone(Store.plants);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const scheduledStart = new Date();
+  scheduledStart.setHours(8, 0, 0, 0);
+  const scheduledEnd = new Date(scheduledStart.getTime() + 60 * 60 * 1000);
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Alerts.scheduleRecompute = () => {};
+  Util.setUtilizationResolver((from, days, tasks, snapshot) =>
+    Utilization.computeMatrix(from, days, tasks, snapshot));
+  Store.replaceCalendars({}, 'unit-test');
+  Store.replacePlants({}, 'unit-test');
+  Store.setLineSetting('KPI-DETACHED-LINE', { plant: 'KPI-DETACHED' }, 'unit-test');
+  Store.setTasks([{
+    id: 'kpi-detached-order', PLANT: 'KPI-DETACHED', PRODUCTION_LINE: 'KPI-DETACHED-LINE', RUN_TIME: 1,
+    start_date: scheduledStart, end_date: scheduledEnd,
+  }], 'unit-test');
+  Store.setSelectedPlant('KPI-DETACHED', 'unit-test');
+  const beforeCalendars = structuredClone(Store.calendars);
+  const beforePlants = structuredClone(Store.plants);
+
+  try {
+    OptimizerPreview.runWithPreview('spt', { plant: 'KPI-DETACHED', respectCalendar: false });
+
+    assert.ok(OptimizerPreview._candidate, 'the preview completes its detached KPI comparison');
+    assert.deepEqual(Store.calendars, beforeCalendars,
+      'KPI computation must not fill missing line calendars in Store before Apply');
+    assert.deepEqual(Store.plants, beforePlants,
+      'KPI computation must not fill missing plant calendars in Store before Apply');
+  } finally {
+    OptimizerPreview._clear();
+    Util.setUtilizationResolver(null);
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.replacePlants(priorPlants, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+    globalThis.NimbusComputeCore = priorCore;
+  }
+});
+
+test('OptimizerPreview keeps evaluation failures out of ErrorLog persistence', () => {
+  // Restoring ErrorLog.error() in the preview catch would persist an un-applied
+  // backlog candidate failure instead of retaining only ephemeral diagnostics.
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const beforeEntries = ErrorLog.entries();
+  const priorSave = ErrorLog._scheduleSave;
+  const priorShip = ErrorLog._scheduleShip;
+  let saveCalls = 0;
+  let shipCalls = 0;
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  ErrorLog._scheduleSave = () => { saveCalls++; };
+  ErrorLog._scheduleShip = () => { shipCalls++; };
+  Store.setMasterData({ plants: [{ plant: 'PREVIEW-FAIL' }], lines: [{ plant: 'PREVIEW-FAIL', production_line: 'FAIL-LINE' }] }, 'unit-test');
+  Store.setTasks([{ id: 'preview-fail', PLANT: 'PREVIEW-FAIL', PRODUCTION_LINE: 'FAIL-LINE', RUN_TIME: 1, start_date: new Date(), end_date: new Date() }], 'unit-test');
+  Store.setSelectedPlant('PREVIEW-FAIL', 'unit-test');
+
+  try {
+    OptimizerPreview.runWithPreview('backlog', { plant: 'PREVIEW-FAIL', respectCalendar: true });
+
+    assert.deepEqual(ErrorLog.entries(), beforeEntries,
+      'a preview evaluation failure must not enter the persistent error log');
+    assert.equal(saveCalls, 0, 'a preview evaluation failure must not schedule IndexedDB persistence');
+    assert.equal(shipCalls, 0, 'a preview evaluation failure must not schedule backend error shipping');
+    assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed',
+      'the failure remains structured in preview-local memory');
+  } finally {
+    OptimizerPreview._clear();
+    ErrorLog._entries = beforeEntries;
+    ErrorLog._scheduleSave = priorSave;
+    ErrorLog._scheduleShip = priorShip;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+  }
 });
 
 test('EditCalendar/ColorWheelViewer/Printer/SandboxAdapter/AlertsUIAdapter expose their documented public API', () => {

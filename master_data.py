@@ -48,6 +48,32 @@ ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE
 # arbitrary optimizer option supplied by the browser.
 SPLIT_ORDER_POLICIES = frozenset({'never', 'overlong_only', 'partial_allowed'})
 
+# Stage 2 setup policy is deliberately a typed sidecar, not a priority-tree
+# node. Every policy starts disabled: persistence alone must never activate
+# setup-aware optimization before the plant's validation/performance gates.
+SETUP_POLICY_DEFAULTS = {
+    'dueDateFirstEnabled': False,
+    'minChangeoverEnabled': False,
+    'throughputEnabled': False,
+    'throughputMinSavingsMin': 60,
+    'throughputMaxSlipMin': 1440,
+    'version': 1,
+}
+
+SETUP_RELEASE_EVIDENCE_DEFAULTS = {
+    'stage1Validated': False,
+    'localDbVerified': False,
+    'performanceVerified': False,
+    'browserUatVerified': False,
+    'representativeReplayVerified': False,
+    'nullPredecessorVerified': False,
+    'ownerApproved': False,
+    'ownerEmail': None,
+    'approvedAt': None,
+    'notes': '',
+    'version': 1,
+}
+
 COLUMN_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 
 # System columns the UI must never see or touch.
@@ -307,17 +333,18 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints, split_order_policy "
+                        "SELECT subnetwork, plant, constraints, split_order_policy, setup_policy_config "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4]) for r in cur.fetchall()}
                     for row in rows:
-                        constraints, policy = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never')
+                        constraints, policy, setup_policy = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
+                        row['setup_policy_config'] = _normalize_setup_policy_config(setup_policy)
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -735,9 +762,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), where),
                     vals,
                 )
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
             deleted += cur.rowcount
 
         # --- Upserts ---
@@ -782,9 +809,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                 )
             try:
                 cur.execute(q, [row[c] for c in col_names])
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
+                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1
@@ -1027,7 +1054,7 @@ def _normalize_constraint_tree(nodes: list, depth: int = 1) -> list[dict]:
     of nesting depth, so a deeper tree is never meaningful, not just
     disallowed for its own sake)."""
     if depth > 3:
-        raise ValueError(f"constraint tree depth exceeds 3 (Stage 3 cap)")
+        raise ValueError("constraint tree depth exceeds 3 (Stage 3 cap)")
     clean: list[dict] = []
     for c in nodes:
         if not isinstance(c, dict) or "key" not in c:
@@ -1080,6 +1107,231 @@ def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
         conn.commit()
 
     return {"status": "ok", "plant": plant, "constraints": clean}
+
+
+def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason: str | None,
+                                 user_email: str | None = None) -> dict:
+    """Persist the setup-only line opt-out without touching excl_optimizer.
+
+    This deliberately has its own narrow write path: generic production-line
+    bulk writes cannot enforce the required incompatibility reason and would
+    make it too easy to conflate this setup signature exception with the
+    existing global optimizer exclusion flag.
+    """
+    if not isinstance(compatible, bool):
+        raise ValueError("setup_compatible must be boolean")
+    plant = str(plant or "").strip()
+    line = str(line or "").strip()
+    reason = str(reason or "").strip() or None
+    if not plant or not line:
+        raise ValueError("plant and line are required")
+    if not compatible and not reason:
+        raise ValueError("Setup compatibility reason is required when incompatible")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE production_lines
+                   SET setup_compatible = %s, setup_compatibility_reason = %s
+                 WHERE plant = %s AND production_line = %s""",
+            (compatible, None if compatible else reason, plant, line),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES (%s, %s, %s, %s)",
+            ("production_lines", "set_setup_compatibility",
+             Jsonb({"plant": plant, "line": line, "setup_compatible": compatible,
+                    "setup_compatibility_reason": None if compatible else reason}), user_email),
+        )
+        conn.commit()
+    return {"plant": plant, "line": line, "setup_compatible": compatible,
+            "setup_compatibility_reason": None if compatible else reason}
+
+
+def _normalize_setup_policy_config(config: dict | None) -> dict:
+    """Return the only persisted/wire shape for Stage 2 setup policies."""
+    raw = config if isinstance(config, dict) else {}
+    clean = {
+        'dueDateFirstEnabled': bool(raw.get('dueDateFirstEnabled', False)),
+        'minChangeoverEnabled': bool(raw.get('minChangeoverEnabled', False)),
+        'throughputEnabled': bool(raw.get('throughputEnabled', False)),
+        'throughputMinSavingsMin': raw.get('throughputMinSavingsMin', 60),
+        'throughputMaxSlipMin': raw.get('throughputMaxSlipMin', 1440),
+        'version': raw.get('version', 1),
+    }
+    if isinstance(clean['throughputMinSavingsMin'], bool) or not isinstance(clean['throughputMinSavingsMin'], int):
+        raise ValueError('throughputMinSavingsMin must be a whole number')
+    if clean['throughputMinSavingsMin'] < 0:
+        raise ValueError('throughputMinSavingsMin must be nonnegative')
+    if isinstance(clean['throughputMaxSlipMin'], bool) or not isinstance(clean['throughputMaxSlipMin'], int):
+        raise ValueError('throughputMaxSlipMin must be a whole number')
+    if clean['throughputMaxSlipMin'] <= 0:
+        raise ValueError('throughputMaxSlipMin must be positive')
+    if isinstance(clean['version'], bool) or not isinstance(clean['version'], int) or clean['version'] <= 0:
+        raise ValueError('setup policy version must be positive')
+    return clean
+
+
+def ensure_plant_setup_policy_config_column() -> None:
+    """Idempotently add the typed Stage 2 policy sidecar to plants."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB "
+            "NOT NULL DEFAULT '{\"dueDateFirstEnabled\": false, \"minChangeoverEnabled\": false, "
+            "\"throughputEnabled\": false, \"throughputMinSavingsMin\": 60, "
+            "\"throughputMaxSlipMin\": 1440, \"version\": 1}'::jsonb"
+        )
+        conn.commit()
+
+
+def _normalize_setup_release_evidence(config: dict | None) -> dict:
+    """Return the only persisted/wire shape for release evidence."""
+    raw = config if isinstance(config, dict) else {}
+    clean = {
+        key: raw.get(key, default)
+        for key, default in SETUP_RELEASE_EVIDENCE_DEFAULTS.items()
+    }
+    for key in (
+        'stage1Validated', 'localDbVerified', 'performanceVerified',
+        'browserUatVerified', 'representativeReplayVerified',
+        'nullPredecessorVerified', 'ownerApproved',
+    ):
+        if not isinstance(clean[key], bool):
+            raise ValueError(f'{key} must be boolean')
+    for key in ('ownerEmail', 'notes'):
+        if clean[key] is not None and not isinstance(clean[key], str):
+            raise ValueError(f'{key} must be text or null')
+    clean['ownerEmail'] = clean['ownerEmail'].strip() if clean['ownerEmail'] else None
+    clean['notes'] = clean['notes'].strip() if clean['notes'] else ''
+    approved_at = clean['approvedAt']
+    if approved_at is not None:
+        if not isinstance(approved_at, str) or not approved_at.strip():
+            raise ValueError('approvedAt must be an ISO timestamp or null')
+        try:
+            datetime.fromisoformat(approved_at.replace('Z', '+00:00'))
+        except ValueError as exc:
+            raise ValueError('approvedAt must be an ISO timestamp or null') from exc
+        clean['approvedAt'] = approved_at.strip()
+    if isinstance(clean['version'], bool) or not isinstance(clean['version'], int) or clean['version'] <= 0:
+        raise ValueError('release evidence version must be positive')
+    return clean
+
+
+def setup_release_evidence_ready(config: dict | None) -> bool:
+    """Return true only when every gate and approval attestation is present."""
+    clean = _normalize_setup_release_evidence(config)
+    return all(clean[key] for key in (
+        'stage1Validated', 'localDbVerified', 'performanceVerified',
+        'browserUatVerified', 'representativeReplayVerified',
+        'nullPredecessorVerified', 'ownerApproved',
+    )) and bool(clean['ownerEmail'] and clean['approvedAt'] and clean['notes'])
+
+
+def ensure_plant_setup_release_evidence_column() -> None:
+    """Idempotently add the typed release-evidence sidecar to plants."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_release_evidence JSONB "
+            "NOT NULL DEFAULT '{\"stage1Validated\": false, \"localDbVerified\": false, "
+            "\"performanceVerified\": false, \"browserUatVerified\": false, "
+            "\"representativeReplayVerified\": false, \"nullPredecessorVerified\": false, "
+            "\"ownerApproved\": false, \"ownerEmail\": null, \"approvedAt\": null, "
+            "\"notes\": \"\", \"version\": 1}'::jsonb"
+        )
+        conn.commit()
+
+
+def get_setup_release_evidence(plant: str) -> dict:
+    if not plant:
+        raise ValueError('plant is required')
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_release_evidence FROM plants WHERE plant = %s", (plant,))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Plant {plant!r} not found")
+    clean = _normalize_setup_release_evidence(row[0])
+    return {'plant': plant, **clean, 'ready': setup_release_evidence_ready(clean)}
+
+
+def set_setup_release_evidence(plant: str, config: dict, expected_version: int,
+                               user_email: str | None = None) -> dict:
+    if not plant:
+        raise ValueError('plant is required')
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version <= 0:
+        raise ValueError('expected_version must be a positive whole number')
+    clean = _normalize_setup_release_evidence(config)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_release_evidence FROM plants WHERE plant = %s FOR UPDATE", (plant,))
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Plant {plant!r} not found")
+        current = _normalize_setup_release_evidence(row[0])
+        if expected_version != current['version']:
+            raise ValueError('Setup release evidence version is stale')
+        clean['version'] = current['version'] + 1
+        cur.execute(
+            "UPDATE plants SET setup_release_evidence = %s, updated_at = NOW() WHERE plant = %s",
+            (Jsonb(clean), plant),
+        )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES "
+            "('plants', 'set_setup_release_evidence', %s, %s)",
+            (Jsonb({'plant': plant, 'setup_release_evidence': clean}), user_email),
+        )
+        conn.commit()
+    return {'plant': plant, **clean, 'ready': setup_release_evidence_ready(clean)}
+
+
+def get_setup_policy_config(plant: str) -> dict:
+    if not plant:
+        raise ValueError('plant is required')
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_policy_config FROM plants WHERE plant = %s", (plant,))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Plant {plant!r} not found")
+    return {'plant': plant, **_normalize_setup_policy_config(row[0])}
+
+
+def set_setup_policy_config(plant: str, config: dict, expected_version: int,
+                            user_email: str | None = None) -> dict:
+    """Optimistically update one plant's typed setup policy sidecar."""
+    if not plant:
+        raise ValueError('plant is required')
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version <= 0:
+        raise ValueError('expected_version must be a positive whole number')
+    clean = _normalize_setup_policy_config(config)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_policy_config, setup_release_evidence FROM plants WHERE plant = %s FOR UPDATE", (plant,))
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Plant {plant!r} not found")
+        current = _normalize_setup_policy_config(row[0])
+        if expected_version != current['version']:
+            raise ValueError('Setup policy version is stale')
+        if (any(clean[key] for key in ('dueDateFirstEnabled', 'minChangeoverEnabled', 'throughputEnabled'))
+                and not setup_release_evidence_ready(row[1])):
+            raise ValueError('Setup policy activation requires complete release evidence')
+        clean['version'] = current['version'] + 1
+        cur.execute(
+            "UPDATE plants SET setup_policy_config = %s, updated_at = NOW() WHERE plant = %s",
+            (Jsonb(clean), plant),
+        )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES ('plants', 'set_setup_policy', %s, %s)",
+            (Jsonb({'plant': plant, 'setup_policy_config': clean}), user_email),
+        )
+        conn.commit()
+    return {'plant': plant, **clean}
+
+
+def get_setup_line_compatibility(plant: str, line: str) -> dict:
+    """Return one line's setup-only compatibility, never a plant-wide line list."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_compatible, setup_compatibility_reason FROM production_lines WHERE plant = %s AND production_line = %s", (plant, line))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+    return {"plant": plant, "line": line, "setup_compatible": bool(row[0]), "setup_compatibility_reason": row[1]}
 
 
 def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,

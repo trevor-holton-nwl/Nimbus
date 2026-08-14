@@ -93,6 +93,18 @@
     return start && end && end > start ? [{ sequence: 1, start: new Date(+start), end: new Date(+end) }] : [];
   }
 
+  // Setup truth is resolved before it reaches the compute core.  The core only
+  // validates interval shape so its worker and synchronous callers consume the
+  // identical, immutable observation data without consulting setup matrices.
+  function setupIntervals(setup) {
+    if (!Array.isArray(setup?.intervals)) return [];
+    return setup.intervals.map(interval => {
+      const start = parseDate(interval?.start), end = parseDate(interval?.end);
+      return start && end && end > start && typeof interval.line === 'string'
+        ? { ...interval, start, end } : null;
+    }).filter(Boolean);
+  }
+
   function mergedOverlapHours(win, intervals) {
     if (!win || !intervals?.length) return 0;
     const w0 = win[0] instanceof Date ? win[0].getTime() : +win[0];
@@ -309,7 +321,7 @@
   // are already filtered against `dismissed`. Merging the incremental `opts.lines` scope
   // into the retained list is the caller's responsibility.
 
-  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts }) {
+  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup }) {
     const t0 = performance.now();
 
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
@@ -553,6 +565,53 @@
       });
     }
 
+    // Setup observations are intentionally supplied by the caller after its
+    // one plant-scoped resolution pass.  Alerting validates/reporting only;
+    // it does not read a matrix, change Store, or start an optimizer run.
+    const setupSeen = new Set();
+    const inScope = line => !onlyLines || onlyLines.has(line || 'Unknown');
+    const setupKey = (type, entry, pairKey = '') => [
+      type, entry.scope || entry.line || 'Unknown', pairKey || entry.pairKey || '',
+      entry.predecessorOrderId ?? 'initial', entry.successorOrderId ?? '',
+    ].join('|');
+    for (const interval of setupIntervals(setup)) {
+      if (!inScope(interval.line)) continue;
+      const requiredMinutes = Number(interval.requiredMinutes);
+      const availableMinutes = Number(interval.availableMinutes);
+      if (!Number.isFinite(requiredMinutes) || !Number.isFinite(availableMinutes) || requiredMinutes <= availableMinutes) continue;
+      const key = setupKey('setup-violated', interval);
+      if (setupSeen.has(key)) continue;
+      setupSeen.add(key);
+      const shortMinutes = requiredMinutes - availableMinutes;
+      alerts.push({
+        id: `setup-violated-${key}`, sev: 'err', type: 'setup-violated',
+        msg: `Setup on ${interval.line} requires ${requiredMinutes}m but only ${availableMinutes}m is available (${shortMinutes}m short).`,
+        taskId: interval.successorOrderId, line: interval.line, time: interval.start,
+        requiredMinutes, availableMinutes, shortMinutes,
+      });
+    }
+    const diagnosticTypes = new Set([
+      'setup-uncovered', 'initial-state-unknown', 'current-state-diverged', 'override-inactive',
+    ]);
+    const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
+    for (const diagnostic of setupDiagnostics) {
+      if (!diagnosticTypes.has(diagnostic?.type) || !inScope(diagnostic.line)) continue;
+      // A missing matrix transition is a pair/scope problem, not one alert per
+      // order occurrence. Other diagnostics remain occurrence-specific.
+      const key = diagnostic.type === 'setup-uncovered'
+        ? [diagnostic.type, diagnostic.scope || diagnostic.line || 'Unknown', diagnostic.pairKey || 'unknown'].join('|')
+        : setupKey(diagnostic.type, diagnostic);
+      if (setupSeen.has(key)) continue;
+      setupSeen.add(key);
+      const time = parseDate(diagnostic.time) || new Date();
+      const pair = diagnostic.pairKey ? ` for ${diagnostic.pairKey}` : '';
+      alerts.push({
+        id: `${diagnostic.type}-${key}`, sev: diagnostic.type === 'override-inactive' ? 'warn' : 'err', type: diagnostic.type,
+        msg: diagnostic.message || `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`,
+        taskId: diagnostic.successorOrderId, line: diagnostic.line, time,
+      });
+    }
+
     _wwCache = null;
     _plantMemo = null;
 
@@ -566,7 +625,7 @@
   // task IDs (the caller resolves them to objects). Pass `lines` to pin the exact line
   // set (app.js's plant-scoped set); omit it to derive from tasks ∪ Object.keys(calendars).
 
-  function computeUtilization({ tasks, lineSettings, calendars, plants, blocks, plantBlocks, masterData, startMs, days, lines: explicitLines }) {
+  function computeUtilization({ tasks, lineSettings, calendars, plants, blocks, plantBlocks, masterData, startMs, days, lines: explicitLines, setup }) {
     const start = startOfDay(new Date(startMs));
     _wwCache = new Map();
     _plantMemo = new Map();
@@ -655,6 +714,27 @@
       }
     }
 
+    // Derived setup occupies real capacity but is never a persisted task.  Its
+    // successor task id is retained only so existing row consumers can focus
+    // the owning order; a missing successor remains an interval-only charge.
+    for (const interval of setupIntervals(setup)) {
+      const lineRows = matrix[interval.line];
+      if (!lineRows) continue;
+      const intervalStartMs = interval.start.getTime();
+      const intervalEndMs = interval.end.getTime();
+      for (const key of Object.keys(lineRows)) {
+        const row = lineRows[key];
+        const dayStartMs = row.date.getTime();
+        const dayEndMs = dayStartMs + MS_DAY;
+        if (intervalEndMs <= dayStartMs || intervalStartMs >= dayEndMs) continue;
+        const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
+        if (contribution > 0) {
+          row.scheduled += contribution;
+          if (interval.successorOrderId && !row.tasks.includes(interval.successorOrderId)) row.tasks.push(interval.successorOrderId);
+        }
+      }
+    }
+
     for (const line of Object.keys(matrix)) {
       for (const k of Object.keys(matrix[line])) {
         const row = matrix[line][k];
@@ -671,7 +751,7 @@
     // constants
     MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     // date/time helpers
-    parseDate, dayKey, startOfDay, runHours, scheduleIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
+    parseDate, dayKey, startOfDay, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, workWindow,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,

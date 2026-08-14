@@ -243,9 +243,9 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
                     " RETURNING (xmax = 0)",
                     (username, row.get("role"), first_name, last_name, has_first, has_last),
                 )
-            except psycopg.errors.ForeignKeyViolation:
+            except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Role {row.get('role')!r} does not exist")
+                raise ValueError(f"Role {row.get('role')!r} does not exist") from exc
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1
@@ -483,6 +483,45 @@ def _actor_email(request: Request) -> str | None:
     stray whitespace never defeats the (case-insensitive) role lookup."""
     raw = request.headers.get("x-user-email") or request.headers.get("X-User")
     return raw.strip() if raw else None
+
+
+def require_authenticated(request: Request) -> str:
+    """Require a known user identity for mutable plant-scoped operations.
+
+    This deliberately has no bootstrap grace: setup state and standards are
+    operational truth, so an arbitrary spoofed-but-unknown header cannot write
+    them.  It remains the same temporary header-backed identity boundary used
+    by the rest of the pilot until Entra replaces ``_actor_email``.
+    """
+    email = _actor_email(request)
+    if not email or get_user_role(email) is None:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return email
+
+
+def require_setup_scheduler(request: Request) -> str:
+    """Require the explicit role permission to record plant setup truth.
+
+    Non-admin roles must opt in with ``roles.settings.permissions`` containing
+    ``{"setup_scheduler": true}`` *and* have at least one assigned
+    ``role_plants`` row.  This keeps the legacy unscoped-role compatibility
+    used by older routes from accidentally granting a new operational write
+    permission.  Admin is the sole intentionally plant-unrestricted role.
+    """
+    email = require_authenticated(request)
+    role = get_user_role(email)
+    if role == "admin":
+        return email
+    settings = get_role_settings(role)
+    permissions = settings.get("permissions") if isinstance(settings, dict) else None
+    if not isinstance(permissions, dict) or permissions.get("setup_scheduler") is not True:
+        raise HTTPException(status_code=403, detail="Setup scheduler permission required")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM role_plants WHERE role = %s LIMIT 1", (role,))
+        assigned = cur.fetchone() is not None
+    if not assigned:
+        raise HTTPException(status_code=403, detail="Setup scheduler requires assigned plants")
+    return email
 
 
 def require_admin(request: Request) -> str:

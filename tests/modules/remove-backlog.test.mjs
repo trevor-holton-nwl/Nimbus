@@ -131,6 +131,22 @@ test('Engine allocates backlog runtime as productive segments when the plant per
   assert.equal(+change.end_date, +at('2026-08-13T10:00'));
 });
 
+test('Engine.removeBacklog retains the never-policy overlong calendar exception as one continuous bar', () => {
+  // Characterization for the deliberate compatibility exception: setup-aware
+  // placement must not turn a legacy Remove Backlog order into child segments
+  // or erase the sequence-preserving continuous-bar behavior.
+  seed({ tasks: [task('legacy-overlong', '2026-08-12T06:00', 9)] });
+
+  const result = Engine.removeBacklog(opts());
+  const change = patch(result, 'legacy-overlong').changes;
+
+  assert.equal(+change.start_date, +at('2026-08-12T08:00'));
+  assert.equal(+change.end_date, +at('2026-08-12T17:00'),
+    'the intentional exception continues through closed time instead of splitting');
+  assert.equal(change.scheduleSegments, undefined);
+  assert.deepEqual(result.diagnostics.overlongIds, ['legacy-overlong']);
+});
+
 test('Engine leaves a protected task after To untouched and reports a boundary conflict', () => {
   seed({
     tasks: [

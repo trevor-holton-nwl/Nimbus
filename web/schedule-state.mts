@@ -4,7 +4,7 @@
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
@@ -52,6 +52,9 @@ interface StoreState {
    *  after a priority-list upload/delete. Shape: {line_or_empty: {field_key:
    *  {VALUE: RANK}}} — matches GET /priority-rank-maps verbatim, no reshaping. */
   priorityRankMaps: PriorityRankMaps;
+  /** Read-only setup truth for exactly one plant, or null while unavailable/stale.
+   * It is intentionally excluded from Persistence's schedule cache/payload. */
+  setupSnapshot: SetupSnapshot | null;
   /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
   userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
   roleDefaults: Record<string, unknown>;
@@ -111,6 +114,7 @@ export const Store = {
     selectedLines: new Set<string>(),
     masterData: null,
     priorityRankMaps: {},
+    setupSnapshot: null,
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {}
   } as StoreState,
@@ -151,6 +155,7 @@ export const Store = {
   get roleDefaults(): Record<string, unknown>  { return this._state.roleDefaults; },
   get masterData(): NimbusMasterData | null    { return this._state.masterData; },
   get priorityRankMaps(): PriorityRankMaps { return this._state.priorityRankMaps; },
+  get setupSnapshot(): SetupSnapshot | null { return this._state.setupSnapshot; },
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
 
   isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
@@ -198,6 +203,15 @@ export const Store = {
    *  the other setters, exactly as in `setLastOptimize`. */
   setPriorityRankMaps(maps: PriorityRankMaps, _source?: string): void {
     this._state.priorityRankMaps = maps || {};
+  },
+
+  /** Replace the one active plant's read-only setup snapshot. Unlike priority
+   * maps this publishes a dedicated event so later observation-only setup views
+   * can render promptly; Persistence deliberately never serializes it into the
+   * schedule cache or update payload. */
+  replaceSetupSnapshot(snapshot: SetupSnapshot | null, source?: string): void {
+    this._state.setupSnapshot = snapshot;
+    this.emit({ type: 'setup-snapshot:replace', snapshot, source });
   },
 
   /* ----- subscription ---------------------------------------------------- */

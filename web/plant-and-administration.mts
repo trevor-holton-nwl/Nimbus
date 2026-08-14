@@ -43,7 +43,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport } from './types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, SetupPolicyConfig, SetupReleaseEvidence, LineSetupState, SetupStateKey } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -99,6 +99,564 @@ const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
  *  "no rank_column was sent", instead of silently auto-detecting a column the
  *  user just declined. */
 const ROW_ORDER_SENTINEL = '__row_order__';
+
+type SetupPermissions = { read: boolean; copy: boolean; export: boolean; definitionWrite: boolean; matrixWrite: boolean; stateWrite: boolean };
+type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPlant: boolean };
+type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string };
+type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
+type SetupReviewNavigation = { selectPlant: boolean; openMasterData: boolean; masterSub: 'plant'; plantTab: 'settings'; renderAfterNavigation: boolean };
+
+/**
+ * Plant-scoped administration for Stage 0 setup truth. It deliberately does
+ * not start the optimizer or alter task placement: this surface is a
+ * versioned observation and maintenance console only.
+ */
+export const SetupAdmin = (() => {
+  const API = Config.API_BASE;
+  const FALLBACK_REGISTERED_FIELDS = ['colorWheel', 'prt01', 'prt02', 'productionVersion'];
+  let _registeredFields = FALLBACK_REGISTERED_FIELDS.slice();
+  let _linesByPlant: Record<string, string[]> = {};
+  let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
+  let _coverageByPlant: Record<string, { observed?: { total_pairs: number; missing_pairs: number }; reachable?: { total_pairs: number; missing_pairs: number } }> = {};
+  let _lineScope = '';
+  let _missingReview: { plant: string; pairs: MissingSetupReviewPair[] } | null = null;
+  let _lastTarget: HTMLElement | null = null;
+
+  const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
+  const keyText = (key: SetupStateKey): string => key.map(part => `${part.fieldKey}=${part.value}`).join(' | ');
+  const keyId = (row: Pick<SetupMatrixRow, 'from_key' | 'to_key'>): string => `${JSON.stringify(row.from_key)}→${JSON.stringify(row.to_key)}`;
+  const headers = (): HeadersInit => ({ 'content-type': 'application/json', 'x-user-email': Session.actor() });
+  const setupText = (key: string, fallback: string, vars?: Record<string, string | number>): string => {
+    try {
+      return typeof window === 'undefined' ? fallback : Util.t(key, vars);
+    } catch {
+      return fallback;
+    }
+  };
+
+  function permissionsFor({ isAdmin, setupScheduler, plantAllowed }: { isAdmin: boolean; setupScheduler: boolean; plantAllowed: boolean }): SetupPermissions {
+    return { read: true, copy: true, export: true, definitionWrite: isAdmin, matrixWrite: isAdmin,
+      stateWrite: isAdmin || (setupScheduler && plantAllowed) };
+  }
+
+  function canWriteVersion(candidate: number | null | undefined, current: number | null | undefined): boolean {
+    return Number.isInteger(candidate) && candidate === current;
+  }
+
+  function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }): { active: boolean; reason: string } {
+    if (!definition) return { active: false, reason: setupText('ui.setup_status_no_definition', 'Create an ordered setup signature before setup-aware optimization can be reviewed.') };
+    if (checks.matrixVersion !== definition.signature_version) {
+      return { active: false, reason: setupText('ui.setup_status_version_mismatch', 'Activation is disabled: a version-matched matrix is required after a definition change.') };
+    }
+    if (checks.coveragePass === undefined) return { active: false, reason: setupText('ui.setup_status_coverage_pending', 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).') };
+    if (!checks.coveragePass) return { active: false, reason: setupText('ui.setup_status_coverage_fail', 'Activation is disabled: the reachable coverage pass is required.') };
+    return definition.active
+      ? { active: true, reason: setupText('ui.setup_status_active_reason', 'Active for approved setup-aware optimization.') }
+      : { active: false, reason: setupText('ui.setup_status_ready_review', 'Ready for activation review; Stage 0 remains observation-only.') };
+  }
+
+  function policyActivationStatus(policy: { dueDateFirstEnabled?: boolean; minChangeoverEnabled?: boolean; throughputEnabled?: boolean },
+                                  gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean; browserUatVerified?: boolean; representativeReplayVerified?: boolean; nullPredecessorVerified?: boolean; ownerApproved?: boolean; ownerEmail?: string | null; approvedAt?: string | null; notes?: string }): { active: boolean; reason: string } {
+    if (!gates.stage1Validated) return { active: false, reason: setupText('ui.setup_policy_status_stage1', 'Activation is blocked: Stage 1 validation is not recorded.') };
+    if (!gates.localDbVerified) return { active: false, reason: setupText('ui.setup_policy_status_local_db', 'Activation is blocked: safe local database verification is not recorded.') };
+    if (!gates.performanceVerified) return { active: false, reason: setupText('ui.setup_policy_status_performance', 'Activation is blocked: representative performance validation is not recorded.') };
+    if (gates.browserUatVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_browser_uat', 'Activation is blocked: browser UAT is not recorded.') };
+    if (gates.representativeReplayVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_replay', 'Activation is blocked: representative replay is not recorded.') };
+    if (gates.nullPredecessorVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_null_predecessor', 'Activation is blocked: null-predecessor persistence is not recorded.') };
+    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: setupText('ui.setup_policy_status_owner', 'Activation is blocked: scheduling-owner approval is not recorded.') };
+    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: setupText('ui.setup_policy_status_complete', 'Policy activation evidence is complete.') };
+  }
+
+  function releaseEvidenceReady(evidence: SetupReleaseEvidence | null | undefined): boolean {
+    if (!evidence) return false;
+    return evidence.ready === true && !!evidence.ownerEmail && !!evidence.approvedAt && !!evidence.notes?.trim();
+  }
+
+  function releaseEvidencePayload(evidence: SetupReleaseEvidence, patch: Partial<SetupReleaseEvidence> = {}): Record<string, unknown> {
+    const merged = { ...evidence, ...patch };
+    return {
+      stage1Validated: !!merged.stage1Validated,
+      localDbVerified: !!merged.localDbVerified,
+      performanceVerified: !!merged.performanceVerified,
+      browserUatVerified: !!merged.browserUatVerified,
+      representativeReplayVerified: !!merged.representativeReplayVerified,
+      nullPredecessorVerified: !!merged.nullPredecessorVerified,
+      ownerApproved: !!merged.ownerApproved,
+      ownerEmail: merged.ownerEmail || null,
+      approvedAt: merged.approvedAt || null,
+      notes: String(merged.notes || '').trim(),
+      expected_version: evidence.version,
+    };
+  }
+
+  function normalizePolicyThresholds(minSavings: string, maxSlip: string): Pick<SetupPolicyConfig, 'throughputMinSavingsMin' | 'throughputMaxSlipMin'> {
+    const parse = (value: string, label: string): number => {
+      if (/^-\d+$/.test(value.trim())) throw new Error(`${label} must be zero or greater.`);
+      if (!/^\d+$/.test(value.trim())) throw new Error(`${label} must be a whole number.`);
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label} must be zero or greater.`);
+      return parsed;
+    };
+    return {
+      throughputMinSavingsMin: parse(minSavings, 'Minimum setup savings'),
+      throughputMaxSlipMin: parse(maxSlip, 'Maximum individual slip'),
+    };
+  }
+
+  function safeDisablePolicy(policy: SetupPolicyConfig): Omit<SetupPolicyConfig, 'version'> & { expected_version: number } {
+    return {
+      plant: policy.plant,
+      dueDateFirstEnabled: false,
+      minChangeoverEnabled: false,
+      throughputEnabled: false,
+      throughputMinSavingsMin: policy.throughputMinSavingsMin,
+      throughputMaxSlipMin: policy.throughputMaxSlipMin,
+      expected_version: policy.version,
+    };
+  }
+
+  function effectiveRows({ plantRows, lineRows, line, version }: { plantRows: SetupMatrixRow[]; lineRows: SetupMatrixRow[]; line: string; version: number }): EffectiveSetupRow[] {
+    const plant = plantRows.filter(row => row.signature_version === version);
+    if (!line) return plant.map(row => ({ ...row, inherited: false, inheritedFromPlant: false }));
+    const overrides = lineRows.filter(row => row.line === line && row.signature_version === version);
+    const byPair = new Map(overrides.map(row => [keyId(row), row]));
+    const result = plant.map(row => {
+      const override = byPair.get(keyId(row));
+      return override
+        ? { ...override, inherited: false, inheritedFromPlant: false }
+        : { ...row, line, inherited: true, inheritedFromPlant: true };
+    });
+    overrides.filter(row => !plant.some(base => keyId(base) === keyId(row))).forEach(row =>
+      result.push({ ...row, inherited: false, inheritedFromPlant: false }));
+    return result;
+  }
+
+  function deleteRequest(row: SetupMatrixRow): { line: string; signature_version: number; rows: SetupMatrixRow[] } {
+    return { line: row.line, signature_version: row.signature_version, rows: [row] };
+  }
+
+  function csvColumns(): string[] {
+    return ['Plant', 'Line', 'Signature version', 'From setup state', 'To setup state', 'Setup minutes'];
+  }
+
+  function missingPairsCsv(plant: string, pairs: ReadonlyArray<MissingSetupReviewPair>): string {
+    const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = pairs.slice(0, 12).map(pair => [plant, pair.line, pair.predecessorOrderId, pair.successorOrderId,
+      pair.fromState, pair.toState, pair.reason].map(quote).join(','));
+    return ['Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...rows].join('\n');
+  }
+
+  function reviewAction(permissions: Pick<SetupPermissions, 'matrixWrite'>): 'editor' | 'copy-export' {
+    return permissions.matrixWrite ? 'editor' : 'copy-export';
+  }
+
+  function canReviewMissingPairs(plant: string): boolean {
+    const session = Session.currentUser();
+    const settings = session?.role_settings?.permissions as Record<string, unknown> | undefined;
+    const plantAllowed = Session.isAdmin() || session?.allowed_plants?.includes(plant) === true;
+    return permissionsFor({ isAdmin: Session.isAdmin(), setupScheduler: settings?.setup_scheduler === true, plantAllowed }).matrixWrite;
+  }
+
+  function reviewNavigation(plant: string, selectedPlant: string | null, paneVisible: boolean): SetupReviewNavigation {
+    return {
+      selectPlant: selectedPlant !== plant,
+      openMasterData: true,
+      masterSub: 'plant',
+      plantTab: 'settings',
+      renderAfterNavigation: !paneVisible || selectedPlant !== plant,
+    };
+  }
+
+  function setupWriteKind(url: string): SetupWriteKind {
+    if (/\/definition(?:$|\?)/.test(url)) return 'definition';
+    if (/\/matrix(?:\/|$)/.test(url)) return 'matrix';
+    if (/\/state(?:$|\?)/.test(url)) return 'state';
+    return 'override';
+  }
+
+  /** Receives only the compact preview edge list. It never stores candidate
+   * schedules and it never triggers an optimization run. */
+  function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): boolean {
+    if (!plant || !canReviewMissingPairs(plant)) return false;
+    _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
+    const lines = [...new Set(_missingReview.pairs.map(pair => pair.line).filter(Boolean))];
+    if (lines.length === 1) _lineScope = lines[0];
+    const existingPane = _lastTarget ?? document.getElementById('setup-admin-pane');
+    const navigation = reviewNavigation(plant, Store.selectedPlant, !!existingPane && !existingPane.closest('[hidden]'));
+    if (navigation.selectPlant) Store.setSelectedPlant(plant, 'setup-preview-review');
+    const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void; gotoMasterSub?: (sub: 'plant') => void } } }).NIMBUS?.App;
+    app?.goto?.('masterdata');
+    app?.gotoMasterSub?.(navigation.masterSub);
+    Plant.gotoTab(navigation.plantTab);
+    const target = document.getElementById('setup-admin-pane') ?? existingPane;
+    if (target) render(target, plant);
+    return true;
+  }
+
+  function csvFor(plant: string, rows: EffectiveSetupRow[]): string {
+    const quote = (value: unknown): string => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    return [csvColumns(), ...rows.map(row => [plant, row.line || '', row.signature_version, JSON.stringify(row.from_key), JSON.stringify(row.to_key), row.setup_min])]
+      .map(row => row.map(quote).join(',')).join('\r\n');
+  }
+
+  function registeredFields(fields: Array<{ field_key: string }> | null | undefined): string[] {
+    return (fields || []).map(field => field.field_key).filter(Boolean);
+  }
+
+  function parseCsv(text: string): string[][] {
+    const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (quoted && char === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (char === '"') quoted = !quoted;
+      else if (!quoted && char === ',') { row.push(cell); cell = ''; }
+      else if (!quoted && (char === '\n' || char === '\r')) { if (char === '\r' && text[i + 1] === '\n') i++; row.push(cell); if (row.some(value => value !== '')) rows.push(row); row = []; cell = ''; }
+      else cell += char;
+    }
+    if (quoted) throw new Error('CSV contains an unclosed quote');
+    row.push(cell); if (row.some(value => value !== '')) rows.push(row);
+    return rows;
+  }
+
+  function parseLongFormCsv(text: string): { plant: string; line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> } {
+    const csv = parseCsv(text); const expected = csvColumns();
+    if (!csv.length || expected.some((name, index) => csv[0][index] !== name)) throw new Error('CSV must use the canonical setup-matrix columns');
+    if (csv.length < 2) throw new Error('CSV has no matrix rows');
+    const first = csv[1]; const plant = first[0]; const line = first[1]; const signature_version = Number(first[2]);
+    if (!plant || !Number.isInteger(signature_version)) throw new Error('CSV requires Plant and integer Signature version');
+    const rows = csv.slice(1).map(values => {
+      if (values.length !== expected.length || values[0] !== plant || values[1] !== line || Number(values[2]) !== signature_version) throw new Error('CSV rows must use one plant, line scope, and signature version');
+      const from = JSON.parse(values[3]); const to = JSON.parse(values[4]); const setup_min = Number(values[5]);
+      if (!Array.isArray(from) || !Array.isArray(to) || !Number.isInteger(setup_min) || setup_min < 0) throw new Error('CSV has invalid setup-state JSON or minutes');
+      return { from, to, setup_min };
+    });
+    return { plant, line, signature_version, rows };
+  }
+
+  async function loadRegisteredFields(): Promise<void> {
+    try { const response = await Util.fetchTraced(`${API}/priority-fields`); if (!response.ok) throw new Error(`HTTP ${response.status}`); const data = await response.json() as { fields?: Array<{ field_key: string }> }; const fields = registeredFields(data.fields); if (fields.length) _registeredFields = fields; }
+    catch (error) { ErrorLog.warn('setup-admin', `Priority-field registry unavailable: ${(error as Error).message}`); }
+  }
+
+  async function collectPagedLines(loadPage: (offset: number, limit: number) => Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>, pageSize = 100): Promise<string[]> {
+    const lines: string[] = []; let offset = 0; let total = Number.POSITIVE_INFINITY;
+    // Each request stays bounded. The server's filtered total controls
+    // continuation; an empty page is a defensive escape from a stale total.
+    while (offset < total) {
+      const page = await loadPage(offset, pageSize);
+      const rows = page.rows || [];
+      lines.push(...rows.map(row => row.production_line).filter(Boolean));
+      total = Number.isFinite(page.meta?.total) ? Math.max(0, Number(page.meta?.total)) : offset + rows.length;
+      offset += rows.length;
+      if (!rows.length) break;
+    }
+    return [...new Set(lines)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  async function loadScopeLines(plant: string): Promise<void> {
+    if (_linesByPlant[plant]) return;
+    try { _linesByPlant[plant] = await collectPagedLines(async (offset, limit) => { const response = await Util.fetchTraced(`${API}/master-data/production_lines?plant=${encodeURIComponent(plant)}&limit=${limit}&offset=${offset}`); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>; }); }
+    catch (error) { ErrorLog.warn('setup-admin', `Plant line scope unavailable: ${(error as Error).message}`); _linesByPlant[plant] = []; }
+  }
+
+  async function loadCompatibility(plant: string, line: string): Promise<void> {
+    const cacheKey = `${plant}\u0000${line}`; if (_compatibilityByLine[cacheKey]) return;
+    try { const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/lines/${encodeURIComponent(line)}/compatibility`); if (!response.ok) throw new Error(`HTTP ${response.status}`); _compatibilityByLine[cacheKey] = await response.json(); }
+    catch (error) { ErrorLog.warn('setup-admin', `Line compatibility unavailable: ${(error as Error).message}`); }
+  }
+
+  async function loadCoverage(plant: string): Promise<void> {
+    if (_coverageByPlant[plant]) return;
+    const started = performance.now();
+    try {
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/coverage?limit=100`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      _coverageByPlant[plant] = await response.json();
+    } catch (error) { ErrorLog.warn('setup-admin', `Setup coverage unavailable: ${(error as Error).message}`); }
+    finally { PerfMonitor.record('setup.coverage.fetch', performance.now() - started); }
+  }
+
+  function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
+    if (!target) return;
+    _lastTarget = target;
+    if (!plant) { target.innerHTML = `<div class="setup-empty">${esc(Util.t('toast.no_plant_selected'))}</div>`; return; }
+    const snapshot = Store.setupSnapshot;
+    if (!snapshot || snapshot.plant !== plant) {
+      target.innerHTML = `<div class="setup-empty">${esc(Util.t('ui.loading'))}</div>`;
+      Persistence.loadSetupSnapshot(plant).then(() => {
+        if (Store.selectedPlant === plant) render(target, plant);
+      });
+      return;
+    }
+    // Await every load once and paint a single time — each of these is a
+    // cheap no-op when already cached, so this doesn't add a real delay on
+    // the common case, but it stops the panel from repainting (and blowing
+    // away the combobox + every listener) up to three times per open.
+    const loaders: Array<Promise<unknown>> = [
+      loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant),
+      Persistence.loadSetupPolicy(plant), Persistence.loadSetupReleaseEvidence(plant),
+    ];
+    if (_lineScope) loaders.push(loadCompatibility(plant, _lineScope));
+    Promise.all(loaders).then(() => {
+      if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
+    });
+  }
+
+  function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
+    const definition = snapshot.definition;
+    const version = definition?.signature_version ?? null;
+    const session = Session.currentUser();
+    const settings = session?.role_settings?.permissions as Record<string, unknown> | undefined;
+    const plantAllowed = Session.isAdmin() || session?.allowed_plants?.includes(snapshot.plant) === true;
+    const permissions = permissionsFor({ isAdmin: Session.isAdmin(), setupScheduler: settings?.setup_scheduler === true, plantAllowed });
+    const lines = _linesByPlant[snapshot.plant] || [];
+    if (_lineScope && !lines.includes(_lineScope)) _lineScope = '';
+    const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, line: _lineScope, version });
+    const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
+    const matrixVersion = rows.length ? version : null;
+    const coverage = _coverageByPlant[snapshot.plant];
+    const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
+    const status = activationStatus(definition, { matrixVersion, coveragePass });
+    const policy = Persistence._setupPolicyPlant === snapshot.plant ? Persistence._setupPolicyConfig : null;
+    const evidence = Persistence._setupReleaseEvidencePlant === snapshot.plant ? Persistence._setupReleaseEvidence : null;
+    const policyStatus = policy
+      ? policyActivationStatus(policy, evidence || { stage1Validated: false, localDbVerified: false, performanceVerified: false })
+      : { active: false, reason: Util.t('ui.setup_policy_loading') };
+    const policyHtml = renderPolicyPanel(policy, evidence, permissions, policyStatus);
+    const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
+    const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
+    const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
+    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
+    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>${esc(Util.t('ui.setup_review_missing_title'))}</strong><span>${esc(Util.t('ui.setup_review_missing_count', { count: review.pairs.length, plural: review.pairs.length === 1 ? '' : 's' }))}${esc(permissions.matrixWrite ? Util.t('ui.setup_review_scope_writable') : Util.t('ui.setup_review_scope_readonly'))}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.copy'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_csv'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_review_scope_label'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
+    target.innerHTML = `
+      <section class="setup-admin" aria-labelledby="setup-admin-title">
+        <header class="setup-admin-head">
+          <div><div class="setup-kicker">${esc(Util.t('ui.setup_matrix_observation'))}</div><h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
+          <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p></div>
+          <span class="setup-version">v${version ?? '—'}</span>
+        </header>
+        <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
+        ${policyHtml}
+        ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>${esc(Util.t('ui.setup_shadow_coverage_title'))}</strong><span>${esc(Util.t('ui.setup_coverage_observed', { transitions: coverage.observed?.total_pairs ?? 0, missing: coverage.observed?.missing_pairs ?? 0 }))}</span><span>${esc(Util.t('ui.setup_coverage_reachable', { pairs: coverage.reachable?.total_pairs ?? 0, missing: coverage.reachable?.missing_pairs ?? 0 }))}</span></div>` : ''}
+        ${reviewHtml}
+        <div class="setup-toolbar">
+          <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
+          <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
+          <div class="spacer"></div>
+          <button class="btn btn-ghost sm" data-setup-copy ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.copy'))}</button>
+          <button class="btn btn-ghost sm" data-setup-export ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_csv'))}</button>
+        </div>
+        <div class="setup-definition panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_definition'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
+          <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<label><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select></label>`).join('')}</div>
+            ${!definition ? `<p class="setup-help">${esc(Util.t('ui.setup_no_definition'))}</p>` : ''}
+            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
+            ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
+            <p class="setup-help">${esc(Util.t('ui.setup_activation_requirements'))}</p></div></div>
+        <div class="setup-matrix panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_matrix_rows'))}: ${esc(sourceLabel)}</h4>${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}</div>
+          <div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_from_state'))}</th><th>${esc(Util.t('ui.setup_to_state'))}</th><th>${esc(Util.t('ui.setup_minutes'))}</th><th>${esc(Util.t('ui.setup_source'))}</th><th></th></tr></thead><tbody>${rows.length ? rows.map(row => `<tr class="${row.inherited ? 'inherited' : ''}" data-setup-row="${esc(keyId(row))}"><td>${esc(keyText(row.from_key))}</td><td>${esc(keyText(row.to_key))}</td><td class="setup-num">${row.setup_min}</td><td>${row.inherited ? esc(Util.t('ui.setup_inherited')) : esc(row.source || 'manual')}</td><td>${row.line && !row.inherited && permissions.matrixWrite ? `<button class="btn btn-ghost sm" data-setup-delete-row="${esc(keyId(row))}">${esc(Util.t('btn.setup_delete_override'))}</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5" class="setup-empty">${esc(Util.t('ui.setup_no_rows'))}</td></tr>`}</tbody></table></div></div>
+        ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
+        <div class="setup-audit panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_override_audit'))}</h4></div><div class="panel-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} · ${esc(keyText(override.predecessor_state_key))} → ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_overrides'))}</span>`}</div></div>
+      </section>`;
+    _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => {
+      _lineScope = value;
+      if (value) loadCompatibility(snapshot.plant, value).then(() => renderSnapshot(target, snapshot));
+      else renderSnapshot(target, snapshot);
+    } });
+    wire(target, snapshot, permissions, rows, policy, evidence);
+  }
+
+  function renderPolicyPanel(policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null, permissions: SetupPermissions, status: { active: boolean; reason: string }): string {
+    if (!policy) return `<div class="setup-policy panel" aria-live="polite"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4></div><div class="panel-body"><span class="setup-empty">${esc(status.reason)}</span></div></div>`;
+    const enabled = policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled;
+    const evidenceReady = releaseEvidenceReady(evidence);
+    const controls = permissions.definitionWrite
+      ? `<button class="btn btn-ghost sm" data-setup-save-policy>${esc(Util.t('btn.save'))}</button>${enabled ? `<button class="btn btn-ghost sm" data-setup-disable-policy>${esc(Util.t('ui.setup_policy_disable_all'))}</button>` : ''}`
+      : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`;
+    const evidenceFields: Array<[keyof SetupReleaseEvidence, string]> = [
+      ['stage1Validated', 'ui.setup_evidence_stage1'], ['localDbVerified', 'ui.setup_evidence_local_db'],
+      ['performanceVerified', 'ui.setup_evidence_performance'], ['browserUatVerified', 'ui.setup_evidence_browser'],
+      ['representativeReplayVerified', 'ui.setup_evidence_replay'], ['nullPredecessorVerified', 'ui.setup_evidence_null_predecessor'],
+      ['ownerApproved', 'ui.setup_evidence_owner'],
+    ];
+    // The evidence checklist is an engineering release gate (Stage 1/local-DB/
+    // browser-UAT/owner-approval), not something a plant scheduler should see
+    // or fill in — visible to admins only. Everyone else gets the plain
+    // enabled/not-enabled status line below.
+    const evidencePanel = (evidence && permissions.definitionWrite) ? `<div class="setup-evidence panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_evidence_title'))}</h4><button class="btn btn-ghost sm" data-setup-save-evidence>${esc(Util.t('btn.save'))}</button></div><div class="panel-body"><div class="setup-evidence-grid">${evidenceFields.map(([key, label]) => `<label class="setup-check"><input type="checkbox" data-setup-evidence="${key}" ${evidence[key] ? 'checked' : ''}>${esc(Util.t(label))}</label>`).join('')}</div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_evidence_owner_email'))}<input class="input" data-setup-evidence-owner-email value="${esc(evidence.ownerEmail || '')}"></label><label>${esc(Util.t('ui.setup_evidence_approved_at'))}<input class="input" data-setup-evidence-approved-at value="${esc(evidence.approvedAt || '')}"></label></div><label class="setup-evidence-notes">${esc(Util.t('ui.setup_evidence_notes'))}<textarea class="input" data-setup-evidence-notes>${esc(evidence.notes)}</textarea></label><div class="setup-status ${evidenceReady ? 'ok' : 'warn'}"><strong>${esc(evidenceReady ? Util.t('ui.setup_evidence_ready') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div></div></div>` : '';
+    const policyReason = status.active ? Util.t('ui.setup_policy_active_reason') : Util.t('ui.setup_policy_not_enabled');
+    return `${evidencePanel}<div class="setup-policy panel" aria-live="polite"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4>${controls}</div><div class="panel-body"><div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${esc(status.active ? Util.t('ui.setup_activation_active') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(policyReason)}</span></div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_policy_min_savings'))}<input class="input" inputmode="numeric" data-setup-policy-min-savings value="${policy.throughputMinSavingsMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_policy_max_slip'))}<input class="input" inputmode="numeric" data-setup-policy-max-slip value="${policy.throughputMaxSlipMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><div class="setup-policy-modes"><label class="setup-check"><input type="checkbox" data-setup-policy-mode="dueDateFirstEnabled" ${policy.dueDateFirstEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_due_date_first'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="minChangeoverEnabled" ${policy.minChangeoverEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_min_changeover'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="throughputEnabled" ${policy.throughputEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_throughput'))}</label></div><p class="setup-help">${esc(evidenceReady ? Util.t('ui.setup_policy_switches_unlocked') : Util.t('ui.setup_policy_switches_locked'))}</p></div></div>`;
+  }
+
+  function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {
+    const values = state ? keyText(state.state_key) : Util.t('ui.setup_state_unknown');
+    return `<div class="setup-state panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_current_state'))}</h4></div><div class="panel-body"><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div></div>`;
+  }
+
+  function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): void {
+    target.querySelector<HTMLButtonElement>('[data-setup-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(csvFor(snapshot.plant, rows)).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
+    target.querySelector<HTMLButtonElement>('[data-setup-export]')?.addEventListener('click', () => {
+      const blob = new Blob([csvFor(snapshot.plant, rows)], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `setup-matrix-${snapshot.plant}-${_lineScope || 'plant'}-v${snapshot.definition?.signature_version ?? 0}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
+    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
+    target.querySelector<HTMLButtonElement>('[data-setup-review-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(missingPairsCsv(snapshot.plant, review?.pairs || [])).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
+    target.querySelector<HTMLButtonElement>('[data-setup-review-export]')?.addEventListener('click', () => {
+      const blob = new Blob([missingPairsCsv(snapshot.plant, review?.pairs || [])], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `missing-setups-${snapshot.plant}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
+    target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
+      const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
+      const index = holder.querySelectorAll('select').length;
+      holder.insertAdjacentHTML('beforeend', `<label><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${option}</option>`).join('')}</select></label>`);
+    });
+    target.querySelectorAll<HTMLButtonElement>('[data-setup-delete-row]').forEach(button => button.addEventListener('click', () => {
+      const row = rows.find(item => keyId(item) === button.dataset.setupDeleteRow); if (row) deleteRow(target, snapshot, row);
+    }));
+    target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
+    target.querySelector<HTMLButtonElement>('[data-setup-edit-state]')?.addEventListener('click', () => editState(target, snapshot));
+    target.querySelector<HTMLButtonElement>('[data-setup-save-policy]')?.addEventListener('click', () => savePolicy(target, snapshot.plant, policy, evidence));
+    target.querySelector<HTMLButtonElement>('[data-setup-disable-policy]')?.addEventListener('click', () => disablePolicy(target, snapshot.plant, policy));
+    target.querySelector<HTMLButtonElement>('[data-setup-save-evidence]')?.addEventListener('click', () => saveEvidence(target, snapshot.plant, evidence));
+    if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
+  }
+
+  async function savePolicy(target: HTMLElement, plant: string, policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): Promise<void> {
+    if (!policy) return;
+    try {
+      const minSavings = target.querySelector<HTMLInputElement>('[data-setup-policy-min-savings]')?.value ?? '';
+      const maxSlip = target.querySelector<HTMLInputElement>('[data-setup-policy-max-slip]')?.value ?? '';
+      const thresholds = normalizePolicyThresholds(minSavings, maxSlip);
+      const enabled = releaseEvidenceReady(evidence);
+      const body = enabled
+        ? {
+          plant, ...thresholds,
+          dueDateFirstEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="dueDateFirstEnabled"]')?.checked === true,
+          minChangeoverEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="minChangeoverEnabled"]')?.checked === true,
+          throughputEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="throughputEnabled"]')?.checked === true,
+          expected_version: policy.version,
+        }
+        : safeDisablePolicy({ ...policy, ...thresholds });
+      await putPolicy(plant, body);
+      await Persistence.loadSetupPolicy(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+  }
+
+  async function saveEvidence(target: HTMLElement, plant: string, evidence: SetupReleaseEvidence | null): Promise<void> {
+    if (!evidence) return;
+    try {
+      const patch: Partial<SetupReleaseEvidence> = {
+        ownerEmail: target.querySelector<HTMLInputElement>('[data-setup-evidence-owner-email]')?.value.trim() || null,
+        approvedAt: target.querySelector<HTMLInputElement>('[data-setup-evidence-approved-at]')?.value.trim() || null,
+        notes: target.querySelector<HTMLTextAreaElement>('[data-setup-evidence-notes]')?.value.trim() || '',
+      };
+      (['stage1Validated', 'localDbVerified', 'performanceVerified', 'browserUatVerified', 'representativeReplayVerified', 'nullPredecessorVerified', 'ownerApproved'] as const).forEach(key => {
+        patch[key] = target.querySelector<HTMLInputElement>(`[data-setup-evidence="${key}"]`)?.checked === true;
+      });
+      await putReleaseEvidence(plant, releaseEvidencePayload(evidence, patch));
+      await Persistence.loadSetupReleaseEvidence(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+  }
+
+  async function disablePolicy(target: HTMLElement, plant: string, policy: SetupPolicyConfig | null): Promise<void> {
+    if (!policy) return;
+    try {
+      await putPolicy(plant, safeDisablePolicy(policy));
+      await Persistence.loadSetupPolicy(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+  }
+
+  async function putPolicy(plant: string, body: Omit<SetupPolicyConfig, 'version'> & { expected_version: number }): Promise<void> {
+    const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/policy`, { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
+    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+  }
+
+  async function putReleaseEvidence(plant: string, body: Record<string, unknown>): Promise<void> {
+    const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/release-evidence`, { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
+    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+  }
+
+  async function saveDefinition(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
+    const fields = Array.from(target.querySelectorAll<HTMLSelectElement>('[data-setup-field]')).map(select => select.value);
+    const strict = target.querySelector<HTMLInputElement>('[data-setup-strict]')?.checked ?? true;
+    if (!fields.length || new Set(fields).size !== fields.length) { Toast.show(Util.t('ui.setup_fields_unique'), 'error'); return; }
+    await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/definition`, 'PUT', { fields, strict_blanks: strict, expected_signature_version: snapshot.definition?.signature_version ?? null });
+  }
+
+  async function deleteRow(target: HTMLElement, snapshot: SetupSnapshot, row: SetupMatrixRow): Promise<void> {
+    if (!canWriteVersion(row.signature_version, snapshot.definition?.signature_version)) { Toast.show(Util.t('ui.setup_version_mismatch'), 'error'); return; }
+    await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, 'DELETE', deleteRequest(row));
+  }
+
+  async function importMatrix(target: HTMLElement, snapshot: SetupSnapshot, input: HTMLInputElement): Promise<void> {
+    const file = input.files?.[0]; if (!file) return;
+    try {
+      const parsed = parseLongFormCsv(await file.text());
+      if (parsed.plant !== snapshot.plant || !canWriteVersion(parsed.signature_version, snapshot.definition?.signature_version)) throw new Error(Util.t('ui.setup_version_mismatch'));
+      if (parsed.line !== _lineScope) throw new Error('CSV line scope must match the selected setup scope');
+      await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, 'POST', {
+        line: parsed.line, signature_version: parsed.signature_version, rows: parsed.rows,
+      });
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+    finally { input.value = ''; }
+  }
+
+  async function editState(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
+    const definition = snapshot.definition; if (!_lineScope || !definition) return;
+    const current = snapshot.line_states.find(state => state.line === _lineScope);
+    const panel = target.querySelector('.setup-state .panel-body'); if (!panel || panel.querySelector('[data-setup-state-editor]')) return;
+    const initial = new Map((current?.state_key || []).map(pair => [pair.fieldKey, pair.value]));
+    const editor = document.createElement('div'); editor.className = 'setup-state-editor'; editor.dataset.setupStateEditor = 'true';
+    editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
+    panel.appendChild(editor);
+    const observed = editor.querySelector<HTMLInputElement>('[data-setup-observed-at]')!;
+    const fp = Util.fpDatetime(observed); fp.setDate(new Date(), false);
+    editor.querySelector<HTMLButtonElement>('[data-setup-save-state]')!.addEventListener('click', async () => {
+      const values = definition.fields.map(field => ({ fieldKey: field, value: editor.querySelector<HTMLInputElement>(`[data-setup-state-field="${CSS.escape(field)}"]`)?.value.trim() || '' }));
+      if (values.some(pair => !pair.value)) { Toast.show(Util.t('ui.setup_state_fields_required'), 'error'); return; }
+      fp.destroy();
+      await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/state`, 'PUT', { values, signature_version: definition.signature_version, observed_at: observed.value, source: 'manual', reason: Util.t('ui.setup_state_manual_reason') });
+    });
+  }
+
+  async function wireCompatibility(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
+    const cacheKey = `${snapshot.plant}\u0000${_lineScope}`;
+    const saved = _compatibilityByLine[cacheKey];
+    const compatible = saved?.setup_compatible !== false;
+    const statePanel = target.querySelector('.setup-state .panel-body');
+    if (!statePanel) return;
+    const compat = document.createElement('div'); compat.className = 'setup-compatibility';
+    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${esc(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${esc(Util.t('ui.setup_compatibility_reason'))}" value="${esc(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${esc(Util.t('btn.save'))}</button><p>${esc(Util.t('ui.setup_not_global_exclusion'))}</p>`;
+    statePanel.appendChild(compat);
+    const checkbox = compat.querySelector<HTMLInputElement>('[data-setup-compatible]')!;
+    const reason = compat.querySelector<HTMLInputElement>('[data-setup-compatibility-reason]')!;
+    const save = compat.querySelector<HTMLButtonElement>('[data-setup-save-compatibility]')!;
+    const persist = async () => {
+      if (!checkbox.checked && !reason.value.trim()) { reason.disabled = false; reason.focus(); Toast.show(Util.t('ui.setup_reason_required'), 'error'); return; }
+      reason.disabled = checkbox.checked;
+      try {
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/compatibility`, { method: 'PUT', headers: headers(), body: JSON.stringify({ setup_compatible: checkbox.checked, reason: reason.value.trim() }) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        Persistence.noteSetupWrite(snapshot.plant, 'override');
+        _compatibilityByLine[cacheKey] = { setup_compatible: checkbox.checked, setup_compatibility_reason: checkbox.checked ? null : reason.value.trim() }; Toast.show(Util.t('toast.line_settings_updated'), 'success');
+      } catch (error) { checkbox.checked = compatible; reason.disabled = compatible; Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+    };
+    checkbox.addEventListener('change', () => { reason.disabled = checkbox.checked; save.disabled = checkbox.checked; if (!checkbox.checked) reason.focus(); });
+    save.addEventListener('click', persist);
+  }
+
+  async function writeAndRefresh(target: HTMLElement, plant: string, url: string, method: string, body: unknown): Promise<void> {
+    try {
+      const response = await Util.fetchTraced(url, { method, headers: headers(), body: JSON.stringify(body) });
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      Persistence.noteSetupWrite(plant, setupWriteKind(url));
+      await Persistence.loadSetupSnapshot(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+  }
+
+  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, releaseEvidenceReady, releaseEvidencePayload, normalizePolicyThresholds, safeDisablePolicy, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
+})();
 
 /* =============================================================================
    CALENDAR UI — blackout-block-tab UI remnant.
@@ -1316,6 +1874,11 @@ export const Plant = {
             </div>
           </div>
 
+          <!-- Stage 0 setup truth is maintained beside the plant's scheduling
+               policy, never inside a timeline/optimizer flow. It remains
+               observation-only until a later stage explicitly enables use. -->
+          <div id="setup-admin-pane"></div>
+
         </div>
       </div></div>`;
 
@@ -1818,6 +2381,7 @@ export const Plant = {
         else Persistence.loadPriorityRankMaps(plantName).then(applyRankHints);
       }
     })();
+    SetupAdmin.render(pane.querySelector<HTMLElement>('#setup-admin-pane'), plantName);
   },
 };
 

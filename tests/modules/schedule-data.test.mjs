@@ -263,6 +263,100 @@ test('Persistence.loadPriorityRankMaps goes through Util.fetchTraced, so the pla
   }
 });
 
+function setupSnapshot(plant) {
+  return {
+    plant,
+    definition: null,
+    plant_rows: [],
+    line_rows: [],
+    line_states: [],
+    overrides: [],
+    freshness: { signature_version: null, request_id: `setup-${plant}` },
+  };
+}
+
+test('Persistence.loadSetupSnapshot clears the outgoing plant before the replacement request resolves', async () => {
+  Store.replaceSetupSnapshot(setupSnapshot('PLANT_A'), 'unit-test');
+  Persistence._setupSnapshotPlant = 'PLANT_A';
+  let resolveRequest;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise(resolve => { resolveRequest = resolve; });
+  try {
+    const loading = Persistence.loadSetupSnapshot('PLANT_B');
+    assert.equal(Store.setupSnapshot, null, 'the outgoing plant snapshot must disappear before PLANT_B can hydrate');
+    assert.equal(Persistence._setupSnapshotPlant, null, 'the freshness marker must remain stale until a successful response');
+    resolveRequest({ ok: true, json: () => Promise.resolve(setupSnapshot('PLANT_B')) });
+    await loading;
+    assert.equal(Store.setupSnapshot?.plant, 'PLANT_B');
+    assert.equal(Persistence._setupSnapshotPlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.loadSetupSnapshot leaves setup state stale and empty after a failed fetch', async () => {
+  Store.replaceSetupSnapshot(setupSnapshot('PLANT_A'), 'unit-test');
+  Persistence._setupSnapshotPlant = 'PLANT_A';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    const result = await Persistence.loadSetupSnapshot('PLANT_B');
+    assert.equal(result, null);
+    assert.equal(Store.setupSnapshot, null, 'a failed plant load must not retain PLANT_A data');
+    assert.notEqual(Persistence._setupSnapshotPlant, 'PLANT_B', 'a failed response must never be marked fresh');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.loadSetupSnapshot suppresses an older plant response after a newer plant request starts', async () => {
+  const pending = new Map();
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = url => new Promise(resolve => { pending.set(String(url), resolve); });
+  try {
+    const oldRequest = Persistence.loadSetupSnapshot('PLANT_A');
+    const newRequest = Persistence.loadSetupSnapshot('PLANT_B');
+    pending.get('/setup/PLANT_B')({ ok: true, json: () => Promise.resolve(setupSnapshot('PLANT_B')) });
+    await newRequest;
+    pending.get('/setup/PLANT_A')({ ok: true, json: () => Promise.resolve(setupSnapshot('PLANT_A')) });
+    assert.equal(await oldRequest, null, 'the stale request must report that it did not hydrate Store');
+    assert.equal(Store.setupSnapshot?.plant, 'PLANT_B', 'a late PLANT_A response must not overwrite the active plant data');
+    assert.equal(Persistence._setupSnapshotPlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.loadSetupPolicy clears prior-plant policy before hydrating and remains empty after failure', async () => {
+  Persistence._setupPolicyConfig = { plant: 'PLANT_A', minChangeoverEnabled: true };
+  Persistence._setupPolicyPlant = 'PLANT_A';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    const result = await Persistence.loadSetupPolicy('PLANT_B');
+    assert.equal(result, null);
+    assert.equal(Persistence._setupPolicyConfig, null, 'a failed load must not retain PLANT_A policy');
+    assert.notEqual(Persistence._setupPolicyPlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Persistence.loadSetupReleaseEvidence clears prior-plant evidence before hydrating and remains empty after failure', async () => {
+  Persistence._setupReleaseEvidence = { plant: 'PLANT_A', stage1Validated: true, ready: false };
+  Persistence._setupReleaseEvidencePlant = 'PLANT_A';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    const result = await Persistence.loadSetupReleaseEvidence('PLANT_B');
+    assert.equal(result, null);
+    assert.equal(Persistence._setupReleaseEvidence, null, 'a failed load must not retain PLANT_A evidence');
+    assert.notEqual(Persistence._setupReleaseEvidencePlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Stage 3 fix — the rank cache must not survive a plant switch.
 //
@@ -321,7 +415,7 @@ test('Persistence._loadCache clears the rank cache — the offline restore hydra
   // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
   // rehydrates whatever plant was last persisted, which need not be the plant the
   // rank cache holds, and it emits schedule:hydrated regardless.
-  localStorage.setItem(Config.LS_KEY, JSON.stringify({
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
     _schemaVersion: Config.SCHEMA_VERSION,
     tasks: [],
   }));
@@ -333,7 +427,7 @@ test('Persistence._loadCache clears the rank cache — the offline restore hydra
       'ranks cannot be trusted to match a cache-restored board, so they must be dropped');
     assert.equal(Persistence._rankMapsPlant, null);
   } finally {
-    localStorage.removeItem(Config.LS_KEY);
+    globalThis.localStorage.removeItem(Config.LS_KEY);
   }
 });
 

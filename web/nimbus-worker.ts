@@ -19,10 +19,11 @@
  * ----------------
  *  IN  { type:'ALERTS',      id, payload:{ tasks, blocks, plantBlocks, calendars,
  *                                          plants, lineSettings, masterData,
- *                                          dismissed, opts:{lines?} } }
+ *                                          dismissed, opts:{lines?},
+ *                                          setup:{intervals,diagnostics} } }
  *  IN  { type:'UTILIZATION', id, payload:{ tasks, lineSettings, calendars, plants,
  *                                          blocks, plantBlocks, masterData,
- *                                          startMs, days } }
+ *                                          startMs, days, setup:{intervals,diagnostics} } }
  *  OUT { type:'ALERTS_RESULT',      id, alerts, elapsed }
  *  OUT { type:'UTILIZATION_RESULT', id, matrix }
  *  OUT { type:'ERROR',              id, error }

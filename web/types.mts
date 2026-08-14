@@ -88,6 +88,35 @@ export interface OrderScheduleSegment {
 
 export type SplitOrderPolicy = 'never' | 'overlong_only' | 'partial_allowed';
 
+/** Plant-scoped Stage 2 policy sidecar.  All modes default off until the
+ * separate validation/performance activation gate is satisfied. */
+export interface SetupPolicyConfig {
+  plant: string;
+  dueDateFirstEnabled: boolean;
+  minChangeoverEnabled: boolean;
+  throughputEnabled: boolean;
+  throughputMinSavingsMin: number;
+  throughputMaxSlipMin: number;
+  version: number;
+}
+
+/** Plant-scoped release evidence required before any setup policy may enable. */
+export interface SetupReleaseEvidence {
+  plant: string;
+  stage1Validated: boolean;
+  localDbVerified: boolean;
+  performanceVerified: boolean;
+  browserUatVerified: boolean;
+  representativeReplayVerified: boolean;
+  nullPredecessorVerified: boolean;
+  ownerApproved: boolean;
+  ownerEmail: string | null;
+  approvedAt: string | null;
+  notes: string;
+  version: number;
+  ready: boolean;
+}
+
 export interface NimbusBlock {
   id: string;
   /** null = all lines in the plant. */
@@ -127,6 +156,11 @@ export interface NimbusMasterLine {
   production_line: string;
   plant: string;
   pl_group?: string;
+  /** A line that cannot safely use the plant's active setup signature must
+   * opt out of detached setup-aware evaluation. Omitted preserves the legacy
+   * compatible behavior for cached/current snapshots. */
+  setup_compatible?: boolean;
+  setup_compatibility_reason?: string | null;
 }
 
 export interface ConstraintConfig {
@@ -212,6 +246,8 @@ export interface NimbusMasterPlant {
   /** Plant-only allocation behavior; missing values intentionally preserve
    *  legacy continuous scheduling. */
   split_order_policy?: SplitOrderPolicy | null;
+  setup_policy_config?: SetupPolicyConfig | null;
+  setup_release_evidence?: SetupReleaseEvidence | null;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */
@@ -231,6 +267,103 @@ export interface NimbusMasterPlant {
 export interface NimbusMasterData {
   plants: NimbusMasterPlant[];
   lines: NimbusMasterLine[];
+}
+
+// ---------------------------------------------------------------------------
+// Setup-transition domain contracts (Changeover Matrix Stage 0)
+// ---------------------------------------------------------------------------
+
+/** A canonical, ordered setup signature. It is not delimiter-joined because
+ * values may themselves contain delimiter characters. */
+export type SetupStateKey = ReadonlyArray<{ fieldKey: string; value: string }>;
+
+/** Plant-scoped setup-signature definition as returned by GET /setup/{plant}. */
+export interface SetupDefinition {
+  plant: string;
+  fields: ReadonlyArray<string>;
+  signature_version: number;
+  strict_blanks: boolean;
+  active: boolean;
+}
+
+/** A long-form setup-matrix row. `line === ''` represents the plant default. */
+export interface SetupMatrixRow {
+  line: string;
+  signature_version: number;
+  from_key: SetupStateKey;
+  to_key: SetupStateKey;
+  setup_min: number;
+  source?: string;
+  source_metadata?: Record<string, unknown>;
+  source_reference?: string | null;
+}
+
+export interface LineSetupState {
+  line: string;
+  state_key: SetupStateKey;
+  signature_version: number;
+  physical_mold_id?: string | null;
+  observed_at?: string | null;
+  source: 'manual' | 'derived' | 'actual';
+  reason: string;
+}
+
+/** An exact, remaining-work override for one predecessor/successor occurrence. */
+export interface SetupOccurrenceOverride {
+  id: string | number;
+  line: string;
+  signature_version: number;
+  predecessor_order_id: string | null;
+  successor_order_id: string;
+  predecessor_state_key: SetupStateKey;
+  successor_state_key: SetupStateKey;
+  standard_min: number;
+  remaining_min: number;
+  status: 'active' | 'inactive' | 'cleared' | 'replaced';
+  reason: string;
+}
+
+/** One authorized plant's complete setup truth, returned by GET /setup/{plant}.
+ * This remains separate from persisted schedule state: it is read-only
+ * observation data for the changeover matrix rollout. */
+export interface SetupSnapshot {
+  plant: string;
+  definition: SetupDefinition | null;
+  plant_rows: SetupMatrixRow[];
+  line_rows: SetupMatrixRow[];
+  line_states: LineSetupState[];
+  overrides: SetupOccurrenceOverride[];
+  freshness?: { signature_version: number | null; request_id: string };
+}
+
+export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'uncovered';
+
+export interface ResolvedSetup {
+  covered: boolean;
+  requiredMin: number | null;
+  effectiveMin: number | null;
+  standardMin: number | null;
+  source: SetupResolutionSource;
+  reason: string;
+  signatureVersion: number;
+  overrideId?: string;
+}
+
+/** Semantic timeline identity. Derived setup occurrences are presentation facts,
+ * never business orders or persisted schedule state. */
+export type TimelineItemKind = 'order' | 'order-segment' | 'setup' | 'blackout' | 'zone';
+
+/** Pure setup-resolution input; callers supply only the selected plant's snapshot. */
+export interface ResolveSetupInput {
+  definition: SetupDefinition;
+  line: string;
+  predecessorState: SetupStateKey | null;
+  successorState: SetupStateKey | null;
+  predecessorOrderId?: string | null;
+  successorOrderId: string;
+  plantRows: ReadonlyArray<SetupMatrixRow>;
+  lineRows: ReadonlyArray<SetupMatrixRow>;
+  overrides: ReadonlyArray<SetupOccurrenceOverride>;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +405,7 @@ export type StoreEventType =
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
+  | 'setup-snapshot:replace'
   // NOTE: no 'priority-rank-maps:updated' member. Store.setPriorityRankMaps
   // deliberately does not emit (see its comment in schedule-state.mts), and the
   // late-arriving /priority-fields registry re-render is a direct

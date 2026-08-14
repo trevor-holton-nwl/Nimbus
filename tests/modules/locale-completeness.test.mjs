@@ -11,7 +11,10 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOCALES_DIR = join(__dirname, '..', '..', 'web', 'locales');
 const LOCALES = ['en', 'de', 'es', 'fr', 'pt'];
-const KEY_RE = /^\s*'([\w.]+)'\s*:/gm;
+// Locale entries are usually one per line, but valid object literals may keep
+// several short translations together; key discovery must not mistake that
+// formatting choice for a missing translation.
+const KEY_RE = /'([\w.]+)'\s*:/g;
 
 function keysOf(locale) {
   const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
@@ -21,6 +24,11 @@ function keysOf(locale) {
   return keys;
 }
 
+function keyCount(locale, key) {
+  const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
+  return [...text.matchAll(new RegExp(`'${key}'\\s*:`, 'g'))].length;
+}
+
 test('every constraint.<field> key exists in all 5 locales', () => {
   const REQUIRED = ['constraint.colorWheel', 'constraint.prt01', 'constraint.prt02', 'constraint.productionVersion'];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
@@ -28,6 +36,33 @@ test('every constraint.<field> key exists in all 5 locales', () => {
     for (const locale of LOCALES) {
       assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
     }
+  }
+});
+
+test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
+  const REQUIRED_SETUP = [
+    'ui.setup_matrix_title', 'ui.setup_matrix_observation', 'ui.setup_line_scope',
+    'ui.setup_inherited', 'ui.setup_activation_inactive', 'ui.setup_activation_requirements',
+    'ui.setup_compatibility', 'ui.setup_compatibility_reason', 'ui.setup_not_global_exclusion',
+    'ui.setup_import_csv',
+    'btn.setup_export_csv', 'btn.setup_delete_override', 'ui.setup_state_source',
+    'ui.setup_observed_at', 'ui.setup_override_audit',
+    'ui.setup_detail_title', 'ui.setup_predecessor', 'ui.setup_predecessor_state', 'ui.setup_required',
+    'ui.setup_effective', 'ui.setup_standard', 'ui.setup_source',
+    'ui.setup_override', 'ui.setup_missing', 'ui.setup_capacity_shortfall',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_SETUP) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
+test('Task 5 reuses the existing setup source label exactly once in every locale', () => {
+  for (const locale of LOCALES) {
+    assert.equal(keyCount(locale, 'ui.setup_source'), 1,
+      `${locale}.js must not introduce a second ui.setup_source key`);
   }
 });
 

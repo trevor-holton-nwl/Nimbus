@@ -32,7 +32,25 @@
 // VM harness for the two bootstrap sites.
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy } from './types.mjs';
+import {
+  placeWithSetup as placeWithSetupPure,
+  evaluateDueDateFirst as evaluateDueDateFirstPure,
+  evaluateMinChangeover as evaluateMinChangeoverPure,
+  evaluateSptWithSetup as evaluateSptWithSetupPure,
+  evaluateThroughput as evaluateThroughputPure,
+} from './setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup-domain.mjs';
+import type {
+  CandidateDiagnostic,
+  CandidateResult,
+  DueDateFirstBounds,
+  SetupPolicyThresholds,
+  PlacementResult,
+  PlaceWithSetupRequest,
+  SchedulePatch,
+  ScheduleSnapshot,
+} from './setup-scheduler.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from './types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 interface CalendarEntry {
@@ -109,6 +127,7 @@ interface WorkerSnapshotBase {
   plants: Record<string, CalendarEntry>;
   lineSettings: Record<string, NimbusLineSetting>;
   masterData: NimbusMasterData | null;
+  setup: SetupObservation;
 }
 
 /** Utilization.computeMatrix's row shape — tasks RESOLVED to objects (see T-8 in
@@ -148,6 +167,373 @@ interface SortTerm {
   cmp(a: any, b: any): number;
 }
 
+/** Capture the complete read model for one optimizer candidate.  Every member
+ * is cloned at the Store boundary so candidate scheduling cannot hold a live
+ * reference that a later Store mutation could alter while it is evaluating. */
+export function snapshotSchedule(): ScheduleSnapshot {
+  return {
+    tasks: structuredClone(Store.tasksArr),
+    fixedIds: Array.from(Store.fixedIds),
+    alerts: structuredClone(Store.alerts),
+    selectedPlant: Store.selectedPlant,
+    blocks: structuredClone(Store.blocks),
+    plantBlocks: structuredClone(Store.plantBlocks),
+    calendars: structuredClone(Store.calendars),
+    plants: structuredClone(Store.plants),
+    lineSettings: structuredClone(Store.lineSettings),
+    masterData: structuredClone(Store.masterData),
+    priorityRankMaps: structuredClone(Store.priorityRankMaps),
+  };
+}
+
+/** The only bridge from a detached candidate into live schedule state.  Keep
+ * this as one Store.updateMany call: candidates never publish intermediate
+ * task, alert, autosave, or Timeline changes. */
+export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
+  if (patches.length) Store.updateMany(Array.from(patches), 'engine');
+}
+
+/** Resolved setup is observation data for capacity/alerts, never a task or a
+ * persisted link.  This is the sole main-thread projection sent to the core
+ * and worker; they must not receive raw setup rows or re-resolve transitions. */
+export interface SetupComputeInterval {
+  line: string;
+  scope: string;
+  predecessorOrderId: string | null;
+  successorOrderId: string;
+  start: Date;
+  end: Date;
+  requiredMinutes: number;
+  availableMinutes: number;
+}
+
+export interface SetupComputeDiagnostic {
+  type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+  line: string;
+  scope: string;
+  pairKey?: string;
+  predecessorOrderId?: string | null;
+  successorOrderId?: string;
+  time?: Date;
+  message?: string;
+}
+
+export interface SetupObservation {
+  intervals: SetupComputeInterval[];
+  diagnostics: SetupComputeDiagnostic[];
+}
+
+interface SetupAvailabilityContext {
+  calendars: Record<string, CalendarEntry>;
+  plants: Record<string, CalendarEntry>;
+  lineSettings: Record<string, NimbusLineSetting>;
+  masterData: NimbusMasterData | null;
+  blocks: ReadonlyArray<NimbusBlock>;
+  plantBlocks: ReadonlyArray<NimbusPlantBlock>;
+}
+
+function setupStateKey(state: SetupStateKey | null): string {
+  return state ? JSON.stringify(state.map(({ fieldKey, value }) => [fieldKey, value])) : 'unknown';
+}
+
+function setupOrderIntervals(task: NimbusTask): Array<{ start: Date; end: Date }> {
+  return globalThis.NimbusComputeCore!.scheduleIntervals(task).map(interval => ({ start: interval.start, end: interval.end }));
+}
+
+function observedAt(value: unknown): Date | null {
+  const date = value ? new Date(String(value)) : null;
+  return date && Number.isFinite(date.getTime()) ? date : null;
+}
+
+/** Match the core's ensureCalendar/ensurePlant fallback without mutating Store-owned maps. */
+function setupDefaultWorkHours(): WorkHours {
+  const core = globalThis.NimbusComputeCore!;
+  const workHours: WorkHours = {};
+  for (let day = 0; day < 7; day++) {
+    workHours[day] = core.WEEKEND_OFF && (day === 0 || day === 6) ? null : [...core.DEFAULT_SHIFT];
+  }
+  return workHours;
+}
+
+function setupAvailabilityMinutes(
+  context: SetupAvailabilityContext | undefined,
+  line: string,
+  plant: string,
+  successorOrderId: string,
+  end: Date,
+  orders: ReadonlyArray<{ task: NimbusTask; start: Date; end: Date }>,
+  fallbackStart: Date | null,
+): number {
+  if (!context) return fallbackStart ? Math.max(0, (end.getTime() - fallbackStart.getTime()) / (60 * 1000)) : 0;
+  // Setup observations are already scoped by the setup snapshot plant. A line
+  // code may be reused at another plant, so master-data lookup is unsafe here.
+  const mappedPlant = plant;
+  const probe = new Date(end.getTime() - 1);
+  const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
+  const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, probe);
+  if (!lineWindow) return 0;
+  const plantHours = context.plants[mappedPlant]?.workHours ?? setupDefaultWorkHours();
+  const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, probe);
+  if (!plantWindow) return 0;
+  const window = [
+    new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
+    new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
+  ] as const;
+  if (window[0] >= window[1]) return 0;
+  if (end > window[1] || end <= window[0]) return 0;
+  let lower = window[0].getTime();
+  const applyBlock = (block: NimbusBlock | NimbusPlantBlock): boolean => {
+    const start = globalThis.NimbusComputeCore!.parseDate(block.start);
+    const blockEnd = globalThis.NimbusComputeCore!.parseDate(block.end);
+    if (!start || !blockEnd || start >= end || blockEnd <= new Date(lower)) return false;
+    if (blockEnd >= end) return true;
+    lower = Math.max(lower, blockEnd.getTime());
+    return false;
+  };
+  for (const block of context.blocks) {
+    if (block.plant && block.plant !== mappedPlant) continue;
+    if (block.line && block.line !== line) continue;
+    if (applyBlock(block)) return 0;
+  }
+  for (const block of context.plantBlocks) {
+    if (block.plant && block.plant !== mappedPlant) continue;
+    if (applyBlock(block)) return 0;
+  }
+  for (const order of orders) {
+    if (String(order.task.id) === successorOrderId) continue;
+    for (const interval of setupOrderIntervals(order.task)) {
+      if (interval.start >= end || interval.end <= new Date(lower)) continue;
+      if (interval.end >= end) return 0;
+      lower = Math.max(lower, interval.end.getTime());
+    }
+  }
+  return Math.max(0, (end.getTime() - lower) / (60 * 1000));
+}
+
+/**
+ * Resolve scheduled setup occurrences exactly once, before either compute path
+ * runs. This pure projection neither mutates Store nor invokes Engine; both
+ * core callers receive its output as opaque interval/diagnostic facts.
+ */
+export function deriveSetupObservation(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
+): SetupObservation {
+  const observation: SetupObservation = { intervals: [], diagnostics: [] };
+  const definition = setup?.definition;
+  // Activation controls setup-aware placement only.  The existing schedule
+  // must continue to expose its setup bars and diagnostics while activation
+  // is deliberately disabled for observation-only rollout.
+  if (!setup || !definition) return observation;
+
+  const stateForLine = new Map(setup.line_states
+    .filter(state => state.signature_version === definition.signature_version)
+    .map(state => [state.line, state]));
+  const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
+  for (const task of tasks) {
+    if (task.PLANT && task.PLANT !== setup.plant) continue;
+    const line = task.PRODUCTION_LINE || 'Unknown';
+    if (scopedLines && !scopedLines.has(line)) continue;
+    const intervals = setupOrderIntervals(task);
+    if (!intervals.length) continue;
+    const first = intervals[0], last = intervals.at(-1)!;
+    const list = byLine.get(line) || [];
+    list.push({ task, start: first.start, end: last.end });
+    byLine.set(line, list);
+  }
+
+  const lines = new Set(byLine.keys());
+  for (const override of setup.overrides) {
+    if (override.status === 'active' && (!scopedLines || scopedLines.has(override.line))) lines.add(override.line);
+  }
+  for (const line of lines) {
+    const orders = byLine.get(line) || [];
+    orders.sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
+    const scope = `${setup.plant}/${line}`;
+    const resolvedEdges = new Set<string>();
+    const assertedState = stateForLine.get(line);
+    const observationTime = observedAt(assertedState?.observed_at);
+    if (assertedState && observationTime) {
+      const planned = orders.filter(order => order.end <= observationTime).at(-1);
+      const plannedState = planned ? stateForOrder(planned.task, definition) : null;
+      if (plannedState && setupStateKey(plannedState) !== setupStateKey(assertedState.state_key)) {
+        observation.diagnostics.push({
+          type: 'current-state-diverged', line, scope, successorOrderId: String(planned!.task.id), time: observationTime,
+          message: `Asserted state on ${line} differs from the state planned by ${String(planned!.task.id)} at observation time.`,
+        });
+      }
+    }
+    let predecessorState = assertedState?.state_key || null;
+    let predecessorOrderId: string | null = null;
+    let predecessorEnd: Date | null = null;
+    for (const order of orders) {
+      const successorState = stateForOrder(order.task, definition);
+      if (!predecessorState) {
+        observation.diagnostics.push({
+          type: 'initial-state-unknown', line, scope, successorOrderId: String(order.task.id), time: order.start,
+          message: `The setup state before ${String(order.task.id)} on ${line} is unknown.`,
+        });
+      } else if (!successorState) {
+        observation.diagnostics.push({
+          type: 'setup-uncovered', line, scope,
+          pairKey: `${setupStateKey(predecessorState)}->unknown`, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+        });
+      } else {
+        const resolved = resolveSetup({
+          definition, line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
+          plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+        });
+        if (!resolved.covered || resolved.effectiveMin == null) {
+          observation.diagnostics.push({
+            type: 'setup-uncovered', line, scope,
+            pairKey: `${setupStateKey(predecessorState)}->${setupStateKey(successorState)}`,
+            predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+          });
+        } else if (resolved.effectiveMin > 0) {
+          resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
+          const end = new Date(order.start);
+          const start = new Date(end.getTime() - resolved.effectiveMin * 60 * 1000);
+          const availableMinutes = setupAvailabilityMinutes(
+            availability, line, setup.plant, String(order.task.id), end, orders, predecessorEnd,
+          );
+          observation.intervals.push({
+            line, scope, predecessorOrderId, successorOrderId: String(order.task.id), start, end,
+            requiredMinutes: resolved.effectiveMin, availableMinutes,
+          });
+        } else {
+          resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
+        }
+      }
+      predecessorState = successorState;
+      predecessorOrderId = String(order.task.id);
+      predecessorEnd = order.end;
+    }
+
+    for (const override of setup.overrides.filter(override => override.status === 'active' && override.line === line)) {
+      const key = `${override.predecessor_order_id ?? 'initial'}|${override.successor_order_id}`;
+      if (!resolvedEdges.has(key)) observation.diagnostics.push({
+        type: 'override-inactive', line, scope, predecessorOrderId: override.predecessor_order_id,
+        successorOrderId: override.successor_order_id, time: orders[0]?.start,
+        message: `Active setup override ${key} no longer matches the scheduled adjacency on ${line}.`,
+      });
+    }
+  }
+  return observation;
+}
+
+// One synchronous candidate evaluation may temporarily select this immutable,
+// deep-cloned read model.  It is deliberately module-private: no Store field is
+// swapped, no listener can observe it, and it is cleared in finally{} before
+// control returns to the preview.  The existing placement algorithms below use
+// these accessors so the migration does not silently rewrite their behavior.
+let _candidateSnapshot: ScheduleSnapshot | null = null;
+let _candidateDiagnostics: CandidateDiagnostic[] | null = null;
+
+/** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
+ * Live optimizer and repair runs retain their existing ErrorLog behavior. */
+function reportSchedulerDiagnostic(
+  level: CandidateDiagnostic['level'],
+  scope: string,
+  code: string,
+  message: string,
+  context?: Readonly<Record<string, unknown>>,
+): void {
+  if (_candidateDiagnostics) {
+    _candidateDiagnostics.push({ level, scope, code, message, context: context ?? {} });
+    return;
+  }
+  if (level === 'error') ErrorLog.error(scope, message, context);
+  else ErrorLog.warn(scope, message, context);
+}
+
+function sourceTasks(): ReadonlyArray<NimbusTask> { return _candidateSnapshot?.tasks ?? Store.tasksArr; }
+function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSnapshot?.blocks ?? Store.blocks; }
+function sourcePlantBlocks(): ReadonlyArray<NimbusPlantBlock> { return _candidateSnapshot?.plantBlocks ?? Store.plantBlocks; }
+function sourceLineSettings(): Readonly<Record<string, NimbusLineSetting>> { return _candidateSnapshot?.lineSettings ?? Store.lineSettings; }
+function sourceMasterData(): NimbusMasterData | null { return _candidateSnapshot?.masterData ?? Store.masterData; }
+function sourcePriorityRankMaps() { return _candidateSnapshot?.priorityRankMaps ?? Store.priorityRankMaps; }
+function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selectedPlant ?? Store.selectedPlant; }
+
+function sourceGetPlantForLine(line: string): string | null {
+  if (!_candidateSnapshot) return Store.getPlantForLine(line);
+  return _candidateSnapshot.lineSettings[line]?.plant
+    ?? _candidateSnapshot.masterData?.lines.find(row => row.production_line === line)?.plant
+    ?? null;
+}
+
+function sourceTasksByPlant(plant: string | null): NimbusTask[] {
+  if (!_candidateSnapshot) return Store.tasksByPlant(plant);
+  if (!plant) return [];
+  return _candidateSnapshot.tasks.filter(task => (task.PLANT || sourceGetPlantForLine(task.PRODUCTION_LINE)) === plant);
+}
+
+function sourceTask(id: string): NimbusTask | undefined {
+  return _candidateSnapshot ? _candidateSnapshot.tasks.find(task => String(task.id) === String(id)) : Store.tasks[id];
+}
+
+function isFixedIdSet(fixed: readonly string[] | ReadonlySet<string>): fixed is ReadonlySet<string> {
+  return !Array.isArray(fixed);
+}
+
+function sourceIsFixed(id: string | number): boolean {
+  if (!_candidateSnapshot) return Store.isFixed(id);
+  const fixed = _candidateSnapshot.fixedIds;
+  if (isFixedIdSet(fixed)) return fixed.has(String(id));
+  return fixed.map(String).includes(String(id));
+}
+
+function candidateDefaultWorkHours(): WorkHours {
+  const workHours: WorkHours = {};
+  for (let day = 0; day < 7; day++) {
+    workHours[day] = Config.WEEKEND_OFF && (day === 0 || day === 6)
+      ? null
+      : [Config.DEFAULT_SHIFT[0], Config.DEFAULT_SHIFT[1]];
+  }
+  return workHours;
+}
+
+function sourceLineWorkHours(line: string): WorkHours {
+  if (!_candidateSnapshot) {
+    Store.ensureCalendar(line);
+    return Store.calendars[line].workHours;
+  }
+  return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+}
+
+function sourcePlantWorkHours(plant: string): WorkHours {
+  if (!_candidateSnapshot) {
+    Store.ensurePlant(plant);
+    return Store.plants[plant].workHours;
+  }
+  return _candidateSnapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+}
+
+function detachedCandidateResult(
+  patches: ReadonlyArray<SchedulePatch>,
+  startedAt: number,
+  termination: 'completed' | 'no-plant' = 'completed',
+  backlogResult?: RemoveBacklogResult,
+): CandidateResult {
+  return {
+    patches,
+    score: [0, 0, 0, 0, 0, patches.length],
+    explanation: [],
+    diagnostics: {
+      candidateCount: termination === 'completed' ? 1 : 0,
+      method: 'legacy-detached',
+      termination,
+      runtimeMs: performance.now() - startedAt,
+      limitReached: false,
+      events: _candidateDiagnostics ? [..._candidateDiagnostics] : [],
+    },
+    unchangedLines: [],
+    missingEdges: [],
+    ...(backlogResult ? { backlogResult } : {}),
+  };
+}
+
 /* =============================================================================
    CALENDAR — capacity math only (working hours, blackout-block availability).
    All functions operate on a `line` (string) + Date objects. The blackout-
@@ -178,7 +564,7 @@ export const Calendar = {
   /** Parse every blackout block once and bucket by line / plant for O(1) lookup. */
   _indexBlocks(plant: string | null): RunBlocksIndex {
     const byLine = new Map<string, BlockRec[]>();
-    for (const b of Store.blocks) {
+    for (const b of sourceBlocks()) {
       // A block applies only within its own plant (line:null = all lines in that
       // plant). Un-stamped legacy blocks (no b.plant) fall back to global behavior.
       if (b.plant && plant && b.plant !== plant) continue;
@@ -190,7 +576,7 @@ export const Calendar = {
       arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
     }
     const byPlant = new Map<string, BlockRec[]>();
-    for (const b of Store.plantBlocks) {
+    for (const b of sourcePlantBlocks()) {
       if (b.plant && plant && b.plant !== plant) continue;
       const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
       if (!s || !e) continue;
@@ -221,18 +607,16 @@ export const Calendar = {
       if (rc.ww.has(key)) return rc.ww.get(key)!;
     }
 
-    Store.ensureCalendar(line);
-    const lineWin = Calendar._dayWindow(Store.calendars[line].workHours, date);
+    const lineWin = Calendar._dayWindow(sourceLineWorkHours(line), date);
     if (!lineWin) {
       if (rc) rc.ww.set(key, null);
       return null;
     }
 
-    const plant = Store.getPlantForLine(line);
+    const plant = sourceGetPlantForLine(line);
     let result: [Date, Date];
     if (plant) {
-      Store.ensurePlant(plant);
-      const plantWin = Calendar._dayWindow(Store.plants[plant].workHours, date);
+      const plantWin = Calendar._dayWindow(sourcePlantWorkHours(plant), date);
       if (!plantWin) {
         if (rc) rc.ww.set(key, null);
         return null;
@@ -391,8 +775,13 @@ export const Calendar = {
       return cur;
     }
     // Loop exhausted: no feasible slot found within 90 days. Log for diagnostics.
-    const plant = Store.getPlantForLine(line);
-    ErrorLog.error('calendar', `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`);
+    const plant = sourceGetPlantForLine(line);
+    reportSchedulerDiagnostic(
+      'error',
+      'calendar',
+      'calendar.next-available-exhausted',
+      `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`,
+    );
     // fallback: return the original from; caller must handle
     return Util.snap(new Date(from));
   },
@@ -525,18 +914,18 @@ export const Calendar = {
     if (cached) {
       for (const block of cached.byLine.get(line) || []) add(block.startDate, block.endDate);
       for (const block of cached.byLine.get('__any__') || []) add(block.startDate, block.endDate);
-      const plant = Store.getPlantForLine(line);
+      const plant = sourceGetPlantForLine(line);
       if (plant) for (const block of cached.byPlant.get(plant) || []) add(block.startDate, block.endDate);
       for (const block of cached.byPlant.get('__any__') || []) add(block.startDate, block.endDate);
     } else {
-      const plant = Store.getPlantForLine(line);
-      for (const block of Store.blocks) {
+      const plant = sourceGetPlantForLine(line);
+      for (const block of sourceBlocks()) {
         if (block.plant && block.plant !== plant) continue;
         if (block.line && block.line !== line) continue;
         const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
         if (s && e) add(s, e);
       }
-      for (const block of Store.plantBlocks) {
+      for (const block of sourcePlantBlocks()) {
         if (block.plant && block.plant !== plant) continue;
         const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
         if (s && e) add(s, e);
@@ -659,6 +1048,25 @@ export const Calendar = {
     };
   },
 
+  /** Adapter for the pure setup-placement primitive. It gathers the same
+   * effective operating fragments the existing allocator uses, including
+   * line/plant hours and blackouts, but never reads setup state or mutates a
+   * task. Setup-aware Engine activation remains intentionally deferred. */
+  placeWithSetup(
+    line: string,
+    request: Omit<PlaceWithSetupRequest, 'freeIntervals' | 'isInherentlyOverlong'>,
+  ): PlacementResult {
+    const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
+    const durationMs = runtimeMinutes * Config.MS_MIN;
+    const isInherentlyOverlong = Number.isFinite(runtimeMinutes) && runtimeMinutes > 0
+      && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs);
+    return placeWithSetupPure({
+      ...request,
+      freeIntervals: Calendar._freeIntervals(line, request.earliestStart),
+      isInherentlyOverlong,
+    });
+  },
+
   /** Find the first blackout block overlapping [start,end) on `line`, else null. */
   _overlapsBlock(line: string, start: Date, end: Date): { start: Date; end: Date } | null {
     const rb = Calendar._runBlocks;
@@ -677,7 +1085,7 @@ export const Calendar = {
           if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
         }
       }
-      const plant = Store.getPlantForLine(line);
+      const plant = sourceGetPlantForLine(line);
       const scanPlant = plant ? rb.byPlant.get(plant) : null;
       if (scanPlant) {
         for (const b of scanPlant) {
@@ -693,15 +1101,15 @@ export const Calendar = {
       return null;
     }
 
-    const plant = Store.getPlantForLine(line);
-    for (const b of Store.blocks) {
+    const plant = sourceGetPlantForLine(line);
+    for (const b of sourceBlocks()) {
       if (b.plant && b.plant !== plant) continue;
       if (b.line && b.line !== line) continue;
       const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
       if (!bs || !be) continue;
       if (start < be && end > bs) return { start: bs, end: be };
     }
-    for (const b of Store.plantBlocks) {
+    for (const b of sourcePlantBlocks()) {
       if (b.plant && b.plant !== plant) continue;
       const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
       if (!bs || !be) continue;
@@ -786,6 +1194,12 @@ export const Compute = (() => {
     return new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject });
+      // Diagnostic-only measurement: setup stays scoped and has no activation gate.
+      if (payload.setup) {
+        const _setupCloneT0 = performance.now();
+        structuredClone(payload.setup);
+        PerfMonitor.record('Worker.setupClone:' + type, performance.now() - _setupCloneT0);
+      }
       const _cloneT0 = performance.now();
       w.postMessage({ type, id, payload });
       PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
@@ -804,15 +1218,26 @@ export const Compute = (() => {
   function _snap(): WorkerSnapshotBase {
     const plant = Store.selectedPlant;
     if (!plant) {
+      // Setup state must be resolved from the un-stripped source: stateForOrder
+      // reads PRT_01/PRT_02/PRODUCTION_VERSION, and _stripPriorityFields deletes
+      // exactly those before transport. Deriving from the stripped copy would
+      // silently blank every state for any definition using those fields.
+      const src = Store.tasksArr;
+      const setup = deriveSetupObservation(Store.setupSnapshot, src, undefined, {
+        calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
+        masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
+      });
+      const tasks = src.map(_stripPriorityFields);
       // No plant selected — nothing is rendered; fall back to the global snapshot.
       return {
-        tasks:        Store.tasksArr.map(_stripPriorityFields),
+        tasks,
         blocks:       Store._state.blocks,
         plantBlocks:  Store._state.plantBlocks,
         calendars:    Store._state.calendars,
         plants:       Store._state.plants,
         lineSettings: Store._state.lineSettings,
         masterData:   Store._state.masterData,
+        setup,
       };
     }
     // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
@@ -828,14 +1253,25 @@ export const Compute = (() => {
       for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
       return out;
     };
+    // Same rule as the no-plant branch above: derive from the un-stripped
+    // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
+    const src = Store.tasksByPlant(plant);
+    const setup = deriveSetupObservation(Store.setupSnapshot, src, lines, {
+      calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+      lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
+      blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
+      plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+    });
+    const tasks = src.map(_stripPriorityFields);
     return {
-      tasks:        Store.tasksByPlant(plant).map(_stripPriorityFields),
+      tasks,
       blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
       plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
       calendars:    pick(Store._state.calendars),
       plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
       lineSettings: pick(Store._state.lineSettings),
       masterData:   Store._state.masterData,
+      setup,
     };
   }
 
@@ -923,6 +1359,10 @@ export const Alerts = {
       plants:       Store.plants,
       lineSettings: Store.lineSettings as any,
       masterData:   Store.masterData as unknown as NimbusMasterData,
+      setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined, {
+        calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+        masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+      }),
       dismissed:    [...Alerts._dismissed],
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
@@ -1079,45 +1519,83 @@ export const Utilization = {
    *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
    *  every Store mutation, so a cache hit always reflects current data. Subset calls
    *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
-  computeMatrix(startDate: Date, days: number = 7, srcTasks: NimbusTask[] | null = null): UtilizationMatrixResolved {
+  computeMatrix(
+    startDate: Date,
+    days: number = 7,
+    srcTasks: NimbusTask[] | null = null,
+    utilizationSnapshot: Readonly<ScheduleSnapshot> | null = null,
+  ): UtilizationMatrixResolved {
     const start = Util.startOfDay(startDate)!;
-    const cacheable = srcTasks === null;
+    const cacheable = srcTasks === null && !utilizationSnapshot;
     // Scope the memo key by selected plant. The worker prewarm (_prewarm) writes a
     // PLANT-SCOPED matrix; this sync path is otherwise GLOBAL. Without a plant
     // discriminator (and a matching line set) the two collide under one key and a
     // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
-    const scope = Store.selectedPlant || 'all';
-    const cacheKey = `${start.getTime()}|${days}|${Store.rev()}|${scope}`;
+    const selectedPlant = utilizationSnapshot ? utilizationSnapshot.selectedPlant : Store.selectedPlant;
+    const scope = selectedPlant || 'all';
+    const revision = utilizationSnapshot ? 'detached' : Store.rev();
+    const cacheKey = `${start.getTime()}|${days}|${revision}|${scope}`;
     if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
       return Utilization._cache.matrix;
     }
     const _pmT0u = performance.now();
-    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
+    const taskList = srcTasks !== null ? srcTasks : (utilizationSnapshot?.tasks ?? Store.tasksArr);
+    // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
+    // a preview, give it clones of the detached candidate context so that
+    // convenience normalization cannot mutate Store (or the candidate itself).
+    const lineSettings = utilizationSnapshot ? structuredClone(utilizationSnapshot.lineSettings) : Store.lineSettings;
+    const calendars = utilizationSnapshot ? structuredClone(utilizationSnapshot.calendars) : Store.calendars;
+    const plants = utilizationSnapshot ? structuredClone(utilizationSnapshot.plants) : Store.plants;
+    const blocks: NimbusBlock[] = utilizationSnapshot
+      ? structuredClone(Array.from(utilizationSnapshot.blocks))
+      : Store.blocks;
+    const plantBlocks: NimbusPlantBlock[] = utilizationSnapshot
+      ? structuredClone(Array.from(utilizationSnapshot.plantBlocks))
+      : Store.plantBlocks;
+    const masterData = utilizationSnapshot ? structuredClone(utilizationSnapshot.masterData) : Store.masterData;
+    const coreTasks: NimbusTask[] = utilizationSnapshot
+      ? structuredClone(Array.from(taskList))
+      : taskList as NimbusTask[];
 
     // Reproduce the exact line set the inline builder used: task lines, plus (when this
     // is NOT a filtered subset) either the selected plant's lines or every visited
     // calendar line. Passed explicitly so the core pins the same set.
     const lineSet = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
     if (srcTasks === null) {
-      if (Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
-      else Object.keys(Store.calendars).forEach(l => lineSet.add(l));
+      if (utilizationSnapshot && selectedPlant) {
+        for (const [line, settings] of Object.entries(lineSettings)) {
+          const mappedPlant = settings.plant
+            ?? masterData?.lines.find(row => row.production_line === line)?.plant;
+          if (mappedPlant === selectedPlant) lineSet.add(line);
+        }
+      } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
+      else Object.keys(calendars).forEach(l => lineSet.add(l));
     }
+    // Detached candidate snapshots deliberately do not retain setup truth;
+    // never reach back into Store while rendering one. Live paths resolve once
+    // and hand the core only the resulting plant/line-scoped observations.
+    const setup = utilizationSnapshot
+      ? { intervals: [], diagnostics: [] }
+      : deriveSetupObservation(Store.setupSnapshot, coreTasks, lineSet, {
+        calendars, plants, lineSettings, masterData, blocks, plantBlocks,
+      });
 
     // Delegate the matrix build to nimbus-compute-core — the single source of truth,
     // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
     // (its worker contract); resolve them back to task OBJECTS here, which is what
     // computeMatrix's callers expect (they read task fields off the rows).
     const { matrix } = globalThis.NimbusComputeCore!.computeUtilization({
-      tasks:        taskList,
-      lineSettings: Store.lineSettings as any,
-      calendars:    Store.calendars,
-      plants:       Store.plants,
-      blocks:       Store.blocks,
-      plantBlocks:  Store.plantBlocks,
-      masterData:   Store.masterData as unknown as NimbusMasterData,
+      tasks:        coreTasks,
+      lineSettings: lineSettings as any,
+      calendars,
+      plants,
+      blocks,
+      plantBlocks,
+      masterData:   masterData as unknown as NimbusMasterData,
       startMs:      start.getTime(),
       days,
       lines:        [...lineSet],
+      setup,
     });
     const byId = new Map(taskList.map(t => [t.id, t]));
     for (const line of Object.keys(matrix)) {
@@ -1278,10 +1756,58 @@ export const Engine = {
    * it so stale diagnostics cannot leak into their shared preview. */
   lastBacklogResult: null as RemoveBacklogResult | null,
 
+  /** Evaluate the established legacy placement algorithm against a deep,
+   * detached snapshot. This is synchronous, so the private source selector is
+   * always cleared before another caller can observe it. */
+  evaluateSchedule(
+    mode: OptimizerMode = 'combined',
+    opts: Record<string, unknown> = {},
+    snapshot: ScheduleSnapshot = snapshotSchedule(),
+  ): CandidateResult {
+    if (_candidateSnapshot) throw new Error('Nested detached schedule evaluation is not supported');
+    _candidateSnapshot = snapshot;
+    _candidateDiagnostics = [];
+    try {
+      return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
+        ?? detachedCandidateResult([], performance.now());
+    } finally {
+      _candidateSnapshot = null;
+      _candidateDiagnostics = null;
+    }
+  },
+
+  /** Explicit detached setup-aware seam. Existing runAndApply/UI calls do
+   * not route here; a caller must supply both the immutable snapshot and the
+   * measured search bounds/setup truth before any setup-aware candidate exists. */
+  evaluateSetupAware(
+    mode: 'due-date-first' | 'spt' | 'min-changeover' | 'throughput',
+    bounds: Readonly<DueDateFirstBounds>,
+    snapshot: ScheduleSnapshot = snapshotSchedule(),
+    thresholds?: Readonly<SetupPolicyThresholds>,
+  ): CandidateResult {
+    if (!bounds.setup.definition?.active) {
+      throw new Error('Setup-aware evaluation is disabled for this plant');
+    }
+    if (mode === 'due-date-first') return evaluateDueDateFirstPure(snapshot, bounds);
+    if (mode === 'spt') return evaluateSptWithSetupPure(snapshot, bounds);
+    if (mode === 'min-changeover') return evaluateMinChangeoverPure(snapshot, bounds);
+    return evaluateThroughputPure(snapshot, bounds, thresholds ?? {
+      throughputMinSavingsMin: 60,
+      throughputMaxSlipMin: 1440,
+    });
+  },
+
+  /** Apply a selected candidate exactly once.  Preview callers use this rather
+   * than calling Store.updateMany themselves so the mutation boundary remains
+   * visible and auditable. */
+  applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
+    applySchedulePatches(patches);
+  },
+
   /** Plant-level behavior only; an absent/malformed value deliberately keeps
    * the established continuous-order scheduler unchanged. */
   splitOrderPolicyFor(plant: string | null): SplitOrderPolicy {
-    const value = Store.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.split_order_policy;
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
   },
 
@@ -1289,7 +1815,7 @@ export const Engine = {
    * are never shifted independently; a one-piece result explicitly clears an
    * obsolete child aggregate. */
   schedulePatchFor(task: NimbusTask, line: string, requestedStart: Date,
-                   policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line))): Partial<NimbusTask> | null {
+                   policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(sourceGetPlantForLine(line))): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
     if (policy === 'never') {
@@ -1309,7 +1835,7 @@ export const Engine = {
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    const plant = Store.getPlantForLine(line) ?? task.PLANT ?? Store.selectedPlant;
+    const plant = sourceGetPlantForLine(line) ?? task.PLANT ?? sourceSelectedPlant();
     const policy = Engine.splitOrderPolicyFor(plant);
     if (policy === 'never') {
       const start = Util.snap(requestedStart);
@@ -1398,10 +1924,10 @@ export const Engine = {
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
    * has no priority, due-date, fixed-protection, or day-integrity branches. */
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
-    const plant = (opts.plant as string | undefined) ?? Store.selectedPlant;
+    const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
     const splitPolicy = Engine.splitOrderPolicyFor(plant);
-    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const row = sourceMasterData()?.plants?.find(p => p.plant === plant);
     const timezone = row?.timezone;
     if (typeof timezone !== 'string' || !timezone.trim()) {
       throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
@@ -1426,7 +1952,7 @@ export const Engine = {
       ? new Set((opts.lines as unknown[]).map(String))
       : null;
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
-    const scopedTasks = Store.tasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
+    const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
     for (const task of scopedTasks) {
       if (!task.start_date) {
         diagnostics.missingStartIds.push(task.id);
@@ -1444,7 +1970,7 @@ export const Engine = {
     Calendar._beginRun(plant);
     try {
       for (const [line, items] of grouped) {
-        if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+        if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
         items.sort((a, b) => a.snapshotStart.getTime() - b.snapshotStart.getTime() || a.task.id.localeCompare(b.task.id));
         const firstBacklog = items.findIndex(item => item.snapshotStart < now);
         if (firstBacklog < 0) continue;
@@ -1506,7 +2032,7 @@ export const Engine = {
           if (scheduleSegments !== undefined) changes.scheduleSegments = scheduleSegments;
           patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
-          if (Store.isFixed(item.task.id)) diagnostics.fixedMoved++;
+          if (sourceIsFixed(item.task.id)) diagnostics.fixedMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
           diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
             Math.round((start.getTime() - item.snapshotStart.getTime()) / Config.MS_MIN));
@@ -1520,7 +2046,7 @@ export const Engine = {
     for (const patch of patches) {
       const movedStart = patch.changes.start_date!;
       const movedEnd = patch.changes.end_date!;
-      const movedTask = Store.tasks[patch.id];
+      const movedTask = sourceTask(patch.id);
       for (const protectedTask of scopedTasks) {
         if (protectedTask.PRODUCTION_LINE !== movedTask?.PRODUCTION_LINE || !protectedTask.start_date || !protectedTask.end_date) continue;
         if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
@@ -1589,7 +2115,7 @@ export const Engine = {
 
   /** Ordered constraint config stored for a plant, or null if never configured. */
   constraintsFor(plant: string | null): ConstraintConfig[] | null {
-    const row = Store.masterData?.plants?.find(p => p.plant === plant);
+    const row = sourceMasterData()?.plants?.find(p => p.plant === plant);
     const list = row && row.constraints;
     return Array.isArray(list) ? list : null;
   },
@@ -1761,7 +2287,10 @@ export const Engine = {
     if (f) return f;
     // No known mapping: warn rather than guess a field name that will
     // silently resolve to undefined for every order.
-    ErrorLog.warn('engine', `No task field registered for priority field "${key}" — orders will not rank on it.`, { key });
+    reportSchedulerDiagnostic(
+      'warn', 'engine', 'engine.unknown-task-field',
+      `No task field registered for priority field "${key}" — orders will not rank on it.`, { key },
+    );
     return '';
   },
 
@@ -1788,7 +2317,7 @@ export const Engine = {
    *  `Store.selectedPlant`, which is why this single non-plant-keyed cache is
    *  safe to read without a plant argument. */
   hasPriorityRanks(fieldKey: string): boolean {
-    const byLine = Store.priorityRankMaps || {};
+    const byLine = sourcePriorityRankMaps() || {};
     for (const line of Object.keys(byLine)) {
       const m = byLine[line]?.[fieldKey];
       if (m && Object.keys(m).length > 0) return true;
@@ -1883,7 +2412,7 @@ export const Engine = {
         terms.push({
           get: (t: NimbusTask): string => {
             const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
-            const byLine = Store.priorityRankMaps || {};
+            const byLine = sourcePriorityRankMaps() || {};
             const line = t.PRODUCTION_LINE || '';
             // An EMPTY line-scoped map must fall through to the plant-wide list,
             // not shadow it: `??` only bridges null/undefined, and a stored
@@ -2154,9 +2683,11 @@ export const Engine = {
             if (cursor.getTime() === prevMs) break;
           }
           if (guard >= 200) {
-            ErrorLog.warn('engine',
+            reportSchedulerDiagnostic(
+              'warn', 'engine', 'engine.day-integrity-guard',
               `Day-integrity dispatch guard hit 200 iterations on "${line}" (day ${dayKeyD}) — schedule may be suboptimal; check fixed orders / blackouts on this line.`,
-              { line, day: dayKeyD });
+              { line, day: dayKeyD },
+            );
           }
           fixIdx = nextFixIdx(cursor, fixIdx);
           // Explicit day-wall check (covers respectCalendar === false, where
@@ -2200,9 +2731,11 @@ export const Engine = {
         const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
         const end   = new Date(start.getTime() + durMs);
         patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
-        ErrorLog.warn('engine',
+        reportSchedulerDiagnostic(
+          'warn', 'engine', 'engine.forced-placement',
           `Order "${t.text || t.id}" on "${line}" would never fit any working day (${FORCE_PLACE_AFTER_DAYS}-day search exhausted) — forced placement at ${Util.fmtDTReadable(start)}. Check RUN_TIME against available daily capacity.`,
-          { line, taskId: t.id });
+          { line, taskId: t.id },
+        );
         queue = queue.filter(x => x !== t);
         cursor = new Date(end);
         fixIdx = nextFixIdx(cursor, fixIdx);
@@ -2255,9 +2788,11 @@ export const Engine = {
       }
 
       if (!scheduled?.start_date || !scheduled.end_date) {
-        ErrorLog.warn('engine',
+        reportSchedulerDiagnostic(
+          'warn', 'engine', 'engine.allocation-exhausted',
           `Could not allocate order "${task.text || task.id}" on "${line}" within the 90-day calendar search; subsequent orders were left unchanged.`,
-          { line, taskId: task.id, policy });
+          { line, taskId: task.id, policy },
+        );
         // Do not schedule later parents around one that could not be allocated:
         // doing so would silently break the strategy-selected sequence.
         break;
@@ -2274,20 +2809,25 @@ export const Engine = {
    *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
    *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
    *  and every caller's effective plant IS Store.selectedPlant. */
-  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): void {
+  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
+    const candidateRun = opts.__candidateRun === true;
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
-    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
-    const plant: string | null = (opts.plant as string | null | undefined) ?? Store.selectedPlant;
+    if (!sourceTasks().length) {
+      if (!candidateRun) Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
+      return candidateRun ? detachedCandidateResult([], _pmT0e) : undefined;
+    }
+    const plant: string | null = (opts.plant as string | null | undefined) ?? sourceSelectedPlant();
     if (!plant) {
-      Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
-      return;
+      if (!candidateRun) Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
+      return candidateRun ? detachedCandidateResult([], _pmT0e, 'no-plant') : undefined;
     }
     // Remove Backlog is a schedule-repair pass, not an optimizer. Dispatch it
     // before priority-term creation so this path cannot accidentally read rank
     // maps, fixed protection, or the day-integrity resequencer.
     if (mode === 'backlog') {
       const result = Engine.removeBacklog({ ...opts, plant });
+      if (candidateRun) return detachedCandidateResult(result.patches, _pmT0e, 'completed', result);
       Engine.lastBacklogResult = result;
       if (result.patches.length) Store.updateMany(result.patches, 'engine-backlog');
       Store.setLastOptimize(new Date(), 'engine-backlog');
@@ -2296,7 +2836,7 @@ export const Engine = {
       PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
       return;
     }
-    Engine.lastBacklogResult = null;
+    if (!candidateRun) Engine.lastBacklogResult = null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
@@ -2312,9 +2852,10 @@ export const Engine = {
     const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
     const sortTerms = Engine._sortTerms(mode, { plant });
 
+    const injectedNow = candidateRun && opts.now instanceof Date ? opts.now : null;
     const horizonStart = opts.startDate
       ? new Date(opts.startDate as string | number | Date)
-      : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
+      : (() => { const d = injectedNow ? new Date(injectedNow) : new Date(); d.setSeconds(0, 0); return d; })();
     const horizonEnd   = opts.endDate   ? new Date(opts.endDate as string | number | Date) : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
@@ -2329,7 +2870,7 @@ export const Engine = {
     // Skip non-allowed lines at insertion when a line filter is supplied so we don't
     // pay for grouping work that will just be discarded.
     const groups: Record<string, { line: string; tasks: NimbusTask[] }> = {};
-    for (const t of Store.tasksByPlant(plant)) {
+    for (const t of sourceTasksByPlant(plant)) {
       const line = t.PRODUCTION_LINE || 'Unknown';
       if (allowed && !allowed.has(line)) continue;
       (groups[line] ||= { line, tasks: [] }).tasks.push(t);
@@ -2344,14 +2885,14 @@ export const Engine = {
     try {
 
     for (const line of Object.keys(groups)) {
-      if ((Store.lineSettings[line] || {}).excludeFromOpt) continue;
+      if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
       const { tasks } = groups[line];
 
       const fixedTasks = tasks.filter(t =>
-        (respectFixed && Store.isFixed(t.id)) || isAged(t) || isOutOfWin(t)
+        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFixed && Store.isFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
+        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
       );
 
       fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
@@ -2359,7 +2900,7 @@ export const Engine = {
       // Cursor floor is max(horizonStart, now): extending "From" backwards
       // widens eligibility (older orders become free to move) but never
       // schedules anything in the literal past.
-      const now = new Date();
+      const now = injectedNow ? new Date(injectedNow) : new Date();
       now.setSeconds(0, 0);
       const cursorFloor = horizonStart.getTime() > now.getTime() ? horizonStart : now;
 
@@ -2464,10 +3005,12 @@ export const Engine = {
         // so the condition isn't silently swallowed (previously a hard-to-diagnose "why
         // didn't this order move?" at scale).
         if (guard >= 200) {
-          ErrorLog.warn('engine',
+          reportSchedulerDiagnostic(
+            'warn', 'engine', 'engine.placement-guard',
             `Placement guard hit 200 iterations on "${line}" for order "${t.text || t.id}" — ` +
             `schedule may be suboptimal; check fixed orders / blackouts on this line.`,
-            { line, taskId: t.id });
+            { line, taskId: t.id },
+          );
         }
 
         const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
@@ -2481,7 +3024,9 @@ export const Engine = {
       Calendar._endRun();
     }
 
-    if (patches.length) Store.updateMany(patches, 'engine');
+    if (candidateRun) return detachedCandidateResult(patches, _pmT0e);
+
+    applySchedulePatches(patches);
     Store.setLastOptimize(new Date(), 'engine');
     Alerts.clearDismissed();
     // Route through the adaptive debounce instead of a direct synchronous recompute:
@@ -2503,16 +3048,32 @@ export const Engine = {
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.PRODUCTION_LINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
+    const setup = Store.setupSnapshot;
+    const definition = setup?.definition;
+    const setupActive = !!(setup && definition?.active && setup.plant === (changed.PLANT || Store.selectedPlant));
+    const setupMinutes = (predecessor: NimbusTask, successor: NimbusTask): number => {
+      if (!setupActive || !setup || !definition) return 0;
+      const predecessorState = stateForOrder(predecessor, definition);
+      const successorState = stateForOrder(successor, definition);
+      if (!predecessorState || !successorState) return 0;
+      const resolved = resolveSetup({
+        definition, line, predecessorState, successorState,
+        predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
+        plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+      });
+      return resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0;
+    };
 
     const peers = Store.tasksByPlant(Store.selectedPlant)
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
                 && t.start_date && t.end_date
                 && t.id !== changedId)
-      .sort((a,b) => Number(a.start_date) - Number(b.start_date));
+      .sort((a, b) => Number(a.start_date) - Number(b.start_date) || String(a.id).localeCompare(String(b.id)));
 
-    // Walk forward from the changed task's end, pushing any overlapping unfixed
-    // peer that starts before cursor to cursor (preserving duration).
+    // One deterministic forward walk: the direct drop stays untouched, then
+    // covered setup is reserved before each permitted downstream peer.
     let cursor = new Date(changed.end_date);
+    let predecessor = changed;
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
     if (splitPolicy !== 'never') {
       const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
@@ -2520,12 +3081,30 @@ export const Engine = {
       try {
         for (const p of peers) {
           if (p.end_date! <= changed.start_date) continue;
-          if (p.start_date! >= cursor) { cursor = new Date(p.end_date!); continue; }
+          const requiredSetupMinutes = setupMinutes(predecessor, p);
+          const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
+          if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
           if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
+            // Fixed or aged orders don't move — if there's a conflict, an alert
+            // will fire — but later unfixed peers must still be de-overlapped,
+            // and the immovable order becomes the setup predecessor they pay for.
             cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+            predecessor = p;
             continue;
           }
-          const changes = Engine.schedulePatchFor(p, line, cursor, splitPolicy);
+          const placement = Calendar.placeWithSetup(line, {
+            earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+            setup: { kind: 'resolved', minutes: requiredSetupMinutes },
+          });
+          const changes: Partial<NimbusTask> | null = placement.kind === 'placed' && placement.productiveSegments.length
+            ? {
+              start_date: placement.productiveSegments[0].start,
+              end_date: placement.productiveSegments.at(-1)!.end,
+              scheduleSegments: placement.productiveSegments.length >= 2
+                ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
+                : [],
+            }
+            : null;
           if (!changes?.start_date || !changes.end_date) {
             ErrorLog.warn('engine',
               `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
@@ -2534,6 +3113,7 @@ export const Engine = {
           }
           patches.push({ id: p.id, changes });
           cursor = new Date(changes.end_date);
+          predecessor = { ...p, ...changes };
         }
       } finally {
         Calendar._endRun();
@@ -2545,19 +3125,37 @@ export const Engine = {
     for (const p of peers) {
       // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
       if (p.end_date! <= changed.start_date) continue;
-      if (p.start_date! >= cursor) { cursor = new Date(p.end_date!); continue; }
+      const requiredSetupMinutes = setupMinutes(predecessor, p);
+      const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
+      if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
       if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
-        // Fixed or aged orders don't move — if there's a conflict, an alert will fire.
+        // Fixed or aged orders don't move — if there's a conflict, an alert
+        // will fire — but later unfixed peers must still be de-overlapped, and
+        // the immovable order becomes the setup predecessor they pay for.
         cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+        predecessor = p;
         continue;
       }
-      const dur = p.end_date!.getTime() - p.start_date!.getTime();
-      const newStart = Calendar.nextAvailable(line, cursor, dur);
-      const newEnd   = new Date(newStart.getTime() + dur);
-      const changes: Partial<NimbusTask> = { start_date: newStart, end_date: newEnd };
-      if (p.scheduleSegments?.length && p.scheduleSegments.length >= 2) changes.scheduleSegments = [];
+      const placement = Calendar.placeWithSetup(line, {
+        earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+        setup: { kind: 'resolved', minutes: requiredSetupMinutes },
+      });
+      if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
+        ErrorLog.warn('engine',
+          `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
+          { line, taskId: p.id, policy: splitPolicy });
+        break;
+      }
+      const changes: Partial<NimbusTask> = {
+        start_date: placement.productiveSegments[0].start,
+        end_date: placement.productiveSegments.at(-1)!.end,
+        scheduleSegments: placement.productiveSegments.length >= 2
+          ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
+          : [],
+      };
       patches.push({ id: p.id, changes });
-      cursor = new Date(newEnd);
+      cursor = new Date(changes.end_date!);
+      predecessor = { ...p, ...changes };
     }
     if (patches.length) Store.updateMany(patches, 'engine');
     // Reflow only ever shifts dates within `line`, so scope the alert recompute to it.

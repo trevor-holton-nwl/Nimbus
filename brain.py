@@ -55,6 +55,7 @@ import auth
 import db
 import master_data as md
 import sap_sync
+import setup_data
 from auth import require_admin
 
 
@@ -194,6 +195,8 @@ async def lifespan(app: FastAPI):
     md.ensure_labor_plan_line_table()
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
+    md.ensure_plant_setup_policy_config_column()
+    md.ensure_plant_setup_release_evidence_column()
     md.ensure_work_hours_columns()
     md.ensure_line_calendar_table()
     md.ensure_line_blackout_table()
@@ -576,11 +579,18 @@ _ADMIN_WRITE_OPERATIONS = {
     "/plant-calendar/line-hours": "calendar.line_hours_update",
     "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
     "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
+    "/setup/{plant}/definition": "setup.definition_write",
+    "/setup/{plant}/matrix/import": "setup.matrix_import",
+    "/setup/{plant}/matrix": "setup.matrix_delete",
+    "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
+    "/setup/{plant}/lines/{line}/compatibility": "setup.line_compatibility_write",
+    "/setup/{plant}/overrides": "setup.override_create",
+    "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "table", "column", "object", "username"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "line", "override_id", "table", "column", "object", "username"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:
@@ -604,6 +614,39 @@ def _set_admin_log_details(request: Request, **details) -> None:
     current = getattr(request.state, "admin_log_details", {})
     current.update(details)
     request.state.admin_log_details = current
+
+
+def _setup_plant_guard(plant: str, allowed_plants: list[str] | None) -> None:
+    """Translate the shared plant scope choke point for setup routes."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _setup_error(exc: ValueError) -> HTTPException:
+    """Keep setup signature conflicts distinct from malformed request data."""
+    status = 409 if "signature version is stale" in str(exc).lower() else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _setup_freshness(result: dict) -> dict:
+    """Attach only a correlation token and current signature marker to responses."""
+    version = result.get("signature_version")
+    if version is None and isinstance(result.get("definition"), dict):
+        version = result["definition"].get("signature_version")
+    return {**result, "freshness": {"signature_version": version, "request_id": _current_rid()}}
+
+
+def _setup_observed_at(value) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("observed_at is required as an ISO datetime")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("observed_at is required as an ISO datetime") from exc
 
 
 def _warn(level, msg, **ctx):
@@ -919,7 +962,7 @@ def _reload_one_plant_lists(plant: str) -> None:
     the whole plant (all lines/fields) since Stage 1 has no per-(line, field)
     upload endpoint yet; Stage 2 can narrow this once it does.
     """
-    global PLANT_LISTS, CW_LOADED_AT
+    global CW_LOADED_AT
     try:
         all_lists = db.load_all_priority_lists()
         if plant in all_lists:
@@ -1275,7 +1318,7 @@ def get_diagnostics_deep():
         wheel_colors = {
             color
             for by_line in PLANT_LISTS.values()
-            for color in (by_line.get("") or {}).get("colorWheel", {}).keys()
+            for color in (by_line.get("") or {}).get("colorWheel", {})
         }
         if order_colors:
             missed = order_colors - wheel_colors
@@ -1814,6 +1857,13 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     offloaded to a worker thread so it doesn't block the event loop.
     """
     raw = await file.read()
+    # Stage 0 observation seam: capture only already-completed planned work
+    # before ingest can replace its source rows.  This never changes orders,
+    # dates, capacity, alerts, or optimizer behavior.
+    await run_in_threadpool(
+        setup_data.capture_setup_states_before_schedule_mutation,
+        actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement"
+    )
     result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
                                      file.filename or "upload.xlsx")
     if result.get("status") != "ok":
@@ -1870,7 +1920,7 @@ async def upload_bom(request: Request, file: UploadFile = File(...)):
 
 
 @api.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def purge_orders(payload: dict):
+def purge_orders(payload: dict, request: Request):
     """
     payload: { start_date: ISO, end_date: ISO } — both inclusive.
     Deletes orders where effective end date falls in the range. Stateless:
@@ -1882,6 +1932,11 @@ def purge_orders(payload: dict):
         end   = datetime.fromisoformat(str(payload["end_date"]).replace("Z", ""))
     except (KeyError, ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid date range: {e}") from e
+    # This must remain adjacent to the DELETE below: a derived state may only
+    # observe the prior schedule while it still exists.
+    setup_data.capture_setup_states_before_schedule_mutation(
+        actor=request.headers.get("x-user-email") or "system", reason="order purge"
+    )
     result = db.purge_orders_by_date(start, end)
     if result.get("status") == "ok":
         _log_event("info", "purge", "Orders purged by date range",
@@ -2309,6 +2364,302 @@ def list_color_wheels(
     if limit is None and offset is None:
         return {"plants": plants}
     return {"plants": plants, "meta": {"total": total}}
+
+
+# =========================
+# SETUP MATRIX API — Stage 0 only: versioned observation/setup truth, never scheduling.
+# =========================
+
+@api.get("/setup/{plant}/policy", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_policy(plant: str,
+                     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Return one plant's disabled-by-default Stage 2 setup policy sidecar."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return md.get_setup_policy_config(plant)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.put("/setup/{plant}/policy", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def put_setup_policy(plant: str, request: Request, body: dict = Body(default={}),
+                     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Persist typed policy thresholds without activating a schedule run."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        config = {key: body.get(key) for key in (
+            'dueDateFirstEnabled', 'minChangeoverEnabled', 'throughputEnabled',
+            'throughputMinSavingsMin', 'throughputMaxSlipMin',
+        )}
+        return md.set_setup_policy_config(
+            plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
+        )
+    except ValueError as exc:
+        if 'stale' in str(exc).lower():
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.get("/setup/{plant}/release-evidence", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_release_evidence(plant: str,
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Return the plant-scoped release-evidence register and derived readiness."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return md.get_setup_release_evidence(plant)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.put("/setup/{plant}/release-evidence", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def put_setup_release_evidence(plant: str, request: Request, body: dict = Body(default={}),
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Persist auditable release evidence; it never starts scheduling."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        config = {key: body.get(key) for key in (
+            'stage1Validated', 'localDbVerified', 'performanceVerified',
+            'browserUatVerified', 'representativeReplayVerified',
+            'nullPredecessorVerified', 'ownerApproved', 'ownerEmail',
+            'approvedAt', 'notes',
+        )}
+        return md.set_setup_release_evidence(
+            plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
+        )
+    except ValueError as exc:
+        if 'stale' in str(exc).lower():
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.get("/setup/{plant}", dependencies=[Depends(auth.require_authenticated)])
+def get_setup(plant: str, request: Request,
+              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Return one authorized plant's complete setup snapshot, never a cross-plant aggregate."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return _setup_freshness(setup_data.get_setup_snapshot(plant))
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+def _setup_coverage_payload(result: dict, *, line: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+    """Keep coverage totals useful without embedding an unbounded missing-edge list."""
+    payload = {"plant": result["plant"], "signature_version": result.get("definition", {}).get("signature_version")
+               if result.get("definition") else None}
+    for kind in ("observed", "reachable"):
+        summary = result[kind]
+        page = setup_data.page_missing_pairs(summary["missing"], line=line, offset=offset, limit=limit)
+        payload[kind] = {key: value for key, value in summary.items() if key != "missing"}
+        payload[kind]["missing_page"] = page
+    return _setup_freshness(payload)
+
+
+@api.get("/setup/{plant}/coverage", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_coverage(plant: str, line: str | None = Query(default=None), offset: int = Query(default=0, ge=0),
+                       limit: int = Query(default=100, ge=1, le=500),
+                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Bounded Stage 0 transition coverage; this observes, never changes, schedules."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return _setup_coverage_payload(setup_data.get_setup_coverage(plant), line=line, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.get("/setup/{plant}/missing-pairs.csv", dependencies=[Depends(auth.require_authenticated)])
+def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed"), line: str | None = Query(default=None),
+                               offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Export one bounded, selectable page of missing canonical long-form pairs."""
+    _setup_plant_guard(plant, allowed_plants)
+    if kind not in {"observed", "reachable"}:
+        raise HTTPException(status_code=400, detail="kind must be observed or reachable")
+    try:
+        coverage = setup_data.get_setup_coverage(plant)
+        page = setup_data.page_missing_pairs(coverage[kind]["missing"], line=line, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Plant", "Line", "Scope", "Signature version", "From setup state", "To setup state"])
+    version = coverage.get("definition", {}).get("signature_version") if coverage.get("definition") else ""
+    for row in page["rows"]:
+        writer.writerow([plant, row["line"], row["scope"], version,
+                         json.dumps(row["from_key"], separators=(",", ":")),
+                         json.dumps(row["to_key"], separators=(",", ":"))])
+    headers = {"Content-Disposition": f'attachment; filename="setup-missing-{kind}-{plant}.csv"',
+               "X-Total-Count": str(page["meta"]["total"])}
+    return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
+
+
+@api.put("/setup/{plant}/definition", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def save_setup_definition(plant: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_authenticated)):
+    """Master-data-owner write for a plant's ordered signature definition."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, field_count=len(body.get("fields", []))
+                           if isinstance(body.get("fields"), list) else 0)
+    try:
+        result = setup_data.save_definition(
+            plant, body.get("fields"), body.get("strict_blanks"), actor,
+            expected_signature_version=body.get("expected_signature_version"),
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"])
+    return _setup_freshness(result)
+
+
+@api.post("/setup/{plant}/matrix/import", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                         Depends(require_admin)])
+def import_setup_matrix(plant: str, request: Request, body: dict = Body(default={}),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                        actor: str = Depends(auth.require_authenticated)):
+    """Write canonical long-form plant rows or sparse rows for one owned line."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line", "")
+    rows = body.get("rows")
+    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    try:
+        if line:
+            result = setup_data.upsert_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        else:
+            result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], rows=result.get("rows", 0))
+    return _setup_freshness(result)
+
+
+@api.delete("/setup/{plant}/matrix", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(default={}),
+                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                             actor: str = Depends(auth.require_authenticated)):
+    """Delete only selected cells; a sparse line deletion exposes inherited plant truth."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line", "")
+    rows = body.get("rows")
+    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    try:
+        if line:
+            result = setup_data.delete_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        else:
+            result = setup_data.delete_plant_matrix_rows(plant, rows, body.get("signature_version"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], deleted=result.get("deleted", 0))
+    return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/lines/{line}/state", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def save_setup_line_state(plant: str, line: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_setup_scheduler)):
+    """Authorized plant schedulers assert current physical state for an owned line."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, line=line)
+    try:
+        result = setup_data.set_line_state(
+            plant, line, body.get("values"), body.get("signature_version"),
+            _setup_observed_at(body.get("observed_at")), body.get("source"), body.get("reason"), actor,
+            body.get("physical_mold_id"),
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"], accepted=result.get("accepted"))
+    return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                                      Depends(require_admin)])
+def save_setup_line_compatibility(plant: str, line: str, request: Request, body: dict = Body(default={}),
+                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                                  actor: str = Depends(auth.require_authenticated)):
+    """Admin-only setup-signature opt-out, distinct from global optimizer exclusion."""
+    _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, line=line)
+    try:
+        result = md.set_setup_line_compatibility(plant, line, body.get("setup_compatible"), body.get("reason"), actor)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, setup_compatible=result["setup_compatible"])
+    return result
+
+
+@api.get("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_line_compatibility(plant: str, line: str,
+                                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return md.get_setup_line_compatibility(plant, line)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.post("/setup/{plant}/overrides", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def create_setup_override(plant: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                          actor: str = Depends(auth.require_setup_scheduler)):
+    """Create one occurrence-specific override; its stable resource ID is server-assigned."""
+    _setup_plant_guard(plant, allowed_plants)
+    if "predecessor_order_id" not in body:
+        raise _setup_error(ValueError("Predecessor order id is required; use null for initial state"))
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line)
+    try:
+        result = setup_data.upsert_occurrence_override(
+            plant, line, body.get("predecessor_order_id"), body.get("successor_order_id"),
+            body.get("predecessor_values"), body.get("successor_values"), body.get("standard_min"),
+            body.get("remaining_min"), body.get("signature_version"), body.get("reason"), actor,
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+                           persisted_override_id=result["id"])
+    return _setup_freshness(result)
+
+
+@api.put("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def save_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                        actor: str = Depends(auth.require_setup_scheduler)):
+    """Update the exact occurrence override identified by the URL; never rebind its adjacency."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    try:
+        result = setup_data.update_occurrence_override(
+            plant, line, override_id, body.get("standard_min"), body.get("remaining_min"),
+            body.get("signature_version"), body.get("reason"), actor,
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+                           persisted_override_id=result["id"])
+    return _setup_freshness(result)
+
+
+@api.delete("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def clear_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
+                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                         actor: str = Depends(auth.require_setup_scheduler)):
+    """Clear an active occurrence override while retaining its audit reason and history."""
+    _setup_plant_guard(plant, allowed_plants)
+    line = body.get("line")
+    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    try:
+        result = setup_data.clear_occurrence_override(
+            plant, line, override_id, body.get("signature_version"), actor, body.get("reason")
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, line=result["line"], cleared=result["cleared"],
+                           signature_version=result.get("signature_version"))
+    return _setup_freshness(result)
 
 
 # =========================

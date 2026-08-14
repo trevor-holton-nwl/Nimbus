@@ -143,10 +143,13 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine } from './schedule-services.mjs';
-import type { RemoveBacklogResult } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation } from './schedule-services.mjs';
+import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
+import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -161,6 +164,7 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, Ut
 interface TimelineVisItem {
   id: string;
   group: string;
+  kind: TimelineItemKind;
   /** Every displayed item resolves back to this one logical order. Segment
    * pieces use an internal item id but never become their own business IDs. */
   parentId?: string;
@@ -176,6 +180,22 @@ interface TimelineVisItem {
   editable?: boolean;
   type?: 'background';
   title?: string;
+  setup?: SetupPresentationDetail;
+  style?: string;
+}
+
+interface SetupPresentationDetail {
+  predecessorOrderId: string | null;
+  predecessorState: string | null;
+  successorOrderId: string;
+  requiredMinutes: number | null;
+  effectiveMinutes: number | null;
+  standardMinutes: number | null;
+  source: string;
+  overrideStatus: string | null;
+  availableMinutes: number | null;
+  shortMinutes: number | null;
+  missingDetail: string | null;
 }
 
 /** A vis-timeline group — one row per production line. */
@@ -380,7 +400,8 @@ export const Timeline = {
     }
 
     if (evt.type === 'tasks:bulk' || evt.type === 'blocks:change'
-        || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change') {
+        || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change'
+        || evt.type === 'setup-snapshot:replace') {
       // Only do a full rebuild when the gantt tab is active; otherwise
       // the next goto('gantt') will call rebuild() anyway. Coalesced to one rAF so
       // back-to-back data events don't each run the full diff inside Store.emit.
@@ -489,6 +510,17 @@ export const Timeline = {
     return item?.parentId || id;
   },
 
+  /** Presentation artifacts never cross into selection, editing, dependency,
+   * drag, or context-menu business paths. */
+  businessOrderIdForItem(itemId: string | number): string | null {
+    const id = String(itemId);
+    const dataSet = Timeline._items as (NimbusVendor.VisDataSet<TimelineVisItem> | { get?: (id: string) => TimelineVisItem | null | undefined } | null);
+    const item = (typeof dataSet?.get === 'function' ? dataSet.get(id) : null) as TimelineVisItem | null | undefined;
+    if (item?.kind && item.kind !== 'order' && item.kind !== 'order-segment') return null;
+    const orderId = item?.parentId || id;
+    return Store.tasks[orderId] ? orderId : null;
+  },
+
   /** Item IDs currently representing one logical parent. The derived fallback
    * keeps focus/selection correct before a fresh rebuild updates the cache. */
   itemIdsForTask(taskId: string | number): string[] {
@@ -525,6 +557,7 @@ export const Timeline = {
       if (index === count - 1) classNames.push('split-order-segment-last');
       return {
         ...base,
+        kind: 'order-segment',
         id: Timeline._segmentItemId(parentId, segment.sequence),
         parentId,
         segmentNumber: index + 1,
@@ -552,6 +585,7 @@ export const Timeline = {
     return {
       id:      String(t.id),
       group:   line,
+      kind:    'order',
       content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}</span>`,
       start:   t.start_date!,
       end:     t.end_date!,
@@ -572,6 +606,7 @@ export const Timeline = {
     return {
       id,
       group:   line,
+      kind:    'blackout',
       content: `<span style="font-style:italic;">✕ ${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>`,
       title:   `${Util.t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
       start:   b.start as Date, end: b.end as Date,
@@ -579,6 +614,133 @@ export const Timeline = {
       className: 'blackout',
       type: 'background'
     };
+  },
+
+  // Same availability context Alerts._recomputeSync passes: without it,
+  // setupAvailabilityMinutes' no-context fallback measures from the
+  // predecessor's end, which is null for a line's first order and renders a
+  // false "setup-conflict" on every line's first setup with no alert to match.
+  _setupObservation(tasks: ReadonlyArray<NimbusTask>): SetupObservation {
+    return deriveSetupObservation(Store.setupSnapshot, tasks, undefined, {
+      calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+      masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+    });
+  },
+
+  /** Render Task 4's immutable setup facts only. This code never calls Engine
+   * or Store mutators, and does not create a pseudo-order. */
+  _setupItemsForObservation(tasks: ReadonlyArray<NimbusTask>, observation: SetupObservation): TimelineVisItem[] {
+    const byId = new Map(tasks.map(task => [String(task.id), task]));
+    const items: TimelineVisItem[] = [];
+    const positiveSuccessors = new Set<string>();
+    const detailFor = (entry: any, missingDetail: string | null = null): SetupPresentationDetail => ({
+      predecessorOrderId: entry.predecessorOrderId ?? null,
+      predecessorState: entry.predecessorState ?? null,
+      successorOrderId: String(entry.successorOrderId),
+      requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
+      effectiveMinutes: Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
+      standardMinutes: Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
+      source: entry.source || 'resolved', overrideStatus: entry.overrideStatus || null,
+      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
+      shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
+        ? entry.requiredMinutes - entry.availableMinutes : null,
+      missingDetail,
+    });
+    for (const interval of observation.intervals || []) {
+      const required = Number(interval.requiredMinutes);
+      const start = new Date(interval.start), end = new Date(interval.end);
+      if (!Number.isFinite(required) || required <= 0 || !(start < end)) continue;
+      const successorId = String(interval.successorOrderId || '');
+      if (!byId.has(successorId)) continue;
+      positiveSuccessors.add(successorId);
+      const conflict = Number.isFinite(interval.availableMinutes) && interval.availableMinutes < required;
+      const detail = detailFor(interval);
+      items.push({
+        id: `setup:${encodeURIComponent(interval.line)}:${encodeURIComponent(interval.predecessorOrderId ?? 'initial')}:${encodeURIComponent(successorId)}`,
+        kind: 'setup', group: interval.line, start, end, editable: false,
+        className: `setup-item${conflict ? ' setup-conflict' : ''}`,
+        style: '',
+        content: `<span aria-hidden="true">${required}m</span>`,
+        title: `${Util.t('ui.setup_detail_title')}: ${required} min`, setup: detail,
+      });
+    }
+    const marked = new Set<string>();
+    for (const diagnostic of observation.diagnostics || []) {
+      const successorId = diagnostic.successorOrderId ? String(diagnostic.successorOrderId) : '';
+      const successor = byId.get(successorId);
+      if (!successor || positiveSuccessors.has(successorId) || marked.has(successorId)) continue;
+      const start = Array.isArray(successor.scheduleSegments) && successor.scheduleSegments.length
+        ? successor.scheduleSegments[0].startDate : successor.start_date;
+      if (!start) continue;
+      marked.add(successorId);
+      const end = new Date(start);
+      const detail = detailFor(diagnostic, diagnostic.message || Util.t('ui.setup_missing'));
+      items.push({
+        id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
+        kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - 10 * Config.MS_MIN), end, editable: false,
+        className: 'setup-item setup-missing', style: '',
+        content: `<span role="img" aria-label="${Util.t('ui.setup_missing')}">!</span>`,
+        title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
+      });
+    }
+    return items;
+  },
+
+  /** A move invalidates adjacency-derived setup on only its source/target
+   * lines; production patching remains owned by the Store subscriber. */
+  rebuildSetupForLines(lines: ReadonlySet<string>): void {
+    if (!Timeline._items || typeof Timeline._items.getIds !== 'function' || !lines.size) return;
+    const _deriveT0 = performance.now();
+    const tasks = Store.tasksForSelectedPlant().filter(task => (
+      lines.has(task.PRODUCTION_LINE || 'Unknown') && task.start_date && task.end_date
+    ));
+    const desired = new Map(Timeline._setupItemsForObservation(tasks, Timeline._setupObservation(tasks))
+      .map(item => [String(item.id), item] as const));
+    PerfMonitor.record('Timeline.setup.derive', performance.now() - _deriveT0);
+    const _diffT0 = performance.now();
+    const current = Timeline._items.getIds().map(String).filter(id => {
+      const item = Timeline._items!.get(id) as TimelineVisItem | null;
+      return item?.kind === 'setup' && lines.has(item.group);
+    });
+    const currentIds = new Set(current);
+    const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
+    for (const [id, item] of desired) (currentIds.has(id) ? update : add).push(item);
+    for (const id of current) if (!desired.has(id)) remove.push(id);
+    PerfMonitor.record('Timeline.setup.diff', performance.now() - _diffT0);
+    const _redrawT0 = performance.now();
+    Timeline._suppressEvents = true;
+    try {
+      if (remove.length) Timeline._items.remove(remove);
+      if (update.length) Timeline._items.update(update);
+      if (add.length) Timeline._items.add(add);
+    } finally { Timeline._suppressEvents = false; }
+    Timeline._tl?.redraw();
+    PerfMonitor.record('Timeline.setup.redraw', performance.now() - _redrawT0);
+  },
+
+  _dragSetupLines: new Set<string>(),
+  /** Presentation-only: called from vis' per-frame drag callback. */
+  dimSetupForDrag(lines: ReadonlySet<string>): void {
+    if (!Timeline._items || typeof Timeline._items.getIds !== 'function') return;
+    const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
+    if (!newlyAffected.size) return;
+    for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
+    const updates = Timeline._items.getIds().map(String).flatMap(id => {
+      const item = Timeline._items!.get(id) as TimelineVisItem | null;
+      return item?.kind === 'setup' && newlyAffected.has(item.group)
+        ? [{ id, className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }]
+        : [];
+    });
+    if (!updates.length) return;
+    Timeline._suppressEvents = true;
+    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
+  },
+
+  finishSetupDrag(extraLines: ReadonlySet<string> = new Set()): void {
+    const lines = new Set(Timeline._dragSetupLines);
+    for (const line of extraLines) lines.add(line);
+    Timeline._dragSetupLines.clear();
+    Timeline.rebuildSetupForLines(lines);
   },
   /** Coalesce data-event-driven rebuilds into a single requestAnimationFrame so
    *  multiple Store emits in one tick (e.g. tasks:bulkUpdate then alerts:change from
@@ -664,6 +826,11 @@ export const Timeline = {
         desired.set(String(item.id), item);
       }
     }
+    // Setup bars are a transient rendering of the current observation. They are
+    // intentionally absent from itemIdsByTask so selection/focus stays on orders.
+    for (const item of Timeline._setupItemsForObservation(scopedTasks, Timeline._setupObservation(scopedTasks))) {
+      desired.set(item.id, item);
+    }
     // Line blackout blocks — one per line for global blocks, one per assigned line otherwise.
     for (const b of Store.blocks) {
       if (b.plant && b.plant !== Store.selectedPlant) continue;
@@ -698,6 +865,7 @@ export const Timeline = {
       const item: TimelineVisItem = {
         id:       `past-zone-${line}`,
         group:    line,
+        kind:     'zone',
         start:    pastStart,
         end:      pastEnd,
         type:     'background',
@@ -720,6 +888,7 @@ export const Timeline = {
           desired.set(`alert-horizon-zone-${line}`, {
             id:        `alert-horizon-zone-${line}`,
             group:     line,
+            kind:      'zone',
             start:     hzNow,
             end:       hzEnd,
             type:      'background',
@@ -757,6 +926,7 @@ export const Timeline = {
       const item: TimelineVisItem = {
         id:    `alertcell-${cell.line}-${cell.dayKey}`,
         group: cell.line,
+        kind:  'zone',
         start: new Date(cell.dayKey + 'T00:00:00'),
         end:   new Date(cell.dayKey + 'T23:59:59'),
         type:  'background',
@@ -2918,7 +3088,8 @@ export const Inspector = {
       if (!Inspector._currentId) return;
       if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
         Inspector._render(Store.tasks[Inspector._currentId]);
-      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change') {
+      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change'
+          || evt.type === 'setup-snapshot:replace') {
         const t = Store.tasks[Inspector._currentId];
         if (t) Inspector._render(t);
         else Inspector.clear();
@@ -2945,6 +3116,52 @@ export const Inspector = {
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
 
+  /** Keyboard/screen-reader equivalent of a setup bar: detail belongs to the
+   * successor order, never to a selectable synthetic timeline item. */
+  _setupDetailForTask(task: NimbusTask, observation: SetupObservation = Timeline._setupObservation(Store.tasksForSelectedPlant())): SetupPresentationDetail | null {
+    const id = String(task.id);
+    const interval = observation.intervals.find(entry => String(entry.successorOrderId) === id);
+    const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === id);
+    if (!interval && !diagnostic) return null;
+    const entry: any = interval || diagnostic;
+    const snapshot = Store.setupSnapshot;
+    const definition = snapshot?.definition;
+    const predecessor = entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
+    const predecessorState = definition
+      ? (predecessor ? stateForOrder(predecessor, definition)
+        : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE)?.state_key)
+      : null;
+    const successorState = definition ? stateForOrder(task, definition) : null;
+    const resolved = definition && predecessorState && successorState && snapshot
+      ? resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
+        predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
+        plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides }) : null;
+    const predecessorStateText = entry.predecessorState || (predecessorState
+      ? predecessorState.map(part => `${part.fieldKey}=${part.value}`).join(' · ') : null);
+    return {
+      predecessorOrderId: entry.predecessorOrderId ?? null,
+      predecessorState: predecessorStateText,
+      successorOrderId: id,
+      requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
+      effectiveMinutes: resolved?.effectiveMin ?? (Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
+      standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
+      source: resolved?.source ?? (entry.source || 'resolved'), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
+      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
+      shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
+        ? entry.requiredMinutes - entry.availableMinutes : null,
+      missingDetail: diagnostic?.message || null,
+    };
+  },
+
+  _setupCapacityConflictText(detail: SetupPresentationDetail): string | null {
+    if (detail.shortMinutes == null || detail.availableMinutes == null || detail.requiredMinutes == null) return null;
+    const fallback = `Capacity shortfall: ${detail.availableMinutes} min available; ${detail.requiredMinutes} min required; ${detail.shortMinutes} min short.`;
+    const translated = Util.t('ui.setup_capacity_shortfall', {
+      available: detail.availableMinutes, required: detail.requiredMinutes, short: detail.shortMinutes,
+    });
+    return translated === 'ui.setup_capacity_shortfall' ? fallback : translated;
+  },
+
   _render(task: NimbusTask): void {
     const body = document.getElementById('inspector-body');
     if (!body) return;
@@ -2961,6 +3178,8 @@ export const Inspector = {
     // Util.impliedOriginalStart. Never reads/writes the raw
     // original_start_date field directly for display.
     const impliedOrigStart = Util.impliedOriginalStart(task);
+    const setupDetail = Inspector._setupDetailForTask(task);
+    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
@@ -3029,6 +3248,19 @@ export const Inspector = {
             </div>`;
           }).join('')}
         </div>
+      </div>` : ''}
+
+      ${setupDetail ? `<div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
+        <h4>${esc(Util.t('ui.setup_detail_title'))}</h4>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || 'â€”')}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || 'â€”')}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? 'â€”' : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? 'â€”' : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? 'â€”' : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || 'â€”')}</div></div>
+        ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
+        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
       </div>` : ''}
 
       <div class="insp-actions">
@@ -5046,6 +5278,27 @@ export const Interaction = {
   // this flag's tracker at all (see install()), so there's no overlap.
   _panDuringGesture: false,
 
+  _businessOrderIdForItem(itemId: string | number): string | null {
+    return Timeline.businessOrderIdForItem(itemId);
+  },
+
+  _isBusinessTimelineItem(itemId: string | number): boolean {
+    return Interaction._businessOrderIdForItem(itemId) != null;
+  },
+
+  /** Alert-cell backgrounds are presentation zones, not business orders. A
+   * real alertcell class is sufficient even on legacy items without `kind`. */
+  _onAlertCellClick(props: Pick<NimbusVendor.VisEventProperties, 'item' | 'group' | 'time'>): void {
+    if (!props.group || !props.time) return;
+    if (props.item && Interaction._isBusinessTimelineItem(props.item)) return;
+    const item = props.item != null ? Timeline._items!.get(String(props.item)) as TimelineVisItem | null : null;
+    if (item && !item.className?.includes('alertcell-')) return;
+    const dayKey = Util.dayKey(props.time);
+    const cellId = `alertcell-${props.group}-${dayKey}`;
+    if (!Timeline._items!.get(cellId)) return;
+    NIMBUS!.AlertsUIAdapter!.showForCell!(String(props.group), dayKey);
+  },
+
   trace(): InteractionTraceEntry[] { return this._trace.slice(-50); },
   _log(type: string, data: Record<string, unknown>): void {
     const entry: InteractionTraceEntry = { t: Date.now(), type, ...data };
@@ -5122,14 +5375,14 @@ export const Interaction = {
         // this flag see an unconsumed verdict for the CURRENT gesture.
         Interaction._panDuringGesture = false;
         const p = Timeline._tl && Timeline._tl.getEventProperties(e);
-        const onRealItem = p && p.item != null && !String(p.item).startsWith('alertcell-');
-        if (onRealItem) {
+        const onBusinessItem = !!(p && p.item != null && Interaction._isBusinessTimelineItem(p.item));
+        if (onBusinessItem) {
           // Mousedown started on an order item — this is an item-drag
           // gesture, not a canvas pan. Don't arm the peak tracker: order
           // drags routinely exceed 8px and must not be mistaken for a
           // canvas pan (that would wrongly suppress the trailing click's
-          // Selection.set after a drag). Mirrors the alertcell-id-prefix
-          // check in the click handler below.
+          // Selection.set after a drag). The same semantic business-item check
+          // is used by the click handler below.
           _downX = _downY = null;
         } else {
           _downX = e.clientX; _downY = e.clientY;
@@ -5160,15 +5413,7 @@ export const Interaction = {
         if (!Timeline._tl) return;
         if (Interaction._panDuringGesture) return; // panned during this gesture — not a real click
         const p = Timeline._tl.getEventProperties(e);
-        if (!p || !p.group || !p.time) return;
-        // If the click is on a real foreground item (an order), let normal
-        // selection handle it — don't hijack order clicks because the cell
-        // happens to be tinted.
-        if (p.item && !String(p.item).startsWith('alertcell-')) return;
-        const dayKey = Util.dayKey(p.time);
-        const cellId = `alertcell-${p.group}-${dayKey}`;
-        if (!Timeline._items!.get(cellId)) return; // no alert highlight here
-        NIMBUS!.AlertsUIAdapter!.showForCell!(String(p.group), dayKey);
+        Interaction._onAlertCellClick(p);
       });
     }
 
@@ -5182,7 +5427,8 @@ export const Interaction = {
         const p = Timeline._tl!.getEventProperties(e);
         e.preventDefault();
         if (p.what === 'item' && p.item != null) {
-          const id = Timeline.parentTaskIdForItem(p.item);
+          const id = Interaction._businessOrderIdForItem(p.item);
+          if (!id) return;
           // If right-click target is not currently selected, replace selection with it.
           if (!Selection.has(id)) Selection.set([id]);
           if (ContextMenu && typeof ContextMenu.open === 'function') {
@@ -5367,8 +5613,7 @@ export const Interaction = {
     const container = document.getElementById('vis-timeline');
     if (!container) return;
 
-    const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
+    const isOrderId = (id: string): boolean => !!Interaction._businessOrderIdForItem(id);
 
     let _cardEl = document.getElementById('nimbus-hover-card') as HTMLDivElement | null;
     if (!_cardEl) {
@@ -5457,7 +5702,8 @@ export const Interaction = {
         if (!props || props.item == null) return;
         const itemId = String(props.item);
         if (!isOrderId(itemId)) return;
-        const id = Timeline.parentTaskIdForItem(itemId);
+        const id = Interaction._businessOrderIdForItem(itemId);
+        if (!id) return;
         // Suppress during active drag or marquee — the user is doing something.
         if (Interaction._isDragging || Interaction._marquee) return;
 
@@ -5512,8 +5758,7 @@ export const Interaction = {
     if (!container || Interaction._marqueeDelegated) return;
     Interaction._marqueeDelegated = true;
 
-    const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => id.startsWith(p));
+    const isOrderId = (id: string): boolean => !!Interaction._businessOrderIdForItem(id);
 
     const _rectsIntersect = (a: MarqueeRect, b: MarqueeRect): boolean =>
       !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
@@ -5597,7 +5842,10 @@ export const Interaction = {
       }
       s.lastHits = hits;
       const next = new Set(s.baseIds);
-      for (const h of hits) next.add(Timeline.parentTaskIdForItem(h));
+      for (const h of hits) {
+        const id = Interaction._businessOrderIdForItem(h);
+        if (id) next.add(id);
+      }
       Selection.set([...next]);
     };
 
@@ -5755,10 +6003,8 @@ export const Interaction = {
       return;
     }
 
-    const id = Timeline.parentTaskIdForItem(props.item);
-
-    // Refuse to "select" a blackout block — they're decorative.
-    if (id.startsWith('blk-')) { Selection.clear(); return; }
+    const id = Interaction._businessOrderIdForItem(props.item);
+    if (!id) return;
 
     if (shift)     Selection.selectRange(id);
     else if (meta) Selection.toggle(id);
@@ -5789,8 +6035,8 @@ export const Interaction = {
     this._dblTimer = setTimeout(() => { this._justDoubleClicked = false; },
                                 this.DBLCLICK_SUPPRESS_MS);
 
-    const id = Timeline.parentTaskIdForItem(props.item);
-    if (id.startsWith('blk-')) return;
+    const id = Interaction._businessOrderIdForItem(props.item);
+    if (!id) return;
     const t = Store.tasks[id];
     if (!t) return;
 
@@ -5816,7 +6062,8 @@ export const Interaction = {
   _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
     for (const rawId of props.items) {
       const itemId = String(rawId);
-      const id = Timeline.parentTaskIdForItem(itemId);
+      const id = Interaction._businessOrderIdForItem(itemId);
+      if (!id) continue;
       const v = Timeline._items!.get(itemId) as TimelineVisItem | null;
       if (!v) continue;
       const t = Store.tasks[id];
@@ -5902,6 +6149,7 @@ export const Interaction = {
           regenerationPatches.push({ id: taskId, changes });
         }
         if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
+        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
         Timeline._scheduleRebuild();
         UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
           () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
@@ -5943,6 +6191,7 @@ export const Interaction = {
           } finally { Timeline._suppressEvents = false; }
         }
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
+        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
 
         if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
 
@@ -5960,6 +6209,8 @@ export const Interaction = {
         end_date:        newEnd,
         PRODUCTION_LINE: newLine
       }, 'timeline');
+      Engine.autoReflow(id);
+      Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
                      () => UndoStack.restoreTasks(snap));
@@ -6007,8 +6258,8 @@ export const Interaction = {
   _onTimeChange(props: VisTimeChangeProps): void {
     if (!props || !props.id || Timeline._suppressEvents) return;
     const dragItemId = String(props.id);
-    if (dragItemId.startsWith('blk-')) return;
-    const dragId = Timeline.parentTaskIdForItem(dragItemId);
+    const dragId = Interaction._businessOrderIdForItem(dragItemId);
+    if (!dragId) return;
 
     this._isDragging = true;
     this._startEdgeScroll();
@@ -6016,6 +6267,11 @@ export const Interaction = {
     const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
     if (_tip) _tip.style.display = 'none';
 
+    const dragTask = Store.tasks[dragId];
+    if (dragTask) Timeline.dimSetupForDrag(new Set([
+      dragTask.PRODUCTION_LINE || 'Unknown',
+      props.group == null ? (dragTask.PRODUCTION_LINE || 'Unknown') : String(props.group),
+    ]));
     const selIds = Selection.ids().filter(sid => sid !== dragId);
     if (!selIds.length) return;
 
@@ -6106,6 +6362,7 @@ export const Interaction = {
       finally { Timeline._suppressEvents = false; }
     }
     this._ghostDragId = null;
+    Timeline.finishSetupDrag();
   },
 
   _onKeyDown(e: KeyboardEvent): void {
@@ -6338,6 +6595,17 @@ interface OptimizerDefaults {
  *  reads defensively via individual `as` casts), so this needs the same index
  *  signature to stay assignable at that call site — same "known fields + open
  *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
+interface OptimizationAuditDetails {
+  mode: OptimizerMode;
+  wheelUsed: boolean;
+  taskCount: number;
+  scope: 'plant' | 'lines';
+  lines: string[] | null;
+  activePriorityFields: string[];
+  unrankedPriorityFields: string[];
+  splitOrderPolicy: SplitOrderPolicy;
+}
+
 interface OptimizerRunOptions {
   plant?: string | null;
   lines?: string[] | null;
@@ -6345,6 +6613,7 @@ interface OptimizerRunOptions {
   endDate?: Date;
   respectFixed?: boolean;
   respectCalendar?: boolean;
+  auditDetails?: OptimizationAuditDetails;
   [key: string]: unknown;
 }
 
@@ -6954,6 +7223,16 @@ export const OptimizeDialog = (() => {
       respectFixed:    sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
       runAt:           new Date(),
+      auditDetails: _mode === 'backlog' ? undefined : {
+        mode: _mode,
+        wheelUsed,
+        taskCount: Store.tasksArr.length,
+        scope: _scope,
+        lines: linesScope || null,
+        activePriorityFields: Engine.activeConstraintKeys(plant),
+        unrankedPriorityFields: unrankedFields,
+        splitOrderPolicy: Engine.splitOrderPolicyFor(plant),
+      },
     };
 
     // Config modal was already hidden (close(true) above) before the rank-map
@@ -6967,24 +7246,6 @@ export const OptimizeDialog = (() => {
       OptimizerPreview.runWithPreview(_mode, optsForEngine);
     }, 0));
 
-    // Persist audit log entry
-    if (_mode !== 'backlog') fetch(`${Config.API_BASE}/audit/log`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
-      body: JSON.stringify({
-        action: 'optimization_run', plant,
-        details: {
-          mode: _mode, wheel_used: wheelUsed, task_count: Store.tasksArr.length,
-          scope: _scope, lines: linesScope || null,
-          // `wheel_used` above is a colorWheel-only fact kept for continuity with
-          // existing audit rows; these two record what the run actually had to
-          // work with across ALL priority fields.
-          active_priority_fields: Engine.activeConstraintKeys(plant),
-          unranked_priority_fields: unrankedFields,
-          split_order_policy: Engine.splitOrderPolicyFor(plant),
-        },
-      }),
-    }).catch(() => {});
   }
 
   function openFromPicker() {
@@ -7055,13 +7316,43 @@ interface OptimizerPreviewCard {
   tip: string;
 }
 
+interface PreviewExplanation {
+  impact: {
+    production: { before: number; after: number };
+    setup: { before: number; after: number };
+    occupiedHours: { before: number; after: number };
+    lateness: { beforeOrders: number; afterOrders: number; beforeHours: number; afterHours: number };
+    utilization: { before: number; after: number };
+    sequences: { changed: number };
+  };
+  reasons: Array<{ code: string; message: string; line?: string; taskId?: string; outcome: 'accepted' | 'rejected' }>;
+  constraints: string[];
+  missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string }>;
+  unchangedLines: string[];
+  search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
+}
+
+interface PreviewExplanationInput {
+  productionBefore: number;
+  productionAfter: number;
+  preKpis: OptimizerKpis;
+  postKpis: OptimizerKpis;
+}
+
+const PREVIEW_REASON_LIMIT = 8;
+const PREVIEW_MISSING_PAIR_LIMIT = 12;
+
 /* =============================================================================
    OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
-  _snapshot: null as NimbusTask[] | null,   // deep-cloned tasks taken before the run
+  // A detached pre-run copy is needed only if the planner later applies the
+  // candidate and wants Ctrl+Z. It is never used to roll a trial back.
+  _snapshot: null as NimbusTask[] | null,
+  _candidate: null as CandidateResult | null,
+  _previewDiagnostics: [] as CandidateDiagnostic[],
   _preKpis:  null as OptimizerKpis | null,
   _postKpis: null as OptimizerKpis | null,
   _mode:     null as OptimizerMode | null,
@@ -7071,8 +7362,11 @@ export const OptimizerPreview = {
   _backlogAudit: null as {
     plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
   } | null,
-  active:    false,  // true from the moment the trial mutates the Store until Apply/Discard
-  _confSnapshot: null as unknown,   // Confidence.snapshot() taken just before the trial mutation
+  _auditDetails: null as OptimizationAuditDetails | null,
+  _explanation: null as PreviewExplanation | null,
+  stale: false,
+  _staleReason: null as string | null,
+  active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
@@ -7101,15 +7395,90 @@ export const OptimizerPreview = {
    *  cancels the no-color-wheel confirm) so the spinner doesn't linger. */
   hideLoading() {
     Modal.close('modal-opt-preview');
-    const root = document.getElementById('modal-opt-preview');
+    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
     if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = false; });
+  },
+
+  /** Compact presentation facts only: candidate patches never carry a full
+   * schedule, and this summary never retains one. */
+  summarizeCandidate(candidate: CandidateResult, input: PreviewExplanationInput): PreviewExplanation {
+    const rejected = /(?:unavailable|unknown|uncovered|infeasible|missing|disabled|fail)/i;
+    const reasons = candidate.explanation.slice(0, PREVIEW_REASON_LIMIT).map(reason => ({
+      code: reason.code, message: reason.message, line: reason.line, taskId: reason.taskId,
+      outcome: rejected.test(`${reason.code} ${reason.message}`) ? 'rejected' as const : 'accepted' as const,
+    }));
+    return {
+      impact: {
+        production: { before: input.productionBefore, after: input.productionAfter },
+        setup: { before: input.preKpis.changeovers, after: input.postKpis.changeovers },
+        occupiedHours: { before: input.preKpis.span_h, after: input.postKpis.span_h },
+        lateness: { beforeOrders: input.preKpis.late_count, afterOrders: input.postKpis.late_count, beforeHours: input.preKpis.late_h, afterHours: input.postKpis.late_h },
+        utilization: { before: input.preKpis.peak_util_pct, after: input.postKpis.peak_util_pct },
+        sequences: { changed: candidate.patches.length },
+      },
+      reasons,
+      constraints: [...new Set(candidate.explanation.map(reason => reason.code))].slice(0, PREVIEW_REASON_LIMIT),
+      missingPairs: candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => ({
+        line: edge.line, predecessorOrderId: edge.predecessorOrderId ?? null,
+        successorOrderId: edge.successorOrderId ?? null, reason: edge.reason,
+      })),
+      unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
+      search: {
+        candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
+        termination: candidate.diagnostics.termination, runtimeMs: candidate.diagnostics.runtimeMs,
+        limitReached: candidate.diagnostics.limitReached,
+      },
+    };
+  },
+
+  /** Derive only the state labels needed to review bounded missing edges while
+   * the detached snapshot is still in scope. No task list is retained. */
+  describeMissingPairs(candidate: CandidateResult, tasks: ReadonlyArray<NimbusTask>, setup: SetupSnapshot | null): PreviewExplanation['missingPairs'] {
+    const definition = setup?.definition;
+    const byId = new Map(tasks.map(task => [String(task.id), task]));
+    const text = (state: SetupStateKey | null | undefined) => state?.map(part => `${part.fieldKey}=${part.value}`).join(' | ') || null;
+    return candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => {
+      const predecessor = edge.predecessorOrderId ? byId.get(String(edge.predecessorOrderId)) : undefined;
+      const successor = edge.successorOrderId ? byId.get(String(edge.successorOrderId)) : undefined;
+      const lineState = definition
+        ? setup?.line_states.find(state => state.line === edge.line && state.signature_version === definition.signature_version)?.state_key
+        : null;
+      return {
+        line: edge.line,
+        predecessorOrderId: edge.predecessorOrderId ?? null,
+        successorOrderId: edge.successorOrderId ?? null,
+        fromState: text(definition && predecessor ? stateForOrder(predecessor, definition) : lineState),
+        toState: text(definition && successor ? stateForOrder(successor, definition) : null),
+        reason: edge.reason,
+      };
+    });
+  },
+
+  missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
+    const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    return ['Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...pairs.map(pair =>
+      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason].map(quote).join(','))].join('\n');
+  },
+
+  canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
+
+  /** Setup writes make comparison facts stale; they never rerun or apply a
+   * candidate. The planner must explicitly run again. */
+  markSetupStale(plant: string, kind: string): void {
+    if (!OptimizerPreview.active || !OptimizerPreview._candidate || OptimizerPreview._plant !== plant) return;
+    OptimizerPreview.stale = true;
+    OptimizerPreview._staleReason = `${kind} setup data changed`;
+    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
+    const apply = root?.querySelector<HTMLButtonElement>('.modal-foot .btn-primary');
+    if (apply) { apply.disabled = true; apply.title = 'Setup data changed. Run optimization again before applying.'; }
+    if (typeof document !== 'undefined') OptimizerPreview._render();
   },
 
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
    *  to close on an outside click, bypassing discard()/apply() entirely (app.js's
    *  boot-time '.modal-backdrop' click handler calls Modal.close() directly). Left
-   *  alone, that would abandon a live trial with no revert AND leave `active` stuck
-   *  true, freezing Confidence forever. Treat any non-apply/discard hide as a discard. */
+   *  alone, that would leave detached candidate details and `active` stuck true.
+   *  Treat any non-apply/discard hide as a discard. */
   _installAbandonGuard() {
     if (OptimizerPreview._abandonGuardInstalled) return;
     OptimizerPreview._abandonGuardInstalled = true;
@@ -7123,6 +7492,7 @@ export const OptimizerPreview = {
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
   runWithPreview(mode: OptimizerMode = 'combined', opts: OptimizerRunOptions = {}) {
+    OptimizerPreview._previewDiagnostics = [];
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
@@ -7147,17 +7517,17 @@ export const OptimizerPreview = {
         // Snapshot every task in the plant — the optimizer may touch any of
         // them transitively (auto-reflow can ripple beyond the chosen window
         // / lines), so the undo snapshot must stay unfiltered.
-        const scopedTasks = Store.tasksByPlant(plant);
-        const ids = scopedTasks.map(t => t.id);
+        const candidateSnapshot = snapshotSchedule();
+        const scopedTasks = candidateSnapshot.tasks.filter(task => {
+          const mappedPlant = candidateSnapshot.lineSettings[task.PRODUCTION_LINE]?.plant
+            ?? candidateSnapshot.masterData?.lines.find(row => row.production_line === task.PRODUCTION_LINE)?.plant;
+          return (task.PLANT || mappedPlant) === plant;
+        });
         const _snapT0 = performance.now();
-        snapshot = UndoStack.snapshotTasks(ids);
-        // Publish the snapshot BEFORE mutating the Store (R6) so a mid-run throw can
-        // be rolled back in the catch — Engine.runAndApply mutates in place.
+        snapshot = structuredClone(scopedTasks);
+        // Keep this detached copy only for the Undo entry if the planner applies.
         OptimizerPreview._snapshot = snapshot;
-        // Freeze Confidence for the whole trial window (through Apply/Discard) and
-        // snapshot it so a Discard can roll back without leaving any trace.
         OptimizerPreview.active = true;
-        OptimizerPreview._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
         PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
         // KPI inputs are scoped to what the user actually selected on screen 1 —
@@ -7177,49 +7547,64 @@ export const OptimizerPreview = {
 
         // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
         const _preKpiT0 = performance.now();
-        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14);
+        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot);
         PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
 
-        // Run the optimizer in place.
-        Engine.runAndApply(mode, opts);
+        // Evaluate the established placement algorithm against a detached read
+        // model. Store changes only if the planner applies this candidate.
+        const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts });
 
-        // Post-KPIs from the now-mutated Store, filtered to the same scope.
-        const postTasks = Store.tasksByPlant(plant).filter(inScope);
+        // Post-KPIs are calculated from detached patched task values.
+        const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
         const _postKpiT0 = performance.now();
-        const postKpis  = Util.scheduleKpis(postTasks, 14);
+        const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot);
         PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
         OptimizerPreview._preKpis  = preKpis;
         OptimizerPreview._postKpis = postKpis;
+        OptimizerPreview._candidate = candidate;
+        OptimizerPreview._previewDiagnostics = [...candidate.diagnostics.events];
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
         OptimizerPreview._splitOrderPolicy = Engine.splitOrderPolicyFor(plant);
-        OptimizerPreview._backlogResult = mode === 'backlog' ? Engine.lastBacklogResult : null;
+        OptimizerPreview._backlogResult = mode === 'backlog' ? candidate.backlogResult ?? null : null;
         OptimizerPreview._backlogAudit = mode === 'backlog' ? {
           plant,
           lines: Array.isArray(opts.lines) ? opts.lines : null,
           from: opts.startDate ?? null,
           to: opts.endDate ?? null,
           runAt: opts.runAt instanceof Date ? opts.runAt : null,
-          timezone: Store.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
+          timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
+        OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
+        const explanation = OptimizerPreview.summarizeCandidate(candidate, {
+          productionBefore: snapshot.filter(inScope).length,
+          productionAfter: postTasks.length,
+          preKpis,
+          postKpis,
+        });
+        explanation.missingPairs = OptimizerPreview.describeMissingPairs(
+          candidate,
+          candidateSnapshot.tasks,
+          Store.setupSnapshot?.plant === plant ? Store.setupSnapshot : null,
+        );
+        OptimizerPreview._explanation = explanation;
+        OptimizerPreview.stale = false;
+        OptimizerPreview._staleReason = null;
 
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._render();
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
-        ErrorLog.error('optimize-preview', errMsg || String(err));
-        // Roll the Store back to the pre-run snapshot (R6) — a mid-run throw leaves
-        // the schedule partially mutated otherwise, with no undo path.
-        if (snapshot) {
-          try {
-            UndoStack.restoreTasks(snapshot);
-            if (NIMBUS!.Confidence && OptimizerPreview._confSnapshot) NIMBUS!.Confidence!.restore!(OptimizerPreview._confSnapshot);
-            Alerts.scheduleRecompute();
-          }
-          catch { ErrorLog.error('optimize-preview', `revert failed`); }
-        }
-        OptimizerPreview._clear();
+        OptimizerPreview._previewDiagnostics = [{
+          level: 'error',
+          scope: 'optimize-preview',
+          code: 'candidate-evaluation-failed',
+          message: errMsg || String(err),
+          context: { mode, plant },
+        }];
+        // Evaluation is detached, so failures leave Store untouched.
+        OptimizerPreview._clear(true);
         if (body) {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
@@ -7240,6 +7625,7 @@ export const OptimizerPreview = {
     const pre  = OptimizerPreview._preKpis  || EMPTY_OPTIMIZER_KPIS;
     const post = OptimizerPreview._postKpis || EMPTY_OPTIMIZER_KPIS;
     const backlog = OptimizerPreview._backlogResult?.diagnostics ?? null;
+    const explanation = OptimizerPreview._explanation;
 
     // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
     // lowerIsBetter: true → decrease=better (green), increase=worse (red).
@@ -7347,6 +7733,27 @@ export const OptimizerPreview = {
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const explanationHtml = (() => {
+      if (!explanation) return '';
+      const compact = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
+      const impact = [
+        ['Production orders', `${explanation.impact.production.before} → ${explanation.impact.production.after}`],
+        ['Setup changeovers', `${explanation.impact.setup.before} → ${explanation.impact.setup.after}`],
+        ['Occupied time', `${compact(explanation.impact.occupiedHours.before)} h → ${compact(explanation.impact.occupiedHours.after)} h`],
+        ['Lateness', `${explanation.impact.lateness.beforeOrders}/${compact(explanation.impact.lateness.beforeHours)} h → ${explanation.impact.lateness.afterOrders}/${compact(explanation.impact.lateness.afterHours)} h`],
+        ['Peak utilization', `${compact(explanation.impact.utilization.before)}% → ${compact(explanation.impact.utilization.after)}%`],
+        ['Sequences changed', String(explanation.impact.sequences.changed)],
+      ];
+      const reasons = explanation.reasons.length
+        ? `<ul>${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
+        : `<span>${esc(Util.t('ui.setup_reasons_none'))}</span>`;
+      const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
+      const missing = explanation.missingPairs.length
+        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.copy'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_csv'))}</button>${canReview ? ` <button class="btn btn-ghost sm" data-opt-review-missing>${esc(Util.t('ui.setup_review_missing_title'))}</button>` : ''}</div>`
+        : `<span>${esc(Util.t('ui.setup_missing_pairs_none'))}</span>`;
+      const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>${esc(Util.t('ui.setup_preview_stale_title'))}</strong> ${esc(OptimizerPreview._staleReason || Util.t('ui.setup_preview_stale_default_reason'))}. ${esc(Util.t('ui.setup_preview_stale_note'))}</div>` : '';
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${esc(Util.t('ui.setup_candidate_explanation_title'))}</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>${esc(Util.t('ui.setup_search_label'))}</strong> ${esc(explanation.search.method)} · ${esc(Util.t('ui.setup_search_candidates', { count: explanation.search.candidateCount, plural: explanation.search.candidateCount === 1 ? '' : 's' }))} · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? esc(Util.t('ui.setup_search_limit_reached')) : ''}</p><p><strong>${esc(Util.t('ui.setup_constraints_label'))}</strong> ${esc(explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none'))}</p><p><strong>${esc(Util.t('ui.setup_unchanged_lines_label'))}</strong> ${esc(explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none'))}</p><div><strong>${esc(Util.t('ui.setup_reasons_title'))}</strong>${reasons}</div><div><strong>${esc(Util.t('ui.setup_missing_pairs_title'))}</strong>${missing}</div></section>`;
+    })();
 
     // Per-card markup
     const cardsHtml = cards.map(c => {
@@ -7424,6 +7831,8 @@ export const OptimizerPreview = {
 
         ${backlogHtml}
 
+        ${explanationHtml}
+
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
@@ -7439,7 +7848,7 @@ export const OptimizerPreview = {
         <div class="opt-pv-grid">${cardsHtml}</div>
 
         <div class="opt-pv-footer-note">
-          <strong>Apply</strong> keeps the new schedule (still undoable via Ctrl+Z). <strong>Discard</strong> reverts every order to its pre-optimization position.
+          <strong>Apply</strong> commits the candidate schedule (still undoable via Ctrl+Z). <strong>Discard</strong> drops this candidate without changing the current schedule.
         </div>
       </div>`;
 
@@ -7464,13 +7873,50 @@ export const OptimizerPreview = {
         requestAnimationFrame(tick);
       });
     });
+    const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
+    body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
+      navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-export-missing]')?.addEventListener('click', () => {
+      const blob = new Blob([missingCsv()], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
+      link.download = `missing-setups-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', () => {
+      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => void } } }).NIMBUS?.SetupAdmin;
+      if (setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+    });
   },
 
   apply() {
     const snap = OptimizerPreview._snapshot;
+    const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
-    if (!snap) { Modal.close('modal-opt-preview'); return; }
+    const auditDetails = OptimizerPreview._auditDetails;
+    if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
+    if (!OptimizerPreview.canApply()) {
+      Toast.show('Setup data changed. Run optimization again before applying.', 'warn');
+      return;
+    }
+    if (auditDetails && plant) {
+      fetch(`${Config.API_BASE}/audit/log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
+        body: JSON.stringify({
+          action: 'optimization_run', plant,
+          details: {
+            mode: auditDetails.mode,
+            wheel_used: auditDetails.wheelUsed,
+            task_count: auditDetails.taskCount,
+            scope: auditDetails.scope,
+            lines: auditDetails.lines,
+            active_priority_fields: auditDetails.activePriorityFields,
+            unranked_priority_fields: auditDetails.unrankedPriorityFields,
+            split_order_policy: auditDetails.splitOrderPolicy,
+          },
+        }),
+      }).catch(() => {});
+    }
     if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
       const audit = OptimizerPreview._backlogAudit;
       const diagnostics = OptimizerPreview._backlogResult.diagnostics;
@@ -7492,6 +7938,10 @@ export const OptimizerPreview = {
         }),
       }).catch(() => {});
     }
+    // This is the sole schedule-state commit for a preview candidate.
+    Engine.applySchedulePatches(candidate.patches);
+    Store.setLastOptimize(new Date(), 'engine');
+    Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
@@ -7505,20 +7955,16 @@ export const OptimizerPreview = {
   },
 
   discard() {
-    const snap = OptimizerPreview._snapshot;
-    const confSnap = OptimizerPreview._confSnapshot;
-    if (snap) {
-      UndoStack.restoreTasks(snap);
-      if (NIMBUS!.Confidence && confSnap) NIMBUS!.Confidence!.restore!(confSnap);
-      Alerts.scheduleRecompute();
+    if (OptimizerPreview._candidate) {
       Toast.show(Util.t('toast.opt_discarded'), 'info');
     }
     OptimizerPreview._clear();
     Modal.close('modal-opt-preview');
   },
 
-  _clear() {
+  _clear(keepPreviewDiagnostics: boolean = false) {
     OptimizerPreview._snapshot = null;
+    OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
     OptimizerPreview._postKpis = null;
     OptimizerPreview._mode     = null;
@@ -7526,10 +7972,16 @@ export const OptimizerPreview = {
     OptimizerPreview._splitOrderPolicy = 'never';
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
+    OptimizerPreview._auditDetails = null;
+    OptimizerPreview._explanation = null;
+    OptimizerPreview.stale = false;
+    OptimizerPreview._staleReason = null;
+    if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];
     OptimizerPreview.active       = false;
-    OptimizerPreview._confSnapshot = null;
   },
 };
+
+Persistence.setSetupWriteListener((plant, kind) => OptimizerPreview.markSetupStale(plant, kind));
 
 // -- Local type declarations (CQ-1 Phase 6 Task 8 conversion; scoped to
 //    EditCalendar/ColorWheelViewer/AlertsUIAdapter/SandboxAdapter/Printer —
@@ -8171,7 +8623,9 @@ export const AlertsUIAdapter = {
       'runtime-schedule-mismatch': 'exceptions',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    for (const a of matches) byCat[CAT_MAP[a.type] || 'exceptions'].push(a);
+    // Setup diagnostics are intentionally not given a UI category in this
+    // Stage-1 task; they retain the existing exceptions fallback.
+    for (const a of matches) byCat[CAT_MAP[a.type as AlertType] || 'exceptions'].push(a);
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;

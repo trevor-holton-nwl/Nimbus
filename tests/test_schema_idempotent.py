@@ -21,11 +21,33 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "schema.sql")
+SETUP_MIGRATION_PATH = os.path.join(ROOT, "migrations", "2026-08-13-changeover-matrix-stage-0.sql")
 
 
 def _schema_text() -> str:
     with open(SCHEMA_PATH, encoding="utf-8") as f:
         return f.read()
+
+
+def _setup_schema_texts() -> list[tuple[str, str]]:
+    """Both deployment paths must provide identical setup persistence guards."""
+    paths = (SCHEMA_PATH, SETUP_MIGRATION_PATH)
+    texts = []
+    for path in paths:
+        with open(path, encoding="utf-8") as schema_file:
+            texts.append((path, schema_file.read()))
+    return texts
+
+
+def _table_block(text: str, table: str) -> str:
+    """Return one CREATE TABLE body so each contract stays table-specific."""
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table} \((?P<body>.*?)\n\);",
+        text,
+        re.DOTALL,
+    )
+    assert match is not None, f"missing CREATE TABLE IF NOT EXISTS {table}"
+    return match.group("body")
 
 
 def test_no_unguarded_horizon_multiply_statement():
@@ -47,6 +69,115 @@ def test_schema_migrations_ledger_present():
     assert "plants_horizon_minutes" in text, (
         "The horizon conversion must be recorded in the schema_migrations ledger."
     )
+
+
+def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
+    """Each setup table must retain its own scope, state, audit, and validation contract."""
+    for path, text in _setup_schema_texts():
+        definition = _table_block(text, "setup_definition")
+        for required in (
+            "plant             TEXT PRIMARY KEY",
+            "fields            JSONB NOT NULL CHECK (jsonb_typeof(fields) = 'array')",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "strict_blanks     BOOLEAN NOT NULL DEFAULT TRUE",
+            "active            BOOLEAN NOT NULL DEFAULT FALSE",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+        ):
+            assert required in definition, f"{path}: setup_definition missing {required}"
+
+        matrix = _table_block(text, "setup_matrix")
+        for required in (
+            "plant             TEXT NOT NULL",
+            "line              TEXT NOT NULL DEFAULT ''",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "from_key          JSONB NOT NULL CHECK (jsonb_typeof(from_key) = 'array')",
+            "to_key            JSONB NOT NULL CHECK (jsonb_typeof(to_key) = 'array')",
+            "setup_min         INTEGER NOT NULL CHECK (setup_min BETWEEN 0 AND 10080)",
+            "source            TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'derived', 'actual'))",
+            "source_metadata   JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "PRIMARY KEY (plant, line, signature_version, from_key, to_key)",
+        ):
+            assert required in matrix, f"{path}: setup_matrix missing {required}"
+
+        line_state = _table_block(text, "line_setup_state")
+        for required in (
+            "plant             TEXT NOT NULL",
+            "line              TEXT NOT NULL",
+            "state_key         JSONB NOT NULL CHECK (jsonb_typeof(state_key) = 'array')",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "physical_mold_id  TEXT",
+            "observed_at       TIMESTAMP NOT NULL DEFAULT NOW()",
+            "source            TEXT NOT NULL CHECK (source IN ('manual', 'derived', 'actual'))",
+            "reason            TEXT",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "PRIMARY KEY (plant, line)",
+        ):
+            assert required in line_state, f"{path}: line_setup_state missing {required}"
+
+        occurrence = _table_block(text, "setup_occurrence_override")
+        for required in (
+            "id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
+            "plant                TEXT NOT NULL",
+            "line                 TEXT NOT NULL",
+            "signature_version    INTEGER NOT NULL CHECK (signature_version > 0)",
+            "predecessor_order_id TEXT",
+            "successor_order_id   TEXT NOT NULL",
+            "predecessor_state_key JSONB NOT NULL CHECK (jsonb_typeof(predecessor_state_key) = 'array')",
+            "successor_state_key   JSONB NOT NULL CHECK (jsonb_typeof(successor_state_key) = 'array')",
+            "standard_min         INTEGER NOT NULL CHECK (standard_min >= 0)",
+            "remaining_min        INTEGER NOT NULL CHECK (remaining_min >= 0)",
+            "status               TEXT NOT NULL DEFAULT 'active'",
+            "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))",
+            "reason               TEXT",
+            "created_by           TEXT",
+            "created_at           TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by           TEXT",
+            "updated_at           TIMESTAMP NOT NULL DEFAULT NOW()",
+        ):
+            assert required in occurrence, f"{path}: setup_occurrence_override missing {required}"
+
+
+def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
+    """Dropping the partial unique index would allow conflicting active overrides."""
+    expected = (
+        r"CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency\s+"
+        r"ON setup_occurrence_override \(\s*plant, line, signature_version,\s+"
+        r"predecessor_order_id,\s+successor_order_id,\s+predecessor_state_key,\s+successor_state_key\s*\)\s+"
+        r"NULLS NOT DISTINCT\s+WHERE status = 'active'"
+    )
+    for path, text in _setup_schema_texts():
+        assert re.search(expected, text, re.DOTALL), path
+
+
+def test_setup_schema_enforces_matrix_bound_and_unbounded_override_minutes():
+    """Only standards use the seven-day cap; physical remaining work stays nonnegative but unbounded."""
+    for path, text in _setup_schema_texts():
+        assert "CHECK (setup_min BETWEEN 0 AND 10080)" in text, path
+        assert "CHECK (standard_min >= 0)" in text, path
+        assert "CHECK (remaining_min >= 0)" in text, path
+        assert "CHECK (source IN ('manual', 'derived', 'actual'))" in text, path
+        assert "CHECK (status IN ('active', 'inactive', 'cleared', 'replaced'))" in text, path
+
+
+def test_setup_schema_keeps_compatibility_separate_from_global_optimizer_exclusion():
+    """An incompatible line must opt out with a reason without mutating excl_optimizer."""
+    expected = (
+        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatible "
+        r"BOOLEAN NOT NULL DEFAULT TRUE;\s*"
+        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;"
+    )
+    for path, text in _setup_schema_texts():
+        assert re.search(expected, text), path
 
 
 @pytest.mark.pg
