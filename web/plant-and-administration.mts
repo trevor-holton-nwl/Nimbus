@@ -127,6 +127,13 @@ export const SetupAdmin = (() => {
   const keyText = (key: SetupStateKey): string => key.map(part => `${part.fieldKey}=${part.value}`).join(' | ');
   const keyId = (row: Pick<SetupMatrixRow, 'from_key' | 'to_key'>): string => `${JSON.stringify(row.from_key)}→${JSON.stringify(row.to_key)}`;
   const headers = (): HeadersInit => ({ 'content-type': 'application/json', 'x-user-email': Session.actor() });
+  const setupText = (key: string, fallback: string, vars?: Record<string, string | number>): string => {
+    try {
+      return typeof window === 'undefined' ? fallback : Util.t(key, vars);
+    } catch {
+      return fallback;
+    }
+  };
 
   function permissionsFor({ isAdmin, setupScheduler, plantAllowed }: { isAdmin: boolean; setupScheduler: boolean; plantAllowed: boolean }): SetupPermissions {
     return { read: true, copy: true, export: true, definitionWrite: isAdmin, matrixWrite: isAdmin,
@@ -138,27 +145,27 @@ export const SetupAdmin = (() => {
   }
 
   function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }): { active: boolean; reason: string } {
-    if (!definition) return { active: false, reason: Util.t('ui.setup_status_no_definition') };
+    if (!definition) return { active: false, reason: setupText('ui.setup_status_no_definition', 'Create an ordered setup signature before setup-aware optimization can be reviewed.') };
     if (checks.matrixVersion !== definition.signature_version) {
-      return { active: false, reason: Util.t('ui.setup_status_version_mismatch') };
+      return { active: false, reason: setupText('ui.setup_status_version_mismatch', 'Activation is disabled: a version-matched matrix is required after a definition change.') };
     }
-    if (checks.coveragePass === undefined) return { active: false, reason: Util.t('ui.setup_status_coverage_pending') };
-    if (!checks.coveragePass) return { active: false, reason: Util.t('ui.setup_status_coverage_fail') };
+    if (checks.coveragePass === undefined) return { active: false, reason: setupText('ui.setup_status_coverage_pending', 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).') };
+    if (!checks.coveragePass) return { active: false, reason: setupText('ui.setup_status_coverage_fail', 'Activation is disabled: the reachable coverage pass is required.') };
     return definition.active
-      ? { active: true, reason: Util.t('ui.setup_status_active_reason') }
-      : { active: false, reason: Util.t('ui.setup_status_ready_review') };
+      ? { active: true, reason: setupText('ui.setup_status_active_reason', 'Active for approved setup-aware optimization.') }
+      : { active: false, reason: setupText('ui.setup_status_ready_review', 'Ready for activation review; Stage 0 remains observation-only.') };
   }
 
   function policyActivationStatus(policy: { dueDateFirstEnabled?: boolean; minChangeoverEnabled?: boolean; throughputEnabled?: boolean },
                                   gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean; browserUatVerified?: boolean; representativeReplayVerified?: boolean; nullPredecessorVerified?: boolean; ownerApproved?: boolean; ownerEmail?: string | null; approvedAt?: string | null; notes?: string }): { active: boolean; reason: string } {
-    if (!gates.stage1Validated) return { active: false, reason: Util.t('ui.setup_policy_status_stage1') };
-    if (!gates.localDbVerified) return { active: false, reason: Util.t('ui.setup_policy_status_local_db') };
-    if (!gates.performanceVerified) return { active: false, reason: Util.t('ui.setup_policy_status_performance') };
-    if (gates.browserUatVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_browser_uat') };
-    if (gates.representativeReplayVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_replay') };
-    if (gates.nullPredecessorVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_null_predecessor') };
-    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: Util.t('ui.setup_policy_status_owner') };
-    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: Util.t('ui.setup_policy_status_complete') };
+    if (!gates.stage1Validated) return { active: false, reason: setupText('ui.setup_policy_status_stage1', 'Activation is blocked: Stage 1 validation is not recorded.') };
+    if (!gates.localDbVerified) return { active: false, reason: setupText('ui.setup_policy_status_local_db', 'Activation is blocked: safe local database verification is not recorded.') };
+    if (!gates.performanceVerified) return { active: false, reason: setupText('ui.setup_policy_status_performance', 'Activation is blocked: representative performance validation is not recorded.') };
+    if (gates.browserUatVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_browser_uat', 'Activation is blocked: browser UAT is not recorded.') };
+    if (gates.representativeReplayVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_replay', 'Activation is blocked: representative replay is not recorded.') };
+    if (gates.nullPredecessorVerified === false) return { active: false, reason: setupText('ui.setup_policy_status_null_predecessor', 'Activation is blocked: null-predecessor persistence is not recorded.') };
+    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: setupText('ui.setup_policy_status_owner', 'Activation is blocked: scheduling-owner approval is not recorded.') };
+    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: setupText('ui.setup_policy_status_complete', 'Policy activation evidence is complete.') };
   }
 
   function releaseEvidenceReady(evidence: SetupReleaseEvidence | null | undefined): boolean {
