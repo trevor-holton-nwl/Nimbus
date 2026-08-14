@@ -196,6 +196,7 @@ async def lifespan(app: FastAPI):
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_setup_policy_config_column()
+    md.ensure_plant_setup_release_evidence_column()
     md.ensure_work_hours_columns()
     md.ensure_line_calendar_table()
     md.ensure_line_blackout_table()
@@ -2391,6 +2392,38 @@ def put_setup_policy(plant: str, request: Request, body: dict = Body(default={})
             'throughputMinSavingsMin', 'throughputMaxSlipMin',
         )}
         return md.set_setup_policy_config(
+            plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
+        )
+    except ValueError as exc:
+        if 'stale' in str(exc).lower():
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.get("/setup/{plant}/release-evidence", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_release_evidence(plant: str,
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Return the plant-scoped release-evidence register and derived readiness."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return md.get_setup_release_evidence(plant)
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
+@api.put("/setup/{plant}/release-evidence", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def put_setup_release_evidence(plant: str, request: Request, body: dict = Body(default={}),
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Persist auditable release evidence; it never starts scheduling."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        config = {key: body.get(key) for key in (
+            'stage1Validated', 'localDbVerified', 'performanceVerified',
+            'browserUatVerified', 'representativeReplayVerified',
+            'nullPredecessorVerified', 'ownerApproved', 'ownerEmail',
+            'approvedAt', 'notes',
+        )}
+        return md.set_setup_release_evidence(
             plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
         )
     except ValueError as exc:

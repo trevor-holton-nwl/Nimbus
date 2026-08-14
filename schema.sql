@@ -153,6 +153,8 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEF
 -- tree; all policies start disabled until plant validation gates are met.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB NOT NULL DEFAULT
   '{"dueDateFirstEnabled": false, "minChangeoverEnabled": false, "throughputEnabled": false, "throughputMinSavingsMin": 60, "throughputMaxSlipMin": 1440, "version": 1}'::jsonb;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_release_evidence JSONB NOT NULL DEFAULT
+  '{"stage1Validated": false, "localDbVerified": false, "performanceVerified": false, "browserUatVerified": false, "representativeReplayVerified": false, "nullPredecessorVerified": false, "ownerApproved": false, "ownerEmail": null, "approvedAt": null, "notes": "", "version": 1}'::jsonb;
 -- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
 -- and NO LONGER re-run on apply.
 --
