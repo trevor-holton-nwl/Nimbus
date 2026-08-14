@@ -62,6 +62,20 @@ test('SetupAdmin keeps read, copy, and export available to non-writers', () => {
   });
 });
 
+test('SetupAdmin bounds missing-setup review data and reserves the editor for writers', () => {
+  // Regression target: exposing a matrix editor to readers, or handing an
+  // unbounded candidate table across the preview/admin boundary.
+  const pairs = Array.from({ length: 14 }, (_, index) => ({
+    line: 'L-1', predecessorOrderId: `before-${index}`, successorOrderId: `after-${index}`,
+    fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing',
+  }));
+  const csv = SetupAdmin.missingPairsCsv('5512', pairs);
+  assert.match(csv, /Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason/);
+  assert.equal(csv.trim().split('\n').length, 13, 'the review export caps rows at the preview boundary');
+  assert.equal(SetupAdmin.reviewAction({ matrixWrite: true }), 'editor');
+  assert.equal(SetupAdmin.reviewAction({ matrixWrite: false }), 'copy-export');
+});
+
 test('SetupAdmin only grants state writes to an explicitly scoped setup scheduler', () => {
   // Regression target: treating any authenticated non-admin as a scheduler
   // would show a write control that the server must reject.

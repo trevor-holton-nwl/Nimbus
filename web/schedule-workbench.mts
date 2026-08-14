@@ -7308,6 +7308,32 @@ interface OptimizerPreviewCard {
   tip: string;
 }
 
+interface PreviewExplanation {
+  impact: {
+    production: { before: number; after: number };
+    setup: { before: number; after: number };
+    occupiedHours: { before: number; after: number };
+    lateness: { beforeOrders: number; afterOrders: number; beforeHours: number; afterHours: number };
+    utilization: { before: number; after: number };
+    sequences: { changed: number };
+  };
+  reasons: Array<{ code: string; message: string; line?: string; taskId?: string; outcome: 'accepted' | 'rejected' }>;
+  constraints: string[];
+  missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string }>;
+  unchangedLines: string[];
+  search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
+}
+
+interface PreviewExplanationInput {
+  productionBefore: number;
+  productionAfter: number;
+  preKpis: OptimizerKpis;
+  postKpis: OptimizerKpis;
+}
+
+const PREVIEW_REASON_LIMIT = 8;
+const PREVIEW_MISSING_PAIR_LIMIT = 12;
+
 /* =============================================================================
    OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
@@ -7329,6 +7355,9 @@ export const OptimizerPreview = {
     plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
   } | null,
   _auditDetails: null as OptimizationAuditDetails | null,
+  _explanation: null as PreviewExplanation | null,
+  stale: false,
+  _staleReason: null as string | null,
   active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
 
@@ -7358,8 +7387,54 @@ export const OptimizerPreview = {
    *  cancels the no-color-wheel confirm) so the spinner doesn't linger. */
   hideLoading() {
     Modal.close('modal-opt-preview');
-    const root = document.getElementById('modal-opt-preview');
+    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
     if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = false; });
+  },
+
+  /** Compact presentation facts only: candidate patches never carry a full
+   * schedule, and this summary never retains one. */
+  summarizeCandidate(candidate: CandidateResult, input: PreviewExplanationInput): PreviewExplanation {
+    const rejected = /(?:unavailable|unknown|uncovered|infeasible|missing|disabled|fail)/i;
+    const reasons = candidate.explanation.slice(0, PREVIEW_REASON_LIMIT).map(reason => ({
+      code: reason.code, message: reason.message, line: reason.line, taskId: reason.taskId,
+      outcome: rejected.test(`${reason.code} ${reason.message}`) ? 'rejected' as const : 'accepted' as const,
+    }));
+    return {
+      impact: {
+        production: { before: input.productionBefore, after: input.productionAfter },
+        setup: { before: input.preKpis.changeovers, after: input.postKpis.changeovers },
+        occupiedHours: { before: input.preKpis.span_h, after: input.postKpis.span_h },
+        lateness: { beforeOrders: input.preKpis.late_count, afterOrders: input.postKpis.late_count, beforeHours: input.preKpis.late_h, afterHours: input.postKpis.late_h },
+        utilization: { before: input.preKpis.peak_util_pct, after: input.postKpis.peak_util_pct },
+        sequences: { changed: candidate.patches.length },
+      },
+      reasons,
+      constraints: [...new Set(candidate.explanation.map(reason => reason.code))].slice(0, PREVIEW_REASON_LIMIT),
+      missingPairs: candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => ({
+        line: edge.line, predecessorOrderId: edge.predecessorOrderId ?? null,
+        successorOrderId: edge.successorOrderId ?? null, reason: edge.reason,
+      })),
+      unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
+      search: {
+        candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
+        termination: candidate.diagnostics.termination, runtimeMs: candidate.diagnostics.runtimeMs,
+        limitReached: candidate.diagnostics.limitReached,
+      },
+    };
+  },
+
+  canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
+
+  /** Setup writes make comparison facts stale; they never rerun or apply a
+   * candidate. The planner must explicitly run again. */
+  markSetupStale(plant: string, kind: string): void {
+    if (!OptimizerPreview.active || !OptimizerPreview._candidate || OptimizerPreview._plant !== plant) return;
+    OptimizerPreview.stale = true;
+    OptimizerPreview._staleReason = `${kind} setup data changed`;
+    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
+    const apply = root?.querySelector<HTMLButtonElement>('.modal-foot .btn-primary');
+    if (apply) { apply.disabled = true; apply.title = 'Setup data changed. Run optimization again before applying.'; }
+    if (typeof document !== 'undefined') OptimizerPreview._render();
   },
 
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
@@ -7465,6 +7540,14 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
+        OptimizerPreview._explanation = OptimizerPreview.summarizeCandidate(candidate, {
+          productionBefore: snapshot.filter(inScope).length,
+          productionAfter: postTasks.length,
+          preKpis,
+          postKpis,
+        });
+        OptimizerPreview.stale = false;
+        OptimizerPreview._staleReason = null;
 
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._render();
@@ -7499,6 +7582,7 @@ export const OptimizerPreview = {
     const pre  = OptimizerPreview._preKpis  || EMPTY_OPTIMIZER_KPIS;
     const post = OptimizerPreview._postKpis || EMPTY_OPTIMIZER_KPIS;
     const backlog = OptimizerPreview._backlogResult?.diagnostics ?? null;
+    const explanation = OptimizerPreview._explanation;
 
     // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
     // lowerIsBetter: true → decrease=better (green), increase=worse (red).
@@ -7606,6 +7690,26 @@ export const OptimizerPreview = {
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const explanationHtml = (() => {
+      if (!explanation) return '';
+      const compact = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
+      const impact = [
+        ['Production orders', `${explanation.impact.production.before} → ${explanation.impact.production.after}`],
+        ['Setup changeovers', `${explanation.impact.setup.before} → ${explanation.impact.setup.after}`],
+        ['Occupied time', `${compact(explanation.impact.occupiedHours.before)} h → ${compact(explanation.impact.occupiedHours.after)} h`],
+        ['Lateness', `${explanation.impact.lateness.beforeOrders}/${compact(explanation.impact.lateness.beforeHours)} h → ${explanation.impact.lateness.afterOrders}/${compact(explanation.impact.lateness.afterHours)} h`],
+        ['Peak utilization', `${compact(explanation.impact.utilization.before)}% → ${compact(explanation.impact.utilization.after)}%`],
+        ['Sequences changed', String(explanation.impact.sequences.changed)],
+      ];
+      const reasons = explanation.reasons.length
+        ? `<ul>${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
+        : '<span>No candidate-specific reasons were reported.</span>';
+      const missing = explanation.missingPairs.length
+        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.predecessorOrderId || '—')}</td><td>${esc(pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>Copy</button> <button class="btn btn-ghost sm" data-opt-export-missing>Export CSV</button> <button class="btn btn-ghost sm" data-opt-review-missing>Review missing setups</button></div>`
+        : '<span>No missing setup pairs in this candidate.</span>';
+      const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>Preview is stale.</strong> ${esc(OptimizerPreview._staleReason || 'Setup data changed')}. Apply is disabled; run optimization again to refresh this comparison.</div>` : '';
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">Candidate explanation</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>Search:</strong> ${esc(explanation.search.method)} · ${explanation.search.candidateCount} candidates · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? ' · limit reached' : ''}</p><p><strong>Constraints:</strong> ${esc(explanation.constraints.join(', ') || 'none reported')}</p><p><strong>Unchanged lines:</strong> ${esc(explanation.unchangedLines.join(', ') || 'none')}</p><div><strong>Accepted/rejected reasons</strong>${reasons}</div><div><strong>Missing setup pairs</strong>${missing}</div></section>`;
+    })();
 
     // Per-card markup
     const cardsHtml = cards.map(c => {
@@ -7683,6 +7787,8 @@ export const OptimizerPreview = {
 
         ${backlogHtml}
 
+        ${explanationHtml}
+
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
@@ -7723,6 +7829,20 @@ export const OptimizerPreview = {
         requestAnimationFrame(tick);
       });
     });
+    const missingCsv = () => ['Line,Predecessor order,Successor order,Reason', ...(OptimizerPreview._explanation?.missingPairs || []).map(pair =>
+      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.reason].map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+    body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
+      navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-export-missing]')?.addEventListener('click', () => {
+      const blob = new Blob([missingCsv()], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
+      link.download = `missing-setups-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', () => {
+      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => void } } }).NIMBUS?.SetupAdmin;
+      setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || []);
+    });
   },
 
   apply() {
@@ -7732,6 +7852,10 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
+    if (!OptimizerPreview.canApply()) {
+      Toast.show('Setup data changed. Run optimization again before applying.', 'warn');
+      return;
+    }
     if (auditDetails && plant) {
       fetch(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
@@ -7806,10 +7930,15 @@ export const OptimizerPreview = {
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
     OptimizerPreview._auditDetails = null;
+    OptimizerPreview._explanation = null;
+    OptimizerPreview.stale = false;
+    OptimizerPreview._staleReason = null;
     if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];
     OptimizerPreview.active       = false;
   },
 };
+
+Persistence.setSetupWriteListener((plant, kind) => OptimizerPreview.markSetupStale(plant, kind));
 
 // -- Local type declarations (CQ-1 Phase 6 Task 8 conversion; scoped to
 //    EditCalendar/ColorWheelViewer/AlertsUIAdapter/SandboxAdapter/Printer —

@@ -5,6 +5,7 @@ import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu
 import { Store, Selection } from '../../web/schedule-state.mjs';
 import { Util, ErrorLog } from '../../web/application-foundation.mjs';
 import { Alerts, Utilization } from '../../web/schedule-services.mjs';
+import { Persistence } from '../../web/schedule-data.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -534,6 +535,59 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
 });
 
+test('OptimizerPreview retains only a bounded candidate explanation and drops it on discard', () => {
+  // Regression target: retaining raw candidate schedules/reasons would make a
+  // long preview unbounded and leave setup explanation data after Discard.
+  const candidate = {
+    patches: [{ id: 'changed-1', changes: { start_date: new Date('2026-08-14T08:00:00') } }],
+    explanation: Array.from({ length: 14 }, (_, index) => ({ code: `reason-${index}`, message: `Reason ${index}`, line: 'L-1' })),
+    diagnostics: { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false, events: [] },
+    unchangedLines: ['L-2', 'L-3'],
+    missingEdges: Array.from({ length: 16 }, (_, index) => ({ line: 'L-1', predecessorOrderId: `before-${index}`, successorOrderId: `after-${index}`, reason: 'matrix-missing' })),
+  };
+  const explanation = OptimizerPreview.summarizeCandidate(candidate, {
+    productionBefore: 10, productionAfter: 10, preKpis: { changeovers: 8, span_h: 20, late_count: 4, late_h: 6, peak_util_pct: 92 },
+    postKpis: { changeovers: 6, span_h: 18, late_count: 2, late_h: 3, peak_util_pct: 88 },
+  });
+  assert.equal(explanation.reasons.length, 8, 'the UI explanation caps candidate reasons');
+  assert.equal(explanation.missingPairs.length, 12, 'the UI explanation caps missing setup pairs');
+  assert.deepEqual(explanation.search, { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false });
+  assert.equal(Object.hasOwn(explanation, 'tasks'), false, 'the compact explanation never retains a schedule snapshot');
+
+  OptimizerPreview._explanation = explanation;
+  OptimizerPreview.active = true;
+  OptimizerPreview.discard();
+  assert.equal(OptimizerPreview._explanation, null, 'Discard destroys the in-memory explanation');
+});
+
+test('Persistence setup writes stale an open preview without applying or rerunning it', () => {
+  // Regression target: a successful matrix/state/override write must require
+  // an explicit preview rerun instead of applying or recomputing silently.
+  const priorFetch = globalThis.fetch;
+  const candidate = { patches: [], explanation: [], diagnostics: { candidateCount: 1, method: 'spt-detached', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] }, unchangedLines: [], missingEdges: [] };
+  let requests = 0;
+  globalThis.fetch = () => { requests++; return Promise.resolve({ ok: true }); };
+  OptimizerPreview._snapshot = [];
+  OptimizerPreview._candidate = candidate;
+  OptimizerPreview._explanation = OptimizerPreview.summarizeCandidate(candidate, { productionBefore: 1, productionAfter: 1, preKpis: { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 }, postKpis: { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 } });
+  OptimizerPreview._plant = 'STALE';
+  OptimizerPreview.active = true;
+  try {
+    for (const kind of ['definition', 'matrix', 'state', 'override']) {
+      OptimizerPreview.stale = false;
+      Persistence.noteSetupWrite('STALE', kind);
+      assert.equal(OptimizerPreview.stale, true, `${kind} writes stale an open preview`);
+      assert.equal(OptimizerPreview.canApply(), false, 'stale previews cannot apply');
+    }
+    OptimizerPreview.apply();
+    assert.equal(OptimizerPreview._candidate, candidate, 'Apply leaves a stale candidate intact for explicit rerun or discard');
+    assert.equal(requests, 0, 'staling and blocked Apply never write an audit row or rerun optimization');
+  } finally {
+    OptimizerPreview._clear();
+    globalThis.fetch = priorFetch;
+  }
+});
+
 test('OptimizerPreview keeps trial patches detached until Apply, then commits them once', () => {
   const priorRaf = globalThis.requestAnimationFrame;
   const priorNimbus = globalThis.NIMBUS;
@@ -584,6 +638,7 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
     OptimizerPreview.discard();
 
     assert.equal(OptimizerPreview._candidate, null, 'Discard destroys the detached candidate');
+    assert.equal(OptimizerPreview._explanation, null, 'Discard destroys the compact explanation with the candidate');
     assert.equal(Store.rev(), beforeRevision, 'Discard must not roll back through Store because Store never changed');
     assert.deepEqual(Store.tasks, beforeTasks, 'Discard leaves the live schedule untouched');
     assert.deepEqual(publications, [], 'Discard must not wake autosave-like subscribers');
@@ -594,9 +649,12 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
     OptimizerPreview.apply();
 
     assert.ok(Store.tasks['preview-short'].start_date, 'Apply commits the selected candidate patch set');
+    assert.equal(OptimizerPreview._explanation, null, 'Apply destroys the explanation after committing its candidate');
     assert.equal(publications.filter(type => type === 'tasks:bulkUpdate').length, 1,
       'Apply performs exactly one schedule task commit');
     assert.equal(auditRequests.length, 1, 'Apply emits the deferred audit row');
+    assert.doesNotMatch(JSON.stringify(auditRequests), /explanation/i,
+      'the applied optimization audit never persists preview explanation data');
     assert.equal(timelineUpdates.length, 0, 'the evaluator itself never writes Timeline items');
   } finally {
     unsubscribe();

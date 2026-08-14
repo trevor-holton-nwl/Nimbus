@@ -102,6 +102,8 @@ const ROW_ORDER_SENTINEL = '__row_order__';
 
 type SetupPermissions = { read: boolean; copy: boolean; export: boolean; definitionWrite: boolean; matrixWrite: boolean; stateWrite: boolean };
 type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPlant: boolean };
+type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string };
+type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
 
 /**
  * Plant-scoped administration for Stage 0 setup truth. It deliberately does
@@ -116,6 +118,8 @@ export const SetupAdmin = (() => {
   let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
   let _coverageByPlant: Record<string, { observed?: { total_pairs: number; missing_pairs: number }; reachable?: { total_pairs: number; missing_pairs: number } }> = {};
   let _lineScope = '';
+  let _missingReview: { plant: string; pairs: MissingSetupReviewPair[] } | null = null;
+  let _lastTarget: HTMLElement | null = null;
 
   const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
@@ -166,6 +170,34 @@ export const SetupAdmin = (() => {
 
   function csvColumns(): string[] {
     return ['Plant', 'Line', 'Signature version', 'From setup state', 'To setup state', 'Setup minutes'];
+  }
+
+  function missingPairsCsv(plant: string, pairs: ReadonlyArray<MissingSetupReviewPair>): string {
+    const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = pairs.slice(0, 12).map(pair => [plant, pair.line, pair.predecessorOrderId, pair.successorOrderId,
+      pair.fromState, pair.toState, pair.reason].map(quote).join(','));
+    return ['Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...rows].join('\n');
+  }
+
+  function reviewAction(permissions: Pick<SetupPermissions, 'matrixWrite'>): 'editor' | 'copy-export' {
+    return permissions.matrixWrite ? 'editor' : 'copy-export';
+  }
+
+  function setupWriteKind(url: string): SetupWriteKind {
+    if (/\/definition(?:$|\?)/.test(url)) return 'definition';
+    if (/\/matrix(?:\/|$)/.test(url)) return 'matrix';
+    if (/\/state(?:$|\?)/.test(url)) return 'state';
+    return 'override';
+  }
+
+  /** Receives only the compact preview edge list. It never stores candidate
+   * schedules and it never triggers an optimization run. */
+  function reviewMissingPairs(plant: string, pairs: ReadonlyArray<MissingSetupReviewPair>): void {
+    _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
+    const lines = [...new Set(_missingReview.pairs.map(pair => pair.line).filter(Boolean))];
+    if (lines.length === 1) _lineScope = lines[0];
+    const target = _lastTarget ?? document.getElementById('setup-admin-pane');
+    if (target) render(target, plant);
   }
 
   function csvFor(plant: string, rows: EffectiveSetupRow[]): string {
@@ -253,6 +285,7 @@ export const SetupAdmin = (() => {
 
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
     if (!target) return;
+    _lastTarget = target;
     if (!plant) { target.innerHTML = `<div class="setup-empty">${esc(Util.t('toast.no_plant_selected'))}</div>`; return; }
     const snapshot = Store.setupSnapshot;
     if (!snapshot || snapshot.plant !== plant) {
@@ -287,6 +320,8 @@ export const SetupAdmin = (() => {
     const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
+    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
+    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>Review missing setups</strong><span>${review.pairs.length} relevant transition${review.pairs.length === 1 ? '' : 's'} from the preview${permissions.matrixWrite ? ' — editor scoped to the affected line where possible.' : ' — copy or export only.'}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.copy'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_csv'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_matrix_rows'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
         <header class="setup-admin-head">
@@ -296,6 +331,7 @@ export const SetupAdmin = (() => {
         </header>
         <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
         ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>Shadow coverage</strong><span>Observed: ${coverage.observed?.total_pairs ?? 0} transitions, ${coverage.observed?.missing_pairs ?? 0} missing</span><span>Reachable: ${coverage.reachable?.total_pairs ?? 0} pairs, ${coverage.reachable?.missing_pairs ?? 0} missing</span></div>` : ''}
+        ${reviewHtml}
         <div class="setup-toolbar">
           <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
           <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
@@ -332,6 +368,12 @@ export const SetupAdmin = (() => {
     target.querySelector<HTMLButtonElement>('[data-setup-export]')?.addEventListener('click', () => {
       const blob = new Blob([csvFor(snapshot.plant, rows)], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `setup-matrix-${snapshot.plant}-${_lineScope || 'plant'}-v${snapshot.definition?.signature_version ?? 0}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
+    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
+    target.querySelector<HTMLButtonElement>('[data-setup-review-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(missingPairsCsv(snapshot.plant, review?.pairs || [])).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
+    target.querySelector<HTMLButtonElement>('[data-setup-review-export]')?.addEventListener('click', () => {
+      const blob = new Blob([missingPairsCsv(snapshot.plant, review?.pairs || [])], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `missing-setups-${snapshot.plant}.csv`; link.click(); URL.revokeObjectURL(url);
     });
     target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
@@ -408,6 +450,7 @@ export const SetupAdmin = (() => {
       try {
         const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/compatibility`, { method: 'PUT', headers: headers(), body: JSON.stringify({ setup_compatible: checkbox.checked, reason: reason.value.trim() }) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        Persistence.noteSetupWrite(snapshot.plant, 'override');
         _compatibilityByLine[cacheKey] = { setup_compatible: checkbox.checked, setup_compatibility_reason: checkbox.checked ? null : reason.value.trim() }; Toast.show(Util.t('toast.line_settings_updated'), 'success');
       } catch (error) { checkbox.checked = compatible; reason.disabled = compatible; Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
     };
@@ -419,11 +462,12 @@ export const SetupAdmin = (() => {
     try {
       const response = await Util.fetchTraced(url, { method, headers: headers(), body: JSON.stringify(body) });
       if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      Persistence.noteSetupWrite(plant, setupWriteKind(url));
       await Persistence.loadSetupSnapshot(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, registeredFields, parseLongFormCsv, collectPagedLines, render };
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
 })();
 
 /* =============================================================================

@@ -183,6 +183,8 @@ interface CalendarService {
 // before app.js's boot glue wires the real Calendar functions (see
 // Persistence.setCalendarService below).
 let _calendarService: CalendarService | null = null;
+type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
+let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null = null;
 
 /* =============================================================================
    PERSISTENCE — backend fetch, demo fallback, save + local cache.
@@ -238,6 +240,17 @@ export const Persistence = {
    *  Until this is called, snap-affecting load paths no-op rather than throw — see
    *  `_snapToWorkingHours`. */
   setCalendarService(svc: CalendarService): void { _calendarService = svc; },
+
+  /** Setup truth is deliberately outside the schedule cache. This tiny
+   * callback seam lets a successful setup write invalidate an open detached
+   * preview without importing the workbench (and therefore without a cycle). */
+  setSetupWriteListener(listener: ((plant: string, kind: SetupWriteKind) => void) | null): void {
+    _setupWriteListener = listener;
+  },
+
+  noteSetupWrite(plant: string, kind: SetupWriteKind): void {
+    if (plant) _setupWriteListener?.(plant, kind);
+  },
 
   stats(): LoadStats { return { ...Persistence._lastLoad }; },
 
