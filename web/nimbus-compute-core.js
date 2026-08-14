@@ -379,7 +379,7 @@
       const intervals = scheduleIntervals(t);
       if (intervals.length >= 2) {
         for (const interval of intervals) {
-          let cursor = startOfDay(interval.start);
+          let cursor = startOfDay(new Date(interval.start));
           while (cursor && cursor < interval.end) {
             const nextDay = new Date(cursor); nextDay.setDate(nextDay.getDate() + 1);
             const overlapHours = (Math.min(+interval.end, +nextDay) - Math.max(+interval.start, +cursor)) / MS_HOUR;

@@ -29,6 +29,30 @@ test('scheduleIntervals returns only the productive pieces of a split order', ()
   ]);
 });
 
+test('split pieces aggregate their actual durations in overload alerts', () => {
+  const first = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  first.setHours(15, 0, 0, 0);
+  const firstEnd = new Date(first); firstEnd.setHours(16, 0, 0, 0);
+  const second = new Date(first); second.setDate(second.getDate() + 1); second.setHours(7, 30, 0, 0);
+  const secondEnd = new Date(second); secondEnd.setHours(16, 0, 0, 0);
+  const split = {
+    id: 'split-overload-hours', PRODUCTION_LINE: 'SFN11', RUN_TIME: 9.5,
+    start_date: first, end_date: secondEnd,
+    scheduleSegments: [
+      { sequence: 1, startDate: first, endDate: firstEnd },
+      { sequence: 2, startDate: second, endDate: secondEnd },
+    ],
+  };
+  const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [7.5, 16]]));
+
+  const alerts = Core.computeAlerts({
+    tasks: [split], lineSettings: { SFN11: { plant: null } }, calendars: { SFN11: { workHours } },
+    plants: {}, blocks: [], plantBlocks: [], masterData: { lines: [] }, dismissed: [], opts: {},
+  }).alerts;
+
+  assert.deepEqual(alerts.filter(alert => alert.type === 'overload'), []);
+});
+
 test('split pieces consume capacity without making the parent gap overlap another order', () => {
   const first = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
   first.setHours(8, 0, 0, 0);
