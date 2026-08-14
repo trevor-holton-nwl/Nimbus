@@ -320,7 +320,10 @@ export function deriveSetupObservation(
 ): SetupObservation {
   const observation: SetupObservation = { intervals: [], diagnostics: [] };
   const definition = setup?.definition;
-  if (!setup || !definition || !definition.active) return observation;
+  // Activation controls setup-aware placement only.  The existing schedule
+  // must continue to expose its setup bars and diagnostics while activation
+  // is deliberately disabled for observation-only rollout.
+  if (!setup || !definition) return observation;
 
   const stateForLine = new Map(setup.line_states
     .filter(state => state.signature_version === definition.signature_version)

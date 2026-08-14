@@ -321,6 +321,42 @@ test('deriveSetupObservation resolves one scoped override interval without invok
   assert.deepEqual(observation.diagnostics, []);
 });
 
+test('deriveSetupObservation keeps inactive setup truth visible without enabling scheduling', () => {
+  // This fails if the activation gate suppresses observation-only setup bars,
+  // overrides, or missing-pair diagnostics instead of only scheduler routing.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-INACTIVE-OBSERVE',
+    definition: { plant: 'P-INACTIVE-OBSERVE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: false },
+    plant_rows: [
+      { line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 40 },
+      { line: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 30 },
+    ],
+    line_rows: [],
+    line_states: [{ line: 'L-INACTIVE-OBSERVE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [{
+      id: 'inactive-observation-override', line: 'L-INACTIVE-OBSERVE', signature_version: 1,
+      predecessor_order_id: 'red', successor_order_id: 'blue', predecessor_state_key: state('RED'), successor_state_key: state('BLUE'),
+      standard_min: 30, remaining_min: 20, status: 'active', reason: 'already started',
+    }],
+  }, [
+    { id: 'red', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+    { id: 'yellow', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'YELLOW', RUN_TIME: 1, start_date: new Date('2026-08-03T12:00:00'), end_date: new Date('2026-08-03T13:00:00') },
+  ], new Set(['L-INACTIVE-OBSERVE']));
+
+  assert.deepEqual(observation.intervals.map(interval => ({
+    predecessorOrderId: interval.predecessorOrderId,
+    successorOrderId: interval.successorOrderId,
+    requiredMinutes: interval.requiredMinutes,
+  })), [
+    { predecessorOrderId: null, successorOrderId: 'red', requiredMinutes: 40 },
+    { predecessorOrderId: 'red', successorOrderId: 'blue', requiredMinutes: 20 },
+  ]);
+  assert.ok(observation.diagnostics.some(diagnostic =>
+    diagnostic.type === 'setup-uncovered' && diagnostic.successorOrderId === 'yellow'));
+});
+
 test('Alerts publishes scoped setup observations without invoking Engine, including Fix It', () => {
   // This fails if alerts bypass the shared setup projection, resolve matrices in
   // the core, or make a setup diagnostic recursively optimize on Fix It.
