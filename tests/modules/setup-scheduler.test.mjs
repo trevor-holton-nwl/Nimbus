@@ -1650,3 +1650,294 @@ test('setup-aware evaluators retain a deleted-predecessor override diagnostic wh
     )), `${label} retains the stale predecessor diagnostic without an anchor`);
   }
 });
+
+test('setup-aware evaluators defer a covered pre-fixed order when its outgoing fixed transition is uncovered', () => {
+  // Production change caught: removing the outgoing-boundary fallback leaves
+  // a fully covered BLUE -> RED route undiscovered after RED -> fixed BLUE is
+  // rejected. The excluded uncovered edge remains a candidate diagnostic.
+  const red = scheduledTask('outgoing-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
+  const fixedBlue = scheduledTask(
+    'outgoing-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([red, fixedBlue], { fixedIds: ['outgoing-fallback-fixed-blue'] }),
+      dueDateBounds(setup),
+    );
+    const redPatch = patchFor(result, 'outgoing-fallback-red');
+
+    assert.equal(patchFor(result, 'outgoing-fallback-fixed-blue'), undefined, `${label} never patches fixed BLUE`);
+    assert.ok(redPatch, `${label} finds the fully covered post-fixed fallback`);
+    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
+      `${label} moves RED to the covered BLUE outgoing state`);
+    assert.deepEqual(result.unchangedLines, []);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'outgoing-fallback-red'
+      && edge.successorOrderId === 'outgoing-fallback-fixed-blue'
+      && edge.reason === 'No version-matched setup transition covers this state pair'
+    )), `${label} retains the rejected uncovered edge as a diagnostic`);
+  }
+});
+
+test('setup-aware evaluators defer a covered pre-fixed order when its setup cannot fit before fixed work', () => {
+  // Production change caught: accepting any covered RED -> BLUE edge ignores
+  // whether its required 30-minute setup actually fits before fixed BLUE.
+  const red = scheduledTask('capacity-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
+  const fixedBlue = scheduledTask(
+    'capacity-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T09:15:00',
+    '2026-08-03T09:15:00', '2026-08-03T10:15:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 30),
+    setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([red, fixedBlue], { fixedIds: ['capacity-fallback-fixed-blue'] }),
+      dueDateBounds(setup),
+    );
+    const redPatch = patchFor(result, 'capacity-fallback-red');
+
+    assert.equal(patchFor(result, 'capacity-fallback-fixed-blue'), undefined, `${label} preserves fixed BLUE`);
+    assert.ok(redPatch, `${label} finds the post-fixed capacity fallback`);
+    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T10:15:00').getTime(),
+      `${label} moves RED after BLUE when the pre-fixed setup cannot fit`);
+    assert.deepEqual(result.unchangedLines, []);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'capacity-fallback-red'
+      && edge.successorOrderId === 'capacity-fallback-fixed-blue'
+      && edge.reason === 'incoming-fixed-setup-infeasible'
+    )), `${label} retains the rejected short incoming setup diagnostic`);
+  }
+});
+
+test('setup-aware evaluators retain a feasible pre-fixed prefix when only the trailing suffix conflicts with fixed setup', () => {
+  // Production change caught: a fallback that always empties the whole
+  // fragment discards A even though A -> fixed BLUE is covered. Only trailing
+  // B belongs after BLUE; no active pair may be split by this behavior.
+  const a = scheduledTask('suffix-fallback-a-yellow', 0.5, 'YELLOW', '2026-08-03T08:30:00');
+  const b = scheduledTask('suffix-fallback-b-red', 0.5, 'RED', '2026-08-03T08:45:00');
+  const fixedBlue = scheduledTask(
+    'suffix-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0),
+    setupRow('YELLOW', 'BLUE', 0), setupRow('GREEN', 'BLUE', 0),
+    setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([b, fixedBlue, a], { fixedIds: ['suffix-fallback-fixed-blue'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.equal(patchFor(result, 'suffix-fallback-a-yellow').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+      `${label} preserves the feasible pre-fixed prefix`);
+    assert.equal(patchFor(result, 'suffix-fallback-b-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
+      `${label} defers only the problematic suffix`);
+    assert.deepEqual(result.unchangedLines, []);
+  }
+});
+
+test('unknown-state anchor preservation reports an active later-predecessor override targeting the anchor as inactive', () => {
+  // Production change caught: filtering the preserved BLUE anchor out of the
+  // mutable fragment hides a stale RED -> BLUE binding. BLUE -> RED remains a
+  // safe physical sequence, but the now-impossible binding must be reported.
+  const anchor = scheduledTask(
+    'anchor-target-blue', 1, 'BLUE', '2026-08-03T09:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const laterRed = scheduledTask(
+    'anchor-target-later-red', 1, 'RED', '2026-08-03T12:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    current: null,
+    rows: [setupRow('BLUE', 'RED', 0)],
+    overrides: [{
+      id: 'anchor-target-stale-override', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'anchor-target-later-red', successor_order_id: 'anchor-target-blue',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'later work cannot precede the preserved anchor',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(setupSnapshot([laterRed, anchor]), dueDateBounds(setup));
+
+    assert.equal(patchFor(result, 'anchor-target-blue'), undefined, `${label} preserves BLUE as the physical anchor`);
+    assert.equal(patchFor(result, 'anchor-target-later-red').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime(),
+      `${label} still schedules covered BLUE -> RED work safely`);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'anchor-target-later-red'
+      && edge.successorOrderId === 'anchor-target-blue'
+      && edge.reason === 'override-inactive'
+    )), `${label} does not silently omit the stale anchor override`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'override-inactive' && reason.taskId === 'anchor-target-blue'
+    )), `${label} exposes the stale anchor override in explanation data`);
+  }
+});
+
+test('fixed-boundary failure retains preserved-anchor and stale-override diagnostics', () => {
+  // Production change caught: boundary early returns replace accumulated
+  // unknown-current-state and stale-binding diagnostics with only the final
+  // fixed failure. Both facts remain relevant to a rejected detached result.
+  const anchor = scheduledTask(
+    'early-exit-anchor-blue', 1, 'BLUE', '2026-08-03T09:00:00',
+    '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const fixedRed = scheduledTask(
+    'early-exit-fixed-red', 1, 'RED', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    current: null,
+    rows: [],
+    overrides: [{
+      id: 'early-exit-stale-fixed', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'deleted-early-exit-green', successor_order_id: 'early-exit-fixed-red',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'deleted predecessor fixture',
+    }],
+  });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([fixedRed, anchor], { fixedIds: ['early-exit-fixed-red'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.deepEqual(result.patches, [], `${label} retains the failed fixed boundary`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.successorOrderId === 'early-exit-anchor-blue' && edge.reason === 'initial-state-unknown'
+    )), `${label} keeps the preserved-anchor diagnostic`);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'deleted-early-exit-green'
+      && edge.successorOrderId === 'early-exit-fixed-red'
+      && edge.reason === 'override-inactive'
+    )), `${label} keeps the stale override diagnostic`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'initial-state-unknown' && reason.taskId === 'early-exit-anchor-blue'
+    )), `${label} keeps the preserved-anchor explanation`);
+    assert.ok(result.explanation.some(reason => reason.code === 'override-inactive'),
+      `${label} keeps the stale override explanation`);
+  }
+});
+
+test('setup-aware evaluators honor a configured partial_allowed plant policy', () => {
+  // Production change caught: hard-coding `never` in the detached evaluator
+  // rejects a two-hour order that has two valid one-hour operating windows.
+  const blue = scheduledTask('partial-policy-blue', 2, 'BLUE', '2026-08-04T09:00:00');
+  const oneHourWindows = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 9]]));
+  const snapshot = setupSnapshot([blue]);
+  snapshot.calendars = { L1: { workHours: oneHourWindows } };
+  snapshot.plants = { P1: { workHours: oneHourWindows } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1', split_order_policy: 'partial_allowed' }],
+    lines: [{ plant: 'P1', production_line: 'L1' }],
+  };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-04T09:00:00') }));
+    const patch = patchFor(result, 'partial-policy-blue');
+
+    assert.ok(patch, `${label} routes the configured plant policy into detached placement`);
+    assert.equal(patch.changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+    assert.equal(patch.changes.end_date.getTime(), at('2026-08-04T09:00:00').getTime());
+    assert.deepEqual(patch.changes.scheduleSegments.map(segment => [segment.startDate, segment.endDate]), [
+      [at('2026-08-03T08:00:00'), at('2026-08-03T09:00:00')],
+      [at('2026-08-04T08:00:00'), at('2026-08-04T09:00:00')],
+    ]);
+    assert.deepEqual(result.unchangedLines, []);
+  }
+});
+
+test('setup-aware evaluators derive immutable overlong_only eligibility from snapshot operating windows', () => {
+  // Production change caught: forwarding overlong_only without its immutable
+  // nominal-window eligibility silently behaves as never. Two one-hour days
+  // make this two-hour order inherently overlong, so it may split.
+  const blue = scheduledTask('overlong-policy-blue', 2, 'BLUE', '2026-08-04T09:00:00');
+  const oneHourWindows = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 9]]));
+  const snapshot = setupSnapshot([blue]);
+  snapshot.calendars = { L1: { workHours: oneHourWindows } };
+  snapshot.plants = { P1: { workHours: oneHourWindows } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1', split_order_policy: 'overlong_only' }],
+    lines: [{ plant: 'P1', production_line: 'L1' }],
+  };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-04T09:00:00') }));
+    const patch = patchFor(result, 'overlong-policy-blue');
+
+    assert.ok(patch, `${label} recognizes the order as inherently overlong from the snapshot`);
+    assert.deepEqual(patch.changes.scheduleSegments.map(segment => [segment.startDate, segment.endDate]), [
+      [at('2026-08-03T08:00:00'), at('2026-08-03T09:00:00')],
+      [at('2026-08-04T08:00:00'), at('2026-08-04T09:00:00')],
+    ]);
+    assert.deepEqual(result.unchangedLines, []);
+  }
+});
+
+test('setup-aware evaluators never schedule through a fixed boundary beyond the caller horizon', () => {
+  // Production change caught: retaining an out-of-horizon fixed BLUE makes
+  // its noon start leak into a caller horizon ending at 10:00. RED cannot fit
+  // before the cutoff and must remain unadmitted rather than schedule at noon.
+  const red = scheduledTask('bounded-horizon-red', 3, 'RED', '2026-08-03T09:00:00');
+  const fixedBlue = scheduledTask(
+    'bounded-horizon-fixed-blue', 1, 'BLUE', '2026-08-03T13:00:00',
+    '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+  ] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([red, fixedBlue], { fixedIds: ['bounded-horizon-fixed-blue'] }),
+      dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
+    );
+
+    assert.deepEqual(result.patches, [], `${label} does not emit work beyond the caller horizon`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.successorOrderId === 'bounded-horizon-red' && edge.reason === 'trailing-fragment-unadmitted'
+    )), `${label} reports the bounded terminal admission failure`);
+  }
+});
