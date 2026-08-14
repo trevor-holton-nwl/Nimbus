@@ -35,7 +35,7 @@
 // see docs/architecture/cq1-compatibility-inventory.md.
 import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, SetupSnapshot, SetupPolicyConfig, OrderScheduleSegment } from './types.mjs';
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
@@ -72,6 +72,7 @@ interface MasterPlantRow {
   product_focus?: string | null;
   timezone?: string | null;
   split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
+  setup_policy_config?: SetupPolicyConfig | null;
 }
 
 /** GET /health (brain.py) — only the fields this file reads are modeled;
@@ -204,6 +205,12 @@ export const Persistence = {
   // The request counter suppresses a late prior-plant response after a switch.
   _setupSnapshotPlant: null as string | null,
   _setupSnapshotRequest: 0,
+  // Policy hydration mirrors setup truth: it is plant-scoped, never cached in
+  // localStorage, and a failed request cannot leave another plant's policy in
+  // memory for a subsequent preview.
+  _setupPolicyConfig: null as SetupPolicyConfig | null,
+  _setupPolicyPlant: null as string | null,
+  _setupPolicyRequest: 0,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
                               // these skip the optimistic-concurrency version check on save
@@ -288,6 +295,11 @@ export const Persistence = {
       Store.setPriorityRankMaps({}, 'persistence');
     }
     if (plant !== Persistence._setupSnapshotPlant) Persistence._invalidateSetupSnapshot('persistence');
+    if (plant !== Persistence._setupPolicyPlant) {
+      Persistence._setupPolicyRequest++;
+      Persistence._setupPolicyPlant = null;
+      Persistence._setupPolicyConfig = null;
+    }
     // A later load invalidates this generation immediately. The older task-load
     // continuation must then not begin a fresh setup request for its old plant.
     const setupSnapshotGeneration = Persistence._setupSnapshotRequest;
@@ -302,6 +314,9 @@ export const Persistence = {
       Store.setTasks([], 'persistence');
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
+      Persistence._setupPolicyRequest++;
+      Persistence._setupPolicyPlant = null;
+      Persistence._setupPolicyConfig = null;
       return Promise.all([
         fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
         fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
@@ -364,6 +379,7 @@ export const Persistence = {
               Promise.all([
                 CalendarSync.fetchPlantConfig(plant),
                 Persistence.loadPriorityRankMaps(plant),
+                Persistence.loadSetupPolicy(plant),
                 setupSnapshotGeneration === Persistence._setupSnapshotRequest
                   ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
               ])
@@ -499,6 +515,7 @@ export const Persistence = {
           Promise.all([
             CalendarSync.fetchPlantConfig(plant),
             Persistence.loadPriorityRankMaps(plant),
+            Persistence.loadSetupPolicy(plant),
             setupSnapshotGeneration === Persistence._setupSnapshotRequest
               ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
           ])
@@ -1349,6 +1366,28 @@ export const Persistence = {
     } catch (e) {
       if (request === Persistence._setupSnapshotRequest) {
         ErrorLog.warn('persistence', `Setup snapshot fetch failed for ${plant}: ${(e as Error).message}`);
+      }
+      return null;
+    }
+  },
+
+  async loadSetupPolicy(plant: string): Promise<SetupPolicyConfig | null> {
+    Persistence._setupPolicyRequest++;
+    const request = Persistence._setupPolicyRequest;
+    Persistence._setupPolicyConfig = null;
+    Persistence._setupPolicyPlant = null;
+    if (!plant) return null;
+    try {
+      const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/policy`);
+      if (!response.ok) throw new Error(`HTTP ${response.status} from /setup/${plant}/policy`);
+      const policy = await response.json() as SetupPolicyConfig;
+      if (request !== Persistence._setupPolicyRequest || policy?.plant !== plant) return null;
+      Persistence._setupPolicyConfig = policy;
+      Persistence._setupPolicyPlant = plant;
+      return policy;
+    } catch (e) {
+      if (request === Persistence._setupPolicyRequest) {
+        ErrorLog.warn('persistence', `Setup policy fetch failed for ${plant}: ${(e as Error).message}`);
       }
       return null;
     }

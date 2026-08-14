@@ -88,6 +88,18 @@ export interface OrderScheduleSegment {
 
 export type SplitOrderPolicy = 'never' | 'overlong_only' | 'partial_allowed';
 
+/** Plant-scoped Stage 2 policy sidecar.  All modes default off until the
+ * separate validation/performance activation gate is satisfied. */
+export interface SetupPolicyConfig {
+  plant: string;
+  dueDateFirstEnabled: boolean;
+  minChangeoverEnabled: boolean;
+  throughputEnabled: boolean;
+  throughputMinSavingsMin: number;
+  throughputMaxSlipMin: number;
+  version: number;
+}
+
 export interface NimbusBlock {
   id: string;
   /** null = all lines in the plant. */
@@ -217,6 +229,7 @@ export interface NimbusMasterPlant {
   /** Plant-only allocation behavior; missing values intentionally preserve
    *  legacy continuous scheduling. */
   split_order_policy?: SplitOrderPolicy | null;
+  setup_policy_config?: SetupPolicyConfig | null;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */

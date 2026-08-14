@@ -149,6 +149,10 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- allocation policy, not a priority term. Existing plants default to exact
 -- legacy behavior until an admin deliberately opts in.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
+-- Changeover Matrix Stage 2 policy sidecar. Kept separate from the priority
+-- tree; all policies start disabled until plant validation gates are met.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB NOT NULL DEFAULT
+  '{"dueDateFirstEnabled": false, "minChangeoverEnabled": false, "throughputEnabled": false, "throughputMinSavingsMin": 60, "throughputMaxSlipMin": 1440, "version": 1}'::jsonb;
 -- Legacy day→minute horizon conversion — ONE-TIME, now recorded in the ledger
 -- and NO LONGER re-run on apply.
 --

@@ -48,6 +48,18 @@ ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE
 # arbitrary optimizer option supplied by the browser.
 SPLIT_ORDER_POLICIES = frozenset({'never', 'overlong_only', 'partial_allowed'})
 
+# Stage 2 setup policy is deliberately a typed sidecar, not a priority-tree
+# node. Every policy starts disabled: persistence alone must never activate
+# setup-aware optimization before the plant's validation/performance gates.
+SETUP_POLICY_DEFAULTS = {
+    'dueDateFirstEnabled': False,
+    'minChangeoverEnabled': False,
+    'throughputEnabled': False,
+    'throughputMinSavingsMin': 60,
+    'throughputMaxSlipMin': 1440,
+    'version': 1,
+}
+
 COLUMN_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 
 # System columns the UI must never see or touch.
@@ -307,17 +319,18 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints, split_order_policy "
+                        "SELECT subnetwork, plant, constraints, split_order_policy, setup_policy_config "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4]) for r in cur.fetchall()}
                     for row in rows:
-                        constraints, policy = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never')
+                        constraints, policy, setup_policy = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
+                        row['setup_policy_config'] = _normalize_setup_policy_config(setup_policy)
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -1116,6 +1129,82 @@ def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason
                     "setup_compatibility_reason": None if compatible else reason}), user_email),
         )
         conn.commit()
+
+
+def _normalize_setup_policy_config(config: dict | None) -> dict:
+    """Return the only persisted/wire shape for Stage 2 setup policies."""
+    raw = config if isinstance(config, dict) else {}
+    clean = {
+        'dueDateFirstEnabled': bool(raw.get('dueDateFirstEnabled', False)),
+        'minChangeoverEnabled': bool(raw.get('minChangeoverEnabled', False)),
+        'throughputEnabled': bool(raw.get('throughputEnabled', False)),
+        'throughputMinSavingsMin': raw.get('throughputMinSavingsMin', 60),
+        'throughputMaxSlipMin': raw.get('throughputMaxSlipMin', 1440),
+        'version': raw.get('version', 1),
+    }
+    if isinstance(clean['throughputMinSavingsMin'], bool) or not isinstance(clean['throughputMinSavingsMin'], int):
+        raise ValueError('throughputMinSavingsMin must be a whole number')
+    if clean['throughputMinSavingsMin'] < 0:
+        raise ValueError('throughputMinSavingsMin must be nonnegative')
+    if isinstance(clean['throughputMaxSlipMin'], bool) or not isinstance(clean['throughputMaxSlipMin'], int):
+        raise ValueError('throughputMaxSlipMin must be a whole number')
+    if clean['throughputMaxSlipMin'] <= 0:
+        raise ValueError('throughputMaxSlipMin must be positive')
+    if isinstance(clean['version'], bool) or not isinstance(clean['version'], int) or clean['version'] <= 0:
+        raise ValueError('setup policy version must be positive')
+    return clean
+
+
+def ensure_plant_setup_policy_config_column() -> None:
+    """Idempotently add the typed Stage 2 policy sidecar to plants."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB "
+            "NOT NULL DEFAULT '{\"dueDateFirstEnabled\": false, \"minChangeoverEnabled\": false, "
+            "\"throughputEnabled\": false, \"throughputMinSavingsMin\": 60, "
+            "\"throughputMaxSlipMin\": 1440, \"version\": 1}'::jsonb"
+        )
+        conn.commit()
+
+
+def get_setup_policy_config(plant: str) -> dict:
+    if not plant:
+        raise ValueError('plant is required')
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_policy_config FROM plants WHERE plant = %s", (plant,))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Plant {plant!r} not found")
+    return {'plant': plant, **_normalize_setup_policy_config(row[0])}
+
+
+def set_setup_policy_config(plant: str, config: dict, expected_version: int,
+                            user_email: str | None = None) -> dict:
+    """Optimistically update one plant's typed setup policy sidecar."""
+    if not plant:
+        raise ValueError('plant is required')
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version <= 0:
+        raise ValueError('expected_version must be a positive whole number')
+    clean = _normalize_setup_policy_config(config)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_policy_config FROM plants WHERE plant = %s FOR UPDATE", (plant,))
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Plant {plant!r} not found")
+        current = _normalize_setup_policy_config(row[0])
+        if expected_version != current['version']:
+            raise ValueError('Setup policy version is stale')
+        clean['version'] = current['version'] + 1
+        cur.execute(
+            "UPDATE plants SET setup_policy_config = %s, updated_at = NOW() WHERE plant = %s",
+            (Jsonb(clean), plant),
+        )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES ('plants', 'set_setup_policy', %s, %s)",
+            (Jsonb({'plant': plant, 'setup_policy_config': clean}), user_email),
+        )
+        conn.commit()
+    return {'plant': plant, **clean}
     return {"plant": plant, "line": line, "setup_compatible": compatible,
             "setup_compatibility_reason": None if compatible else reason}
 

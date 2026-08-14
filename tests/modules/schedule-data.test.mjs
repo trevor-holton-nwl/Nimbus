@@ -327,6 +327,21 @@ test('Persistence.loadSetupSnapshot suppresses an older plant response after a n
   }
 });
 
+test('Persistence.loadSetupPolicy clears prior-plant policy before hydrating and remains empty after failure', async () => {
+  Persistence._setupPolicyConfig = { plant: 'PLANT_A', minChangeoverEnabled: true };
+  Persistence._setupPolicyPlant = 'PLANT_A';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    const result = await Persistence.loadSetupPolicy('PLANT_B');
+    assert.equal(result, null);
+    assert.equal(Persistence._setupPolicyConfig, null, 'a failed load must not retain PLANT_A policy');
+    assert.notEqual(Persistence._setupPolicyPlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Stage 3 fix — the rank cache must not survive a plant switch.
 //
