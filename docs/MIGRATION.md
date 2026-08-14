@@ -1046,3 +1046,10 @@ To roll back, set all three `*Enabled` fields to `false` through the
 plant-scoped setup policy endpoint. This prevents new setup-aware policy runs;
 it intentionally does not alter existing orders, derived setup bars, setup
 truth, diagnostics, or alerts.
+
+**2026-08-14 evidence status:** policy controls and detached threshold checks
+are implemented, but activation remains blocked. The current environment is
+configured for Azure PostgreSQL, so it is not a valid local DB verification
+target; browser/performance UAT, representative-plant replay, owner approval,
+and null-predecessor override persistence are also outstanding. Do not deploy
+or enable policies based on automated checks alone.

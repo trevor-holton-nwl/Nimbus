@@ -179,6 +179,64 @@ export interface SetupPolicyConfig {
   These are activation blockers, not conditions that may be bypassed by the
   policy flags.
 
+### Release-readiness evidence update (2026-08-14)
+
+**Implemented, still disabled**
+
+- `98ea7b8` adds the Plant Settings policy panel. It hydrates through
+  `Persistence.loadSetupPolicy`, uses optimistic `expected_version` writes,
+  validates whole-minute thresholds, and renders policy switches disabled.
+  Every threshold save sends a safe-disable payload; the only available state
+  action for a pre-existing enabled record is disable-all. No task, setup-bar,
+  setup-truth, alert, or preview mutation is performed by policy maintenance.
+- `bdbae77` adds a pure throughput-policy selector and boundary contracts.
+  It rejects 59 minutes of savings at the default 60-minute floor, accepts 60,
+  accepts individual 1439/1440-minute slips, and rejects a 1441-minute slip
+  while naming the violating order. The comparison remains detached from Store
+  and patch application.
+- `1f3f10c` restores the response from `set_setup_line_compatibility` that the
+  Stage 2 sidecar insertion had accidentally stranded after a return. Its
+  focused regression test passes.
+
+**Automated checks run**
+
+- `node --test tests/modules/plant-and-administration.test.mjs
+  tests/modules/locale-completeness.test.mjs`: 22 passing.
+- `node --test tests/modules/setup-scheduler.test.mjs
+  tests/modules/schedule-services.test.mjs`: 131 passing, repeated three
+  times with the same result.
+- `py -m pytest -q -p no:cacheprovider tests/test_master_data_setup_policy.py
+  tests/test_setup_policy_config.py`: 5 passing.
+- `npm run build` and `npm run typecheck`: passing after each Stage 2 code
+  change.
+- `npm test`: one inherited CQ-1 contract-snapshot failure; legacy tests and
+  all other module tests passed. It is unrelated to the Stage 2 policy changes.
+- `npm run lint`: blocked by 49 pre-existing repository errors (including
+  duplicate locale keys and legacy test globals); no new policy-panel lint
+  error was reported.
+- `py -m ruff check .`: blocked by 10 pre-existing errors. The Stage 2
+  unreachable return / undefined-name finding was corrected in `1f3f10c`.
+- `py -m pytest -m "not pg"`: 193 passed and 70 deselected, but three
+  `test_db_safety.py` tests fail because the process inherits the Azure host;
+  this is the expected guard refusing a non-local database, not a bypassable
+  Stage 2 result.
+
+**External evidence not available in this environment — activation blocked**
+
+- The configured `PG_HOST` is `pgdb-nimbus-dev.postgres.database.azure.com`.
+  No local target was confirmed, so no schema action and no
+  `NIMBUS_TEST_DB=1` test was run.
+- No controllable browser session was available, so permission/hydration,
+  plant-switch, keyboard, dark-mode, safe-disable, and screenshot UAT have
+  not been performed.
+- No representative real-plant snapshot replay, candidate/runtime measurement,
+  or scheduling-owner approval has been recorded.
+- Null-predecessor initial-state override persistence remains unresolved.
+
+**Release decision:** Stage 2 is code-complete and remains observation/preview
+only. Do not enable any setup policy or deploy this work until every external
+gate above is recorded as passed.
+
 ## Recovery / Token-Limit Handoff
 
 On a new session, read only:
