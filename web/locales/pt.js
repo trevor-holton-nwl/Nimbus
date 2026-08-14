@@ -1254,5 +1254,5 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_detail_title': 'Detalhe de preparação derivado', 'ui.setup_predecessor': 'Ordem predecessora',
   'ui.setup_predecessor_state': 'Estado predecessor',
   'ui.setup_required': 'Preparação necessária', 'ui.setup_effective': 'Preparação efetiva', 'ui.setup_standard': 'Preparação padrão',
-  'ui.setup_source': 'Fonte da preparação', 'ui.setup_override': 'Substituição da ocorrência', 'ui.setup_missing': 'Detalhe da preparação indisponível',
+  'ui.setup_override': 'Substituição da ocorrência', 'ui.setup_missing': 'Detalhe da preparação indisponível',
 };

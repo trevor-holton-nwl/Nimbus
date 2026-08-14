@@ -24,6 +24,11 @@ function keysOf(locale) {
   return keys;
 }
 
+function keyCount(locale, key) {
+  const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
+  return [...text.matchAll(new RegExp(`'${key}'\\s*:`, 'g'))].length;
+}
+
 test('every constraint.<field> key exists in all 5 locales', () => {
   const REQUIRED = ['constraint.colorWheel', 'constraint.prt01', 'constraint.prt02', 'constraint.productionVersion'];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
@@ -51,6 +56,13 @@ test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
     for (const locale of LOCALES) {
       assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
     }
+  }
+});
+
+test('Task 5 reuses the existing setup source label exactly once in every locale', () => {
+  for (const locale of LOCALES) {
+    assert.equal(keyCount(locale, 'ui.setup_source'), 1,
+      `${locale}.js must not introduce a second ui.setup_source key`);
   }
 });
 
