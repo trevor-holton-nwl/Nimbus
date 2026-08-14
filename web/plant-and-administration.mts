@@ -149,6 +149,14 @@ export const SetupAdmin = (() => {
       : { active: false, reason: 'Ready for activation review; Stage 0 remains observation-only.' };
   }
 
+  function policyActivationStatus(policy: { dueDateFirstEnabled?: boolean; minChangeoverEnabled?: boolean; throughputEnabled?: boolean },
+                                  gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean }): { active: boolean; reason: string } {
+    if (!gates.stage1Validated) return { active: false, reason: 'Activation is blocked: Stage 1 validation is not recorded.' };
+    if (!gates.localDbVerified) return { active: false, reason: 'Activation is blocked: safe local database verification is not recorded.' };
+    if (!gates.performanceVerified) return { active: false, reason: 'Activation is blocked: representative performance validation is not recorded.' };
+    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: 'Policy activation evidence is complete.' };
+  }
+
   function effectiveRows({ plantRows, lineRows, line, version }: { plantRows: SetupMatrixRow[]; lineRows: SetupMatrixRow[]; line: string; version: number }): EffectiveSetupRow[] {
     const plant = plantRows.filter(row => row.signature_version === version);
     if (!line) return plant.map(row => ({ ...row, inherited: false, inheritedFromPlant: false }));
@@ -494,7 +502,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
+  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
 })();
 
 /* =============================================================================

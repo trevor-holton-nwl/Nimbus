@@ -123,6 +123,14 @@ test('SetupAdmin blocks stale writes and reports why activation is unavailable a
     /coverage pass/i);
 });
 
+test('SetupAdmin keeps Stage 2 policy activation blocked without recorded release evidence', () => {
+  const status = SetupAdmin.policyActivationStatus({ minChangeoverEnabled: true }, {
+    stage1Validated: false, localDbVerified: false, performanceVerified: false,
+  });
+  assert.equal(status.active, false);
+  assert.match(status.reason, /Stage 1 validation/);
+});
+
 test('SetupAdmin exports canonical long-form columns with plant, line, and version metadata', () => {
   // Regression target: changing labels or omitting scope/version makes an
   // exported file impossible to import deterministically into this editor.
