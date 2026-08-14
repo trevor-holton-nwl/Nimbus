@@ -131,6 +131,23 @@ test('SetupAdmin keeps Stage 2 policy activation blocked without recorded releas
   assert.match(status.reason, /Stage 1 validation/);
 });
 
+test('SetupAdmin validates editable policy thresholds and makes safe-disable payloads', () => {
+  // Regression target: an admin must be able to maintain guardrails without
+  // accidentally activating a detached optimization policy.
+  assert.deepEqual(SetupAdmin.normalizePolicyThresholds('60', '1440'), {
+    throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440,
+  });
+  assert.throws(() => SetupAdmin.normalizePolicyThresholds('59.5', '1440'), /whole number/i);
+  assert.throws(() => SetupAdmin.normalizePolicyThresholds('60', '-1'), /zero or greater/i);
+  assert.deepEqual(SetupAdmin.safeDisablePolicy({
+    plant: '5512', dueDateFirstEnabled: true, minChangeoverEnabled: true, throughputEnabled: true,
+    throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440, version: 3,
+  }), {
+    plant: '5512', dueDateFirstEnabled: false, minChangeoverEnabled: false, throughputEnabled: false,
+    throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440, expected_version: 3,
+  });
+});
+
 test('SetupAdmin exports canonical long-form columns with plant, line, and version metadata', () => {
   // Regression target: changing labels or omitting scope/version makes an
   // exported file impossible to import deterministically into this editor.
