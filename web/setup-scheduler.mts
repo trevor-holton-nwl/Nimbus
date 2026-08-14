@@ -350,6 +350,11 @@ export interface DueDateFirstBounds {
   horizonEnd: Date;
 }
 
+export interface SetupPolicyThresholds {
+  throughputMinSavingsMin: number;
+  throughputMaxSlipMin: number;
+}
+
 export interface CandidateReason {
   code: string;
   message: string;
@@ -469,7 +474,7 @@ interface LineSearchResult {
   unchanged: boolean;
 }
 
-type FragmentMode = 'due-date-first' | 'spt';
+type FragmentMode = 'due-date-first' | 'spt' | 'min-changeover' | 'throughput';
 
 interface BoundaryOverrideLocks {
   requiredFirstOrderId?: string;
@@ -1257,12 +1262,22 @@ function hasNominalWindow(
   return false;
 }
 
-function compareCandidate(left: DueDateCandidate, right: DueDateCandidate): number {
+function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
+                          mode: FragmentMode = 'due-date-first'): number {
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
   const policyDelta = left.policyKey.localeCompare(right.policyKey);
   if (policyDelta) return policyDelta;
-  for (let index = 2; index < Math.max(left.score.length, right.score.length); index += 1) {
+  // All policies retain hard feasibility and configured policy tiers. Only the
+  // lower-order comparison changes: Min Changeover remains due-safe, while
+  // Throughput may prefer setup savings and is constrained by its explicit
+  // post-evaluation slip gate below.
+  const terms = mode === 'min-changeover'
+    ? [2, 3, 5, 4]
+    : mode === 'throughput'
+      ? [5, 2, 3, 4]
+      : [2, 3, 4, 5];
+  for (const index of terms) {
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
   }
@@ -1524,6 +1539,7 @@ function exactSearch(
   fragment: Readonly<FragmentContext>,
   adjacency: Readonly<FragmentAdjacency>,
   budget: SearchBudget,
+  mode: FragmentMode = 'due-date-first',
 ): SearchRun {
   if (adjacency.issue) {
     return {
@@ -1644,7 +1660,7 @@ function exactSearch(
       }
       candidateCount += 1;
       const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment, adjacency);
-      if (candidate.feasible && (!winner || compareCandidate(candidate, winner) < 0)) winner = candidate;
+      if (candidate.feasible && (!winner || compareCandidate(candidate, winner, mode) < 0)) winner = candidate;
       if (!candidate.feasible) missingEdges.push(...candidate.missingEdges);
       popFrame();
       continue;
@@ -1681,6 +1697,7 @@ function greedySearch(
   fragment: Readonly<FragmentContext>,
   adjacency: Readonly<FragmentAdjacency>,
   budget: SearchBudget,
+  mode: FragmentMode = 'due-date-first',
 ): SearchRun {
   if (adjacency.issue) {
     return {
@@ -1734,7 +1751,7 @@ function greedySearch(
       missingEdges.push(...candidate.missingEdges);
       return null;
     }
-    if (!winner || compareCandidate(candidate, winner) < 0) winner = candidate;
+    if (!winner || compareCandidate(candidate, winner, mode) < 0) winner = candidate;
     return candidate;
   };
 
@@ -1758,7 +1775,7 @@ function greedySearch(
       [neighbor[index], neighbor[index + 1]] = [neighbor[index + 1], neighbor[index]];
       const candidate = evaluate(neighbor);
       if (termination !== 'completed') break;
-      if (candidate && current && compareCandidate(candidate, current) < 0) {
+      if (candidate && current && compareCandidate(candidate, current, mode) < 0) {
         currentOrder = neighbor;
         current = candidate;
         improved = true;
@@ -1909,8 +1926,8 @@ function searchFragment(
     };
   }
   return groups.length <= bounds.exactSearchThreshold
-    ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget)
-    : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget);
+    ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode)
+    : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode);
 }
 
 function unchangedLineResult(
@@ -3139,6 +3156,7 @@ export function evaluateSptWithSetup(
 export function evaluateDueDateFirst(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
+  mode: Extract<FragmentMode, 'due-date-first' | 'min-changeover' | 'throughput'> = 'due-date-first',
 ): CandidateResult {
   requireDueDateBounds(bounds);
   const started = bounds.clock();
@@ -3238,6 +3256,7 @@ export function evaluateDueDateFirst(
         ...(anchor ? { preservedAnchor: anchor } : {}),
       },
       budget,
+      mode,
     );
     candidateCount += result.candidateCount;
     if (result.method === 'due-date-first-greedy') method = result.method;
@@ -3269,6 +3288,95 @@ export function evaluateDueDateFirst(
     unchangedLines,
     missingEdges: uniqueMissingEdges(missingEdges),
   };
+}
+
+function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
+  const end = timestamp(task.end_date);
+  return end ? Math.floor(end.getTime() / (60 * 1000)) : null;
+}
+
+function lateOrderFacts(tasks: ReadonlyArray<NimbusTask>): Map<string, { late: boolean; end: number | null }> {
+  const facts = new Map<string, { late: boolean; end: number | null }>();
+  for (const task of tasks) {
+    const end = scheduledEndMinutes(task);
+    const due = dueTimestamp(task);
+    facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end });
+  }
+  return facts;
+}
+
+function withPolicyReason(result: CandidateResult, code: string, message: string): CandidateResult {
+  return { ...result, explanation: [...result.explanation, { code, message }] };
+}
+
+/** Use available slack: run the shared candidate evaluator with setup as the
+ * first non-due comparator, then fail closed to Due-date-first if it made an
+ * originally on-time order late or increased the line's existing late count.
+ */
+export function evaluateMinChangeover(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
+): CandidateResult {
+  const baseline = evaluateDueDateFirst(snapshot, bounds);
+  const candidate = evaluateDueDateFirst(snapshot, bounds, 'min-changeover');
+  const before = lateOrderFacts(snapshot.tasks);
+  const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
+  const after = lateOrderFacts(afterTasks);
+  const beforeLate = [...before.values()].filter(fact => fact.late).length;
+  const afterLate = [...after.values()].filter(fact => fact.late).length;
+  const newlyLate = [...after.entries()].filter(([id, fact]) => fact.late && !before.get(id)?.late);
+  const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
+  if (afterLate > beforeLate || newlyLate.length) {
+    return withPolicyReason(
+      baseline,
+      'min-changeover-rejected-lateness',
+      `Rejected ${savings} setup minutes saved because the alternative would create new lateness.`,
+    );
+  }
+  return withPolicyReason(
+    candidate,
+    'min-changeover-due-safe',
+    `Accepted ${savings} setup minutes saved without creating new lateness.`,
+  );
+}
+
+/** Throughput-first may trade schedule delay for setup savings, but only when
+ * every delayed order is individually under the configured cap. This compares
+ * the same detached candidate path against the Due-date-first baseline; it
+ * does not create a second placement or mutation mechanism. */
+export function evaluateThroughput(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  thresholds: Readonly<SetupPolicyThresholds>,
+): CandidateResult {
+  if (!Number.isInteger(thresholds.throughputMinSavingsMin) || thresholds.throughputMinSavingsMin < 0) {
+    throw new TypeError('Throughput policy requires nonnegative setup-savings minutes.');
+  }
+  if (!Number.isInteger(thresholds.throughputMaxSlipMin) || thresholds.throughputMaxSlipMin <= 0) {
+    throw new TypeError('Throughput policy requires a positive per-order slip cap.');
+  }
+  const baseline = evaluateDueDateFirst(snapshot, bounds);
+  const candidate = evaluateDueDateFirst(snapshot, bounds, 'throughput');
+  const before = lateOrderFacts(snapshot.tasks);
+  const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
+  const after = lateOrderFacts(afterTasks);
+  const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
+  const slips = [...after.entries()].flatMap(([id, fact]) => {
+    const prior = before.get(id)?.end;
+    return prior === null || prior === undefined || fact.end === null ? [] : [{ id, minutes: Math.max(0, fact.end - prior) }];
+  });
+  const overCap = slips.filter(slip => slip.minutes > thresholds.throughputMaxSlipMin);
+  if (savings < thresholds.throughputMinSavingsMin || overCap.length) {
+    const reason = overCap.length
+      ? `${overCap.map(slip => `${slip.id} (${slip.minutes} min)`).join(', ')} exceeds the ${thresholds.throughputMaxSlipMin}-minute slip cap`
+      : `${savings} setup minutes saved is below the ${thresholds.throughputMinSavingsMin}-minute minimum`;
+    return withPolicyReason(baseline, 'throughput-rejected-threshold', `Rejected throughput alternative: ${reason}.`);
+  }
+  const maxSlip = Math.max(0, ...slips.map(slip => slip.minutes));
+  return withPolicyReason(
+    candidate,
+    'throughput-accepted',
+    `Accepted ${savings} setup minutes saved; every order slips no more than ${maxSlip} minutes.`,
+  );
 }
 
 /**

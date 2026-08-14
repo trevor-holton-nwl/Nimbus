@@ -184,6 +184,30 @@ test('placeWithSetup applies never, overlong_only, and partial_allowed without s
     'a complete under-30-minute order remains legal only when it is unsplit');
 });
 
+test('Min Changeover stays detached and reports its due-safe setup savings decision', () => {
+  const red = scheduledTask('red-due', 1, 'RED', '2026-08-03T09:30:00');
+  const blue = scheduledTask('blue-future', 1, 'BLUE', '2026-08-03T13:00:00');
+  const red2 = scheduledTask('red-future', 1, 'RED', '2026-08-03T13:00:00');
+  const snapshot = setupSnapshot([red, blue, red2]);
+  const result = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setupTruth({
+    current: 'GREEN', rows: [
+      setupRow('GREEN', 'RED', 20), setupRow('GREEN', 'BLUE', 20),
+      setupRow('RED', 'BLUE', 60), setupRow('BLUE', 'RED', 60),
+    ],
+  })));
+  assert.ok(result.explanation.some(reason => reason.code === 'min-changeover-due-safe'));
+  assert.equal(snapshot.tasks[0].start_date, null, 'policy evaluation never mutates the snapshot');
+});
+
+test('Throughput rejects policy candidates that do not meet the explicit savings threshold', () => {
+  const red = scheduledTask('throughput-red', 1, 'RED', '2026-08-03T12:00:00');
+  const snapshot = setupSnapshot([red]);
+  const result = SetupScheduler.evaluateThroughput(snapshot, dueDateBounds(setupTruth({
+    current: 'GREEN', rows: [setupRow('GREEN', 'RED', 20)],
+  })), { throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440 });
+  assert.ok(result.explanation.some(reason => reason.code === 'throughput-rejected-threshold'));
+});
+
 test('placeWithSetup skips shift tails that fit setup alone or too little production', () => {
   // This fails if setup is placed by itself at shift end, shortened, or paired
   // with less than the fixed 30-minute productive minimum.

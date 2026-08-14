@@ -35,13 +35,16 @@ import { Store, UndoStack } from './schedule-state.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
+  evaluateMinChangeover as evaluateMinChangeoverPure,
   evaluateSptWithSetup as evaluateSptWithSetupPure,
+  evaluateThroughput as evaluateThroughputPure,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
   DueDateFirstBounds,
+  SetupPolicyThresholds,
   PlacementResult,
   PlaceWithSetupRequest,
   SchedulePatch,
@@ -1767,16 +1770,21 @@ export const Engine = {
    * not route here; a caller must supply both the immutable snapshot and the
    * measured search bounds/setup truth before any setup-aware candidate exists. */
   evaluateSetupAware(
-    mode: 'due-date-first' | 'spt',
+    mode: 'due-date-first' | 'spt' | 'min-changeover' | 'throughput',
     bounds: Readonly<DueDateFirstBounds>,
     snapshot: ScheduleSnapshot = snapshotSchedule(),
+    thresholds?: Readonly<SetupPolicyThresholds>,
   ): CandidateResult {
     if (!bounds.setup.definition?.active) {
       throw new Error('Setup-aware evaluation is disabled for this plant');
     }
-    return mode === 'due-date-first'
-      ? evaluateDueDateFirstPure(snapshot, bounds)
-      : evaluateSptWithSetupPure(snapshot, bounds);
+    if (mode === 'due-date-first') return evaluateDueDateFirstPure(snapshot, bounds);
+    if (mode === 'spt') return evaluateSptWithSetupPure(snapshot, bounds);
+    if (mode === 'min-changeover') return evaluateMinChangeoverPure(snapshot, bounds);
+    return evaluateThroughputPure(snapshot, bounds, thresholds ?? {
+      throughputMinSavingsMin: 60,
+      throughputMaxSlipMin: 1440,
+    });
   },
 
   /** Apply a selected candidate exactly once.  Preview callers use this rather
