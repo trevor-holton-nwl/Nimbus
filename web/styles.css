@@ -6015,6 +6015,24 @@ body.dark .sap-kind-orders { color: var(--accent); }
   .sap-tabbody, .sap-map-row, .sap-wire-fill { animation: none !important; }
 }
 
+/* Derived setup is deliberately quieter than a productive order: an existing
+   signal/warn treatment and hairline hatch, with no new status color family. */
+.vis-item.setup-item {
+  background: repeating-linear-gradient(-45deg, var(--warn-soft) 0 4px, transparent 4px 8px) !important;
+  border: 1px solid var(--warn) !important;
+  border-radius: 2px;
+  color: var(--warn) !important;
+  font: 700 10px/1 'JetBrains Mono', monospace;
+  pointer-events: none;
+}
+.vis-item.setup-item.setup-conflict { border-color: var(--err) !important; color: var(--err) !important; }
+.vis-item.setup-item.setup-missing {
+  min-width: 3px; background: var(--warn) !important; border-color: var(--warn) !important; color: var(--bg-elev) !important;
+}
+body.dark .vis-item.setup-item { background: repeating-linear-gradient(-45deg, var(--warn-soft) 0 4px, transparent 4px 8px) !important; }
+.insp-setup-detail { border-color: var(--line-strong); }
+.insp-setup-warning { margin: 8px 0 0; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--warn); font-size: 11px; line-height: 1.4; }
+
 /* Setup matrix administration — dense, plant-scoped observation console. */
 .setup-admin { display:flex; flex-direction:column; gap:12px; }
 .setup-admin-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding:4px 0 12px; }

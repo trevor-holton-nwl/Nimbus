@@ -143,12 +143,13 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine, snapshotSchedule } from './schedule-services.mjs';
-import type { RemoveBacklogResult } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation } from './schedule-services.mjs';
+import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -163,6 +164,7 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, Ut
 interface TimelineVisItem {
   id: string;
   group: string;
+  kind: TimelineItemKind;
   /** Every displayed item resolves back to this one logical order. Segment
    * pieces use an internal item id but never become their own business IDs. */
   parentId?: string;
@@ -178,6 +180,20 @@ interface TimelineVisItem {
   editable?: boolean;
   type?: 'background';
   title?: string;
+  setup?: SetupPresentationDetail;
+}
+
+interface SetupPresentationDetail {
+  predecessorOrderId: string | null;
+  predecessorState: string | null;
+  successorOrderId: string;
+  requiredMinutes: number | null;
+  effectiveMinutes: number | null;
+  standardMinutes: number | null;
+  source: string;
+  overrideStatus: string | null;
+  availableMinutes: number | null;
+  missingDetail: string | null;
 }
 
 /** A vis-timeline group — one row per production line. */
@@ -382,7 +398,8 @@ export const Timeline = {
     }
 
     if (evt.type === 'tasks:bulk' || evt.type === 'blocks:change'
-        || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change') {
+        || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change'
+        || evt.type === 'setup-snapshot:replace') {
       // Only do a full rebuild when the gantt tab is active; otherwise
       // the next goto('gantt') will call rebuild() anyway. Coalesced to one rAF so
       // back-to-back data events don't each run the full diff inside Store.emit.
@@ -491,6 +508,17 @@ export const Timeline = {
     return item?.parentId || id;
   },
 
+  /** Presentation artifacts never cross into selection, editing, dependency,
+   * drag, or context-menu business paths. */
+  businessOrderIdForItem(itemId: string | number): string | null {
+    const id = String(itemId);
+    const dataSet = Timeline._items as (NimbusVendor.VisDataSet<TimelineVisItem> | { get?: (id: string) => TimelineVisItem | null | undefined } | null);
+    const item = (typeof dataSet?.get === 'function' ? dataSet.get(id) : null) as TimelineVisItem | null | undefined;
+    if (item?.kind && item.kind !== 'order' && item.kind !== 'order-segment') return null;
+    const orderId = item?.parentId || id;
+    return Store.tasks[orderId] ? orderId : null;
+  },
+
   /** Item IDs currently representing one logical parent. The derived fallback
    * keeps focus/selection correct before a fresh rebuild updates the cache. */
   itemIdsForTask(taskId: string | number): string[] {
@@ -527,6 +555,7 @@ export const Timeline = {
       if (index === count - 1) classNames.push('split-order-segment-last');
       return {
         ...base,
+        kind: 'order-segment',
         id: Timeline._segmentItemId(parentId, segment.sequence),
         parentId,
         segmentNumber: index + 1,
@@ -554,6 +583,7 @@ export const Timeline = {
     return {
       id:      String(t.id),
       group:   line,
+      kind:    'order',
       content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}</span>`,
       start:   t.start_date!,
       end:     t.end_date!,
@@ -574,6 +604,7 @@ export const Timeline = {
     return {
       id,
       group:   line,
+      kind:    'blackout',
       content: `<span style="font-style:italic;">✕ ${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>`,
       title:   `${Util.t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
       start:   b.start as Date, end: b.end as Date,
@@ -581,6 +612,64 @@ export const Timeline = {
       className: 'blackout',
       type: 'background'
     };
+  },
+
+  _setupObservation(tasks: ReadonlyArray<NimbusTask>): SetupObservation {
+    return deriveSetupObservation(Store.setupSnapshot, tasks);
+  },
+
+  /** Render Task 4's immutable setup facts only. This code never calls Engine
+   * or Store mutators, and does not create a pseudo-order. */
+  _setupItemsForObservation(tasks: ReadonlyArray<NimbusTask>, observation: SetupObservation): TimelineVisItem[] {
+    const byId = new Map(tasks.map(task => [String(task.id), task]));
+    const items: TimelineVisItem[] = [];
+    const positiveSuccessors = new Set<string>();
+    const detailFor = (entry: any, missingDetail: string | null = null): SetupPresentationDetail => ({
+      predecessorOrderId: entry.predecessorOrderId ?? null,
+      predecessorState: entry.predecessorState ?? null,
+      successorOrderId: String(entry.successorOrderId),
+      requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
+      effectiveMinutes: Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
+      standardMinutes: Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null),
+      source: entry.source || 'resolved', overrideStatus: entry.overrideStatus || null,
+      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null, missingDetail,
+    });
+    for (const interval of observation.intervals || []) {
+      const required = Number(interval.requiredMinutes);
+      const start = new Date(interval.start), end = new Date(interval.end);
+      if (!Number.isFinite(required) || required <= 0 || !(start < end)) continue;
+      const successorId = String(interval.successorOrderId || '');
+      if (!byId.has(successorId)) continue;
+      positiveSuccessors.add(successorId);
+      const conflict = Number.isFinite(interval.availableMinutes) && interval.availableMinutes < required;
+      const detail = detailFor(interval);
+      items.push({
+        id: `setup:${encodeURIComponent(interval.line)}:${encodeURIComponent(interval.predecessorOrderId ?? 'initial')}:${encodeURIComponent(successorId)}`,
+        kind: 'setup', group: interval.line, start, end, editable: false,
+        className: `setup-item${conflict ? ' setup-conflict' : ''}`,
+        content: `<span aria-hidden="true">${required}m</span>`,
+        title: `${Util.t('ui.setup_detail_title')}: ${required} min`, setup: detail,
+      });
+    }
+    const marked = new Set<string>();
+    for (const diagnostic of observation.diagnostics || []) {
+      const successorId = diagnostic.successorOrderId ? String(diagnostic.successorOrderId) : '';
+      const successor = byId.get(successorId);
+      if (!successor || positiveSuccessors.has(successorId) || marked.has(successorId)) continue;
+      const start = Array.isArray(successor.scheduleSegments) && successor.scheduleSegments.length
+        ? successor.scheduleSegments[0].startDate : successor.start_date;
+      if (!start) continue;
+      marked.add(successorId);
+      const end = new Date(start);
+      const detail = detailFor(diagnostic, diagnostic.message || Util.t('ui.setup_missing'));
+      items.push({
+        id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
+        kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - Config.MS_MIN), end, editable: false,
+        className: 'setup-item setup-missing', content: '<span aria-hidden="true">!</span>',
+        title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
+      });
+    }
+    return items;
   },
   /** Coalesce data-event-driven rebuilds into a single requestAnimationFrame so
    *  multiple Store emits in one tick (e.g. tasks:bulkUpdate then alerts:change from
@@ -666,6 +755,11 @@ export const Timeline = {
         desired.set(String(item.id), item);
       }
     }
+    // Setup bars are a transient rendering of the current observation. They are
+    // intentionally absent from itemIdsByTask so selection/focus stays on orders.
+    for (const item of Timeline._setupItemsForObservation(scopedTasks, Timeline._setupObservation(scopedTasks))) {
+      desired.set(item.id, item);
+    }
     // Line blackout blocks — one per line for global blocks, one per assigned line otherwise.
     for (const b of Store.blocks) {
       if (b.plant && b.plant !== Store.selectedPlant) continue;
@@ -700,6 +794,7 @@ export const Timeline = {
       const item: TimelineVisItem = {
         id:       `past-zone-${line}`,
         group:    line,
+        kind:     'zone',
         start:    pastStart,
         end:      pastEnd,
         type:     'background',
@@ -722,6 +817,7 @@ export const Timeline = {
           desired.set(`alert-horizon-zone-${line}`, {
             id:        `alert-horizon-zone-${line}`,
             group:     line,
+            kind:      'zone',
             start:     hzNow,
             end:       hzEnd,
             type:      'background',
@@ -759,6 +855,7 @@ export const Timeline = {
       const item: TimelineVisItem = {
         id:    `alertcell-${cell.line}-${cell.dayKey}`,
         group: cell.line,
+        kind:  'zone',
         start: new Date(cell.dayKey + 'T00:00:00'),
         end:   new Date(cell.dayKey + 'T23:59:59'),
         type:  'background',
@@ -2920,7 +3017,8 @@ export const Inspector = {
       if (!Inspector._currentId) return;
       if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
         Inspector._render(Store.tasks[Inspector._currentId]);
-      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change') {
+      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change'
+          || evt.type === 'setup-snapshot:replace') {
         const t = Store.tasks[Inspector._currentId];
         if (t) Inspector._render(t);
         else Inspector.clear();
@@ -2947,6 +3045,41 @@ export const Inspector = {
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
 
+  /** Keyboard/screen-reader equivalent of a setup bar: detail belongs to the
+   * successor order, never to a selectable synthetic timeline item. */
+  _setupDetailForTask(task: NimbusTask, observation: SetupObservation = Timeline._setupObservation(Store.tasksForSelectedPlant())): SetupPresentationDetail | null {
+    const id = String(task.id);
+    const interval = observation.intervals.find(entry => String(entry.successorOrderId) === id);
+    const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === id);
+    if (!interval && !diagnostic) return null;
+    const entry: any = interval || diagnostic;
+    const snapshot = Store.setupSnapshot;
+    const definition = snapshot?.definition;
+    const predecessor = entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
+    const predecessorState = definition
+      ? (predecessor ? stateForOrder(predecessor, definition)
+        : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE)?.state_key)
+      : null;
+    const successorState = definition ? stateForOrder(task, definition) : null;
+    const resolved = definition && predecessorState && successorState && snapshot
+      ? resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
+        predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
+        plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides }) : null;
+    const predecessorStateText = entry.predecessorState || (predecessorState
+      ? predecessorState.map(part => `${part.fieldKey}=${part.value}`).join(' · ') : null);
+    return {
+      predecessorOrderId: entry.predecessorOrderId ?? null,
+      predecessorState: predecessorStateText,
+      successorOrderId: id,
+      requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
+      effectiveMinutes: resolved?.effectiveMin ?? (Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
+      standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
+      source: resolved?.source ?? (entry.source || 'resolved'), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
+      availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
+      missingDetail: diagnostic?.message || null,
+    };
+  },
+
   _render(task: NimbusTask): void {
     const body = document.getElementById('inspector-body');
     if (!body) return;
@@ -2963,6 +3096,7 @@ export const Inspector = {
     // Util.impliedOriginalStart. Never reads/writes the raw
     // original_start_date field directly for display.
     const impliedOrigStart = Util.impliedOriginalStart(task);
+    const setupDetail = Inspector._setupDetailForTask(task);
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
@@ -3031,6 +3165,18 @@ export const Inspector = {
             </div>`;
           }).join('')}
         </div>
+      </div>` : ''}
+
+      ${setupDetail ? `<div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
+        <h4>${esc(Util.t('ui.setup_detail_title'))}</h4>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || 'â€”')}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || 'â€”')}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? 'â€”' : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? 'â€”' : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? 'â€”' : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || 'â€”')}</div></div>
+        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
       </div>` : ''}
 
       <div class="insp-actions">
@@ -5048,6 +5194,10 @@ export const Interaction = {
   // this flag's tracker at all (see install()), so there's no overlap.
   _panDuringGesture: false,
 
+  _businessOrderIdForItem(itemId: string | number): string | null {
+    return Timeline.businessOrderIdForItem(itemId);
+  },
+
   trace(): InteractionTraceEntry[] { return this._trace.slice(-50); },
   _log(type: string, data: Record<string, unknown>): void {
     const entry: InteractionTraceEntry = { t: Date.now(), type, ...data };
@@ -5184,7 +5334,8 @@ export const Interaction = {
         const p = Timeline._tl!.getEventProperties(e);
         e.preventDefault();
         if (p.what === 'item' && p.item != null) {
-          const id = Timeline.parentTaskIdForItem(p.item);
+          const id = Interaction._businessOrderIdForItem(p.item);
+          if (!id) return;
           // If right-click target is not currently selected, replace selection with it.
           if (!Selection.has(id)) Selection.set([id]);
           if (ContextMenu && typeof ContextMenu.open === 'function') {
@@ -5369,8 +5520,7 @@ export const Interaction = {
     const container = document.getElementById('vis-timeline');
     if (!container) return;
 
-    const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => String(id).startsWith(p));
+    const isOrderId = (id: string): boolean => !!Interaction._businessOrderIdForItem(id);
 
     let _cardEl = document.getElementById('nimbus-hover-card') as HTMLDivElement | null;
     if (!_cardEl) {
@@ -5459,7 +5609,8 @@ export const Interaction = {
         if (!props || props.item == null) return;
         const itemId = String(props.item);
         if (!isOrderId(itemId)) return;
-        const id = Timeline.parentTaskIdForItem(itemId);
+        const id = Interaction._businessOrderIdForItem(itemId);
+        if (!id) return;
         // Suppress during active drag or marquee — the user is doing something.
         if (Interaction._isDragging || Interaction._marquee) return;
 
@@ -5514,8 +5665,7 @@ export const Interaction = {
     if (!container || Interaction._marqueeDelegated) return;
     Interaction._marqueeDelegated = true;
 
-    const SKIP_PREFIXES = ['blk-', 'past-zone-', 'alert-horizon-zone-', 'alertcell-'];
-    const isOrderId = (id: string): boolean => !SKIP_PREFIXES.some(p => id.startsWith(p));
+    const isOrderId = (id: string): boolean => !!Interaction._businessOrderIdForItem(id);
 
     const _rectsIntersect = (a: MarqueeRect, b: MarqueeRect): boolean =>
       !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
@@ -5599,7 +5749,10 @@ export const Interaction = {
       }
       s.lastHits = hits;
       const next = new Set(s.baseIds);
-      for (const h of hits) next.add(Timeline.parentTaskIdForItem(h));
+      for (const h of hits) {
+        const id = Interaction._businessOrderIdForItem(h);
+        if (id) next.add(id);
+      }
       Selection.set([...next]);
     };
 
@@ -5757,10 +5910,8 @@ export const Interaction = {
       return;
     }
 
-    const id = Timeline.parentTaskIdForItem(props.item);
-
-    // Refuse to "select" a blackout block — they're decorative.
-    if (id.startsWith('blk-')) { Selection.clear(); return; }
+    const id = Interaction._businessOrderIdForItem(props.item);
+    if (!id) return;
 
     if (shift)     Selection.selectRange(id);
     else if (meta) Selection.toggle(id);
@@ -5791,8 +5942,8 @@ export const Interaction = {
     this._dblTimer = setTimeout(() => { this._justDoubleClicked = false; },
                                 this.DBLCLICK_SUPPRESS_MS);
 
-    const id = Timeline.parentTaskIdForItem(props.item);
-    if (id.startsWith('blk-')) return;
+    const id = Interaction._businessOrderIdForItem(props.item);
+    if (!id) return;
     const t = Store.tasks[id];
     if (!t) return;
 
@@ -5818,7 +5969,8 @@ export const Interaction = {
   _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
     for (const rawId of props.items) {
       const itemId = String(rawId);
-      const id = Timeline.parentTaskIdForItem(itemId);
+      const id = Interaction._businessOrderIdForItem(itemId);
+      if (!id) continue;
       const v = Timeline._items!.get(itemId) as TimelineVisItem | null;
       if (!v) continue;
       const t = Store.tasks[id];
@@ -6009,8 +6161,8 @@ export const Interaction = {
   _onTimeChange(props: VisTimeChangeProps): void {
     if (!props || !props.id || Timeline._suppressEvents) return;
     const dragItemId = String(props.id);
-    if (dragItemId.startsWith('blk-')) return;
-    const dragId = Timeline.parentTaskIdForItem(dragItemId);
+    const dragId = Interaction._businessOrderIdForItem(dragItemId);
+    if (!dragId) return;
 
     this._isDragging = true;
     this._startEdgeScroll();

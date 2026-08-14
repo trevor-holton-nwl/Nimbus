@@ -1258,4 +1258,8 @@ window.__NIMBUS_LOCALES.de = {
   'btn.setup_export_csv': 'CSV exportieren', 'btn.setup_delete_override': 'Überschreibung löschen', 'btn.setup_add_field': 'Feld hinzufügen', 'btn.setup_update_state': 'Zustand aktualisieren',
   'toast.setup_saved': 'Setup-Verwaltung gespeichert', 'toast.setup_copied': 'Setup-Zeilen kopiert',
   'ui.setup_import_csv': 'CSV importieren',
+  'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag',
+  'ui.setup_predecessor_state': 'Vorgängerzustand',
+  'ui.setup_required': 'Erforderliches Setup', 'ui.setup_effective': 'Effektives Setup', 'ui.setup_standard': 'Standard-Setup',
+  'ui.setup_source': 'Setup-Quelle', 'ui.setup_override': 'Vorgangsüberschreibung', 'ui.setup_missing': 'Setup-Details nicht verfügbar',
 };

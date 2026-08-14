@@ -1326,4 +1326,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.setup_saved':               'Setup administration saved',
   'toast.setup_copied':              'Setup rows copied',
   'ui.setup_import_csv':             'Import CSV',
+  'ui.setup_detail_title':           'Derived setup detail', 'ui.setup_predecessor': 'Predecessor order',
+  'ui.setup_predecessor_state':      'Predecessor state',
+  'ui.setup_required':               'Required setup', 'ui.setup_effective': 'Effective setup', 'ui.setup_standard': 'Standard setup',
+  'ui.setup_source':                 'Setup source', 'ui.setup_override': 'Occurrence override', 'ui.setup_missing': 'Setup detail unavailable',
 };

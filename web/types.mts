@@ -318,6 +318,10 @@ export interface ResolvedSetup {
   overrideId?: string;
 }
 
+/** Semantic timeline identity. Derived setup occurrences are presentation facts,
+ * never business orders or persisted schedule state. */
+export type TimelineItemKind = 'order' | 'order-segment' | 'setup' | 'blackout' | 'zone';
+
 /** Pure setup-resolution input; callers supply only the selected plant's snapshot. */
 export interface ResolveSetupInput {
   definition: SetupDefinition;

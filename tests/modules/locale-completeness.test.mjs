@@ -42,6 +42,9 @@ test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
     'ui.setup_import_csv',
     'btn.setup_export_csv', 'btn.setup_delete_override', 'ui.setup_state_source',
     'ui.setup_observed_at', 'ui.setup_override_audit',
+    'ui.setup_detail_title', 'ui.setup_predecessor', 'ui.setup_predecessor_state', 'ui.setup_required',
+    'ui.setup_effective', 'ui.setup_standard', 'ui.setup_source',
+    'ui.setup_override', 'ui.setup_missing',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED_SETUP) {

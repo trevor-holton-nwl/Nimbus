@@ -1252,4 +1252,8 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.setup_export_csv': 'Exporter CSV', 'btn.setup_delete_override': 'Supprimer le remplacement', 'btn.setup_add_field': 'Ajouter un champ', 'btn.setup_update_state': 'Mettre à jour l’état',
   'toast.setup_saved': 'Administration de réglage enregistrée', 'toast.setup_copied': 'Lignes de réglage copiées',
   'ui.setup_import_csv': 'Importer CSV',
+  'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur',
+  'ui.setup_predecessor_state': 'État prédécesseur',
+  'ui.setup_required': 'Réglage requis', 'ui.setup_effective': 'Réglage effectif', 'ui.setup_standard': 'Réglage standard',
+  'ui.setup_source': 'Source du réglage', 'ui.setup_override': 'Remplacement d’occurrence', 'ui.setup_missing': 'Détail du réglage indisponible',
 };

@@ -77,6 +77,111 @@ test('Timeline renders split schedules as multiple parent-mapped timeline items'
   assert.equal(items[1].end.getTime(), task.scheduleSegments[1].endDate.getTime());
 });
 
+test('Timeline derives exact setup bars before successor processing, including the first split segment', () => {
+  const successor = {
+    id: 'setup-successor', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 3,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T11:00:00'),
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-14T08:00:00'), endDate: new Date('2026-08-14T09:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-14T10:00:00'), endDate: new Date('2026-08-14T12:00:00') },
+    ],
+  };
+  const items = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L1', predecessorOrderId: 'setup-predecessor', successorOrderId: 'setup-successor',
+      start: new Date('2026-08-14T07:40:00'), end: new Date('2026-08-14T08:00:00'), requiredMinutes: 20, availableMinutes: 20 }],
+    diagnostics: [],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'setup');
+  assert.equal(items[0].start.getTime(), new Date('2026-08-14T07:40:00').getTime());
+  assert.equal(items[0].end.getTime(), successor.scheduleSegments[0].startDate.getTime());
+  assert.equal(items[0].editable, false);
+  assert.match(items[0].title, /20 min/);
+});
+
+test('Timeline omits zero setup but renders a leading-edge marker for missing setup detail', () => {
+  const successor = { id: 'missing-successor', PRODUCTION_LINE: 'SETUP-L2', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const zero = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L2', successorOrderId: 'missing-successor', start: new Date('2026-08-14T08:00:00'), end: new Date('2026-08-14T08:00:00'), requiredMinutes: 0, availableMinutes: 0 }], diagnostics: [],
+  });
+  assert.deepEqual(zero, []);
+  const missing = Timeline._setupItemsForObservation([successor], {
+    intervals: [], diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L2', successorOrderId: 'missing-successor', time: successor.start_date }],
+  });
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].kind, 'setup');
+  assert.match(missing[0].className, /setup-missing/);
+  assert.equal(missing[0].end.getTime(), successor.start_date.getTime());
+});
+
+test('Timeline preserves the full required setup duration when capacity conflicts', () => {
+  const successor = { id: 'conflict-successor', PRODUCTION_LINE: 'SETUP-L3', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const [item] = Timeline._setupItemsForObservation([successor], {
+    intervals: [{ line: 'SETUP-L3', successorOrderId: 'conflict-successor', start: new Date('2026-08-14T07:20:00'), end: successor.start_date,
+      requiredMinutes: 40, availableMinutes: 10 }], diagnostics: [],
+  });
+  assert.equal(item.end.getTime() - item.start.getTime(), 40 * 60 * 1000);
+  assert.match(item.className, /setup-conflict/);
+});
+
+test('setup timeline items never resolve to a business order across interaction guards', () => {
+  const setupItem = { id: 'setup:SETUP-L1:successor', kind: 'setup', group: 'SETUP-L1', start: new Date(), end: new Date(), editable: false };
+  const priorItems = Timeline._items;
+  try {
+    Timeline._items = { get: id => String(id) === setupItem.id ? setupItem : null };
+    assert.equal(Timeline.businessOrderIdForItem(setupItem.id), null);
+    assert.equal(Interaction._businessOrderIdForItem(setupItem.id), null);
+  } finally { Timeline._items = priorItems; }
+});
+
+test('setup items are ignored by click, double-click, drag, ghost, selection, focus, dependency, hover, marquee, and context dispatch', () => {
+  const setupId = 'setup:SETUP-L1:successor';
+  const setupItem = { id: setupId, kind: 'setup', group: 'SETUP-L1', start: new Date('2026-08-14T07:30:00'), end: new Date('2026-08-14T08:00:00'), editable: false };
+  const order = { id: 'guard-order', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const priorItems = Timeline._items;
+  const priorTl = Timeline._tl;
+  try {
+    Store.setTasks([order], 'unit-test');
+    Selection.clear();
+    Timeline._items = { get: id => String(id) === setupId ? setupItem : null };
+    Timeline._tl = { focus() { throw new Error('setup must not focus'); } };
+    Interaction._onClick({ what: 'item', item: setupId, event: {} });
+    Interaction._onDoubleClick({ what: 'item', item: setupId });
+    Interaction._onDataSetUpdate({ items: [setupId] });
+    Interaction._onTimeChange({ id: setupId, time: new Date() });
+    assert.deepEqual(Selection.ids(), []);
+    assert.equal(Interaction._ghostDragId, null);
+    assert.equal(Timeline.businessOrderIdForItem(setupId), null, 'shared semantic dispatch gates hover, marquee, context, focus, and dependency routes');
+  } finally {
+    Timeline._items = priorItems;
+    Timeline._tl = priorTl;
+    Store.setTasks([], 'unit-test');
+    Selection.clear();
+  }
+});
+
+test('Inspector exposes keyboard-equivalent setup detail on the successor, including override and missing states', () => {
+  const task = { id: 'detail-successor', PRODUCTION_LINE: 'SETUP-L4', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const detail = Inspector._setupDetailForTask(task, {
+    intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
+      start: new Date('2026-08-14T07:30:00'), end: task.start_date, requiredMinutes: 30, availableMinutes: 15,
+      predecessorState: 'COLOR=RED', standardMinutes: 45, source: 'occurrence', overrideStatus: 'active' }],
+    diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L4', successorOrderId: 'detail-successor', message: 'Matrix row missing.' }],
+  });
+  assert.equal(detail.predecessorOrderId, 'detail-predecessor');
+  assert.equal(detail.predecessorState, 'COLOR=RED');
+  assert.equal(detail.requiredMinutes, 30);
+  assert.equal(detail.effectiveMinutes, 30);
+  assert.equal(detail.standardMinutes, 45);
+  assert.equal(detail.source, 'occurrence');
+  assert.equal(detail.overrideStatus, 'active');
+  assert.equal(detail.missingDetail, 'Matrix row missing.');
+});
+
 test('TimelineNav exposes init/render', () => {
   assert.equal(typeof TimelineNav.init, 'function');
   assert.equal(typeof TimelineNav.render, 'function');

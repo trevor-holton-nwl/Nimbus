@@ -1255,4 +1255,8 @@ window.__NIMBUS_LOCALES.es = {
   'btn.setup_export_csv': 'Exportar CSV', 'btn.setup_delete_override': 'Eliminar anulación', 'btn.setup_add_field': 'Añadir campo', 'btn.setup_update_state': 'Actualizar estado',
   'toast.setup_saved': 'Administración de preparación guardada', 'toast.setup_copied': 'Filas de preparación copiadas',
   'ui.setup_import_csv': 'Importar CSV',
+  'ui.setup_detail_title': 'Detalle de preparación derivado', 'ui.setup_predecessor': 'Orden predecesora',
+  'ui.setup_predecessor_state': 'Estado predecesor',
+  'ui.setup_required': 'Preparación requerida', 'ui.setup_effective': 'Preparación efectiva', 'ui.setup_standard': 'Preparación estándar',
+  'ui.setup_source': 'Fuente de preparación', 'ui.setup_override': 'Anulación de ocurrencia', 'ui.setup_missing': 'Detalle de preparación no disponible',
 };
