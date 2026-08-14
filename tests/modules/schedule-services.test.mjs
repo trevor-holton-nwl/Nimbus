@@ -382,6 +382,30 @@ test('deriveSetupObservation measures setup availability against a preceding bla
   assert.equal(observation.intervals[0].availableMinutes, 0);
 });
 
+test('deriveSetupObservation intersects line and plant hours when measuring setup availability', () => {
+  // This fails if a wider line calendar is allowed to admit setup after the
+  // plant-level capacity window has closed.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const lineHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+  const plantHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 16]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-INTERSECT',
+    definition: { plant: 'P-INTERSECT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'L-INTERSECT', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }], overrides: [],
+  }, [{
+    id: 'after-plant-close', PLANT: 'P-INTERSECT', PRODUCTION_LINE: 'L-INTERSECT', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T17:00:00'), end_date: new Date('2026-08-03T18:00:00'),
+  }], undefined, {
+    calendars: { 'L-INTERSECT': { workHours: lineHours } }, plants: { 'P-INTERSECT': { workHours: plantHours } },
+    lineSettings: { 'L-INTERSECT': { plant: 'P-INTERSECT' } }, masterData: { lines: [{ production_line: 'L-INTERSECT', plant: 'P-INTERSECT' }] },
+    blocks: [], plantBlocks: [],
+  });
+
+  assert.equal(observation.intervals[0].availableMinutes, 0);
+});
+
 test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([

@@ -255,10 +255,19 @@ function setupAvailabilityMinutes(
   const mappedPlant = context.lineSettings[line]?.plant
     ?? context.masterData?.lines?.find(row => row.production_line === line)?.plant
     ?? plant;
-  const workHours = context.calendars[line]?.workHours ?? context.plants[mappedPlant]?.workHours;
   const probe = new Date(end.getTime() - 1);
-  const window = workHours ? globalThis.NimbusComputeCore!._dayWindow(workHours, probe) : null;
-  if (!window || end > window[1] || end <= window[0]) return 0;
+  const lineHours = context.calendars[line]?.workHours;
+  const lineWindow = lineHours ? globalThis.NimbusComputeCore!._dayWindow(lineHours, probe) : null;
+  if (!lineWindow) return 0;
+  const plantHours = context.plants[mappedPlant]?.workHours;
+  const plantWindow = plantHours ? globalThis.NimbusComputeCore!._dayWindow(plantHours, probe) : null;
+  if (!plantWindow) return 0;
+  const window = [
+    new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
+    new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
+  ] as const;
+  if (window[0] >= window[1]) return 0;
+  if (end > window[1] || end <= window[0]) return 0;
   let lower = window[0].getTime();
   const applyBlock = (block: NimbusBlock | NimbusPlantBlock): boolean => {
     const start = globalThis.NimbusComputeCore!.parseDate(block.start);
