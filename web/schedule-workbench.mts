@@ -652,6 +652,7 @@ export const Timeline = {
         id: `setup:${encodeURIComponent(interval.line)}:${encodeURIComponent(interval.predecessorOrderId ?? 'initial')}:${encodeURIComponent(successorId)}`,
         kind: 'setup', group: interval.line, start, end, editable: false,
         className: `setup-item${conflict ? ' setup-conflict' : ''}`,
+        style: '',
         content: `<span aria-hidden="true">${required}m</span>`,
         title: `${Util.t('ui.setup_detail_title')}: ${required} min`, setup: detail,
       });
@@ -670,7 +671,7 @@ export const Timeline = {
       items.push({
         id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
         kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - Config.MS_MIN), end, editable: false,
-        className: 'setup-item setup-missing', content: '<span aria-hidden="true">!</span>',
+        className: 'setup-item setup-missing', style: '', content: '<span aria-hidden="true">!</span>',
         title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
       });
     }

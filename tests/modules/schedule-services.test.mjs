@@ -174,6 +174,46 @@ test('Engine.autoReflow reserves a covered incoming setup before moving a downst
   }
 });
 
+test('Engine.autoReflow resolves equal-start successors by id before reserving setup', () => {
+  // This fails if equal starts retain object insertion order: z-first would
+  // put Z at 09:30 instead of preserving A's valid 09:15 slot first.
+  const line = 'SETUP-TIE-LINE';
+  const plant = 'SETUP-TIE-PLANT';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [
+      { line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'GREEN' }], setup_min: 10 },
+      { line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'GREEN' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 60 },
+      { line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 },
+    ],
+    line_rows: [], line_states: [], overrides: [],
+  }, 'unit-test');
+  // Deliberately opposite to the expected id tie-break order.
+  Store.setTasks([
+    { id: 'tie-red', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'z-successor', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:15:00'), end_date: new Date('2026-08-17T10:15:00') },
+    { id: 'a-successor', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'GREEN', start_date: new Date('2026-08-17T09:15:00'), end_date: new Date('2026-08-17T10:15:00') },
+  ], 'unit-test');
+  try {
+    Engine.autoReflow('tie-red');
+    assert.equal(Store.tasks['a-successor'].start_date.getTime(), new Date('2026-08-17T09:15:00').getTime());
+    assert.equal(Store.tasks['z-successor'].start_date.getTime(), new Date('2026-08-17T11:15:00').getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Engine.evaluateSchedule snapshots the live read model without publishing a candidate', () => {
   Store.setTasks([
     { id: 'detached-long', PRODUCTION_LINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '5', start_date: null, end_date: null },

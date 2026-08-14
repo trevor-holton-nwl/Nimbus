@@ -3044,7 +3044,7 @@ export const Engine = {
       .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
                 && t.start_date && t.end_date
                 && t.id !== changedId)
-      .sort((a,b) => Number(a.start_date) - Number(b.start_date));
+      .sort((a, b) => Number(a.start_date) - Number(b.start_date) || String(a.id).localeCompare(String(b.id)));
 
     // One deterministic forward walk: the direct drop stays untouched, then
     // covered setup is reserved before each permitted downstream peer.

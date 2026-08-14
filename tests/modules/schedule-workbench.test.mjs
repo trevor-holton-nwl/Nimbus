@@ -95,6 +95,55 @@ test('Timeline.rebuildSetupForLines batches setup additions, updates, and remova
   }
 });
 
+test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancelled drag', () => {
+  // This fails if a normal DataSet update omits style: vis-data retains the
+  // drag opacity, leaving a valid setup bar dimmed after cancellation.
+  const line = 'SETUP-CANCEL-LINE';
+  const plant = 'SETUP-CANCEL-PLANT';
+  const setupId = 'setup:SETUP-CANCEL-LINE:cancel-red:cancel-blue';
+  const priorItems = Timeline._items;
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorSetup = Store.setupSnapshot;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const records = new Map([[setupId, {
+    id: setupId, kind: 'setup', group: line,
+    start: new Date('2026-08-17T09:00:00'), end: new Date('2026-08-17T09:30:00'),
+    className: 'setup-item setup-drag-dim', style: 'opacity:0.18;',
+  }]]);
+  Timeline._items = {
+    getIds: () => [...records.keys()], get: id => records.get(String(id)),
+    add(items) { for (const item of items) records.set(item.id, item); },
+    update(items) { for (const item of items) records.set(item.id, { ...records.get(item.id), ...item }); },
+    remove(ids) { for (const id of ids) records.delete(String(id)); },
+  };
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+    line_rows: [], line_states: [], overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'cancel-red', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'cancel-blue', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') },
+  ], 'unit-test');
+  Timeline._dragSetupLines.add(line);
+  try {
+    Timeline.finishSetupDrag();
+    assert.equal(records.get(setupId).style, '', 'the retained item explicitly clears drag style');
+    assert.doesNotMatch(records.get(setupId).className, /setup-drag-dim/);
+  } finally {
+    Timeline._dragSetupLines.clear();
+    Timeline._items = priorItems;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Timeline renders split schedules as multiple parent-mapped timeline items', () => {
   const task = {
     id: 'timeline-split', PRODUCTION_LINE: 'L-SPLIT', RUN_TIME: 14,
