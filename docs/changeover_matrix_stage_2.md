@@ -263,6 +263,11 @@ fail-closed until real evidence is recorded:
 - `ruff check .` passes with no findings. `npm run lint` passes with zero
   errors (31 inherited warnings). `npm test` remains at 312 passing / 1
   inherited CQ-1 snapshot failure.
+- With the project root virtual environment and an explicitly local-only
+  `PG_HOST=127.0.0.1` override (without `NIMBUS_TEST_DB=1`), the focused setup
+  Python contracts pass 57/57 and the complete non-Postgres suite passes
+  201/201 (70 Postgres tests deselected). This is unit/contract verification,
+  not a schema round-trip against a local database.
 
 The following release blockers are still intentionally unresolved because this
 workspace has neither a safe local PostgreSQL target nor a controllable browser
