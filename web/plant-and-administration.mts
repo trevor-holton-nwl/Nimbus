@@ -138,27 +138,27 @@ export const SetupAdmin = (() => {
   }
 
   function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }): { active: boolean; reason: string } {
-    if (!definition) return { active: false, reason: 'Create an ordered setup signature before setup-aware optimization can be reviewed.' };
+    if (!definition) return { active: false, reason: Util.t('ui.setup_status_no_definition') };
     if (checks.matrixVersion !== definition.signature_version) {
-      return { active: false, reason: 'Activation is disabled: a version-matched matrix is required after a definition change.' };
+      return { active: false, reason: Util.t('ui.setup_status_version_mismatch') };
     }
-    if (checks.coveragePass === undefined) return { active: false, reason: 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).' };
-    if (!checks.coveragePass) return { active: false, reason: 'Activation is disabled: the reachable coverage pass is required.' };
+    if (checks.coveragePass === undefined) return { active: false, reason: Util.t('ui.setup_status_coverage_pending') };
+    if (!checks.coveragePass) return { active: false, reason: Util.t('ui.setup_status_coverage_fail') };
     return definition.active
-      ? { active: true, reason: 'Active for approved setup-aware optimization.' }
-      : { active: false, reason: 'Ready for activation review; Stage 0 remains observation-only.' };
+      ? { active: true, reason: Util.t('ui.setup_status_active_reason') }
+      : { active: false, reason: Util.t('ui.setup_status_ready_review') };
   }
 
   function policyActivationStatus(policy: { dueDateFirstEnabled?: boolean; minChangeoverEnabled?: boolean; throughputEnabled?: boolean },
                                   gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean; browserUatVerified?: boolean; representativeReplayVerified?: boolean; nullPredecessorVerified?: boolean; ownerApproved?: boolean; ownerEmail?: string | null; approvedAt?: string | null; notes?: string }): { active: boolean; reason: string } {
-    if (!gates.stage1Validated) return { active: false, reason: 'Activation is blocked: Stage 1 validation is not recorded.' };
-    if (!gates.localDbVerified) return { active: false, reason: 'Activation is blocked: safe local database verification is not recorded.' };
-    if (!gates.performanceVerified) return { active: false, reason: 'Activation is blocked: representative performance validation is not recorded.' };
-    if (gates.browserUatVerified === false) return { active: false, reason: 'Activation is blocked: browser UAT is not recorded.' };
-    if (gates.representativeReplayVerified === false) return { active: false, reason: 'Activation is blocked: representative replay is not recorded.' };
-    if (gates.nullPredecessorVerified === false) return { active: false, reason: 'Activation is blocked: null-predecessor persistence is not recorded.' };
-    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: 'Activation is blocked: scheduling-owner approval is not recorded.' };
-    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: 'Policy activation evidence is complete.' };
+    if (!gates.stage1Validated) return { active: false, reason: Util.t('ui.setup_policy_status_stage1') };
+    if (!gates.localDbVerified) return { active: false, reason: Util.t('ui.setup_policy_status_local_db') };
+    if (!gates.performanceVerified) return { active: false, reason: Util.t('ui.setup_policy_status_performance') };
+    if (gates.browserUatVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_browser_uat') };
+    if (gates.representativeReplayVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_replay') };
+    if (gates.nullPredecessorVerified === false) return { active: false, reason: Util.t('ui.setup_policy_status_null_predecessor') };
+    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: Util.t('ui.setup_policy_status_owner') };
+    return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: Util.t('ui.setup_policy_status_complete') };
   }
 
   function releaseEvidenceReady(evidence: SetupReleaseEvidence | null | undefined): boolean {
@@ -382,11 +382,18 @@ export const SetupAdmin = (() => {
       });
       return;
     }
-    Promise.all([loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant), Persistence.loadSetupPolicy(plant), Persistence.loadSetupReleaseEvidence(plant)]).then(() => {
+    // Await every load once and paint a single time — each of these is a
+    // cheap no-op when already cached, so this doesn't add a real delay on
+    // the common case, but it stops the panel from repainting (and blowing
+    // away the combobox + every listener) up to three times per open.
+    const loaders: Array<Promise<unknown>> = [
+      loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant),
+      Persistence.loadSetupPolicy(plant), Persistence.loadSetupReleaseEvidence(plant),
+    ];
+    if (_lineScope) loaders.push(loadCompatibility(plant, _lineScope));
+    Promise.all(loaders).then(() => {
       if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
     });
-    if (_lineScope) loadCompatibility(plant, _lineScope).then(() => { if (Store.selectedPlant === plant) renderSnapshot(target, snapshot); });
-    renderSnapshot(target, snapshot);
   }
 
   function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
@@ -414,7 +421,7 @@ export const SetupAdmin = (() => {
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
-    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>Review missing setups</strong><span>${review.pairs.length} relevant transition${review.pairs.length === 1 ? '' : 's'} from the preview${permissions.matrixWrite ? ' — editor scoped to the affected line where possible.' : ' — copy or export only.'}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.copy'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_csv'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_matrix_rows'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
+    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>${esc(Util.t('ui.setup_review_missing_title'))}</strong><span>${esc(Util.t('ui.setup_review_missing_count', { count: review.pairs.length, plural: review.pairs.length === 1 ? '' : 's' }))}${esc(permissions.matrixWrite ? Util.t('ui.setup_review_scope_writable') : Util.t('ui.setup_review_scope_readonly'))}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.copy'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_csv'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_review_scope_label'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
         <header class="setup-admin-head">
@@ -424,7 +431,7 @@ export const SetupAdmin = (() => {
         </header>
         <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
         ${policyHtml}
-        ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>Shadow coverage</strong><span>Observed: ${coverage.observed?.total_pairs ?? 0} transitions, ${coverage.observed?.missing_pairs ?? 0} missing</span><span>Reachable: ${coverage.reachable?.total_pairs ?? 0} pairs, ${coverage.reachable?.missing_pairs ?? 0} missing</span></div>` : ''}
+        ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>${esc(Util.t('ui.setup_shadow_coverage_title'))}</strong><span>${esc(Util.t('ui.setup_coverage_observed', { transitions: coverage.observed?.total_pairs ?? 0, missing: coverage.observed?.missing_pairs ?? 0 }))}</span><span>${esc(Util.t('ui.setup_coverage_reachable', { pairs: coverage.reachable?.total_pairs ?? 0, missing: coverage.reachable?.missing_pairs ?? 0 }))}</span></div>` : ''}
         ${reviewHtml}
         <div class="setup-toolbar">
           <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
@@ -465,8 +472,13 @@ export const SetupAdmin = (() => {
       ['representativeReplayVerified', 'ui.setup_evidence_replay'], ['nullPredecessorVerified', 'ui.setup_evidence_null_predecessor'],
       ['ownerApproved', 'ui.setup_evidence_owner'],
     ];
-    const evidencePanel = evidence ? `<div class="setup-evidence panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_evidence_title'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-evidence>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div><div class="panel-body"><div class="setup-evidence-grid">${evidenceFields.map(([key, label]) => `<label class="setup-check"><input type="checkbox" data-setup-evidence="${key}" ${evidence[key] ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t(label))}</label>`).join('')}</div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_evidence_owner_email'))}<input class="input" data-setup-evidence-owner-email value="${esc(evidence.ownerEmail || '')}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_evidence_approved_at'))}<input class="input" data-setup-evidence-approved-at value="${esc(evidence.approvedAt || '')}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><label class="setup-evidence-notes">${esc(Util.t('ui.setup_evidence_notes'))}<textarea class="input" data-setup-evidence-notes ${permissions.definitionWrite ? '' : 'disabled'}>${esc(evidence.notes)}</textarea></label><div class="setup-status ${evidenceReady ? 'ok' : 'warn'}"><strong>${esc(evidenceReady ? Util.t('ui.setup_evidence_ready') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div></div></div>` : '';
-    return `${evidencePanel}<div class="setup-policy panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4>${controls}</div><div class="panel-body"><div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${esc(status.active ? Util.t('ui.setup_activation_active') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_policy_min_savings'))}<input class="input" inputmode="numeric" data-setup-policy-min-savings value="${policy.throughputMinSavingsMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_policy_max_slip'))}<input class="input" inputmode="numeric" data-setup-policy-max-slip value="${policy.throughputMaxSlipMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><div class="setup-policy-modes"><label class="setup-check"><input type="checkbox" data-setup-policy-mode="dueDateFirstEnabled" ${policy.dueDateFirstEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_due_date_first'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="minChangeoverEnabled" ${policy.minChangeoverEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_min_changeover'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="throughputEnabled" ${policy.throughputEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_throughput'))}</label></div><p class="setup-help">${esc(evidenceReady ? Util.t('ui.setup_policy_switches_unlocked') : Util.t('ui.setup_policy_switches_locked'))}</p></div></div>`;
+    // The evidence checklist is an engineering release gate (Stage 1/local-DB/
+    // browser-UAT/owner-approval), not something a plant scheduler should see
+    // or fill in — visible to admins only. Everyone else gets the plain
+    // enabled/not-enabled status line below.
+    const evidencePanel = (evidence && permissions.definitionWrite) ? `<div class="setup-evidence panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_evidence_title'))}</h4><button class="btn btn-ghost sm" data-setup-save-evidence>${esc(Util.t('btn.save'))}</button></div><div class="panel-body"><div class="setup-evidence-grid">${evidenceFields.map(([key, label]) => `<label class="setup-check"><input type="checkbox" data-setup-evidence="${key}" ${evidence[key] ? 'checked' : ''}>${esc(Util.t(label))}</label>`).join('')}</div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_evidence_owner_email'))}<input class="input" data-setup-evidence-owner-email value="${esc(evidence.ownerEmail || '')}"></label><label>${esc(Util.t('ui.setup_evidence_approved_at'))}<input class="input" data-setup-evidence-approved-at value="${esc(evidence.approvedAt || '')}"></label></div><label class="setup-evidence-notes">${esc(Util.t('ui.setup_evidence_notes'))}<textarea class="input" data-setup-evidence-notes>${esc(evidence.notes)}</textarea></label><div class="setup-status ${evidenceReady ? 'ok' : 'warn'}"><strong>${esc(evidenceReady ? Util.t('ui.setup_evidence_ready') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div></div></div>` : '';
+    const policyReason = status.active ? Util.t('ui.setup_policy_active_reason') : Util.t('ui.setup_policy_not_enabled');
+    return `${evidencePanel}<div class="setup-policy panel" aria-live="polite"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4>${controls}</div><div class="panel-body"><div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${esc(status.active ? Util.t('ui.setup_activation_active') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(policyReason)}</span></div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_policy_min_savings'))}<input class="input" inputmode="numeric" data-setup-policy-min-savings value="${policy.throughputMinSavingsMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_policy_max_slip'))}<input class="input" inputmode="numeric" data-setup-policy-max-slip value="${policy.throughputMaxSlipMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><div class="setup-policy-modes"><label class="setup-check"><input type="checkbox" data-setup-policy-mode="dueDateFirstEnabled" ${policy.dueDateFirstEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_due_date_first'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="minChangeoverEnabled" ${policy.minChangeoverEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_min_changeover'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="throughputEnabled" ${policy.throughputEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_throughput'))}</label></div><p class="setup-help">${esc(evidenceReady ? Util.t('ui.setup_policy_switches_unlocked') : Util.t('ui.setup_policy_switches_locked'))}</p></div></div>`;
   }
 
   function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {

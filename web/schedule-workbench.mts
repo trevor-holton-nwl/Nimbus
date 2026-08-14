@@ -670,8 +670,9 @@ export const Timeline = {
       const detail = detailFor(diagnostic, diagnostic.message || Util.t('ui.setup_missing'));
       items.push({
         id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
-        kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - Config.MS_MIN), end, editable: false,
-        className: 'setup-item setup-missing', style: '', content: '<span aria-hidden="true">!</span>',
+        kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - 10 * Config.MS_MIN), end, editable: false,
+        className: 'setup-item setup-missing', style: '',
+        content: `<span role="img" aria-label="${Util.t('ui.setup_missing')}">!</span>`,
         title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
       });
     }
@@ -7738,13 +7739,13 @@ export const OptimizerPreview = {
       ];
       const reasons = explanation.reasons.length
         ? `<ul>${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
-        : '<span>No candidate-specific reasons were reported.</span>';
+        : `<span>${esc(Util.t('ui.setup_reasons_none'))}</span>`;
       const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
       const missing = explanation.missingPairs.length
-        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>Copy</button> <button class="btn btn-ghost sm" data-opt-export-missing>Export CSV</button>${canReview ? ' <button class="btn btn-ghost sm" data-opt-review-missing>Review missing setups</button>' : ''}</div>`
-        : '<span>No missing setup pairs in this candidate.</span>';
-      const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>Preview is stale.</strong> ${esc(OptimizerPreview._staleReason || 'Setup data changed')}. Apply is disabled; run optimization again to refresh this comparison.</div>` : '';
-      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">Candidate explanation</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>Search:</strong> ${esc(explanation.search.method)} · ${explanation.search.candidateCount} candidates · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? ' · limit reached' : ''}</p><p><strong>Constraints:</strong> ${esc(explanation.constraints.join(', ') || 'none reported')}</p><p><strong>Unchanged lines:</strong> ${esc(explanation.unchangedLines.join(', ') || 'none')}</p><div><strong>Accepted/rejected reasons</strong>${reasons}</div><div><strong>Missing setup pairs</strong>${missing}</div></section>`;
+        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.copy'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_csv'))}</button>${canReview ? ` <button class="btn btn-ghost sm" data-opt-review-missing>${esc(Util.t('ui.setup_review_missing_title'))}</button>` : ''}</div>`
+        : `<span>${esc(Util.t('ui.setup_missing_pairs_none'))}</span>`;
+      const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>${esc(Util.t('ui.setup_preview_stale_title'))}</strong> ${esc(OptimizerPreview._staleReason || Util.t('ui.setup_preview_stale_default_reason'))}. ${esc(Util.t('ui.setup_preview_stale_note'))}</div>` : '';
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${esc(Util.t('ui.setup_candidate_explanation_title'))}</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>${esc(Util.t('ui.setup_search_label'))}</strong> ${esc(explanation.search.method)} · ${esc(Util.t('ui.setup_search_candidates', { count: explanation.search.candidateCount, plural: explanation.search.candidateCount === 1 ? '' : 's' }))} · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? esc(Util.t('ui.setup_search_limit_reached')) : ''}</p><p><strong>${esc(Util.t('ui.setup_constraints_label'))}</strong> ${esc(explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none'))}</p><p><strong>${esc(Util.t('ui.setup_unchanged_lines_label'))}</strong> ${esc(explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none'))}</p><div><strong>${esc(Util.t('ui.setup_reasons_title'))}</strong>${reasons}</div><div><strong>${esc(Util.t('ui.setup_missing_pairs_title'))}</strong>${missing}</div></section>`;
     })();
 
     // Per-card markup
