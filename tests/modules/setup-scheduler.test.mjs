@@ -208,6 +208,48 @@ test('Throughput rejects policy candidates that do not meet the explicit savings
   assert.ok(result.explanation.some(reason => reason.code === 'throughput-rejected-threshold'));
 });
 
+test('Throughput applies exact savings and per-order slip boundaries without mutating the snapshot', () => {
+  // Regression target: a fleet-level average or an off-by-one comparison can
+  // approve a 59-minute saving or a 1441-minute delay hidden beside a safe ID.
+  const original = setupSnapshot([
+    scheduledTask('slip-1439', 1, 'RED', '2026-08-05T12:00:00', '2026-08-03T08:00:00', '2026-08-03T09:00:00'),
+    scheduledTask('slip-1440', 1, 'BLUE', '2026-08-05T12:00:00', '2026-08-03T09:00:00', '2026-08-03T10:00:00'),
+    scheduledTask('slip-1441', 1, 'GREEN', '2026-08-05T12:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00'),
+  ]);
+  const before = structuredClone(original);
+  const candidate = (setupMinutes, delays = []) => ({
+    patches: delays.map(([id, minutes]) => ({
+      id, changes: { end_date: new Date(original.tasks.find(task => task.id === id).end_date.getTime() + minutes * 60 * 1000) },
+    })),
+    score: [0, 0, 0, 0, 0, setupMinutes], explanation: [], missingEdges: [], unchangedLines: [],
+    diagnostics: { candidateCount: 1, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 0, limitReached: false, events: [] },
+  });
+  const baseline = candidate(100);
+
+  const below = SetupScheduler.selectThroughputCandidate(original, baseline, candidate(41), {
+    throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440,
+  });
+  assert.ok(below.explanation.some(reason => reason.code === 'throughput-rejected-threshold'));
+
+  const exactSavings = SetupScheduler.selectThroughputCandidate(original, baseline, candidate(40), {
+    throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440,
+  });
+  assert.ok(exactSavings.explanation.some(reason => reason.code === 'throughput-accepted'));
+
+  const exactCap = SetupScheduler.selectThroughputCandidate(original, baseline, candidate(40, [
+    ['slip-1439', 1439], ['slip-1440', 1440],
+  ]), { throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440 });
+  assert.ok(exactCap.explanation.some(reason => reason.code === 'throughput-accepted'));
+
+  const overCap = SetupScheduler.selectThroughputCandidate(original, baseline, candidate(40, [
+    ['slip-1439', 1439], ['slip-1440', 1440], ['slip-1441', 1441],
+  ]), { throughputMinSavingsMin: 60, throughputMaxSlipMin: 1440 });
+  const rejection = overCap.explanation.find(reason => reason.code === 'throughput-rejected-threshold');
+  assert.match(rejection.message, /slip-1441 \(1441 min\)/);
+  assert.doesNotMatch(rejection.message, /slip-1439|slip-1440/);
+  assert.deepEqual(original, before, 'policy comparison must not mutate the snapshot before Apply');
+});
+
 test('placeWithSetup skips shift tails that fit setup alone or too little production', () => {
   // This fails if setup is placed by itself at shift end, shortened, or paired
   // with less than the fixed 30-minute productive minimum.

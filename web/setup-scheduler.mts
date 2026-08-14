@@ -3339,23 +3339,15 @@ export function evaluateMinChangeover(
   );
 }
 
-/** Throughput-first may trade schedule delay for setup savings, but only when
- * every delayed order is individually under the configured cap. This compares
- * the same detached candidate path against the Due-date-first baseline; it
- * does not create a second placement or mutation mechanism. */
-export function evaluateThroughput(
+/** Select between two already-detached candidates. Keeping the guard here
+ * makes every per-order delay visible to a single, testable fail-closed
+ * comparison; it neither constructs nor applies a schedule patch. */
+export function selectThroughputCandidate(
   snapshot: Readonly<ScheduleSnapshot>,
-  bounds: Readonly<DueDateFirstBounds>,
+  baseline: Readonly<CandidateResult>,
+  candidate: Readonly<CandidateResult>,
   thresholds: Readonly<SetupPolicyThresholds>,
 ): CandidateResult {
-  if (!Number.isInteger(thresholds.throughputMinSavingsMin) || thresholds.throughputMinSavingsMin < 0) {
-    throw new TypeError('Throughput policy requires nonnegative setup-savings minutes.');
-  }
-  if (!Number.isInteger(thresholds.throughputMaxSlipMin) || thresholds.throughputMaxSlipMin <= 0) {
-    throw new TypeError('Throughput policy requires a positive per-order slip cap.');
-  }
-  const baseline = evaluateDueDateFirst(snapshot, bounds);
-  const candidate = evaluateDueDateFirst(snapshot, bounds, 'throughput');
   const before = lateOrderFacts(snapshot.tasks);
   const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
   const after = lateOrderFacts(afterTasks);
@@ -3376,6 +3368,29 @@ export function evaluateThroughput(
     candidate,
     'throughput-accepted',
     `Accepted ${savings} setup minutes saved; every order slips no more than ${maxSlip} minutes.`,
+  );
+}
+
+/** Throughput-first may trade schedule delay for setup savings, but only when
+ * every delayed order is individually under the configured cap. This compares
+ * the same detached candidate path against the Due-date-first baseline; it
+ * does not create a second placement or mutation mechanism. */
+export function evaluateThroughput(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  thresholds: Readonly<SetupPolicyThresholds>,
+): CandidateResult {
+  if (!Number.isInteger(thresholds.throughputMinSavingsMin) || thresholds.throughputMinSavingsMin < 0) {
+    throw new TypeError('Throughput policy requires nonnegative setup-savings minutes.');
+  }
+  if (!Number.isInteger(thresholds.throughputMaxSlipMin) || thresholds.throughputMaxSlipMin <= 0) {
+    throw new TypeError('Throughput policy requires a positive per-order slip cap.');
+  }
+  return selectThroughputCandidate(
+    snapshot,
+    evaluateDueDateFirst(snapshot, bounds),
+    evaluateDueDateFirst(snapshot, bounds, 'throughput'),
+    thresholds,
   );
 }
 
