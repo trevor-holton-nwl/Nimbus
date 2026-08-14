@@ -43,7 +43,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, SetupPolicyConfig, SetupReleaseEvidence, LineSetupState, SetupStateKey } from './types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, SetupPolicyConfig, SetupReleaseEvidence, LineSetupState, SetupStateKey, PriorityRankMaps } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -106,6 +106,19 @@ type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null
 type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
 type SetupReviewNavigation = { selectPlant: boolean; openMasterData: boolean; masterSub: 'plant'; plantTab: 'settings'; renderAfterNavigation: boolean };
 
+/** One cell of the from-state x to-state grid's header axis. `sig` is an
+ *  order-independent signature (`fieldKey=value` parts, sorted) so it matches
+ *  a stored row's `from_key`/`to_key` regardless of the property/array order
+ *  the server happened to return — safer than comparing `JSON.stringify`
+ *  output directly, which is order-sensitive. */
+type SetupGridState = { key: SetupStateKey; sig: string; parts: string[] };
+/** One pending, unsaved edit to a grid cell — `setup_min: null` means "clear
+ *  this cell" (delete the row if one exists). `line` is the scope the edit
+ *  was staged under (captured at edit time, not read from current state at
+ *  save time — a mid-edit scope switch must not silently retag it). */
+type SetupGridEdit = { row: SetupGridState; col: SetupGridState; setup_min: number | null; line: string };
+type SetupGridModel = { fields: string[]; rowStates: SetupGridState[]; colStates: SetupGridState[]; cellLookup: Map<string, Map<string, EffectiveSetupRow>> };
+
 /**
  * Plant-scoped administration for Stage 0 setup truth. It deliberately does
  * not start the optimizer or alter task placement: this surface is a
@@ -121,6 +134,16 @@ export const SetupAdmin = (() => {
   let _lineScope = '';
   let _missingReview: { plant: string; pairs: MissingSetupReviewPair[] } | null = null;
   let _lastTarget: HTMLElement | null = null;
+  // Grid state (Setup Standard's from-state x to-state editor). Rebuilt every
+  // renderSnapshot() call, same full-repaint model as the rest of this module.
+  let _gridModel: SetupGridModel | null = null;
+  let _gridFilter = '';
+  let _gridDirty: Map<string, SetupGridEdit> = new Map(); // key: `${row.sig} ${col.sig}`
+  let _gridCellGrid: Array<Array<HTMLTableCellElement | null>> = []; // [rowIdx][colIdx] -> <td>, built per paint
+  let _gridSelRange: { r0: number; c0: number; r1: number; c1: number } | null = null;
+  let _gridDragging = false;
+  let _gridDragAnchor: { row: number; col: number } | null = null;
+  let _gridSelTds: Set<HTMLTableCellElement> = new Set();
 
   const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
@@ -234,6 +257,137 @@ export const SetupAdmin = (() => {
 
   function deleteRequest(row: SetupMatrixRow): { line: string; signature_version: number; rows: SetupMatrixRow[] } {
     return { line: row.line, signature_version: row.signature_version, rows: [row] };
+  }
+
+  // ── Setup Standard grid: from-state x to-state editor ─────────────────────
+  // Replaces the old flat from/to edge-list table. Header axes are the
+  // cross-product of each active signature field's known priority-list
+  // values (Store.priorityRankMaps) — not bounded to states that already have
+  // a matrix row — so a value that exists in a priority list but has never
+  // been scheduled yet already has a header and an editable cell. See
+  // docs/setup_matrix_ui_redesign.md §3.2 Group 1.
+
+  /** Order-independent signature for a state key, so a row's stored
+   *  `from_key`/`to_key` matches a candidate cross-product state regardless
+   *  of property/array order — safer than comparing JSON.stringify output. */
+  function stateSig(key: SetupStateKey): string {
+    return key.map(part => `${part.fieldKey}=${part.value}`).slice().sort().join('|');
+  }
+
+  function gridEditKey(row: SetupGridState, col: SetupGridState): string {
+    return `${row.sig} ${col.sig}`;
+  }
+
+  /** Union of every value with a rank in the plant-default map or (if a line
+   *  is scoped) that line's override map — a state is definable if it has a
+   *  rank anywhere, not only in whichever map is currently in view. */
+  function fieldValueSet(rankMaps: PriorityRankMaps, fieldKey: string, lineScope: string): string[] {
+    const plantMap = rankMaps['']?.[fieldKey] || {};
+    const lineMap = lineScope ? (rankMaps[lineScope]?.[fieldKey] || {}) : {};
+    return [...new Set([...Object.keys(plantMap), ...Object.keys(lineMap)])]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  function cartesianStates(fields: ReadonlyArray<string>, valuesByField: Record<string, string[]>): SetupGridState[] {
+    let acc: Array<Array<{ fieldKey: string; value: string }>> = [[]];
+    for (const field of fields) {
+      const values = valuesByField[field] || [];
+      const next: Array<Array<{ fieldKey: string; value: string }>> = [];
+      for (const partial of acc) for (const value of values) next.push([...partial, { fieldKey: field, value }]);
+      acc = next;
+    }
+    return acc.map(key => ({ key, sig: stateSig(key), parts: key.map(part => part.value) }));
+  }
+
+  function buildCellLookup(rows: ReadonlyArray<EffectiveSetupRow>): Map<string, Map<string, EffectiveSetupRow>> {
+    const lookup = new Map<string, Map<string, EffectiveSetupRow>>();
+    rows.forEach(row => {
+      const fromSig = stateSig(row.from_key), toSig = stateSig(row.to_key);
+      if (!lookup.has(fromSig)) lookup.set(fromSig, new Map());
+      lookup.get(fromSig)!.set(toSig, row);
+    });
+    return lookup;
+  }
+
+  function buildGridModel(fields: ReadonlyArray<string>, valuesByField: Record<string, string[]>, rows: ReadonlyArray<EffectiveSetupRow>): SetupGridModel {
+    const states = cartesianStates(fields, valuesByField);
+    return { fields: [...fields], rowStates: states, colStates: states, cellLookup: buildCellLookup(rows) };
+  }
+
+  function filterStates(states: ReadonlyArray<SetupGridState>, query: string): SetupGridState[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return states.slice();
+    return states.filter(s => s.parts.some(part => part.toLowerCase().includes(q)));
+  }
+
+  /** Colspan/rowspan run-length encoding for one header tier: groups
+   *  consecutive states that share the same value through this tier's prefix,
+   *  so two non-adjacent groups that happen to share a later-tier value are
+   *  never merged into one run. `states` must already be in cartesian-product
+   *  order (cartesianStates/filterStates preserve it). */
+  function tierRuns(states: ReadonlyArray<SetupGridState>, tier: number): Array<{ value: string; start: number; span: number }> {
+    const runs: Array<{ value: string; start: number; span: number }> = [];
+    const prefix = (s: SetupGridState) => s.parts.slice(0, tier + 1).join(' ');
+    states.forEach((s, i) => {
+      if (i > 0 && prefix(s) === prefix(states[i - 1])) runs[runs.length - 1].span++;
+      else runs.push({ value: s.parts[tier] ?? '', start: i, span: 1 });
+    });
+    return runs;
+  }
+
+  /** A diagonal cell (identical from/to state) with no explicit row and no
+   *  pending edit resolves to 0 per docs/changeover_matrix.md's resolution
+   *  rule ("identical states" is the only missing-row case that may resolve
+   *  to zero) — every other missing non-diagonal cell resolves to `null`
+   *  ("unknown"), never a fabricated zero. */
+  function gridCellValue(row: SetupGridState, col: SetupGridState, existing: EffectiveSetupRow | undefined, dirty: SetupGridEdit | undefined): number | null {
+    if (dirty) return dirty.setup_min;
+    if (existing) return existing.setup_min;
+    return row.sig === col.sig ? 0 : null;
+  }
+
+  /** Parses one grid cell's typed or pasted text. `null` = clear the cell;
+   *  `'invalid'` = reject without changing anything (schema bound is 0-10080
+   *  minutes, `schema.sql`'s `setup_matrix.setup_min` check). */
+  function parseGridMinutes(raw: string): number | null | 'invalid' {
+    const trimmed = raw.trim().replace(/,/g, '');
+    if (trimmed === '') return null;
+    const num = Math.round(Number(trimmed));
+    if (!Number.isFinite(num) || num < 0 || num > 10080) return 'invalid';
+    return num;
+  }
+
+  /** Splits pending grid edits into the request bodies the EXISTING endpoints
+   *  already accept — no new backend endpoint. Line-scoped edits are a safe
+   *  sparse upsert as-is (setup_data.upsert_line_matrix_rows). Plant-default
+   *  (line==='') edits must resend the FULL current plant-default row set
+   *  merged with the edits, because that scope's import path is a
+   *  delete-then-insert replace (setup_data.replace_plant_matrix), not an
+   *  upsert — sending only the edited cells there would silently wipe every
+   *  other plant-default row. See docs/setup_matrix_ui_redesign.md §7. */
+  function buildSaveRequests(edits: ReadonlyArray<SetupGridEdit>, signatureVersion: number, existingPlantRows: ReadonlyArray<SetupMatrixRow>): {
+    upsert: Array<{ line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }>;
+    deletes: Array<{ line: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }>;
+  } {
+    const byLine = new Map<string, SetupGridEdit[]>();
+    edits.forEach(e => { if (!byLine.has(e.line)) byLine.set(e.line, []); byLine.get(e.line)!.push(e); });
+    const upsert: Array<{ line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }> = [];
+    const deletes: Array<{ line: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }> = [];
+    byLine.forEach((lineEdits, line) => {
+      const sets = lineEdits.filter((e): e is SetupGridEdit & { setup_min: number } => e.setup_min !== null);
+      const clears = lineEdits.filter(e => e.setup_min === null);
+      if (line) {
+        if (sets.length) upsert.push({ line, signature_version: signatureVersion, rows: sets.map(e => ({ from: e.row.key, to: e.col.key, setup_min: e.setup_min })) });
+        if (clears.length) deletes.push({ line, signature_version: signatureVersion, rows: clears.map(e => ({ from_key: e.row.key, to_key: e.col.key })) });
+        return;
+      }
+      const merged = new Map<string, SetupMatrixRow>();
+      existingPlantRows.forEach(row => merged.set(`${stateSig(row.from_key)} ${stateSig(row.to_key)}`, row));
+      sets.forEach(e => merged.set(gridEditKey(e.row, e.col), { line: '', signature_version: signatureVersion, from_key: e.row.key, to_key: e.col.key, setup_min: e.setup_min, source: 'manual' }));
+      clears.forEach(e => merged.delete(gridEditKey(e.row, e.col)));
+      if (sets.length || clears.length) upsert.push({ line: '', signature_version: signatureVersion, rows: [...merged.values()].map(r => ({ from: r.from_key, to: r.to_key, setup_min: r.setup_min })) });
+    });
+    return { upsert, deletes };
   }
 
   function csvColumns(): string[] {
@@ -397,6 +551,12 @@ export const SetupAdmin = (() => {
       loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant),
       Persistence.loadSetupPolicy(plant), Persistence.loadSetupReleaseEvidence(plant),
     ];
+    // The grid's header axes read Store.priorityRankMaps directly — load it
+    // here rather than relying on the Scheduling Rules tab's constraint-panel
+    // side effect (Plant._renderSettingsPane's initConstraints IIFE), since
+    // the two are now separate inner tabs and a visitor may open Setup Matrix
+    // without ever visiting Scheduling Rules first.
+    if (Persistence._rankMapsPlant !== plant) loaders.push(Persistence.loadPriorityRankMaps(plant));
     if (_lineScope) loaders.push(loadCompatibility(plant, _lineScope));
     Promise.all(loaders).then(() => {
       if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
@@ -428,42 +588,72 @@ export const SetupAdmin = (() => {
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
-    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>${esc(Util.t('ui.setup_review_missing_title'))}</strong><span>${esc(Util.t('ui.setup_review_missing_count', { count: review.pairs.length, plural: review.pairs.length === 1 ? '' : 's' }))}${esc(permissions.matrixWrite ? Util.t('ui.setup_review_scope_writable') : Util.t('ui.setup_review_scope_readonly'))}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.copy'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_csv'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_review_scope_label'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
+    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>${esc(Util.t('ui.setup_review_missing_title'))}</strong><span>${esc(Util.t('ui.setup_review_missing_count', { count: review.pairs.length, plural: review.pairs.length === 1 ? '' : 's' }))}${esc(permissions.matrixWrite ? Util.t('ui.setup_review_scope_writable') : Util.t('ui.setup_review_scope_readonly'))}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.setup_copy_missing'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_missing'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_review_scope_label'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
+    const eyebrowKey = status.active ? 'ui.setup_eyebrow_active' : 'ui.setup_eyebrow_inactive';
+    const eyebrowTone = status.active ? 'ok' : 'warn';
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
         <header class="setup-admin-head">
-          <div><div class="setup-kicker">${esc(Util.t('ui.setup_matrix_observation'))}</div><h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
-          <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p></div>
+          <div><div class="setup-kicker ${eyebrowTone}">${esc(Util.t(eyebrowKey))}</div><h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
+          <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
+          <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div></div>
           <span class="setup-version">v${version ?? '—'}</span>
         </header>
-        <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
-        ${policyHtml}
-        ${coverage ? `<div class="setup-coverage" aria-live="polite"><strong>${esc(Util.t('ui.setup_shadow_coverage_title'))}</strong><span>${esc(Util.t('ui.setup_coverage_observed', { transitions: coverage.observed?.total_pairs ?? 0, missing: coverage.observed?.missing_pairs ?? 0 }))}</span><span>${esc(Util.t('ui.setup_coverage_reachable', { pairs: coverage.reachable?.total_pairs ?? 0, missing: coverage.reachable?.missing_pairs ?? 0 }))}</span></div>` : ''}
-        ${reviewHtml}
-        <div class="setup-toolbar">
-          <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
-          <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
-          <div class="spacer"></div>
-          <button class="btn btn-ghost sm" data-setup-copy ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.copy'))}</button>
-          <button class="btn btn-ghost sm" data-setup-export ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_csv'))}</button>
+
+        <div class="setup-group" data-setup-group="standard">
+          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_standard_title'))}</div><p>${esc(Util.t('ui.setup_group_standard_desc'))}</p></div>
+          <div class="setup-definition panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_step1_definition'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
+            <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
+              ${!definition ? `<p class="setup-help">${esc(Util.t('ui.setup_no_definition'))}</p>` : ''}
+              <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
+              ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
+              <p class="setup-help">${esc(Util.t('ui.setup_activation_requirements'))}</p></div></div>
+          <div class="setup-standard-grid panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_step2_grid'))}: ${esc(sourceLabel)}</h4>
+              <input type="text" class="input setup-grid-filter" data-setup-grid-filter placeholder="${esc(Util.t('ui.setup_grid_filter_placeholder'))}" value="${esc(_gridFilter)}">
+              <button class="btn btn-ghost sm" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
+              <button class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
+              ${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
+            </div>
+            <div class="setup-grid-savebar" data-setup-grid-savebar hidden>
+              <span data-setup-grid-dirty-count></span>
+              <button class="btn btn-ghost sm" data-setup-grid-discard>${esc(Util.t('btn.discard'))}</button>
+              <button class="btn btn-primary sm" data-setup-grid-save>${esc(Util.t('btn.save'))}</button>
+            </div>
+            <div id="setup-grid-table-mount"></div>
+          </div>
         </div>
-        <div class="setup-definition panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_definition'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-          <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<label><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select></label>`).join('')}</div>
-            ${!definition ? `<p class="setup-help">${esc(Util.t('ui.setup_no_definition'))}</p>` : ''}
-            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
-            ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
-            <p class="setup-help">${esc(Util.t('ui.setup_activation_requirements'))}</p></div></div>
-        <div class="setup-matrix panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_matrix_rows'))}: ${esc(sourceLabel)}</h4>${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}</div>
-          <div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_from_state'))}</th><th>${esc(Util.t('ui.setup_to_state'))}</th><th>${esc(Util.t('ui.setup_minutes'))}</th><th>${esc(Util.t('ui.setup_source'))}</th><th></th></tr></thead><tbody>${rows.length ? rows.map(row => `<tr class="${row.inherited ? 'inherited' : ''}" data-setup-row="${esc(keyId(row))}"><td>${esc(keyText(row.from_key))}</td><td>${esc(keyText(row.to_key))}</td><td class="setup-num">${row.setup_min}</td><td>${row.inherited ? esc(Util.t('ui.setup_inherited')) : esc(row.source || 'manual')}</td><td>${row.line && !row.inherited && permissions.matrixWrite ? `<button class="btn btn-ghost sm" data-setup-delete-row="${esc(keyId(row))}">${esc(Util.t('btn.setup_delete_override'))}</button>` : ''}</td></tr>`).join('') : `<tr><td colspan="5" class="setup-empty">${esc(Util.t('ui.setup_no_rows'))}</td></tr>`}</tbody></table></div></div>
-        ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
-        <div class="setup-audit panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_override_audit'))}</h4></div><div class="panel-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} · ${esc(keyText(override.predecessor_state_key))} → ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_overrides'))}</span>`}</div></div>
+
+        <div class="setup-group" data-setup-group="line-status">
+          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_line_title'))}</div><p>${esc(Util.t('ui.setup_group_line_desc'))}</p></div>
+          <div class="setup-toolbar">
+            <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
+            <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
+          </div>
+          ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : `<p class="setup-help">${esc(Util.t('ui.setup_line_status_empty'))}</p>`}
+        </div>
+
+        <div class="setup-group" data-setup-group="coverage">
+          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_coverage_title'))}</div><p>${esc(Util.t('ui.setup_group_coverage_desc'))}</p></div>
+          ${coverage ? `<div class="setup-kpi-row" role="group" aria-label="${esc(Util.t('ui.setup_shadow_coverage_title'))}">
+            <button type="button" class="kpi-tile"><span class="k">${esc(Util.t('ui.setup_kpi_observed'))}</span><span class="v">${coverage.observed?.total_pairs ?? 0}</span><span class="d">${esc(Util.t('ui.setup_kpi_missing_count', { missing: coverage.observed?.missing_pairs ?? 0 }))}</span></button>
+            <button type="button" class="kpi-tile${(coverage.reachable?.missing_pairs ?? 0) > 0 ? ' warn' : ''}" data-setup-reachable-tile><span class="k">${esc(Util.t('ui.setup_kpi_reachable'))}</span><span class="v">${coverage.reachable?.total_pairs ?? 0}</span><span class="d">${esc(Util.t('ui.setup_kpi_missing_count', { missing: coverage.reachable?.missing_pairs ?? 0 }))}</span></button>
+          </div>` : ''}
+          ${reviewHtml}
+          <div class="setup-audit panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_override_audit'))}</h4><button class="btn btn-ghost sm" data-setup-audit-toggle aria-expanded="false">${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button></div><div class="panel-body" hidden>${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} · ${esc(keyText(override.predecessor_state_key))} → ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_overrides'))}</span>`}</div></div>
+        </div>
+
+        ${permissions.definitionWrite ? `<div class="setup-group panel-quiet" data-setup-group="readiness">
+          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_readiness_title'))}</div><p>${esc(Util.t('ui.setup_group_readiness_desc'))}</p></div>
+          ${policyHtml}
+        </div>` : ''}
       </section>`;
     _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => {
       _lineScope = value;
       if (value) loadCompatibility(snapshot.plant, value).then(() => renderSnapshot(target, snapshot));
       else renderSnapshot(target, snapshot);
     } });
-    wire(target, snapshot, permissions, rows, policy, evidence);
+    wire(target, snapshot, permissions, rows, policy, evidence, definition);
+    paintGrid(target, snapshot, definition, rows, permissions);
   }
 
   function renderPolicyPanel(policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null, permissions: SetupPermissions, status: { active: boolean; reason: string }): string {
@@ -493,9 +683,9 @@ export const SetupAdmin = (() => {
     return `<div class="setup-state panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_current_state'))}</h4></div><div class="panel-body"><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div></div>`;
   }
 
-  function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): void {
-    target.querySelector<HTMLButtonElement>('[data-setup-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(csvFor(snapshot.plant, rows)).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
-    target.querySelector<HTMLButtonElement>('[data-setup-export]')?.addEventListener('click', () => {
+  function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null, definition: SetupDefinition | null): void {
+    target.querySelector<HTMLButtonElement>('[data-setup-copy-matrix]')?.addEventListener('click', () => navigator.clipboard?.writeText(csvFor(snapshot.plant, rows)).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
+    target.querySelector<HTMLButtonElement>('[data-setup-export-matrix]')?.addEventListener('click', () => {
       const blob = new Blob([csvFor(snapshot.plant, rows)], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `setup-matrix-${snapshot.plant}-${_lineScope || 'plant'}-v${snapshot.definition?.signature_version ?? 0}.csv`; link.click(); URL.revokeObjectURL(url);
     });
@@ -509,8 +699,50 @@ export const SetupAdmin = (() => {
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
       const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
       const index = holder.querySelectorAll('select').length;
-      holder.insertAdjacentHTML('beforeend', `<label><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${option}</option>`).join('')}</select></label>`);
+      holder.insertAdjacentHTML('beforeend', `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${option}</option>`).join('')}</select><button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" disabled aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button></div>`);
     });
+    // Reorder-by-value-swap: the field-row DOM nodes never move (so their
+    // up/down disabled state stays tied to fixed position), only the
+    // selected value swaps with the adjacent row.
+    target.querySelector<HTMLElement>('[data-setup-field-order]')?.addEventListener('click', event => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-setup-field-up], [data-setup-field-down]');
+      if (!button) return;
+      const holder = button.closest<HTMLElement>('[data-setup-field-order]')!;
+      const fieldRows = Array.from(holder.querySelectorAll<HTMLElement>('.setup-field-row'));
+      const currentIndex = fieldRows.indexOf(button.closest('.setup-field-row')!);
+      const swapIndex = currentIndex + (button.hasAttribute('data-setup-field-up') ? -1 : 1);
+      if (currentIndex < 0 || swapIndex < 0 || swapIndex >= fieldRows.length) return;
+      const a = fieldRows[currentIndex].querySelector<HTMLSelectElement>('select')!;
+      const b = fieldRows[swapIndex].querySelector<HTMLSelectElement>('select')!;
+      const temp = a.value; a.value = b.value; b.value = temp;
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-audit-toggle]')?.addEventListener('click', function (this: HTMLButtonElement) {
+      const body = this.closest('.setup-audit')?.querySelector<HTMLElement>('.panel-body'); if (!body) return;
+      body.hidden = !body.hidden;
+      this.setAttribute('aria-expanded', String(!body.hidden));
+      this.textContent = Util.t('btn.setup_audit_toggle', { count: snapshot.overrides.length });
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-reachable-tile]')?.addEventListener('click', () => {
+      // No endpoint enumerates which specific pairs are "reachable but
+      // missing" (loadCoverage returns counts only) — this highlights the
+      // grid's broader "missing in the definable standard" cells as the
+      // closest available approximation, not a precise reachable-only set.
+      const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount'); if (!mount) return;
+      mount.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const missingCells = mount.querySelectorAll<HTMLElement>('.setup-grid-td[data-missing="true"]');
+      missingCells.forEach(td => td.classList.add('setup-grid-highlight'));
+      window.setTimeout(() => missingCells.forEach(td => td.classList.remove('setup-grid-highlight')), 2000);
+    });
+    target.querySelector<HTMLInputElement>('[data-setup-grid-filter]')?.addEventListener('input', event => {
+      _gridFilter = (event.target as HTMLInputElement).value;
+      paintGrid(target, snapshot, definition, rows, permissions);
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.addEventListener('click', () => saveGridEdits(target, snapshot, definition, rows, permissions));
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.addEventListener('click', () => {
+      _gridDirty.clear();
+      paintGrid(target, snapshot, definition, rows, permissions);
+    });
+    wireGridInteractions(target, snapshot, definition, rows, permissions);
     target.querySelectorAll<HTMLButtonElement>('[data-setup-delete-row]').forEach(button => button.addEventListener('click', () => {
       const row = rows.find(item => keyId(item) === button.dataset.setupDeleteRow); if (row) deleteRow(target, snapshot, row);
     }));
@@ -520,6 +752,227 @@ export const SetupAdmin = (() => {
     target.querySelector<HTMLButtonElement>('[data-setup-disable-policy]')?.addEventListener('click', () => disablePolicy(target, snapshot.plant, policy));
     target.querySelector<HTMLButtonElement>('[data-setup-save-evidence]')?.addEventListener('click', () => saveEvidence(target, snapshot.plant, evidence));
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
+  }
+
+  /** (Re)paints only the grid's table mount — never the whole panel — so the
+   *  filter input and save/discard bar (in the static shell `renderSnapshot`
+   *  already rendered) never lose focus or get re-wired. Called after every
+   *  cell edit, paste, filter keystroke, save, and discard. */
+  function paintGrid(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
+    const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount');
+    if (!mount) return;
+    const savebar = target.querySelector<HTMLElement>('[data-setup-grid-savebar]');
+    const dirtyCount = target.querySelector<HTMLElement>('[data-setup-grid-dirty-count]');
+    if (savebar) savebar.hidden = _gridDirty.size === 0;
+    if (dirtyCount) dirtyCount.textContent = Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size });
+    const fields = definition?.fields?.length ? [...definition.fields] : [];
+    if (!fields.length) {
+      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.setup_no_definition'))}</p>`;
+      _gridCellGrid = []; _gridModel = null;
+      return;
+    }
+    const valuesByField: Record<string, string[]> = {};
+    fields.forEach(field => { valuesByField[field] = fieldValueSet(Store.priorityRankMaps, field, _lineScope); });
+    _gridModel = buildGridModel(fields, valuesByField, rows);
+    if (!_gridModel.rowStates.length) {
+      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.setup_grid_no_values'))}</p>`;
+      _gridCellGrid = [];
+      return;
+    }
+    const rowStates = filterStates(_gridModel.rowStates, _gridFilter);
+    const colStates = filterStates(_gridModel.colStates, _gridFilter);
+    if (!rowStates.length || !colStates.length) {
+      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.no_matches'))}</p>`;
+      _gridCellGrid = [];
+      return;
+    }
+    const tierCount = fields.length;
+    const theadRows: string[] = [];
+    for (let tier = 0; tier < tierCount; tier++) {
+      const runs = tierRuns(colStates, tier);
+      const corner = tier === 0 ? `<th rowspan="${tierCount}" colspan="${tierCount}" class="setup-grid-corner"></th>` : '';
+      theadRows.push(`<tr>${corner}${runs.map(run => `<th colspan="${run.span}" class="setup-grid-col-head">${esc(run.value)}</th>`).join('')}</tr>`);
+    }
+    const rowSpanMaps = Array.from({ length: tierCount }, (_, tier) => {
+      const map = new Map<number, number>();
+      tierRuns(rowStates, tier).forEach(run => map.set(run.start, run.span));
+      return map;
+    });
+    const bodyRows = rowStates.map((rowState, r) => {
+      const headerCells = Array.from({ length: tierCount }, (_, tier) => {
+        const span = rowSpanMaps[tier].get(r);
+        return span === undefined ? '' : `<th rowspan="${span}" scope="row" class="setup-grid-row-head">${esc(rowState.parts[tier] ?? '')}</th>`;
+      }).join('');
+      const dataCells = colStates.map((colState, c) => {
+        const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
+        const dirty = _gridDirty.get(gridEditKey(rowState, colState));
+        const value = gridCellValue(rowState, colState, existing, dirty);
+        const missing = value === null;
+        const cellClass = ['setup-grid-td', dirty ? 'setup-grid-dirty' : ''].filter(Boolean).join(' ');
+        return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}"><input type="number" class="setup-grid-cell" min="0" max="10080" step="1" inputmode="numeric" value="${value !== null ? value : ''}" placeholder="${esc(Util.t('ui.setup_grid_missing_placeholder'))}" ${permissions.matrixWrite ? '' : 'disabled'}></td>`;
+      }).join('');
+      return `<tr>${headerCells}${dataCells}</tr>`;
+    }).join('');
+    mount.innerHTML = `<div class="setup-grid-scroll"><table class="setup-table setup-grid"><thead>${theadRows.join('')}</thead><tbody>${bodyRows}</tbody></table></div>`;
+    _gridCellGrid = rowStates.map((_row, r) => colStates.map((_col, c) => mount.querySelector<HTMLTableCellElement>(`td[data-setup-grid-row="${r}"][data-setup-grid-col="${c}"]`)));
+    const mountData = mount as unknown as { _gridRowStates?: SetupGridState[]; _gridColStates?: SetupGridState[] };
+    mountData._gridRowStates = rowStates;
+    mountData._gridColStates = colStates;
+    mount.querySelectorAll<HTMLInputElement>('.setup-grid-cell').forEach(input => {
+      input.addEventListener('change', () => {
+        const td = input.closest<HTMLTableCellElement>('td')!;
+        const r = Number(td.dataset.setupGridRow), c = Number(td.dataset.setupGridCol);
+        const rowState = rowStates[r], colState = colStates[c];
+        const parsed = parseGridMinutes(input.value);
+        if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); input.value = ''; return; }
+        const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
+        const baseline = existing ? existing.setup_min : (rowState.sig === colState.sig ? 0 : null);
+        const editKey = gridEditKey(rowState, colState);
+        if (parsed === baseline) _gridDirty.delete(editKey);
+        else _gridDirty.set(editKey, { row: rowState, col: colState, setup_min: parsed, line: _lineScope });
+        paintGrid(target, snapshot, definition, rows, permissions);
+      });
+    });
+  }
+
+  /** Lasso range-select, copy, delete, and Excel-paste on the grid — the same
+   *  interaction model as LaborPlanning's Aggregate grid (see
+   *  docs/setup_matrix_ui_redesign.md §5), adapted for the grid's row/col
+   *  state axes instead of group/week axes. Wired once per `target` (the
+   *  panel host persists across renderSnapshot() repaints; only its
+   *  innerHTML is replaced), guarded by a dataset flag exactly like
+   *  LaborPlanning's `grid._lpDragWired`. Edits are staged into `_gridDirty`,
+   *  never written until an explicit Save. */
+  function wireGridInteractions(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
+    const flagged = target as unknown as { _setupGridWired?: boolean };
+    if (flagged._setupGridWired) return;
+    flagged._setupGridWired = true;
+
+    const mount = (): HTMLElement | null => target.querySelector<HTMLElement>('#setup-grid-table-mount');
+    const axesOf = (): { rowStates: SetupGridState[]; colStates: SetupGridState[] } => {
+      const el = mount() as unknown as { _gridRowStates?: SetupGridState[]; _gridColStates?: SetupGridState[] } | null;
+      return { rowStates: el?._gridRowStates || [], colStates: el?._gridColStates || [] };
+    };
+
+    function clearSelection(): void {
+      _gridSelRange = null; _gridDragging = false; _gridDragAnchor = null;
+      _gridSelTds.forEach(td => td.classList.remove('setup-grid-selected'));
+      _gridSelTds.clear();
+    }
+    function paintSelection(): void {
+      const next = new Set<HTMLTableCellElement>();
+      if (_gridSelRange) {
+        const { r0, c0, r1, c1 } = _gridSelRange;
+        for (let r = r0; r <= r1; r++) { const row = _gridCellGrid[r]; if (!row) continue; for (let c = c0; c <= c1; c++) { const td = row[c]; if (td) next.add(td); } }
+      }
+      _gridSelTds.forEach(td => { if (!next.has(td)) td.classList.remove('setup-grid-selected'); });
+      next.forEach(td => { if (!_gridSelTds.has(td)) td.classList.add('setup-grid-selected'); });
+      _gridSelTds = next;
+    }
+    function cellAt(rowState: SetupGridState, colState: SetupGridState): { existing: EffectiveSetupRow | undefined; dirty: SetupGridEdit | undefined; baseline: number | null } {
+      const existing = _gridModel?.cellLookup.get(rowState.sig)?.get(colState.sig);
+      const dirty = _gridDirty.get(gridEditKey(rowState, colState));
+      const baseline = existing ? existing.setup_min : (rowState.sig === colState.sig ? 0 : null);
+      return { existing, dirty, baseline };
+    }
+    function stageEdit(rowState: SetupGridState, colState: SetupGridState, value: number | null): void {
+      const { baseline } = cellAt(rowState, colState);
+      const editKey = gridEditKey(rowState, colState);
+      if (value === baseline) _gridDirty.delete(editKey);
+      else _gridDirty.set(editKey, { row: rowState, col: colState, setup_min: value, line: _lineScope });
+    }
+
+    target.addEventListener('mousedown', event => {
+      const mountEl = mount(); if (!mountEl || !mountEl.contains(event.target as Node)) return;
+      if (!event.ctrlKey && !event.metaKey) { if (!(event.target as HTMLElement).closest('.setup-grid-selected')) clearSelection(); return; }
+      const td = (event.target as HTMLElement).closest<HTMLTableCellElement>('td[data-setup-grid-row]'); if (!td) return;
+      event.preventDefault();
+      const r = Number(td.dataset.setupGridRow), c = Number(td.dataset.setupGridCol);
+      _gridDragging = true; _gridDragAnchor = { row: r, col: c };
+      _gridSelRange = { r0: r, c0: c, r1: r, c1: c }; paintSelection();
+    });
+    target.addEventListener('mousemove', event => {
+      if (!_gridDragging || !_gridDragAnchor) return;
+      const td = (event.target as HTMLElement).closest<HTMLTableCellElement>('td[data-setup-grid-row]'); if (!td) return;
+      const r = Number(td.dataset.setupGridRow), c = Number(td.dataset.setupGridCol);
+      _gridSelRange = { r0: Math.min(_gridDragAnchor.row, r), c0: Math.min(_gridDragAnchor.col, c), r1: Math.max(_gridDragAnchor.row, r), c1: Math.max(_gridDragAnchor.col, c) };
+      paintSelection();
+    });
+    document.addEventListener('mouseup', () => { _gridDragging = false; });
+
+    target.addEventListener('keydown', event => {
+      const mountEl = mount(); if (!mountEl || !_gridSelRange) return;
+      if (!mountEl.contains(document.activeElement) && !mountEl.contains(event.target as Node)) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+        const { rowStates, colStates } = axesOf();
+        const { r0, c0, r1, c1 } = _gridSelRange;
+        const lines: string[] = [];
+        for (let r = r0; r <= r1; r++) {
+          const cols: string[] = [];
+          for (let c = c0; c <= c1; c++) {
+            const rowState = rowStates[r], colState = colStates[c];
+            const value = rowState && colState ? gridCellValue(rowState, colState, cellAt(rowState, colState).existing, cellAt(rowState, colState).dirty) : null;
+            cols.push(value !== null ? String(value) : '');
+          }
+          lines.push(cols.join('\t'));
+        }
+        navigator.clipboard?.writeText(lines.join('\n')).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
+      }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && permissions.matrixWrite) {
+        const { rowStates, colStates } = axesOf();
+        const { r0, c0, r1, c1 } = _gridSelRange;
+        for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+          const rowState = rowStates[r], colState = colStates[c]; if (!rowState || !colState) continue;
+          stageEdit(rowState, colState, null);
+        }
+        paintGrid(target, snapshot, definition, rows, permissions);
+      }
+    });
+
+    target.addEventListener('paste', event => {
+      if (!permissions.matrixWrite) return;
+      const anchorTd = (document.activeElement as HTMLElement | null)?.closest<HTMLTableCellElement>('td[data-setup-grid-row]');
+      if (!anchorTd) return;
+      event.preventDefault();
+      const text = event.clipboardData?.getData('text/plain'); if (!text) return;
+      const clipRows = text.replace(/\r/g, '').split('\n').filter(r => r !== '').map(r => r.split('\t'));
+      const { rowStates, colStates } = axesOf();
+      const anchorRow = Number(anchorTd.dataset.setupGridRow), anchorCol = Number(anchorTd.dataset.setupGridCol);
+      let changed = 0, rejected = 0;
+      clipRows.forEach((cols, r) => cols.forEach((raw, c) => {
+        const rowState = rowStates[anchorRow + r], colState = colStates[anchorCol + c]; if (!rowState || !colState) return;
+        const parsed = parseGridMinutes(raw);
+        if (parsed === 'invalid') { rejected++; return; }
+        stageEdit(rowState, colState, parsed);
+        changed++;
+      }));
+      if (changed) { Toast.show(Util.t('ui.setup_grid_pasted', { count: changed }), 'success'); paintGrid(target, snapshot, definition, rows, permissions); }
+      if (rejected) Toast.show(Util.t('ui.setup_grid_paste_rejected', { count: rejected }), 'warn');
+    });
+  }
+
+  async function saveGridEdits(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): Promise<void> {
+    if (!definition || !_gridDirty.size) return;
+    const edits = [..._gridDirty.values()];
+    const existingPlantRows = snapshot.plant_rows.filter(row => row.signature_version === definition.signature_version);
+    const { upsert, deletes } = buildSaveRequests(edits, definition.signature_version, existingPlantRows);
+    try {
+      for (const body of upsert) {
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      }
+      for (const body of deletes) {
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, { method: 'DELETE', headers: headers(), body: JSON.stringify(body) });
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      }
+      Persistence.noteSetupWrite(snapshot.plant, 'matrix');
+      _gridDirty.clear();
+      await Persistence.loadSetupSnapshot(snapshot.plant);
+      render(target, snapshot.plant);
+      Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) {
+      Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error');
+    }
   }
 
   async function savePolicy(target: HTMLElement, plant: string, policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): Promise<void> {
@@ -595,6 +1048,20 @@ export const SetupAdmin = (() => {
       const parsed = parseLongFormCsv(await file.text());
       if (parsed.plant !== snapshot.plant || !canWriteVersion(parsed.signature_version, snapshot.definition?.signature_version)) throw new Error(Util.t('ui.setup_version_mismatch'));
       if (parsed.line !== _lineScope) throw new Error('CSV line scope must match the selected setup scope');
+      // Plant-default scope is a destructive delete-then-insert replace
+      // (setup_data.replace_plant_matrix) — unlike a line-scoped import, which
+      // is a safe sparse upsert — so confirm before an admin silently wipes
+      // every other plant-default row for this signature version.
+      if (!parsed.line) {
+        const existingCount = snapshot.plant_rows.filter(row => row.signature_version === parsed.signature_version).length;
+        const confirmed = await Modal.confirm({
+          title: Util.t('ui.setup_replace_confirm_title'),
+          message: Util.t('ui.setup_replace_confirm_msg', { existing: existingCount, incoming: parsed.rows.length }),
+          confirmLabel: Util.t('btn.setup_replace_confirm'),
+          tone: 'warn',
+        });
+        if (!confirmed) return;
+      }
       await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, 'POST', {
         line: parsed.line, signature_version: parsed.signature_version, rows: parsed.rows,
       });
@@ -655,7 +1122,10 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, releaseEvidenceReady, releaseEvidencePayload, normalizePolicyThresholds, safeDisablePolicy, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
+  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, releaseEvidenceReady, releaseEvidencePayload, normalizePolicyThresholds, safeDisablePolicy, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render,
+    // Grid helpers — exported for direct unit testing, matching this file's
+    // existing pattern of testing pure logic without a DOM harness.
+    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, parseGridMinutes, buildSaveRequests };
 })();
 
 /* =============================================================================
@@ -891,6 +1361,12 @@ export const Plant = {
   // dropzones and no explanation.
   _priorityLoadError: null as string | null,
   _currentPlantTab: 'general',
+  // System Settings' inner tab strip (docs/setup_matrix_ui_redesign.md §3.1)
+  // — separate from _currentPlantTab, which is the outer General/Optimization/
+  // System Settings strip. Defaults to 'rules' so the four simple numeric/
+  // dropdown settings are what a visitor sees first, not the Setup Matrix
+  // console.
+  _currentSettingsSubTab: 'rules' as 'rules' | 'setup',
   _pillFps: null as PillFpPair[] | null,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
@@ -1805,6 +2281,7 @@ export const Plant = {
     const alertHz = plantRow?.alt_flag_horizon   ?? Store.userSettings.alertHorizonMinutes   ?? 43200;
     const confHz  = plantRow?.conf_score_horizon ?? Store.userSettings.confidenceHorizonMinutes ?? 20160;
 
+    const subTab = Plant._currentSettingsSubTab;
     pane.innerHTML = `
       <div class="cal-scroll"><div class="cal-container">
         <header class="cal-head">
@@ -1813,12 +2290,18 @@ export const Plant = {
             <p class="sub">${Util.t('ui.system_settings_sub', { plant: plantName || 'the selected plant' })}</p>
           </div>
         </header>
-        <div style="display:flex;flex-direction:column;gap:24px;padding:8px 0 32px">
+
+        <nav class="admin-subtabs" role="tablist" style="padding:0 24px;">
+          <button class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}">${Util.t('ui.settings_subtab_rules')}</button>
+          <button class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}">${Util.t('ui.settings_subtab_setup')}</button>
+        </nav>
+
+        <div id="settings-subtab-rules" style="display:flex;flex-direction:column;gap:24px;padding:8px 0 32px" ${subTab === 'rules' ? '' : 'hidden'}>
 
           <div class="panel">
             <header class="panel-head"><h3>Alert Horizon</h3></header>
             <div class="panel-body">
-              <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">Controls which alerts appear in the header badge and alert drawer. Orders beyond the selected window are hidden to reduce noise. The window rolls with the current clock continuously.</p>
+              <p class="panel-help-text">Controls which alerts appear in the header badge and alert drawer. Orders beyond the selected window are hidden to reduce noise. The window rolls with the current clock continuously.</p>
               <div style="display:flex;align-items:center;gap:8px;font-size:13px">
                 <span style="min-width:160px">Show alerts within the next</span>
                 <input type="number" id="sys-alert-horizon-days" class="form-input" min="1" max="60" step="1"
@@ -1831,7 +2314,7 @@ export const Plant = {
           <div class="panel">
             <header class="panel-head"><h3>Confidence Score Horizon</h3></header>
             <div class="panel-body">
-              <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">The rolling window used to compute the schedule confidence score. Shorter windows surface near-term risk more sharply; longer windows give a broader health picture. The window rolls with the current clock continuously.</p>
+              <p class="panel-help-text">The rolling window used to compute the schedule confidence score. Shorter windows surface near-term risk more sharply; longer windows give a broader health picture. The window rolls with the current clock continuously.</p>
               <div style="display:flex;align-items:center;gap:8px;font-size:13px">
                 <span style="min-width:160px">Score covers the next</span>
                 <input type="number" id="sys-conf-horizon-days" class="form-input" min="1" step="1"
@@ -1844,7 +2327,7 @@ export const Plant = {
           <div class="panel">
             <header class="panel-head"><h3>Split-order allocation</h3></header>
             <div class="panel-body split-policy-body">
-              <p class="split-policy-copy">Choose how future scheduling actions use valid operating intervals. Existing schedules are never rewritten by changing this plant setting.</p>
+              <p class="panel-help-text split-policy-copy">Choose how future scheduling actions use valid operating intervals. Existing schedules are never rewritten by changing this plant setting.</p>
               <label class="split-policy-control" for="sys-split-order-policy">
                 <span>Allocation policy</span>
                 <select id="sys-split-order-policy" class="form-input" aria-describedby="sys-split-order-policy-help">
@@ -1860,7 +2343,7 @@ export const Plant = {
           <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.constraints_title')}</h3></header>
             <div class="panel-body">
-              <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute)">${Util.t('ui.constraints_sub')}</p>
+              <p class="panel-help-text">${Util.t('ui.constraints_sub')}</p>
               <div id="sys-constraints-list" class="constraint-list"></div>
               <!-- Stage 3: the readout that keeps the presentational tree honest.
                    The tree above is nested; the optimizer runs a FLAT ordered key
@@ -1874,13 +2357,23 @@ export const Plant = {
             </div>
           </div>
 
-          <!-- Stage 0 setup truth is maintained beside the plant's scheduling
-               policy, never inside a timeline/optimizer flow. It remains
-               observation-only until a later stage explicitly enables use. -->
-          <div id="setup-admin-pane"></div>
-
         </div>
+
+        <!-- Stage 0 setup truth is maintained beside the plant's scheduling
+             policy, never inside a timeline/optimizer flow. It remains
+             observation-only until a later stage explicitly enables use. -->
+        <div id="settings-subtab-setup" style="padding:8px 0 32px" ${subTab === 'setup' ? '' : 'hidden'}>
+          <div id="setup-admin-pane"></div>
+        </div>
+
       </div></div>`;
+
+    pane.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach(button => button.addEventListener('click', () => {
+      const next = button.dataset.settingsSubtab as 'rules' | 'setup';
+      if (next === Plant._currentSettingsSubTab) return;
+      Plant._currentSettingsSubTab = next;
+      Plant._renderSettingsPane();
+    }));
 
     const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;

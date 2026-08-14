@@ -210,3 +210,103 @@ test('SetupAdmin loads every plant-line page without requesting an unbounded lis
   assert.deepEqual(lines, ['L-001', 'L-100', 'L-250']);
   assert.deepEqual(calls, [{ offset: 0, limit: 2 }, { offset: 2, limit: 2 }]);
 });
+
+// Setup Matrix grid redesign (docs/setup_matrix_ui_redesign.md) — the
+// from-state x to-state grid replacing the old flat edge-list table.
+
+test('cartesianStates builds one state per combination, in field order', () => {
+  const states = SetupAdmin.cartesianStates(['colorWheel', 'prt01'], { colorWheel: ['BLUE', 'RED'], prt01: ['A12'] });
+  assert.equal(states.length, 2);
+  assert.deepEqual(states.map(s => s.parts), [['BLUE', 'A12'], ['RED', 'A12']]);
+  assert.deepEqual(states[0].key, [{ fieldKey: 'colorWheel', value: 'BLUE' }, { fieldKey: 'prt01', value: 'A12' }]);
+});
+
+test('stateSig matches regardless of key part order — a real row must resolve against a synthesized candidate state', () => {
+  const candidate = SetupAdmin.cartesianStates(['colorWheel', 'prt01'], { colorWheel: ['RED'], prt01: ['A12'] })[0];
+  const storedRow = { line: '', signature_version: 1, from_key: [{ fieldKey: 'prt01', value: 'A12' }, { fieldKey: 'colorWheel', value: 'RED' }], to_key: [], setup_min: 5 };
+  assert.equal(SetupAdmin.stateSig(candidate.key), SetupAdmin.stateSig(storedRow.from_key));
+});
+
+test('fieldValueSet unions plant-default and line-override ranked values', () => {
+  const rankMaps = { '': { colorWheel: { RED: 1, BLUE: 2 } }, L1: { colorWheel: { BLUE: 1, GREEN: 2 } } };
+  assert.deepEqual(SetupAdmin.fieldValueSet(rankMaps, 'colorWheel', ''), ['BLUE', 'RED']);
+  assert.deepEqual(SetupAdmin.fieldValueSet(rankMaps, 'colorWheel', 'L1'), ['BLUE', 'GREEN', 'RED']);
+});
+
+test('buildGridModel resolves an existing row regardless of from/to array order', () => {
+  const rows = [{ line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 12, inherited: false, inheritedFromPlant: false }];
+  const model = SetupAdmin.buildGridModel(['colorWheel'], { colorWheel: ['RED', 'BLUE'] }, rows);
+  const red = model.rowStates.find(s => s.parts[0] === 'RED');
+  const blue = model.colStates.find(s => s.parts[0] === 'BLUE');
+  const found = model.cellLookup.get(red.sig)?.get(blue.sig);
+  assert.equal(found?.setup_min, 12);
+});
+
+test('gridCellValue: identical states default to 0, any other missing pair is unknown (null), never a fabricated zero', () => {
+  // Mirrors docs/changeover_matrix.md's resolution rule: "For A != B, missing
+  // means unknown, never zero... the only missing-row case that may resolve
+  // to zero" is the diagonal.
+  const red = { key: [], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  assert.equal(SetupAdmin.gridCellValue(red, red, undefined, undefined), 0);
+  assert.equal(SetupAdmin.gridCellValue(red, blue, undefined, undefined), null);
+  assert.equal(SetupAdmin.gridCellValue(red, blue, { setup_min: 7 }, undefined), 7);
+  assert.equal(SetupAdmin.gridCellValue(red, blue, undefined, { setup_min: 3 }), 3);
+  assert.equal(SetupAdmin.gridCellValue(red, blue, undefined, { setup_min: null }), null);
+});
+
+test('filterStates matches any field part, case-insensitively, and preserves order', () => {
+  const states = SetupAdmin.cartesianStates(['colorWheel'], { colorWheel: ['RED', 'BLUE', 'GREEN'] });
+  assert.deepEqual(SetupAdmin.filterStates(states, 'blu').map(s => s.parts[0]), ['BLUE']);
+  assert.deepEqual(SetupAdmin.filterStates(states, '').map(s => s.parts[0]), ['RED', 'BLUE', 'GREEN']);
+});
+
+test('tierRuns groups by prefix per tier, not merging non-adjacent groups that share a later value', () => {
+  const states = SetupAdmin.cartesianStates(['colorWheel', 'prt01'], { colorWheel: ['BLUE', 'RED'], prt01: ['A', 'B'] });
+  // BLUE/A, BLUE/B, RED/A, RED/B
+  assert.deepEqual(SetupAdmin.tierRuns(states, 0), [{ value: 'BLUE', start: 0, span: 2 }, { value: 'RED', start: 2, span: 2 }]);
+  // tier 1 must NOT merge BLUE/A's "A" with RED/A's "A" into one run — they share a value but not the tier-0 prefix.
+  assert.deepEqual(SetupAdmin.tierRuns(states, 1), [{ value: 'A', start: 0, span: 1 }, { value: 'B', start: 1, span: 1 }, { value: 'A', start: 2, span: 1 }, { value: 'B', start: 3, span: 1 }]);
+});
+
+test('parseGridMinutes accepts 0-10080 whole minutes, clears on blank, rejects out-of-range/non-numeric', () => {
+  assert.equal(SetupAdmin.parseGridMinutes('45'), 45);
+  assert.equal(SetupAdmin.parseGridMinutes(' 45 '), 45);
+  assert.equal(SetupAdmin.parseGridMinutes(''), null);
+  assert.equal(SetupAdmin.parseGridMinutes('  '), null);
+  assert.equal(SetupAdmin.parseGridMinutes('-1'), 'invalid');
+  assert.equal(SetupAdmin.parseGridMinutes('10081'), 'invalid');
+  assert.equal(SetupAdmin.parseGridMinutes('abc'), 'invalid');
+});
+
+test('buildSaveRequests: line-scoped edits are a sparse upsert of only the edited rows', () => {
+  const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, line: 'L1' }], 4, []);
+  assert.deepEqual(upsert, [{ line: 'L1', signature_version: 4, rows: [{ from: red.key, to: blue.key, setup_min: 20 }] }]);
+  assert.deepEqual(deletes, []);
+});
+
+test('buildSaveRequests: plant-default edits merge into the FULL existing row set (replace_plant_matrix is delete-then-insert)', () => {
+  const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  const green = { key: [{ fieldKey: 'colorWheel', value: 'GREEN' }], sig: 'colorWheel=GREEN', parts: ['GREEN'] };
+  const existingUntouchedRow = { line: '', signature_version: 4, from_key: green.key, to_key: blue.key, setup_min: 99 };
+  const { upsert } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, line: '' }], 4, [existingUntouchedRow]);
+  assert.equal(upsert.length, 1);
+  assert.equal(upsert[0].line, '');
+  // The edited pair AND the untouched existing row must both be present —
+  // sending only the edited cell here would silently wipe the untouched row.
+  assert.equal(upsert[0].rows.length, 2);
+  assert.ok(upsert[0].rows.some(r => r.setup_min === 20 && r.from[0].value === 'RED'));
+  assert.ok(upsert[0].rows.some(r => r.setup_min === 99 && r.from[0].value === 'GREEN'));
+});
+
+test('buildSaveRequests: a plant-default clear removes that pair from the resent set', () => {
+  const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  const existingRow = { line: '', signature_version: 4, from_key: red.key, to_key: blue.key, setup_min: 20 };
+  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: null, line: '' }], 4, [existingRow]);
+  assert.equal(upsert[0].rows.length, 0);
+  assert.deepEqual(deletes, []); // plant-default clears are folded into the resend, not a separate DELETE call
+});

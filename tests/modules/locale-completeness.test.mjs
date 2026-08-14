@@ -104,6 +104,33 @@ test('Stage 3 priority-tree / effective-sequence ui.* keys exist in all 5 locale
   }
 });
 
+test('Setup Matrix grid redesign keys exist in all 5 locales', () => {
+  // docs/setup_matrix_ui_redesign.md — the grid rebuild + IA regroup pass.
+  const REQUIRED_GRID = [
+    'ui.setup_eyebrow_inactive', 'ui.setup_eyebrow_active',
+    'ui.settings_subtab_rules', 'ui.settings_subtab_setup',
+    'ui.setup_group_standard_title', 'ui.setup_group_standard_desc',
+    'ui.setup_group_line_title', 'ui.setup_group_line_desc', 'ui.setup_line_status_empty',
+    'ui.setup_group_coverage_title', 'ui.setup_group_coverage_desc',
+    'ui.setup_group_readiness_title', 'ui.setup_group_readiness_desc',
+    'ui.setup_step1_definition', 'ui.setup_step2_grid',
+    'ui.setup_grid_filter_placeholder', 'ui.setup_grid_dirty_count', 'ui.setup_grid_no_values',
+    'ui.setup_grid_missing_placeholder', 'ui.setup_grid_invalid_minutes',
+    'ui.setup_grid_pasted', 'ui.setup_grid_paste_rejected',
+    'ui.setup_replace_confirm_title', 'ui.setup_replace_confirm_msg',
+    'ui.setup_kpi_observed', 'ui.setup_kpi_reachable', 'ui.setup_kpi_missing_count',
+    'btn.setup_audit_toggle', 'btn.setup_copy_matrix', 'btn.setup_export_matrix',
+    'btn.setup_copy_missing', 'btn.setup_export_missing', 'btn.setup_replace_confirm',
+    'btn.setup_field_up', 'btn.setup_field_down',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_GRID) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {
