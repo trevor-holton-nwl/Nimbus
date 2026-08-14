@@ -1941,3 +1941,309 @@ test('setup-aware evaluators never schedule through a fixed boundary beyond the 
     )), `${label} reports the bounded terminal admission failure`);
   }
 });
+
+test('due-date fallback retains a covered non-policy component before fixed work', () => {
+  // This fails when fixed-boundary fallback considers only suffixes of the
+  // policy/due base order: RED then BLUE is invalid, but BLUE can legally run
+  // before fixed YELLOW and RED can run immediately after it. Deferring both
+  // creates avoidable lateness, so the detached due-date evaluator must test
+  // the feasible retained component candidate through its normal search.
+  const red = scheduledTask('fallback-choice-red', 1, 'RED', '2026-08-03T08:30:00');
+  const blue = scheduledTask('fallback-choice-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const fixedYellow = scheduledTask(
+    'fallback-choice-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0),
+    setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'YELLOW', 0),
+    setupRow('GREEN', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0), setupRow('YELLOW', 'BLUE', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([red, fixedYellow, blue], { fixedIds: ['fallback-choice-fixed-yellow'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'fallback-choice-fixed-yellow'), undefined, 'fixed YELLOW stays immutable');
+  assert.equal(patchFor(result, 'fallback-choice-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'covered BLUE stays in the pre-fixed fragment');
+  assert.equal(patchFor(result, 'fallback-choice-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
+    'only the invalid RED suffix moves past fixed YELLOW');
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.missingEdges.some(edge => (
+    edge.predecessorOrderId === 'fallback-choice-red'
+    && edge.successorOrderId === 'fallback-choice-fixed-yellow'
+    && edge.reason === 'No version-matched setup transition covers this state pair'
+  )), 'the rejected uncovered RED -> fixed YELLOW edge remains visible');
+  const rejectedReasons = result.explanation.filter(reason => (
+    reason.code === 'rejected-uncovered-transition' && reason.taskId === 'fallback-choice-fixed-yellow'
+  ));
+  assert.equal(rejectedReasons.length, 1, 'the rejected fallback edge has one concise planner explanation');
+});
+
+test('due-date final-boundary fallback compares complete candidates before local admission', () => {
+  // The two safe fallback paths retain different amounts of work before the
+  // fixed run. BLUE alone leaves less pre-fixed work than protected RED ->
+  // ORANGE, but BLUE is the higher policy tier and must win once each route is
+  // evaluated through its deferred continuation. A local patches.length sort
+  // incorrectly selects RED -> ORANGE before fixed work.
+  const red = scheduledTask('complete-fallback-red', 0.5, 'RED', '2026-08-03T08:30:00');
+  const orange = scheduledTask('complete-fallback-orange', 0.5, 'ORANGE', '2026-08-03T08:45:00');
+  const blue = scheduledTask('complete-fallback-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const fixed = scheduledTask(
+    'complete-fallback-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0),
+      setupRow('BLUE', 'YELLOW', 0), setupRow('RED', 'YELLOW', 0),
+      setupRow('YELLOW', 'RED', 0), setupRow('YELLOW', 'BLUE', 0),
+    ],
+    overrides: [{
+      id: 'complete-fallback-protected-red-orange', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'complete-fallback-red', successor_order_id: 'complete-fallback-orange',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('ORANGE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'component fixture',
+    }],
+  });
+  const snapshot = setupSnapshot([red, fixed, orange, blue], { fixedIds: ['complete-fallback-fixed-yellow'] });
+  snapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 1, RED: 2, ORANGE: 2 } } };
+
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+
+  assert.equal(patchFor(result, 'complete-fallback-fixed-yellow'), undefined, 'fixed YELLOW remains immutable');
+  assert.deepEqual(result.patches.map(patch => patch.id), [
+    'complete-fallback-blue', 'complete-fallback-red', 'complete-fallback-orange',
+  ]);
+  assert.equal(patchFor(result, 'complete-fallback-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'the higher-priority complete route keeps BLUE before fixed work');
+  assert.equal(patchFor(result, 'complete-fallback-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.equal(patchFor(result, 'complete-fallback-orange').changes.start_date.getTime(), at('2026-08-03T11:30:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('due-date earlier fixed-boundary fallback fails closed when multiple local routes are feasible', () => {
+  // Each one-order prefix can enter the first fixed YELLOW run, but later
+  // fixed boundaries make it unsafe to rank those local prefixes without a
+  // full branching planner. The detached evaluator must preserve the line
+  // rather than promote admitted work above the documented full objective.
+  const red = scheduledTask('ambiguous-earlier-red', 1, 'RED', '2026-08-03T08:30:00');
+  const blue = scheduledTask('ambiguous-earlier-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const firstFixed = scheduledTask(
+    'ambiguous-earlier-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const secondFixed = scheduledTask(
+    'ambiguous-earlier-fixed-purple', 1, 'PURPLE', '2026-08-03T13:00:00',
+    '2026-08-03T13:00:00', '2026-08-03T14:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0),
+    setupRow('RED', 'YELLOW', 0), setupRow('BLUE', 'YELLOW', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([red, firstFixed, blue, secondFixed], {
+      fixedIds: ['ambiguous-earlier-fixed-yellow', 'ambiguous-earlier-fixed-purple'],
+    }),
+    dueDateBounds(setup),
+  );
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'fixed-boundary-fallback-ambiguous'
+    && reason.taskId === 'ambiguous-earlier-fixed-yellow'
+  )), 'the planner explains why it did not choose between local fallback routes');
+});
+
+test('due-date earlier fixed-boundary fallback proceeds when exactly one local route is feasible', () => {
+  // The same two-boundary shape is safe when only BLUE can enter first fixed
+  // YELLOW. RED is then evaluated normally between YELLOW and PURPLE.
+  const red = scheduledTask('unique-earlier-red', 1, 'RED', '2026-08-03T08:30:00');
+  const blue = scheduledTask('unique-earlier-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const firstFixed = scheduledTask(
+    'unique-earlier-fixed-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const secondFixed = scheduledTask(
+    'unique-earlier-fixed-purple', 1, 'PURPLE', '2026-08-03T13:00:00',
+    '2026-08-03T13:00:00', '2026-08-03T14:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0),
+    setupRow('BLUE', 'YELLOW', 0),
+    setupRow('YELLOW', 'RED', 0), setupRow('RED', 'PURPLE', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([red, firstFixed, blue, secondFixed], {
+      fixedIds: ['unique-earlier-fixed-yellow', 'unique-earlier-fixed-purple'],
+    }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'unique-earlier-fixed-yellow'), undefined);
+  assert.equal(patchFor(result, 'unique-earlier-fixed-purple'), undefined);
+  assert.equal(patchFor(result, 'unique-earlier-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.equal(patchFor(result, 'unique-earlier-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.explanation.some(reason => reason.code === 'fixed-boundary-fallback-ambiguous'), false);
+});
+
+test('setup-aware evaluators preserve active relations crossing a strictly post-horizon fixed boundary', () => {
+  // This fails when filtering a fixed run after the hard horizon also erases
+  // active physical adjacency constraints. A valid pair is not inactive just
+  // because this candidate cannot safely include its fixed endpoint; leave
+  // the line unchanged rather than placing one side inside the horizon.
+  const cases = [
+    {
+      label: 'free predecessor to fixed successor',
+      tasks: [
+        scheduledTask('post-horizon-before-blue', 0.5, 'BLUE', '2026-08-03T08:30:00'),
+        scheduledTask('post-horizon-other-red', 0.5, 'RED', '2026-08-03T09:00:00'),
+        scheduledTask(
+          'post-horizon-fixed-yellow', 1, 'YELLOW', '2026-08-03T13:00:00',
+          '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+        ),
+      ],
+      predecessorOrderId: 'post-horizon-before-blue',
+      successorOrderId: 'post-horizon-fixed-yellow',
+      predecessorState: 'BLUE',
+      successorState: 'YELLOW',
+      rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'YELLOW', 0)],
+    },
+    {
+      label: 'fixed predecessor to free successor',
+      tasks: [
+        scheduledTask('post-horizon-before-blue-2', 0.5, 'BLUE', '2026-08-03T08:30:00'),
+        scheduledTask('post-horizon-after-red', 0.5, 'RED', '2026-08-03T09:00:00'),
+        scheduledTask(
+          'post-horizon-fixed-yellow-2', 1, 'YELLOW', '2026-08-03T13:00:00',
+          '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+        ),
+      ],
+      predecessorOrderId: 'post-horizon-fixed-yellow-2',
+      successorOrderId: 'post-horizon-after-red',
+      predecessorState: 'YELLOW',
+      successorState: 'RED',
+      rows: [setupRow('GREEN', 'BLUE', 0), setupRow('GREEN', 'RED', 0), setupRow('YELLOW', 'RED', 0)],
+    },
+    {
+      label: 'free component chained into fixed successor',
+      tasks: [
+        scheduledTask('post-horizon-chain-blue', 0.5, 'BLUE', '2026-08-03T08:30:00'),
+        scheduledTask('post-horizon-chain-red', 0.5, 'RED', '2026-08-03T09:00:00'),
+        scheduledTask(
+          'post-horizon-fixed-yellow-3', 1, 'YELLOW', '2026-08-03T13:00:00',
+          '2026-08-03T12:00:00', '2026-08-03T13:00:00',
+        ),
+      ],
+      predecessorOrderId: 'post-horizon-chain-red',
+      successorOrderId: 'post-horizon-fixed-yellow-3',
+      predecessorState: 'RED',
+      successorState: 'YELLOW',
+      rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('RED', 'YELLOW', 0)],
+      additionalOverrides: [{
+        id: 'post-horizon-chain-free-pair', line: 'L1', signature_version: 1,
+        predecessor_order_id: 'post-horizon-chain-blue', successor_order_id: 'post-horizon-chain-red',
+        predecessor_state_key: setupState('BLUE'), successor_state_key: setupState('RED'),
+        standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected free component fixture',
+      }],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const override = {
+      id: `post-horizon-${fixture.label}`, line: 'L1', signature_version: 1,
+      predecessor_order_id: fixture.predecessorOrderId, successor_order_id: fixture.successorOrderId,
+      predecessor_state_key: setupState(fixture.predecessorState), successor_state_key: setupState(fixture.successorState),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'post-horizon fixed boundary fixture',
+    };
+    const setup = setupTruth({ rows: fixture.rows, overrides: [override, ...(fixture.additionalOverrides ?? [])] });
+    for (const [mode, evaluate] of [
+      ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+      ['SPT', SetupScheduler.evaluateSptWithSetup],
+    ]) {
+      const result = evaluate(
+        setupSnapshot(fixture.tasks, { fixedIds: [fixture.tasks.at(-1).id] }),
+        dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
+      );
+
+      assert.deepEqual(result.patches, [], `${mode} preserves ${fixture.label}`);
+      assert.deepEqual(result.unchangedLines, ['L1']);
+      assert.ok(result.missingEdges.some(edge => (
+        edge.predecessorOrderId === fixture.predecessorOrderId
+        && edge.successorOrderId === fixture.successorOrderId
+        && edge.reason === 'protected-fixed-boundary-outside-horizon'
+      )), `${mode} reports the retained boundary constraint`);
+      assert.equal(result.missingEdges.some(edge => (
+        edge.predecessorOrderId === fixture.predecessorOrderId
+        && edge.successorOrderId === fixture.successorOrderId
+        && edge.reason === 'override-inactive'
+      )), false, `${mode} does not mislabel the valid protected pair inactive`);
+    }
+  }
+});
+
+test('setup-aware evaluators retain a fixed order at horizonEnd as the terminal incoming boundary', () => {
+  // This fails when `start >= horizonEnd` removes a fixed order whose incoming
+  // setup still belongs to the candidate horizon. A -> fixed BLUE is missing,
+  // so A must not be emitted merely because BLUE processing continues later.
+  const red = scheduledTask('horizon-terminal-red', 1, 'RED', '2026-08-03T09:00:00');
+  const fixedBlue = scheduledTask(
+    'horizon-terminal-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0)] });
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([red, fixedBlue], { fixedIds: ['horizon-terminal-fixed-blue'] }),
+      dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
+    );
+
+    assert.deepEqual(result.patches, [], `${label} does not schedule RED through the terminal boundary`);
+    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(result.missingEdges.some(edge => (
+      edge.predecessorOrderId === 'horizon-terminal-red'
+      && edge.successorOrderId === 'horizon-terminal-fixed-blue'
+      && edge.reason === 'No version-matched setup transition covers this state pair'
+    )), `${label} reports RED -> fixed BLUE as uncovered`);
+  }
+});
+
+test('due-date search retains uncovered rejected alternatives for exact and greedy paths', () => {
+  // This fails when a successful B -> A route discards the observed failed
+  // A -> B alternative. The result must remain feasible while preserving one
+  // deduplicated explanation and edge for planner review; SPT is deliberately
+  // excluded because it does not explore alternate orders.
+  const red = scheduledTask('rejected-edge-red', 1, 'RED', '2026-08-03T08:30:00');
+  const blue = scheduledTask('rejected-edge-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+  ] });
+
+  for (const [label, threshold] of [['exact', 6], ['greedy', 0]]) {
+    const result = SetupScheduler.evaluateDueDateFirst(
+      setupSnapshot([red, blue]),
+      dueDateBounds(setup, { exactSearchThreshold: threshold }),
+    );
+    const rejectedEdges = result.missingEdges.filter(edge => (
+      edge.predecessorOrderId === 'rejected-edge-red'
+      && edge.successorOrderId === 'rejected-edge-blue'
+      && edge.reason === 'No version-matched setup transition covers this state pair'
+    ));
+
+    assert.deepEqual(result.unchangedLines, [], `${label} retains the covered B -> A route`);
+    assert.equal(patchFor(result, 'rejected-edge-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+    assert.equal(rejectedEdges.length, 1, `${label} exposes one rejected uncovered edge`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'rejected-uncovered-transition' && reason.taskId === 'rejected-edge-blue'
+    )), `${label} supplies a concise rejected-edge explanation`);
+  }
+});
