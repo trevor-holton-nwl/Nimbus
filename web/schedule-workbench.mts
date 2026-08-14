@@ -149,7 +149,7 @@ import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs'
 import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey } from './types.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -7423,6 +7423,35 @@ export const OptimizerPreview = {
     };
   },
 
+  /** Derive only the state labels needed to review bounded missing edges while
+   * the detached snapshot is still in scope. No task list is retained. */
+  describeMissingPairs(candidate: CandidateResult, tasks: ReadonlyArray<NimbusTask>, setup: SetupSnapshot | null): PreviewExplanation['missingPairs'] {
+    const definition = setup?.definition;
+    const byId = new Map(tasks.map(task => [String(task.id), task]));
+    const text = (state: SetupStateKey | null | undefined) => state?.map(part => `${part.fieldKey}=${part.value}`).join(' | ') || null;
+    return candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => {
+      const predecessor = edge.predecessorOrderId ? byId.get(String(edge.predecessorOrderId)) : undefined;
+      const successor = edge.successorOrderId ? byId.get(String(edge.successorOrderId)) : undefined;
+      const lineState = definition
+        ? setup?.line_states.find(state => state.line === edge.line && state.signature_version === definition.signature_version)?.state_key
+        : null;
+      return {
+        line: edge.line,
+        predecessorOrderId: edge.predecessorOrderId ?? null,
+        successorOrderId: edge.successorOrderId ?? null,
+        fromState: text(definition && predecessor ? stateForOrder(predecessor, definition) : lineState),
+        toState: text(definition && successor ? stateForOrder(successor, definition) : null),
+        reason: edge.reason,
+      };
+    });
+  },
+
+  missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
+    const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    return ['Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...pairs.map(pair =>
+      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason].map(quote).join(','))].join('\n');
+  },
+
   canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
 
   /** Setup writes make comparison facts stale; they never rerun or apply a
@@ -7540,12 +7569,18 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
-        OptimizerPreview._explanation = OptimizerPreview.summarizeCandidate(candidate, {
+        const explanation = OptimizerPreview.summarizeCandidate(candidate, {
           productionBefore: snapshot.filter(inScope).length,
           productionAfter: postTasks.length,
           preKpis,
           postKpis,
         });
+        explanation.missingPairs = OptimizerPreview.describeMissingPairs(
+          candidate,
+          candidateSnapshot.tasks,
+          Store.setupSnapshot?.plant === plant ? Store.setupSnapshot : null,
+        );
+        OptimizerPreview._explanation = explanation;
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
 
@@ -7704,8 +7739,9 @@ export const OptimizerPreview = {
       const reasons = explanation.reasons.length
         ? `<ul>${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
         : '<span>No candidate-specific reasons were reported.</span>';
+      const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
       const missing = explanation.missingPairs.length
-        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.predecessorOrderId || '—')}</td><td>${esc(pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>Copy</button> <button class="btn btn-ghost sm" data-opt-export-missing>Export CSV</button> <button class="btn btn-ghost sm" data-opt-review-missing>Review missing setups</button></div>`
+        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>Line</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>Copy</button> <button class="btn btn-ghost sm" data-opt-export-missing>Export CSV</button>${canReview ? ' <button class="btn btn-ghost sm" data-opt-review-missing>Review missing setups</button>' : ''}</div>`
         : '<span>No missing setup pairs in this candidate.</span>';
       const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>Preview is stale.</strong> ${esc(OptimizerPreview._staleReason || 'Setup data changed')}. Apply is disabled; run optimization again to refresh this comparison.</div>` : '';
       return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">Candidate explanation</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>Search:</strong> ${esc(explanation.search.method)} · ${explanation.search.candidateCount} candidates · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? ' · limit reached' : ''}</p><p><strong>Constraints:</strong> ${esc(explanation.constraints.join(', ') || 'none reported')}</p><p><strong>Unchanged lines:</strong> ${esc(explanation.unchangedLines.join(', ') || 'none')}</p><div><strong>Accepted/rejected reasons</strong>${reasons}</div><div><strong>Missing setup pairs</strong>${missing}</div></section>`;
@@ -7829,8 +7865,7 @@ export const OptimizerPreview = {
         requestAnimationFrame(tick);
       });
     });
-    const missingCsv = () => ['Line,Predecessor order,Successor order,Reason', ...(OptimizerPreview._explanation?.missingPairs || []).map(pair =>
-      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.reason].map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+    const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
       navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
     });
@@ -7841,7 +7876,7 @@ export const OptimizerPreview = {
     });
     body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', () => {
       const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => void } } }).NIMBUS?.SetupAdmin;
-      setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || []);
+      if (setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
     });
   },
 

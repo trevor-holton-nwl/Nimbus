@@ -104,6 +104,7 @@ type SetupPermissions = { read: boolean; copy: boolean; export: boolean; definit
 type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPlant: boolean };
 type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string };
 type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
+type SetupReviewNavigation = { selectPlant: boolean; openMasterData: boolean; masterSub: 'plant'; plantTab: 'settings'; renderAfterNavigation: boolean };
 
 /**
  * Plant-scoped administration for Stage 0 setup truth. It deliberately does
@@ -183,6 +184,23 @@ export const SetupAdmin = (() => {
     return permissions.matrixWrite ? 'editor' : 'copy-export';
   }
 
+  function canReviewMissingPairs(plant: string): boolean {
+    const session = Session.currentUser();
+    const settings = session?.role_settings?.permissions as Record<string, unknown> | undefined;
+    const plantAllowed = Session.isAdmin() || session?.allowed_plants?.includes(plant) === true;
+    return permissionsFor({ isAdmin: Session.isAdmin(), setupScheduler: settings?.setup_scheduler === true, plantAllowed }).matrixWrite;
+  }
+
+  function reviewNavigation(plant: string, selectedPlant: string | null, paneVisible: boolean): SetupReviewNavigation {
+    return {
+      selectPlant: selectedPlant !== plant,
+      openMasterData: true,
+      masterSub: 'plant',
+      plantTab: 'settings',
+      renderAfterNavigation: !paneVisible || selectedPlant !== plant,
+    };
+  }
+
   function setupWriteKind(url: string): SetupWriteKind {
     if (/\/definition(?:$|\?)/.test(url)) return 'definition';
     if (/\/matrix(?:\/|$)/.test(url)) return 'matrix';
@@ -192,12 +210,21 @@ export const SetupAdmin = (() => {
 
   /** Receives only the compact preview edge list. It never stores candidate
    * schedules and it never triggers an optimization run. */
-  function reviewMissingPairs(plant: string, pairs: ReadonlyArray<MissingSetupReviewPair>): void {
+  function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): boolean {
+    if (!plant || !canReviewMissingPairs(plant)) return false;
     _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
     const lines = [...new Set(_missingReview.pairs.map(pair => pair.line).filter(Boolean))];
     if (lines.length === 1) _lineScope = lines[0];
-    const target = _lastTarget ?? document.getElementById('setup-admin-pane');
+    const existingPane = _lastTarget ?? document.getElementById('setup-admin-pane');
+    const navigation = reviewNavigation(plant, Store.selectedPlant, !!existingPane && !existingPane.closest('[hidden]'));
+    if (navigation.selectPlant) Store.setSelectedPlant(plant, 'setup-preview-review');
+    const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void; gotoMasterSub?: (sub: 'plant') => void } } }).NIMBUS?.App;
+    app?.goto?.('masterdata');
+    app?.gotoMasterSub?.(navigation.masterSub);
+    Plant.gotoTab(navigation.plantTab);
+    const target = document.getElementById('setup-admin-pane') ?? existingPane;
     if (target) render(target, plant);
+    return true;
   }
 
   function csvFor(plant: string, rows: EffectiveSetupRow[]): string {
@@ -467,7 +494,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
 })();
 
 /* =============================================================================

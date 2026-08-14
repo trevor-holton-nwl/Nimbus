@@ -560,6 +560,28 @@ test('OptimizerPreview retains only a bounded candidate explanation and drops it
   assert.equal(OptimizerPreview._explanation, null, 'Discard destroys the in-memory explanation');
 });
 
+test('OptimizerPreview derives and exports real setup states for bounded missing pairs', () => {
+  // Regression target: displaying order IDs in From/To (and exporting no
+  // states) prevents a matrix editor from acting on the reported pair.
+  const candidate = {
+    patches: [], explanation: [], diagnostics: { candidateCount: 1, method: 'spt-detached', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] },
+    unchangedLines: [], missingEdges: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', reason: 'matrix-missing' }],
+  };
+  const setup = {
+    plant: '5512', definition: { plant: '5512', fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false },
+    plant_rows: [], line_rows: [], line_states: [], overrides: [],
+  };
+  const pairs = OptimizerPreview.describeMissingPairs(candidate, [
+    { id: 'red-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'RED' },
+    { id: 'blue-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'BLUE' },
+  ], setup);
+  assert.deepEqual(pairs, [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing' }]);
+  const csv = OptimizerPreview.missingPairsCsv(pairs);
+  assert.match(csv, /From setup state,To setup state/);
+  assert.match(csv, /colorWheel=RED/);
+  assert.match(csv, /colorWheel=BLUE/);
+});
+
 test('Persistence setup writes stale an open preview without applying or rerunning it', () => {
   // Regression target: a successful matrix/state/override write must require
   // an explicit preview rerun instead of applying or recomputing silently.

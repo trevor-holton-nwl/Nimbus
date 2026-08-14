@@ -76,6 +76,18 @@ test('SetupAdmin bounds missing-setup review data and reserves the editor for wr
   assert.equal(SetupAdmin.reviewAction({ matrixWrite: false }), 'copy-export');
 });
 
+test('SetupAdmin plans a cross-plant missing-setup handoff even when its pane is hidden', () => {
+  // Regression target: review used to render only an already-visible pane,
+  // leaving a preview from another plant with nowhere usable to go.
+  assert.deepEqual(SetupAdmin.reviewNavigation('5512', '1006', false), {
+    selectPlant: true,
+    openMasterData: true,
+    masterSub: 'plant',
+    plantTab: 'settings',
+    renderAfterNavigation: true,
+  });
+});
+
 test('SetupAdmin only grants state writes to an explicitly scoped setup scheduler', () => {
   // Regression target: treating any authenticated non-admin as a scheduler
   // would show a write control that the server must reject.
