@@ -43,7 +43,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, SetupPolicyConfig, LineSetupState, SetupStateKey } from './types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, SetupPolicyConfig, SetupReleaseEvidence, LineSetupState, SetupStateKey } from './types.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -150,11 +150,37 @@ export const SetupAdmin = (() => {
   }
 
   function policyActivationStatus(policy: { dueDateFirstEnabled?: boolean; minChangeoverEnabled?: boolean; throughputEnabled?: boolean },
-                                  gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean }): { active: boolean; reason: string } {
+                                  gates: { stage1Validated: boolean; localDbVerified: boolean; performanceVerified: boolean; browserUatVerified?: boolean; representativeReplayVerified?: boolean; nullPredecessorVerified?: boolean; ownerApproved?: boolean; ownerEmail?: string | null; approvedAt?: string | null; notes?: string }): { active: boolean; reason: string } {
     if (!gates.stage1Validated) return { active: false, reason: 'Activation is blocked: Stage 1 validation is not recorded.' };
     if (!gates.localDbVerified) return { active: false, reason: 'Activation is blocked: safe local database verification is not recorded.' };
     if (!gates.performanceVerified) return { active: false, reason: 'Activation is blocked: representative performance validation is not recorded.' };
+    if (gates.browserUatVerified === false) return { active: false, reason: 'Activation is blocked: browser UAT is not recorded.' };
+    if (gates.representativeReplayVerified === false) return { active: false, reason: 'Activation is blocked: representative replay is not recorded.' };
+    if (gates.nullPredecessorVerified === false) return { active: false, reason: 'Activation is blocked: null-predecessor persistence is not recorded.' };
+    if (gates.ownerApproved === false || !gates.ownerEmail || !gates.approvedAt || !gates.notes?.trim()) return { active: false, reason: 'Activation is blocked: scheduling-owner approval is not recorded.' };
     return { active: !!(policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled), reason: 'Policy activation evidence is complete.' };
+  }
+
+  function releaseEvidenceReady(evidence: SetupReleaseEvidence | null | undefined): boolean {
+    if (!evidence) return false;
+    return evidence.ready === true && !!evidence.ownerEmail && !!evidence.approvedAt && !!evidence.notes?.trim();
+  }
+
+  function releaseEvidencePayload(evidence: SetupReleaseEvidence, patch: Partial<SetupReleaseEvidence> = {}): Record<string, unknown> {
+    const merged = { ...evidence, ...patch };
+    return {
+      stage1Validated: !!merged.stage1Validated,
+      localDbVerified: !!merged.localDbVerified,
+      performanceVerified: !!merged.performanceVerified,
+      browserUatVerified: !!merged.browserUatVerified,
+      representativeReplayVerified: !!merged.representativeReplayVerified,
+      nullPredecessorVerified: !!merged.nullPredecessorVerified,
+      ownerApproved: !!merged.ownerApproved,
+      ownerEmail: merged.ownerEmail || null,
+      approvedAt: merged.approvedAt || null,
+      notes: String(merged.notes || '').trim(),
+      expected_version: evidence.version,
+    };
   }
 
   function normalizePolicyThresholds(minSavings: string, maxSlip: string): Pick<SetupPolicyConfig, 'throughputMinSavingsMin' | 'throughputMaxSlipMin'> {
@@ -356,7 +382,7 @@ export const SetupAdmin = (() => {
       });
       return;
     }
-    Promise.all([loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant), Persistence.loadSetupPolicy(plant)]).then(() => {
+    Promise.all([loadRegisteredFields(), loadScopeLines(plant), loadCoverage(plant), Persistence.loadSetupPolicy(plant), Persistence.loadSetupReleaseEvidence(plant)]).then(() => {
       if (Store.selectedPlant === plant) renderSnapshot(target, snapshot);
     });
     if (_lineScope) loadCompatibility(plant, _lineScope).then(() => { if (Store.selectedPlant === plant) renderSnapshot(target, snapshot); });
@@ -379,10 +405,11 @@ export const SetupAdmin = (() => {
     const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
     const status = activationStatus(definition, { matrixVersion, coveragePass });
     const policy = Persistence._setupPolicyPlant === snapshot.plant ? Persistence._setupPolicyConfig : null;
+    const evidence = Persistence._setupReleaseEvidencePlant === snapshot.plant ? Persistence._setupReleaseEvidence : null;
     const policyStatus = policy
-      ? policyActivationStatus(policy, { stage1Validated: false, localDbVerified: false, performanceVerified: false })
+      ? policyActivationStatus(policy, evidence || { stage1Validated: false, localDbVerified: false, performanceVerified: false })
       : { active: false, reason: Util.t('ui.setup_policy_loading') };
-    const policyHtml = renderPolicyPanel(policy, permissions, policyStatus);
+    const policyHtml = renderPolicyPanel(policy, evidence, permissions, policyStatus);
     const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
@@ -422,16 +449,24 @@ export const SetupAdmin = (() => {
       if (value) loadCompatibility(snapshot.plant, value).then(() => renderSnapshot(target, snapshot));
       else renderSnapshot(target, snapshot);
     } });
-    wire(target, snapshot, permissions, rows, policy);
+    wire(target, snapshot, permissions, rows, policy, evidence);
   }
 
-  function renderPolicyPanel(policy: SetupPolicyConfig | null, permissions: SetupPermissions, status: { active: boolean; reason: string }): string {
+  function renderPolicyPanel(policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null, permissions: SetupPermissions, status: { active: boolean; reason: string }): string {
     if (!policy) return `<div class="setup-policy panel" aria-live="polite"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4></div><div class="panel-body"><span class="setup-empty">${esc(status.reason)}</span></div></div>`;
     const enabled = policy.dueDateFirstEnabled || policy.minChangeoverEnabled || policy.throughputEnabled;
+    const evidenceReady = releaseEvidenceReady(evidence);
     const controls = permissions.definitionWrite
       ? `<button class="btn btn-ghost sm" data-setup-save-policy>${esc(Util.t('btn.save'))}</button>${enabled ? `<button class="btn btn-ghost sm" data-setup-disable-policy>${esc(Util.t('ui.setup_policy_disable_all'))}</button>` : ''}`
       : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`;
-    return `<div class="setup-policy panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4>${controls}</div><div class="panel-body"><div class="setup-status warn"><strong>${esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_policy_min_savings'))}<input class="input" inputmode="numeric" data-setup-policy-min-savings value="${policy.throughputMinSavingsMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_policy_max_slip'))}<input class="input" inputmode="numeric" data-setup-policy-max-slip value="${policy.throughputMaxSlipMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><div class="setup-policy-modes"><label class="setup-check"><input type="checkbox" ${policy.dueDateFirstEnabled ? 'checked' : ''} disabled>${esc(Util.t('ui.setup_policy_due_date_first'))}</label><label class="setup-check"><input type="checkbox" ${policy.minChangeoverEnabled ? 'checked' : ''} disabled>${esc(Util.t('ui.setup_policy_min_changeover'))}</label><label class="setup-check"><input type="checkbox" ${policy.throughputEnabled ? 'checked' : ''} disabled>${esc(Util.t('ui.setup_policy_throughput'))}</label></div><p class="setup-help">${esc(Util.t('ui.setup_policy_switches_locked'))}</p></div></div>`;
+    const evidenceFields: Array<[keyof SetupReleaseEvidence, string]> = [
+      ['stage1Validated', 'ui.setup_evidence_stage1'], ['localDbVerified', 'ui.setup_evidence_local_db'],
+      ['performanceVerified', 'ui.setup_evidence_performance'], ['browserUatVerified', 'ui.setup_evidence_browser'],
+      ['representativeReplayVerified', 'ui.setup_evidence_replay'], ['nullPredecessorVerified', 'ui.setup_evidence_null_predecessor'],
+      ['ownerApproved', 'ui.setup_evidence_owner'],
+    ];
+    const evidencePanel = evidence ? `<div class="setup-evidence panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_evidence_title'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-evidence>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div><div class="panel-body"><div class="setup-evidence-grid">${evidenceFields.map(([key, label]) => `<label class="setup-check"><input type="checkbox" data-setup-evidence="${key}" ${evidence[key] ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t(label))}</label>`).join('')}</div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_evidence_owner_email'))}<input class="input" data-setup-evidence-owner-email value="${esc(evidence.ownerEmail || '')}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_evidence_approved_at'))}<input class="input" data-setup-evidence-approved-at value="${esc(evidence.approvedAt || '')}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><label class="setup-evidence-notes">${esc(Util.t('ui.setup_evidence_notes'))}<textarea class="input" data-setup-evidence-notes ${permissions.definitionWrite ? '' : 'disabled'}>${esc(evidence.notes)}</textarea></label><div class="setup-status ${evidenceReady ? 'ok' : 'warn'}"><strong>${esc(evidenceReady ? Util.t('ui.setup_evidence_ready') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div></div></div>` : '';
+    return `${evidencePanel}<div class="setup-policy panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_policy_title'))}</h4>${controls}</div><div class="panel-body"><div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${esc(status.active ? Util.t('ui.setup_activation_active') : Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div><div class="setup-policy-grid"><label>${esc(Util.t('ui.setup_policy_min_savings'))}<input class="input" inputmode="numeric" data-setup-policy-min-savings value="${policy.throughputMinSavingsMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label><label>${esc(Util.t('ui.setup_policy_max_slip'))}<input class="input" inputmode="numeric" data-setup-policy-max-slip value="${policy.throughputMaxSlipMin}" ${permissions.definitionWrite ? '' : 'disabled'}></label></div><div class="setup-policy-modes"><label class="setup-check"><input type="checkbox" data-setup-policy-mode="dueDateFirstEnabled" ${policy.dueDateFirstEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_due_date_first'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="minChangeoverEnabled" ${policy.minChangeoverEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_min_changeover'))}</label><label class="setup-check"><input type="checkbox" data-setup-policy-mode="throughputEnabled" ${policy.throughputEnabled ? 'checked' : ''} ${permissions.definitionWrite && evidenceReady ? '' : 'disabled'}>${esc(Util.t('ui.setup_policy_throughput'))}</label></div><p class="setup-help">${esc(evidenceReady ? Util.t('ui.setup_policy_switches_unlocked') : Util.t('ui.setup_policy_switches_locked'))}</p></div></div>`;
   }
 
   function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {
@@ -439,7 +474,7 @@ export const SetupAdmin = (() => {
     return `<div class="setup-state panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_current_state'))}</h4></div><div class="panel-body"><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div></div>`;
   }
 
-  function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], policy: SetupPolicyConfig | null): void {
+  function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): void {
     target.querySelector<HTMLButtonElement>('[data-setup-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(csvFor(snapshot.plant, rows)).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
     target.querySelector<HTMLButtonElement>('[data-setup-export]')?.addEventListener('click', () => {
       const blob = new Blob([csvFor(snapshot.plant, rows)], { type: 'text/csv;charset=utf-8' });
@@ -462,19 +497,46 @@ export const SetupAdmin = (() => {
     }));
     target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
     target.querySelector<HTMLButtonElement>('[data-setup-edit-state]')?.addEventListener('click', () => editState(target, snapshot));
-    target.querySelector<HTMLButtonElement>('[data-setup-save-policy]')?.addEventListener('click', () => savePolicy(target, snapshot.plant, policy));
+    target.querySelector<HTMLButtonElement>('[data-setup-save-policy]')?.addEventListener('click', () => savePolicy(target, snapshot.plant, policy, evidence));
     target.querySelector<HTMLButtonElement>('[data-setup-disable-policy]')?.addEventListener('click', () => disablePolicy(target, snapshot.plant, policy));
+    target.querySelector<HTMLButtonElement>('[data-setup-save-evidence]')?.addEventListener('click', () => saveEvidence(target, snapshot.plant, evidence));
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
   }
 
-  async function savePolicy(target: HTMLElement, plant: string, policy: SetupPolicyConfig | null): Promise<void> {
+  async function savePolicy(target: HTMLElement, plant: string, policy: SetupPolicyConfig | null, evidence: SetupReleaseEvidence | null): Promise<void> {
     if (!policy) return;
     try {
       const minSavings = target.querySelector<HTMLInputElement>('[data-setup-policy-min-savings]')?.value ?? '';
       const maxSlip = target.querySelector<HTMLInputElement>('[data-setup-policy-max-slip]')?.value ?? '';
       const thresholds = normalizePolicyThresholds(minSavings, maxSlip);
-      await putPolicy(plant, { ...safeDisablePolicy({ ...policy, ...thresholds }) });
+      const enabled = releaseEvidenceReady(evidence);
+      const body = enabled
+        ? {
+          plant, ...thresholds,
+          dueDateFirstEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="dueDateFirstEnabled"]')?.checked === true,
+          minChangeoverEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="minChangeoverEnabled"]')?.checked === true,
+          throughputEnabled: target.querySelector<HTMLInputElement>('[data-setup-policy-mode="throughputEnabled"]')?.checked === true,
+          expected_version: policy.version,
+        }
+        : safeDisablePolicy({ ...policy, ...thresholds });
+      await putPolicy(plant, body);
       await Persistence.loadSetupPolicy(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+  }
+
+  async function saveEvidence(target: HTMLElement, plant: string, evidence: SetupReleaseEvidence | null): Promise<void> {
+    if (!evidence) return;
+    try {
+      const patch: Partial<SetupReleaseEvidence> = {
+        ownerEmail: target.querySelector<HTMLInputElement>('[data-setup-evidence-owner-email]')?.value.trim() || null,
+        approvedAt: target.querySelector<HTMLInputElement>('[data-setup-evidence-approved-at]')?.value.trim() || null,
+        notes: target.querySelector<HTMLTextAreaElement>('[data-setup-evidence-notes]')?.value.trim() || '',
+      };
+      (['stage1Validated', 'localDbVerified', 'performanceVerified', 'browserUatVerified', 'representativeReplayVerified', 'nullPredecessorVerified', 'ownerApproved'] as const).forEach(key => {
+        patch[key] = target.querySelector<HTMLInputElement>(`[data-setup-evidence="${key}"]`)?.checked === true;
+      });
+      await putReleaseEvidence(plant, releaseEvidencePayload(evidence, patch));
+      await Persistence.loadSetupReleaseEvidence(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
@@ -488,6 +550,11 @@ export const SetupAdmin = (() => {
 
   async function putPolicy(plant: string, body: Omit<SetupPolicyConfig, 'version'> & { expected_version: number }): Promise<void> {
     const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/policy`, { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
+    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+  }
+
+  async function putReleaseEvidence(plant: string, body: Record<string, unknown>): Promise<void> {
+    const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/release-evidence`, { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
     if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
   }
 
@@ -569,7 +636,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, normalizePolicyThresholds, safeDisablePolicy, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
+  return { permissionsFor, canWriteVersion, activationStatus, policyActivationStatus, releaseEvidenceReady, releaseEvidencePayload, normalizePolicyThresholds, safeDisablePolicy, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render };
 })();
 
 /* =============================================================================

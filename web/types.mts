@@ -100,6 +100,23 @@ export interface SetupPolicyConfig {
   version: number;
 }
 
+/** Plant-scoped release evidence required before any setup policy may enable. */
+export interface SetupReleaseEvidence {
+  plant: string;
+  stage1Validated: boolean;
+  localDbVerified: boolean;
+  performanceVerified: boolean;
+  browserUatVerified: boolean;
+  representativeReplayVerified: boolean;
+  nullPredecessorVerified: boolean;
+  ownerApproved: boolean;
+  ownerEmail: string | null;
+  approvedAt: string | null;
+  notes: string;
+  version: number;
+  ready: boolean;
+}
+
 export interface NimbusBlock {
   id: string;
   /** null = all lines in the plant. */
@@ -230,6 +247,7 @@ export interface NimbusMasterPlant {
    *  legacy continuous scheduling. */
   split_order_policy?: SplitOrderPolicy | null;
   setup_policy_config?: SetupPolicyConfig | null;
+  setup_release_evidence?: SetupReleaseEvidence | null;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */

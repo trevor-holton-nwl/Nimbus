@@ -342,6 +342,21 @@ test('Persistence.loadSetupPolicy clears prior-plant policy before hydrating and
   }
 });
 
+test('Persistence.loadSetupReleaseEvidence clears prior-plant evidence before hydrating and remains empty after failure', async () => {
+  Persistence._setupReleaseEvidence = { plant: 'PLANT_A', stage1Validated: true, ready: false };
+  Persistence._setupReleaseEvidencePlant = 'PLANT_A';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+  try {
+    const result = await Persistence.loadSetupReleaseEvidence('PLANT_B');
+    assert.equal(result, null);
+    assert.equal(Persistence._setupReleaseEvidence, null, 'a failed load must not retain PLANT_A evidence');
+    assert.notEqual(Persistence._setupReleaseEvidencePlant, 'PLANT_B');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Stage 3 fix — the rank cache must not survive a plant switch.
 //

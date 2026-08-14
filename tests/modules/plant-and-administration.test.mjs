@@ -148,6 +148,26 @@ test('SetupAdmin validates editable policy thresholds and makes safe-disable pay
   });
 });
 
+test('SetupAdmin derives release readiness and preserves versioned evidence payloads', () => {
+  const incomplete = {
+    plant: '5512', stage1Validated: true, localDbVerified: true,
+    performanceVerified: true, browserUatVerified: true,
+    representativeReplayVerified: true, nullPredecessorVerified: true,
+    ownerApproved: true, ownerEmail: 'owner@example.com', approvedAt: '2026-08-14T12:00:00Z',
+    notes: '', version: 4, ready: false,
+  };
+  assert.equal(SetupAdmin.releaseEvidenceReady(incomplete), false);
+  const complete = { ...incomplete, notes: 'All checks recorded.', ready: true };
+  assert.equal(SetupAdmin.releaseEvidenceReady(complete), true);
+  assert.deepEqual(SetupAdmin.releaseEvidencePayload(complete, { notes: 'Updated record.' }), {
+    stage1Validated: true, localDbVerified: true, performanceVerified: true,
+    browserUatVerified: true, representativeReplayVerified: true,
+    nullPredecessorVerified: true, ownerApproved: true,
+    ownerEmail: 'owner@example.com', approvedAt: '2026-08-14T12:00:00Z',
+    notes: 'Updated record.', expected_version: 4,
+  });
+});
+
 test('SetupAdmin exports canonical long-form columns with plant, line, and version metadata', () => {
   // Regression target: changing labels or omitting scope/version makes an
   // exported file impossible to import deterministically into this editor.
