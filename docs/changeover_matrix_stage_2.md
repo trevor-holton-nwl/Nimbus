@@ -250,6 +250,11 @@ fail-closed until real evidence is recorded:
   permission-aware evidence editor and policy controls, and keeps switches
   disabled until the server-visible evidence is complete. Focused UI,
   hydration, locale, build, and typecheck checks pass.
+- `e44a669` localizes the setup review/status surface, limits evidence editing
+  to administrators, coalesces setup-panel loads, and hardens setup-bar
+  accessibility/contrast. `1a22dee` keeps the exported status evaluators
+  usable in Node-side tests without a browser global. The focused
+  SetupAdmin/locale suite passes 23/23.
 - Null-predecessor initial overrides now preserve explicit JSON `null` through
   validation, null-safe replacement matching, and parameterized SQL. The
   schema/migration allow the nullable initial binding and use `NULLS NOT
