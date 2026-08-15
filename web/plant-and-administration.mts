@@ -1524,6 +1524,10 @@ export const Plant = {
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
+  _settingsSubTabVisibility(subTab: 'rules' | 'setup'): { rules: boolean; setup: boolean } {
+    return { rules: subTab === 'rules', setup: subTab === 'setup' };
+  },
+
   init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
@@ -2435,6 +2439,7 @@ export const Plant = {
     const confHz  = plantRow?.conf_score_horizon ?? Store.userSettings.confidenceHorizonMinutes ?? 20160;
 
     const subTab = Plant._currentSettingsSubTab;
+    const subTabVisibility = Plant._settingsSubTabVisibility(subTab);
     pane.innerHTML = `
       <div class="cal-scroll"><div class="cal-container">
         <header class="cal-head">
@@ -2449,7 +2454,7 @@ export const Plant = {
           <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>
         </nav>
 
-        <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:flex;flex-direction:column;gap:24px;padding:8px 0 32px" ${subTab === 'rules' ? '' : 'hidden'}>
+        <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px;padding:8px 0 32px" ${subTabVisibility.rules ? '' : 'hidden'}>
 
           <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.alert_horizon_title')}</h3></header>
@@ -2515,7 +2520,7 @@ export const Plant = {
         <!-- Stage 0 setup truth is maintained beside the plant's scheduling
              policy, never inside a timeline/optimizer flow. It remains
              observation-only until a later stage explicitly enables use. -->
-        <div id="settings-subtab-setup" role="tabpanel" aria-labelledby="settings-subtab-setup-tab" style="padding:8px 0 32px" ${subTab === 'setup' ? '' : 'hidden'}>
+        <div id="settings-subtab-setup" role="tabpanel" aria-labelledby="settings-subtab-setup-tab" style="display:${subTabVisibility.setup ? 'block' : 'none'};padding:8px 0 32px" ${subTabVisibility.setup ? '' : 'hidden'}>
           <div id="setup-admin-pane"></div>
         </div>
 
