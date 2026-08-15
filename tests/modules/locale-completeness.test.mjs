@@ -40,12 +40,19 @@ test('every constraint.<field> key exists in all 5 locales', () => {
 });
 
 test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
+  // ui.setup_matrix_observation, btn.setup_export_csv, and btn.setup_delete_override
+  // were retired as dead i18n keys (docs/Setup_matrix_redesign.md §10/§15) — the
+  // "REFERENCE DATA" observation eyebrow, CSV-export button, and delete-row
+  // wiring they backed have no remaining callers.
+  // ui.setup_inherited backed the old flat edge-list table's `tr.inherited`
+  // row styling; the grid rebuild (docs/setup_matrix_ui_redesign.md) replaced
+  // that table and never carried this key's usage forward.
   const REQUIRED_SETUP = [
-    'ui.setup_matrix_title', 'ui.setup_matrix_observation', 'ui.setup_line_scope',
-    'ui.setup_inherited', 'ui.setup_activation_inactive', 'ui.setup_activation_requirements',
+    'ui.setup_matrix_title',
+    'ui.setup_activation_inactive',
     'ui.setup_compatibility', 'ui.setup_compatibility_reason', 'ui.setup_not_global_exclusion',
     'ui.setup_import_csv',
-    'btn.setup_export_csv', 'btn.setup_delete_override', 'ui.setup_state_source',
+    'ui.setup_state_source',
     'ui.setup_observed_at', 'ui.setup_override_audit',
     'ui.setup_detail_title', 'ui.setup_predecessor', 'ui.setup_predecessor_state', 'ui.setup_required',
     'ui.setup_effective', 'ui.setup_standard', 'ui.setup_source',
@@ -105,20 +112,35 @@ test('Stage 3 priority-tree / effective-sequence ui.* keys exist in all 5 locale
 });
 
 test('Setup Matrix grid redesign keys exist in all 5 locales', () => {
-  // docs/setup_matrix_ui_redesign.md — the grid rebuild + IA regroup pass.
+  // docs/Setup_matrix_redesign.md — the four-band layout + grid rebuild pass.
+  // ui.setup_eyebrow_active/_inactive, the setup_group_* group headers/descs,
+  // ui.setup_line_status_empty, ui.setup_step2_grid, and ui.setup_kpi_observed/
+  // _reachable were retired: the four-group layout collapsed into four bands
+  // (context bar, standard rail, grid, action bar) with one status chip and
+  // an inline coverage readout replacing the KPI tiles (§9, §15).
   const REQUIRED_GRID = [
-    'ui.setup_eyebrow_inactive', 'ui.setup_eyebrow_active',
     'ui.settings_subtab_rules', 'ui.settings_subtab_setup',
-    'ui.setup_group_standard_title', 'ui.setup_group_standard_desc',
-    'ui.setup_group_line_title', 'ui.setup_group_line_desc', 'ui.setup_line_status_empty',
-    'ui.setup_group_coverage_title', 'ui.setup_group_coverage_desc',
-    'ui.setup_group_readiness_title', 'ui.setup_group_readiness_desc',
-    'ui.setup_step1_definition', 'ui.setup_step2_grid',
-    'ui.setup_grid_filter_placeholder', 'ui.setup_grid_dirty_count', 'ui.setup_grid_no_values',
-    'ui.setup_grid_missing_placeholder', 'ui.setup_grid_invalid_minutes',
+    'ui.setup_include_setup_times',
+    'ui.setup_step1_definition',
+    // Band A/B additions (§9): status-chip-adjacent signature popover, Scope
+    // selector, inline coverage readout, and the missing-pairs review chip
+    // that replaced the tab's own copy of the missing-pairs mini-table.
+    'ui.setup_band_signature_label', 'ui.setup_scope_label', 'ui.setup_no_definition_short',
+    'ui.setup_signature_popover_hint', 'ui.setup_coverage_inline',
+    'ui.setup_review_chip', 'btn.setup_review_clear',
+    // "You are here" row marker (§9-C.5), replacing the standalone Line Status panel.
+    'ui.setup_you_are_here', 'ui.setup_you_are_here_hint',
+    // Split From/To filter (docs/Setup_matrix_redesign.md §6) replaces the
+    // single shared ui.setup_grid_filter_placeholder, which made directional
+    // inspection (e.g. BLUE→RED) impossible.
+    'ui.setup_grid_filter_from_placeholder', 'ui.setup_grid_filter_to_placeholder',
+    'ui.setup_grid_axis_capped', 'ui.setup_grid_uncovered_hint',
+    'ui.setup_grid_implicit_zero_hint', 'ui.setup_grid_line_override_hint',
+    'ui.setup_grid_dirty_count', 'ui.setup_grid_no_values',
+    'ui.setup_grid_invalid_minutes',
     'ui.setup_grid_pasted', 'ui.setup_grid_paste_rejected',
     'ui.setup_replace_confirm_title', 'ui.setup_replace_confirm_msg',
-    'ui.setup_kpi_observed', 'ui.setup_kpi_reachable', 'ui.setup_kpi_missing_count',
+    'ui.setup_kpi_missing_count',
     'btn.setup_audit_toggle', 'btn.setup_copy_matrix', 'btn.setup_export_matrix',
     'btn.setup_copy_missing', 'btn.setup_export_missing', 'btn.setup_replace_confirm',
     'btn.setup_field_up', 'btn.setup_field_down',

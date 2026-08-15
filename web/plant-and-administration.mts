@@ -137,13 +137,32 @@ export const SetupAdmin = (() => {
   // Grid state (Setup Standard's from-state x to-state editor). Rebuilt every
   // renderSnapshot() call, same full-repaint model as the rest of this module.
   let _gridModel: SetupGridModel | null = null;
-  let _gridFilter = '';
+  // Split From/To (docs/Setup_matrix_redesign.md §6) — a single shared filter
+  // applied to both axes made directional inspection (e.g. BLUE→RED) impossible:
+  // filtering "BLUE" collapsed the grid to the BLUE→BLUE block only.
+  let _gridFilterFrom = '';
+  let _gridFilterTo = '';
+  let _scopeSeededPlant = '';
   let _gridDirty: Map<string, SetupGridEdit> = new Map(); // key: `${row.sig} ${col.sig}`
   let _gridCellGrid: Array<Array<HTMLTableCellElement | null>> = []; // [rowIdx][colIdx] -> <td>, built per paint
   let _gridSelRange: { r0: number; c0: number; r1: number; c1: number } | null = null;
   let _gridDragging = false;
   let _gridDragAnchor: { row: number; col: number } | null = null;
   let _gridSelTds: Set<HTMLTableCellElement> = new Set();
+  // Four-band layout (docs/Setup_matrix_redesign.md §9): the signature editor
+  // moved from an always-open panel into a popover behind the band-B chip.
+  let _signaturePopoverOpen = false;
+  let _setupMenuOpen = false;
+  // Single floating editor that repositions over whichever cell is focused,
+  // replacing one live <input> per cell (§7/§9-C.3) — the read-only <td>s
+  // this replaces are far cheaper to paint at MAX_AXIS² scale than an <input>
+  // per cell was before the axis cap existed.
+  let _gridEditor: { row: SetupGridState; col: SetupGridState } | null = null;
+  // Context for whichever cell _gridEditor currently points at — refreshed on
+  // every openGridEditor() call so the floating editor's keydown/blur
+  // listeners (wired once, globally, in ensureGridEditorEl — never per-render)
+  // always act on the latest render instead of a stale closure.
+  let _gridEditorCtx: { target: HTMLElement; snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions } | null = null;
 
   const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
@@ -157,6 +176,24 @@ export const SetupAdmin = (() => {
       return fallback;
     }
   };
+  /** Same `constraint.<key>` vocabulary Scheduling Rules already uses for
+   *  these four fields, so the signature reads "Color Wheel" instead of the
+   *  raw `colorWheel` field key — one term for the same underlying registry
+   *  instead of two (docs/Setup_matrix_redesign.md §3). Falls back to the
+   *  raw key if a field has no translated label. */
+  function fieldLabel(fieldKey: string): string {
+    const translated = setupText(`constraint.${fieldKey}`, '');
+    return translated || fieldKey;
+  }
+  /** `.empty-state`-styled markup for the grid/pane's empty conditions,
+   *  reusing the app's existing empty-state visual language (application-
+   *  shell.mts's EmptyState) instead of ad hoc `.setup-help`/`.setup-empty`
+   *  text scattered across multiple styles (docs/Setup_matrix_redesign.md
+   *  §4-5). Inline markup, not the EmptyState module itself, so this has no
+   *  dependency on that module's mount/action wiring. */
+  function emptyState(message: string, hint?: string): string {
+    return `<div class="empty-state setup-empty-state"><p>${esc(message)}</p>${hint ? `<p class="setup-empty-state-hint">${esc(hint)}</p>` : ''}</div>`;
+  }
 
   function permissionsFor({ isAdmin, setupScheduler, plantAllowed }: { isAdmin: boolean; setupScheduler: boolean; plantAllowed: boolean }): SetupPermissions {
     return { read: true, copy: true, export: true, definitionWrite: isAdmin, matrixWrite: isAdmin,
@@ -212,6 +249,18 @@ export const SetupAdmin = (() => {
    *  of property/array order — safer than comparing JSON.stringify output. */
   function stateSig(key: SetupStateKey): string {
     return key.map(part => `${part.fieldKey}=${part.value}`).slice().sort().join('|');
+  }
+
+  /** Converts an optimizer-preview pair's pre-formatted `"fieldKey=value | ..."`
+   *  text (schedule-workbench.mts's `describeMissingPairs`) into the same
+   *  order-independent signature `stateSig` produces, so a missing-pairs
+   *  review filter (§9 "what moves off the page") can match grid states by
+   *  sig instead of needing its own comparison format. Returns `null` for the
+   *  unresolvable placeholder text ('—' or empty). */
+  function reviewStateSigFromText(text: string | null | undefined): string | null {
+    if (!text) return null;
+    const parts = text.split('|').map(part => part.trim()).filter(Boolean);
+    return parts.length ? parts.slice().sort().join('|') : null;
   }
 
   function gridEditKey(row: SetupGridState, col: SetupGridState): string {
@@ -285,6 +334,32 @@ export const SetupAdmin = (() => {
     if (existing) return existing.setup_min;
     return row.sig === col.sig ? 0 : null;
   }
+
+  /** The six states a cell must render distinctly (docs/Setup_matrix_redesign.md
+   *  §7) — a bare numeric value can only ever say "0 or not 0", which
+   *  collapses an explicit diagonal row, a structurally-free implicit zero, a
+   *  line override, and a plant-default value into the same look. `lineScope`
+   *  is threaded explicitly (not read from module state) so this stays a pure,
+   *  directly-testable function like its sibling `fieldValueSet`. */
+  type SetupGridCellState = 'dirty' | 'uncovered' | 'diagonal-explicit' | 'implicit-zero' | 'line-override' | 'plant-default';
+  function gridCellState(row: SetupGridState, col: SetupGridState, existing: EffectiveSetupRow | undefined, dirty: SetupGridEdit | undefined, lineScope: string): SetupGridCellState {
+    if (dirty) return 'dirty';
+    const diagonal = row.sig === col.sig;
+    if (!existing) return diagonal ? 'implicit-zero' : 'uncovered';
+    if (diagonal) return 'diagonal-explicit';
+    return lineScope && !existing.inherited ? 'line-override' : 'plant-default';
+  }
+
+  /** Bounds the rendered universe per axis (docs/Setup_matrix_redesign.md §6
+   *  — an unbounded cross-product renders one `<input>` DOM node per cell, and
+   *  a two-field, 20-30-value-per-field signature already produces hundreds of
+   *  thousands of cells). Reports `total`/`truncated` so the caller can tell
+   *  the user how much was hidden rather than silently dropping states. */
+  function capAxis(states: ReadonlyArray<SetupGridState>, maxAxis: number): { states: SetupGridState[]; total: number; truncated: boolean } {
+    const total = states.length;
+    return { states: states.length > maxAxis ? states.slice(0, maxAxis) : states.slice(), total, truncated: total > maxAxis };
+  }
+  const MAX_AXIS = 60;
 
   /** Parses one grid cell's typed or pasted text. `null` = clear the cell;
    *  `'invalid'` = reject without changing anything (schema bound is 0-10080
@@ -511,6 +586,19 @@ export const SetupAdmin = (() => {
     const plantAllowed = Session.isAdmin() || session?.allowed_plants?.includes(snapshot.plant) === true;
     const permissions = permissionsFor({ isAdmin: Session.isAdmin(), setupScheduler: settings?.setup_scheduler === true, plantAllowed });
     const lines = _linesByPlant[snapshot.plant] || [];
+    // Seed the scope from the global line filter (Store.selectedLines) once
+    // per plant, on open only — deliberately NOT a live bind. Live-binding
+    // would silently re-scope the matrix an admin is mid-edit on whenever the
+    // Gantt/Orders line filter changes elsewhere (docs/Setup_matrix_redesign.md
+    // §16 Q2). Only seeds when exactly one of this plant's lines is selected;
+    // an empty or multi-line filter has no single unambiguous scope to seed.
+    if (_scopeSeededPlant !== snapshot.plant) {
+      _scopeSeededPlant = snapshot.plant;
+      if (!_lineScope) {
+        const candidates = lines.filter(line => Store.selectedLines.has(line));
+        if (candidates.length === 1) _lineScope = candidates[0];
+      }
+    }
     if (_lineScope && !lines.includes(_lineScope)) _lineScope = '';
     const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, line: _lineScope, version });
     const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
@@ -522,59 +610,80 @@ export const SetupAdmin = (() => {
     const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
-    const reviewHtml = review ? `<div class="setup-coverage" data-setup-missing-review><strong>${esc(Util.t('ui.setup_review_missing_title'))}</strong><span>${esc(Util.t('ui.setup_review_missing_count', { count: review.pairs.length, plural: review.pairs.length === 1 ? '' : 's' }))}${esc(permissions.matrixWrite ? Util.t('ui.setup_review_scope_writable') : Util.t('ui.setup_review_scope_readonly'))}</span><div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${review.pairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || pair.predecessorOrderId || '—')}</td><td>${esc(pair.toState || pair.successorOrderId || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="setup-toolbar"><button class="btn btn-ghost sm" data-setup-review-copy>${esc(Util.t('btn.setup_copy_missing'))}</button><button class="btn btn-ghost sm" data-setup-review-export>${esc(Util.t('btn.setup_export_missing'))}</button>${permissions.matrixWrite ? `<span class="setup-scope-note">${esc(Util.t('ui.setup_review_scope_label'))} ${esc(_lineScope ? `(${_lineScope})` : '')}</span>` : ''}</div></div>` : '';
-    const eyebrowKey = status.active ? 'ui.setup_eyebrow_active' : 'ui.setup_eyebrow_inactive';
-    const eyebrowTone = status.active ? 'ok' : 'warn';
+    // §9 "what moves off the page": the tab's own missing-pairs mini-table
+    // collapses to a filter chip on the grid — not the OptimizerPreview
+    // modal's own copy of this table (schedule-workbench.mts), which is a
+    // separate surface (the run-time comparison dialog) left untouched.
+    const missingChipHtml = review ? `<span class="setup-review-chip">${esc(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${esc(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
+    const totalPairs = coverage?.reachable?.total_pairs ?? 0;
+    const missingPairs = coverage?.reachable?.missing_pairs ?? 0;
+    const coverageInlineHtml = coverage
+      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${esc(Util.t('ui.setup_coverage_inline', { covered: Math.max(0, totalPairs - missingPairs), total: totalPairs }))} · ${esc(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
+      : '';
+    const signatureChipHtml = definitionFields.length
+      ? definitionFields.map(field => esc(fieldLabel(field))).join(' &rsaquo; ')
+      : esc(Util.t('ui.setup_no_definition_short'));
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
-        <header class="setup-admin-head">
-          <div><div class="setup-kicker ${eyebrowTone}">${esc(Util.t(eyebrowKey))}</div><h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
-          <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
-          <div class="setup-status ${status.active ? 'ok' : 'warn'}"><strong>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</strong><span>${esc(status.reason)}</span></div>
-          ${permissions.definitionWrite ? `<label class="setup-check" data-setup-active-toggle-wrap><input type="checkbox" data-setup-active-toggle ${definition?.active ? 'checked' : ''} ${definition ? '' : 'disabled'}>${esc(Util.t('ui.setup_include_setup_times'))}</label>` : ''}</div>
-          <span class="setup-version">v${version ?? '—'}</span>
+        <header class="setup-band setup-context-bar">
+          <div class="setup-context-main">
+            <h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
+            <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
+          </div>
+          <div class="setup-context-controls">
+            ${permissions.definitionWrite ? `<label class="setup-check" data-setup-active-toggle-wrap><input type="checkbox" data-setup-active-toggle ${definition?.active ? 'checked' : ''} ${definition ? '' : 'disabled'}>${esc(Util.t('ui.setup_include_setup_times'))}</label>` : ''}
+            <span class="setup-status-chip ${status.active ? 'ok' : 'warn'}" title="${esc(status.reason)}"><span class="dot"></span>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</span>
+            <button type="button" class="setup-version-chip" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">v${version ?? '—'} &#9998;</button>
+          </div>
         </header>
 
-        <div class="setup-group" data-setup-group="standard">
-          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_standard_title'))}</div><p>${esc(Util.t('ui.setup_group_standard_desc'))}</p></div>
-          <div class="setup-definition panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_step1_definition'))}</h4>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-            <div class="panel-body"><div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${option}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
-              ${!definition ? `<p class="setup-help">${esc(Util.t('ui.setup_no_definition'))}</p>` : ''}
-              <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
-              ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
-              <p class="setup-help">${esc(Util.t('ui.setup_activation_requirements'))}</p></div></div>
-          <div class="setup-standard-grid panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_step2_grid'))}: ${esc(sourceLabel)}</h4>
-              <input type="text" class="input setup-grid-filter" data-setup-grid-filter placeholder="${esc(Util.t('ui.setup_grid_filter_placeholder'))}" value="${esc(_gridFilter)}">
-              <button class="btn btn-ghost sm" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
-              <button class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
-              ${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
-            </div>
-            <div class="setup-grid-savebar" data-setup-grid-savebar hidden>
-              <span data-setup-grid-dirty-count></span>
-              <button class="btn btn-ghost sm" data-setup-grid-discard>${esc(Util.t('btn.discard'))}</button>
-              <button class="btn btn-primary sm" data-setup-grid-save>${esc(Util.t('btn.save'))}</button>
-            </div>
-            <div id="setup-grid-table-mount"></div>
+        <div class="setup-band setup-standard-rail">
+          <div class="setup-signature-wrap">
+            <span class="mono-eyebrow">${esc(Util.t('ui.setup_band_signature_label'))}</span>
+            <span class="setup-signature-chip">${signatureChipHtml}</span>
+          </div>
+          <div class="setup-scope-wrap">
+            <label class="mono-eyebrow" for="setup-line-combobox">${esc(Util.t('ui.setup_scope_label'))}</label>
+            <span id="setup-line-combobox"></span>
+            ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
+          </div>
+          <div class="setup-coverage-wrap">
+            ${coverageInlineHtml}
+            ${missingChipHtml}
           </div>
         </div>
 
-        <div class="setup-group" data-setup-group="line-status">
-          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_line_title'))}</div><p>${esc(Util.t('ui.setup_group_line_desc'))}</p></div>
-          <div class="setup-toolbar">
-            <label>${esc(Util.t('ui.setup_line_scope'))}<span id="setup-line-combobox"></span></label>
-            <span class="setup-scope-note">${esc(_lineScope ? Util.t('ui.setup_sparse_override_scope') : Util.t('ui.setup_plant_default'))}</span>
-          </div>
-          ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : `<p class="setup-help">${esc(Util.t('ui.setup_line_status_empty'))}</p>`}
+        <div class="setup-popover" data-setup-signature-popover ${_signaturePopoverOpen ? '' : 'hidden'}>
+          <p class="setup-popover-hint">${esc(Util.t('ui.setup_signature_popover_hint'))}</p>
+          <div class="panel-head"><span class="label">${esc(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
+          <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
+          <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
+          ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
         </div>
 
-        <div class="setup-group" data-setup-group="coverage">
-          <div class="setup-group-head"><div class="setup-group-eyebrow">${esc(Util.t('ui.setup_group_coverage_title'))}</div><p>${esc(Util.t('ui.setup_group_coverage_desc'))}</p></div>
-          ${coverage ? `<div class="setup-kpi-row" role="group" aria-label="${esc(Util.t('ui.setup_shadow_coverage_title'))}">
-            <button type="button" class="kpi-tile"><span class="k">${esc(Util.t('ui.setup_kpi_observed'))}</span><span class="v">${coverage.observed?.total_pairs ?? 0}</span><span class="d">${esc(Util.t('ui.setup_kpi_missing_count', { missing: coverage.observed?.missing_pairs ?? 0 }))}</span></button>
-            <button type="button" class="kpi-tile${(coverage.reachable?.missing_pairs ?? 0) > 0 ? ' warn' : ''}" data-setup-reachable-tile><span class="k">${esc(Util.t('ui.setup_kpi_reachable'))}</span><span class="v">${coverage.reachable?.total_pairs ?? 0}</span><span class="d">${esc(Util.t('ui.setup_kpi_missing_count', { missing: coverage.reachable?.missing_pairs ?? 0 }))}</span></button>
-          </div>` : ''}
-          ${reviewHtml}
-          <div class="setup-audit panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_override_audit'))}</h4><button class="btn btn-ghost sm" data-setup-audit-toggle aria-expanded="false">${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button></div><div class="panel-body" hidden>${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} · ${esc(keyText(override.predecessor_state_key))} → ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : `<span class="setup-empty">${esc(Util.t('ui.setup_no_overrides'))}</span>`}</div></div>
+        <div class="setup-band setup-grid-band">
+          <div class="setup-grid-toolbar">
+            <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${esc(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${esc(_gridFilterFrom)}">
+            <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${esc(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${esc(_gridFilterTo)}">
+          </div>
+          <div id="setup-grid-table-mount"></div>
+        </div>
+
+        <div class="setup-band setup-action-bar">
+          <span data-setup-grid-dirty-count>${esc(Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size }))}</span>
+          <div class="setup-action-buttons">
+            <button class="btn btn-ghost sm" data-setup-grid-discard ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.discard'))}</button>
+            <button class="btn btn-primary sm" data-setup-grid-save ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.save'))}</button>
+          </div>
+          <div class="setup-menu">
+            <button type="button" class="btn btn-ghost sm" data-setup-menu-toggle aria-haspopup="true" aria-expanded="${_setupMenuOpen}">&#8943;</button>
+            <div class="setup-menu-list" data-setup-menu-list role="menu" ${_setupMenuOpen ? '' : 'hidden'}>
+              <button type="button" role="menuitem" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
+              <button type="button" role="menuitem" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
+              ${permissions.matrixWrite && definition ? `<label class="setup-menu-item" role="menuitem">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
+              <button type="button" role="menuitem" data-setup-history-open>${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
+            </div>
+          </div>
         </div>
 
       </section>`;
@@ -587,9 +696,41 @@ export const SetupAdmin = (() => {
     paintGrid(target, snapshot, definition, rows, permissions);
   }
 
+  /** Compact "you are here" readout inline under the Scope selector — replaces
+   *  the old standalone "Line Status" group/panel (docs/Setup_matrix_redesign.md
+   *  §9 "what moves off the page"). The grid itself marks the matching row;
+   *  this is only the state text + the write affordance (`editState`/
+   *  `wireCompatibility` still need a mount point in the DOM). */
   function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {
     const values = state ? keyText(state.state_key) : Util.t('ui.setup_state_unknown');
-    return `<div class="setup-state panel"><div class="panel-head"><h4>${esc(Util.t('ui.setup_current_state'))}</h4></div><div class="panel-body"><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div></div>`;
+    return `<div class="setup-state-inline" data-setup-state-inline><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div>`;
+  }
+
+  function overridesFor(snapshot: SetupSnapshot): SetupSnapshot['overrides'] {
+    return _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
+  }
+
+  /** §9 "what moves off the page": the override-audit panel becomes a modal
+   *  behind the action bar's `⋯ → History` menu item instead of an inline
+   *  collapsed panel. Built on demand (not a static index.html modal, since
+   *  its content is per-plant/per-scope) and removed from the DOM on close
+   *  rather than merely hidden, matching the one-shot nature of every other
+   *  dynamically-built dialog in this module (e.g. `editState`'s inline editor). */
+  function openHistoryModal(snapshot: SetupSnapshot): void {
+    const overrides = overridesFor(snapshot);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-history-title">
+      <header class="modal-head"><h3 id="setup-history-title">${esc(Util.t('ui.setup_override_audit'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-history-close aria-label="${esc(Util.t('btn.close'))}">&times;</button></header>
+      <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} &middot; ${esc(keyText(override.predecessor_state_key))} &rarr; ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
+      <footer class="modal-foot"><button type="button" class="btn btn-ghost sm" data-setup-history-close>${esc(Util.t('btn.close'))}</button></footer>
+    </div>`;
+    const close = (): void => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) close(); });
+    backdrop.querySelectorAll<HTMLButtonElement>('[data-setup-history-close]').forEach(button => button.addEventListener('click', close));
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(backdrop);
   }
 
   function wire(target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions, rows: EffectiveSetupRow[], definition: SetupDefinition | null): void {
@@ -598,12 +739,36 @@ export const SetupAdmin = (() => {
       const blob = new Blob([csvFor(snapshot.plant, rows)], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `setup-matrix-${snapshot.plant}-${_lineScope || 'plant'}-v${snapshot.definition?.signature_version ?? 0}.csv`; link.click(); URL.revokeObjectURL(url);
     });
-    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
-    target.querySelector<HTMLButtonElement>('[data-setup-review-copy]')?.addEventListener('click', () => navigator.clipboard?.writeText(missingPairsCsv(snapshot.plant, review?.pairs || [])).then(() => Toast.show(Util.t('toast.setup_copied'), 'success')).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error')));
-    target.querySelector<HTMLButtonElement>('[data-setup-review-export]')?.addEventListener('click', () => {
-      const blob = new Blob([missingPairsCsv(snapshot.plant, review?.pairs || [])], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `missing-setups-${snapshot.plant}.csv`; link.click(); URL.revokeObjectURL(url);
+    target.querySelector<HTMLButtonElement>('[data-setup-review-clear]')?.addEventListener('click', () => {
+      _missingReview = null;
+      renderSnapshot(target, snapshot);
     });
+    target.querySelector<HTMLButtonElement>('[data-setup-signature-edit]')?.addEventListener('click', () => {
+      _signaturePopoverOpen = !_signaturePopoverOpen;
+      renderSnapshot(target, snapshot);
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-menu-toggle]')?.addEventListener('click', () => {
+      _setupMenuOpen = !_setupMenuOpen;
+      renderSnapshot(target, snapshot);
+    });
+    target.querySelector<HTMLButtonElement>('[data-setup-history-open]')?.addEventListener('click', () => {
+      _setupMenuOpen = false;
+      renderSnapshot(target, snapshot);
+      openHistoryModal(snapshot);
+    });
+    if (_signaturePopoverOpen || _setupMenuOpen) {
+      const dismiss = (event: MouseEvent): void => {
+        const withinPopover = (event.target as HTMLElement).closest('[data-setup-signature-popover], [data-setup-signature-edit]');
+        const withinMenu = (event.target as HTMLElement).closest('[data-setup-menu-list], [data-setup-menu-toggle]');
+        let changed = false;
+        if (_signaturePopoverOpen && !withinPopover) { _signaturePopoverOpen = false; changed = true; }
+        if (_setupMenuOpen && !withinMenu) { _setupMenuOpen = false; changed = true; }
+        if (changed) { document.removeEventListener('mousedown', dismiss); renderSnapshot(target, snapshot); }
+      };
+      // Deferred one tick so the click that just opened the popover/menu
+      // (still bubbling) doesn't immediately re-close it.
+      window.setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
+    }
     target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
       const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
@@ -625,13 +790,7 @@ export const SetupAdmin = (() => {
       const b = fieldRows[swapIndex].querySelector<HTMLSelectElement>('select')!;
       const temp = a.value; a.value = b.value; b.value = temp;
     });
-    target.querySelector<HTMLButtonElement>('[data-setup-audit-toggle]')?.addEventListener('click', function (this: HTMLButtonElement) {
-      const body = this.closest('.setup-audit')?.querySelector<HTMLElement>('.panel-body'); if (!body) return;
-      body.hidden = !body.hidden;
-      this.setAttribute('aria-expanded', String(!body.hidden));
-      this.textContent = Util.t('btn.setup_audit_toggle', { count: snapshot.overrides.length });
-    });
-    target.querySelector<HTMLButtonElement>('[data-setup-reachable-tile]')?.addEventListener('click', () => {
+    target.querySelector<HTMLButtonElement>('[data-setup-missing-filter]')?.addEventListener('click', () => {
       // No endpoint enumerates which specific pairs are "reachable but
       // missing" (loadCoverage returns counts only) — this highlights the
       // grid's broader "missing in the definable standard" cells as the
@@ -642,8 +801,12 @@ export const SetupAdmin = (() => {
       missingCells.forEach(td => td.classList.add('setup-grid-highlight'));
       window.setTimeout(() => missingCells.forEach(td => td.classList.remove('setup-grid-highlight')), 2000);
     });
-    target.querySelector<HTMLInputElement>('[data-setup-grid-filter]')?.addEventListener('input', event => {
-      _gridFilter = (event.target as HTMLInputElement).value;
+    target.querySelector<HTMLInputElement>('[data-setup-grid-filter-from]')?.addEventListener('input', event => {
+      _gridFilterFrom = (event.target as HTMLInputElement).value;
+      paintGrid(target, snapshot, definition, rows, permissions);
+    });
+    target.querySelector<HTMLInputElement>('[data-setup-grid-filter-to]')?.addEventListener('input', event => {
+      _gridFilterTo = (event.target as HTMLInputElement).value;
       paintGrid(target, snapshot, definition, rows, permissions);
     });
     target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.addEventListener('click', () => saveGridEdits(target, snapshot, definition, rows, permissions));
@@ -652,15 +815,13 @@ export const SetupAdmin = (() => {
       paintGrid(target, snapshot, definition, rows, permissions);
     });
     wireGridInteractions(target, snapshot, definition, rows, permissions);
-    target.querySelectorAll<HTMLButtonElement>('[data-setup-delete-row]').forEach(button => button.addEventListener('click', () => {
-      const row = rows.find(item => keyId(item) === button.dataset.setupDeleteRow); if (row) deleteRow(target, snapshot, row);
-    }));
     target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
     target.querySelector<HTMLButtonElement>('[data-setup-edit-state]')?.addEventListener('click', () => editState(target, snapshot));
     target.querySelector<HTMLInputElement>('[data-setup-active-toggle]')?.addEventListener('change', event => {
       setSetupActive(target, snapshot.plant, definition, (event.target as HTMLInputElement).checked);
     });
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
+    wireGridEditor(target, snapshot, definition, rows, permissions);
   }
 
   /** (Re)paints only the grid's table mount — never the whole panel — so the
@@ -670,13 +831,16 @@ export const SetupAdmin = (() => {
   function paintGrid(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
     const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount');
     if (!mount) return;
-    const savebar = target.querySelector<HTMLElement>('[data-setup-grid-savebar]');
+    // §9-D: the action bar is always present now (not hidden until dirty), so
+    // Import/Export/History always have a stable home — only the dirty count
+    // text and the Save/Discard buttons' enabled state react to _gridDirty.
     const dirtyCount = target.querySelector<HTMLElement>('[data-setup-grid-dirty-count]');
-    if (savebar) savebar.hidden = _gridDirty.size === 0;
     if (dirtyCount) dirtyCount.textContent = Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size });
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.toggleAttribute('disabled', _gridDirty.size === 0);
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.toggleAttribute('disabled', _gridDirty.size === 0);
     const fields = definition?.fields?.length ? [...definition.fields] : [];
     if (!fields.length) {
-      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.setup_no_definition'))}</p>`;
+      mount.innerHTML = emptyState(Util.t('ui.setup_no_definition'));
       _gridCellGrid = []; _gridModel = null;
       return;
     }
@@ -684,17 +848,36 @@ export const SetupAdmin = (() => {
     fields.forEach(field => { valuesByField[field] = fieldValueSet(Store.priorityRankMaps, field, _lineScope); });
     _gridModel = buildGridModel(fields, valuesByField, rows);
     if (!_gridModel.rowStates.length) {
-      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.setup_grid_no_values'))}</p>`;
+      mount.innerHTML = emptyState(Util.t('ui.setup_grid_no_values'));
       _gridCellGrid = [];
       return;
     }
-    const rowStates = filterStates(_gridModel.rowStates, _gridFilter);
-    const colStates = filterStates(_gridModel.colStates, _gridFilter);
+    // Missing-pairs review filter chip (§9 "what moves off the page"): when a
+    // review is active, narrow both axes to only the states its pairs touch,
+    // instead of rendering the review's own separate 4-column table.
+    const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
+    const reviewSigs = review
+      ? new Set(review.pairs.flatMap(pair => [reviewStateSigFromText(pair.fromState), reviewStateSigFromText(pair.toState)]).filter((sig): sig is string => sig !== null))
+      : null;
+    const preFilterRowStates = reviewSigs ? _gridModel.rowStates.filter(s => reviewSigs.has(s.sig)) : _gridModel.rowStates;
+    const preFilterColStates = reviewSigs ? _gridModel.colStates.filter(s => reviewSigs.has(s.sig)) : _gridModel.colStates;
+    const rowAxis = capAxis(filterStates(preFilterRowStates, _gridFilterFrom), MAX_AXIS);
+    const colAxis = capAxis(filterStates(preFilterColStates, _gridFilterTo), MAX_AXIS);
+    const rowStates = rowAxis.states, colStates = colAxis.states;
     if (!rowStates.length || !colStates.length) {
-      mount.innerHTML = `<p class="setup-empty">${esc(Util.t('ui.no_matches'))}</p>`;
+      mount.innerHTML = emptyState(Util.t('ui.no_matches'));
       _gridCellGrid = [];
       return;
     }
+    const axisCapNote = (rowAxis.truncated || colAxis.truncated)
+      ? `<p class="setup-grid-cap-note">${esc(Util.t('ui.setup_grid_axis_capped', { shown: Math.max(rowStates.length, colStates.length), total: Math.max(rowAxis.total, colAxis.total) }))}</p>`
+      : '';
+    // "You are here" (§9-C.5): mark the row matching the scoped line's known
+    // current state, making the old standalone Line Status panel unnecessary.
+    const currentState = _lineScope && definition
+      ? snapshot.line_states.find(s => s.line === _lineScope && s.signature_version === definition.signature_version)
+      : undefined;
+    const currentStateSig = currentState ? stateSig(currentState.state_key) : null;
     const tierCount = fields.length;
     const theadRows: string[] = [];
     for (let tier = 0; tier < tierCount; tier++) {
@@ -708,40 +891,39 @@ export const SetupAdmin = (() => {
       return map;
     });
     const bodyRows = rowStates.map((rowState, r) => {
+      const youAreHere = currentStateSig !== null && rowState.sig === currentStateSig;
       const headerCells = Array.from({ length: tierCount }, (_, tier) => {
         const span = rowSpanMaps[tier].get(r);
-        return span === undefined ? '' : `<th rowspan="${span}" scope="row" class="setup-grid-row-head">${esc(rowState.parts[tier] ?? '')}</th>`;
+        if (span === undefined) return '';
+        const mark = youAreHere && tier === tierCount - 1 ? `<span class="setup-grid-here-badge" title="${esc(Util.t('ui.setup_you_are_here_hint', { line: _lineScope }))}">${esc(Util.t('ui.setup_you_are_here'))}</span>` : '';
+        return `<th rowspan="${span}" scope="row" class="setup-grid-row-head">${esc(rowState.parts[tier] ?? '')}${mark}</th>`;
       }).join('');
       const dataCells = colStates.map((colState, c) => {
         const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
         const dirty = _gridDirty.get(gridEditKey(rowState, colState));
         const value = gridCellValue(rowState, colState, existing, dirty);
         const missing = value === null;
-        const cellClass = ['setup-grid-td', dirty ? 'setup-grid-dirty' : ''].filter(Boolean).join(' ');
-        return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}"><input type="number" class="setup-grid-cell" min="0" max="10080" step="1" inputmode="numeric" value="${value !== null ? value : ''}" placeholder="${esc(Util.t('ui.setup_grid_missing_placeholder'))}" ${permissions.matrixWrite ? '' : 'disabled'}></td>`;
+        const cellState = gridCellState(rowState, colState, existing, dirty, _lineScope);
+        const cellClass = ['setup-grid-td', `setup-grid-${cellState}`, permissions.matrixWrite ? 'setup-grid-editable' : ''].filter(Boolean).join(' ');
+        const display = cellState === 'uncovered' ? '&middot;' : (value !== null ? esc(String(value)) : '');
+        const title = cellState === 'uncovered' ? Util.t('ui.setup_grid_uncovered_hint')
+          : cellState === 'implicit-zero' ? Util.t('ui.setup_grid_implicit_zero_hint')
+          : cellState === 'line-override' ? Util.t('ui.setup_grid_line_override_hint') : '';
+        return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}" ${permissions.matrixWrite ? 'tabindex="0"' : ''}${title ? ` title="${esc(title)}"` : ''}>${display}</td>`;
       }).join('');
-      return `<tr>${headerCells}${dataCells}</tr>`;
+      return `<tr${youAreHere ? ' class="setup-grid-here-row"' : ''}>${headerCells}${dataCells}</tr>`;
     }).join('');
-    mount.innerHTML = `<div class="setup-grid-scroll"><table class="setup-table setup-grid"><thead>${theadRows.join('')}</thead><tbody>${bodyRows}</tbody></table></div>`;
+    mount.innerHTML = `${axisCapNote}<div class="setup-grid-scroll"><table class="setup-table setup-grid"><thead>${theadRows.join('')}</thead><tbody>${bodyRows}</tbody></table></div>`;
     _gridCellGrid = rowStates.map((_row, r) => colStates.map((_col, c) => mount.querySelector<HTMLTableCellElement>(`td[data-setup-grid-row="${r}"][data-setup-grid-col="${c}"]`)));
     const mountData = mount as unknown as { _gridRowStates?: SetupGridState[]; _gridColStates?: SetupGridState[] };
     mountData._gridRowStates = rowStates;
     mountData._gridColStates = colStates;
-    mount.querySelectorAll<HTMLInputElement>('.setup-grid-cell').forEach(input => {
-      input.addEventListener('change', () => {
-        const td = input.closest<HTMLTableCellElement>('td')!;
-        const r = Number(td.dataset.setupGridRow), c = Number(td.dataset.setupGridCol);
-        const rowState = rowStates[r], colState = colStates[c];
-        const parsed = parseGridMinutes(input.value);
-        if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); input.value = ''; return; }
-        const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
-        const baseline = existing ? existing.setup_min : (rowState.sig === colState.sig ? 0 : null);
-        const editKey = gridEditKey(rowState, colState);
-        if (parsed === baseline) _gridDirty.delete(editKey);
-        else _gridDirty.set(editKey, { row: rowState, col: colState, setup_min: parsed, line: _lineScope });
-        paintGrid(target, snapshot, definition, rows, permissions);
-      });
-    });
+    // Re-anchor the floating editor if it's still open on a cell that
+    // survived this repaint (e.g. a filter keystroke); otherwise close it.
+    if (_gridEditor) {
+      const stillThere = rowStates.some(s => s.sig === _gridEditor!.row.sig) && colStates.some(s => s.sig === _gridEditor!.col.sig);
+      if (stillThere) positionGridEditor(); else closeGridEditor(false);
+    }
   }
 
   /** Lasso range-select, copy, delete, and Excel-paste on the grid — the same
@@ -860,6 +1042,120 @@ export const SetupAdmin = (() => {
     });
   }
 
+  /** Single floating `<input>` shared across every SetupAdmin render, created
+   *  once and repositioned over whichever cell is being edited (§7/§9-C.3) —
+   *  replaces the old one-`<input>`-per-cell rendering. Its keydown/blur
+   *  listeners are wired exactly once here (never per-render, unlike
+   *  `wireGridInteractions`/`wireGridEditor` below) so they always act on
+   *  `_gridEditorCtx`, refreshed on every `openGridEditor` call, rather than a
+   *  stale closure from whichever render first wired them. */
+  function ensureGridEditorEl(): HTMLInputElement {
+    let el = document.getElementById('setup-grid-editor-input') as (HTMLInputElement & { _setupWired?: boolean }) | null;
+    if (!el) {
+      el = document.createElement('input') as HTMLInputElement & { _setupWired?: boolean };
+      el.type = 'number'; el.id = 'setup-grid-editor-input'; el.className = 'setup-grid-editor-input';
+      el.min = '0'; el.max = '10080'; el.step = '1'; el.inputMode = 'numeric';
+      el.hidden = true;
+      document.body.appendChild(el);
+    }
+    if (!el._setupWired) {
+      el._setupWired = true;
+      el.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); closeGridEditor(true, true); }
+        else if (event.key === 'Escape') { event.preventDefault(); closeGridEditor(false); }
+      });
+      el.addEventListener('blur', () => { if (_gridEditor) closeGridEditor(true); });
+    }
+    return el;
+  }
+
+  /** Resolves `_gridEditor`'s row/col back to the live `<td>` via the grid
+   *  mount's current axis arrays (not `_gridCellGrid` directly, since a
+   *  row/col's index can shift between repaints — e.g. a filter keystroke). */
+  function gridEditorTd(): HTMLTableCellElement | null {
+    if (!_gridEditor || !_gridEditorCtx) return null;
+    const mount = _gridEditorCtx.target.querySelector<HTMLElement>('#setup-grid-table-mount');
+    const data = mount as unknown as { _gridRowStates?: SetupGridState[]; _gridColStates?: SetupGridState[] } | null;
+    const r = data?._gridRowStates?.findIndex(s => s.sig === _gridEditor!.row.sig) ?? -1;
+    const c = data?._gridColStates?.findIndex(s => s.sig === _gridEditor!.col.sig) ?? -1;
+    if (r < 0 || c < 0 || !mount) return null;
+    return mount.querySelector<HTMLTableCellElement>(`td[data-setup-grid-row="${r}"][data-setup-grid-col="${c}"]`);
+  }
+
+  function positionGridEditor(): void {
+    const el = ensureGridEditorEl();
+    const td = gridEditorTd();
+    if (!td) { el.hidden = true; return; }
+    const rect = td.getBoundingClientRect();
+    el.style.position = 'fixed';
+    el.style.left = `${rect.left}px`; el.style.top = `${rect.top}px`;
+    el.style.width = `${rect.width}px`; el.style.height = `${rect.height}px`;
+    el.hidden = false;
+  }
+
+  function openGridEditor(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions, row: SetupGridState, col: SetupGridState): void {
+    if (!permissions.matrixWrite) return;
+    if (_gridEditor && (_gridEditor.row.sig !== row.sig || _gridEditor.col.sig !== col.sig)) closeGridEditor(true);
+    _gridEditorCtx = { target, snapshot, definition, rows, permissions };
+    _gridEditor = { row, col };
+    const existing = _gridModel?.cellLookup.get(row.sig)?.get(col.sig);
+    const dirty = _gridDirty.get(gridEditKey(row, col));
+    const value = gridCellValue(row, col, existing, dirty);
+    const el = ensureGridEditorEl();
+    el.value = value !== null ? String(value) : '';
+    positionGridEditor();
+    el.focus(); el.select();
+  }
+
+  /** `commit`: stage the typed value into `_gridDirty` and repaint (Enter/blur).
+   *  `advanceRow`: after committing, open the editor on the next row in the
+   *  same column — the closest analog to spreadsheet Enter-to-advance, since
+   *  cells no longer have their own persistent `<input>` to Tab between. */
+  function closeGridEditor(commit: boolean, advanceRow = false): void {
+    if (!_gridEditor || !_gridEditorCtx) return;
+    const { row, col } = _gridEditor;
+    const { target, snapshot, definition, rows, permissions } = _gridEditorCtx;
+    const el = ensureGridEditorEl();
+    _gridEditor = null;
+    el.hidden = true;
+    if (!commit) return;
+    const parsed = parseGridMinutes(el.value);
+    if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); return; }
+    const existing = _gridModel?.cellLookup.get(row.sig)?.get(col.sig);
+    const baseline = existing ? existing.setup_min : (row.sig === col.sig ? 0 : null);
+    const editKey = gridEditKey(row, col);
+    if (parsed === baseline) _gridDirty.delete(editKey);
+    else _gridDirty.set(editKey, { row, col, setup_min: parsed, line: _lineScope });
+    paintGrid(target, snapshot, definition, rows, permissions);
+    if (advanceRow) {
+      const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount');
+      const data = mount as unknown as { _gridRowStates?: SetupGridState[] } | null;
+      const rowStates = data?._gridRowStates || [];
+      const nextRow = rowStates[rowStates.findIndex(s => s.sig === row.sig) + 1];
+      if (nextRow) openGridEditor(target, snapshot, definition, rows, permissions, nextRow, col);
+    }
+  }
+
+  /** Click-to-open wiring for the floating editor — guarded per-`target` like
+   *  `wireGridInteractions`, since (unlike the editor element's own listeners
+   *  above) this needs the current render's `snapshot`/`rows`/`permissions`. */
+  function wireGridEditor(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
+    const flagged = target as unknown as { _setupGridEditorWired?: boolean };
+    if (flagged._setupGridEditorWired) return;
+    flagged._setupGridEditorWired = true;
+    target.addEventListener('click', event => {
+      if (!permissions.matrixWrite || event.ctrlKey || event.metaKey) return; // ctrl/cmd-click is lasso mode
+      const mountEl = target.querySelector<HTMLElement>('#setup-grid-table-mount');
+      if (!mountEl || !mountEl.contains(event.target as Node)) return;
+      const td = (event.target as HTMLElement).closest<HTMLTableCellElement>('td.setup-grid-editable[data-setup-grid-row]');
+      if (!td) return;
+      const data = mountEl as unknown as { _gridRowStates?: SetupGridState[]; _gridColStates?: SetupGridState[] };
+      const r = Number(td.dataset.setupGridRow), c = Number(td.dataset.setupGridCol);
+      const row = data._gridRowStates?.[r], col = data._gridColStates?.[c];
+      if (row && col) openGridEditor(target, snapshot, definition, rows, permissions, row, col);
+    });
+  }
+
   async function saveGridEdits(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): Promise<void> {
     if (!definition || !_gridDirty.size) return;
     const edits = [..._gridDirty.values()];
@@ -895,12 +1191,8 @@ export const SetupAdmin = (() => {
     const fields = Array.from(target.querySelectorAll<HTMLSelectElement>('[data-setup-field]')).map(select => select.value);
     const strict = target.querySelector<HTMLInputElement>('[data-setup-strict]')?.checked ?? true;
     if (!fields.length || new Set(fields).size !== fields.length) { Toast.show(Util.t('ui.setup_fields_unique'), 'error'); return; }
+    _signaturePopoverOpen = false;
     await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/definition`, 'PUT', { fields, strict_blanks: strict, expected_signature_version: snapshot.definition?.signature_version ?? null });
-  }
-
-  async function deleteRow(target: HTMLElement, snapshot: SetupSnapshot, row: SetupMatrixRow): Promise<void> {
-    if (!canWriteVersion(row.signature_version, snapshot.definition?.signature_version)) { Toast.show(Util.t('ui.setup_version_mismatch'), 'error'); return; }
-    await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, 'DELETE', deleteRequest(row));
   }
 
   async function importMatrix(target: HTMLElement, snapshot: SetupSnapshot, input: HTMLInputElement): Promise<void> {
@@ -986,7 +1278,7 @@ export const SetupAdmin = (() => {
   return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
-    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, parseGridMinutes, buildSaveRequests };
+    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText };
 })();
 
 /* =============================================================================
@@ -2153,51 +2445,51 @@ export const Plant = {
         </header>
 
         <nav class="admin-subtabs" role="tablist" style="padding:0 24px;">
-          <button class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}">${Util.t('ui.settings_subtab_rules')}</button>
-          <button class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}">${Util.t('ui.settings_subtab_setup')}</button>
+          <button id="settings-subtab-rules-tab" class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}" aria-controls="settings-subtab-rules">${Util.t('ui.settings_subtab_rules')}</button>
+          <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>
         </nav>
 
-        <div id="settings-subtab-rules" style="display:flex;flex-direction:column;gap:24px;padding:8px 0 32px" ${subTab === 'rules' ? '' : 'hidden'}>
+        <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:flex;flex-direction:column;gap:24px;padding:8px 0 32px" ${subTab === 'rules' ? '' : 'hidden'}>
 
           <div class="panel">
-            <header class="panel-head"><h3>Alert Horizon</h3></header>
+            <header class="panel-head"><h3>${Util.t('ui.alert_horizon_title')}</h3></header>
             <div class="panel-body">
-              <p class="panel-help-text">Controls which alerts appear in the header badge and alert drawer. Orders beyond the selected window are hidden to reduce noise. The window rolls with the current clock continuously.</p>
+              <p class="panel-help-text">${Util.t('ui.alert_horizon_help')}</p>
               <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-                <span style="min-width:160px">Show alerts within the next</span>
+                <span style="min-width:160px">${Util.t('ui.show_alerts_within')}</span>
                 <input type="number" id="sys-alert-horizon-days" class="form-input" min="1" max="60" step="1"
                        style="width:64px;text-align:right" placeholder="0">
-                <span>days</span>
+                <span>${Util.t('ui.days')}</span>
               </div>
             </div>
           </div>
 
           <div class="panel">
-            <header class="panel-head"><h3>Confidence Score Horizon</h3></header>
+            <header class="panel-head"><h3>${Util.t('ui.conf_horizon_title')}</h3></header>
             <div class="panel-body">
-              <p class="panel-help-text">The rolling window used to compute the schedule confidence score. Shorter windows surface near-term risk more sharply; longer windows give a broader health picture. The window rolls with the current clock continuously.</p>
+              <p class="panel-help-text">${Util.t('ui.conf_horizon_help')}</p>
               <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-                <span style="min-width:160px">Score covers the next</span>
+                <span style="min-width:160px">${Util.t('ui.score_covers')}</span>
                 <input type="number" id="sys-conf-horizon-days" class="form-input" min="1" step="1"
                        style="width:64px;text-align:right" placeholder="0">
-                <span>days</span>
+                <span>${Util.t('ui.days')}</span>
               </div>
             </div>
           </div>
 
           <div class="panel">
-            <header class="panel-head"><h3>Split-order allocation</h3></header>
+            <header class="panel-head"><h3>${Util.t('ui.split_order_title')}</h3></header>
             <div class="panel-body split-policy-body">
-              <p class="panel-help-text split-policy-copy">Choose how future scheduling actions use valid operating intervals. Existing schedules are never rewritten by changing this plant setting.</p>
+              <p class="panel-help-text split-policy-copy">${Util.t('ui.split_order_help')}</p>
               <label class="split-policy-control" for="sys-split-order-policy">
-                <span>Allocation policy</span>
+                <span>${Util.t('ui.split_order_policy_label')}</span>
                 <select id="sys-split-order-policy" class="form-input" aria-describedby="sys-split-order-policy-help">
-                  <option value="never">Never split orders</option>
-                  <option value="overlong_only">Split inherently overlong orders only</option>
-                  <option value="partial_allowed">Allow partial orders across operating intervals</option>
+                  <option value="never">${Util.t('ui.split_order_opt_never')}</option>
+                  <option value="overlong_only">${Util.t('ui.split_order_opt_overlong')}</option>
+                  <option value="partial_allowed">${Util.t('ui.split_order_opt_partial')}</option>
                 </select>
               </label>
-              <p id="sys-split-order-policy-help" class="split-policy-help">Generated segments are planner-visible, remain one logical order, and are never shorter than 30 minutes.</p>
+              <p id="sys-split-order-policy-help" class="split-policy-help">${Util.t('ui.split_order_policy_help')}</p>
             </div>
           </div>
 
@@ -2223,7 +2515,7 @@ export const Plant = {
         <!-- Stage 0 setup truth is maintained beside the plant's scheduling
              policy, never inside a timeline/optimizer flow. It remains
              observation-only until a later stage explicitly enables use. -->
-        <div id="settings-subtab-setup" style="padding:8px 0 32px" ${subTab === 'setup' ? '' : 'hidden'}>
+        <div id="settings-subtab-setup" role="tabpanel" aria-labelledby="settings-subtab-setup-tab" style="padding:8px 0 32px" ${subTab === 'setup' ? '' : 'hidden'}>
           <div id="setup-admin-pane"></div>
         </div>
 

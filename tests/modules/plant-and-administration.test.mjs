@@ -182,6 +182,21 @@ test('stateSig matches regardless of key part order — a real row must resolve 
   assert.equal(SetupAdmin.stateSig(candidate.key), SetupAdmin.stateSig(storedRow.from_key));
 });
 
+test('reviewStateSigFromText matches stateSig regardless of the optimizer preview text\'s part order', () => {
+  const candidate = SetupAdmin.cartesianStates(['colorWheel', 'prt01'], { colorWheel: ['RED'], prt01: ['A12'] })[0];
+  // schedule-workbench.mts's describeMissingPairs formats states as
+  // "fieldKey=value | fieldKey=value" (see stateForOrder/text there) — same
+  // shape keyText() produces in this file, unordered.
+  assert.equal(SetupAdmin.reviewStateSigFromText('prt01=A12 | colorWheel=RED'), SetupAdmin.stateSig(candidate.key));
+  assert.equal(SetupAdmin.reviewStateSigFromText('colorWheel=RED | prt01=A12'), SetupAdmin.stateSig(candidate.key));
+});
+
+test('reviewStateSigFromText returns null for missing/placeholder text', () => {
+  assert.equal(SetupAdmin.reviewStateSigFromText(null), null);
+  assert.equal(SetupAdmin.reviewStateSigFromText(undefined), null);
+  assert.equal(SetupAdmin.reviewStateSigFromText(''), null);
+});
+
 test('fieldValueSet unions plant-default and line-override ranked values', () => {
   const rankMaps = { '': { colorWheel: { RED: 1, BLUE: 2 } }, L1: { colorWheel: { BLUE: 1, GREEN: 2 } } };
   assert.deepEqual(SetupAdmin.fieldValueSet(rankMaps, 'colorWheel', ''), ['BLUE', 'RED']);
@@ -208,6 +223,42 @@ test('gridCellValue: identical states default to 0, any other missing pair is un
   assert.equal(SetupAdmin.gridCellValue(red, blue, { setup_min: 7 }, undefined), 7);
   assert.equal(SetupAdmin.gridCellValue(red, blue, undefined, { setup_min: 3 }), 3);
   assert.equal(SetupAdmin.gridCellValue(red, blue, undefined, { setup_min: null }), null);
+});
+
+test('gridCellState distinguishes the six cell states (docs/Setup_matrix_redesign.md §7)', () => {
+  const red = { key: [], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  // dirty always wins, even over an existing row
+  assert.equal(SetupAdmin.gridCellState(red, blue, { setup_min: 7, inherited: false }, { setup_min: 3 }, ''), 'dirty');
+  // no row, off-diagonal: uncovered — never a fabricated value
+  assert.equal(SetupAdmin.gridCellState(red, blue, undefined, undefined, ''), 'uncovered');
+  // no row, diagonal: implicit zero — structurally free, not recorded
+  assert.equal(SetupAdmin.gridCellState(red, red, undefined, undefined, ''), 'implicit-zero');
+  // a row exists on the diagonal: an engineer recorded this explicitly
+  assert.equal(SetupAdmin.gridCellState(red, red, { setup_min: 10, inherited: false }, undefined, ''), 'diagonal-explicit');
+  // line scoped, row not inherited from the plant default: an explicit line override
+  assert.equal(SetupAdmin.gridCellState(red, blue, { setup_min: 5, inherited: false }, undefined, 'L1'), 'line-override');
+  // line scoped, row inherited from the plant default: not an override
+  assert.equal(SetupAdmin.gridCellState(red, blue, { setup_min: 5, inherited: true }, undefined, 'L1'), 'plant-default');
+  // no line scope at all: always plant-default, never "override"
+  assert.equal(SetupAdmin.gridCellState(red, blue, { setup_min: 5, inherited: false }, undefined, ''), 'plant-default');
+});
+
+test('capAxis bounds the rendered universe and reports what was hidden (docs/Setup_matrix_redesign.md §6)', () => {
+  const states = SetupAdmin.cartesianStates(['colorWheel'], { colorWheel: ['A', 'B', 'C', 'D', 'E'] });
+  const uncapped = SetupAdmin.capAxis(states, 60);
+  assert.equal(uncapped.states.length, 5);
+  assert.equal(uncapped.truncated, false);
+  const capped = SetupAdmin.capAxis(states, 3);
+  assert.equal(capped.states.length, 3);
+  assert.equal(capped.total, 5);
+  assert.equal(capped.truncated, true);
+});
+
+test('fieldLabel translates the shared constraint.<key> vocabulary, falling back to the raw key', () => {
+  assert.equal(typeof SetupAdmin.fieldLabel('colorWheel'), 'string');
+  assert.equal(SetupAdmin.fieldLabel('colorWheel').length > 0, true);
+  assert.equal(SetupAdmin.fieldLabel('not_a_real_field'), 'not_a_real_field');
 });
 
 test('filterStates matches any field part, case-insensitively, and preserves order', () => {

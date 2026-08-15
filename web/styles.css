@@ -6045,82 +6045,84 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .insp-setup-detail { border-color: var(--line-strong); }
 .insp-setup-warning { margin: 8px 0 0; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--warn); font-size: 11px; line-height: 1.4; }
 
-/* Setup matrix administration — dense, plant-scoped observation console. */
-.setup-admin { display: flex; flex-direction: column; gap: 12px; }
-.setup-admin-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 4px 0 12px; }
-.setup-admin-head h3 { font-size: 16px; }
-.setup-admin-head p, .setup-help, .setup-compatibility p { margin: 4px 0 0; color: var(--fg-mute); font-size: 12px; }
-.setup-kicker, .setup-version { font: 700 10px/1.2 var(--font-mono); letter-spacing: .07em; color: var(--fg-mute); }
-.setup-version { color: var(--accent); background: var(--accent-wash); border: 1px solid var(--accent-soft); border-radius: var(--r-sm); padding: 5px 7px; white-space: nowrap; }
-.setup-status { display: flex; align-items: baseline; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12px; }
-.setup-status.ok { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 32%, var(--line)); color: var(--ok); }
-.setup-status.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 32%, var(--line)); color: var(--warn); }
-.setup-status span { color: var(--fg); }
-.setup-coverage { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12px; }
-.setup-coverage strong { font: 700 10px/1.2 var(--font-mono); letter-spacing: .07em; color: var(--fg-mute); text-transform: uppercase; }
-.setup-coverage span { color: var(--fg); }
-.setup-coverage table.setup-table { margin-top: 4px; }
-.setup-toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
-.setup-toolbar label { display: flex; flex-direction: column; gap: 4px; color: var(--fg-mute); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.setup-toolbar .md-bom-combobox { min-width: 250px; }
-.setup-scope-note { color: var(--fg-mute); font-size: 12px; padding-bottom: 5px; }
-.setup-policy .panel-body { display: flex; flex-direction: column; gap: 10px; }
-.setup-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 10px; }
-.setup-policy-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--fg-mute); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.setup-policy-modes { display: flex; gap: 14px; flex-wrap: wrap; }
-.setup-policy-modes .setup-check { opacity: .72; }
-.setup-evidence .panel-body { display: flex; flex-direction: column; gap: 10px; }
-.setup-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 4px 14px; }
-.setup-evidence-notes { display: flex; flex-direction: column; gap: 4px; color: var(--fg-mute); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.setup-evidence-notes textarea { min-height: 60px; resize: vertical; }
-.setup-definition .panel-head, .setup-matrix .panel-head, .setup-state .panel-head, .setup-audit .panel-head { display: flex; align-items: center; justify-content: space-between; }
-.setup-definition h4, .setup-matrix h4, .setup-state h4, .setup-audit h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+/* Setup matrix administration — four-band layout (docs/Setup_matrix_redesign.md
+   §9): context bar, standard rail, the grid itself, and an always-visible
+   action bar. Two label treatments only (DESIGN.md §3): .mono-eyebrow for
+   status/coverage/grid headers, .label for popover/modal form labels —
+   replaces the seven near-duplicate uppercase micro-label styles the grouped
+   layout had accumulated. */
+.setup-admin { display: flex; flex-direction: column; gap: 12px; position: relative; }
+.setup-admin .mono-eyebrow { font: 600 10px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-mute); }
+.setup-admin .label { font: 600 11px/1.3 var(--body-font, inherit); letter-spacing: .04em; text-transform: uppercase; color: var(--fg-mute); }
+.setup-band { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid var(--line); }
+.setup-band:first-of-type { border-top: 0; padding-top: 0; }
+.setup-context-bar { justify-content: space-between; align-items: flex-start; }
+.setup-context-main h3 { font-size: 16px; margin: 0; }
+.setup-context-main p { margin: 4px 0 0; color: var(--fg-mute); font-size: 12px; }
+.setup-context-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.setup-status-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.setup-status-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.setup-status-chip.ok { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 32%, var(--line)); color: var(--ok); }
+.setup-status-chip.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 32%, var(--line)); color: var(--warn); }
+.setup-version-chip { font: 700 11px/1.2 var(--font-mono); letter-spacing: .03em; color: var(--accent); background: var(--accent-wash); border: 1px solid var(--accent-soft); border-radius: var(--r-sm); padding: 5px 8px; white-space: nowrap; cursor: pointer; }
+.setup-check { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.setup-check input { accent-color: var(--primary); }
+
+.setup-standard-rail { justify-content: flex-start; align-items: flex-start; }
+.setup-signature-wrap, .setup-scope-wrap, .setup-coverage-wrap { display: flex; flex-direction: column; gap: 4px; }
+.setup-signature-chip { font: 600 13px/1.3 var(--body-font, inherit); color: var(--fg); }
+.setup-scope-wrap .md-bom-combobox { min-width: 220px; }
+.setup-state-inline { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.setup-state-readout { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.setup-state-readout span:first-child { font-family: var(--font-mono); }
+.setup-coverage-inline { border: 1px solid var(--line); border-radius: var(--r-md); background: none; padding: 6px 10px; font-size: 12px; color: var(--fg); cursor: pointer; }
+.setup-coverage-inline.warn { border-color: color-mix(in srgb, var(--warn) 32%, var(--line)); color: var(--warn); }
+.setup-review-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: var(--r-sm); font-size: 11.5px; color: var(--accent); }
+.setup-review-chip-clear { border: 0; background: none; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
+
+/* Signature popover (§9-B) — replaces the always-open definition panel. Not a
+   Modal; a small anchored panel below the version chip, dismissed by
+   clicking outside or Escape (see wire()'s dismiss listener). */
+.setup-popover { position: absolute; top: 52px; right: 0; z-index: 20; width: min(420px, 100%); background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow-lg); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.setup-popover-hint { margin: 0; font-size: 11.5px; color: var(--fg-mute); }
+.setup-popover .panel-head { display: flex; align-items: center; justify-content: space-between; }
 .setup-field-order { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .setup-field-row { display: flex; align-items: center; gap: 5px; }
 .setup-field-row > span { font: 700 11px var(--font-mono); color: var(--fg-mute); }
 .setup-field-row select { min-width: 135px; height: 30px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-elev); padding: 0 7px; }
 .setup-field-row .btn.sm { padding: 0 6px; min-width: 26px; }
-.setup-check { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 12px; }
-.setup-check input { accent-color: var(--primary); }
-.setup-definition .btn { margin-top: 10px; }
+
 .setup-table-wrap { overflow: auto; }
 .setup-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .setup-table th { font: 700 10.5px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; color: var(--fg-mute); background: var(--bg-strong); text-align: left; }
 .setup-table th, .setup-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-.setup-table tr.inherited { background: var(--bg-subtle); }
 .setup-num { font-family: var(--font-mono); text-align: right; white-space: nowrap; }
-.setup-empty { color: var(--fg-mute); font-size: 12px; padding: 9px 0; }
-.setup-state-readout { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; gap: 10px; font-size: 12px; }
-.setup-state-readout span:first-child { font-family: var(--font-mono); }
-.setup-compatibility { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.setup-compatibility { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
+.setup-compatibility p { margin: 4px 0 0; color: var(--fg-mute); }
 .setup-compatibility .input { margin-top: 8px; width: min(100%, 420px); }
 .setup-audit-row { display: grid; grid-template-columns: 74px minmax(160px, 1fr) auto minmax(120px, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .setup-audit-row:last-child { border-bottom: 0; }
 .setup-audit-row strong { color: var(--warn); font: 700 10px var(--font-mono); }
 @media (max-width: 760px) {
   .setup-state-readout, .setup-audit-row { grid-template-columns: 1fr; gap: 4px; }
-  .setup-toolbar .md-bom-combobox { min-width: min(100%, 250px); }
 }
 
-/* Setup Matrix redesign — group sections, KPI row, and the from-state x
-   to-state grid (docs/setup_matrix_ui_redesign.md). No color/heat-intensity
-   encoding here by design — see that doc's Revisions section. */
-.setup-kicker.ok { color: var(--ok); }
-.setup-kicker.warn { color: var(--warn); }
-.setup-group { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
-.setup-group:first-of-type { padding-top: 0; border-top: 0; }
-.setup-group-head { display: flex; flex-direction: column; gap: 2px; }
-.setup-group-eyebrow { font: 700 10px/1.2 var(--font-mono); letter-spacing: .07em; color: var(--fg-mute); text-transform: uppercase; }
-.setup-group-head p { margin: 0; color: var(--fg-mute); font-size: 12px; }
-.panel-help-text { margin: 0 0 12px; font-size: 13px; color: var(--fg-mute); }
+.setup-grid-band { flex-direction: column; align-items: stretch; }
+.setup-grid-toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
+.setup-grid-filter { height: 30px; width: 160px; }
+.setup-grid-cap-note { margin: 8px 0 0; font-size: 11.5px; color: var(--fg-mute); }
+.setup-empty-state.empty-state { padding: 24px 0; }
+.setup-empty-state-hint { margin-top: 4px; font-size: 11.5px; }
 
-.setup-kpi-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.setup-kpi-row .kpi-tile { flex: 1 1 160px; min-width: 160px; text-align: left; }
+.setup-action-bar { justify-content: space-between; }
+.setup-action-bar > span { color: var(--fg-mute); font: 700 11px var(--font-mono); }
+.setup-action-buttons { display: flex; gap: 8px; }
+.setup-menu { position: relative; }
+.setup-menu-list { position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 20; min-width: 200px; background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; padding: 6px; }
+.setup-menu-list button, .setup-menu-list .setup-menu-item { display: block; width: 100%; text-align: left; padding: 7px 9px; border: 0; background: none; font-size: 12.5px; color: var(--fg); border-radius: var(--r-sm); cursor: pointer; }
+.setup-menu-list button:hover, .setup-menu-list .setup-menu-item:hover { background: var(--bg-subtle); }
+.setup-menu-list button:disabled { color: var(--fg-faint); cursor: not-allowed; }
 
-.setup-standard-grid .panel-head { flex-wrap: wrap; gap: 8px; }
-.setup-grid-filter { height: 30px; width: 200px; }
-.setup-grid-savebar { display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-top: 8px; background: var(--bg-subtle); border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12px; }
-.setup-grid-savebar span { color: var(--fg-mute); font: 700 11px var(--font-mono); }
 .setup-grid-scroll { overflow: auto; max-height: 480px; margin-top: 8px; }
 table.setup-grid { width: auto; border-collapse: collapse; font-size: 12px; }
 table.setup-grid th, table.setup-grid td { border: 1px solid var(--line); padding: 0; }
@@ -6130,18 +6132,27 @@ table.setup-grid .setup-grid-col-head, table.setup-grid .setup-grid-row-head {
   background: var(--bg-strong); text-align: center; padding: 6px 10px; white-space: nowrap; position: sticky;
 }
 table.setup-grid .setup-grid-col-head { top: 0; z-index: 2; }
-table.setup-grid .setup-grid-row-head { left: 0; z-index: 1; text-align: left; }
+table.setup-grid .setup-grid-row-head { left: 0; z-index: 1; text-align: left; position: relative; }
 table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index: 3; }
-.setup-grid-td { padding: 0 !important; }
-.setup-grid-cell {
-  width: 64px; height: 30px; border: 0; background: transparent; text-align: right; font-family: var(--font-mono);
-  font-size: 12px; padding: 0 8px; color: var(--fg);
-}
-.setup-grid-cell:disabled { color: var(--fg-mute); }
-.setup-grid-cell::placeholder { color: var(--fg-faint); font-family: var(--body-font, inherit); font-size: 10.5px; }
-.setup-grid-cell:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.setup-grid-here-row .setup-grid-row-head { background: color-mix(in srgb, var(--accent) 10%, var(--bg-strong)); }
+.setup-grid-here-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--accent); color: var(--bg-elev); font: 700 9px var(--font-mono); letter-spacing: .04em; text-transform: uppercase; vertical-align: middle; }
+.setup-grid-td { padding: 0 !important; text-align: right; font-family: var(--font-mono); font-size: 12px; color: var(--fg); height: 30px; width: 64px; }
+.setup-grid-td.setup-grid-editable { cursor: text; }
+.setup-grid-td.setup-grid-editable:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.setup-grid-td:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Six distinct cell states (docs/Setup_matrix_redesign.md §7) — a bare
+   number can only say "0 or not 0", which made an explicit diagonal row
+   indistinguishable from an implicit zero, and a line override
+   indistinguishable from an inherited plant value. */
+.setup-grid-uncovered { color: var(--fg-faint); font-size: 13px; }
+.setup-grid-implicit-zero { color: var(--fg-faint); font-style: italic; }
+.setup-grid-line-override { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 /* Dirty marker reuses the Master Data grid's inset-accent idiom (.md-cell-dirty, styles.css:4515). */
 .setup-grid-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
 .setup-grid-selected { background: color-mix(in srgb, var(--accent) 16%, transparent); outline: 1px solid var(--accent); outline-offset: -1px; }
 .setup-grid-highlight { outline: 2px solid var(--warn); outline-offset: -2px; }
 @media (prefers-reduced-motion: no-preference) { .setup-grid-highlight { transition: outline-color .2s ease-out; } }
+
+/* Single floating editor shared across every grid cell (§7/§9-C.3) — replaces
+   one live <input> per cell; repositioned over whichever cell is focused. */
+.setup-grid-editor-input { position: fixed; z-index: 30; border: 0; outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-elev); text-align: right; font-family: var(--font-mono); font-size: 12px; padding: 0 8px; color: var(--fg); }

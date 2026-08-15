@@ -60,4 +60,4 @@ All four registered fields are wired into the optimizer; adding a fifth means re
 
 ## Deliberately out of scope (see `docs/MIGRATION.md`)
 
-Sequence-dependent setup-time minutes, a release-date floor on pull-forward, and auto-pinning (in-progress orders, SAP-firmed/FIXKZ orders, a frozen near-term fence) — manual pinning (`Store.isFixed`) is the only protection an order has from being moved.
+A release-date floor on pull-forward, and auto-pinning (in-progress orders, SAP-firmed/FIXKZ orders, a frozen near-term fence) — manual pinning (`Store.isFixed`) is the only protection an order has from being moved. Sequence-dependent setup-time minutes are **implemented**, not out of scope — `Engine.runAndApply` routes `spt`/`changeover`/`combined` through `Engine.evaluateSetupAware` (`web/setup-scheduler.mts`) whenever a plant's `setup_definition.active` is set via the "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15); see `docs/changeover_matrix.md` for the full setup-aware design.
