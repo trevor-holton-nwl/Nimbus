@@ -1225,7 +1225,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_matrix_sub': 'Le temps nécessaire pour changer l\'outillage d\'une ligne entre deux ordres — utilisé pour planifier les changements une fois la planification tenant compte des réglages activée pour {{plant}}. Cela n\'affecte pas encore le planning actuel.',
   'ui.setup_line_scope': 'Périmètre de ligne', 'ui.setup_plant_default': 'Valeur usine',
   'ui.setup_sparse_override_scope': 'Les remplacements de ligne clairsemés héritent des valeurs usine non modifiées.',
-  'ui.setup_inherited': 'Hérité de l’usine', 'ui.setup_activation_active': 'Optimisation tenant compte des réglages active', 'ui.setup_activation_inactive': 'Optimisation tenant compte des réglages inactive',
+  'ui.setup_inherited': 'Hérité de l’usine', 'ui.setup_activation_active': 'Optimisation tenant compte des réglages active', 'ui.setup_activation_inactive': 'Optimisation tenant compte des réglages inactive', 'ui.setup_include_setup_times': 'Inclure les temps de réglage dans l’optimiseur',
   'ui.setup_activation_requirements': 'Modifier la définition désactive l’activation. Une matrice de version correspondante et une couverture validée sont requises.',
   'ui.setup_compatibility': 'Compatible avec cette signature de réglage usine', 'ui.setup_compatibility_reason': 'Motif requis en cas d’incompatibilité',
   'ui.setup_not_global_exclusion': 'Exclusion de réglage seulement. Ne modifie pas l’exclusion globale de l’optimiseur.',

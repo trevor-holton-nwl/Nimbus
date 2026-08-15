@@ -1225,7 +1225,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_matrix_sub': 'Cuánto tarda en cambiarse el utillaje de una línea entre dos órdenes — se usa para planificar los cambios una vez que la programación consciente de la preparación esté activada para {{plant}}. Esto todavía no afecta al programa actual.',
   'ui.setup_line_scope': 'Alcance de línea', 'ui.setup_plant_default': 'Predeterminado de planta',
   'ui.setup_sparse_override_scope': 'Las anulaciones de línea dispersas heredan cada valor de planta sin modificar.',
-  'ui.setup_inherited': 'Heredado de planta', 'ui.setup_activation_active': 'Optimización consciente de preparación activa', 'ui.setup_activation_inactive': 'Optimización consciente de preparación inactiva',
+  'ui.setup_inherited': 'Heredado de planta', 'ui.setup_activation_active': 'Optimización consciente de preparación activa', 'ui.setup_activation_inactive': 'Optimización consciente de preparación inactiva', 'ui.setup_include_setup_times': 'Incluir tiempos de preparación en el optimizador',
   'ui.setup_activation_requirements': 'Cambiar la definición desactiva la activación. Se requieren una matriz de versión coincidente y cobertura aprobada.',
   'ui.setup_compatibility': 'Compatible con esta firma de preparación de planta', 'ui.setup_compatibility_reason': 'Motivo obligatorio si es incompatible',
   'ui.setup_not_global_exclusion': 'Exclusión solo de preparación. No cambia la exclusión global del optimizador.',

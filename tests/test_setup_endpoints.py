@@ -32,6 +32,11 @@ class _SetupService:
         return {"plant": plant, "fields": fields, "strict_blanks": strict_blanks,
                 "signature_version": self.version, "active": False}
 
+    def set_definition_active(self, plant, active, actor, expected_signature_version):
+        self._check_version(expected_signature_version)
+        return {"plant": plant, "fields": ["colorWheel"], "strict_blanks": True,
+                "signature_version": self.version, "active": active}
+
     def replace_plant_matrix(self, plant, rows, signature_version, actor):
         self._check_rows(rows, signature_version)
         return {"plant": plant, "line": "", "signature_version": self.version, "rows": len(rows)}
@@ -120,8 +125,8 @@ def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, mon
 def tc(monkeypatch):
     service = _SetupService()
     for name in (
-        "get_setup_snapshot", "save_definition", "replace_plant_matrix", "upsert_line_matrix_rows",
-        "delete_plant_matrix_rows", "delete_line_matrix_rows", "set_line_state",
+        "get_setup_snapshot", "save_definition", "set_definition_active", "replace_plant_matrix",
+        "upsert_line_matrix_rows", "delete_plant_matrix_rows", "delete_line_matrix_rows", "set_line_state",
         "upsert_occurrence_override", "update_occurrence_override", "clear_occurrence_override",
     ):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
@@ -216,6 +221,29 @@ def test_definition_write_requires_master_data_owner(tc, monkeypatch):
     )
     response = tc.put("/setup/5512/definition", json={"fields": ["colorWheel"], "strict_blanks": True})
     assert response.status_code == 403
+
+
+def test_active_write_requires_master_data_owner(tc, monkeypatch):
+    """A scheduler cannot flip 'Include Setup Times in Optimizer' for a plant."""
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    response = tc.put("/setup/5512/active", json={"active": True, "expected_signature_version": 4})
+    assert response.status_code == 403
+
+
+def test_active_write_requires_current_version_and_returns_freshness(tc):
+    enabled = tc.put(
+        "/setup/5512/active", headers={"x-request-id": "setup-active"},
+        json={"active": True, "expected_signature_version": 4},
+    )
+    assert enabled.status_code == 200
+    body = enabled.json()
+    assert body["active"] is True
+    assert body["freshness"] == {"signature_version": 4, "request_id": "setup-active"}
+
+    stale = tc.put("/setup/5512/active", json={"active": True, "expected_signature_version": 3})
+    assert stale.status_code == 409
 
 
 def test_matrix_import_enforces_stale_versions_invalid_minutes_and_line_ownership(tc):

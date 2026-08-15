@@ -250,6 +250,27 @@ def test_definition_edit_versions_and_deactivates_without_rewriting_prior_matrix
     assert "UPDATE setup_matrix" not in statements
 
 
+def test_set_definition_active_toggles_without_touching_fields(monkeypatch):
+    """The single 'Include Setup Times in Optimizer' checkbox flips one column only."""
+    cursor = _DefinitionCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.set_definition_active("5512", True, "owner@example.com", expected_signature_version=2)
+    assert result == {
+        "plant": "5512", "fields": ["colorWheel"], "signature_version": 2,
+        "strict_blanks": True, "active": True,
+    }
+    statements = "\n".join(sql for sql, _params in cursor.executed)
+    assert "UPDATE setup_definition" in statements
+    assert "SET active = %s" in statements
+
+
+def test_set_definition_active_rejects_stale_signature_version(monkeypatch):
+    cursor = _DefinitionCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    with pytest.raises(ValueError, match="signature version"):
+        setup_data.set_definition_active("5512", True, "owner@example.com", expected_signature_version=1)
+
+
 def test_snapshot_reads_only_one_current_signature_version_in_a_repeatable_transaction(monkeypatch):
     """A setup hydration never combines historical rows with a newer definition's effective truth."""
     cursor = _SnapshotCursor()

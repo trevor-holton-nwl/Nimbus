@@ -431,6 +431,15 @@ export function deriveSetupObservation(
 let _candidateSnapshot: ScheduleSnapshot | null = null;
 let _candidateDiagnostics: CandidateDiagnostic[] | null = null;
 
+/** Search-safety limits for the setup-aware evaluators (setup-scheduler.mjs).
+ *  Stage 0's originally-planned perf-measurement gate (docs/changeover_matrix_
+ *  stage_2.md) was never run, so these are hardcoded rather than measured —
+ *  chosen to bias toward the fast/greedy path and a safe bail-out over
+ *  exactness. Revisit once real per-plant timing data exists. */
+const SETUP_AWARE_EXACT_SEARCH_THRESHOLD = 8;
+const SETUP_AWARE_ITERATION_CAP = 20000;
+const SETUP_AWARE_DEADLINE_MS = 5000;
+
 /** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
  * Live optimizer and repair runs retain their existing ErrorLog behavior. */
 function reportSchedulerDiagnostic(
@@ -2859,6 +2868,53 @@ export const Engine = {
     const horizonEnd   = opts.endDate   ? new Date(opts.endDate as string | number | Date) : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
+
+    // "Include Setup Times in Optimizer" (SetupDefinition.active) routes
+    // spt/changeover/combined through the setup-aware evaluators
+    // (setup-scheduler.mjs) instead of the legacy per-line walk below. Mirrors
+    // the same live gate Engine.autoReflow already reads for incremental
+    // reflow. Search-safety limits are hardcoded (see SETUP_AWARE_* above) —
+    // the perf-measurement gate this was meant to come from was never run.
+    const setupSnapshot = Store.setupSnapshot;
+    if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.definition?.active) {
+      const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'changeover' ? 'min-changeover' : 'due-date-first';
+      const snapshot = _candidateSnapshot ?? snapshotSchedule();
+      const bounds: DueDateFirstBounds = {
+        setup: setupSnapshot,
+        exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+        iterationCap: SETUP_AWARE_ITERATION_CAP,
+        clock: () => performance.now(),
+        deadline: performance.now() + SETUP_AWARE_DEADLINE_MS,
+        now: horizonStart,
+        horizonEnd,
+      };
+      let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
+      // The setup-aware evaluators group every line for the plant with no
+      // opts.lines/excludeFromOpt filter of their own (unlike the legacy walk
+      // below) — apply both as a post-filter over the returned patches so a
+      // line-scoped run or an opted-out line still behaves as promised.
+      const optsLines = opts.lines as string[] | undefined;
+      const allowedLines = Array.isArray(optsLines) && optsLines.length ? new Set(optsLines) : null;
+      if (allowedLines || Object.values(sourceLineSettings()).some(setting => setting?.excludeFromOpt)) {
+        const byId = new Map(snapshot.tasks.map(t => [String(t.id), t]));
+        result = {
+          ...result,
+          patches: result.patches.filter(patch => {
+            const line = byId.get(String(patch.id))?.PRODUCTION_LINE || 'Unknown';
+            if (allowedLines && !allowedLines.has(line)) return false;
+            if (sourceLineSettings()[line]?.excludeFromOpt) return false;
+            return true;
+          }),
+        };
+      }
+      if (candidateRun) return result;
+      applySchedulePatches(result.patches);
+      Store.setLastOptimize(new Date(), 'engine');
+      Alerts.clearDismissed();
+      Alerts.scheduleRecompute();
+      PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
+      return;
+    }
 
     // Optional caller-supplied line filter — when present, only these lines are optimized.
     const optsLines = opts.lines as string[] | undefined;

@@ -196,6 +196,23 @@ def _require_definition(cur, plant: str, signature_version: int, *, lock: bool =
     return definition
 
 
+def set_definition_active(plant: str, active: bool, actor: str, *, expected_signature_version: int) -> dict:
+    """Toggle whether the setup-aware optimizer paths are live for this plant."""
+    plant = _required_text(plant, "Plant")
+    actor = _required_text(actor, "Actor")
+    if not isinstance(active, bool):
+        raise ValueError("active must be boolean")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        definition = _require_definition(cur, plant, expected_signature_version, lock=True)
+        cur.execute(
+            "UPDATE setup_definition SET active = %s, updated_by = %s, updated_at = NOW() WHERE plant = %s",
+            (active, actor, plant),
+        )
+        conn.commit()
+    return {"plant": plant, "fields": definition["fields"], "signature_version": definition["signature_version"],
+            "strict_blanks": definition["strict_blanks"], "active": active}
+
+
 def _assert_line_owned(cur, plant: str, line: str) -> None:
     cur.execute(
         "SELECT 1 FROM production_lines WHERE plant = %s AND production_line = %s LIMIT 1",

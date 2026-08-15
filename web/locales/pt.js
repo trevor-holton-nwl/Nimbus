@@ -1224,7 +1224,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_matrix_sub': 'Quanto tempo leva para mudar o ferramental de uma linha entre dois pedidos — usado para planejar trocas quando a programação com preparação estiver ativada para {{plant}}. Isso ainda não afeta a programação de hoje.',
   'ui.setup_line_scope': 'Escopo da linha', 'ui.setup_plant_default': 'Padrão da fábrica',
   'ui.setup_sparse_override_scope': 'Substituições esparsas de linha herdam todos os valores da fábrica não alterados.',
-  'ui.setup_inherited': 'Herdado da fábrica', 'ui.setup_activation_active': 'Otimização com preparação ativa', 'ui.setup_activation_inactive': 'Otimização com preparação inativa',
+  'ui.setup_inherited': 'Herdado da fábrica', 'ui.setup_activation_active': 'Otimização com preparação ativa', 'ui.setup_activation_inactive': 'Otimização com preparação inativa', 'ui.setup_include_setup_times': 'Incluir tempos de preparação no otimizador',
   'ui.setup_activation_requirements': 'Alterar a definição desativa a ativação. São necessários uma matriz de versão correspondente e uma aprovação de cobertura.',
   'ui.setup_compatibility': 'Compatível com esta assinatura de preparação da fábrica', 'ui.setup_compatibility_reason': 'Motivo obrigatório se incompatível',
   'ui.setup_not_global_exclusion': 'Exclusão somente de preparação. Não altera a exclusão global do otimizador.',

@@ -195,8 +195,6 @@ async def lifespan(app: FastAPI):
     md.ensure_labor_plan_line_table()
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
-    md.ensure_plant_setup_policy_config_column()
-    md.ensure_plant_setup_release_evidence_column()
     md.ensure_work_hours_columns()
     md.ensure_line_calendar_table()
     md.ensure_line_blackout_table()
@@ -580,6 +578,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
     "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
     "/setup/{plant}/definition": "setup.definition_write",
+    "/setup/{plant}/active": "setup.active_write",
     "/setup/{plant}/matrix/import": "setup.matrix_import",
     "/setup/{plant}/matrix": "setup.matrix_delete",
     "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
@@ -2370,66 +2369,23 @@ def list_color_wheels(
 # SETUP MATRIX API — Stage 0 only: versioned observation/setup truth, never scheduling.
 # =========================
 
-@api.get("/setup/{plant}/policy", dependencies=[Depends(auth.require_authenticated)])
-def get_setup_policy(plant: str,
-                     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Return one plant's disabled-by-default Stage 2 setup policy sidecar."""
+@api.put("/setup/{plant}/active", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                 Depends(require_admin)])
+def set_setup_active(plant: str, request: Request, body: dict = Body(default={}),
+                     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                     actor: str = Depends(auth.require_authenticated)):
+    """Toggle whether setup-aware optimization is live for this plant (the
+    single "Include Setup Times in Optimizer" checkbox)."""
     _setup_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, active=bool(body.get("active")))
     try:
-        return md.get_setup_policy_config(plant)
-    except ValueError as exc:
-        raise _setup_error(exc) from exc
-
-
-@api.put("/setup/{plant}/policy", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def put_setup_policy(plant: str, request: Request, body: dict = Body(default={}),
-                     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Persist typed policy thresholds without activating a schedule run."""
-    _setup_plant_guard(plant, allowed_plants)
-    try:
-        config = {key: body.get(key) for key in (
-            'dueDateFirstEnabled', 'minChangeoverEnabled', 'throughputEnabled',
-            'throughputMinSavingsMin', 'throughputMaxSlipMin',
-        )}
-        return md.set_setup_policy_config(
-            plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
+        result = setup_data.set_definition_active(
+            plant, bool(body.get("active")), actor,
+            expected_signature_version=body.get("expected_signature_version"),
         )
     except ValueError as exc:
-        if 'stale' in str(exc).lower():
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@api.get("/setup/{plant}/release-evidence", dependencies=[Depends(auth.require_authenticated)])
-def get_setup_release_evidence(plant: str,
-                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Return the plant-scoped release-evidence register and derived readiness."""
-    _setup_plant_guard(plant, allowed_plants)
-    try:
-        return md.get_setup_release_evidence(plant)
-    except ValueError as exc:
         raise _setup_error(exc) from exc
-
-
-@api.put("/setup/{plant}/release-evidence", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def put_setup_release_evidence(plant: str, request: Request, body: dict = Body(default={}),
-                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Persist auditable release evidence; it never starts scheduling."""
-    _setup_plant_guard(plant, allowed_plants)
-    try:
-        config = {key: body.get(key) for key in (
-            'stage1Validated', 'localDbVerified', 'performanceVerified',
-            'browserUatVerified', 'representativeReplayVerified',
-            'nullPredecessorVerified', 'ownerApproved', 'ownerEmail',
-            'approvedAt', 'notes',
-        )}
-        return md.set_setup_release_evidence(
-            plant, config, body.get('expected_version'), request.headers.get('x-user-email'),
-        )
-    except ValueError as exc:
-        if 'stale' in str(exc).lower():
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _setup_freshness(result)
 
 
 @api.get("/setup/{plant}", dependencies=[Depends(auth.require_authenticated)])

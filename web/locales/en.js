@@ -1287,6 +1287,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.setup_inherited':              'Inherited from plant',
   'ui.setup_activation_active':      'Setup-aware optimization active',
   'ui.setup_activation_inactive':    'Setup-aware optimization inactive',
+  'ui.setup_include_setup_times':    'Include setup times in optimizer',
   'ui.setup_activation_requirements':'Changing the definition disables activation. A version-matched matrix and reachable coverage pass are required before activation review.',
   'ui.setup_compatibility':          'Compatible with this plant setup signature',
   'ui.setup_compatibility_reason':   'Reason required when incompatible',

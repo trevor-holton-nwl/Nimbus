@@ -1227,6 +1227,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_sparse_override_scope': 'Sparsame Linienüberschreibungen übernehmen unveränderte Werkswerte.',
   'ui.setup_inherited': 'Vom Werk übernommen', 'ui.setup_activation_active': 'Setup-bewusste Optimierung aktiv',
   'ui.setup_activation_inactive': 'Setup-bewusste Optimierung inaktiv',
+  'ui.setup_include_setup_times': 'Rüstzeiten im Optimierer berücksichtigen',
   'ui.setup_activation_requirements': 'Eine Definitionsänderung deaktiviert die Aktivierung. Eine versionsgleiche Matrix und bestandene Abdeckung sind erforderlich.',
   'ui.setup_compatibility': 'Kompatibel mit dieser Werks-Setup-Signatur', 'ui.setup_compatibility_reason': 'Grund bei Inkompatibilität erforderlich',
   'ui.setup_not_global_exclusion': 'Nur Setup-Opt-out. Dies ändert nicht den separaten globalen Optimierungsausschluss.',
