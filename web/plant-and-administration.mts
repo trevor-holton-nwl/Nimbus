@@ -697,8 +697,8 @@ export const SetupAdmin = (() => {
       });
       Toast.show(Util.t('ui.setup_grid_pasted', { count: lastOutcome.ready.length }), 'success');
       close();
-      paintGrid(target, snapshot, definition, rows, permissions);
-      if (_setupView === 'list') renderListView(target, snapshot, definition, permissions);
+      if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
+      else if (definition) paintListView(target, snapshot, definition, permissions);
     });
     document.addEventListener('keydown', onKey);
     document.body.appendChild(backdrop);
