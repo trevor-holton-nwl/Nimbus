@@ -1362,6 +1362,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.setup_preview_stale_title':          'Preview is stale.',
   'ui.setup_preview_stale_default_reason': 'Setup data changed',
   'ui.setup_preview_stale_note':           'Apply is disabled; run optimization again to refresh this comparison.',
+  'ui.setup_preview_apply_stale_title':      'Setup data changed. Run optimization again before applying.',
+  'ui.setup_preview_apply_not_ready_title':  'No candidate is ready to apply yet.',
   'ui.setup_search_label':            'Search:',
   'ui.setup_search_candidates':       '{{count}} candidate{{plural}}',
   'ui.setup_search_limit_reached':    ' · limit reached',

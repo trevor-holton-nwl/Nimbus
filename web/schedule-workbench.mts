@@ -7531,7 +7531,8 @@ export const OptimizerPreview = {
   hideLoading() {
     Modal.close('modal-opt-preview');
     const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
-    if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = false; });
+    if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot .btn-ghost').forEach((b) => { b.disabled = false; });
+    OptimizerPreview._syncApplyButton();
   },
 
   /** Compact presentation facts only: candidate patches never carry a full
@@ -7597,15 +7598,27 @@ export const OptimizerPreview = {
 
   canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
 
+  /** Single place that decides whether Apply is clickable — always derived
+   *  from canApply(), never poked ad hoc. Replaces three separate direct-DOM
+   *  writers (showLoading's blanket disable, hideLoading's blanket enable,
+   *  markSetupStale's manual disable) that could disagree with each other. */
+  _syncApplyButton(): void {
+    const button = typeof document === 'undefined' ? null : document.getElementById('opt-preview-apply-btn') as HTMLButtonElement | null;
+    if (!button) return;
+    const applyable = OptimizerPreview.canApply();
+    button.disabled = !applyable;
+    button.title = applyable ? '' : (OptimizerPreview.stale
+      ? Util.t('ui.setup_preview_apply_stale_title')
+      : Util.t('ui.setup_preview_apply_not_ready_title'));
+  },
+
   /** Setup writes make comparison facts stale; they never rerun or apply a
    * candidate. The planner must explicitly run again. */
   markSetupStale(plant: string, kind: string): void {
     if (!OptimizerPreview.active || !OptimizerPreview._candidate || OptimizerPreview._plant !== plant) return;
     OptimizerPreview.stale = true;
     OptimizerPreview._staleReason = `${kind} setup data changed`;
-    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
-    const apply = root?.querySelector<HTMLButtonElement>('.modal-foot .btn-primary');
-    if (apply) { apply.disabled = true; apply.title = 'Setup data changed. Run optimization again before applying.'; }
+    OptimizerPreview._syncApplyButton();
     if (typeof document !== 'undefined') OptimizerPreview._render();
   },
 
@@ -7728,6 +7741,7 @@ export const OptimizerPreview = {
         OptimizerPreview._staleReason = null;
 
         footBtns.forEach((b) => { b.disabled = false; });
+        OptimizerPreview._syncApplyButton();
         OptimizerPreview._render();
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
@@ -7748,6 +7762,7 @@ export const OptimizerPreview = {
           + '</div>';
         }
         footBtns.forEach((b) => { b.disabled = false; });
+        OptimizerPreview._syncApplyButton();
       } finally {
         PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
       }
@@ -8021,6 +8036,7 @@ export const OptimizerPreview = {
       const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => void } } }).NIMBUS?.SetupAdmin;
       if (setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
     });
+    OptimizerPreview._syncApplyButton();
   },
 
   apply() {
