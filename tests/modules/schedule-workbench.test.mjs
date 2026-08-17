@@ -551,6 +551,17 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
 });
 
+test('combined is no longer an optimizer strategy users can select', () => {
+  const { readFileSync } = require('node:fs');
+  const types = readFileSync(new URL('../../web/types.mts', import.meta.url), 'utf8');
+  const dialogMarkup = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(types, /'combined'/,
+    'the public optimizer-mode type must not expose the retired strategy');
+  assert.doesNotMatch(dialogMarkup, /data-mode="combined"/,
+    'the optimize dialog must not render a combined strategy button');
+});
+
 test('OptimizerPreview retains only a bounded candidate explanation and drops it on discard', () => {
   // Regression target: retaining raw candidate schedules/reasons would make a
   // long preview unbounded and leave setup explanation data after Discard.

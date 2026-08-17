@@ -117,7 +117,7 @@ There is **no single task constructor.** `Persistence._prepTask` (`schedule-data
 
 | Domain | Members | Evidence |
 |---|---|---|
-| Optimizer mode | `'spt' \| 'changeover' \| 'combined'` | `schedule-services.mjs:892…`; `'combined'`="Smart" in UI |
+| Optimizer mode | `'spt' \| 'changeover' \| 'backlog'` | `schedule-services.mts`; `backlog` is a schedule-repair pass |
 | Alert `type` | `'overlap'\|'overload'\|'near-capacity'\|'closed'\|'blackout'\|'fixed-closed'\|'fixed-out-of-hours'` | `nimbus-compute-core.js`; matches `.d.ts` exactly |
 | Alert `sev` | `'err' \| 'warn'` | |
 | Utilization sev bucket | `'err' \| 'warn' \| 'ok'` | `schedule-services.mjs:721-725` — note `'ok'` is NOT a valid alert sev |

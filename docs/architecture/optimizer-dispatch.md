@@ -4,19 +4,19 @@ Full mechanics behind the summary in `CLAUDE.md` → Key Patterns → Optimizati
 
 ## Modes
 
-`Engine.runAndApply(mode)` where `mode ∈ {'spt', 'changeover', 'combined'}`. These are **dispatching heuristics, not true optimization** — there is no changeover-cost matrix, no finite-capacity constraint, and finish-to-start precedence is not consulted.
+`Engine.runAndApply(mode)` where `mode ∈ {'spt', 'changeover', 'backlog'}`. These are **dispatching heuristics, not true optimization** — there is no changeover-cost matrix, no finite-capacity constraint, and finish-to-start precedence is not consulted.
 
 - `'spt'` sorts by run-hours ascending across the whole horizon (via `Engine._sortTerms` + a greedy back-to-back placement walk, jumping fixed orders and calendar/blackout-closed windows, with a 200-iteration guard that logs via `ErrorLog.warn` if it fails to converge) — this is the only mode still on that legacy single-sort walk.
-- `'changeover'` and `'combined'` ("Smart" in the UI) both route through `Engine._dispatchDayIntegrity`.
+- `'changeover'` routes through `Engine._dispatchDayIntegrity`.
 
-## Day-integrity dispatch (`changeover` / `combined`)
+## Day-integrity dispatch (`changeover`)
 
 A calendar day's own orders (its "native" set — orders whose `Util.sapDueDate` falls on that day) get first refusal on every fragment of their day before any other order is considered, so a native order can never be pushed to a *later* day while its own day still has room for it (it can only be pulled *earlier* by an emptier prior day, or bumped by a genuinely overdue arrival from a prior day that needs the room).
 
 The dispatch walks calendar days forward; per day it ranks the remaining queue into 4 tiers:
 0. native (due today)
 1. carry (overdue from a prior day, due-date-ascending)
-2. pull-in (due later — `'combined'` ranks these due-ascending-then-color, `'changeover'` ranks them color-first-then-due — the only behavioral difference between the two modes)
+2. pull-in (due later, color-first then due-date)
 3. floater (no due date)
 
 Then it runs the same admit-then-resequence two-phase placement as the old bucket mechanism, bounded to that day's window so nothing bleeds past midnight (or shift close, under `respectCalendar`) into a day it doesn't belong to:
@@ -50,7 +50,7 @@ The sort key is `pad(rank,7) + '|' + normalizedValue` (rank rounded and clamped 
 
 `GET /priority-rank-maps` is plant-gated server-side, so `loadPriorityRankMaps` must keep using `Util.fetchTraced` (bare `fetch` sends no identity header and 403s for plant-restricted users).
 
-`Engine._comparator('combined'|'changeover', …)` no longer reflects either mode's actual placement order (kept only for hypothetical external callers) — see `_dispatchDayIntegrity` for the real logic.
+`Engine._comparator('changeover', …)` no longer reflects the mode's actual placement order (kept only for hypothetical external callers) — see `_dispatchDayIntegrity` for the real logic.
 
 ## Constraint registry
 
@@ -60,4 +60,4 @@ All four registered fields are wired into the optimizer; adding a fifth means re
 
 ## Deliberately out of scope (see `docs/MIGRATION.md`)
 
-A release-date floor on pull-forward, and auto-pinning (in-progress orders, SAP-firmed/FIXKZ orders, a frozen near-term fence) — manual pinning (`Store.isFixed`) is the only protection an order has from being moved. Sequence-dependent setup-time minutes are **implemented**, not out of scope — `Engine.runAndApply` routes `spt`/`changeover`/`combined` through `Engine.evaluateSetupAware` (`web/setup-scheduler.mts`) whenever a plant's `setup_definition.active` is set via the "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15); see `docs/changeover_matrix.md` for the full setup-aware design.
+A release-date floor on pull-forward, and auto-pinning (in-progress orders, SAP-firmed/FIXKZ orders, a frozen near-term fence) — manual pinning (`Store.isFixed`) is the only protection an order has from being moved. Sequence-dependent setup-time minutes are **implemented**, not out of scope — `Engine.runAndApply` routes `spt`/`changeover` through `Engine.evaluateSetupAware` (`web/setup-scheduler.mts`) whenever a plant's `setup_definition.active` is set via the "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15); see `docs/changeover_matrix.md` for the full setup-aware design.

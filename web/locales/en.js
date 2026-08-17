@@ -1069,7 +1069,6 @@ window.__NIMBUS_LOCALES.en = {
   'tip.no_wheel_loaded':               'No wheel loaded',
   'tip.spt_mode':                      'Shortest processing first — minimize average completion time',
   'tip.changeover_mode':               "Daily sequence — each day's orders in color-wheel order; fills spare capacity by color match",
-  'tip.combined_mode':                 "Daily sequence — protects each day's plan; fills spare capacity by due date",
   'ph.search_plants':                  'Search plants…',
   'ph.search_colors':                  'Search colors…',
   'ph.blackout_reason_line':           'Maintenance, cleaning, shift change…',

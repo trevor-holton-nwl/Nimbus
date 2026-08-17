@@ -1012,7 +1012,6 @@ window.__NIMBUS_LOCALES.de = {
   'tip.no_wheel_loaded':               'Kein Rad geladen',
   'tip.spt_mode':                      'Kürzeste Bearbeitung zuerst — mittlere Durchlaufzeit minimieren',
   'tip.changeover_mode':               'Tagesreihenfolge — Aufträge des Tages in Farbrad-Reihenfolge; füllt freie Kapazität nach Farbübereinstimmung',
-  'tip.combined_mode':                 'Tagesreihenfolge — schützt den Plan jedes Tages; füllt freie Kapazität nach Fälligkeitsdatum',
   'tip.refresh':                       'Aktualisieren',
   'tip.inspect_storage':               'localStorage-Schlüssel prüfen',
   'tip.diag_export_bundle':            'Diagnosepaket für den Support herunterladen',

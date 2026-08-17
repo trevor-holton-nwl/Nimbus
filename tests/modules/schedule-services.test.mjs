@@ -623,7 +623,7 @@ test('deriveSetupObservation uses the core default plant calendar when its recor
   assert.equal(observation.intervals[0].availableMinutes, 120);
 });
 
-test('Engine.evaluateSchedule preserves combined-mode placement from the live legacy path', () => {
+test('Engine.evaluateSchedule preserves changeover-mode placement from the live path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
   Store.setTasks([
     { id: 'parity-blue-long', PRODUCTION_LINE: 'L1', PLANT: 'PARITY', COLOR: 'BLUE', FORM_SIZE: 'B', RUN_TIME: '5', start_date: null, end_date: null },
@@ -632,9 +632,9 @@ test('Engine.evaluateSchedule preserves combined-mode placement from the live le
   ], 'unit-test');
   Store.setSelectedPlant('PARITY', 'unit-test');
   const options = { startDate, respectFixed: true, respectCalendar: false };
-  const candidate = Engine.evaluateSchedule('combined', options);
+  const candidate = Engine.evaluateSchedule('changeover', options);
 
-  Engine.runAndApply('combined', options);
+  Engine.runAndApply('changeover', options);
   const committed = candidate.patches.map(patch => ({
     id: patch.id,
     start: patch.changes.start_date?.getTime(),
@@ -646,7 +646,7 @@ test('Engine.evaluateSchedule preserves combined-mode placement from the live le
     end: Store.tasks[patch.id].end_date?.getTime(),
   }));
   assert.deepEqual(committed, legacy,
-    'detached evaluation must reuse the same combined/day-integrity placement as the live legacy path');
+    'detached evaluation must reuse the same changeover/day-integrity placement as the live path');
 });
 
 test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending run-hours', () => {
@@ -703,7 +703,7 @@ test('Engine.runAndApply respects explicit respectFixed/respectCalendar options 
   try {
     Store.setTasks([{ id: 'e3', PRODUCTION_LINE: 'L1', plant: '5512', RUN_TIME: '1' }], 'unit-test');
     Store.setSelectedPlant('5512', 'unit-test');
-    assert.doesNotThrow(() => Engine.runAndApply('combined', { respectFixed: true, respectCalendar: true }));
+    assert.doesNotThrow(() => Engine.runAndApply('changeover', { respectFixed: true, respectCalendar: true }));
     assert.equal(calls, 0, 'Engine.runAndApply must not call document.getElementById when respectFixed/respectCalendar are both passed explicitly');
   } finally {
     globalThis.document = priorDocument;
@@ -1043,7 +1043,7 @@ test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
 
 test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
   // The one call site Task 0's audit flagged as silently breakable:
-  // Alerts.applyFix's overload branch calls Engine.runAndApply('combined', {
+  // Alerts.applyFix's overload branch calls Engine.runAndApply('changeover', {
   // lines, startDate, endDate }) with no plant and no rank argument, so it
   // depends entirely on Store.selectedPlant + Store.priorityRankMaps. Assert an
   // end-to-end sequence, not just the term factory in isolation.
@@ -1056,7 +1056,7 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
     { id: 'cw-red',  PRODUCTION_LINE: 'LC', PLANT: '5512', RUN_TIME: '3', COLOR: 'RED',  start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  Engine.runAndApply('combined', { respectFixed: true, respectCalendar: false });
+  Engine.runAndApply('changeover', { respectFixed: true, respectCalendar: false });
   const red = Store.tasks['cw-red'], blue = Store.tasks['cw-blue'];
   assert.ok(red.start_date && blue.start_date, 'both orders must have been scheduled');
   assert.ok(red.start_date <= blue.start_date,

@@ -1012,7 +1012,6 @@ window.__NIMBUS_LOCALES.pt = {
   'tip.no_wheel_loaded':               'Nenhuma roda carregada',
   'tip.spt_mode':                      'Menor processamento primeiro — minimizar tempo médio de conclusão',
   'tip.changeover_mode':               'Sequência diária — pedidos do dia na ordem da roda de cores; preenche capacidade livre por correspondência de cor',
-  'tip.combined_mode':                 'Sequência diária — protege o plano de cada dia; preenche capacidade livre por data de vencimento',
   'tip.refresh':                       'Atualizar',
   'tip.inspect_storage':               'Inspecionar chaves localStorage',
   'tip.diag_export_bundle':            'Baixar pacote de diagnósticos para suporte',

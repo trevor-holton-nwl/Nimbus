@@ -1449,7 +1449,7 @@ export const Alerts = {
       Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
 
     } else if (a.type === 'overload') {
-      // Scope the combined optimizer to just this line+day so the optimize and the
+      // Scope the changeover optimizer to just this line+day so the optimize and the
       // undo snapshot cover the SAME tasks. (Passing no opts re-optimized the whole
       // plant over a 35-day horizon while the snapshot only captured one line+day,
       // so undo silently lost every cross-line / cross-day move.)
@@ -1465,7 +1465,7 @@ export const Alerts = {
         (!t.end_date   || t.end_date   >= dayStart) &&
         (!t.start_date || t.start_date <= dayEnd)
       ).map(t => t.id));
-      Engine.runAndApply('combined', { lines: [line], startDate: dayStart, endDate: dayEnd });
+      Engine.runAndApply('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd });
       UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
       Alerts.dismiss(alertId);
     }
@@ -1769,7 +1769,7 @@ export const Engine = {
    * detached snapshot. This is synchronous, so the private source selector is
    * always cleared before another caller can observe it. */
   evaluateSchedule(
-    mode: OptimizerMode = 'combined',
+    mode: OptimizerMode = 'changeover',
     opts: Record<string, unknown> = {},
     snapshot: ScheduleSnapshot = snapshotSchedule(),
   ): CandidateResult {
@@ -2404,10 +2404,9 @@ export const Engine = {
     if (mode === 'spt') {
       return [{ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp }];
     }
-    if (mode === 'changeover' || mode === 'combined') {
-      // 'changeover' groups identical attributes adjacently to minimize setups;
-      // 'combined' keeps that grouping but runs the shortest job first within
-      // each group (SPT). Domain constraints come FIRST, in the plant's
+    if (mode === 'changeover') {
+      // Changeover groups identical attributes adjacently to minimize setups.
+      // Domain constraints come FIRST, in the plant's
       // configured (now possibly nested) order; the intrinsic form / material /
       // hours heuristic always follows as the tail.
       const terms: SortTerm[] = [];
@@ -2452,13 +2451,8 @@ export const Engine = {
         });
       }
       terms.push({ get: (t: NimbusTask) => Util.norm(t.FORM_SIZE), cmp: strCmp });
-      if (mode === 'combined') {
-        terms.push({ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp });
-        terms.push({ get: (t: NimbusTask) => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
-      } else {
-        terms.push({ get: (t: NimbusTask) => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
-        terms.push({ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp });
-      }
+      terms.push({ get: (t: NimbusTask) => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
+      terms.push({ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp });
       return terms;
     }
     return []; // default: preserve input order
@@ -2466,8 +2460,8 @@ export const Engine = {
 
   /** Comparator built from _sortTerms — kept for callers that want a plain
    *  comparator. runAndApply uses the decorate variant for the Schwartzian win.
-   *  For 'combined' and 'changeover' this reflects only the legacy
-   *  color/form-grouping order — runAndApply no longer uses it for either
+   *  For 'changeover' this reflects only the legacy color/form-grouping
+   *  order — runAndApply no longer uses it for the actual
    *  mode; see _dispatchDayIntegrity for the actual (day-integrity, tiered
    *  admit-then-resequence) logic. */
   _comparator(mode: string, opts: { plant?: string | null } = {}): (a: NimbusTask, b: NimbusTask) => number {
@@ -2478,7 +2472,7 @@ export const Engine = {
     };
   },
 
-  /** Day-integrity dispatch — mode === 'changeover' | 'combined'. A calendar
+  /** Day-integrity dispatch for changeover mode. A calendar
    *  day's own orders (dueDay === that day, per `Util.sapDueDate`) get first
    *  refusal on every fragment of their day before any overdue carry-over or
    *  pulled-in future order is considered, so a native order can never be
@@ -2507,9 +2501,9 @@ export const Engine = {
     freeTasksIn: NimbusTask[],
     fixedTasks: NimbusTask[],
     cursorInit: Date,
-    opts: { respectCalendar: boolean; tieBreakTerms: SortTerm[]; mode: string }
+    opts: { respectCalendar: boolean; tieBreakTerms: SortTerm[] }
   ): Array<{ id: string; changes: Partial<NimbusTask> }> {
-    const { respectCalendar, tieBreakTerms, mode } = opts;
+    const { respectCalendar, tieBreakTerms } = opts;
     const dueMs = (t: any): number => { const d = Util.sapDueDate(t); return d ? d.getTime() : Infinity; };
     const dueDayKey = (t: any): string | null => { const d = Util.sapDueDate(t); return d ? Util.dayKey(d) : null; };
 
@@ -2599,9 +2593,7 @@ export const Engine = {
         if (a.tier === 1) {
           c = (a.due - b.due) || wheelFirst(a, b);
         } else if (a.tier === 2) {
-          c = mode === 'changeover'
-            ? (wheelFirst(a, b) || (a.due - b.due))
-            : ((a.due - b.due) || wheelFirst(a, b));
+          c = wheelFirst(a, b) || (a.due - b.due);
         } else {
           c = wheelFirst(a, b); // tier 0 (native) and tier 3 (floater)
         }
@@ -2818,7 +2810,7 @@ export const Engine = {
    *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
    *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
    *  and every caller's effective plant IS Store.selectedPlant. */
-  runAndApply(mode: OptimizerMode = 'combined', opts: Record<string, unknown> = {}): CandidateResult | void {
+  runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
     const candidateRun = opts.__candidateRun === true;
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
@@ -2870,14 +2862,14 @@ export const Engine = {
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
 
     // "Include Setup Times in Optimizer" (SetupDefinition.active) routes
-    // spt/changeover/combined through the setup-aware evaluators
+    // spt/changeover through the setup-aware evaluators
     // (setup-scheduler.mjs) instead of the legacy per-line walk below. Mirrors
     // the same live gate Engine.autoReflow already reads for incremental
     // reflow. Search-safety limits are hardcoded (see SETUP_AWARE_* above) —
     // the perf-measurement gate this was meant to come from was never run.
     const setupSnapshot = Store.setupSnapshot;
     if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.definition?.active) {
-      const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'changeover' ? 'min-changeover' : 'due-date-first';
+      const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
       const snapshot = _candidateSnapshot ?? snapshotSchedule();
       const bounds: DueDateFirstBounds = {
         setup: setupSnapshot,
@@ -2972,13 +2964,13 @@ export const Engine = {
 
       if (splitPolicy !== 'never') {
         let selectedOrder: NimbusTask[];
-        if (mode === 'combined' || mode === 'changeover') {
+        if (mode === 'changeover') {
           // Let the established tiered dispatcher choose the parent sequence
           // first, then replace only its continuous placement phase. This keeps
           // due-date admission / priority / changeover ordering intact while
           // allowing a selected parent to span valid operating intervals.
           const legacySequence = Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-            respectCalendar, tieBreakTerms: sortTerms, mode,
+            respectCalendar, tieBreakTerms: sortTerms,
           });
           const byId = new Map(freeTasks.map(task => [task.id, task]));
           selectedOrder = legacySequence.map(patch => byId.get(patch.id)).filter((task): task is NimbusTask => !!task);
@@ -2997,13 +2989,13 @@ export const Engine = {
         continue;
       }
 
-      if (mode === 'combined' || mode === 'changeover') {
+      if (mode === 'changeover') {
         // Day-integrity, tiered admit-then-resequence dispatch — see
         // Engine._dispatchDayIntegrity. sortTerms here already IS
         // Engine._sortTerms(mode, { plant }), so it doubles as both
         // the pull-in/floater tie-break and the phase-2 color/form sequencer.
         patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-          respectCalendar, tieBreakTerms: sortTerms, mode,
+          respectCalendar, tieBreakTerms: sortTerms,
         }));
         continue;
       }
@@ -3011,8 +3003,8 @@ export const Engine = {
       // Schwartzian transform: decorate each task once with its ordered sort
       // keys (from Engine._sortTerms — the single source of truth, so this can
       // no longer drift from _comparator), then sort by comparing keys
-      // positionally. 'changeover' and 'combined' return above via
-      // _dispatchDayIntegrity — only 'spt' reaches this walk now.
+      // positionally. 'changeover' returns above via _dispatchDayIntegrity —
+      // only 'spt' reaches this walk now.
       const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
       decorated.sort((a, b) => {
         for (let i = 0; i < sortTerms.length; i++) {

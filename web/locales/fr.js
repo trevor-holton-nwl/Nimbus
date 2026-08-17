@@ -1013,7 +1013,6 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.no_wheel_loaded':               'Aucune roue chargée',
   'tip.spt_mode':                      'Plus court d\'abord — minimiser le temps moyen d\'achèvement',
   'tip.changeover_mode':               'Séquence quotidienne — commandes du jour dans l\'ordre de la roue des couleurs ; comble la capacité restante par correspondance de couleur',
-  'tip.combined_mode':                 'Séquence quotidienne — protège le plan de chaque jour ; comble la capacité restante par date d\'échéance',
   'tip.refresh':                       'Actualiser',
   'tip.inspect_storage':               'Inspecter les clés localStorage',
   'tip.diag_export_bundle':            'Télécharger le pack de diagnostics pour le support',

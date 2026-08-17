@@ -304,11 +304,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectMode('combined')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.OptimizeDialog.selectMode('spt')"
     },
     {

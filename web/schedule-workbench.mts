@@ -7210,7 +7210,9 @@ export const OptimizeDialog = (() => {
     const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
     applyPreset(_seedPreset);
     const savedMode = _od?.mode;
-    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'combined', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
+    // A previously saved unsupported strategy is intentionally normalized to
+    // the default changeover strategy.
+    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
     _startDirty = false;
     _endDirty = false;
     selectMode(_seedMode);
@@ -7330,7 +7332,7 @@ export const OptimizeDialog = (() => {
     // a failed REFETCH wiped the cache while _rankMapsPlant still matched:
     // ranksFresh was true, the old colorWheel probe found nothing, and the run
     // went ahead unranked and unannounced.
-    if (unrankedFields.length && (_mode === 'changeover' || _mode === 'combined')) {
+    if (unrankedFields.length && _mode === 'changeover') {
       const names = unrankedFields.map(k => Util.t(`constraint.${k}`)).join(', ');
       const ok = await Modal.confirm({
         title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
@@ -7615,7 +7617,7 @@ export const OptimizerPreview = {
 
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
-  runWithPreview(mode: OptimizerMode = 'combined', opts: OptimizerRunOptions = {}) {
+  runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
     OptimizerPreview._previewDiagnostics = [];
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;

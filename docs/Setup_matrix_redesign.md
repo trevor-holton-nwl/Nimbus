@@ -504,7 +504,7 @@ Readiness rather than building on it:
   chip) is untouched and still governs the status pill described in §4/§9-A.
 - **Optimizer wiring (the part this document didn't cover at all):** `Engine.runAndApply`
   (`schedule-services.mts`) now checks `Store.setupSnapshot.definition?.active` for the run's plant and, if
-  true, routes `spt`/`changeover`/`combined` through `Engine.evaluateSetupAware` — which had existed fully
+  true, routes `spt`/`changeover` through `Engine.evaluateSetupAware` — which had existed fully
   implemented in `setup-scheduler.mts` since Stage 0/1 (`evaluateDueDateFirst`, `evaluateSptWithSetup`,
   `evaluateMinChangeover`, `evaluateThroughput`) but had zero callers before this change. `setup-scheduler.mts`
   itself was not modified. The `DueDateFirstBounds` search-safety limits that Stage 0 deferred to an unrun
@@ -513,7 +513,7 @@ Readiness rather than building on it:
   `SETUP_AWARE_DEADLINE_MS = 5000`) rather than measured — an explicit, user-accepted risk, not an oversight.
 - **What this resolves from §16:** Q1 (modal vs. Admin Cockpit) is moot — there is no modal. Q4 (the three
   evaluator-toggle names) is moot — there are no per-mode toggles; the checkbox enables all setup-aware modes
-  uniformly, so the naming clash with the Optimize dialog's `spt`/`changeover`/`combined` never surfaces in
+  uniformly, so the naming clash with the Optimize dialog's `spt`/`changeover` modes never surfaces in
   the UI.
 - **What this does NOT resolve:** §1.1's correction (machinery was already built, only authorization was
   gated) still holds — this change just removed the authorization ceremony rather than relocating it. §§3-9

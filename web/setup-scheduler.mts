@@ -3400,7 +3400,7 @@ export function evaluateThroughput(
  * it emits patches and never applies them while evaluating a candidate.
  */
 export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
-  const { mode = 'combined', ...opts } = request;
+  const { mode = 'changeover', ...opts } = request;
   return Engine.evaluateSchedule(mode, opts, snapshot);
 }
 

@@ -339,7 +339,7 @@ export interface ResolveSetupInput {
 // §D — String-literal enum inventory
 // ---------------------------------------------------------------------------
 
-export type OptimizerMode = 'spt' | 'changeover' | 'combined' | 'backlog';
+export type OptimizerMode = 'spt' | 'changeover' | 'backlog';
 
 export type AlertType =
   | 'overlap' | 'overload' | 'near-capacity' | 'closed'
