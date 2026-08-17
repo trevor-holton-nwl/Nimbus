@@ -7892,6 +7892,16 @@ export const OptimizerPreview = {
         : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_reasons_none'))}</p>`;
       const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');
       const unchangedLines = explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none');
+      // Order count and occupied hours are the two impact figures the KPI
+      // cards do NOT restate (they carry changeovers/span/late orders/
+      // lateness/utilization), so they live here rather than being dropped
+      // with the old duplicate "Candidate explanation" grid.
+      const production = Util.t('ui.opt_pv_before_after', {
+        before: String(explanation.impact.production.before), after: String(explanation.impact.production.after),
+      });
+      const occupied = Util.t('ui.opt_pv_before_after', {
+        before: explanation.impact.occupiedHours.before.toFixed(1), after: explanation.impact.occupiedHours.after.toFixed(1),
+      });
       return `<details class="opt-pv-section" open>
         <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_why_title'))}</span></summary>
         <div class="opt-pv-section-body">
@@ -7901,6 +7911,8 @@ export const OptimizerPreview = {
             <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
             <div><dt>${esc(Util.t('ui.setup_unchanged_lines_label'))}</dt><dd>${esc(unchangedLines)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_sequences_changed_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_production_orders_label'))}</dt><dd>${esc(production)}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_occupied_hours_label'))}</dt><dd>${esc(occupied)}</dd></div>
           </dl>
         </div>
       </details>`;
@@ -7924,8 +7936,14 @@ export const OptimizerPreview = {
 
     const diagHtml = (() => {
       if (!explanation) return '';
+      // The search being truncated by a deadline / iteration cap (rather than
+      // converging) is the one diagnostic that changes what the planner should
+      // do about the result, so it is surfaced on the collapsed summary too.
+      const limitBadge = explanation.search.limitReached
+        ? `<span class="opt-pv-section-badge" title="${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}">${esc(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
+        : '';
       return `<details class="opt-pv-section">
-        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span></summary>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span>${limitBadge}</summary>
         <div class="opt-pv-section-body">
           <dl class="opt-pv-meta-list">
             <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(explanation.search.method)}</dd></div>
@@ -7933,6 +7951,7 @@ export const OptimizerPreview = {
             <div><dt>${esc(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${esc(explanation.search.termination)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
           </dl>
+          ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
         </div>
       </details>`;
     })();
