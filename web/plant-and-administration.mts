@@ -2443,13 +2443,6 @@ export const Plant = {
     const subTabVisibility = Plant._settingsSubTabVisibility(subTab);
     pane.innerHTML = `
       <div class="cal-scroll"><div class="cal-container">
-        <header class="cal-head">
-          <div>
-            <h2>${Util.t('ui.system_settings_title')}</h2>
-            <p class="sub">${Util.t('ui.system_settings_sub', { plant: plantName || 'the selected plant' })}</p>
-          </div>
-        </header>
-
         <nav class="admin-subtabs" role="tablist" style="padding:0 24px;">
           <button id="settings-subtab-rules-tab" class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}" aria-controls="settings-subtab-rules">${Util.t('ui.settings_subtab_rules')}</button>
           <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>

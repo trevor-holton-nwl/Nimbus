@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
 import { Util, ErrorLog } from '../../web/application-foundation.mjs';
@@ -343,6 +344,35 @@ test('Orders grid exposes editable priority fields instead of Form Size', () => 
   assert.deepEqual(columns.map(c => c.field), ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION']);
   assert.ok(columns.every(c => c.editable === true), 'priority fields must be inline-editable');
   assert.ok(!columns.some(c => c.field === 'FORM_SIZE'), 'Form Size must be removed from the Orders view');
+});
+
+test('Inspector puts editable priority fields in the Order section', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorVisibility = structuredClone(Store.orderFieldVisibility);
+  const body = {
+    innerHTML: '',
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Store.setOrderFieldVisibility({
+      ...priorVisibility,
+      PRT_01: { inspector: true }, PRT_02: { inspector: true }, PRODUCTION_VERSION: { inspector: true },
+    }, 'unit-test');
+    Inspector._render({
+      id: 'inspector-priority-fields', ORDER: '100001', PRODUCTION_LINE: 'L1', RUN_TIME: 1,
+      PRT_01: '1J13', PRT_02: '2K24', PRODUCTION_VERSION: '0001',
+    });
+    const orderSection = body.innerHTML.slice(0, body.innerHTML.indexOf('ui.insp_notes_section'));
+    for (const field of ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION']) {
+      assert.match(orderSection, new RegExp(`<input type="text" data-field="${field}"`),
+        `${field} is an editable input in the Order section`);
+    }
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Store.setOrderFieldVisibility(priorVisibility, 'unit-test');
+  }
 });
 
 test('Hierarchy exposes init/render', () => {

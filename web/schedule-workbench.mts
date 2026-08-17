@@ -3148,9 +3148,10 @@ export const Table = {
 
 /** Inspector._onFieldChange's `[data-field]` inputs — Inspector._render() only
  *  ever wires PRODUCTION_LINE (<select>), notes (<textarea>), start_date
- *  (<input>, upgraded to Flatpickr) and RUN_TIME (<input type=number>), plus
- *  the open SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name
- *  arrives as a plain string read off the DOM, not a compile-time literal. */
+ *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>), the
+ *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION), plus the open
+ *  SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name arrives as
+ *  a plain string read off the DOM, not a compile-time literal. */
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /* =============================================================================
@@ -3310,6 +3311,14 @@ export const Inspector = {
         ${Inspector._fieldVisible('FORM_SIZE') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_form')}</label>
           <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>` : ''}
+        ${['PRT_01', 'PRT_02', 'PRODUCTION_VERSION'].map(key => {
+          if (!Inspector._fieldVisible(key)) return '';
+          const field = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          if (!field) return '';
+          const value = (task as unknown as Record<string, unknown>)[key] ?? '';
+          return `<div class="insp-row"><label>${Util.t(field.i18nInspectorKey)}</label>
+            <div class="insp-val"><input type="text" data-field="${key}" value="${esc(value)}"></div></div>`;
+        }).join('')}
         <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
           <div class="insp-val"><select data-field="PRODUCTION_LINE">
             ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
@@ -3344,7 +3353,7 @@ export const Inspector = {
       </div>
 
       ${(() => {
-        const moreKeys = ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'PLANT', 'FIRMING_INDICATOR'];
+        const moreKeys = ['PLANT', 'FIRMING_INDICATOR'];
         const rows = moreKeys.map(key => {
           if (!Inspector._fieldVisible(key)) return '';
           const f = ORDER_FIELD_CATALOG.find(c => c.key === key);

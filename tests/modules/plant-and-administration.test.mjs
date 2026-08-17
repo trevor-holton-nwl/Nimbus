@@ -1,6 +1,7 @@
 // Tests for web/plant-and-administration.mjs — CQ-1 Phase 4 Tasks 1-3.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, SetupAdmin } from '../../web/plant-and-administration.mjs';
 
 test('CalendarUI/Plant/ProdLines expose their documented public API', () => {
@@ -42,6 +43,13 @@ test('Plant Settings pane exposes tree-rendering internals', () => {
   // reimplement the flatten), and its render path needs a live DOM, which this
   // node:test suite has no jsdom for.
   assert.equal(typeof Plant._renderSettingsPane, 'function');
+});
+
+test('Plant Settings pane omits the redundant title and introductory copy', () => {
+  const source = readFileSync(new URL('../../web/plant-and-administration.mts', import.meta.url), 'utf8');
+  const renderer = source.slice(source.indexOf('_renderSettingsPane(): void {'), source.indexOf('  },\n};', source.indexOf('_renderSettingsPane(): void {')));
+  assert.doesNotMatch(renderer, /ui\.system_settings_title/);
+  assert.doesNotMatch(renderer, /ui\.system_settings_sub/);
 });
 
 test('Plant exposes the generalized priority-list optimization API', () => {
