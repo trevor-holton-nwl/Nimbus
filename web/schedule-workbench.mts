@@ -7885,26 +7885,56 @@ export const OptimizerPreview = {
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const explanationHtml = (() => {
+    const whyHtml = (() => {
       if (!explanation) return '';
-      const compact = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
-      const impact = [
-        ['Production orders', `${explanation.impact.production.before} → ${explanation.impact.production.after}`],
-        ['Setup changeovers', `${explanation.impact.setup.before} → ${explanation.impact.setup.after}`],
-        ['Occupied time', `${compact(explanation.impact.occupiedHours.before)} h → ${compact(explanation.impact.occupiedHours.after)} h`],
-        ['Lateness', `${explanation.impact.lateness.beforeOrders}/${compact(explanation.impact.lateness.beforeHours)} h → ${explanation.impact.lateness.afterOrders}/${compact(explanation.impact.lateness.afterHours)} h`],
-        ['Peak utilization', `${compact(explanation.impact.utilization.before)}% → ${compact(explanation.impact.utilization.after)}%`],
-        ['Sequences changed', String(explanation.impact.sequences.changed)],
-      ];
       const reasons = explanation.reasons.length
-        ? `<ul>${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
-        : `<span>${esc(Util.t('ui.setup_reasons_none'))}</span>`;
+        ? `<ul class="opt-pv-reasons">${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
+        : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_reasons_none'))}</p>`;
+      const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');
+      const unchangedLines = explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none');
+      return `<details class="opt-pv-section" open>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_why_title'))}</span></summary>
+        <div class="opt-pv-section-body">
+          <p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_why_intro'))}</p>
+          ${reasons}
+          <dl class="opt-pv-meta-list">
+            <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
+            <div><dt>${esc(Util.t('ui.setup_unchanged_lines_label'))}</dt><dd>${esc(unchangedLines)}</dd></div>
+            <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
+          </dl>
+        </div>
+      </details>`;
+    })();
+
+    const gapsHtml = (() => {
+      if (!explanation) return '';
       const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
-      const missing = explanation.missingPairs.length
+      const body = explanation.missingPairs.length
         ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_missing'))}</button>${canReview ? ` <button class="btn btn-ghost sm" data-opt-review-missing>${esc(Util.t('ui.setup_review_missing_title'))}</button>` : ''}</div>`
-        : `<span>${esc(Util.t('ui.setup_missing_pairs_none'))}</span>`;
-      const stale = OptimizerPreview.stale ? `<div class="opt-pv-backlog-warning"><strong>${esc(Util.t('ui.setup_preview_stale_title'))}</strong> ${esc(OptimizerPreview._staleReason || Util.t('ui.setup_preview_stale_default_reason'))}. ${esc(Util.t('ui.setup_preview_stale_note'))}</div>` : '';
-      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${esc(Util.t('ui.setup_candidate_explanation_title'))}</div>${stale}<div class="opt-pv-backlog-grid">${impact.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div><p><strong>${esc(Util.t('ui.setup_search_label'))}</strong> ${esc(explanation.search.method)} · ${esc(Util.t('ui.setup_search_candidates', { count: explanation.search.candidateCount, plural: explanation.search.candidateCount === 1 ? '' : 's' }))} · ${esc(explanation.search.termination)} · ${compact(explanation.search.runtimeMs)} ms${explanation.search.limitReached ? esc(Util.t('ui.setup_search_limit_reached')) : ''}</p><p><strong>${esc(Util.t('ui.setup_constraints_label'))}</strong> ${esc(explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none'))}</p><p><strong>${esc(Util.t('ui.setup_unchanged_lines_label'))}</strong> ${esc(explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none'))}</p><div><strong>${esc(Util.t('ui.setup_reasons_title'))}</strong>${reasons}</div><div><strong>${esc(Util.t('ui.setup_missing_pairs_title'))}</strong>${missing}</div></section>`;
+        : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_missing_pairs_none'))}</p>`;
+      const badge = explanation.missingPairs.length ? `<span class="opt-pv-section-badge">${explanation.missingPairs.length}</span>` : '';
+      return `<details class="opt-pv-section">
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_gaps_title'))}</span>${badge}</summary>
+        <div class="opt-pv-section-body">
+          <p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_gaps_intro'))}</p>
+          ${body}
+        </div>
+      </details>`;
+    })();
+
+    const diagHtml = (() => {
+      if (!explanation) return '';
+      return `<details class="opt-pv-section">
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span></summary>
+        <div class="opt-pv-section-body">
+          <dl class="opt-pv-meta-list">
+            <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(explanation.search.method)}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_diag_candidates'))}</dt><dd>${esc(String(explanation.search.candidateCount))}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${esc(explanation.search.termination)}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
+          </dl>
+        </div>
+      </details>`;
     })();
 
     // Per-card markup
@@ -7959,7 +7989,7 @@ export const OptimizerPreview = {
               <div class="opt-pv-num-val">${c.fmt(preV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
             <div class="opt-pv-arrow">→</div>
-            <div class="opt-pv-num opt-pv-num-post" data-target="${postV}" data-fmt="${isInt ? 'int' : 'dec'}" data-unit="${c.unit}">
+            <div class="opt-pv-num opt-pv-num-post">
               <div class="opt-pv-num-lbl">${esc(Util.t('ui.opt_pv_after_label'))}</div>
               <div class="opt-pv-num-val">${c.fmt(postV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
@@ -7983,8 +8013,6 @@ export const OptimizerPreview = {
 
         ${backlogHtml}
 
-        ${explanationHtml}
-
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
@@ -7999,32 +8027,17 @@ export const OptimizerPreview = {
 
         <div class="opt-pv-grid">${cardsHtml}</div>
 
+        <div class="opt-pv-sections">
+          ${whyHtml}
+          ${gapsHtml}
+          ${diagHtml}
+        </div>
+
         <div class="opt-pv-footer-note">
           ${Util.t('ui.opt_pv_footer_note')}
         </div>
       </div>`;
 
-    // Counter animation on the "After" numbers — runs once on mount.
-    requestAnimationFrame(() => {
-      body.querySelectorAll<HTMLElement>('.opt-pv-num-post').forEach((el) => {
-        const target = parseFloat(el.dataset.target || '');
-        if (!Number.isFinite(target)) return;
-        const fmt   = el.dataset.fmt;
-        const unit  = el.dataset.unit || '';
-        const valEl = el.querySelector<HTMLElement>('.opt-pv-num-val')!;
-        const dur   = 520;
-        const t0    = performance.now();
-        const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3);
-        const tick = (now: number) => {
-          const t = Math.min(1, (now - t0) / dur);
-          const v = target * easeOutCubic(t);
-          const disp = fmt === 'int' ? String(Math.round(v)) : v.toFixed(1);
-          valEl.innerHTML = `${disp}<span class="opt-pv-num-unit">${unit}</span>`;
-          if (t < 1) requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      });
-    });
     const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
       navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
