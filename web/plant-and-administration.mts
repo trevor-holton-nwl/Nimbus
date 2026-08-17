@@ -160,7 +160,12 @@ export const SetupAdmin = (() => {
   // editing surface.
   let _setupView: 'list' | 'matrix' = 'list';
   let _hideEmptyStates = true;
-  let _listRows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey; setup_min: number; source: string; inherited: boolean; plant_value: number | null }> = [];
+  // `setup_min` is the row's EFFECTIVE value (its own recorded minutes, line
+  // override or plant default) and is nullable independently of
+  // `plant_value` — a line-scoped override on a pair with no plant default
+  // has a real `setup_min` and a null `plant_value`. Anything deciding
+  // "does this row have a value?" must read `setup_min`, never `plant_value`.
+  let _listRows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey; setup_min: number | null; source: string; inherited: boolean; plant_value: number | null }> = [];
   let _listMeta = { total: 0, offset: 0, limit: 50 };
   // `stagedKey` tracks the `_gridDirty` key this draft row is currently
   // staged under (if any), so an edit that changes which key resolves (or
@@ -465,6 +470,14 @@ export const SetupAdmin = (() => {
   function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): boolean {
     if (!plant || !canReviewMissingPairs(plant)) return false;
     _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
+    // The review affordance (axis narrowing + missing-cell highlight) lives
+    // entirely inside paintGrid, so this flow has to land on the Matrix view
+    // regardless of which view was last selected. The List view structurally
+    // cannot show a missing pair at all — it renders only rows that exist in
+    // setup_matrix, and a missing pair by definition has no row — so honoring
+    // a 'list' selection here would show the review chip with nothing
+    // filtered or highlighted.
+    _setupView = 'matrix';
     const lines = [...new Set(_missingReview.pairs.map(pair => pair.line).filter(Boolean))];
     if (lines.length === 1) _lineScope = lines[0];
     const existingPane = _lastTarget ?? document.getElementById('setup-admin-pane');
@@ -684,7 +697,18 @@ export const SetupAdmin = (() => {
     backdrop.addEventListener('click', event => { if (event.target === backdrop) close(); });
     backdrop.querySelectorAll<HTMLButtonElement>('[data-setup-mass-upload-close]').forEach(button => button.addEventListener('click', close));
     backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.addEventListener('click', () => {
-      const csv = ['Line,Reason', ...lastOutcome.rejected.map(r => `${r.line},"${r.message.replace(/"/g, '""')}"`)].join('\n');
+      // Reason text is built from user-pasted values, so a message beginning
+      // `=`/`+`/`-`/`@` (or a tab/CR that Excel strips before re-reading the
+      // leading character) would be evaluated as a formula on open — prefix a
+      // single quote so the cell stays literal text.
+      const csvCell = (value: string): string => {
+        const guarded = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+        return `"${guarded.replace(/"/g, '""')}"`;
+      };
+      const csv = [
+        [Util.t('ui.setup_mass_upload_csv_col_line'), Util.t('ui.setup_mass_upload_csv_col_reason')].map(csvCell).join(','),
+        ...lastOutcome.rejected.map(r => [String(r.line), r.message].map(csvCell).join(',')),
+      ].join('\n');
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'setup-mass-upload-rejected.csv'; link.click(); URL.revokeObjectURL(url);
     });
@@ -974,6 +998,10 @@ export const SetupAdmin = (() => {
       // missing" (loadCoverage returns counts only) — this highlights the
       // grid's broader "missing in the definable standard" cells as the
       // closest available approximation, not a precise reachable-only set.
+      // The highlight only exists on the Matrix grid's <td>s, and the List
+      // view cannot render a missing pair at all (no setup_matrix row), so
+      // switch views first — otherwise this scrolls/highlights a hidden mount.
+      if (_setupView !== 'matrix') { _setupView = 'matrix'; renderSnapshot(target, snapshot); }
       const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount'); if (!mount) return;
       mount.scrollIntoView({ behavior: 'smooth', block: 'center' });
       const missingCells = mount.querySelectorAll<HTMLElement>('.setup-grid-td[data-missing="true"]');
@@ -996,7 +1024,11 @@ export const SetupAdmin = (() => {
     });
     target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.addEventListener('click', () => saveGridEdits(target, snapshot, definition, rows, permissions));
     target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.addEventListener('click', () => {
-      _gridDirty.clear();
+      discardStagedEdits();
+      // paintGrid refreshes the dirty bar itself; the List path does not, so
+      // refresh it explicitly or the count/Save state stays stale after a
+      // Discard taken from the List view.
+      refreshDirtyBar(target);
       if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
       else if (definition) paintListView(target, snapshot, definition, permissions);
     });
@@ -1015,8 +1047,9 @@ export const SetupAdmin = (() => {
    *  `rowVals` helper. `isOverride` favors a pending dirty edit's own delta
    *  from the plant value over the row's already-persisted `inherited` flag,
    *  so an in-progress edit reflects immediately without waiting on a
-   *  refetch. `isGap` is only true for a row with neither a persisted plant
-   *  value nor a pending edit — i.e. truly nothing recorded anywhere yet. */
+   *  refetch. `isGap` is only true for a row with no persisted plant value and
+   *  no pending edit that would give it one — i.e. truly nothing recorded
+   *  anywhere (a pending clear counts as nothing). */
   interface ListRowView {
     fromText: string; toText: string; minutes: string; plantValue: string;
     sourceLabel: string; sourceClass: string; isOverride: boolean; isGap: boolean; key: string;
@@ -1025,12 +1058,22 @@ export const SetupAdmin = (() => {
     const key = `${stateSig(row.from_key)} ${stateSig(row.to_key)}`;
     const dirty = _gridDirty.get(key);
     const isOverride = dirty ? dirty.setup_min !== row.plant_value : (!!line && !row.inherited);
-    const gap = !isOverride && row.plant_value === null && dirty === undefined;
-    const minutes = dirty ? (dirty.setup_min === null ? '' : String(dirty.setup_min)) : String(row.setup_min);
+    // A pending *clear* (dirty.setup_min === null) on a pair with no plant
+    // default leaves nothing recorded anywhere, so it reads as a gap too —
+    // otherwise the row that fix #3 now correctly stages would still claim to
+    // be "Inherited from plant" with no plant value to inherit.
+    const gap = !isOverride && row.plant_value === null && (dirty === undefined || dirty.setup_min === null);
+    const effective = dirty ? dirty.setup_min : row.setup_min;
+    const minutes = effective === null ? '' : String(effective);
     return {
       fromText: keyText(row.from_key), toText: keyText(row.to_key), minutes,
       plantValue: row.plant_value === null ? '—' : String(row.plant_value),
-      sourceLabel: isOverride ? Util.t('ui.setup_list_source_override', { line }) : gap ? Util.t('ui.setup_list_source_gap') : Util.t('ui.setup_list_source_inherited'),
+      // In plant scope there is no line to name — reusing the line-override
+      // label there rendered a dangling "Line override · " with an empty
+      // interpolation, so plant-scope edits get their own label.
+      sourceLabel: isOverride
+        ? (line ? Util.t('ui.setup_list_source_override', { line }) : Util.t('ui.setup_list_source_plant_edit'))
+        : gap ? Util.t('ui.setup_list_source_gap') : Util.t('ui.setup_list_source_inherited'),
       sourceClass: isOverride ? 'setup-list-source-override' : gap ? 'setup-list-source-gap' : 'setup-list-source-inherited',
       isOverride, isGap: gap, key,
     };
@@ -1054,10 +1097,20 @@ export const SetupAdmin = (() => {
   function paintListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition, permissions: SetupPermissions): void {
     const mount = target.querySelector<HTMLElement>('#setup-list-mount');
     if (!mount || _setupView !== 'list') return;
+    const fromQuery = _gridFilterFrom.trim().toLowerCase();
     const toQuery = _gridFilterTo.trim().toLowerCase();
     let rows = _listRows;
+    // The From box narrows the displayed page by substring exactly like the To
+    // box does. resolveFromKey() only ever fires for an EXACT full-state match
+    // (it is the server-side `from_key` filter's input); without this
+    // client-side pass a partial query like "BLU" silently matched nothing.
+    if (fromQuery) rows = rows.filter(r => keyText(r.from_key).toLowerCase().includes(fromQuery));
     if (toQuery) rows = rows.filter(r => keyText(r.to_key).toLowerCase().includes(toQuery));
-    if (_hideEmptyStates) rows = rows.filter(r => r.plant_value !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
+    // "Hide states with no value" means no EFFECTIVE value — its own recorded
+    // setup_min (which a line override has even with no plant default) or a
+    // staged edit. Testing plant_value here hid every line-scoped override on
+    // a pair the plant has no default for.
+    if (_hideEmptyStates) rows = rows.filter(r => r.setup_min !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
     const bodyRows = rows.map(row => {
       const v = listRowView(row, _lineScope);
       // Two separate data attributes, not one space-joined `${sig1} ${sig2}`
@@ -1128,10 +1181,16 @@ export const SetupAdmin = (() => {
         const row = _listRows.find(r => stateSig(r.from_key) === rowSig && stateSig(r.to_key) === colSig);
         if (!row) return;
         const parsed = parseGridMinutes(input.value);
-        if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); input.value = String(row.setup_min); return; }
+        if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); input.value = row.setup_min === null ? '' : String(row.setup_min); return; }
         const key = `${rowSig} ${colSig}`;
-        if (parsed === row.plant_value && !!_lineScope) _gridDirty.delete(key);
-        else if (!_lineScope && parsed === row.setup_min) _gridDirty.delete(key);
+        // A cleared input (`parsed === null`) is an explicit "remove this
+        // value" and must always stage. It only collapses back to "no edit"
+        // when the value it now matches genuinely exists: null === null
+        // otherwise reads as "already equals the plant default" and silently
+        // swallowed a clear on any override whose pair has no plant default.
+        const revertsToPlantDefault = !!_lineScope && row.plant_value !== null && parsed === row.plant_value;
+        const matchesPersistedValue = !_lineScope && row.setup_min !== null && parsed === row.setup_min;
+        if (revertsToPlantDefault || matchesPersistedValue) _gridDirty.delete(key);
         else _gridDirty.set(key, { row: { key: row.from_key, sig: rowSig, parts: [] }, col: { key: row.to_key, sig: colSig, parts: [] }, setup_min: parsed, line: _lineScope });
         refreshDirtyBar(target);
         paintListView(target, snapshot, definition, permissions);
@@ -1198,6 +1257,18 @@ export const SetupAdmin = (() => {
       row.stagedKey = null;
       refreshDirtyBar(target);
     }
+  }
+
+  /** Drops every staged edit — both the `_gridDirty` map and the List view's
+   *  "Add pair" draft rows, which are a second, *visible* representation of
+   *  the same pending state. Clearing only `_gridDirty` left drafts on screen
+   *  still labelled "Staged — unsaved": after a Save they sat next to the now
+   *  real, persisted row for the same pair (a duplicate), and after a Discard
+   *  they claimed to be staged while the dirty count read 0 and Save was
+   *  disabled. Both callers (Save success, Discard) repaint straight after. */
+  function discardStagedEdits(): void {
+    _gridDirty.clear();
+    _listNewRows = [];
   }
 
   /** Refreshes only the dirty-count readout and Save/Discard button state —
@@ -1559,7 +1630,7 @@ export const SetupAdmin = (() => {
         if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
       }
       Persistence.noteSetupWrite(snapshot.plant, 'matrix');
-      _gridDirty.clear();
+      discardStagedEdits();
       await Persistence.loadSetupSnapshot(snapshot.plant);
       render(target, snapshot.plant);
       Toast.show(Util.t('toast.setup_saved'), 'success');
