@@ -1053,3 +1053,60 @@ configured for Azure PostgreSQL, so it is not a valid local DB verification
 target; browser/performance UAT, representative-plant replay, owner approval,
 and null-predecessor override persistence are also outstanding. Do not deploy
 or enable policies based on automated checks alone.
+
+## Setup Matrix List view — known limitations / follow-up (2026-08-17)
+
+The Setup Matrix's **List view** (default view as of the `feature/setup-matrix-and-optimizer-preview`
+branch; `SetupAdmin` in `web/plant-and-administration.mts`, backed by
+`GET /setup/{plant}/matrix-rows` → `setup_data.page_matrix_rows`) shipped with three known
+scalability gaps. All three were found in the branch's final review, and all three were
+**deliberately deferred** rather than fixed in that wave: none is a correctness bug at today's
+prototype scale (single-digit plants, ~5 lines, a handful of signature values per axis), and fixing
+them properly is a scoped effort of its own — server-side pagination with a pushed-down SQL
+`LIMIT`/`OFFSET`, a paging UI, and a memoized state-resolution cache.
+
+They become real when a plant approaches the **Production Scale Roadmap** target in `CLAUDE.md`
+(50+ plants, 70+ lines per plant, ~1,600 states per signature axis — i.e. ~2.5 M possible pairs per
+plant/version). Treat this section as the follow-up ticket's scope.
+
+1. **Pagination is plumbed but has no UI, and the merge order can make line-only overrides
+   unreachable.** `_listMeta.offset` exists and is sent to the endpoint, but no next/prev control
+   was ever wired, so the List view only ever shows page 0 (`limit` 50). Worse,
+   `page_matrix_rows` merges plant-default rows first and *appends* line-only rows afterwards
+   (`setup_data.py`, the `merged` dict build) — dict insertion order is the page order, so once a
+   plant has more than one page of plant-default rows, a line's own overrides on pairs the plant has
+   no default for sort past the end of page 0 and become unreachable from the UI entirely.
+   *Fix direction:* deterministic server-side ordering that does not depend on the merge sequence
+   (order by `from_key, to_key` across the merged set), plus a real paging control. Note the axis
+   ordering must stay stable across pages or paging will duplicate/skip rows.
+
+2. **`page_matrix_rows` has no SQL-level `LIMIT`/`OFFSET` despite its docstring claiming
+   "bounded".** It is bounded only by `plant`/`signature_version`/`line IN ('', :line)` — it fetches
+   **every** matching row for that scope and slices in Python (`rows[offset:offset + limit]`). At
+   1,600 states per axis that is a multi-million-row fetch per keystroke-triggered refetch. The
+   `from_key` filter is the only genuinely narrow path today.
+   *Fix direction:* push the merge into SQL (e.g. `DISTINCT ON (from_key, to_key)` with
+   `ORDER BY from_key, to_key, line DESC` so the line row wins, plus a `LEFT JOIN`/window to carry
+   the plant default through as `plant_value`) so `LIMIT`/`OFFSET` can go into the query. `meta.total`
+   then needs its own bounded `COUNT` — it must stay the **post-merge effective** count, which
+   `tests/test_setup_data.py::test_page_matrix_rows_pages_over_the_post_merge_effective_rows` pins.
+
+3. **`resolveFromKey` rebuilds the full cartesian state list on every call, and the mass-upload
+   validator revalidates on every keystroke with no debounce.** `resolveFromKey`
+   (`web/plant-and-administration.mts`) calls `fieldValueSet` per definition field and then
+   `cartesianStates` over the product, unmemoized — and it is called once per List-view render, once
+   per "Add pair" draft-row status refresh, and **twice per pasted row** in
+   `parseMassUploadText`. The mass-upload modal's `revalidate()` is bound to the textarea's `input`
+   event with no debounce, so a real paste of a few thousand rows against a large signature will
+   stall the main thread.
+   *Fix direction:* memoize the resolved state lookup on
+   `(definition.fields, _lineScope, Store.priorityRankMaps revision)` and build a `sig → key` map
+   once per validation pass instead of scanning candidates per row; debounce `revalidate()`
+   (~150 ms) and/or move validation off the paste path onto an explicit "Validate" step.
+
+Not deferred, and already fixed in the same review wave (recorded here so the follow-up does not
+re-litigate them): the Optimizer-Preview → "Fill these in the Setup Matrix" hand-off now forces the
+Matrix view (the review/highlight affordance lives only in `paintGrid`), the "Hide states with no
+value" filter and the clear-an-override path now test the row's **effective** `setup_min` rather
+than `plant_value`, the "From" box narrows the displayed page by substring, and `_listNewRows` is
+cleared on both Save and Discard.
