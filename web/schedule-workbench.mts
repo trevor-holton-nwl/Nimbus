@@ -7482,6 +7482,11 @@ const PREVIEW_MISSING_PAIR_LIMIT = 12;
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
+/** Shared HTML-attribute/text escaper for OptimizerPreview's rendered markup
+ *  (module-level so both showLoading() and _render() can use one copy). */
+const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g,
+  (c: string) => (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
+
 export const OptimizerPreview = {
   // A detached pre-run copy is needed only if the planner later applies the
   // candidate and wants Ctrl+Z. It is never used to roll a trial back.
@@ -7516,9 +7521,9 @@ export const OptimizerPreview = {
         '<div class="cw-loading" style="justify-content:center;flex-direction:column;gap:10px;padding:40px 20px;">'
       + '  <div style="display:flex;align-items:center;gap:8px;">'
       + '    <span class="cw-spin"></span>'
-      + '    <span style="font-size:14px;color:var(--fg);">Calculating optimization impact…</span>'
+      + `    <span style="font-size:14px;color:var(--fg);">${esc(Util.t('ui.opt_pv_loading_title'))}</span>`
       + '  </div>'
-      + `  <div style="font-size:12px;color:var(--fg-mute);">Running ${mode} on ${plant}</div>`
+      + `  <div style="font-size:12px;color:var(--fg-mute);">${esc(Util.t('ui.opt_pv_loading_sub', { mode, plant }))}</div>`
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
@@ -7757,7 +7762,7 @@ export const OptimizerPreview = {
         if (body) {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--err);">'
-          + '  <div style="font-size:14px;margin-bottom:8px;">Optimization failed</div>'
+          + `  <div style="font-size:14px;margin-bottom:8px;">${esc(Util.t('ui.opt_pv_failed_title'))}</div>`
           + `  <div style="font-size:12px;color:var(--fg-mute);">${(errMsg || 'Unknown error').replace(/[<>&]/g, (c: string) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as Record<string, string>)[c]))}</div>`
           + '</div>';
         }
@@ -7787,29 +7792,29 @@ export const OptimizerPreview = {
     //                null → neutral in both directions.
     const cards: OptimizerPreviewCard[] = [
       {
-        label: 'Changeovers', k: 'changeovers', ico: '🔁',
+        label: Util.t('ui.opt_pv_card_changeovers'), k: 'changeovers', ico: '🔁',
         fmt: (v) => String(v), unit: '', lowerIsBetter: true,
-        tip: 'Adjacent orders on the same line that differ in COLOR or FORM_SIZE. Each one costs cleanout/setup time, so fewer is better.',
+        tip: Util.t('ui.opt_pv_card_changeovers_tip'),
       },
       {
-        label: 'Schedule span', k: 'span_h', ico: '↔',
+        label: Util.t('ui.opt_pv_card_span'), k: 'span_h', ico: '↔',
         fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
-        tip: 'Total clock time from the earliest order start to the latest order finish, across the selected window and lines.',
+        tip: Util.t('ui.opt_pv_card_span_tip'),
       },
       {
-        label: 'Late orders', k: 'late_count', ico: '⏰',
+        label: Util.t('ui.opt_pv_card_late'), k: 'late_count', ico: '⏰',
         fmt: (v) => String(v), unit: '', lowerIsBetter: true,
-        tip: 'Count of orders whose scheduled finish lands AFTER the SAP planning date. Equal-weight headcount — a 1-hour slip and a 40-hour slip each count as one.',
+        tip: Util.t('ui.opt_pv_card_late_tip'),
       },
       {
-        label: 'Cumulative lateness', k: 'late_h', ico: '⛌',
+        label: Util.t('ui.opt_pv_card_lateness'), k: 'late_h', ico: '⛌',
         fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: true,
-        tip: 'Sum of due-date slip across every late order, in hours. Captures severity, not just count: ten orders slipping 1 h = 10 h; one order slipping 40 h = 40 h. Lower is better.',
+        tip: Util.t('ui.opt_pv_card_lateness_tip'),
       },
       {
-        label: 'Peak line utilization', k: 'peak_util_pct', ico: '▲',
+        label: Util.t('ui.opt_pv_card_util'), k: 'peak_util_pct', ico: '▲',
         fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
-        tip: 'Highest single-line single-day utilization in the 14-day horizon. High is good for throughput; over 100% means overbooked vs Calendar capacity.',
+        tip: Util.t('ui.opt_pv_card_util_tip'),
       },
     ];
 
@@ -7829,57 +7834,54 @@ export const OptimizerPreview = {
     let verdictTone: string, verdictTitle: string, verdictSub: string;
     if (better === 0 && worse === 0) {
       verdictTone = 'neutral';
-      verdictTitle = 'No measurable change';
-      verdictSub = 'The optimizer ran but the KPIs are unchanged within tolerance.';
+      verdictTitle = Util.t('ui.opt_pv_verdict_neutral_title');
+      verdictSub = Util.t('ui.opt_pv_verdict_neutral_sub');
     } else if (worse === 0) {
       verdictTone = 'better';
-      verdictTitle = better === directional.length ? 'Big win — every KPI improved' : 'Schedule improved';
-      verdictSub = `${better} of ${directional.length} optimization KPIs moved in your favor with no regressions.`;
+      verdictTitle = better === directional.length ? Util.t('ui.opt_pv_verdict_big_win_title') : Util.t('ui.opt_pv_verdict_improved_title');
+      verdictSub = Util.t('ui.opt_pv_verdict_better_sub', { better, total: directional.length });
     } else if (better === 0) {
       verdictTone = 'worse';
-      verdictTitle = 'Schedule regressed';
-      verdictSub = `${worse} of ${directional.length} optimization KPIs got worse. Discard is probably the call.`;
+      verdictTitle = Util.t('ui.opt_pv_verdict_regressed_title');
+      verdictSub = Util.t('ui.opt_pv_verdict_all_worse_sub', { worse, total: directional.length });
     } else if (better >= worse) {
       verdictTone = 'better';
-      verdictTitle = 'Net improvement, with trade-offs';
-      verdictSub = `${better} KPI${better===1?'':'s'} improved, ${worse} regressed. Review before applying.`;
+      verdictTitle = Util.t('ui.opt_pv_verdict_tradeoffs_title');
+      verdictSub = Util.t('ui.opt_pv_verdict_tradeoffs_sub', { better, betterPlural: better === 1 ? '' : 's', worse });
     } else {
       verdictTone = 'worse';
-      verdictTitle = 'Net regression';
-      verdictSub = `${worse} KPI${worse===1?'':'s'} got worse, ${better} improved. Discard recommended.`;
+      verdictTitle = Util.t('ui.opt_pv_verdict_net_regression_title');
+      verdictSub = Util.t('ui.opt_pv_verdict_net_regression_sub', { worse, worsePlural: worse === 1 ? '' : 's', better });
     }
-
-    const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
-      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
 
     const backlogHtml = (() => {
       if (!backlog) return '';
       const rows: Array<[string, string]> = [
-        ['Backlogged orders found', String(backlog.backlogFound)],
-        ['Orders moved', String(backlog.moved)],
-        ['Fixed orders moved', String(backlog.fixedMoved)],
-        ['Moved backlog runtime', `${backlog.movedRuntimeHours.toFixed(1)} h`],
-        ['Largest delay', `${backlog.largestDelayMinutes} min`],
+        [Util.t('ui.opt_pv_backlog_found'), String(backlog.backlogFound)],
+        [Util.t('ui.opt_pv_backlog_moved'), String(backlog.moved)],
+        [Util.t('ui.opt_pv_backlog_fixed_moved'), String(backlog.fixedMoved)],
+        [Util.t('ui.opt_pv_backlog_runtime'), `${backlog.movedRuntimeHours.toFixed(1)} h`],
+        [Util.t('ui.opt_pv_backlog_largest_delay'), `${backlog.largestDelayMinutes} min`],
       ];
-      if (backlog.invalidRuntimeIds.length) rows.push(['Skipped invalid runtime', String(backlog.invalidRuntimeIds.length)]);
-      if (backlog.missingStartIds.length) rows.push(['Skipped missing start', String(backlog.missingStartIds.length)]);
-      if (backlog.overlongIds.length) rows.push(['Continuous overlong exceptions', String(backlog.overlongIds.length)]);
-      if (backlog.calendarSearchFailures.length) rows.push(['Calendar capacity failures', String(backlog.calendarSearchFailures.length)]);
+      if (backlog.invalidRuntimeIds.length) rows.push([Util.t('ui.opt_pv_backlog_skipped_runtime'), String(backlog.invalidRuntimeIds.length)]);
+      if (backlog.missingStartIds.length) rows.push([Util.t('ui.opt_pv_backlog_skipped_start'), String(backlog.missingStartIds.length)]);
+      if (backlog.overlongIds.length) rows.push([Util.t('ui.opt_pv_backlog_overlong'), String(backlog.overlongIds.length)]);
+      if (backlog.calendarSearchFailures.length) rows.push([Util.t('ui.opt_pv_backlog_capacity_fail'), String(backlog.calendarSearchFailures.length)]);
       const summary = backlog.backlogFound === 0 && backlog.moved === 0 && !backlog.invalidRuntimeIds.length && !backlog.missingStartIds.length
-        ? '<div class="opt-pv-backlog-empty">No eligible backlog was found in this window; the schedule is unchanged.</div>'
+        ? `<div class="opt-pv-backlog-empty">${esc(Util.t('ui.opt_pv_backlog_empty'))}</div>`
         : '';
       const boundary = backlog.boundaryConflicts.length
-        ? `<div class="opt-pv-backlog-warning"><strong>Boundary conflicts:</strong> ${backlog.boundaryConflicts.length} moved order(s) overlap protected work after To. Apply remains available so you can repair that period manually.</div>`
+        ? `<div class="opt-pv-backlog-warning">${Util.t('ui.opt_pv_backlog_boundary', { count: backlog.boundaryConflicts.length })}</div>`
         : '';
-      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">Remove Backlog results</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${esc(Util.t('ui.opt_pv_backlog_title'))}</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
     })();
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
     const plant = OptimizerPreview._plant || '';
     const splitPolicyLabel: Record<SplitOrderPolicy, string> = {
-      never: 'No splitting',
-      overlong_only: 'Split overlong only',
-      partial_allowed: 'Partial orders allowed',
+      never: Util.t('ui.opt_pv_split_none'),
+      overlong_only: Util.t('ui.opt_pv_split_overlong'),
+      partial_allowed: Util.t('ui.opt_pv_split_partial'),
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -7998,7 +8000,7 @@ export const OptimizerPreview = {
         <div class="opt-pv-grid">${cardsHtml}</div>
 
         <div class="opt-pv-footer-note">
-          <strong>Apply</strong> commits the candidate schedule (still undoable via Ctrl+Z). <strong>Discard</strong> drops this candidate without changing the current schedule.
+          ${Util.t('ui.opt_pv_footer_note')}
         </div>
       </div>`;
 

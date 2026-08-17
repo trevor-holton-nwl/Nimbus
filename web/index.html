@@ -2564,15 +2564,15 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="modal-backdrop" id="modal-opt-preview" hidden>
   <div class="modal" style="max-width:760px;">
     <header class="modal-head">
-      <h3>Optimization impact preview</h3>
+      <h3 data-i18n="ui.opt_pv_modal_title">Optimization impact preview</h3>
       <button class="icon-btn sm" onclick="NIMBUS.OptimizerPreview.discard()">✕</button>
     </header>
     <div class="modal-body" id="opt-preview-body" style="padding:18px 20px;">
       <!-- Filled by OptimizerPreview._render() -->
     </div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost"   onclick="NIMBUS.OptimizerPreview.discard()">↶ Discard</button>
-      <button class="btn btn-primary" id="opt-preview-apply-btn" onclick="NIMBUS.OptimizerPreview.apply()">✓ Apply changes</button>
+      <button class="btn btn-ghost"   data-i18n="btn.opt_pv_discard" onclick="NIMBUS.OptimizerPreview.discard()">↶ Discard</button>
+      <button class="btn btn-primary" id="opt-preview-apply-btn" data-i18n="btn.opt_pv_apply" onclick="NIMBUS.OptimizerPreview.apply()">✓ Apply changes</button>
     </footer>
   </div>
 </div>
