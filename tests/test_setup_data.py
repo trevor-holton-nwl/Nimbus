@@ -18,6 +18,13 @@ def test_canonical_state_key_preserves_registered_definition_order_and_values():
     ]
 
 
+def test_derived_order_state_values_are_scoped_to_the_setup_definition():
+    """Pre-upload state capture must not submit registered fields the plant did not configure."""
+    assert setup_data.derived_order_state_values(
+        ["colorWheel", "prt01"], "Blue", "Tool-1", "Mold-2", "0007"
+    ) == {"colorWheel": "Blue", "prt01": "Tool-1"}
+
+
 @pytest.mark.parametrize("fields", [
     ["not_registered"],
     ["colorWheel", "colorWheel"],

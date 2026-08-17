@@ -72,6 +72,23 @@ def _normalise_value(value) -> str:
     return str(value).strip()
 
 
+def derived_order_state_values(fields, color, prt01, prt02, production_version) -> dict[str, object]:
+    """Return only the last order's attributes used by this setup definition.
+
+    The pre-upload replacement snapshot reads all registered order attributes in
+    one query, but a plant's setup signature can deliberately use a subset.
+    Supplying the full row to ``canonical_state_key`` would correctly be
+    rejected as an ambiguous state authored against another definition.
+    """
+    values = {
+        "colorWheel": color,
+        "prt01": prt01,
+        "prt02": prt02,
+        "productionVersion": production_version,
+    }
+    return {field: values[field] for field in _normalise_fields(fields)}
+
+
 def canonical_state_key(fields, values) -> list[dict[str, str]]:
     """Return an unambiguous ordered JSON state key for a definition signature."""
     field_keys = _normalise_fields(fields)
@@ -449,7 +466,7 @@ def derive_line_state_before_replacement(plant, line, *, captured_at: datetime |
         if row is None:
             conn.commit()
             return {"plant": plant, "line": line, "accepted": False, "reason": "no_completed_order"}
-        values = {"colorWheel": row[1], "prt01": row[2], "prt02": row[3], "productionVersion": row[4]}
+        values = derived_order_state_values(definition["fields"], row[1], row[2], row[3], row[4])
         state_key = canonical_state_key(definition["fields"], values)
         if definition["strict_blanks"] and any(not item["value"] for item in state_key):
             conn.commit()
