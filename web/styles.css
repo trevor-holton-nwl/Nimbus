@@ -6173,3 +6173,20 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 /* Single floating editor shared across every grid cell (§7/§9-C.3) — replaces
    one live <input> per cell; repositioned over whichever cell is focused. */
 .setup-grid-editor-input { position: fixed; z-index: 30; border: 0; outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-elev); text-align: right; font-family: var(--font-mono); font-size: 12px; padding: 0 8px; color: var(--fg); }
+
+.setup-mass-upload-modal { width: min(720px, 92vw); }
+.setup-mass-upload-body { display: flex; flex-direction: column; gap: 16px; }
+.setup-mass-upload-section { display: flex; flex-direction: column; gap: 7px; }
+.setup-mass-upload-textarea { min-height: 120px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; resize: vertical; }
+.setup-mass-upload-kpis { display: flex; gap: 8px; flex-wrap: wrap; }
+.setup-mass-upload-kpi { display: flex; flex-direction: column; gap: 3px; min-width: 96px; padding: 7px 10px; background: var(--bg-elev); border: 1px solid var(--line); border-top: 3px solid var(--line-strong); border-radius: var(--r-sm); font-size: 12px; }
+.setup-mass-upload-kpi span { font: 600 9.5px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-mute); }
+.setup-mass-upload-kpi strong { font: 600 17px/1.15 var(--font-mono); letter-spacing: -.02em; }
+.setup-mass-upload-kpi.ok { border-top-color: var(--ok); }
+.setup-mass-upload-kpi.ok strong { color: var(--ok); }
+.setup-mass-upload-kpi.err { border-top-color: var(--err); }
+.setup-mass-upload-kpi.err strong { color: var(--err); }
+.setup-mass-upload-rejects { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; max-height: 160px; overflow-y: auto; }
+.setup-mass-upload-reject-row { padding: 7px 10px; font-size: 11.5px; color: var(--err); background: var(--err-soft); border-bottom: 1px solid var(--line); }
+.setup-mass-upload-reject-row.muted { color: var(--fg-mute); background: none; }
+.setup-mass-upload-reject-row:last-child { border-bottom: 0; }

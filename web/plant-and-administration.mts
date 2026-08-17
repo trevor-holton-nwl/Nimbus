@@ -596,6 +596,115 @@ export const SetupAdmin = (() => {
     return match ? match.key : null;
   }
 
+  interface MassUploadOutcome {
+    ready: Array<{ line: number; from: SetupStateKey; to: SetupStateKey; minutes: number | null }>;
+    rejected: Array<{ line: number; message: string }>;
+    overwrites: number;
+  }
+
+  /** Positional pipe-joined state text ("BLUE|T1"), one value per definition
+   *  field in order — same convention as the mockup's textarea. Header row is
+   *  optional and detected by "doesn't parse as a valid row" on line 1. */
+  function parseMassUploadText(text: string, definition: SetupDefinition, existing: EffectiveSetupRow[], clearOnBlank: boolean): MassUploadOutcome {
+    const lookup = buildCellLookup(existing);
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const outcome: MassUploadOutcome = { ready: [], rejected: [], overwrites: 0 };
+    lines.forEach((raw, index) => {
+      const lineNo = index + 1;
+      const cols = raw.includes('\t') ? raw.split('\t') : raw.split(',');
+      if (cols.length !== 3) {
+        if (lineNo === 1) return; // tolerate an optional header row
+        outcome.rejected.push({ line: lineNo, message: Util.t('ui.setup_mass_upload_reject_columns', { line: lineNo, count: cols.length }) });
+        return;
+      }
+      const [fromText, toText, minutesText] = cols.map(c => c.trim());
+      const fromKey = resolveFromKey(definition.fields, fromText.replace(/\|/g, ' · '));
+      const toKey = resolveFromKey(definition.fields, toText.replace(/\|/g, ' · '));
+      if (!fromKey || !toKey) {
+        outcome.rejected.push({ line: lineNo, message: Util.t('ui.setup_mass_upload_reject_bad_state', { line: lineNo, value: !fromKey ? fromText : toText }) });
+        return;
+      }
+      const minutes = clearOnBlank && !minutesText ? null : parseGridMinutes(minutesText);
+      if (minutes === 'invalid') {
+        outcome.rejected.push({ line: lineNo, message: Util.t('ui.setup_mass_upload_reject_bad_minutes', { line: lineNo, value: minutesText }) });
+        return;
+      }
+      if (lookup.get(stateSig(fromKey))?.get(stateSig(toKey))) outcome.overwrites++;
+      outcome.ready.push({ line: lineNo, from: fromKey, to: toKey, minutes });
+    });
+    return outcome;
+  }
+
+  function openMassUploadModal(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
+    if (!definition || !permissions.matrixWrite) return;
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<div class="modal setup-mass-upload-modal" role="dialog" aria-modal="true" aria-labelledby="setup-mass-upload-title">
+      <header class="modal-head"><h3 id="setup-mass-upload-title">${esc(Util.t('ui.setup_mass_upload_title'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close aria-label="${esc(Util.t('btn.close'))}">&times;</button></header>
+      <div class="modal-body setup-mass-upload-body">
+        <div class="setup-mass-upload-section">
+          <span class="label">${esc(Util.t('ui.setup_mass_upload_step1'))}</span>
+          <p class="setup-panel-hint">${esc(Util.t('ui.setup_mass_upload_hint'))}</p>
+          <textarea class="input setup-mass-upload-textarea" data-setup-mass-upload-text rows="6"></textarea>
+        </div>
+        <div class="setup-mass-upload-section">
+          <span class="label">${esc(Util.t('ui.setup_mass_upload_step2'))}</span>
+          <div class="setup-mass-upload-kpis" data-setup-mass-upload-kpis></div>
+          <div class="setup-mass-upload-rejects" data-setup-mass-upload-rejects></div>
+        </div>
+        <label class="setup-check"><input type="checkbox" data-setup-mass-upload-clear-blank>${esc(Util.t('ui.setup_mass_upload_clear_blank'))}</label>
+      </div>
+      <footer class="modal-foot">
+        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-download disabled>${esc(Util.t('btn.setup_mass_upload_download_rejected'))}</button>
+        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close>${esc(Util.t('btn.cancel'))}</button>
+        <button type="button" class="btn btn-primary sm" data-setup-mass-upload-stage disabled>${esc(Util.t('btn.setup_mass_upload_stage', { count: 0 }))}</button>
+      </footer>
+    </div>`;
+    let lastOutcome: MassUploadOutcome = { ready: [], rejected: [], overwrites: 0 };
+    const revalidate = (): void => {
+      const text = backdrop.querySelector<HTMLTextAreaElement>('[data-setup-mass-upload-text]')!.value;
+      const clearOnBlank = backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.checked;
+      lastOutcome = parseMassUploadText(text, definition, rows, clearOnBlank);
+      backdrop.querySelector('[data-setup-mass-upload-kpis]')!.innerHTML = `
+        <div class="setup-mass-upload-kpi ok"><span>${esc(Util.t('ui.setup_mass_upload_ready'))}</span><strong>${lastOutcome.ready.length}</strong></div>
+        <div class="setup-mass-upload-kpi err"><span>${esc(Util.t('ui.setup_mass_upload_rejected'))}</span><strong>${lastOutcome.rejected.length}</strong></div>
+        <div class="setup-mass-upload-kpi"><span>${esc(Util.t('ui.setup_mass_upload_overwrites'))}</span><strong>${lastOutcome.overwrites}</strong></div>`;
+      const shown = lastOutcome.rejected.slice(0, 12);
+      const more = lastOutcome.rejected.length - shown.length;
+      backdrop.querySelector('[data-setup-mass-upload-rejects]')!.innerHTML = shown.map(r => `<div class="setup-mass-upload-reject-row">${esc(r.message)}</div>`).join('')
+        + (more > 0 ? `<div class="setup-mass-upload-reject-row muted">${esc(Util.t('ui.setup_mass_upload_more_rejected', { count: more }))}</div>` : '');
+      backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.disabled = lastOutcome.ready.length === 0;
+      backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.textContent = Util.t('btn.setup_mass_upload_stage', { count: lastOutcome.ready.length });
+      backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.disabled = lastOutcome.rejected.length === 0;
+    };
+    backdrop.querySelector<HTMLTextAreaElement>('[data-setup-mass-upload-text]')!.addEventListener('input', revalidate);
+    backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.addEventListener('change', revalidate);
+    const close = (): void => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) close(); });
+    backdrop.querySelectorAll<HTMLButtonElement>('[data-setup-mass-upload-close]').forEach(button => button.addEventListener('click', close));
+    backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.addEventListener('click', () => {
+      const csv = ['Line,Reason', ...lastOutcome.rejected.map(r => `${r.line},"${r.message.replace(/"/g, '""')}"`)].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'setup-mass-upload-rejected.csv'; link.click(); URL.revokeObjectURL(url);
+    });
+    backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.addEventListener('click', () => {
+      lastOutcome.ready.forEach(entry => {
+        const key = `${stateSig(entry.from)} ${stateSig(entry.to)}`;
+        _gridDirty.set(key, { row: { key: entry.from, sig: stateSig(entry.from), parts: entry.from.map(p => p.value) },
+                              col: { key: entry.to, sig: stateSig(entry.to), parts: entry.to.map(p => p.value) },
+                              setup_min: entry.minutes, line: _lineScope });
+      });
+      Toast.show(Util.t('ui.setup_grid_pasted', { count: lastOutcome.ready.length }), 'success');
+      close();
+      paintGrid(target, snapshot, definition, rows, permissions);
+      if (_setupView === 'list') renderListView(target, snapshot, definition, permissions);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(backdrop);
+    revalidate();
+  }
+
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
     if (!target) return;
     _lastTarget = target;
@@ -899,6 +1008,7 @@ export const SetupAdmin = (() => {
     });
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
     wireGridEditor(target, snapshot, definition, rows, permissions);
+    target.querySelector<HTMLButtonElement>('[data-setup-mass-upload-open]')?.addEventListener('click', () => openMassUploadModal(target, snapshot, definition, rows, permissions));
   }
 
   /** One List-view row's derived display state — mirrors the mockup's
