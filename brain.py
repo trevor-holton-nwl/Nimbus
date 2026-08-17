@@ -2433,13 +2433,12 @@ def get_setup_matrix_rows(plant: str, line: str = Query(default=""), from_key: s
     _setup_plant_guard(plant, allowed_plants)
     try:
         parsed_from_key = json.loads(from_key) if from_key else None
-        snapshot = setup_data.get_setup_snapshot(plant)
-        definition = snapshot.get("definition")
-        if definition is None:
+        signature_version = setup_data.current_signature_version(plant)
+        if signature_version is None:
             return _setup_freshness({"plant": plant, "line": line, "signature_version": None, "rows": [],
                                      "meta": {"total": 0, "offset": offset, "limit": limit}})
         return _setup_freshness(setup_data.page_matrix_rows(
-            plant, line, definition["signature_version"], from_key=parsed_from_key, offset=offset, limit=limit,
+            plant, line, signature_version, from_key=parsed_from_key, offset=offset, limit=limit,
         ))
     except (ValueError, json.JSONDecodeError) as exc:
         raise _setup_error(exc) from exc

@@ -624,6 +624,18 @@ def _iso(value):
     return value.isoformat() if isinstance(value, datetime) else value
 
 
+def current_signature_version(plant: str) -> int | None:
+    """Return the current signature version for a plant, or None if no definition exists.
+
+    Lightweight lookup: single-row query only, no matrix/state/override data.
+    Used by clients that need the version to scope subsequent bounded fetches.
+    """
+    plant = _required_text(plant, "Plant")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        definition = _definition(cur, plant, lock=False)
+        return definition["signature_version"] if definition else None
+
+
 def get_setup_snapshot(plant: str) -> dict:
     """Return exactly one plant's versioned setup truth; no cross-plant rows leak."""
     plant = _required_text(plant, "Plant")

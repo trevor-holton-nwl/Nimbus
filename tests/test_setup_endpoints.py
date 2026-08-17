@@ -104,6 +104,10 @@ class _SetupService:
 
 
 class _SetupServiceWithMatrixRows(_SetupService):
+    def current_signature_version(self, plant):
+        assert plant == "PLANT-A"
+        return 4
+
     def page_matrix_rows(self, plant, line, signature_version, from_key=None, offset=0, limit=100):
         assert plant == "PLANT-A"
         rows = [
@@ -119,6 +123,9 @@ class _SetupServiceWithMatrixRows(_SetupService):
         return {"plant": plant, "line": line, "signature_version": signature_version,
                 "rows": rows[offset:offset + limit],
                 "meta": {"total": len(rows), "offset": offset, "limit": limit}}
+
+    def get_setup_snapshot(self, plant):
+        raise AssertionError("get_setup_snapshot must not be called by matrix-rows endpoint")
 
 
 def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, monkeypatch):
@@ -404,8 +411,8 @@ def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id
 
 def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
     service = _SetupServiceWithMatrixRows()
+    monkeypatch.setattr(brain.setup_data, "current_signature_version", service.current_signature_version, raising=False)
     monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
-    monkeypatch.setattr(brain.setup_data, "get_setup_snapshot", service.get_setup_snapshot, raising=False)
     monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
@@ -427,8 +434,8 @@ def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
 
 def test_get_setup_matrix_rows_rejects_bad_limit(monkeypatch):
     service = _SetupServiceWithMatrixRows()
+    monkeypatch.setattr(brain.setup_data, "current_signature_version", service.current_signature_version, raising=False)
     monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
-    monkeypatch.setattr(brain.setup_data, "get_setup_snapshot", service.get_setup_snapshot, raising=False)
     monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
