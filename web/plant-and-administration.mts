@@ -558,6 +558,40 @@ export const SetupAdmin = (() => {
     finally { PerfMonitor.record('setup.coverage.fetch', performance.now() - started); }
   }
 
+  /** Fetches one page of the List view's flattened matrix rows from the
+   *  Task 1 endpoint, replacing `_listRows`/`_listMeta` in place. On failure
+   *  it clears both rather than leaving a stale page on screen — the caller
+   *  paints the current (possibly now-empty) state either way. */
+  async function fetchListRows(plant: string, definition: SetupDefinition, fromKey: SetupStateKey | null): Promise<void> {
+    const params = new URLSearchParams({ line: _lineScope, offset: String(_listMeta.offset), limit: String(_listMeta.limit) });
+    if (fromKey) params.set('from_key', JSON.stringify(fromKey));
+    try {
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/matrix-rows?${params.toString()}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { rows: typeof _listRows; meta: typeof _listMeta };
+      _listRows = data.rows;
+      _listMeta = data.meta;
+    } catch (error) {
+      ErrorLog.warn('setup-admin', `Setup matrix rows unavailable: ${(error as Error).message}`);
+      _listRows = []; _listMeta = { ..._listMeta, total: 0 };
+    }
+  }
+
+  /** Resolves the List view's free-text "From" filter to a canonical
+   *  `SetupStateKey` only when it exactly matches one known cross-product
+   *  state (by rendered text or by signature) — otherwise returns `null` so
+   *  the caller fetches unfiltered and narrows the displayed page by
+   *  substring instead, same fallback as the grid's own filters. */
+  function resolveFromKey(definitionFields: ReadonlyArray<string>, filterText: string): SetupStateKey | null {
+    const q = filterText.trim();
+    if (!q) return null;
+    const valuesByField: Record<string, string[]> = {};
+    definitionFields.forEach(field => { valuesByField[field] = fieldValueSet(Store.priorityRankMaps, field, _lineScope); });
+    const candidates = cartesianStates(definitionFields, valuesByField);
+    const match = candidates.find(state => state.parts.join(' · ').toLowerCase() === q.toLowerCase() || state.sig === q);
+    return match ? match.key : null;
+  }
+
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
     if (!target) return;
     _lastTarget = target;
@@ -835,11 +869,17 @@ export const SetupAdmin = (() => {
     });
     target.querySelector<HTMLInputElement>('[data-setup-grid-filter-from]')?.addEventListener('input', event => {
       _gridFilterFrom = (event.target as HTMLInputElement).value;
-      paintGrid(target, snapshot, definition, rows, permissions);
+      if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
+      else renderListView(target, snapshot, definition, permissions);
     });
     target.querySelector<HTMLInputElement>('[data-setup-grid-filter-to]')?.addEventListener('input', event => {
       _gridFilterTo = (event.target as HTMLInputElement).value;
-      paintGrid(target, snapshot, definition, rows, permissions);
+      if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
+      else if (definition) paintListView(target, snapshot, definition, permissions);
+    });
+    target.querySelector<HTMLInputElement>('[data-setup-list-hide-empty]')?.addEventListener('change', event => {
+      _hideEmptyStates = (event.target as HTMLInputElement).checked;
+      if (definition) paintListView(target, snapshot, definition, permissions);
     });
     target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.addEventListener('click', () => saveGridEdits(target, snapshot, definition, rows, permissions));
     target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.addEventListener('click', () => {
@@ -856,12 +896,184 @@ export const SetupAdmin = (() => {
     wireGridEditor(target, snapshot, definition, rows, permissions);
   }
 
-  // Stub — Task 3 (List view rendering) replaces this body. Signature must
-  // stay exactly (target, snapshot, definition, permissions) since Task 3's
-  // real implementation and this file's call site both already match it.
+  /** One List-view row's derived display state — mirrors the mockup's
+   *  `rowVals` helper. `isOverride` favors a pending dirty edit's own delta
+   *  from the plant value over the row's already-persisted `inherited` flag,
+   *  so an in-progress edit reflects immediately without waiting on a
+   *  refetch. `isGap` is only true for a row with neither a persisted plant
+   *  value nor a pending edit — i.e. truly nothing recorded anywhere yet. */
+  interface ListRowView {
+    fromText: string; toText: string; minutes: string; plantValue: string;
+    sourceLabel: string; sourceClass: string; isOverride: boolean; isGap: boolean; key: string;
+  }
+  function listRowView(row: typeof _listRows[number], line: string): ListRowView {
+    const key = `${stateSig(row.from_key)} ${stateSig(row.to_key)}`;
+    const dirty = _gridDirty.get(key);
+    const isOverride = dirty ? dirty.setup_min !== row.plant_value : (!!line && !row.inherited);
+    const gap = !isOverride && row.plant_value === null && dirty === undefined;
+    const minutes = dirty ? (dirty.setup_min === null ? '' : String(dirty.setup_min)) : String(row.setup_min);
+    return {
+      fromText: keyText(row.from_key), toText: keyText(row.to_key), minutes,
+      plantValue: row.plant_value === null ? '—' : String(row.plant_value),
+      sourceLabel: isOverride ? Util.t('ui.setup_list_source_override', { line }) : gap ? Util.t('ui.setup_list_source_gap') : Util.t('ui.setup_list_source_inherited'),
+      sourceClass: isOverride ? 'setup-list-source-override' : gap ? 'setup-list-source-gap' : 'setup-list-source-inherited',
+      isOverride, isGap: gap, key,
+    };
+  }
+
+  /** Fetches the current page of matrix rows from the backend and paints
+   *  immediately with whatever's already cached (e.g. right after a local
+   *  edit, before any network round-trip) so the table never flashes empty
+   *  while the fetch is in flight — then repaints once the fetch resolves. */
   function renderListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, permissions: SetupPermissions): void {
     const mount = target.querySelector<HTMLElement>('#setup-list-mount');
-    if (mount) mount.innerHTML = emptyState(Util.t('ui.loading'));
+    if (!mount) return;
+    if (!definition) { mount.innerHTML = emptyState(Util.t('ui.setup_no_definition')); return; }
+    const fromKey = resolveFromKey(definition.fields, _gridFilterFrom);
+    fetchListRows(snapshot.plant, definition, fromKey).then(() => paintListView(target, snapshot, definition, permissions));
+    // Paint immediately with whatever's cached (e.g. after an edit) so the
+    // table never flashes empty while the fetch is in flight.
+    paintListView(target, snapshot, definition, permissions);
+  }
+
+  function paintListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition, permissions: SetupPermissions): void {
+    const mount = target.querySelector<HTMLElement>('#setup-list-mount');
+    if (!mount || _setupView !== 'list') return;
+    const toQuery = _gridFilterTo.trim().toLowerCase();
+    let rows = _listRows;
+    if (toQuery) rows = rows.filter(r => keyText(r.to_key).toLowerCase().includes(toQuery));
+    if (_hideEmptyStates) rows = rows.filter(r => r.plant_value !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
+    const bodyRows = rows.map(row => {
+      const v = listRowView(row, _lineScope);
+      return `<tr data-setup-list-row="${esc(v.key)}">
+        <td class="mono">${esc(v.fromText)}</td>
+        <td class="mono">${esc(v.toText)}</td>
+        <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${esc(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
+        <td class="setup-num">${esc(v.plantValue)}</td>
+        <td><span class="${v.sourceClass}">${esc(v.sourceLabel)}</span></td>
+        <td class="setup-num">${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${esc(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}</td>
+      </tr>`;
+    }).join('');
+    const newRowsHtml = _listNewRows.map(row => {
+      const status = listNewRowStatus(row, definition);
+      return `<tr data-setup-list-new-row="${row.id}" class="setup-list-new-row">
+        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_from'))}" value="${esc(row.from)}" data-setup-list-new-from></td>
+        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_to'))}" value="${esc(row.to)}" data-setup-list-new-to></td>
+        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_minutes'))}" value="${esc(row.minutes)}" data-setup-list-new-minutes></td>
+        <td class="setup-num">—</td>
+        <td class="setup-list-new-status">${esc(status)}</td>
+        <td class="setup-num"><button type="button" class="setup-list-remove" data-setup-list-new-remove>&times;</button></td>
+      </tr>`;
+    }).join('');
+    mount.innerHTML = `
+      <table class="setup-table setup-list-table">
+        <thead><tr>
+          <th>${esc(Util.t('ui.setup_list_col_from'))}</th>
+          <th>${esc(Util.t('ui.setup_list_col_to'))}</th>
+          <th class="setup-num">${esc(Util.t('ui.setup_list_col_minutes'))}</th>
+          <th class="setup-num">${esc(Util.t('ui.setup_list_col_plant_value'))}</th>
+          <th>${esc(Util.t('ui.setup_list_col_source'))}</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${bodyRows}${newRowsHtml}</tbody>
+      </table>
+      <div class="setup-list-footer">
+        ${permissions.matrixWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-list-add-pair>${esc(Util.t('ui.setup_list_add_pair'))}</button>` : '<span></span>'}
+        <span class="setup-list-count">${esc(Util.t('ui.setup_list_showing', { shown: rows.length, total: _listMeta.total, from: _gridFilterFrom || Util.t('ui.setup_plant_default') }))}</span>
+      </div>`;
+    wireListView(target, snapshot, definition, permissions);
+  }
+
+  function listNewRowStatus(row: { from: string; to: string; minutes: string }, definition: SetupDefinition): string {
+    if (!row.from.trim() || !row.to.trim()) return Util.t('ui.setup_list_row_needs_states');
+    if (!row.minutes.trim()) return Util.t('ui.setup_list_row_needs_minutes');
+    const parsed = parseGridMinutes(row.minutes);
+    if (parsed === 'invalid') return Util.t('ui.setup_list_row_bad_minutes');
+    const fromKey = resolveFromKey(definition.fields, row.from);
+    const toKey = resolveFromKey(definition.fields, row.to);
+    if (!fromKey || !toKey) return Util.t('ui.setup_list_row_unknown_state');
+    return Util.t('ui.setup_list_row_staged');
+  }
+
+  /** Wires the List view's minutes inputs, revert buttons, "Add pair" row,
+   *  and the per-new-row inputs/remove button. Called at the end of every
+   *  `paintListView` since the mount's innerHTML is fully replaced each time. */
+  function wireListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition, permissions: SetupPermissions): void {
+    const mount = target.querySelector<HTMLElement>('#setup-list-mount');
+    if (!mount) return;
+    mount.querySelectorAll<HTMLInputElement>('[data-setup-list-minutes]').forEach(input => {
+      input.addEventListener('change', () => {
+        const tr = input.closest<HTMLElement>('[data-setup-list-row]')!;
+        const [rowSig, colSig] = tr.dataset.setupListRow!.split(' ');
+        const row = _listRows.find(r => stateSig(r.from_key) === rowSig && stateSig(r.to_key) === colSig);
+        if (!row) return;
+        const parsed = parseGridMinutes(input.value);
+        if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); input.value = String(row.setup_min); return; }
+        const key = `${rowSig} ${colSig}`;
+        if (parsed === row.plant_value && !!_lineScope) _gridDirty.delete(key);
+        else if (!_lineScope && parsed === row.setup_min) _gridDirty.delete(key);
+        else _gridDirty.set(key, { row: { key: row.from_key, sig: rowSig, parts: [] }, col: { key: row.to_key, sig: colSig, parts: [] }, setup_min: parsed, line: _lineScope });
+        refreshDirtyBar(target);
+        paintListView(target, snapshot, definition, permissions);
+      });
+    });
+    mount.querySelectorAll<HTMLButtonElement>('[data-setup-list-revert]').forEach(button => {
+      button.addEventListener('click', () => {
+        const tr = button.closest<HTMLElement>('[data-setup-list-row]')!;
+        _gridDirty.delete(tr.dataset.setupListRow!);
+        refreshDirtyBar(target);
+        paintListView(target, snapshot, definition, permissions);
+      });
+    });
+    mount.querySelector<HTMLButtonElement>('[data-setup-list-add-pair]')?.addEventListener('click', () => {
+      _listNewRows.push({ id: _listNextRowId++, from: '', to: '', minutes: '' });
+      paintListView(target, snapshot, definition, permissions);
+    });
+    mount.querySelectorAll<HTMLElement>('[data-setup-list-new-row]').forEach(tr => {
+      const id = Number(tr.dataset.setupListNewRow);
+      const row = _listNewRows.find(r => r.id === id);
+      if (!row) return;
+      tr.querySelector<HTMLInputElement>('[data-setup-list-new-from]')?.addEventListener('input', e => { row.from = (e.target as HTMLInputElement).value; refreshNewRowStatus(target, tr, row, definition); });
+      tr.querySelector<HTMLInputElement>('[data-setup-list-new-to]')?.addEventListener('input', e => { row.to = (e.target as HTMLInputElement).value; refreshNewRowStatus(target, tr, row, definition); });
+      tr.querySelector<HTMLInputElement>('[data-setup-list-new-minutes]')?.addEventListener('input', e => { row.minutes = (e.target as HTMLInputElement).value; refreshNewRowStatus(target, tr, row, definition); });
+      tr.querySelector<HTMLButtonElement>('[data-setup-list-new-remove]')?.addEventListener('click', () => {
+        _listNewRows = _listNewRows.filter(r => r.id !== id);
+        paintListView(target, snapshot, definition, permissions);
+      });
+    });
+    mount.querySelector<HTMLInputElement>('[data-setup-list-hide-empty]');
+  }
+
+  /** Refreshes one new-pair row's status cell live as its inputs change, and
+   *  (only once the row fully resolves to "staged") writes it into
+   *  `_gridDirty` under the same `${fromSig} ${toSig}` key every other List
+   *  edit uses, so it rides the existing Save/Discard machinery unchanged. */
+  function refreshNewRowStatus(target: HTMLElement, tr: HTMLElement, row: { from: string; to: string; minutes: string }, definition: SetupDefinition): void {
+    const statusCell = tr.querySelector('.setup-list-new-status');
+    if (statusCell) statusCell.textContent = listNewRowStatus(row, definition);
+    const status = listNewRowStatus(row, definition);
+    if (status === Util.t('ui.setup_list_row_staged')) {
+      const fromKey = resolveFromKey(definition.fields, row.from)!;
+      const toKey = resolveFromKey(definition.fields, row.to)!;
+      const parsed = parseGridMinutes(row.minutes) as number;
+      const key = `${stateSig(fromKey)} ${stateSig(toKey)}`;
+      _gridDirty.set(key, { row: { key: fromKey, sig: stateSig(fromKey), parts: fromKey.map(p => p.value) },
+                            col: { key: toKey, sig: stateSig(toKey), parts: toKey.map(p => p.value) },
+                            setup_min: parsed, line: _lineScope });
+      refreshDirtyBar(target);
+    }
+  }
+
+  /** Refreshes only the dirty-count readout and Save/Discard button state —
+   *  the same two DOM writes paintGrid() does at its top, factored out so
+   *  List-view and mass-upload edits (which never touch the Matrix grid's
+   *  _gridModel/rows) can react to _gridDirty changes without repainting or
+   *  corrupting the Matrix mount with a stale/empty rows array. */
+  function refreshDirtyBar(target: HTMLElement): void {
+    const dirtyCount = target.querySelector<HTMLElement>('[data-setup-grid-dirty-count]');
+    if (dirtyCount) dirtyCount.textContent = Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size });
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.toggleAttribute('disabled', _gridDirty.size === 0);
+    target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.toggleAttribute('disabled', _gridDirty.size === 0);
   }
 
   /** (Re)paints only the grid's table mount — never the whole panel — so the

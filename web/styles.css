@@ -6128,6 +6128,18 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .setup-menu-list button:hover, .setup-menu-list .setup-menu-item:hover { background: var(--bg-subtle); }
 .setup-menu-list button:disabled { color: var(--fg-faint); cursor: not-allowed; }
 
+.setup-list-table { margin-top: 8px; }
+.setup-list-table .mono { font-family: var(--font-mono); }
+.setup-list-minutes-input { height: 26px; width: 76px; text-align: right; font-family: var(--font-mono); }
+.setup-list-source-override { color: var(--accent); font-weight: 600; }
+.setup-list-source-gap { color: var(--warn); }
+.setup-list-source-inherited { color: var(--fg-mute); }
+.setup-list-new-row td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.setup-list-new-row input { height: 26px; }
+.setup-list-remove { border: 0; background: none; color: var(--fg-faint); cursor: pointer; font-size: 14px; line-height: 1; }
+.setup-list-revert { border: 0; background: none; color: var(--fg-mute); cursor: pointer; font-size: 14px; line-height: 1; }
+.setup-list-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 0; font-size: 11.5px; color: var(--fg-mute); }
+
 .setup-grid-scroll { overflow: auto; max-height: 480px; margin-top: 8px; }
 table.setup-grid { width: auto; border-collapse: collapse; font-size: 12px; }
 table.setup-grid th, table.setup-grid td { border: 1px solid var(--line); padding: 0; }
