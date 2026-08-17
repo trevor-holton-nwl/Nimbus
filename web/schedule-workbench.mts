@@ -7756,7 +7756,7 @@ export const OptimizerPreview = {
         OptimizerPreview._clear(true);
         if (body) {
           body.innerHTML =
-            '<div style="padding:24px;text-align:center;color:var(--danger,#c0392b);">'
+            '<div style="padding:24px;text-align:center;color:var(--err);">'
           + '  <div style="font-size:14px;margin-bottom:8px;">Optimization failed</div>'
           + `  <div style="font-size:12px;color:var(--fg-mute);">${(errMsg || 'Unknown error').replace(/[<>&]/g, (c: string) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as Record<string, string>)[c]))}</div>`
           + '</div>';
