@@ -2953,6 +2953,17 @@ export const Plant = {
           </div>
 
           <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.max_pull_forward_title')}</h3></header>
+            <div class="panel-body split-policy-body">
+              <label class="split-policy-control" for="sys-max-pull-forward-days">
+                <span>${Util.t('ui.max_pull_forward_label')}</span>
+                <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-max-pull-forward-help" placeholder="${Util.t('ui.max_pull_forward_none')}">
+              </label>
+              <p id="sys-max-pull-forward-help" class="split-policy-help">${Util.t('ui.max_pull_forward_help')}</p>
+            </div>
+          </div>
+
+          <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.constraints_title')}</h3></header>
             <div class="panel-body">
               <p class="panel-help-text">${Util.t('ui.constraints_sub')}</p>
@@ -2990,12 +3001,15 @@ export const Plant = {
     const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
     const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
+    const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
     const savedSplitPolicy = plantRow?.split_order_policy;
     splitPolicySelect.value = savedSplitPolicy === 'overlong_only' || savedSplitPolicy === 'partial_allowed'
       ? savedSplitPolicy : 'never';
+    maxPullForwardInp.value = Number.isInteger(plantRow?.max_pull_forward_days) && (plantRow!.max_pull_forward_days as number) >= 0
+      ? String(plantRow!.max_pull_forward_days) : '';
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -3084,6 +3098,33 @@ export const Plant = {
       } finally {
         splitPolicySelect.disabled = false;
       }
+    });
+
+    maxPullForwardInp.addEventListener('change', async () => {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previous = Number.isInteger(plantRow.max_pull_forward_days) && (plantRow.max_pull_forward_days as number) >= 0
+        ? plantRow.max_pull_forward_days : null;
+      const raw = maxPullForwardInp.value.trim();
+      const next = raw === '' ? null : Number(raw);
+      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+        maxPullForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(Util.t('ui.max_pull_forward_invalid'), 'error');
+        return;
+      }
+      maxPullForwardInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/max-pull-forward-days`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_pull_forward_days: next }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        plantRow.max_pull_forward_days = next;
+        Toast.show(Util.t('ui.max_pull_forward_saved'), 'success');
+      } catch (error) {
+        maxPullForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
+      } finally { maxPullForwardInp.disabled = false; }
     });
 
     // --- Scheduling constraints (per-plant PRIORITY TREE) -------------------
@@ -5128,6 +5169,7 @@ interface PlantRow extends MasterDataRow {
   alt_flag_horizon?: number;
   conf_score_horizon?: number;
   split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
+  max_pull_forward_days?: number | null;
   /** Attached by master_data.py's get_table_data for the 'plants' table only. */
   constraints?: ConstraintConfig[] | null;
 }

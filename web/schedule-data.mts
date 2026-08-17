@@ -72,6 +72,7 @@ interface MasterPlantRow {
   product_focus?: string | null;
   timezone?: string | null;
   split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
+  max_pull_forward_days?: number | null;
 }
 
 /** GET /health (brain.py) — only the fields this file reads are modeled;

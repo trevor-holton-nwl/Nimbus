@@ -149,6 +149,14 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- allocation policy, not a priority term. Existing plants default to exact
 -- legacy behavior until an admin deliberately opts in.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_max_pull_forward_days_nonnegative') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_max_pull_forward_days_nonnegative
+      CHECK (max_pull_forward_days IS NULL OR max_pull_forward_days >= 0);
+  END IF;
+END $$;
 -- Changeover Matrix Stage 2 policy sidecar. Kept separate from the priority
 -- tree; all policies start disabled until plant validation gates are met.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB NOT NULL DEFAULT

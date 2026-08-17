@@ -307,17 +307,18 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints, split_order_policy "
+                        "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4]) for r in cur.fetchall()}
                     for row in rows:
-                        constraints, policy = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never')
+                        constraints, policy, max_pull_forward_days = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
+                        row['max_pull_forward_days'] = max_pull_forward_days
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -989,6 +990,13 @@ def ensure_plant_split_order_policy_column() -> None:
         conn.commit()
 
 
+def ensure_plant_max_pull_forward_days_column() -> None:
+    """Idempotent nullable plant scheduling guardrail, kept out of the grid."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER")
+        conn.commit()
+
+
 def ensure_material_plant_attributes() -> None:
     """Idempotent: add material_plants.prt_01/prt_02/color/default_workcenter +
     their column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
@@ -1161,6 +1169,34 @@ def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,
         conn.commit()
 
     return {"status": "ok", "plant": plant, "split_order_policy": clean}
+
+
+def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | None,
+                                    user_email: str | None = None) -> dict:
+    """Persist a nullable whole-calendar-day pull-forward limit for one plant."""
+    if not plant:
+        raise ValueError("plant is required")
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise ValueError("max_pull_forward_days must be a non-negative integer or null")
+
+    params: list = [value, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET max_pull_forward_days = %s, updated_at = NOW() WHERE {where}", params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_max_pull_forward_days', %s, %s)",
+            (Jsonb({"plant": plant, "max_pull_forward_days": value}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "max_pull_forward_days": value}
 
 
 # Top-level pages a role's access can be toggled for. Must mirror the frontend

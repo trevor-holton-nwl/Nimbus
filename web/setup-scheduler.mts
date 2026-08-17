@@ -348,6 +348,8 @@ export interface DueDateFirstBounds {
   deadline: number;
   now: Date;
   horizonEnd: Date;
+  /** Optional plant rule supplied by the live engine; absent retains detached legacy behavior. */
+  notBefore?: (task: NimbusTask) => Date | null;
 }
 
 export interface SetupPolicyThresholds {
@@ -1320,6 +1322,8 @@ function candidateForSequence(
 
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
+    const pullForwardFloor = bounds.notBefore?.(task);
+    if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const successorState = stateForOrder(task, definition);
     if (!successorState) {
       missingEdges.push({ line, predecessorOrderId, successorOrderId: taskId(task), reason: 'successor-state-unknown' });

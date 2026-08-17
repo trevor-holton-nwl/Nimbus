@@ -31,6 +31,32 @@ globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') globalThis.document = { getElementById: () => null };
 
+test('Engine derives a due-date-day pull-forward floor using calendar days', () => {
+  Store.setMasterData({ plants: [{ plant: 'PULL', max_pull_forward_days: 7 }], lines: [] }, 'unit-test');
+  const floor = Engine.earliestAllowedStart(
+    { PLANT: 'PULL', original_end_date: new Date('2026-08-17T18:30:00') },
+    'PULL',
+  );
+  assert.deepEqual(
+    [floor?.getFullYear(), floor?.getMonth(), floor?.getDate(), floor?.getHours()],
+    [2026, 7, 10, 0],
+    'seven calendar days before the due-date calendar day, at local midnight rather than 168 elapsed hours earlier',
+  );
+  const dstFloor = Engine.earliestAllowedStart(
+    { PLANT: 'PULL', original_end_date: new Date('2026-03-09T12:00:00') },
+    'PULL',
+  );
+  assert.deepEqual([dstFloor?.getMonth(), dstFloor?.getDate(), dstFloor?.getHours()], [2, 2, 0],
+    'crossing daylight saving still subtracts seven calendar dates and lands at local midnight');
+});
+
+test('Engine leaves undated orders and disabled pull-forward limits unrestricted', () => {
+  Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: null }], lines: [] }, 'unit-test');
+  assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN', BASIC_FINISH_DATE: new Date('2026-08-17') }, 'OPEN'), null);
+  Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: 0 }], lines: [] }, 'unit-test');
+  assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN' }, 'OPEN'), null);
+});
+
 test('Calendar exposes capacity-math methods only (no render/openBlockModal/DOM)', () => {
   assert.equal(typeof Calendar.workWindow, 'function');
   assert.equal(typeof Calendar.dailyCapacityHours, 'function');

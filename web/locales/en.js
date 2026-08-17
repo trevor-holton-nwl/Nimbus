@@ -543,6 +543,13 @@ window.__NIMBUS_LOCALES.en = {
   'ui.split_order_opt_overlong':       'Split inherently overlong orders only',
   'ui.split_order_opt_partial':        'Allow partial orders across operating intervals',
   'ui.split_order_policy_help':        'Generated segments are planner-visible, remain one logical order, and are never shorter than 30 minutes.',
+  'ui.max_pull_forward_title':         'Due-date pull-forward limit',
+  'ui.max_pull_forward_label':         'Maximum pull-forward (days)',
+  'ui.max_pull_forward_none':          'No limit',
+  'ui.max_pull_forward_help':          'Leave blank for no limit. A dated order cannot start earlier than this many calendar days before its due-date day.',
+  'ui.max_pull_forward_invalid':       'Enter a whole number of days, zero or greater.',
+  'ui.max_pull_forward_saved':         'Maximum pull-forward saved for this plant.',
+  'ui.max_pull_forward_failed':        'Could not save maximum pull-forward',
 
   // Stage 2 of docs/scheduling_priority.md — priority-list field labels
   // (shared namespace with Stage 3's Scheduling Constraints tree, Decision 4).

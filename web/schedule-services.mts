@@ -1820,6 +1820,18 @@ export const Engine = {
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
   },
 
+  /** Local due-date calendar-day floor for a plant's optional pull-forward limit. */
+  earliestAllowedStart(task: NimbusTask, plant: string | null): Date | null {
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
+    if (!Number.isInteger(value) || (value as number) < 0) return null;
+    const due = Util.sapDueDate(task);
+    if (!due) return null;
+    const floor = new Date(due);
+    floor.setHours(0, 0, 0, 0);
+    floor.setDate(floor.getDate() - (value as number));
+    return floor;
+  },
+
   /** Regenerate one logical order from its requested parent start. Segments
    * are never shifted independently; a one-piece result explicitly clears an
    * obsolete child aggregate. */
@@ -2501,9 +2513,9 @@ export const Engine = {
     freeTasksIn: NimbusTask[],
     fixedTasks: NimbusTask[],
     cursorInit: Date,
-    opts: { respectCalendar: boolean; tieBreakTerms: SortTerm[] }
+    opts: { respectCalendar: boolean; tieBreakTerms: SortTerm[]; plant?: string | null }
   ): Array<{ id: string; changes: Partial<NimbusTask> }> {
-    const { respectCalendar, tieBreakTerms } = opts;
+    const { respectCalendar, tieBreakTerms, plant = sourceSelectedPlant() } = opts;
     const dueMs = (t: any): number => { const d = Util.sapDueDate(t); return d ? d.getTime() : Infinity; };
     const dueDayKey = (t: any): string | null => { const d = Util.sapDueDate(t); return d ? Util.dayKey(d) : null; };
 
@@ -2537,6 +2549,8 @@ export const Engine = {
     // enforcement: with respectCalendar it's redundant with the work window's
     // own close, but it's the ONLY day wall when respectCalendar is off.
     const fitsAt = (at: Date, t: any, fIdx: number, dayEndMs: number): boolean => {
+      const floor = Engine.earliestAllowedStart(t, plant);
+      if (floor && at < floor) return false;
       const durMs = Util.runHours(t) * Config.MS_HOUR;
       const endMs = at.getTime() + durMs;
       if (endMs > dayEndMs) return false;
@@ -2766,6 +2780,7 @@ export const Engine = {
     fixedTasks: NimbusTask[],
     cursorInit: Date,
     policy: Exclude<SplitOrderPolicy, 'never'>,
+    plant: string | null,
   ): Array<{ id: string; changes: Partial<NimbusTask> }> {
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
     let cursor = new Date(cursorInit);
@@ -2775,6 +2790,8 @@ export const Engine = {
       if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) continue;
 
       let requested = new Date(cursor);
+      const floor = Engine.earliestAllowedStart(task, plant);
+      if (floor && requested < floor) requested = new Date(floor);
       let scheduled: Partial<NimbusTask> | null = null;
       for (let guard = 0; guard < 200; guard++) {
         const candidate = Engine.schedulePatchFor(task, line, requested, policy);
@@ -2879,6 +2896,7 @@ export const Engine = {
         deadline: performance.now() + SETUP_AWARE_DEADLINE_MS,
         now: horizonStart,
         horizonEnd,
+        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
       };
       let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
       // The setup-aware evaluators group every line for the plant with no
@@ -2970,7 +2988,7 @@ export const Engine = {
           // due-date admission / priority / changeover ordering intact while
           // allowing a selected parent to span valid operating intervals.
           const legacySequence = Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-            respectCalendar, tieBreakTerms: sortTerms,
+            respectCalendar, tieBreakTerms: sortTerms, plant,
           });
           const byId = new Map(freeTasks.map(task => [task.id, task]));
           selectedOrder = legacySequence.map(patch => byId.get(patch.id)).filter((task): task is NimbusTask => !!task);
@@ -2985,7 +3003,7 @@ export const Engine = {
           });
           selectedOrder = decorated.map(d => d.t);
         }
-        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, fixedTasks, cursor, splitPolicy));
+        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, fixedTasks, cursor, splitPolicy, plant));
         continue;
       }
 
@@ -2995,7 +3013,7 @@ export const Engine = {
         // Engine._sortTerms(mode, { plant }), so it doubles as both
         // the pull-in/floater tie-break and the phase-2 color/form sequencer.
         patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-          respectCalendar, tieBreakTerms: sortTerms,
+          respectCalendar, tieBreakTerms: sortTerms, plant,
         }));
         continue;
       }
@@ -3020,6 +3038,8 @@ export const Engine = {
       for (const t of freeTasks) {
         const durMs = Util.runHours(t) * Config.MS_HOUR;
         if (durMs <= 0) continue;
+        const floor = Engine.earliestAllowedStart(t, plant);
+        if (floor && cursor < floor) cursor = new Date(floor);
 
         // Alternate between fixed-task collision check and calendar adjustment
         // until cursor is stable. This handles the case where a calendar gap

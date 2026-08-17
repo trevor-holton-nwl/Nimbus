@@ -217,6 +217,8 @@ export interface NimbusMasterPlant {
   /** Plant-only allocation behavior; missing values intentionally preserve
    *  legacy continuous scheduling. */
   split_order_policy?: SplitOrderPolicy | null;
+  /** Nullable whole calendar days an order may be scheduled before its due-date day. */
+  max_pull_forward_days?: number | null;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */
