@@ -154,6 +154,16 @@ export const SetupAdmin = (() => {
   // moved from an always-open panel into a popover behind the band-B chip.
   let _signaturePopoverOpen = false;
   let _setupMenuOpen = false;
+  // List/Matrix toggle (Setup_matrix_redesign v2): List is the default because
+  // a real signature is ~1,600 states per axis — the cartesian grid is a
+  // secondary, opt-in view for spot-checking a narrow slice, not the primary
+  // editing surface.
+  let _setupView: 'list' | 'matrix' = 'list';
+  let _hideEmptyStates = true;
+  let _listRows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey; setup_min: number; source: string; inherited: boolean; plant_value: number | null }> = [];
+  let _listMeta = { total: 0, offset: 0, limit: 50 };
+  let _listNewRows: Array<{ id: number; from: string; to: string; minutes: string }> = [];
+  let _listNextRowId = 1;
   // Single floating editor that repositions over whichever cell is focused,
   // replacing one live <input> per cell (§7/§9-C.3) — the read-only <td>s
   // this replaces are far cheaper to paint at MAX_AXIS² scale than an <input>
@@ -663,11 +673,25 @@ export const SetupAdmin = (() => {
         </div>
 
         <div class="setup-band setup-grid-band">
+          <div class="setup-view-toolbar">
+            <span class="mono-eyebrow">${esc(Util.t('ui.setup_section_matrix'))}</span>
+            <div class="setup-view-tabs" role="tablist">
+              <button type="button" role="tab" aria-selected="${_setupView === 'list'}" class="setup-view-tab${_setupView === 'list' ? ' active' : ''}" data-setup-view="list">${esc(Util.t('ui.setup_view_list'))}</button>
+              <button type="button" role="tab" aria-selected="${_setupView === 'matrix'}" class="setup-view-tab${_setupView === 'matrix' ? ' active' : ''}" data-setup-view="matrix">${esc(Util.t('ui.setup_view_matrix'))}</button>
+            </div>
+            <div class="setup-view-actions">
+              <button type="button" class="btn btn-primary sm" data-setup-mass-upload-open>${esc(Util.t('btn.setup_mass_upload'))}</button>
+              <button type="button" class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
+              <button type="button" class="btn btn-ghost sm" data-setup-history-open>${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
+            </div>
+          </div>
           <div class="setup-grid-toolbar">
             <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${esc(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${esc(_gridFilterFrom)}">
             <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${esc(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${esc(_gridFilterTo)}">
+            ${_setupView === 'list' ? `<label class="setup-check"><input type="checkbox" data-setup-list-hide-empty ${_hideEmptyStates ? 'checked' : ''}>${esc(Util.t('ui.setup_list_hide_empty'))}</label>` : ''}
           </div>
-          <div id="setup-grid-table-mount"></div>
+          <div id="setup-list-mount" ${_setupView === 'list' ? '' : 'hidden'}></div>
+          <div id="setup-grid-table-mount" ${_setupView === 'matrix' ? '' : 'hidden'}></div>
         </div>
 
         <div class="setup-band setup-action-bar">
@@ -680,9 +704,7 @@ export const SetupAdmin = (() => {
             <button type="button" class="btn btn-ghost sm" data-setup-menu-toggle aria-haspopup="true" aria-expanded="${_setupMenuOpen}">&#8943;</button>
             <div class="setup-menu-list" data-setup-menu-list role="menu" ${_setupMenuOpen ? '' : 'hidden'}>
               <button type="button" role="menuitem" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
-              <button type="button" role="menuitem" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
               ${permissions.matrixWrite && definition ? `<label class="setup-menu-item" role="menuitem">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
-              <button type="button" role="menuitem" data-setup-history-open>${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
             </div>
           </div>
         </div>
@@ -694,7 +716,8 @@ export const SetupAdmin = (() => {
       else renderSnapshot(target, snapshot);
     } });
     wire(target, snapshot, permissions, rows, definition);
-    paintGrid(target, snapshot, definition, rows, permissions);
+    if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
+    else renderListView(target, snapshot, definition, permissions);
   }
 
   /** Compact "you are here" readout inline under the Scope selector — replaces
@@ -756,6 +779,14 @@ export const SetupAdmin = (() => {
       _setupMenuOpen = false;
       renderSnapshot(target, snapshot);
       openHistoryModal(snapshot);
+    });
+    target.querySelectorAll<HTMLButtonElement>('[data-setup-view]').forEach(button => {
+      button.addEventListener('click', () => {
+        const next = button.dataset.setupView as 'list' | 'matrix';
+        if (next === _setupView) return;
+        _setupView = next;
+        renderSnapshot(target, snapshot);
+      });
     });
     if (_signaturePopoverOpen || _setupMenuOpen) {
       const dismiss = (event: MouseEvent): void => {
@@ -823,6 +854,14 @@ export const SetupAdmin = (() => {
     });
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
     wireGridEditor(target, snapshot, definition, rows, permissions);
+  }
+
+  // Stub — Task 3 (List view rendering) replaces this body. Signature must
+  // stay exactly (target, snapshot, definition, permissions) since Task 3's
+  // real implementation and this file's call site both already match it.
+  function renderListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, permissions: SetupPermissions): void {
+    const mount = target.querySelector<HTMLElement>('#setup-list-mount');
+    if (mount) mount.innerHTML = emptyState(Util.t('ui.loading'));
   }
 
   /** (Re)paints only the grid's table mount — never the whole panel — so the

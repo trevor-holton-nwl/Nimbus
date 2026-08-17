@@ -6111,6 +6111,11 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .setup-grid-toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
 .setup-grid-filter { height: 30px; width: 160px; }
 .setup-grid-cap-note { margin: 8px 0 0; font-size: 11.5px; color: var(--fg-mute); }
+.setup-view-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: space-between; }
+.setup-view-tabs { display: flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
+.setup-view-tab { height: 26px; padding: 0 12px; border: 0; background: var(--bg-elev); color: var(--fg-mute); font: 600 11px/1 var(--body-font, inherit); cursor: pointer; transition: background .14s ease-out, color .14s ease-out; }
+.setup-view-tab.active { background: var(--accent); color: var(--bg-elev); }
+.setup-view-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .setup-empty-state.empty-state { padding: 24px 0; }
 .setup-empty-state-hint { margin-top: 4px; font-size: 11.5px; }
 
