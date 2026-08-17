@@ -6045,18 +6045,17 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .insp-setup-detail { border-color: var(--line-strong); }
 .insp-setup-warning { margin: 8px 0 0; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--warn); font-size: 11px; line-height: 1.4; }
 
-/* Setup matrix administration — four-band layout (docs/Setup_matrix_redesign.md
-   §9): context bar, standard rail, the grid itself, and an always-visible
-   action bar. Two label treatments only (DESIGN.md §3): .mono-eyebrow for
-   status/coverage/grid headers, .label for popover/modal form labels —
-   replaces the seven near-duplicate uppercase micro-label styles the grouped
-   layout had accumulated. */
-.setup-admin { display: flex; flex-direction: column; gap: 12px; position: relative; }
+/* Setup matrix administration — two flat panels ("Setup standard",
+   "Changeover minutes"), each a `.panel`/`.panel-head`/`.panel-body` card,
+   matching Setup Matrix Redesign v2's visual target. The page-level context
+   bar (title + activation status) sits above both panels, not banded inside
+   them. Two label treatments only (DESIGN.md §3): .mono-eyebrow for
+   status/coverage/grid headers, .label for popover/modal form labels. */
+.setup-admin { display: flex; flex-direction: column; gap: 16px; }
 .setup-admin .mono-eyebrow { font: 600 10px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-mute); }
 .setup-admin .label { font: 600 11px/1.3 var(--body-font, inherit); letter-spacing: .04em; text-transform: uppercase; color: var(--fg-mute); }
-.setup-band { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid var(--line); }
-.setup-band:first-of-type { border-top: 0; padding-top: 0; }
-.setup-context-bar { justify-content: space-between; align-items: flex-start; }
+.setup-panel { position: relative; }
+.setup-context-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .setup-context-main h3 { font-size: 16px; margin: 0; }
 .setup-context-main p { margin: 4px 0 0; color: var(--fg-mute); font-size: 12px; }
 .setup-context-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -6064,26 +6063,32 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .setup-status-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .setup-status-chip.ok { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 32%, var(--line)); color: var(--ok); }
 .setup-status-chip.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 32%, var(--line)); color: var(--warn); }
-.setup-version-chip { font: 700 11px/1.2 var(--font-mono); letter-spacing: .03em; color: var(--accent); background: var(--accent-wash); border: 1px solid var(--accent-soft); border-radius: var(--r-sm); padding: 5px 8px; white-space: nowrap; cursor: pointer; }
 .setup-check { display: flex; align-items: center; gap: 7px; font-size: 12px; }
 .setup-check input { accent-color: var(--primary); }
 
-.setup-standard-rail { justify-content: flex-start; align-items: flex-start; }
-.setup-signature-wrap, .setup-scope-wrap, .setup-coverage-wrap { display: flex; flex-direction: column; gap: 4px; }
+.setup-standard-rail { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(250px, 1.15fr) minmax(230px, .95fr); gap: 16px 28px; align-items: start; }
+.setup-signature-wrap, .setup-scope-wrap, .setup-coverage-wrap { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.setup-signature-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .setup-signature-chip { font: 600 13px/1.3 var(--body-font, inherit); color: var(--fg); }
+.setup-scale-readout { margin: 2px 0 0; font-size: 11.5px; color: var(--fg-mute); }
 .setup-scope-wrap .md-bom-combobox { min-width: 220px; }
-.setup-state-inline { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
-.setup-state-readout { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
-.setup-state-readout span:first-child { font-family: var(--font-mono); }
-.setup-coverage-inline { border: 1px solid var(--line); border-radius: var(--r-md); background: none; padding: 6px 10px; font-size: 12px; color: var(--fg); cursor: pointer; }
-.setup-coverage-inline.warn { border-color: color-mix(in srgb, var(--warn) 32%, var(--line)); color: var(--warn); }
+.setup-state-inline { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin-top: 2px; }
+.setup-state-readout { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; font-family: var(--font-mono); }
+.setup-coverage-tiles { display: flex; gap: 8px; flex-wrap: wrap; }
+.setup-coverage-tile { display: flex; flex-direction: column; gap: 3px; min-width: 88px; padding: 7px 10px; background: var(--bg-elev); border: 1px solid var(--line); border-top: 3px solid var(--line-strong); border-radius: var(--r-sm); text-align: left; cursor: default; }
+button.setup-coverage-tile { cursor: pointer; }
+.setup-coverage-tile.warn { border-top-color: var(--warn); }
+.setup-coverage-tile.warn .setup-coverage-tile-num { color: var(--warn); }
+.setup-coverage-tile-num { font: 600 17px/1.15 var(--font-mono); letter-spacing: -.02em; }
 .setup-review-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: var(--r-sm); font-size: 11.5px; color: var(--accent); }
 .setup-review-chip-clear { border: 0; background: none; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
 
-/* Signature popover (§9-B) — replaces the always-open definition panel. Not a
-   Modal; a small anchored panel below the version chip, dismissed by
-   clicking outside or Escape (see wire()'s dismiss listener). */
-.setup-popover { position: absolute; top: 52px; right: 0; z-index: 20; width: min(420px, 100%); background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow-lg); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+/* Signature drawer — an in-flow disclosure below the standard rail, not an
+   absolutely-positioned overlay (that shipped as a popover, then got flagged
+   as "still floating over the page" — see Setup Matrix v2 spec §8). Toggled
+   by the same `_signaturePopoverOpen` state/hook. */
+.setup-popover { display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; background: var(--bg-subtle); border-top: 1px solid var(--line); }
+.setup-popover[hidden] { display: none; }
 .setup-popover-hint { margin: 0; font-size: 11.5px; color: var(--fg-mute); }
 .setup-popover .panel-head { display: flex; align-items: center; justify-content: space-between; }
 .setup-field-order { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -6107,26 +6112,23 @@ body.dark .sap-kind-orders { color: var(--accent); }
   .setup-state-readout, .setup-audit-row { grid-template-columns: 1fr; gap: 4px; }
 }
 
-.setup-grid-band { flex-direction: column; align-items: stretch; }
-.setup-grid-toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
+.setup-grid-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
 .setup-grid-filter { height: 30px; width: 160px; }
 .setup-grid-cap-note { margin: 8px 0 0; font-size: 11.5px; color: var(--fg-mute); }
-.setup-view-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: space-between; }
+.setup-view-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
 .setup-view-tabs { display: flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
 .setup-view-tab { height: 26px; padding: 0 12px; border: 0; background: var(--bg-elev); color: var(--fg-mute); font: 600 11px/1 var(--body-font, inherit); cursor: pointer; transition: background .14s ease-out, color .14s ease-out; }
 .setup-view-tab.active { background: var(--accent); color: var(--bg-elev); }
 .setup-view-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.setup-import-label { display: inline-flex; align-items: center; }
 .setup-empty-state.empty-state { padding: 24px 0; }
 .setup-empty-state-hint { margin-top: 4px; font-size: 11.5px; }
 
-.setup-action-bar { justify-content: space-between; }
-.setup-action-bar > span { color: var(--fg-mute); font: 700 11px var(--font-mono); }
+/* Sticky Save bar owned by the "Changeover minutes" panel itself, not a
+   page-level band — matches Setup Matrix Redesign v2's footer treatment. */
+.setup-action-bar { position: sticky; bottom: 0; z-index: 4; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 18px; background: var(--bg-subtle); border-top: 1px solid var(--line); }
+.setup-action-bar > span { color: var(--accent); font: 700 11px var(--font-mono); letter-spacing: .04em; }
 .setup-action-buttons { display: flex; gap: 8px; }
-.setup-menu { position: relative; }
-.setup-menu-list { position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 20; min-width: 200px; background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; padding: 6px; }
-.setup-menu-list button, .setup-menu-list .setup-menu-item { display: block; width: 100%; text-align: left; padding: 7px 9px; border: 0; background: none; font-size: 12.5px; color: var(--fg); border-radius: var(--r-sm); cursor: pointer; }
-.setup-menu-list button:hover, .setup-menu-list .setup-menu-item:hover { background: var(--bg-subtle); }
-.setup-menu-list button:disabled { color: var(--fg-faint); cursor: not-allowed; }
 
 .setup-list-table { margin-top: 8px; }
 .setup-list-table .mono { font-family: var(--font-mono); }

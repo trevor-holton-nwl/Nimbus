@@ -153,7 +153,6 @@ export const SetupAdmin = (() => {
   // Four-band layout (docs/Setup_matrix_redesign.md §9): the signature editor
   // moved from an always-open panel into a popover behind the band-B chip.
   let _signaturePopoverOpen = false;
-  let _setupMenuOpen = false;
   // List/Matrix toggle (Setup_matrix_redesign v2): List is the default because
   // a real signature is ~1,600 states per axis — the cartesian grid is a
   // secondary, opt-in view for spot-checking a narrow slice, not the primary
@@ -805,9 +804,21 @@ export const SetupAdmin = (() => {
     const signatureChipHtml = definitionFields.length
       ? definitionFields.map(field => esc(fieldLabel(field))).join(' &rsaquo; ')
       : esc(Util.t('ui.setup_no_definition_short'));
+    const scaleReadoutHtml = definitionFields.length
+      ? `<p class="setup-scale-readout">${esc(Util.t('ui.setup_scale_readout', {
+          fields: definitionFields.map(field => `${fieldValueSet(Store.priorityRankMaps, field, _lineScope).length} ${fieldLabel(field).toLowerCase()}`).join(' × '),
+          states: definitionFields.length ? Math.max(...definitionFields.map(field => fieldValueSet(Store.priorityRankMaps, field, _lineScope).length)) : 0,
+        }))}</p>`
+      : '';
+    const coverageTilesHtml = coverage
+      ? `<div class="setup-coverage-tiles">
+          <div class="setup-coverage-tile"><span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_recorded'))}</span><span class="setup-coverage-tile-num">${totalPairs - missingPairs}</span></div>
+          <button type="button" class="setup-coverage-tile${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter><span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_gaps'))}</span><span class="setup-coverage-tile-num">${missingPairs}</span></button>
+        </div>`
+      : '';
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
-        <header class="setup-band setup-context-bar">
+        <header class="setup-context-bar">
           <div class="setup-context-main">
             <h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
             <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
@@ -815,67 +826,75 @@ export const SetupAdmin = (() => {
           <div class="setup-context-controls">
             ${permissions.definitionWrite ? `<label class="setup-check" data-setup-active-toggle-wrap><input type="checkbox" data-setup-active-toggle ${definition?.active ? 'checked' : ''} ${definition ? '' : 'disabled'}>${esc(Util.t('ui.setup_include_setup_times'))}</label>` : ''}
             <span class="setup-status-chip ${status.active ? 'ok' : 'warn'}" title="${esc(status.reason)}"><span class="dot"></span>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</span>
-            <button type="button" class="setup-version-chip" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">v${version ?? '—'} &#9998;</button>
           </div>
         </header>
 
-        <div class="setup-band setup-standard-rail">
-          <div class="setup-signature-wrap">
-            <span class="mono-eyebrow">${esc(Util.t('ui.setup_band_signature_label'))}</span>
-            <span class="setup-signature-chip">${signatureChipHtml}</span>
+        <div class="panel setup-panel">
+          <div class="panel-head">
+            <span class="mono-eyebrow">${esc(Util.t('ui.setup_step1_definition'))}</span>
+            <p class="panel-hint">${esc(Util.t('ui.setup_signature_popover_hint'))}</p>
           </div>
-          <div class="setup-scope-wrap">
-            <label class="mono-eyebrow" for="setup-line-combobox">${esc(Util.t('ui.setup_scope_label'))}</label>
-            <span id="setup-line-combobox"></span>
-            ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
+          <div class="panel-body setup-standard-rail">
+            <div class="setup-signature-wrap">
+              <span class="mono-eyebrow">${esc(Util.t('ui.setup_band_signature_label'))}</span>
+              <div class="setup-signature-line">
+                <span class="setup-signature-chip">${signatureChipHtml}</span>
+                <button type="button" class="btn btn-ghost sm" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">${esc(Util.t('btn.setup_edit_signature'))} v${version ?? '—'}</button>
+              </div>
+              ${scaleReadoutHtml}
+            </div>
+            <div class="setup-scope-wrap">
+              <label class="mono-eyebrow" for="setup-line-combobox">${esc(Util.t('ui.setup_scope_label'))}</label>
+              <span id="setup-line-combobox"></span>
+              ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
+            </div>
+            <div class="setup-coverage-wrap">
+              <span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_label'))}</span>
+              ${coverageTilesHtml}
+              ${missingChipHtml}
+            </div>
           </div>
-          <div class="setup-coverage-wrap">
-            ${coverageInlineHtml}
-            ${missingChipHtml}
+
+          <div class="setup-popover" data-setup-signature-popover ${_signaturePopoverOpen ? '' : 'hidden'}>
+            <div class="panel-head"><span class="label">${esc(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
+            <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
+            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
+            ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
+            <p class="setup-popover-hint">${esc(Util.t('ui.setup_version_note', { version: (version ?? 0) + 1 }))}</p>
           </div>
         </div>
 
-        <div class="setup-popover" data-setup-signature-popover ${_signaturePopoverOpen ? '' : 'hidden'}>
-          <p class="setup-popover-hint">${esc(Util.t('ui.setup_signature_popover_hint'))}</p>
-          <div class="panel-head"><span class="label">${esc(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-          <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
-          <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
-          ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
-        </div>
-
-        <div class="setup-band setup-grid-band">
-          <div class="setup-view-toolbar">
-            <span class="mono-eyebrow">${esc(Util.t('ui.setup_section_matrix'))}</span>
-            <div class="setup-view-tabs" role="tablist">
-              <button type="button" role="tab" aria-selected="${_setupView === 'list'}" class="setup-view-tab${_setupView === 'list' ? ' active' : ''}" data-setup-view="list">${esc(Util.t('ui.setup_view_list'))}</button>
-              <button type="button" role="tab" aria-selected="${_setupView === 'matrix'}" class="setup-view-tab${_setupView === 'matrix' ? ' active' : ''}" data-setup-view="matrix">${esc(Util.t('ui.setup_view_matrix'))}</button>
+        <div class="panel setup-panel">
+          <div class="panel-head">
+            <div class="setup-view-toolbar">
+              <span class="mono-eyebrow">${esc(Util.t('ui.setup_section_matrix'))}</span>
+              <div class="setup-view-tabs" role="tablist">
+                <button type="button" role="tab" aria-selected="${_setupView === 'list'}" class="setup-view-tab${_setupView === 'list' ? ' active' : ''}" data-setup-view="list">${esc(Util.t('ui.setup_view_list'))}</button>
+                <button type="button" role="tab" aria-selected="${_setupView === 'matrix'}" class="setup-view-tab${_setupView === 'matrix' ? ' active' : ''}" data-setup-view="matrix">${esc(Util.t('ui.setup_view_matrix'))}</button>
+              </div>
             </div>
             <div class="setup-view-actions">
               <button type="button" class="btn btn-primary sm" data-setup-mass-upload-open>${esc(Util.t('btn.setup_mass_upload'))}</button>
               <button type="button" class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
+              <button type="button" class="btn btn-ghost sm" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
+              ${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm setup-import-label">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
               <button type="button" class="btn btn-ghost sm" data-setup-history-open>${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
             </div>
           </div>
-          <div class="setup-grid-toolbar">
-            <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${esc(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${esc(_gridFilterFrom)}">
-            <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${esc(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${esc(_gridFilterTo)}">
-            ${_setupView === 'list' ? `<label class="setup-check"><input type="checkbox" data-setup-list-hide-empty ${_hideEmptyStates ? 'checked' : ''}>${esc(Util.t('ui.setup_list_hide_empty'))}</label>` : ''}
+          <div class="panel-body">
+            <div class="setup-grid-toolbar">
+              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${esc(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${esc(_gridFilterFrom)}">
+              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${esc(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${esc(_gridFilterTo)}">
+              ${_setupView === 'list' ? `<label class="setup-check"><input type="checkbox" data-setup-list-hide-empty ${_hideEmptyStates ? 'checked' : ''}>${esc(Util.t('ui.setup_list_hide_empty'))}</label>` : ''}
+            </div>
+            <div id="setup-list-mount" ${_setupView === 'list' ? '' : 'hidden'}></div>
+            <div id="setup-grid-table-mount" ${_setupView === 'matrix' ? '' : 'hidden'}></div>
           </div>
-          <div id="setup-list-mount" ${_setupView === 'list' ? '' : 'hidden'}></div>
-          <div id="setup-grid-table-mount" ${_setupView === 'matrix' ? '' : 'hidden'}></div>
-        </div>
-
-        <div class="setup-band setup-action-bar">
-          <span data-setup-grid-dirty-count>${esc(Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size }))}</span>
-          <div class="setup-action-buttons">
-            <button class="btn btn-ghost sm" data-setup-grid-discard ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.discard'))}</button>
-            <button class="btn btn-primary sm" data-setup-grid-save ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.save'))}</button>
-          </div>
-          <div class="setup-menu">
-            <button type="button" class="btn btn-ghost sm" data-setup-menu-toggle aria-haspopup="true" aria-expanded="${_setupMenuOpen}">&#8943;</button>
-            <div class="setup-menu-list" data-setup-menu-list role="menu" ${_setupMenuOpen ? '' : 'hidden'}>
-              <button type="button" role="menuitem" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
-              ${permissions.matrixWrite && definition ? `<label class="setup-menu-item" role="menuitem">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
+          <div class="setup-action-bar">
+            <span data-setup-grid-dirty-count>${esc(Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size }))}</span>
+            <div class="setup-action-buttons">
+              <button class="btn btn-ghost sm" data-setup-grid-discard ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.discard'))}</button>
+              <button class="btn btn-primary sm" data-setup-grid-save ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.save'))}</button>
             </div>
           </div>
         </div>
@@ -897,8 +916,10 @@ export const SetupAdmin = (() => {
    *  this is only the state text + the write affordance (`editState`/
    *  `wireCompatibility` still need a mount point in the DOM). */
   function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {
-    const values = state ? keyText(state.state_key) : Util.t('ui.setup_state_unknown');
-    return `<div class="setup-state-inline" data-setup-state-inline><div class="setup-state-readout"><span>${esc(values)}</span><span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div>`;
+    const fieldLines = state
+      ? state.state_key.map(part => `<span>${esc(fieldLabel(part.fieldKey))}: ${esc(part.value)}</span>`).join('')
+      : `<span>${esc(Util.t('ui.setup_state_unknown'))}</span>`;
+    return `<div class="setup-state-inline" data-setup-state-inline><div class="setup-state-readout">${fieldLines}<span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div>`;
   }
 
   function overridesFor(snapshot: SetupSnapshot): SetupSnapshot['overrides'] {
@@ -942,13 +963,7 @@ export const SetupAdmin = (() => {
       _signaturePopoverOpen = !_signaturePopoverOpen;
       renderSnapshot(target, snapshot);
     });
-    target.querySelector<HTMLButtonElement>('[data-setup-menu-toggle]')?.addEventListener('click', () => {
-      _setupMenuOpen = !_setupMenuOpen;
-      renderSnapshot(target, snapshot);
-    });
     target.querySelector<HTMLButtonElement>('[data-setup-history-open]')?.addEventListener('click', () => {
-      _setupMenuOpen = false;
-      renderSnapshot(target, snapshot);
       openHistoryModal(snapshot);
     });
     target.querySelectorAll<HTMLButtonElement>('[data-setup-view]').forEach(button => {
@@ -959,19 +974,6 @@ export const SetupAdmin = (() => {
         renderSnapshot(target, snapshot);
       });
     });
-    if (_signaturePopoverOpen || _setupMenuOpen) {
-      const dismiss = (event: MouseEvent): void => {
-        const withinPopover = (event.target as HTMLElement).closest('[data-setup-signature-popover], [data-setup-signature-edit]');
-        const withinMenu = (event.target as HTMLElement).closest('[data-setup-menu-list], [data-setup-menu-toggle]');
-        let changed = false;
-        if (_signaturePopoverOpen && !withinPopover) { _signaturePopoverOpen = false; changed = true; }
-        if (_setupMenuOpen && !withinMenu) { _setupMenuOpen = false; changed = true; }
-        if (changed) { document.removeEventListener('mousedown', dismiss); renderSnapshot(target, snapshot); }
-      };
-      // Deferred one tick so the click that just opened the popover/menu
-      // (still bubbling) doesn't immediately re-close it.
-      window.setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
-    }
     target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
       const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
