@@ -792,6 +792,63 @@ def page_missing_pairs(rows: list[dict], *, line: str | None = None, offset: int
             "meta": {"total": len(filtered), "offset": offset, "limit": limit}}
 
 
+def page_matrix_rows(plant: str, line: str, signature_version: int, *, from_key: list | None = None,
+                     offset: int = 0, limit: int = 100) -> dict:
+    """Return one bounded, from-state-scoped page of effective matrix rows.
+
+    Scoped by line (plant-default rows plus this one line's overrides) so a
+    List view never has to load every line's recorded rows for the whole
+    plant, unlike get_setup_snapshot. When from_key is supplied the SQL WHERE
+    filters on it directly (JSONB equality on the canonical, deterministically
+    ordered key), so the common "rows starting from one state" case is a
+    narrow, indexed lookup rather than a fetch-then-filter.
+    """
+    plant = _required_text(plant, "Plant")
+    line = line or ""
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a nonnegative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        _require_definition(cur, plant, signature_version, lock=False)
+        where = ["plant = %s", "signature_version = %s", "line IN ('', %s)"]
+        params: list = [plant, signature_version, line]
+        if from_key is not None:
+            where.append("from_key = %s")
+            params.append(Jsonb(from_key))
+        clause = " AND ".join(where)
+        cur.execute(
+            f"SELECT line, from_key, to_key, setup_min, source FROM setup_matrix "
+            f"WHERE {clause} ORDER BY from_key, to_key, line DESC",
+            params,
+        )
+        raw = cur.fetchall()
+    # Merge line-over-plant inheritance in Python — the raw set is already
+    # bounded to one line's scope (plus plant-default) by the SQL above, so
+    # this mirrors the client's effectiveRows() at a scale the query already
+    # narrowed, not a second unbounded fetch.
+    plant_by_key: dict[str, dict] = {}
+    line_by_key: dict[str, dict] = {}
+    for r in raw:
+        key = f"{json.dumps(r[1], sort_keys=True)} {json.dumps(r[2], sort_keys=True)}"
+        entry = {"from_key": r[1], "to_key": r[2], "setup_min": int(r[3]), "source": r[4]}
+        if r[0] == "":
+            plant_by_key[key] = entry
+        else:
+            line_by_key[key] = entry
+    merged: dict[str, dict] = {}
+    for key, entry in plant_by_key.items():
+        merged[key] = {**entry, "inherited": not line, "plant_value": entry["setup_min"]}
+    for key, entry in line_by_key.items():
+        plant_value = plant_by_key.get(key, {}).get("setup_min")
+        merged[key] = {**entry, "inherited": False, "plant_value": plant_value}
+    rows = list(merged.values())
+    total = len(rows)
+    return {"plant": plant, "line": line, "signature_version": signature_version,
+            "rows": rows[offset:offset + limit],
+            "meta": {"total": total, "offset": offset, "limit": limit}}
+
+
 def get_setup_coverage(plant: str) -> dict:
     """Measure one plant's current schedule transitions without mutating it."""
     snapshot = get_setup_snapshot(plant)

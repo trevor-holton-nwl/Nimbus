@@ -103,6 +103,24 @@ class _SetupService:
             raise ValueError("Setup signature version is stale")
 
 
+class _SetupServiceWithMatrixRows(_SetupService):
+    def page_matrix_rows(self, plant, line, signature_version, from_key=None, offset=0, limit=100):
+        assert plant == "PLANT-A"
+        rows = [
+            {"from_key": [{"fieldKey": "colorWheel", "value": "BLUE"}],
+             "to_key": [{"fieldKey": "colorWheel", "value": "RED"}],
+             "setup_min": 35, "source": "manual", "inherited": False, "plant_value": 30},
+            {"from_key": [{"fieldKey": "colorWheel", "value": "BLUE"}],
+             "to_key": [{"fieldKey": "colorWheel", "value": "WHITE"}],
+             "setup_min": 40, "source": "manual", "inherited": True, "plant_value": 40},
+        ]
+        if from_key is not None:
+            rows = [r for r in rows if r["from_key"] == from_key]
+        return {"plant": plant, "line": line, "signature_version": signature_version,
+                "rows": rows[offset:offset + limit],
+                "meta": {"total": len(rows), "offset": offset, "limit": limit}}
+
+
 def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, monkeypatch):
     """A setup-only opt-out cannot be silently stored without an operator reason."""
     calls = []
@@ -382,3 +400,42 @@ def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id
     assert event["ctx"]["actor"] == "owner@example.com"
     assert event["ctx"]["plant"] == "5512"
     assert "file_content" not in event["ctx"]
+
+
+def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
+    service = _SetupServiceWithMatrixRows()
+    monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
+    monkeypatch.setattr(brain.setup_data, "get_setup_snapshot", service.get_setup_snapshot, raising=False)
+    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    try:
+        client = TestClient(brain.api)
+        response = client.get(
+            "/setup/PLANT-A/matrix-rows",
+            params={"line": "LINE-1", "from_key": '[{"fieldKey":"colorWheel","value":"BLUE"}]', "limit": 1},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["meta"]["total"] == 2
+        assert len(body["rows"]) == 1
+        assert body["rows"][0]["setup_min"] == 35
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_get_setup_matrix_rows_rejects_bad_limit(monkeypatch):
+    service = _SetupServiceWithMatrixRows()
+    monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
+    monkeypatch.setattr(brain.setup_data, "get_setup_snapshot", service.get_setup_snapshot, raising=False)
+    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    try:
+        client = TestClient(brain.api)
+        response = client.get("/setup/PLANT-A/matrix-rows", params={"limit": 0})
+        assert response.status_code in (400, 422)
+    finally:
+        brain.api.dependency_overrides.clear()

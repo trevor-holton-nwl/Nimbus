@@ -2425,6 +2425,26 @@ def get_setup_coverage(plant: str, line: str | None = Query(default=None), offse
         raise _setup_error(exc) from exc
 
 
+@api.get("/setup/{plant}/matrix-rows", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_matrix_rows(plant: str, line: str = Query(default=""), from_key: str | None = Query(default=None),
+                          offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Bounded, from-state-scoped page of effective matrix rows for the List view."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        parsed_from_key = json.loads(from_key) if from_key else None
+        snapshot = setup_data.get_setup_snapshot(plant)
+        definition = snapshot.get("definition")
+        if definition is None:
+            return _setup_freshness({"plant": plant, "line": line, "signature_version": None, "rows": [],
+                                     "meta": {"total": 0, "offset": offset, "limit": limit}})
+        return _setup_freshness(setup_data.page_matrix_rows(
+            plant, line, definition["signature_version"], from_key=parsed_from_key, offset=offset, limit=limit,
+        ))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise _setup_error(exc) from exc
+
+
 @api.get("/setup/{plant}/missing-pairs.csv", dependencies=[Depends(auth.require_authenticated)])
 def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed"), line: str | None = Query(default=None),
                                offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
