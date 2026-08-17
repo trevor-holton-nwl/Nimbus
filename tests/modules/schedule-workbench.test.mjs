@@ -60,6 +60,22 @@ test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.gotoLineDay, 'function');
 });
 
+test('Timeline resets the initial Gantt vertical position once without affecting later navigation', () => {
+  const priorTimeline = Timeline._tl;
+  const priorPending = Timeline._initialVerticalScrollPending;
+  const scrollTops = [];
+  Timeline._tl = { _setScrollTop(top) { scrollTops.push(top); } };
+  Timeline._initialVerticalScrollPending = true;
+  try {
+    Timeline._resetInitialVerticalScroll();
+    Timeline._resetInitialVerticalScroll();
+    assert.deepEqual(scrollTops, [0], 'only the first populated render starts at the top');
+  } finally {
+    Timeline._tl = priorTimeline;
+    Timeline._initialVerticalScrollPending = priorPending;
+  }
+});
+
 test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {
   // This fails if setup changes route through full Timeline.rebuild(), if the
   // public line-scoped batch seam is removed, or if a stale setup bar survives.

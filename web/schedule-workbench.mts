@@ -249,6 +249,7 @@ export const Timeline = {
   _cachedRowH:  null as number | null,
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
+  _initialVerticalScrollPending: true,
   _itemIdsByTask: {} as Record<string, string[]>,
 
   init(): void {
@@ -997,7 +998,19 @@ export const Timeline = {
     if (savedWindow && Timeline._tl) {
       Timeline._tl.setWindow(savedWindow.start, savedWindow.end, { animation: false });
     }
+    // vis-timeline may retain its own initial group-scroll offset after it lays
+    // out the first set of rows. Start the board on the first line, but only
+    // once: later rebuilds deliberately preserve the scheduler's scroll position.
+    if (visibleLines.length) requestAnimationFrame(() => Timeline._resetInitialVerticalScroll());
     PerfMonitor.record('Timeline.rebuild', performance.now() - _pmT0t);
+  },
+
+  _resetInitialVerticalScroll(): void {
+    if (!Timeline._initialVerticalScrollPending || !Timeline._tl) return;
+    const tl = Timeline._tl as unknown as VisInternalTimeline;
+    if (!tl._setScrollTop) return;
+    tl._setScrollTop(0);
+    Timeline._initialVerticalScrollPending = false;
   },
 
   _fitHeight(groupCount: number): void {
