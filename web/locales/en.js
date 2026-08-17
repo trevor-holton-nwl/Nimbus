@@ -1420,6 +1420,18 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_modal_title':             'Optimization impact preview',
   'btn.opt_pv_discard':                '↶ Discard',
   'btn.opt_pv_apply':                  '✓ Apply changes',
+  'ui.opt_pv_why_title':               'Why this candidate',
+  'ui.opt_pv_why_intro':               'The optimizer evaluated this run and picked the candidate below.',
+  'ui.opt_pv_gaps_title':              'Missing setup times',
+  'ui.opt_pv_gaps_intro':              'The optimizer could not evaluate these transitions because no setup time is recorded for them. Filling them in may produce a better candidate on the next run.',
+  'ui.opt_pv_diag_title':              'Search diagnostics',
+  'ui.opt_pv_no_change':                'No change',
+  'ui.opt_pv_before_label':             'Before',
+  'ui.opt_pv_after_label':              'After',
+  'ui.opt_pv_kpis_improved_label':      'KPIs improved',
+  'ui.opt_pv_card_help_aria':           'What is this?',
+  'ui.opt_pv_chip_plant_title':         'Plant scope',
+  'ui.opt_pv_chip_policy_title':        'Plant-level split-order allocation policy',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Scheduling Rules',

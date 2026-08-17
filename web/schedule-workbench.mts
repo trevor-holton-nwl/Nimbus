@@ -7935,7 +7935,7 @@ export const OptimizerPreview = {
         ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
         : '';
       const deltaText = zero
-        ? '<span class="opt-pv-pill-icon">●</span> No change'
+        ? `<span class="opt-pv-pill-icon">●</span> ${esc(Util.t('ui.opt_pv_no_change'))}`
         : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
 
       // Bar — visual scale of post vs pre. For neutral/no scale, hide.
@@ -7948,19 +7948,19 @@ export const OptimizerPreview = {
           <div class="opt-pv-card-head">
             <span class="opt-pv-card-ico">${c.ico}</span>
             <span class="opt-pv-card-label">${esc(c.label)}</span>
-            <span class="opt-pv-card-help" tabindex="0" aria-label="What is this?">
+            <span class="opt-pv-card-help" tabindex="0" aria-label="${esc(Util.t('ui.opt_pv_card_help_aria'))}">
               <span class="opt-pv-help-dot">?</span>
               <span class="opt-pv-tip">${esc(c.tip)}</span>
             </span>
           </div>
           <div class="opt-pv-card-body">
             <div class="opt-pv-num opt-pv-num-pre">
-              <div class="opt-pv-num-lbl">Before</div>
+              <div class="opt-pv-num-lbl">${esc(Util.t('ui.opt_pv_before_label'))}</div>
               <div class="opt-pv-num-val">${c.fmt(preV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
             <div class="opt-pv-arrow">→</div>
             <div class="opt-pv-num opt-pv-num-post" data-target="${postV}" data-fmt="${isInt ? 'int' : 'dec'}" data-unit="${c.unit}">
-              <div class="opt-pv-num-lbl">After</div>
+              <div class="opt-pv-num-lbl">${esc(Util.t('ui.opt_pv_after_label'))}</div>
               <div class="opt-pv-num-val">${c.fmt(postV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
           </div>
@@ -7976,8 +7976,8 @@ export const OptimizerPreview = {
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
           <div class="opt-pv-chip opt-pv-chip-mode">${esc(modeLabel)}</div>
-          <div class="opt-pv-chip opt-pv-chip-plant" title="Plant scope">📍 ${esc(plant)}</div>
-          <div class="opt-pv-chip opt-pv-chip-policy" title="Plant-level split-order allocation policy">${esc(splitPolicyLabel[splitPolicy])}</div>
+          <div class="opt-pv-chip opt-pv-chip-plant" title="${esc(Util.t('ui.opt_pv_chip_plant_title'))}">📍 ${esc(plant)}</div>
+          <div class="opt-pv-chip opt-pv-chip-policy" title="${esc(Util.t('ui.opt_pv_chip_policy_title'))}">${esc(splitPolicyLabel[splitPolicy])}</div>
           <div class="opt-pv-chip opt-pv-chip-time">⏱ ${esc(stamp)}</div>
         </div>
 
@@ -7993,7 +7993,7 @@ export const OptimizerPreview = {
           </div>
           <div class="opt-pv-verdict-score">
             <div class="opt-pv-score-num">${better}<span class="opt-pv-score-of">/${directional.length}</span></div>
-            <div class="opt-pv-score-lbl">KPIs improved</div>
+            <div class="opt-pv-score-lbl">${esc(Util.t('ui.opt_pv_kpis_improved_label'))}</div>
           </div>
         </div>
 
