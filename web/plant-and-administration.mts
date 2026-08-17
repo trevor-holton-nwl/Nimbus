@@ -162,7 +162,11 @@ export const SetupAdmin = (() => {
   let _hideEmptyStates = true;
   let _listRows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey; setup_min: number; source: string; inherited: boolean; plant_value: number | null }> = [];
   let _listMeta = { total: 0, offset: 0, limit: 50 };
-  let _listNewRows: Array<{ id: number; from: string; to: string; minutes: string }> = [];
+  // `stagedKey` tracks the `_gridDirty` key this draft row is currently
+  // staged under (if any), so an edit that changes which key resolves (or
+  // makes the row no longer resolve to "staged") can clean up the *previous*
+  // key instead of leaking it — see refreshNewRowStatus.
+  let _listNewRows: Array<{ id: number; from: string; to: string; minutes: string; stagedKey: string | null }> = [];
   let _listNextRowId = 1;
   // Single floating editor that repositions over whichever cell is focused,
   // replacing one live <input> per cell (§7/§9-C.3) — the read-only <td>s
@@ -884,7 +888,8 @@ export const SetupAdmin = (() => {
     target.querySelector<HTMLButtonElement>('[data-setup-grid-save]')?.addEventListener('click', () => saveGridEdits(target, snapshot, definition, rows, permissions));
     target.querySelector<HTMLButtonElement>('[data-setup-grid-discard]')?.addEventListener('click', () => {
       _gridDirty.clear();
-      paintGrid(target, snapshot, definition, rows, permissions);
+      if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
+      else if (definition) paintListView(target, snapshot, definition, permissions);
     });
     wireGridInteractions(target, snapshot, definition, rows, permissions);
     target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
@@ -945,7 +950,12 @@ export const SetupAdmin = (() => {
     if (_hideEmptyStates) rows = rows.filter(r => r.plant_value !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
     const bodyRows = rows.map(row => {
       const v = listRowView(row, _lineScope);
-      return `<tr data-setup-list-row="${esc(v.key)}">
+      // Two separate data attributes, not one space-joined `${sig1} ${sig2}`
+      // string — stateSig() values are `|`-joined and a priority-list value
+      // containing a literal space (e.g. "Light Blue") would make a combined
+      // attribute unsplittable, silently dropping the edit.
+      const fromSig = stateSig(row.from_key), toSig = stateSig(row.to_key);
+      return `<tr data-setup-list-row-from="${esc(fromSig)}" data-setup-list-row-to="${esc(toSig)}">
         <td class="mono">${esc(v.fromText)}</td>
         <td class="mono">${esc(v.toText)}</td>
         <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${esc(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
@@ -1003,8 +1013,8 @@ export const SetupAdmin = (() => {
     if (!mount) return;
     mount.querySelectorAll<HTMLInputElement>('[data-setup-list-minutes]').forEach(input => {
       input.addEventListener('change', () => {
-        const tr = input.closest<HTMLElement>('[data-setup-list-row]')!;
-        const [rowSig, colSig] = tr.dataset.setupListRow!.split(' ');
+        const tr = input.closest<HTMLElement>('[data-setup-list-row-from]')!;
+        const rowSig = tr.dataset.setupListRowFrom!, colSig = tr.dataset.setupListRowTo!;
         const row = _listRows.find(r => stateSig(r.from_key) === rowSig && stateSig(r.to_key) === colSig);
         if (!row) return;
         const parsed = parseGridMinutes(input.value);
@@ -1019,14 +1029,14 @@ export const SetupAdmin = (() => {
     });
     mount.querySelectorAll<HTMLButtonElement>('[data-setup-list-revert]').forEach(button => {
       button.addEventListener('click', () => {
-        const tr = button.closest<HTMLElement>('[data-setup-list-row]')!;
-        _gridDirty.delete(tr.dataset.setupListRow!);
+        const tr = button.closest<HTMLElement>('[data-setup-list-row-from]')!;
+        _gridDirty.delete(`${tr.dataset.setupListRowFrom} ${tr.dataset.setupListRowTo}`);
         refreshDirtyBar(target);
         paintListView(target, snapshot, definition, permissions);
       });
     });
     mount.querySelector<HTMLButtonElement>('[data-setup-list-add-pair]')?.addEventListener('click', () => {
-      _listNewRows.push({ id: _listNextRowId++, from: '', to: '', minutes: '' });
+      _listNewRows.push({ id: _listNextRowId++, from: '', to: '', minutes: '', stagedKey: null });
       paintListView(target, snapshot, definition, permissions);
     });
     mount.querySelectorAll<HTMLElement>('[data-setup-list-new-row]').forEach(tr => {
@@ -1037,29 +1047,45 @@ export const SetupAdmin = (() => {
       tr.querySelector<HTMLInputElement>('[data-setup-list-new-to]')?.addEventListener('input', e => { row.to = (e.target as HTMLInputElement).value; refreshNewRowStatus(target, tr, row, definition); });
       tr.querySelector<HTMLInputElement>('[data-setup-list-new-minutes]')?.addEventListener('input', e => { row.minutes = (e.target as HTMLInputElement).value; refreshNewRowStatus(target, tr, row, definition); });
       tr.querySelector<HTMLButtonElement>('[data-setup-list-new-remove]')?.addEventListener('click', () => {
+        // A removed draft row may already be staged in _gridDirty (its status
+        // resolved to "staged" before removal) — drop that entry too, or an
+        // orphaned edit lingers forever with nothing in the UI pointing at it.
+        if (row.stagedKey) { _gridDirty.delete(row.stagedKey); refreshDirtyBar(target); }
         _listNewRows = _listNewRows.filter(r => r.id !== id);
         paintListView(target, snapshot, definition, permissions);
       });
     });
-    mount.querySelector<HTMLInputElement>('[data-setup-list-hide-empty]');
   }
 
   /** Refreshes one new-pair row's status cell live as its inputs change, and
    *  (only once the row fully resolves to "staged") writes it into
    *  `_gridDirty` under the same `${fromSig} ${toSig}` key every other List
-   *  edit uses, so it rides the existing Save/Discard machinery unchanged. */
-  function refreshNewRowStatus(target: HTMLElement, tr: HTMLElement, row: { from: string; to: string; minutes: string }, definition: SetupDefinition): void {
-    const statusCell = tr.querySelector('.setup-list-new-status');
-    if (statusCell) statusCell.textContent = listNewRowStatus(row, definition);
+   *  edit uses, so it rides the existing Save/Discard machinery unchanged.
+   *  `row.stagedKey` tracks whichever key the row is *currently* staged
+   *  under — recomputing the key fresh from the row's current from/to text
+   *  every call means an edit that changes which state pair it resolves to
+   *  (e.g. From: A→C, still valid) must drop the *previous* key first, or
+   *  that stale entry lingers in `_gridDirty` forever with nothing in the UI
+   *  pointing at it. Same when the row stops resolving to "staged" at all
+   *  (e.g. minutes cleared) — the last-staged key must still be dropped. */
+  function refreshNewRowStatus(target: HTMLElement, tr: HTMLElement, row: { from: string; to: string; minutes: string; stagedKey: string | null }, definition: SetupDefinition): void {
     const status = listNewRowStatus(row, definition);
+    const statusCell = tr.querySelector('.setup-list-new-status');
+    if (statusCell) statusCell.textContent = status;
     if (status === Util.t('ui.setup_list_row_staged')) {
       const fromKey = resolveFromKey(definition.fields, row.from)!;
       const toKey = resolveFromKey(definition.fields, row.to)!;
       const parsed = parseGridMinutes(row.minutes) as number;
       const key = `${stateSig(fromKey)} ${stateSig(toKey)}`;
+      if (row.stagedKey && row.stagedKey !== key) _gridDirty.delete(row.stagedKey);
       _gridDirty.set(key, { row: { key: fromKey, sig: stateSig(fromKey), parts: fromKey.map(p => p.value) },
                             col: { key: toKey, sig: stateSig(toKey), parts: toKey.map(p => p.value) },
                             setup_min: parsed, line: _lineScope });
+      row.stagedKey = key;
+      refreshDirtyBar(target);
+    } else if (row.stagedKey) {
+      _gridDirty.delete(row.stagedKey);
+      row.stagedKey = null;
       refreshDirtyBar(target);
     }
   }
