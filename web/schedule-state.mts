@@ -58,6 +58,11 @@ interface StoreState {
   /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
   userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
   roleDefaults: Record<string, unknown>;
+  /** Admin-configured global default (system_settings.orderFields) for which
+   *  optional Orders fields show in the AG Grid / Inspector — see
+   *  web/order-field-catalog.mjs. Keyed by catalog `key`; absent keys fall
+   *  back to the catalog's gridDefault/inspectorDefault. */
+  orderFieldVisibility: Record<string, { grid?: boolean; inspector?: boolean }>;
 }
 
 interface SelectionEmitPayload {
@@ -116,7 +121,8 @@ export const Store = {
     priorityRankMaps: {},
     setupSnapshot: null,
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
-    roleDefaults: {}
+    roleDefaults: {},
+    orderFieldVisibility: {}
   } as StoreState,
   _listeners: new Set<((event: StoreEvent) => void) & { _pmLabel?: string }>(),
   // Lazily populated by alertsByTask() below — declared here (not left to first
@@ -157,6 +163,7 @@ export const Store = {
   get priorityRankMaps(): PriorityRankMaps { return this._state.priorityRankMaps; },
   get setupSnapshot(): SetupSnapshot | null { return this._state.setupSnapshot; },
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
+  get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
 
   isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
 
@@ -182,6 +189,15 @@ export const Store = {
     this._state.masterData = masterData;
     this.rebuildPlantIndex();
     this.emit({ type: 'master-data-changed', source });
+  },
+
+  /** Replace the admin-configured global Orders field-visibility default
+   *  (system_settings.orderFields) wholesale. Global/system-tier, not part of
+   *  the per-user Store.pref() 3-tier resolution — every user sees the same
+   *  value, with no per-user override. */
+  setOrderFieldVisibility(cfg: Record<string, { grid?: boolean; inspector?: boolean }> | null | undefined, source?: string): void {
+    this._state.orderFieldVisibility = (cfg && typeof cfg === 'object') ? { ...cfg } : {};
+    this.emit({ type: 'order-field-visibility:changed', source });
   },
 
   /** Replace the priority rank-map cache wholesale (Stage 3). Populated by

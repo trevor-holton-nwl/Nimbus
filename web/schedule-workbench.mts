@@ -150,6 +150,7 @@ import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey } from './types.mjs';
+import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -1832,6 +1833,47 @@ export const Table = {
     } catch (e: unknown) {
       ErrorLog.warn('table', `Reset grid layout failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+    // resetColumnState() reverts `hide` to whatever was baked into columnDefs
+    // at grid-creation time — which can itself be stale (built before the
+    // /system-settings boot fetch resolved). Force-reapply the CURRENT admin
+    // default so _resetGridLayout()'s re-capture below persists the right
+    // baseline, not a stale one. Same guard, so this doesn't echo back into
+    // the user's personal gridLayout either.
+    Table._applyFieldVisibility();
+    setTimeout(() => { Table._applyingLayout = false; }, 0);
+  },
+
+  /* ── Admin-configured Orders field visibility (system_settings.orderFields,
+     web/order-field-catalog.mjs) — a global default, not per-user. See the
+     design note above _resetGridState: this must win over gridLayout's own
+     `hide` state at both initial load (onGridReady, after _applySavedLayout)
+     and after a manual reset, or a stale per-user layout silently overrides
+     the admin default. ───────────────────────────────────────────────────── */
+  _fieldHidden(key: string): boolean {
+    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    if (!f) return false;
+    const cfg = Store.orderFieldVisibility[key];
+    return !(cfg?.grid ?? f.gridDefault);
+  },
+
+  // Force-applies current catalog+config visibility for every catalog-driven
+  // field via two batched setColumnsVisible calls (not a per-key loop). Uses
+  // the same _applyingLayout guard as _applySavedLayout/_resetGridState so
+  // this doesn't get captured back into the user's personal gridLayout.
+  _applyFieldVisibility(): void {
+    if (!Table._api) return;
+    const visible: string[] = [];
+    const hidden: string[] = [];
+    for (const f of ORDER_FIELD_CATALOG) {
+      (Table._fieldHidden(f.key) ? hidden : visible).push(f.key);
+    }
+    Table._applyingLayout = true;
+    try {
+      if (visible.length) Table._api.setColumnsVisible(visible, true);
+      if (hidden.length) Table._api.setColumnsVisible(hidden, false);
+    } catch (e: unknown) {
+      ErrorLog.warn('table', `Apply field visibility failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     setTimeout(() => { Table._applyingLayout = false; }, 0);
   },
 
@@ -1850,10 +1892,31 @@ export const Table = {
   /** Columns for the order attributes that schedulers may edit inline. */
   _priorityColumns(): TableColDef[] {
     return [
-      { headerName: Util.t('col.prt_01'), field: 'PRT_01', width: 130, flex: 0, editable: true },
-      { headerName: Util.t('col.prt_02'), field: 'PRT_02', width: 130, flex: 0, editable: true },
-      { headerName: Util.t('col.prod_version'), field: 'PRODUCTION_VERSION', width: 140, flex: 0, editable: true },
+      { headerName: Util.t('col.prt_01'), field: 'PRT_01', width: 130, flex: 0, editable: true,
+        hide: Table._fieldHidden('PRT_01') },
+      { headerName: Util.t('col.prt_02'), field: 'PRT_02', width: 130, flex: 0, editable: true,
+        hide: Table._fieldHidden('PRT_02') },
+      { headerName: Util.t('col.prod_version'), field: 'PRODUCTION_VERSION', width: 140, flex: 0, editable: true,
+        hide: Table._fieldHidden('PRODUCTION_VERSION') },
     ];
+  },
+
+  /** New columnDefs for catalog fields that have no hand-written column
+   *  today (MATERIAL_NUMBER, FORM_SIZE, PLANT, FIRMING_INDICATOR) — generated
+   *  generically from web/order-field-catalog.mjs so adding a future
+   *  no-column catalog entry doesn't need a matching hand-written columnDef. */
+  _catalogOnlyColumns(): TableColDef[] {
+    const handwritten = new Set(['MATERIAL_DESCRIPTION', 'ORDER_QUANTITY_(GMEIN)', 'COLOR', 'RUN_TIME',
+      'original_start_date', 'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION']);
+    return ORDER_FIELD_CATALOG.filter(f => !handwritten.has(f.key)).map(f => ({
+      headerName: Util.t(f.i18nGridKey),
+      field: f.key,
+      width: f.gridWidth ?? 110,
+      flex: 0,
+      editable: false,
+      hide: Table._fieldHidden(f.key),
+      cellClass: f.type !== 'text' ? (() => 'cell-num') : undefined,
+    }));
   },
 
   init(): void {
@@ -1904,9 +1967,9 @@ export const Table = {
           pinned: 'left', editable: false,
           valueGetter: (p: { data: NimbusTask }) => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
         { headerName: Util.t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
-          tooltipField: 'MATERIAL_DESCRIPTION' },
+          tooltipField: 'MATERIAL_DESCRIPTION', hide: Table._fieldHidden('MATERIAL_DESCRIPTION') },
         { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
-          editable: false, cellClass: 'cell-num',
+          editable: false, cellClass: 'cell-num', hide: Table._fieldHidden('ORDER_QUANTITY_(GMEIN)'),
           valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
@@ -1919,13 +1982,15 @@ export const Table = {
             return `<span class="cell-line-tag"><span class="dot" style="background:${color}"></span>${p.value}</span>`;
           }
         },
-        { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false },
+        { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false,
+          hide: Table._fieldHidden('COLOR') },
         ...Table._priorityColumns(),
+        ...Table._catalogOnlyColumns(),
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
-          cellClass: 'cell-num',
+          cellClass: 'cell-num', hide: Table._fieldHidden('RUN_TIME'),
           valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
         { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
-          editable: false,
+          editable: false, hide: Table._fieldHidden('original_start_date'),
           // Display-only derived value (due date minus RUN_TIME — see
           // Util.impliedOriginalStart) instead of the raw midnight SAP
           // date. `field` is kept alongside `valueGetter` (same precedent
@@ -1937,7 +2002,7 @@ export const Table = {
           valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.orig_end'), field: 'original_end_date', minWidth: 160,
-          editable: false,
+          editable: false, hide: Table._fieldHidden('original_end_date'),
           valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
         { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
@@ -2042,6 +2107,10 @@ export const Table = {
         // Restore the user's saved grid layout (if the feature is on) before
         // first paint so the table opens in their remembered arrangement.
         Table._applySavedLayout();
+        // Must run AFTER _applySavedLayout — the admin's field-visibility
+        // default has to win over any stale per-user saved `hide` state for
+        // the same columns (see the design note above _resetGridState).
+        Table._applyFieldVisibility();
         ErrorLog.info('table', `AG Grid ready with ${Store.tasksArr.length} rows`);
       },
     };
@@ -2050,6 +2119,13 @@ export const Table = {
 
     // Re-render rows whenever relevant store slices change.
     Store.subscribe(evt => Table._onStore(evt), 'Table');
+
+    // Live-apply an admin's System Configuration field-visibility change with
+    // no page reload. Also covers the boot-time race where this grid paints
+    // before the /system-settings fetch resolves — _applyFieldVisibility()
+    // guards on Table._api itself, but the fetch can equally resolve BEFORE
+    // onGridReady fires, so this subscription is the other half of that race.
+    Store.subscribe(evt => { if (evt.type === 'order-field-visibility:changed') Table._applyFieldVisibility(); }, 'Table');
 
     // Outside-click closes any open chip dropdown. Capture phase so AG Grid
     // (which can stopPropagation on some interactions) doesn't swallow the event.
@@ -3072,6 +3148,18 @@ export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
 
+  // Admin-configured Orders field visibility (system_settings.orderFields,
+  // web/order-field-catalog.mjs) for the Inspector surface. No live-refresh
+  // subscription needed — _render() already runs fresh on every task
+  // selection, so a later System Configuration change is picked up the next
+  // time this panel opens.
+  _fieldVisible(key: string): boolean {
+    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    if (!f) return true;
+    const cfg = Store.orderFieldVisibility[key];
+    return cfg?.inspector ?? f.inspectorDefault;
+  },
+
   init(): void {
     Inspector._unsubStore = Store.subscribe(evt => {
     // Allow fixed:change through even from 'inspector' so the Fix/Unfix
@@ -3194,16 +3282,21 @@ export const Inspector = {
           <div class="insp-val">${esc(task.id)}</div></div>
           <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
           <div class="insp-val">${esc(task.ORDER || task.id)}</div></div>
+        ${Inspector._fieldVisible('MATERIAL_NUMBER') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_material_no')}</label>
-          <div class="insp-val">${esc(task.MATERIAL_NUMBER || '—')}</div></div>
+          <div class="insp-val">${esc(task.MATERIAL_NUMBER || '—')}</div></div>` : ''}
+        ${Inspector._fieldVisible('MATERIAL_DESCRIPTION') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_material_desc')}</label>
-          <div class="insp-val">${esc(task.MATERIAL_DESCRIPTION || '—')}</div></div>
+          <div class="insp-val">${esc(task.MATERIAL_DESCRIPTION || '—')}</div></div>` : ''}
+        ${Inspector._fieldVisible('ORDER_QUANTITY_(GMEIN)') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_qty')}</label>
-          <div class="insp-val">${esc(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>
+          <div class="insp-val">${esc(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>` : ''}
+        ${Inspector._fieldVisible('COLOR') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_color')}</label>
-          <div class="insp-val">${esc(task.COLOR || '—')}</div></div>
+          <div class="insp-val">${esc(task.COLOR || '—')}</div></div>` : ''}
+        ${Inspector._fieldVisible('FORM_SIZE') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_form')}</label>
-          <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>
+          <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
           <div class="insp-val"><select data-field="PRODUCTION_LINE">
             ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
@@ -3220,10 +3313,12 @@ export const Inspector = {
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
+        ${Inspector._fieldVisible('original_start_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_orig_start')}</label>
-          <div class="insp-val">${impliedOrigStart ? Util.fmtDTReadable(impliedOrigStart) : '—'}</div></div>
+          <div class="insp-val">${impliedOrigStart ? Util.fmtDTReadable(impliedOrigStart) : '—'}</div></div>` : ''}
+        ${Inspector._fieldVisible('original_end_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_orig_end')}</label>
-          <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>
+          <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_updated_start')}</label>
           <div class="insp-val">
             <input type="text" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
@@ -3234,6 +3329,22 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
           <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}"></div></div>
       </div>
+
+      ${(() => {
+        const moreKeys = ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'PLANT', 'FIRMING_INDICATOR'];
+        const rows = moreKeys.map(key => {
+          if (!Inspector._fieldVisible(key)) return '';
+          const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          if (!f) return '';
+          const val = (task as unknown as Record<string, unknown>)[key];
+          return `<div class="insp-row"><label>${Util.t(f.i18nInspectorKey)}</label>
+            <div class="insp-val">${esc(val ?? '—')}</div></div>`;
+        }).join('');
+        return rows ? `<div class="insp-card">
+          <h4>${Util.t('ui.insp_more_section')}</h4>
+          ${rows}
+        </div>` : '';
+      })()}
 
       ${scheduleSegments.length ? `<div class="insp-card insp-split-summary">
         <h4>Productive schedule</h4>

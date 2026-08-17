@@ -44,6 +44,7 @@ import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from './types.mjs';
+import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -6392,13 +6393,16 @@ export const AdminCockpit = {
     const mg = document.getElementById('admin-manage-pane');
     const ifc = document.getElementById('admin-interface-pane');
     const sec = document.getElementById('admin-security-pane');
+    const sc  = document.getElementById('admin-system-config-pane');
     if (ov) ov.hidden = (sub !== 'overview');
     if (mg) mg.hidden = (sub !== 'manage');
     if (ifc) ifc.hidden = (sub !== 'interface');
     if (sec) sec.hidden = (sub !== 'security');
+    if (sc) sc.hidden = (sub !== 'system-config');
     if (sub === 'manage') MasterData.render();
     else if (sub === 'interface') Interface.render();
     else if (sub === 'security') Security.render();
+    else if (sub === 'system-config') SystemConfig.render();
     else AdminCockpit._renderOverview();
   },
 
@@ -9450,6 +9454,122 @@ interface SecurityMasterDataResponse<T> {
   rows: T[];
   meta?: { total: number };
 }
+
+/* ============================================================================
+   SystemConfig — Admin Cockpit "System Configuration" sub-tab: admin-set
+   GLOBAL defaults (all users, no per-user override) for which optional Orders
+   fields show in the AG Grid columns / Inspector panel. Backed by the
+   system_settings singleton table (GET/POST /system-settings) and the shared
+   web/order-field-catalog.mjs catalog.
+
+   Deliberately distinct — in both code and UI label — from
+   Plant._renderSettingsPane()'s "System Settings" pane, a different,
+   plant-scoped UI surface (alert/confidence horizons + optimizer constraints).
+   ========================================================================== */
+export const SystemConfig = (() => {
+  const API = Config.API_BASE;
+  let _orderFields: Record<string, { grid?: boolean; inspector?: boolean }> = {};
+
+  const _esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
+
+  function _writeHeaders(): Record<string, string> {
+    return { 'x-user-email': Session.actor(), 'content-type': 'application/json' };
+  }
+
+  // Public entry point — fetch the current global config, then paint.
+  async function render(): Promise<void> {
+    const host = document.getElementById('system-config-host');
+    if (!host) return;
+    try {
+      // Response body IS the settings content directly ({"orderFields": {...}}),
+      // no wrapper envelope — see master_data.get_system_settings() in brain.py.
+      const data: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> } =
+        await Util.fetchTraced(`${API}/system-settings`).then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+      _orderFields = data.orderFields ?? {};
+      _paint();
+    } catch (e) {
+      host.innerHTML = `<div class="empty-state">${_esc(Util.t('ui.system_config_load_failed'))}: ${_esc((e as Error).message)}</div>`;
+      ErrorLog.error('system-config', `Load system settings failed: ${(e as Error).message}`);
+    }
+  }
+
+  function _paint(): void {
+    const host = document.getElementById('system-config-host');
+    if (!host) return;
+    const rows = ORDER_FIELD_CATALOG.map((f) => {
+      const cfg = _orderFields[f.key] || {};
+      const gridChecked = cfg.grid ?? f.gridDefault;
+      const inspChecked = cfg.inspector ?? f.inspectorDefault;
+      return `<tr>
+        <td class="md-th">${_esc(Util.t(f.i18nInspectorKey))}</td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${_esc(f.key)}" data-sc-surface="grid" ${gridChecked ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${_esc(f.key)}" data-sc-surface="inspector" ${inspChecked ? 'checked' : ''}></td>
+      </tr>`;
+    }).join('');
+
+    host.innerHTML = `
+      <div class="panel">
+        <h3>${_esc(Util.t('ui.system_config_title'))}</h3>
+        <p class="muted">${_esc(Util.t('ui.system_config_desc'))}</p>
+        <div class="md-table-wrap">
+          <table class="md-table">
+            <thead><tr>
+              <th class="md-th">${_esc(Util.t('ui.system_config_field'))}</th>
+              <th class="md-th">${_esc(Util.t('ui.system_config_show_grid'))}</th>
+              <th class="md-th">${_esc(Util.t('ui.system_config_show_inspector'))}</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
+          <button class="btn btn-primary" id="sc-save-btn">${_esc(Util.t('btn.save'))}</button>
+        </div>
+      </div>
+    `;
+
+    host.querySelector('#sc-save-btn')?.addEventListener('click', _save);
+  }
+
+  async function _save(): Promise<void> {
+    const host = document.getElementById('system-config-host');
+    if (!host) return;
+    const next: Record<string, { grid: boolean; inspector: boolean }> = {};
+    for (const f of ORDER_FIELD_CATALOG) {
+      const gridEl = host.querySelector<HTMLInputElement>(`input[data-sc-field="${f.key}"][data-sc-surface="grid"]`);
+      const inspEl = host.querySelector<HTMLInputElement>(`input[data-sc-field="${f.key}"][data-sc-surface="inspector"]`);
+      next[f.key] = {
+        grid: gridEl ? gridEl.checked : f.gridDefault,
+        inspector: inspEl ? inspEl.checked : f.inspectorDefault,
+      };
+    }
+    try {
+      // POST body and response are both the unwrapped { orderFields: {...} }
+      // shape (same contract as the GET above) — the whole map is always sent,
+      // never a per-field diff (the backend merge replaces 'orderFields' wholesale).
+      const saved: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> } =
+        await fetch(`${API}/system-settings`, {
+          method: 'POST',
+          headers: _writeHeaders(),
+          body: JSON.stringify({ orderFields: next }),
+        }).then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+      _orderFields = saved.orderFields ?? next;
+      Store.setOrderFieldVisibility(_orderFields, 'system-config');
+      Toast.show(Util.t('toast.system_config_saved'), 'success');
+    } catch (e) {
+      ErrorLog.error('system-config', `Save system settings failed: ${(e as Error).message}`);
+      Toast.show(Util.t('toast.system_config_save_failed'), 'err');
+    }
+  }
+
+  return { render };
+})();
 
 /* =============================================================================
    SECURITY — admin sub-tab: user accounts (username / role / password) and

@@ -148,6 +148,11 @@ declare global {
        *  App.gotoGanttSub's Orders-sub-tab activation calls it) as the real
        *  AG Grid v31 Grid API surface that call site uses. */
       sizeColumnsToFit(): void;
+      /** Batched show/hide for one or more columns by colId — used by Table's
+       *  admin-configured Orders field-visibility feature
+       *  (_applyFieldVisibility, web/order-field-catalog.mjs) instead of a
+       *  per-column setColumnVisible() loop. Real AG Grid v31 Grid API method. */
+      setColumnsVisible(colKeys: string[], visible: boolean): void;
       [method: string]: unknown;
     }
 

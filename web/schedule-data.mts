@@ -475,17 +475,22 @@ export const Persistence = {
 
         Persistence._saveCache();
 
-        // Load master-data plants and lines in parallel (non-blocking).
+        // Load master-data plants/lines and the global system-settings blob in
+        // parallel (non-blocking). System-settings response body IS the settings
+        // content directly ({"orderFields": {...}}), no wrapper envelope — see
+        // master_data.get_system_settings()/GET /system-settings in brain.py.
         Promise.all([
           fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
           fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-        ]).then(([pData, lData]) => {
+          fetch(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
+        ]).then(([pData, lData, ssData]) => {
           if (pData || lData) {
             Store.setMasterData({
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
             }, 'persistence');
           }
+          Store.setOrderFieldVisibility(ssData?.orderFields ?? {}, 'persistence');
         }).catch(e => {
           ErrorLog.warn('persistence', `Master-data fetch failed: ${e.message}`);
           Toast.show(Util.t('toast.master_data_unavail'), 'warn', 5000);

@@ -1212,6 +1212,74 @@ def set_role_page_access(role: str, pages: dict, user_email: str | None = None) 
     return {"status": "ok", "role": role, "pages": merged_pages}
 
 
+# ---------------------------------------------------------------------------
+# System-wide settings (global, not per-user/per-plant) — currently just which
+# optional Orders fields show by default in the AG Grid / Inspector panel.
+# ---------------------------------------------------------------------------
+def ensure_system_settings_table() -> None:
+    """Idempotent: create the system_settings singleton table + seed row.
+    Mirrors auth.ensure_user_settings_table()'s startup-bootstrap pattern but
+    for a single global row (id always 1) instead of one row per user."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id         INTEGER PRIMARY KEY DEFAULT 1,
+                settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                CONSTRAINT chk_system_settings_singleton CHECK (id = 1)
+            )
+        """)
+        cur.execute(
+            "INSERT INTO system_settings (id, settings) VALUES (1, '{}'::jsonb)"
+            " ON CONFLICT (id) DO NOTHING"
+        )
+        conn.commit()
+
+
+def get_system_settings() -> dict:
+    """Return the global settings blob (e.g. {"orderFields": {...}}) directly —
+    no wrapper envelope. Never raises; returns {} if the row is missing."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT settings FROM system_settings WHERE id = 1")
+        row = cur.fetchone()
+        return dict(row[0]) if row and row[0] else {}
+
+
+def upsert_system_settings(patch: dict, user_email: str | None = None) -> dict:
+    """Shallow-merge `patch`'s top-level keys into the global settings blob
+    (e.g. patch={"orderFields": {...}} replaces just the 'orderFields' key,
+    leaving any future sibling keys untouched — same merge idiom as
+    set_role_page_access above) and audit-log the change. Returns the full
+    post-merge settings blob, same unwrapped shape as get_system_settings()."""
+    if not isinstance(patch, dict):
+        raise ValueError("patch must be an object")
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT settings FROM system_settings WHERE id = 1 FOR UPDATE")
+        row = cur.fetchone()
+        settings = dict(row[0]) if row and row[0] else {}
+        settings.update(patch)
+        cur.execute(
+            "UPDATE system_settings SET settings = %s, updated_at = NOW() WHERE id = 1",
+            (Jsonb(settings),),
+        )
+        if cur.rowcount == 0:
+            # The table exists (bootstrapped at startup) but the singleton row
+            # is somehow missing — self-heal rather than silently no-op.
+            cur.execute(
+                "INSERT INTO system_settings (id, settings) VALUES (1, %s)",
+                (Jsonb(settings),),
+            )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('system_settings', 'update', %s, %s)",
+            (Jsonb(patch), user_email),
+        )
+        conn.commit()
+
+    return settings
+
+
 def list_audit(limit: int = 100) -> list[dict]:
     """Return the most recent N admin_audit entries for the Master Data tab."""
     with _pool.connection() as conn, conn.cursor() as cur:

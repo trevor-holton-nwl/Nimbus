@@ -374,7 +374,7 @@ export type StoreEventType =
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
-  | 'setup-snapshot:replace'
+  | 'setup-snapshot:replace' | 'order-field-visibility:changed'
   // NOTE: no 'priority-rank-maps:updated' member. Store.setPriorityRankMaps
   // deliberately does not emit (see its comment in schedule-state.mts), and the
   // late-arriving /priority-fields registry re-render is a direct

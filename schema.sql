@@ -881,6 +881,23 @@ CREATE TABLE IF NOT EXISTS user_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- ----------------------------------------------------------------------------
+-- system_settings — global (not per-user, not per-plant) admin-configured
+-- settings, singleton row (id always 1). Currently holds orderFields: which
+-- optional Orders fields show by default in the AG Grid / Inspector panel
+-- ({"orderFields": {"<FIELD_KEY>": {"grid": bool, "inspector": bool}}}).
+-- Read/written ONLY through master_data.py (get_system_settings /
+-- upsert_system_settings) and the /system-settings endpoints. Self-bootstrapped
+-- at startup by master_data.ensure_system_settings_table().
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS system_settings (
+    id         INTEGER PRIMARY KEY DEFAULT 1,
+    settings   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_system_settings_singleton CHECK (id = 1)
+);
+INSERT INTO system_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+
 -- ============================================================================
 -- SCHEDULING PRIORITY LISTS (docs/scheduling_priority.md, Stage 1 — data
 -- plumbing only: no upload UI, no optimizer change yet)

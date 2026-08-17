@@ -208,6 +208,7 @@ async def lifespan(app: FastAPI):
     auth.ensure_bootstrap_admin()
     auth.ensure_role_settings_column()
     auth.ensure_user_settings_table()
+    md.ensure_system_settings_table()
     _log_event("info", "startup", "Priority lists loaded",
                plants_with_lists=len(PLANT_LISTS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -563,6 +564,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
+    "/system-settings": "system_settings.update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
     "/master-data/resync-order-attributes": "material_plants.resync_order_attributes",
     "/security/users/bulk": "security.users_bulk_write",
@@ -2909,6 +2911,29 @@ def md_set_role_page_access(role: str, request: Request, body: dict = Body(defau
             pages=body.get("pages", {}),
             user_email=request.headers.get("x-user-email"),
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.get("/system-settings")
+def get_system_settings():
+    """Return the global system-settings blob (currently just orderFields —
+    which optional Orders fields show by default in the AG Grid / Inspector).
+    Unauthenticated: every user's boot needs this, same as color-wheel reads.
+    Response body IS the settings content directly, no wrapper envelope."""
+    return md.get_system_settings()
+
+
+@api.post("/system-settings", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def post_system_settings(request: Request, body: dict = Body(default={})):
+    """Persist a shallow-merge patch into the global system-settings blob.
+
+    Payload: { orderFields?: { <FIELD_KEY>: { grid: bool, inspector: bool } } }
+    The 'orderFields' key is replaced wholesale by whatever is sent — callers
+    must POST the complete map, not a per-field diff. Response body is the
+    full post-merge settings blob, same unwrapped shape as the GET above."""
+    try:
+        return md.upsert_system_settings(body, user_email=request.headers.get("x-user-email"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
