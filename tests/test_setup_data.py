@@ -1,5 +1,6 @@
 """Stage 0 setup-data contracts that do not require a PostgreSQL target."""
 from datetime import datetime
+import json
 from math import inf, nan
 import asyncio
 
@@ -321,6 +322,67 @@ def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(mo
     assert "JOIN production_lines" in query
 
 
+def test_page_matrix_rows_lets_a_line_override_replace_the_plant_default(monkeypatch):
+    """One effective row per pair — the line's value wins, and the plant default
+    it displaced is still reported as `plant_value` so the UI can offer a revert."""
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MatrixRowsCursor()))
+    page = setup_data.page_matrix_rows("5512", "LINE-1", 4)
+    blue_red = [r for r in page["rows"] if r["from_key"] == _state("BLUE") and r["to_key"] == _state("RED")]
+    assert len(blue_red) == 1, "the plant default and its line override must merge into one row"
+    assert blue_red[0]["setup_min"] == 35
+    assert blue_red[0]["plant_value"] == 30
+    assert blue_red[0]["inherited"] is False
+    # LINE-2's row is another line's override and must never leak into this scope.
+    assert all(r["setup_min"] != 99 for r in page["rows"])
+
+
+def test_page_matrix_rows_reports_null_plant_value_for_an_override_with_no_default(monkeypatch):
+    """A line override on a pair the plant has no default for keeps its own
+    setup_min and a null plant_value — the case the List view's
+    "hide states with no value" filter must not treat as valueless."""
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MatrixRowsCursor()))
+    page = setup_data.page_matrix_rows("5512", "LINE-1", 4)
+    green_red = next(r for r in page["rows"] if r["from_key"] == _state("GREEN"))
+    assert green_red["setup_min"] == 55
+    assert green_red["plant_value"] is None
+    assert green_red["inherited"] is False
+
+
+def test_page_matrix_rows_filters_by_from_key(monkeypatch):
+    """The from-state scope is pushed into the SQL WHERE, so only that
+    from-state's pairs come back."""
+    cursor = _MatrixRowsCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    page = setup_data.page_matrix_rows("5512", "LINE-1", 4, from_key=_state("GREEN"))
+    assert "from_key = %s" in cursor.executed[-1][0]
+    assert [r["to_key"] for r in page["rows"]] == [_state("RED")]
+    assert page["meta"]["total"] == 1
+
+
+def test_page_matrix_rows_pages_over_the_post_merge_effective_rows(monkeypatch):
+    """`meta.total` counts merged effective rows, not the raw pre-merge SQL rows
+    (4 raw rows in this line's scope collapse to 3 effective pairs), and
+    offset/limit slice that same merged list."""
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MatrixRowsCursor()))
+    full = setup_data.page_matrix_rows("5512", "LINE-1", 4)
+    assert full["meta"]["total"] == 3
+    assert len(full["rows"]) == 3
+    first = setup_data.page_matrix_rows("5512", "LINE-1", 4, limit=2)
+    second = setup_data.page_matrix_rows("5512", "LINE-1", 4, offset=2, limit=2)
+    assert first["rows"] == full["rows"][:2]
+    assert second["rows"] == full["rows"][2:]
+    assert first["meta"] == {"total": 3, "offset": 0, "limit": 2}
+    assert second["meta"] == {"total": 3, "offset": 2, "limit": 2}
+
+
+@pytest.mark.parametrize("kwargs", [{"offset": -1}, {"limit": 0}, {"limit": 501}, {"limit": True}])
+def test_page_matrix_rows_rejects_out_of_range_paging(monkeypatch, kwargs):
+    """Paging bounds are validated before any connection is opened."""
+    monkeypatch.setattr(setup_data, "_pool", _FailPool())
+    with pytest.raises(ValueError):
+        setup_data.page_matrix_rows("5512", "LINE-1", 4, **kwargs)
+
+
 class _DefinitionCursor:
     def __init__(self):
         self.executed = []
@@ -432,3 +494,36 @@ class _Pool:
 
     def connection(self):
         return _Connection(self._cursor)
+
+
+def _state(value):
+    return [{"fieldKey": "colorWheel", "value": value}]
+
+
+class _MatrixRowsCursor(_DefinitionCursor):
+    """Serves `page_matrix_rows`' one setup_matrix SELECT from a fixed row set,
+    applying the same `line IN ('', %s)` / `from_key = %s` narrowing the SQL
+    does so the merge under test sees a realistic raw result."""
+
+    #      line       from      to        min  source
+    ROWS = [
+        ("",       _state("BLUE"),  _state("RED"),   30, "manual"),
+        ("",       _state("BLUE"),  _state("WHITE"), 40, "manual"),
+        ("LINE-1", _state("BLUE"),  _state("RED"),   35, "manual"),
+        ("LINE-1", _state("GREEN"), _state("RED"),   55, "manual"),
+        ("LINE-2", _state("BLUE"),  _state("RED"),   99, "manual"),
+    ]
+
+    def fetchone(self):
+        return (["colorWheel"], 4, True, True)
+
+    def fetchall(self):
+        sql, params = self.executed[-1]
+        assert "FROM setup_matrix" in sql
+        line = params[2]
+        rows = [r for r in self.ROWS if r[0] in ("", line)]
+        if "from_key = %s" in sql:
+            wanted = params[3].obj if hasattr(params[3], "obj") else params[3]
+            rows = [r for r in rows if r[1] == wanted]
+        # Mirror the query's ORDER BY from_key, to_key, line DESC.
+        return sorted(rows, key=lambda r: (json.dumps(r[1]), json.dumps(r[2]), r[0]), reverse=False)

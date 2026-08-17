@@ -128,6 +128,29 @@ class _SetupServiceWithMatrixRows(_SetupService):
         raise AssertionError("get_setup_snapshot must not be called by matrix-rows endpoint")
 
 
+def _install_matrix_rows_double(monkeypatch):
+    """Install the matrix-rows service double over the real `setup_data` module.
+
+    `get_setup_snapshot` is patched in DELIBERATELY, wired to the double's
+    AssertionError-raising version: the whole point of this read path is that
+    it resolves the signature version through the cheap
+    `current_signature_version()` lookup and never loads a full plant
+    snapshot. Patching only the two functions the endpoint is *supposed* to
+    call (as this file originally did) left the guard uninstalled on the real
+    module, so the test passed whether or not the hot path stayed
+    snapshot-free. AssertionError is not in the endpoint's `except` tuple, so
+    a reintroduced `get_setup_snapshot` call now surfaces as a test failure.
+    """
+    service = _SetupServiceWithMatrixRows()
+    for name in ("current_signature_version", "page_matrix_rows", "get_setup_snapshot"):
+        monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
+    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    return service
+
+
 def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, monkeypatch):
     """A setup-only opt-out cannot be silently stored without an operator reason."""
     calls = []
@@ -410,13 +433,10 @@ def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id
 
 
 def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
-    service = _SetupServiceWithMatrixRows()
-    monkeypatch.setattr(brain.setup_data, "current_signature_version", service.current_signature_version, raising=False)
-    monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
-    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
-    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
-    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
-    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    """Also pins the no-full-snapshot contract: the installed double's
+    get_setup_snapshot raises, so a 200 here proves the hot path never
+    loaded a whole-plant snapshot to answer one bounded page."""
+    _install_matrix_rows_double(monkeypatch)
     try:
         client = TestClient(brain.api)
         response = client.get(
@@ -433,16 +453,30 @@ def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
 
 
 def test_get_setup_matrix_rows_rejects_bad_limit(monkeypatch):
-    service = _SetupServiceWithMatrixRows()
-    monkeypatch.setattr(brain.setup_data, "current_signature_version", service.current_signature_version, raising=False)
-    monkeypatch.setattr(brain.setup_data, "page_matrix_rows", service.page_matrix_rows, raising=False)
-    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
-    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
-    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
-    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    _install_matrix_rows_double(monkeypatch)
     try:
         client = TestClient(brain.api)
         response = client.get("/setup/PLANT-A/matrix-rows", params={"limit": 0})
         assert response.status_code in (400, 422)
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_get_setup_matrix_rows_never_loads_a_full_snapshot(monkeypatch):
+    """Regression guard for the fix that replaced get_setup_snapshot() with
+    current_signature_version() on this path. Proves the guard actually bites:
+    with get_setup_snapshot rewired to the *endpoint's* version resolver, the
+    request fails — so the passing sibling tests above are meaningful, not
+    vacuous."""
+    _install_matrix_rows_double(monkeypatch)
+    monkeypatch.setattr(
+        brain.setup_data, "current_signature_version",
+        lambda plant: brain.setup_data.get_setup_snapshot(plant)["definition"]["signature_version"],
+        raising=False,
+    )
+    try:
+        client = TestClient(brain.api)
+        with pytest.raises(AssertionError, match="must not be called"):
+            client.get("/setup/PLANT-A/matrix-rows")
     finally:
         brain.api.dependency_overrides.clear()
