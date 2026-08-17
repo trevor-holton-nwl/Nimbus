@@ -7900,7 +7900,7 @@ export const OptimizerPreview = {
           <dl class="opt-pv-meta-list">
             <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
             <div><dt>${esc(Util.t('ui.setup_unchanged_lines_label'))}</dt><dd>${esc(unchangedLines)}</dd></div>
-            <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_sequences_changed_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
           </dl>
         </div>
       </details>`;
@@ -7936,6 +7936,10 @@ export const OptimizerPreview = {
         </div>
       </details>`;
     })();
+
+    const staleHtml = OptimizerPreview.stale
+      ? `<div class="opt-pv-backlog-warning"><strong>${esc(Util.t('ui.setup_preview_stale_title'))}</strong> ${esc(OptimizerPreview._staleReason || Util.t('ui.setup_preview_stale_default_reason'))}. ${esc(Util.t('ui.setup_preview_stale_note'))}</div>`
+      : '';
 
     // Per-card markup
     const cardsHtml = cards.map(c => {
@@ -8012,6 +8016,8 @@ export const OptimizerPreview = {
         </div>
 
         ${backlogHtml}
+
+        ${staleHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
