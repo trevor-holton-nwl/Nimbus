@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, AdminCockpit, SetupAdmin } from '../../web/plant-and-administration.mjs';
+import { CalendarSync } from '../../web/schedule-data.mjs';
+import { Store } from '../../web/schedule-state.mjs';
 
 test('CalendarUI/Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof CalendarUI.render, 'function');
@@ -57,6 +59,75 @@ test('Plant exposes the generalized priority-list optimization API', () => {
   assert.equal(typeof Plant._uploadPriorityList, 'function');
   assert.equal(typeof Plant._confirmDeletePriorityList, 'function');
   assert.equal(typeof Plant._resyncOrderAttributes, 'function');
+});
+
+test('Plant blackout list renders only blocks for the selected plant', () => {
+  const list = { innerHTML: '', style: {} };
+  const stats = { innerHTML: '' };
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const priorBlocks = Store.plantBlocks;
+  globalThis.window = {};
+  globalThis.document = {
+    getElementById: id => id === 'plant-blocks-list' ? list
+      : id === 'plant-blocks-stats' ? stats : null,
+  };
+  try {
+    const start = new Date('2026-08-18T08:00:00');
+    const end = new Date('2026-08-18T12:00:00');
+    Store.setSelectedPlant('1006', 'test');
+    Store.replacePlantBlocks([
+      { id: 'plant-5512', plant: '5512', start, end, reason: '5512-only' },
+      { id: 'plant-1006', plant: '1006', start, end, reason: '1006-only' },
+    ], 'test');
+    Plant._renderBlocks();
+    assert.doesNotMatch(list.innerHTML, /5512-only/);
+    assert.match(list.innerHTML, /1006-only/);
+    assert.match(stats.innerHTML, /pbs-val">1</);
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+    Store.replacePlantBlocks(priorBlocks, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});
+
+test('Plant blackout delete ignores an ID that belongs to another plant', () => {
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const priorBlocks = Store.plantBlocks;
+  const originalDelete = CalendarSync.savePlantBlackoutDelete;
+  let deleteCalls = 0;
+  CalendarSync.savePlantBlackoutDelete = () => {
+    deleteCalls += 1;
+    return Promise.resolve({ ok: true });
+  };
+  globalThis.window = {};
+  globalThis.document = { getElementById: () => null };
+  const block = {
+    id: 'plant-5512', plant: '5512',
+    start: new Date('2026-08-18T08:00:00'), end: new Date('2026-08-18T12:00:00'),
+    reason: '5512-only',
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Store.replacePlantBlocks([block], 'test');
+    Plant.removePlantBlock(block.id);
+    assert.deepEqual(Store.plantBlocks, [block]);
+    assert.equal(deleteCalls, 0);
+  } finally {
+    CalendarSync.savePlantBlackoutDelete = originalDelete;
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+    Store.replacePlantBlocks(priorBlocks, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
 });
 
 test('SetupAdmin keeps read, copy, and export available to non-writers', () => {

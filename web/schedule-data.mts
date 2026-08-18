@@ -1572,6 +1572,11 @@ export const CalendarSync = {
       lineBlackouts:  (cfg.line_blackouts || []).length > 0,
       plantBlackouts: (cfg.plant_blackouts || []).length > 0,
     };
+    // A missing blackout slice is the migration path for older local caches.
+    // Remove legacy global state before emitting or migrating it: those blocks
+    // must never be fanned out or re-posted as copies for every plant.
+    if (!has.lineBlackouts)  CalendarSync._discardLegacyGlobalLineBlocks();
+    if (!has.plantBlackouts) CalendarSync._discardLegacyGlobalPlantBlocks();
     this._hydrating = true;
     try {
       if (has.plantHours) {
@@ -1684,18 +1689,13 @@ export const CalendarSync = {
       if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
     }
     if (!has.lineBlackouts) {
-      // Legacy line-less UNSTAMPED blocks were global (applied to every plant). Don't let
-      // the first-loading plant capture them — fan each out to a deterministic stamped
-      // copy per known plant, preserving global reach durably + idempotently. (F8)
-      CalendarSync._fanOutLegacyGlobalLineBlocks();
-      // Now migrate this plant's own blocks: already-stamped for it, or line-mapped to it.
+      // Migrate this plant's own blocks: already-stamped for it, or line-mapped to it.
       const blks = Store.blocks.filter(b =>
         b.plant === plant || (!b.plant && b.line && Store.getPlantForLine(b.line) === plant));
       blks.forEach(b => { b.plant = plant; });
       if (blks.length) jobs.push(this._post('/plant-calendar/line-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, true)) }, 'migrate-line-blackouts'));
     }
     if (!has.plantBlackouts) {
-      CalendarSync._fanOutLegacyGlobalPlantBlocks();  // same first-loader-capture fix (F8)
       const blks = Store.plantBlocks.filter(b => b.plant === plant);
       if (blks.length) jobs.push(this._post('/plant-calendar/plant-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, false)) }, 'migrate-plant-blackouts'));
     }
@@ -1725,41 +1725,38 @@ export const CalendarSync = {
     return true;
   },
 
-  // One-time migration fix: legacy line-less UNSTAMPED blackouts were global (applied to
-  // every plant). Replace each with one deterministic stamped copy per known plant so no
-  // single plant captures it and none is dropped from other plants. Idempotent — after
-  // the first run there are no un-stamped line-less blocks left to fan out. (F8)
-  _fanOutLegacyGlobalLineBlocks(): void {
-    const plants = Store.knownPlants();
-    if (!plants.length) return;
-    const legacy = Store.blocks.filter(b => !b.plant && !b.line);
-    if (!legacy.length) return;
-    const keep = Store.blocks.filter(b => b.plant || b.line);
-    for (const b of legacy) {
-      for (const p of plants) {
-        keep.push({ id: `${b.id}::${p}`, line: null, plant: p, start: b.start, end: b.end, reason: b.reason || '' });
-      }
-    }
-    // In-place replace (no reference reassignment) so Store.blocks' identity is stable.
-    Store.blocks.length = 0;
-    Store.blocks.push(...keep);
-    ErrorLog.info('calendar-sync', `Fanned out ${legacy.length} legacy global line blackout(s) across ${plants.length} plant(s)`);
+  // Legacy global blackouts were previously replicated as `${id}::${plant}`.
+  // The suffix is the old migration's reserved marker, so a matching stored
+  // plant is unambiguously a generated copy rather than a current local block.
+  _isLegacyFanoutCopy(block: { id?: unknown; plant?: string | null }): boolean {
+    const id = typeof block?.id === 'string' ? block.id : '';
+    const plant = typeof block?.plant === 'string' ? block.plant : '';
+    return !!id && !!plant && id.endsWith(`::${plant}`);
   },
 
-  _fanOutLegacyGlobalPlantBlocks(): void {
-    const plants = Store.knownPlants();
-    if (!plants.length) return;
-    const legacy = Store.plantBlocks.filter(b => !b.plant);
-    if (!legacy.length) return;
-    const keep = Store.plantBlocks.filter(b => b.plant);
-    for (const b of legacy) {
-      for (const p of plants) {
-        keep.push({ id: `${b.id}::${p}`, plant: p, start: b.start, end: b.end, reason: b.reason || '' });
-      }
-    }
+  // Global blackout state is no longer valid. Preserve line-specific legacy
+  // blocks so they can still be mapped to their owning plant, but discard
+  // unscoped global blocks and their old replicated copies before migration.
+  _discardLegacyGlobalLineBlocks(): void {
+    const before = Store.blocks.length;
+    const keep = Store.blocks.filter(b => {
+      if (!b.plant && !b.line) return false;
+      if (!b.line && CalendarSync._isLegacyFanoutCopy(b)) return false;
+      return true;
+    });
+    if (keep.length === before) return;
+    Store.blocks.length = 0;
+    Store.blocks.push(...keep);
+    ErrorLog.info('calendar-sync', `Discarded ${before - keep.length} legacy global line blackout(s)`);
+  },
+
+  _discardLegacyGlobalPlantBlocks(): void {
+    const before = Store.plantBlocks.length;
+    const keep = Store.plantBlocks.filter(b => b.plant && !CalendarSync._isLegacyFanoutCopy(b));
+    if (keep.length === before) return;
     Store.plantBlocks.length = 0;
     Store.plantBlocks.push(...keep);
-    ErrorLog.info('calendar-sync', `Fanned out ${legacy.length} legacy global plant blackout(s) across ${plants.length} plant(s)`);
+    ErrorLog.info('calendar-sync', `Discarded ${before - keep.length} legacy global plant blackout(s)`);
   },
 
   /* ----- immediate per-edit saves --------------------------------------- */

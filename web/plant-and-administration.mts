@@ -2338,8 +2338,10 @@ export const Plant = {
     const statsEl = document.getElementById('plant-blocks-stats');
     if (!list) return;
 
-    const blocks = (Store.plantBlocks || []).slice()
-      .sort((a, b) => (Util.parseDate(a.start)?.getTime() || 0) - (Util.parseDate(b.start)?.getTime() || 0));
+    const selectedPlant = Store.selectedPlant;
+    const blocks = selectedPlant ? (Store.plantBlocks || [])
+      .filter(b => b.plant === selectedPlant).slice() : [];
+    blocks.sort((a, b) => (Util.parseDate(a.start)?.getTime() || 0) - (Util.parseDate(b.start)?.getTime() || 0));
 
     if (statsEl) {
       if (blocks.length) {
@@ -2496,10 +2498,13 @@ export const Plant = {
   },
 
   removePlantBlock(id: string): void {
-    const blk = Store.plantBlocks.find(b => b.id === id);
-    const plant = blk?.plant || Store.selectedPlant;
+    // The rendered list is plant-scoped, but keep the write guard here too:
+    // a stale DOM handler must never delete a blackout belonging to another plant.
+    const plant = Store.selectedPlant;
+    const blk = Store.plantBlocks.find(b => b.id === id && b.plant === plant);
+    if (!blk || !plant) return;
     Store.removePlantBlock(id, 'plant');
-    if (plant) CalendarSync.savePlantBlackoutDelete(plant, id);
+    CalendarSync.savePlantBlackoutDelete(plant, id);
     Toast.show(Util.t('toast.plant_blackout_removed'), 'success');
   },
 
