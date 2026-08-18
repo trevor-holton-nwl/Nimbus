@@ -4500,7 +4500,10 @@ body.dark .cw-active-card {
    inner scrollers (.cal-scroll etc.) rely on clipping their own overflow against
    this ancestor; the other three panes don't need it. */
 #md-master-plant-pane { overflow: hidden; }
-.md-master-subtabs { margin: 0 0 12px; flex: 0 0 auto; }
+.md-master-subtabs { margin: 0; flex: 0 0 auto; }
+/* The Plant pane inner tabs sit flush beneath the master-data sub-tab row —
+   same zero-margin treatment as .settings-inner-tabs one level further in. */
+.plant-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
 
 /* The System Settings inner tabs are navigation, not content: keep them
    visible while the Rules or Setup Matrix panel scrolls independently. */
