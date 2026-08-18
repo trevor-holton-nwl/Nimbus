@@ -3306,24 +3306,26 @@ export const Inspector = {
     const id = String(task.id);
     const interval = observation.intervals.find(entry => String(entry.successorOrderId) === id);
     const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === id);
+    const hasObservedEntry = !!interval || !!diagnostic;
     // Keep a stable detail surface for every order. Positive setup intervals
     // and diagnostics supply their existing facts; an order with neither still
     // gets an honest, placeholder-only panel instead of losing the section.
     const entry: any = interval || diagnostic || { successorOrderId: id };
     const snapshot = Store.setupSnapshot;
     const definition = snapshot?.definition;
-    const predecessor = entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
-    const predecessorState = definition
+    const predecessor = hasObservedEntry && entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
+    const predecessorState = hasObservedEntry && definition
       ? (predecessor ? stateForOrder(predecessor, definition)
         : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE && state.signature_version === definition.signature_version)?.state_key)
       : null;
-    const successorState = definition ? stateForOrder(task, definition) : null;
-    const resolved = definition && predecessorState && successorState && snapshot
+    const successorState = hasObservedEntry && definition ? stateForOrder(task, definition) : null;
+    const resolved = hasObservedEntry && definition && predecessorState && successorState && snapshot
       ? resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
         plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides }) : null;
-    const predecessorStateText = Inspector._formatSetupState(predecessorState ?? null, definition)
-      || entry.predecessorState || null;
+    const predecessorStateText = hasObservedEntry
+      ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)
+      : null;
     return {
       predecessorOrderId: entry.predecessorOrderId ?? null,
       predecessorState: predecessorStateText,
@@ -3331,7 +3333,7 @@ export const Inspector = {
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
       effectiveMinutes: resolved?.effectiveMin ?? (Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
       standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
-      source: resolved?.source ?? (entry.source || null), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
+      source: resolved?.source ?? (entry.source || (hasObservedEntry ? 'resolved' : null)), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
       shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
         ? entry.requiredMinutes - entry.availableMinutes : null,

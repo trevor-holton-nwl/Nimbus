@@ -387,6 +387,36 @@ test('Inspector renders derived setup details for orders without setup observati
   }
 });
 
+test('Inspector does not infer setup values for an order absent from the observation', () => {
+  const priorSetup = Store.setupSnapshot;
+  const task = {
+    id: 'detail-configured-without-observation', ORDER: '100004', PLANT: 'P-SETUP',
+    PRODUCTION_LINE: 'L-SETUP', COLOR: 'BLUE', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00'),
+  };
+  try {
+    Store.replaceSetupSnapshot({
+      plant: 'P-SETUP',
+      definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [{ line: '', signature_version: 1,
+        from_key: [{ fieldKey: 'colorWheel', value: 'RED' }],
+        to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+      line_rows: [],
+      line_states: [{ line: 'L-SETUP', signature_version: 1,
+        state_key: [{ fieldKey: 'colorWheel', value: 'RED' }], source: 'manual', reason: 'unit-test' }],
+      overrides: [],
+    }, 'unit-test');
+    const detail = Inspector._setupDetailForTask(task, { intervals: [], diagnostics: [] });
+    assert.equal(detail.predecessorState, null);
+    assert.equal(detail.requiredMinutes, null);
+    assert.equal(detail.effectiveMinutes, null);
+    assert.equal(detail.standardMinutes, null);
+    assert.equal(detail.source, null);
+  } finally {
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+  }
+});
+
 test('Inspector formats setup signatures in configured order with readable labels', () => {
   const formatted = Inspector._formatSetupState([
     { fieldKey: 'colorWheel', value: 'Ruby' },
