@@ -7606,6 +7606,7 @@ interface PreviewExplanation {
   reasons: Array<{ code: string; message: string; line?: string; taskId?: string; outcome: 'accepted' | 'rejected' }>;
   constraints: string[];
   missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string }>;
+  missingPairsTotal: number;
   unchangedLines: string[];
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
 }
@@ -7702,10 +7703,8 @@ export const OptimizerPreview = {
       },
       reasons,
       constraints: [...new Set(candidate.explanation.map(reason => reason.code))].slice(0, PREVIEW_REASON_LIMIT),
-      missingPairs: candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => ({
-        line: edge.line, predecessorOrderId: edge.predecessorOrderId ?? null,
-        successorOrderId: edge.successorOrderId ?? null, reason: edge.reason,
-      })),
+      missingPairs: [],
+      missingPairsTotal: 0,
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
@@ -7717,11 +7716,11 @@ export const OptimizerPreview = {
 
   /** Derive only the state labels needed to review bounded missing edges while
    * the detached snapshot is still in scope. No task list is retained. */
-  describeMissingPairs(candidate: CandidateResult, tasks: ReadonlyArray<NimbusTask>, setup: SetupSnapshot | null): PreviewExplanation['missingPairs'] {
+  describeMissingPairs(candidate: CandidateResult, tasks: ReadonlyArray<NimbusTask>, setup: SetupSnapshot | null): { pairs: PreviewExplanation['missingPairs']; total: number } {
     const definition = setup?.definition;
     const byId = new Map(tasks.map(task => [String(task.id), task]));
-    const text = (state: SetupStateKey | null | undefined) => state?.map(part => `${part.fieldKey}=${part.value}`).join(' | ') || null;
-    return candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => {
+    const text = (state: SetupStateKey | null | undefined) => state?.map(part => part.value).join(' · ') || null;
+    const pairs = candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => {
       const predecessor = edge.predecessorOrderId ? byId.get(String(edge.predecessorOrderId)) : undefined;
       const successor = edge.successorOrderId ? byId.get(String(edge.successorOrderId)) : undefined;
       const lineState = definition
@@ -7736,6 +7735,7 @@ export const OptimizerPreview = {
         reason: edge.reason,
       };
     });
+    return { pairs, total: candidate.missingEdges.length };
   },
 
   missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
@@ -7879,11 +7879,13 @@ export const OptimizerPreview = {
           preKpis,
           postKpis,
         });
-        explanation.missingPairs = OptimizerPreview.describeMissingPairs(
+        const described = OptimizerPreview.describeMissingPairs(
           candidate,
           candidateSnapshot.tasks,
           Store.setupSnapshot?.plant === plant ? Store.setupSnapshot : null,
         );
+        explanation.missingPairs = described.pairs;
+        explanation.missingPairsTotal = described.total;
         OptimizerPreview._explanation = explanation;
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
@@ -7906,7 +7908,7 @@ export const OptimizerPreview = {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--err);">'
           + `  <div style="font-size:14px;margin-bottom:8px;">${esc(Util.t('ui.opt_pv_failed_title'))}</div>`
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${(errMsg || 'Unknown error').replace(/[<>&]/g, (c: string) => (({'<':'&lt;','>':'&gt;','&':'&amp;'} as Record<string, string>)[c]))}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${esc(errMsg || 'Unknown error')}</div>`
           + '</div>';
         }
         footBtns.forEach((b) => { b.disabled = false; });
@@ -7935,43 +7937,40 @@ export const OptimizerPreview = {
     //                null → neutral in both directions.
     const cards: OptimizerPreviewCard[] = [
       {
-        label: Util.t('ui.opt_pv_card_changeovers'), k: 'changeovers', ico: '🔁',
+        label: Util.t('ui.opt_pv_card_changeovers'), k: 'changeovers', ico: '&#8635;',
         fmt: (v) => String(v), unit: '', lowerIsBetter: true,
         tip: Util.t('ui.opt_pv_card_changeovers_tip'),
       },
       {
-        label: Util.t('ui.opt_pv_card_span'), k: 'span_h', ico: '↔',
+        label: Util.t('ui.opt_pv_card_span'), k: 'span_h', ico: '&#8596;',
         fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: 'soft',
         tip: Util.t('ui.opt_pv_card_span_tip'),
       },
       {
-        label: Util.t('ui.opt_pv_card_late'), k: 'late_count', ico: '⏰',
+        label: Util.t('ui.opt_pv_card_late'), k: 'late_count', ico: '&#9201;',
         fmt: (v) => String(v), unit: '', lowerIsBetter: true,
         tip: Util.t('ui.opt_pv_card_late_tip'),
       },
       {
-        label: Util.t('ui.opt_pv_card_lateness'), k: 'late_h', ico: '⛌',
+        label: Util.t('ui.opt_pv_card_lateness'), k: 'late_h', ico: '&#8721;',
         fmt: (v) => v.toFixed(1), unit: 'h', lowerIsBetter: true,
         tip: Util.t('ui.opt_pv_card_lateness_tip'),
       },
       {
-        label: Util.t('ui.opt_pv_card_util'), k: 'peak_util_pct', ico: '▲',
+        label: Util.t('ui.opt_pv_card_util'), k: 'peak_util_pct', ico: '&#9650;',
         fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
         tip: Util.t('ui.opt_pv_card_util_tip'),
       },
     ];
 
-    // Verdict: count how many directional KPIs moved the right way. 'soft'
-    // cards (span, peak utilization) count decreases as wins but treat
-    // increases as neutral — they shouldn't trigger a regression verdict.
-    const directional = cards.filter(c => c.lowerIsBetter === true || c.lowerIsBetter === 'soft');
+    // Verdict: score against the three targets only (changeovers, late_count, late_h).
+    // span_h and peak_util_pct are context — they affect card color but never the verdict.
+    const directional = cards.filter(c => c.lowerIsBetter === true);
     let better = 0, worse = 0;
     for (const c of directional) {
       const d = (post[c.k] ?? 0) - (pre[c.k] ?? 0);
       if (Math.abs(d) < 0.05) { continue; }
-      if (c.lowerIsBetter === 'soft') {
-        if (d < 0) better++;
-      } else if (d < 0) better++;
+      if (d < 0) better++;
       else worse++;
     }
     let verdictTone: string, verdictTitle: string, verdictSub: string;
@@ -7982,7 +7981,7 @@ export const OptimizerPreview = {
     } else if (worse === 0) {
       verdictTone = 'better';
       verdictTitle = better === directional.length ? Util.t('ui.opt_pv_verdict_big_win_title') : Util.t('ui.opt_pv_verdict_improved_title');
-      verdictSub = Util.t('ui.opt_pv_verdict_better_sub', { better, total: directional.length });
+      verdictSub = Util.t('ui.opt_pv_verdict_better_sub', { better, total: directional.length, targets: directional.length });
     } else if (better === 0) {
       verdictTone = 'worse';
       verdictTitle = Util.t('ui.opt_pv_verdict_regressed_title');
@@ -8030,32 +8029,15 @@ export const OptimizerPreview = {
     const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const whyHtml = (() => {
       if (!explanation) return '';
-      const reasons = explanation.reasons.length
-        ? `<ul class="opt-pv-reasons">${explanation.reasons.map(reason => `<li><strong>${esc(reason.outcome)}</strong> ${esc(reason.message)}</li>`).join('')}</ul>`
-        : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_reasons_none'))}</p>`;
       const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');
-      const unchangedLines = explanation.unchangedLines.join(', ') || Util.t('ui.setup_unchanged_lines_none');
-      // Order count and occupied hours are the two impact figures the KPI
-      // cards do NOT restate (they carry changeovers/span/late orders/
-      // lateness/utilization), so they live here rather than being dropped
-      // with the old duplicate "Candidate explanation" grid.
-      const production = Util.t('ui.opt_pv_before_after', {
-        before: String(explanation.impact.production.before), after: String(explanation.impact.production.after),
-      });
-      const occupied = Util.t('ui.opt_pv_before_after', {
-        before: explanation.impact.occupiedHours.before.toFixed(1), after: explanation.impact.occupiedHours.after.toFixed(1),
-      });
+      const unchangedCount = explanation.unchangedLines.length;
       return `<details class="opt-pv-section" open>
         <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_why_title'))}</span></summary>
         <div class="opt-pv-section-body">
-          <p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_why_intro'))}</p>
-          ${reasons}
           <dl class="opt-pv-meta-list">
             <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
-            <div><dt>${esc(Util.t('ui.setup_unchanged_lines_label'))}</dt><dd>${esc(unchangedLines)}</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_lines_changed'))}</dt><dd>${unchangedCount > 0 ? esc(Util.t('ui.opt_pv_lines_unchanged_count', { count: unchangedCount })) : esc(Util.t('ui.setup_unchanged_lines_none'))}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_sequences_changed_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_production_orders_label'))}</dt><dd>${esc(production)}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_occupied_hours_label'))}</dt><dd>${esc(occupied)}</dd></div>
           </dl>
         </div>
       </details>`;
@@ -8063,11 +8045,17 @@ export const OptimizerPreview = {
 
     const gapsHtml = (() => {
       if (!explanation) return '';
+      const pairCount = explanation.missingPairs.length;
+      const totalPairs = explanation.missingPairsTotal;
+      const isTruncated = totalPairs > pairCount;
+      const truncatedNote = isTruncated
+        ? `<p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_gaps_truncated', { shown: pairCount, total: totalPairs }))}</p>`
+        : '';
       const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
-      const body = explanation.missingPairs.length
-        ? `<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note"><button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_missing'))}</button>${canReview ? ` <button class="btn btn-ghost sm" data-opt-review-missing>${esc(Util.t('ui.setup_review_missing_title'))}</button>` : ''}</div>`
+      const body = pairCount
+        ? `${truncatedNote}<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note">${canReview ? `<button class="btn btn-primary sm" data-opt-review-missing>${esc(Util.t('btn.opt_fill_setup_matrix'))}</button> ` : ''}<button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_missing'))}</button></div>`
         : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_missing_pairs_none'))}</p>`;
-      const badge = explanation.missingPairs.length ? `<span class="opt-pv-section-badge">${explanation.missingPairs.length}</span>` : '';
+      const badge = pairCount ? `<span class="opt-pv-section-badge">${isTruncated ? Util.t('ui.opt_pv_gaps_badge', { count: totalPairs }) : pairCount}</span>` : '';
       return `<details class="opt-pv-section">
         <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_gaps_title'))}</span>${badge}</summary>
         <div class="opt-pv-section-body">
@@ -8082,25 +8070,36 @@ export const OptimizerPreview = {
       // The search being truncated by a deadline / iteration cap (rather than
       // converging) is the one diagnostic that changes what the planner should
       // do about the result, so it is surfaced on the collapsed summary too.
+      const diagSummary = Util.t('ui.opt_pv_diag_summary', {
+        method: explanation.search.method,
+        count: explanation.search.candidateCount,
+        runtime: `${explanation.search.runtimeMs.toFixed(0)} ms`,
+      });
       const limitBadge = explanation.search.limitReached
         ? `<span class="opt-pv-section-badge" title="${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}">${esc(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
         : '';
+      const diagEvents = OptimizerPreview._previewDiagnostics.filter(e => e.level === 'error' || e.level === 'warn');
+      const eventsHtml = diagEvents.length
+        ? `<ul class="opt-pv-diag-events">${diagEvents.map(e => `<li class="opt-pv-diag-event opt-pv-diag-${esc(e.level)}"><strong>${esc(e.level.toUpperCase())}</strong> ${esc(e.message)}</li>`).join('')}</ul>`
+        : '';
       return `<details class="opt-pv-section">
-        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span>${limitBadge}</summary>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span><span class="opt-pv-section-summary">${esc(diagSummary)}</span>${limitBadge}</summary>
         <div class="opt-pv-section-body">
           <dl class="opt-pv-meta-list">
             <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(explanation.search.method)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_candidates'))}</dt><dd>${esc(String(explanation.search.candidateCount))}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${esc(explanation.search.termination)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
+            <div><dt>${esc(Util.t('ui.opt_pv_diag_orders_in_scope'))}</dt><dd>${esc(String(explanation.impact.production.before))} → ${esc(String(explanation.impact.production.after))}</dd></div>
           </dl>
           ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
+          ${eventsHtml}
         </div>
       </details>`;
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-backlog-warning"><strong>${esc(Util.t('ui.setup_preview_stale_title'))}</strong> ${esc(OptimizerPreview._staleReason || Util.t('ui.setup_preview_stale_default_reason'))}. ${esc(Util.t('ui.setup_preview_stale_note'))}</div>`
+      ? `<div class="opt-pv-stale">${esc(Util.t('ui.opt_stale_banner'))}</div>`
       : '';
 
     // Per-card markup
@@ -8172,12 +8171,10 @@ export const OptimizerPreview = {
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
           <div class="opt-pv-chip opt-pv-chip-mode">${esc(modeLabel)}</div>
-          <div class="opt-pv-chip opt-pv-chip-plant" title="${esc(Util.t('ui.opt_pv_chip_plant_title'))}">📍 ${esc(plant)}</div>
+          <div class="opt-pv-chip opt-pv-chip-plant" title="${esc(Util.t('ui.opt_pv_chip_plant_title'))}">${esc(plant)}</div>
           <div class="opt-pv-chip opt-pv-chip-policy" title="${esc(Util.t('ui.opt_pv_chip_policy_title'))}">${esc(splitPolicyLabel[splitPolicy])}</div>
-          <div class="opt-pv-chip opt-pv-chip-time">⏱ ${esc(stamp)}</div>
+          <div class="opt-pv-chip opt-pv-chip-time">${esc(stamp)}</div>
         </div>
-
-        ${backlogHtml}
 
         ${staleHtml}
 
@@ -8194,6 +8191,8 @@ export const OptimizerPreview = {
         </div>
 
         <div class="opt-pv-grid">${cardsHtml}</div>
+
+        ${backlogHtml}
 
         <div class="opt-pv-sections">
           ${whyHtml}
@@ -8230,7 +8229,7 @@ export const OptimizerPreview = {
     const auditDetails = OptimizerPreview._auditDetails;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     if (!OptimizerPreview.canApply()) {
-      Toast.show('Setup data changed. Run optimization again before applying.', 'warn');
+      Toast.show(Util.t('ui.setup_preview_apply_stale_title'), 'warn');
       return;
     }
     if (auditDetails && plant) {
