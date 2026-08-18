@@ -365,7 +365,7 @@
           alerts.push({
             id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
-            msg: `Orders "${prev.task.text || prev.task.id}" and "${cur.task.text || cur.task.id}" overlap on ${line}.`,
+            msg: `Orders "${prev.task.PRODUCTION_ORDER || prev.task.ORDER || prev.task.id}" and "${cur.task.PRODUCTION_ORDER || cur.task.ORDER || cur.task.id}" overlap on ${line}.`,
             taskId: cur.task.id, line, time: cur.start
           });
         }
@@ -500,7 +500,7 @@
       if (conflict) {
         alerts.push({
           id:  `blk-${t.id}`, sev: 'err', type: 'blackout',
-          msg: `Order "${t.text || t.id}" overlaps a blackout block on ${line}.`,
+          msg: `Order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" overlaps a blackout block on ${line}.`,
           taskId: t.id, line, time: conflictTime
         });
       }
@@ -515,7 +515,7 @@
       if (badInterval) {
         alerts.push({
           id:  `fixclosed-${t.id}`, sev: 'warn', type: 'fixed-closed',
-          msg: `Fixed order "${t.text || t.id}" is on a day the ${line} calendar is closed.`,
+          msg: `Fixed order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" is on a day the ${line} calendar is closed.`,
           taskId: t.id, line, time: badInterval.start
         });
       }
@@ -542,7 +542,7 @@
       if (parts.length) {
         alerts.push({
           id:  `fixhours-${t.id}`, sev: 'warn', type: 'fixed-out-of-hours',
-          msg: `Fixed order "${t.text || t.id}" ${parts.join(' and ')}.`,
+          msg: `Fixed order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" ${parts.join(' and ')}.`,
           taskId: t.id, line, time: alertTime
         });
       }
@@ -560,7 +560,7 @@
       const line = t.PRODUCTION_LINE || 'Unknown';
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
-        msg: `Order "${t.text || t.id}" has a runtime that no longer matches its saved schedule.`,
+        msg: `Order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" has a runtime that no longer matches its saved schedule.`,
         taskId: t.id, line, time: t.start_date || new Date(),
       });
     }
@@ -578,14 +578,16 @@
       } catch { return 'an unrecorded state'; }
     };
     const formatSetupPairKey = pairKey => {
-      // The left half is always either the literal 'unknown' or a JSON array
-      // ending in ']'; splitting on lastIndexOf('->') mis-parses a pairKey
-      // whose signature value itself contains the substring '->'. Find the
-      // '->' that immediately follows that boundary instead.
-      const boundary = pairKey.indexOf(']') >= 0 ? pairKey.indexOf(']') + 1
-        : pairKey.startsWith('unknown') ? 'unknown'.length : -1;
-      if (boundary < 0 || pairKey.slice(boundary, boundary + 2) !== '->') return pairKey;
-      return `${formatSetupState(pairKey.slice(0, boundary))} → ${formatSetupState(pairKey.slice(boundary + 2))}`;
+      // The left half is either 'unknown' or a JSON array (e.g. [["colorWheel","X"]]).
+      // For JSON arrays, the split delimiter is ']->': the outer closing bracket
+      // immediately followed by '->'. Using indexOf(']') alone finds the inner ']'
+      // first and misses the boundary for nested arrays.
+      if (pairKey.startsWith('unknown->')) {
+        return `${formatSetupState('unknown')} → ${formatSetupState(pairKey.slice(9))}`;
+      }
+      const splitIdx = pairKey.indexOf(']->')
+      if (splitIdx < 0) return pairKey;
+      return `${formatSetupState(pairKey.slice(0, splitIdx + 1))} → ${formatSetupState(pairKey.slice(splitIdx + 3))}`;
     };
     const setupSeen = new Set();
     const inScope = line => !onlyLines || onlyLines.has(line || 'Unknown');

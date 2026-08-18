@@ -401,9 +401,9 @@ window.__NIMBUS_LOCALES.fr = {
 
   // Phase 2 de docs/scheduling_priority.md — libellés de champs pour les listes de priorités
   // (espace de noms partagé avec l'arborescence des Contraintes de Planification de la Phase 3, Décision 4).
-  'constraint.colorWheel':             'Roue Chromatique',
-  'constraint.prt01':                  'Outil de Production (01)',
-  'constraint.prt02':                  'Outil de Production (02)',
+  'constraint.colorWheel':             'Color',
+  'constraint.prt01':                  'PRT01',
+  'constraint.prt02':                  'PRT02',
   'constraint.productionVersion':      'Version de Production',
   'ui.values_ranked':                  'valeurs classées',
   'ui.values':                         'valeurs',

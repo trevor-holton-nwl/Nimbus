@@ -401,9 +401,9 @@ window.__NIMBUS_LOCALES.de = {
 
   // Phase 2 von docs/scheduling_priority.md — Feldbezeichnungen für Prioritätslisten
   // (gemeinsamer Namensraum mit dem Scheduling-Constraints-Baum aus Phase 3, Entscheidung 4).
-  'constraint.colorWheel':             'Farbrad',
-  'constraint.prt01':                  'Fertigungshilfsmittel (01)',
-  'constraint.prt02':                  'Fertigungshilfsmittel (02)',
+  'constraint.colorWheel':             'Color',
+  'constraint.prt01':                  'PRT01',
+  'constraint.prt02':                  'PRT02',
   'constraint.productionVersion':      'Fertigungsversion',
   'ui.values_ranked':                  'Werte eingestuft',
   'ui.values':                         'Werte',

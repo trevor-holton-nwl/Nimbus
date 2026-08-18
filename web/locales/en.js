@@ -553,9 +553,9 @@ window.__NIMBUS_LOCALES.en = {
 
   // Stage 2 of docs/scheduling_priority.md — priority-list field labels
   // (shared namespace with Stage 3's Scheduling Constraints tree, Decision 4).
-  'constraint.colorWheel':             'Color Wheel',
-  'constraint.prt01':                  'Prod. Resource Tool (01)',
-  'constraint.prt02':                  'Prod. Resource Tool (02)',
+  'constraint.colorWheel':             'Color',
+  'constraint.prt01':                  'PRT01',
+  'constraint.prt02':                  'PRT02',
   'constraint.productionVersion':      'Production Version',
   'ui.values_ranked':                  'values ranked',
   'ui.values':                         'values',

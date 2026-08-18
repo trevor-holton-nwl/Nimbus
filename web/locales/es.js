@@ -405,9 +405,9 @@ window.__NIMBUS_LOCALES.es = {
 
   // Fase 2 de docs/scheduling_priority.md — etiquetas de campo para listas de prioridades
   // (espacio de nombres compartido con el árbol de Restricciones de Programación de la Fase 3, Decisión 4).
-  'constraint.colorWheel':             'Rueda de Colores',
-  'constraint.prt01':                  'Herramienta de Producción (01)',
-  'constraint.prt02':                  'Herramienta de Producción (02)',
+  'constraint.colorWheel':             'Color',
+  'constraint.prt01':                  'PRT01',
+  'constraint.prt02':                  'PRT02',
   'constraint.productionVersion':      'Versión de Producción',
   'ui.values_ranked':                  'valores clasificados',
   'ui.values':                         'valores',

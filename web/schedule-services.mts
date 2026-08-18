@@ -2118,8 +2118,8 @@ export const Engine = {
    *  as the offline/loading-state fallback — R8). Order matches the backend
    *  registry (master_data.RANKABLE_FIELDS' declaration order). */
   CONSTRAINT_CATALOG: [
-    { key: 'colorWheel', label: 'Color wheel',
-      desc: 'Sequence orders by color-wheel priority to minimize color changeovers.' },
+    { key: 'colorWheel', label: 'Color',
+      desc: 'Sequence orders by color priority to minimize color changeovers.' },
   ] as Array<{ key: string; label: string; desc: string }>,
 
   /** Local, static field_key -> description fallback. `GET /priority-fields`

@@ -79,9 +79,9 @@ const _okJson = (r: Response) => r.ok ? r.json() : Promise.reject(new Error(`HTT
  *  so these labels are never what the user actually sees. Keep the key list in
  *  sync with RANKABLE_FIELDS if a field is added there. */
 const _FALLBACK_PRIORITY_FIELDS: PriorityFieldMeta[] = [
-  { field_key: 'colorWheel', mp_column: 'color', orders_column: 'color', task_field: 'COLOR', default_label: 'Color Wheel' },
-  { field_key: 'prt01', mp_column: 'prt_01', orders_column: 'prt_01', task_field: 'PRT_01', default_label: 'Prod. Resource Tool (01)' },
-  { field_key: 'prt02', mp_column: 'prt_02', orders_column: 'prt_02', task_field: 'PRT_02', default_label: 'Prod. Resource Tool (02)' },
+  { field_key: 'colorWheel', mp_column: 'color', orders_column: 'color', task_field: 'COLOR', default_label: 'Color' },
+  { field_key: 'prt01', mp_column: 'prt_01', orders_column: 'prt_01', task_field: 'PRT_01', default_label: 'PRT01' },
+  { field_key: 'prt02', mp_column: 'prt_02', orders_column: 'prt_02', task_field: 'PRT_02', default_label: 'PRT02' },
 ];
 
 /** Reserved key in `PriorityListFieldSummary.coverage` holding the true
@@ -195,7 +195,7 @@ export const SetupAdmin = (() => {
     }
   };
   /** Same `constraint.<key>` vocabulary Scheduling Rules already uses for
-   *  these four fields, so the signature reads "Color Wheel" instead of the
+   *  these four fields, so the signature reads "Color" instead of the
    *  raw `colorWheel` field key — one term for the same underlying registry
    *  instead of two (docs/Setup_matrix_redesign.md §3). Falls back to the
    *  raw key if a field has no translated label. */
