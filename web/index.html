@@ -869,10 +869,39 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
 .opt-pv-section-title { font: 600 10px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .opt-pv-section-badge { font: 600 9px/1.5 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--warn); background: var(--warn-soft); border-radius: 3px; padding: 1px 6px; }
 .opt-pv-section-summary { font-size: 11.5px; color: var(--fg-mute); }
+.opt-pv-plan-wrap { overflow-x: auto; margin-bottom: 14px; }
+.opt-pv-plan-table { width: 100%; border-collapse: collapse; min-width: 480px; font-size: 12px; }
+.opt-pv-plan-table th, .opt-pv-plan-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.opt-pv-plan-table thead th { font: 700 10.5px/1.3 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; color: var(--fg-mute); text-align: right; white-space: nowrap; }
+.opt-pv-plan-table thead th:first-child { border-bottom: 1px solid var(--line); }
+.opt-pv-plan-table tbody th { font: 600 10.5px/1.3 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; color: var(--fg-mute); text-align: left; cursor: help; white-space: nowrap; }
+.opt-pv-plan-table td { text-align: right; font: 400 13px/1 var(--font-mono); color: var(--fg-mute); white-space: nowrap; }
+.opt-pv-plan-applied-head { background: var(--bg-subtle); border-top: 2px solid var(--fg) !important; color: var(--fg) !important; }
+.opt-pv-plan-applied-cell { background: var(--bg-subtle); }
+.opt-pv-plan-current { color: var(--fg-mute); }
+.opt-pv-plan-val-applied { font-weight: 600; color: var(--fg); }
+.opt-pv-plan-col-sub { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--fg-mute); margin-top: 2px; font-size: 10.5px; font-family: inherit; }
+.opt-pv-plan-delta-ok   { display: block; font: 600 9.5px/1.4 var(--font-mono); color: var(--ok);   margin-top: 2px; }
+.opt-pv-plan-delta-err  { display: block; font: 600 9.5px/1.4 var(--font-mono); color: var(--err);  margin-top: 2px; }
+.opt-pv-plan-delta-warn { display: block; font: 600 9.5px/1.4 var(--font-mono); color: var(--warn); margin-top: 2px; }
+.opt-pv-plan-delta-mute { display: block; font: 600 9.5px/1.4 var(--font-mono); color: var(--fg-mute); margin-top: 2px; }
+.opt-pv-plan-tfoot th, .opt-pv-plan-tfoot td { padding: 9px 10px; font-size: 11.5px; color: var(--fg-mute); border-bottom: 0; line-height: 1.45; min-width: 110px; }
+.opt-pv-plan-tfoot th { font: 600 9.5px/1.4 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .opt-pv-section-body { padding: 12px; border-top: 1px solid var(--line); background: var(--bg-elev); }
 .opt-pv-section-intro { margin: 0 0 10px; font-size: 11.5px; color: var(--fg-mute); max-width: 78ch; }
 .opt-pv-section-empty { margin: 0; font-size: 12px; color: var(--fg-mute); }
 .opt-pv-reasons { margin: 0 0 10px; padding-left: 18px; font-size: 12px; }
+.opt-pv-prunes { margin-bottom: 14px; }
+.opt-pv-prunes-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.opt-pv-prunes-title { font: 600 10px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-mute); }
+.opt-pv-prunes-total { font-size: 11.5px; color: var(--fg-mute); }
+.opt-pv-prune-row { display: grid; grid-template-columns: 170px 1fr 44px; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+.opt-pv-prune-label { color: var(--fg-mute); }
+.opt-pv-prune-track { background: var(--bg-subtle); border-radius: 3px; height: 10px; overflow: hidden; }
+.opt-pv-prune-fill { display: block; height: 100%; background: var(--line-strong); border-radius: 3px; }
+.opt-pv-prune-fill.warn { background: var(--warn); }
+.opt-pv-prune-count { text-align: right; font: 600 12px/1 var(--font-mono); color: var(--fg); }
+.opt-pv-prune-footnote { margin: 8px 0 0; font-size: 11px; color: var(--fg-mute); max-width: 78ch; }
 .opt-pv-meta-list { display: flex; flex-wrap: wrap; gap: 6px 24px; margin: 0; }
 .opt-pv-meta-list > div { display: flex; gap: 10px; }
 .opt-pv-meta-list dt { font: 600 9px/1.7 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-faint); }

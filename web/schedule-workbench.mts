@@ -146,7 +146,7 @@ import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation } from './schedule-services.mjs';
 import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import { SetupAdmin } from './plant-and-administration.mjs';
@@ -7609,6 +7609,11 @@ interface PreviewExplanation {
   missingPairsTotal: number;
   unchangedLines: string[];
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
+  /** Aggregate prune tally for the whole run (§4.3 OPTIMIZER-PREVIEW.md), bucketed
+   *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
+   *  count — per-order placement/acceptance log entries (e.g. 'due-date-first-placement')
+   *  are not prunes and are excluded, not rolled into 'other'. */
+  prunes: { setup: number; fixed: number; capacity: number; other: number; total: number };
 }
 
 interface PreviewExplanationInput {
@@ -7620,6 +7625,71 @@ interface PreviewExplanationInput {
 
 const PREVIEW_REASON_LIMIT = 8;
 const PREVIEW_MISSING_PAIR_LIMIT = 12;
+
+/** Reason codes that represent a genuine exclusion (order/line left out of the
+ *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
+ *  successes or policy-chooser notes (e.g. 'due-date-first-placement',
+ *  'fixed-incoming-setup', 'covered-fixed-boundary-fallback') and must never be
+ *  tallied as prunes — see OPTIMIZER-PREVIEW.md §4.3 open question 2. There is
+ *  no 'color block' or 'due date' code in this engine today; only setup,
+ *  fixed-boundary and capacity-deferral exclusions are ever emitted. */
+const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'fixed' | 'capacity' | 'other'> = {
+  'rejected-uncovered-transition': 'setup',
+  'setup-incompatible': 'setup',
+  'setup-sequence-infeasible': 'setup',
+  'setup-definition-unavailable': 'setup',
+  'spt-sequence-infeasible': 'setup',
+  'setup-signature-incompatible': 'setup',
+  'override-inactive': 'fixed',
+  'fixed-boundary-infeasible': 'fixed',
+  'fixed-boundary-fallback-ambiguous': 'fixed',
+  'due-work-unadmitted': 'capacity',
+  'trailing-fragment-unadmitted': 'capacity',
+  'initial-state-unknown': 'other',
+};
+
+function tallyPrunes(explanation: ReadonlyArray<CandidateReason>): PreviewExplanation['prunes'] {
+  const prunes = { setup: 0, fixed: 0, capacity: 0, other: 0, total: 0 };
+  for (const reason of explanation) {
+    const bucket = PRUNE_BUCKET_BY_CODE[reason.code];
+    if (!bucket) continue;
+    prunes[bucket] += 1;
+    prunes.total += 1;
+  }
+  return prunes;
+}
+
+/** Target KPIs a finalist's whyNot sentence is scored against — the same three
+ *  targets the verdict banner scores (changeovers, late_count, late_h); span_h
+ *  and peak_util_pct are context-only, never part of a finalist's rationale.
+ *  `phrase` renders the quantified delta the OPTIMIZER-PREVIEW.md §4.2 example
+ *  uses ("one more late order and 65 h more slip"), not just a KPI name. */
+const FINALIST_TARGET_KEYS: ReadonlyArray<{
+  key: keyof OptimizerKpis;
+  phrase: (n: number, worse: boolean) => string;
+}> = [
+  { key: 'changeovers', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} changeover${n === 1 ? '' : 's'}` },
+  { key: 'late_count', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} late order${n === 1 ? '' : 's'}` },
+  { key: 'late_h', phrase: (n, worse) => `${n.toFixed(1)} h ${worse ? 'more' : 'less'} slip` },
+];
+
+/** One-sentence rationale for why an alternate finalist wasn't applied. Compares
+ *  only the scored targets against the applied plan — never fabricates a "best
+ *  balance" claim, since this is a 2-wide mode-swap comparison, not a true beam
+ *  (see OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
+function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): string {
+  const worse: string[] = [];
+  const better: string[] = [];
+  for (const { key, phrase } of FINALIST_TARGET_KEYS) {
+    const d = (alt[key] ?? 0) - (applied[key] ?? 0);
+    if (Math.abs(d) < 0.05) continue;
+    (d > 0 ? worse : better).push(phrase(Math.abs(d), d > 0));
+  }
+  if (!worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_tie');
+  if (worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_worse', { list: worse.join(' and ') });
+  if (better.length && !worse.length) return Util.t('ui.opt_pv_plan_pruned_better', { list: better.join(' and ') });
+  return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
+}
 
 /* =============================================================================
    OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
@@ -7648,6 +7718,9 @@ export const OptimizerPreview = {
   } | null,
   _auditDetails: null as OptimizationAuditDetails | null,
   _explanation: null as PreviewExplanation | null,
+  /** KPI vectors for the applied plan and one alternate mode — populated in
+   *  runWithPreview, wiped in _clear. Patches are never retained. */
+  _finalists: null as Array<{ label: string; mode: OptimizerMode; kpis: OptimizerKpis; whyNot: string | null }> | null,
   stale: false,
   _staleReason: null as string | null,
   active:    false,  // true while detached candidate details await Apply/Discard
@@ -7706,6 +7779,7 @@ export const OptimizerPreview = {
       missingPairs: [],
       missingPairsTotal: 0,
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
+      prunes: tallyPrunes(candidate.explanation),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
         termination: candidate.diagnostics.termination, runtimeMs: candidate.diagnostics.runtimeMs,
@@ -7887,6 +7961,32 @@ export const OptimizerPreview = {
         explanation.missingPairs = described.pairs;
         explanation.missingPairsTotal = described.total;
         OptimizerPreview._explanation = explanation;
+
+        // Alternate-mode KPI vectors — the only data needed for the plan
+        // comparison table. Patches are computed and immediately discarded;
+        // only the KPI scalars survive for the preview.
+        {
+          const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover' };
+          const altMode = altModeMap[mode];
+          let finalists: typeof OptimizerPreview['_finalists'] = null;
+          if (altMode) {
+            try {
+              const altCandidate = evaluateSchedule(candidateSnapshot, {
+                mode: altMode, plant: opts.plant, lines: opts.lines,
+                startDate: opts.startDate, endDate: opts.endDate,
+                respectFixed: opts.respectFixed, respectCalendar: opts.respectCalendar,
+              });
+              const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
+              const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot);
+              finalists = [
+                { label: 'A', mode, kpis: postKpis, whyNot: null },
+                { label: 'B', mode: altMode, kpis: altKpis, whyNot: describeFinalistWhyNot(postKpis, altKpis) },
+              ];
+            } catch { /* alt run failed — table stays absent */ }
+          }
+          OptimizerPreview._finalists = finalists;
+        }
+
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
 
@@ -8031,9 +8131,79 @@ export const OptimizerPreview = {
       if (!explanation) return '';
       const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');
       const unchangedCount = explanation.unchangedLines.length;
+      const finalists = OptimizerPreview._finalists;
+
+      let planTableHtml = '';
+      if (finalists) {
+        const fmtDelta = (d: number, lb: LowerIsBetter, fmt: (v: number) => string, unit: string): string => {
+          if (Math.abs(d) < 0.05) return '';
+          const sign = d < 0 ? '−' : '+';
+          const cls = lb === true
+            ? (d < 0 ? 'opt-pv-plan-delta-ok' : 'opt-pv-plan-delta-err')
+            : lb === 'soft'
+              ? (d < 0 ? 'opt-pv-plan-delta-ok' : 'opt-pv-plan-delta-warn')
+              : 'opt-pv-plan-delta-mute';
+          return `<span class="${cls}">${sign}${esc(fmt(Math.abs(d)))}${esc(unit)}</span>`;
+        };
+        const bodyRows = cards.map(c => {
+          const preV = pre[c.k] ?? 0;
+          const currentCell = `<td class="opt-pv-plan-current">${esc(c.fmt(preV))}${esc(c.unit)}</td>`;
+          const dataCells = finalists!.map((f, i) => {
+            const val = f.kpis[c.k] ?? 0;
+            const delta = fmtDelta(val - preV, c.lowerIsBetter, c.fmt, c.unit);
+            return i === 0
+              ? `<td class="opt-pv-plan-applied-cell"><span class="opt-pv-plan-val-applied">${esc(c.fmt(val))}${esc(c.unit)}</span>${delta}</td>`
+              : `<td>${esc(c.fmt(val))}${esc(c.unit)}${delta}</td>`;
+          }).join('');
+          return `<tr><th scope="row" title="${esc(c.tip)}">${esc(c.label)}</th>${currentCell}${dataCells}</tr>`;
+        }).join('');
+        const headCells = finalists.map((f, i) => i === 0
+          ? `<th class="opt-pv-plan-applied-head"><div>${esc(Util.t('ui.opt_pv_plan_col_applied'))}</div><div class="opt-pv-plan-col-sub">${esc(f.mode.toUpperCase())}</div></th>`
+          : `<th><div>${esc(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${esc(f.mode.toUpperCase())}</div></th>`
+        ).join('');
+        const verdictCells = finalists.map((f, i) => i === 0
+          ? `<td class="opt-pv-plan-applied-cell"><strong>${esc(Util.t('ui.opt_pv_plan_chosen'))}</strong> ${esc(Util.t('ui.opt_pv_plan_chosen_reason', { mode: f.mode.toUpperCase() }))}</td>`
+          : `<td><strong>${esc(Util.t('ui.opt_pv_plan_pruned'))}</strong> ${esc(f.whyNot || '')}</td>`
+        ).join('');
+        planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
+          <thead><tr><th></th><th><div>${esc(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${esc(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+          <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${esc(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${esc(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
+        </table></div>`;
+      }
+
+      // §4.3 — aggregate prune tally for the whole run. Only rendered when at
+      // least one genuinely exclusionary reason code fired (see tallyPrunes).
+      let prunesHtml = '';
+      const p = explanation.prunes;
+      if (p && p.total > 0) {
+        const rows: Array<{ label: string; count: number; warn?: boolean }> = [
+          { label: Util.t('ui.opt_pv_prune_setup'), count: p.setup, warn: true },
+          { label: Util.t('ui.opt_pv_prune_fixed'), count: p.fixed },
+          { label: Util.t('ui.opt_pv_prune_capacity'), count: p.capacity },
+          { label: Util.t('ui.opt_pv_prune_other'), count: p.other },
+        ].filter(row => row.count > 0).sort((a, b) => b.count - a.count);
+        const max = Math.max(...rows.map(row => row.count), 1);
+        const barsHtml = rows.map(row => `<div class="opt-pv-prune-row">
+          <span class="opt-pv-prune-label">${esc(row.label)}</span>
+          <span class="opt-pv-prune-track"><span class="opt-pv-prune-fill${row.warn ? ' warn' : ''}" style="width:${Math.round((row.count / max) * 100)}%"></span></span>
+          <span class="opt-pv-prune-count">${esc(String(row.count))}</span>
+        </div>`).join('');
+        prunesHtml = `<div class="opt-pv-prunes">
+          <div class="opt-pv-prunes-head">
+            <span class="opt-pv-prunes-title">${esc(Util.t('ui.opt_pv_prunes_title'))}</span>
+            <span class="opt-pv-prunes-total">${esc(Util.t('ui.opt_pv_prunes_total', { count: p.total }))}</span>
+          </div>
+          ${barsHtml}
+          ${p.setup > 0 ? `<p class="opt-pv-prune-footnote">${esc(Util.t('ui.opt_pv_prune_footnote', { count: p.setup }))}</p>` : ''}
+        </div>`;
+      }
+
       return `<details class="opt-pv-section" open>
         <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_why_title'))}</span></summary>
         <div class="opt-pv-section-body">
+          ${planTableHtml}
+          ${prunesHtml}
           <dl class="opt-pv-meta-list">
             <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_lines_changed'))}</dt><dd>${unchangedCount > 0 ? esc(Util.t('ui.opt_pv_lines_unchanged_count', { count: unchangedCount })) : esc(Util.t('ui.setup_unchanged_lines_none'))}</dd></div>
@@ -8307,6 +8477,7 @@ export const OptimizerPreview = {
     OptimizerPreview._backlogAudit = null;
     OptimizerPreview._auditDetails = null;
     OptimizerPreview._explanation = null;
+    OptimizerPreview._finalists = null;
     OptimizerPreview.stale = false;
     OptimizerPreview._staleReason = null;
     if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];

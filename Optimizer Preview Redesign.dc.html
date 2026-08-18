@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #e9edf2; }
+  a { color: #1f5fbf; }
+  a:hover { color: #1a4fa0; }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:rgba(12,28,48,.42);padding:32px 24px;display:flex;justify-content:center;align-items:flex-start;font-family:'Public Sans',system-ui,sans-serif;font-size:13px;line-height:1.45;color:#1c2b3a">
+  <div style="width:min(900px,100%);background:#ffffff;border:1px solid #d5dce4;border-radius:8px;box-shadow:0 24px 60px rgba(12,28,48,.4),0 12px 32px rgba(12,28,48,.28);display:flex;flex-direction:column;max-height:calc(100vh - 64px)">
+
+    <header style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid #d5dce4">
+      <h3 style="margin:0;font-family:Archivo,'Public Sans',sans-serif;font-weight:700;letter-spacing:-0.015em;font-size:15px">Optimization preview</h3>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0">
+        <span style="font:600 10px/1 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#12263f;background:#e9edf2;border:1px solid #d5dce4;border-radius:4px;padding:5px 8px;white-space:nowrap">Combined</span>
+        <span style="display:inline-flex;align-items:baseline;gap:7px;font:600 10px/1 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#5d7186;background:#ffffff;border:1px solid #d5dce4;border-radius:4px;padding:5px 8px;white-space:nowrap">CHI-04<span style="font-weight:400;letter-spacing:0;text-transform:none;color:#8fa1b3">14:32</span></span>
+        <span style="font:600 10px/1 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#5d7186;background:#ffffff;border:1px solid #d5dce4;border-radius:4px;padding:5px 8px;white-space:nowrap">No splitting</span>
+      </div>
+    </header>
+
+    <div style="overflow:auto;padding:18px;display:flex;flex-direction:column;gap:16px;align-items:stretch">
+
+      <div style="{{ staleStyle }}">
+        <strong style="font-weight:600">Setup data changed while this comparison was open.</strong> Run optimization again before applying — these numbers no longer describe the current setup times.
+      </div>
+
+      <div style="{{ verdictStyle }}" style-before="{{ verdictRail }}">
+        <div style="{{ verdictIconStyle }}">{{ verdictIcon }}</div>
+        <div style="min-width:0">
+          <div style="font-family:Archivo,'Public Sans',sans-serif;font-size:16px;font-weight:700;letter-spacing:-0.01em;line-height:1.25;color:#1c2b3a">{{ verdictTitle }}</div>
+          <div style="font-size:12px;color:#5d7186;margin-top:3px;line-height:1.4;text-wrap:pretty">{{ verdictSub }}</div>
+        </div>
+        <div style="text-align:center;padding-left:16px;border-left:1px solid #d5dce4;flex:none">
+          <div style="{{ verdictScoreStyle }}">{{ verdictScore }}<span style="color:#8fa1b3;font-weight:500;font-size:14px">/5</span></div>
+          <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#5d7186;margin-top:4px">KPIs improved</div>
+        </div>
+      </div>
+
+      <div style="flex:0 0 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="position:relative;background:#ffffff;border:1px solid #d5dce4;border-top:2px solid #1e7a4a;border-radius:8px;padding:12px 14px 14px" style-hover="border-color:#c6d0db;box-shadow:0 2px 6px rgba(12,28,48,.08),0 1px 2px rgba(12,28,48,.04)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:#dde9f8;color:#1f5fbf">&#8635;</span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#5d7186;flex:1;min-width:0">Changeovers</span>
+            <span title="Adjacent orders on the same line that differ in COLOR or FORM_SIZE. Each one costs cleanout and setup time, so fewer is better." style="width:15px;height:15px;border-radius:50%;background:#f4f7fa;border:1px solid #d5dce4;color:#5d7186;font:700 10px 'Public Sans',system-ui,sans-serif;display:inline-flex;align-items:center;justify-content:center;cursor:help;flex:none">?</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:4px 0 10px">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">Before</div>
+              <div style="font:500 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#5d7186">34<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500"></span></div>
+            </div>
+            <div style="font-size:16px;font-weight:300;color:#1e7a4a;padding:0 2px">&rarr;</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">After</div>
+              <div style="font:600 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#1c2b3a">27<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500"></span></div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px dashed #d5dce4">
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">pre</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:100%;background:#c6d0db"></i></div></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">post</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:79%;background:linear-gradient(90deg,#1e7a4a,#66ab84)"></i></div></div>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 10px;border-radius:999px;font:700 11.5px 'JetBrains Mono',monospace;letter-spacing:.01em;background:rgba(30,122,74,.10);color:#1e7a4a"><span style="font-size:9px">&#9660;</span>&minus;7<span style="font-weight:500;opacity:.8;margin-left:2px">(&minus;21%)</span></div>
+        </div>
+        <div style="position:relative;background:#ffffff;border:1px solid #d5dce4;border-top:2px solid #1e7a4a;border-radius:8px;padding:12px 14px 14px" style-hover="border-color:#c6d0db;box-shadow:0 2px 6px rgba(12,28,48,.08),0 1px 2px rgba(12,28,48,.04)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:#dde9f8;color:#1f5fbf">&#9201;</span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#5d7186;flex:1;min-width:0">Late orders</span>
+            <span title="Orders whose scheduled finish lands after the SAP planning date. Equal weight — a 1-hour slip and a 40-hour slip each count as one." style="width:15px;height:15px;border-radius:50%;background:#f4f7fa;border:1px solid #d5dce4;color:#5d7186;font:700 10px 'Public Sans',system-ui,sans-serif;display:inline-flex;align-items:center;justify-content:center;cursor:help;flex:none">?</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:4px 0 10px">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">Before</div>
+              <div style="font:500 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#5d7186">12<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500"></span></div>
+            </div>
+            <div style="font-size:16px;font-weight:300;color:#1e7a4a;padding:0 2px">&rarr;</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">After</div>
+              <div style="font:600 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#1c2b3a">9<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500"></span></div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px dashed #d5dce4">
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">pre</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:100%;background:#c6d0db"></i></div></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">post</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:75%;background:linear-gradient(90deg,#1e7a4a,#66ab84)"></i></div></div>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 10px;border-radius:999px;font:700 11.5px 'JetBrains Mono',monospace;letter-spacing:.01em;background:rgba(30,122,74,.10);color:#1e7a4a"><span style="font-size:9px">&#9660;</span>&minus;3<span style="font-weight:500;opacity:.8;margin-left:2px">(&minus;25%)</span></div>
+        </div>
+        <div style="position:relative;background:#ffffff;border:1px solid #d5dce4;border-top:2px solid #b02a20;border-radius:8px;padding:12px 14px 14px" style-hover="border-color:#c6d0db;box-shadow:0 2px 6px rgba(12,28,48,.08),0 1px 2px rgba(12,28,48,.04)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:#dde9f8;color:#1f5fbf">&#8721;</span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#5d7186;flex:1;min-width:0">Cumulative lateness</span>
+            <span title="Total due-date slip across every late order, in hours. Captures severity, not just count. Lower is better." style="width:15px;height:15px;border-radius:50%;background:#f4f7fa;border:1px solid #d5dce4;color:#5d7186;font:700 10px 'Public Sans',system-ui,sans-serif;display:inline-flex;align-items:center;justify-content:center;cursor:help;flex:none">?</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:4px 0 10px">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">Before</div>
+              <div style="font:500 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#5d7186">148.5<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">h</span></div>
+            </div>
+            <div style="font-size:16px;font-weight:300;color:#b02a20;padding:0 2px">&rarr;</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">After</div>
+              <div style="font:600 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#1c2b3a">161.0<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">h</span></div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px dashed #d5dce4">
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">pre</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:92%;background:#c6d0db"></i></div></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">post</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:100%;background:linear-gradient(90deg,#b02a20,#cc6f66)"></i></div></div>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 10px;border-radius:999px;font:700 11.5px 'JetBrains Mono',monospace;letter-spacing:.01em;background:rgba(176,42,32,.10);color:#b02a20"><span style="font-size:9px">&#9650;</span>+12.5<span style="font-weight:500;opacity:.8;margin-left:2px">(+8%)</span></div>
+        </div>
+        <div style="position:relative;background:#ffffff;border:1px solid #d5dce4;border-top:2px solid #1e7a4a;border-radius:8px;padding:12px 14px 14px" style-hover="border-color:#c6d0db;box-shadow:0 2px 6px rgba(12,28,48,.08),0 1px 2px rgba(12,28,48,.04)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:#dde9f8;color:#1f5fbf">&#8596;</span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#5d7186;flex:1;min-width:0">Schedule span</span>
+            <span title="Clock time from the earliest order start to the latest order finish, across the selected window and lines." style="width:15px;height:15px;border-radius:50%;background:#f4f7fa;border:1px solid #d5dce4;color:#5d7186;font:700 10px 'Public Sans',system-ui,sans-serif;display:inline-flex;align-items:center;justify-content:center;cursor:help;flex:none">?</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:4px 0 10px">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">Before</div>
+              <div style="font:500 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#5d7186">336.0<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">h</span></div>
+            </div>
+            <div style="font-size:16px;font-weight:300;color:#1e7a4a;padding:0 2px">&rarr;</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">After</div>
+              <div style="font:600 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#1c2b3a">331.5<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">h</span></div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px dashed #d5dce4">
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">pre</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:100%;background:#c6d0db"></i></div></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">post</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:99%;background:linear-gradient(90deg,#1e7a4a,#66ab84)"></i></div></div>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 10px;border-radius:999px;font:700 11.5px 'JetBrains Mono',monospace;letter-spacing:.01em;background:rgba(30,122,74,.10);color:#1e7a4a"><span style="font-size:9px">&#9660;</span>&minus;4.5<span style="font-weight:500;opacity:.8;margin-left:2px">(&minus;1%)</span></div>
+        </div>
+        <div style="position:relative;background:#ffffff;border:1px solid #d5dce4;border-top:2px solid #1e7a4a;border-radius:8px;padding:12px 14px 14px" style-hover="border-color:#c6d0db;box-shadow:0 2px 6px rgba(12,28,48,.08),0 1px 2px rgba(12,28,48,.04)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:#dde9f8;color:#1f5fbf">&#9650;</span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#5d7186;flex:1;min-width:0">Peak line utilization</span>
+            <span title="Highest single-line, single-day utilization in the 14-day horizon. Over 100% means overbooked against calendar capacity." style="width:15px;height:15px;border-radius:50%;background:#f4f7fa;border:1px solid #d5dce4;color:#5d7186;font:700 10px 'Public Sans',system-ui,sans-serif;display:inline-flex;align-items:center;justify-content:center;cursor:help;flex:none">?</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:4px 0 10px">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">Before</div>
+              <div style="font:500 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#5d7186">104<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">%</span></div>
+            </div>
+            <div style="font-size:16px;font-weight:300;color:#1e7a4a;padding:0 2px">&rarr;</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;margin-bottom:2px">After</div>
+              <div style="font:600 22px/1 'JetBrains Mono',monospace;letter-spacing:-.01em;color:#1c2b3a">97<span style="font-size:12px;color:#8fa1b3;margin-left:2px;font-weight:500">%</span></div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px dashed #d5dce4">
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">pre</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:100%;background:#c6d0db"></i></div></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b3;width:28px;flex:none">post</span><div style="flex:1;height:6px;background:#f4f7fa;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;border-radius:3px;width:93%;background:linear-gradient(90deg,#1e7a4a,#66ab84)"></i></div></div>
+          </div>
+          <div style="display:inline-flex;align-items:center;gap:5px;margin-top:8px;padding:4px 10px;border-radius:999px;font:700 11.5px 'JetBrains Mono',monospace;letter-spacing:.01em;background:rgba(30,122,74,.10);color:#1e7a4a"><span style="font-size:9px">&#9660;</span>&minus;7<span style="font-weight:500;opacity:.8;margin-left:2px">(&minus;7%)</span></div>
+        </div>
+      </div>
+
+      <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:0;border:1px solid #d5dce4;border-radius:4px;overflow:hidden">
+
+        <button type="button" onClick="{{ toggleWhy }}" style="{{ whyHeadStyle }}">
+          <span style="display:flex;align-items:baseline;gap:10px;min-width:0"><span style="font:600 10px/1.2 'JetBrains Mono',monospace;letter-spacing:.08em;text-transform:uppercase">Why this candidate</span><span style="font-size:11.5px;color:#8fa1b3">{{ whySummary }}</span></span>
+          <span style="font-size:8px;line-height:1;color:#5d7186">{{ whyCaret }}</span>
+        </button>
+        <div style="{{ whyBodyStyle }}">
+          <p style="margin:0 0 12px;font-size:11.5px;color:#5d7186;max-width:80ch;text-wrap:pretty">The optimizer kept the three strongest whole-plan candidates and pruned the rest. Each column is a complete plan for the window; deltas are against the current schedule.</p>
+
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;min-width:560px">
+              <thead>
+                <tr>
+                  <th style="border-bottom:1px solid #c6d0db"></th>
+                  <th style="text-align:right;padding:8px 10px;border-bottom:1px solid #c6d0db;white-space:nowrap">
+                    <div style="font:700 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186">Current</div>
+                    <div style="font-size:10.5px;font-weight:400;letter-spacing:0;text-transform:none;color:#8fa1b3;margin-top:2px">in place now</div>
+                  </th>
+                  <th style="text-align:right;padding:8px 10px;border-bottom:1px solid #c6d0db;background:#dde9f8;border-top:2px solid #12263f;white-space:nowrap">
+                    <div style="font:700 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#12263f">Applied</div>
+                    <div style="font-size:10.5px;font-weight:400;letter-spacing:0;text-transform:none;color:#8fa1b3;margin-top:2px">plan A</div>
+                  </th>
+                  <th style="text-align:right;padding:8px 10px;border-bottom:1px solid #c6d0db;white-space:nowrap">
+                    <div style="font:700 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186">Alt B</div>
+                    <div style="font-size:10.5px;font-weight:400;letter-spacing:0;text-transform:none;color:#8fa1b3;margin-top:2px">not applied</div>
+                  </th>
+                  <th style="text-align:right;padding:8px 10px;border-bottom:1px solid #c6d0db;white-space:nowrap">
+                    <div style="font:700 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186">Alt C</div>
+                    <div style="font-size:10.5px;font-weight:400;letter-spacing:0;text-transform:none;color:#8fa1b3;margin-top:2px">not applied</div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row" title="Adjacent orders on the same line that differ in COLOR or FORM_SIZE." style="text-align:left;padding:7px 10px;border-bottom:1px solid #d5dce4;font:600 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186;cursor:help">Changeovers</th>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;font:400 13px/1 'JetBrains Mono',monospace;color:#8fa1b3;white-space:nowrap">34</td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;background:#f2f7fd;white-space:nowrap">
+                    <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">27</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;7</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">24</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;10</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">31</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;3</span>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row" title="Orders finishing after the SAP planning date." style="text-align:left;padding:7px 10px;border-bottom:1px solid #d5dce4;font:600 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186;cursor:help">Late orders</th>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;font:400 13px/1 'JetBrains Mono',monospace;color:#8fa1b3;white-space:nowrap">12</td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;background:#f2f7fd;white-space:nowrap">
+                    <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">9</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;3</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">13</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#b02a20;margin-top:2px">+1</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">7</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;5</span>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row" title="Total due-date slip across every late order, in hours." style="text-align:left;padding:7px 10px;border-bottom:1px solid #d5dce4;font:600 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186;cursor:help">Cumulative lateness</th>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;font:400 13px/1 'JetBrains Mono',monospace;color:#8fa1b3;white-space:nowrap">148.5h</td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;background:#f2f7fd;white-space:nowrap">
+                    <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">161.0h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#b02a20;margin-top:2px">+12.5</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">214.0h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#b02a20;margin-top:2px">+65.5</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">128.0h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;20.5</span>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row" title="Earliest start to latest finish across the window." style="text-align:left;padding:7px 10px;border-bottom:1px solid #d5dce4;font:600 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186;cursor:help">Schedule span</th>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;font:400 13px/1 'JetBrains Mono',monospace;color:#8fa1b3;white-space:nowrap">336.0h</td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;background:#f2f7fd;white-space:nowrap">
+                    <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">331.5h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;4.5</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">329.0h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;7.0</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">344.0h</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#8fa1b3;margin-top:2px">+8.0</span>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row" title="Highest single-line, single-day utilization in the 14-day horizon." style="text-align:left;padding:7px 10px;border-bottom:1px solid #d5dce4;font:600 10.5px/1.3 'JetBrains Mono',monospace;letter-spacing:.04em;text-transform:uppercase;color:#5d7186;cursor:help">Peak utilization</th>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;font:400 13px/1 'JetBrains Mono',monospace;color:#8fa1b3;white-space:nowrap">104%</td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;background:#f2f7fd;white-space:nowrap">
+                    <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">97%</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;7</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">99%</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#1e7a4a;margin-top:2px">&minus;5</span>
+                  </td>
+                  <td style="text-align:right;padding:7px 10px;border-bottom:1px solid #d5dce4;white-space:nowrap">
+                    <span style="font:400 13px/1 'JetBrains Mono',monospace;color:#1c2b3a">104%</span>
+                    <span style="display:block;font:600 9.5px/1.4 'JetBrains Mono',monospace;color:#8fa1b3;margin-top:2px">&plusmn;0</span>
+                  </td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th scope="row" style="text-align:left;padding:9px 10px;font:600 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3;vertical-align:top">Verdict</th>
+                  <td style="padding:9px 10px;font-size:11.5px;color:#8fa1b3;vertical-align:top">Baseline</td>
+                  <td style="padding:9px 10px;background:#f2f7fd;font-size:11.5px;color:#12263f;vertical-align:top;line-height:1.45;min-width:132px"><strong style="font-weight:600">Chosen.</strong> Best balance &mdash; cuts changeovers and late orders without pushing a line over capacity.</td>
+                  <td style="padding:9px 10px;font-size:11.5px;color:#5d7186;vertical-align:top;line-height:1.45;min-width:132px"><strong style="font-weight:600;color:#b02a20">Pruned.</strong> Fewest changeovers, but one more late order and 65 h more slip.</td>
+                  <td style="padding:9px 10px;font-size:11.5px;color:#5d7186;vertical-align:top;line-height:1.45;min-width:132px"><strong style="font-weight:600;color:#b02a20">Pruned.</strong> Best due dates, but +4 changeovers and it holds a line at 104%.</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div style="margin-top:16px;padding-top:13px;border-top:1px solid #d5dce4">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:10px">
+              <span style="font:600 10px/1.2 'JetBrains Mono',monospace;letter-spacing:.08em;text-transform:uppercase;color:#5d7186">Where the other candidates went</span>
+              <span style="font:600 10px/1.2 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3;white-space:nowrap">{{ pruneNote }}</span>
+            </div>
+            <sc-for list="{{ pruneRows }}" as="prune" hint-placeholder-count="5">
+              <div title="{{ prune.tip }}" style="display:grid;grid-template-columns:minmax(140px,1.1fr) minmax(90px,2fr) auto;align-items:center;gap:12px;padding:5px 0;cursor:help">
+                <span style="font-size:12px;color:#1c2b3a;min-width:0">{{ prune.label }}</span>
+                <span style="height:8px;border-radius:3px;background:#f4f7fa;overflow:hidden;display:block"><i style="{{ prune.barStyle }}"></i></span>
+                <span style="font:600 11.5px/1 'JetBrains Mono',monospace;color:#5d7186;white-space:nowrap;text-align:right">{{ prune.count }}</span>
+              </div>
+            </sc-for>
+            <p style="margin:10px 0 0;font-size:11.5px;color:#8fa1b3;max-width:78ch;text-wrap:pretty">{{ pruneFootnote }}</p>
+          </div>
+
+          <dl style="display:flex;flex-wrap:wrap;gap:6px 24px;margin:14px 0 0;padding-top:12px;border-top:1px solid #d5dce4">
+            <div style="display:flex;gap:10px"><dt style="font:600 9px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Constraints</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">color-block, due-date, calendar-capacity</dd></div>
+            <div style="display:flex;gap:10px"><dt style="font:600 9px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Lines changed</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ linesChanged }}</dd></div>
+            <div style="display:flex;gap:10px"><dt style="font:600 9px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Sequences changed</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ sequencesChanged }}</dd></div>
+          </dl>
+        </div>
+
+        <button type="button" onClick="{{ toggleGaps }}" style="{{ gapsHeadStyle }}">
+          <span style="display:flex;align-items:baseline;gap:10px;min-width:0"><span style="font:600 10px/1.2 'JetBrains Mono',monospace;letter-spacing:.08em;text-transform:uppercase">Missing setup times</span><span style="font:600 9px/1.5 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#93610a;background:#f8ecd0;border-radius:3px;padding:1px 6px">{{ gapsSummary }}</span></span>
+          <span style="font-size:8px;line-height:1;color:#5d7186">{{ gapsCaret }}</span>
+        </button>
+        <div style="{{ gapsBodyStyle }}">
+          <p style="margin:0 0 10px;font-size:11.5px;color:#5d7186;max-width:70ch;text-wrap:pretty">The optimizer could not evaluate these transitions because no setup time is recorded for them. Filling them in may produce a better candidate on the next run. <span style="color:#8fa1b3">{{ gapsNote }}</span></p>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr>
+                <th style="font:700 10.5px 'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.04em;color:#5d7186;text-align:left;padding:6px 10px;border-bottom:1px solid #d5dce4">Line</th>
+                <th style="font:700 10.5px 'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.04em;color:#5d7186;text-align:left;padding:6px 10px;border-bottom:1px solid #d5dce4">From</th>
+                <th style="font:700 10.5px 'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.04em;color:#5d7186;text-align:left;padding:6px 10px;border-bottom:1px solid #d5dce4">To</th>
+                <th style="font:700 10.5px 'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.04em;color:#5d7186;text-align:left;padding:6px 10px;border-bottom:1px solid #d5dce4">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">LINE-11</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">Green &middot; T3</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">Red &middot; T1</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;color:#5d7186">No recorded setup time</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">LINE-11</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">Red &middot; T1</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">White &middot; T2</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;color:#5d7186">No recorded setup time</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">LINE-07</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">Blue &middot; T2</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;font-family:'JetBrains Mono',monospace">Green &middot; T3</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #d5dce4;color:#5d7186">No recorded setup time</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 10px;font-family:'JetBrains Mono',monospace">LINE-04</td>
+                <td style="padding:6px 10px;font-family:'JetBrains Mono',monospace">White &middot; T1</td>
+                <td style="padding:6px 10px;font-family:'JetBrains Mono',monospace">Cream &middot; T1</td>
+                <td style="padding:6px 10px;color:#5d7186">Signature version mismatch</td>
+              </tr>
+            </tbody>
+          </table>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px">
+            <button type="button" style="height:26px;padding:0 10px;border:1px solid #12263f;border-radius:4px;background:#12263f;color:#ffffff;font:500 12px 'Public Sans',system-ui,sans-serif;cursor:pointer" style-hover="background:#1f3a5c">Fill these in the Setup Matrix</button>
+            <button type="button" style="height:26px;padding:0 10px;border:1px solid #d5dce4;border-radius:4px;background:#ffffff;font:500 12px 'Public Sans',system-ui,sans-serif;color:#1c2b3a;cursor:pointer" style-hover="background:#f4f7fa">Copy</button>
+            <button type="button" style="height:26px;padding:0 10px;border:1px solid #d5dce4;border-radius:4px;background:#ffffff;font:500 12px 'Public Sans',system-ui,sans-serif;color:#1c2b3a;cursor:pointer" style-hover="background:#f4f7fa">Export CSV</button>
+          </div>
+        </div>
+
+        <button type="button" onClick="{{ toggleDiag }}" style="{{ diagHeadStyle }}">
+          <span style="display:flex;align-items:baseline;gap:10px;min-width:0"><span style="font:600 10px/1.2 'JetBrains Mono',monospace;letter-spacing:.08em;text-transform:uppercase">Search diagnostics</span><span style="font-size:11.5px;color:#8fa1b3">{{ diagSummary }}</span></span>
+          <span style="font-size:8px;line-height:1;color:#5d7186">{{ diagCaret }}</span>
+        </button>
+        <div style="{{ diagBodyStyle }}">
+          <dl style="display:flex;flex-direction:column;gap:6px;margin:0">
+            <div style="display:flex;gap:12px"><dt style="flex:0 0 116px;font:600 9.5px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Method</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ diagMethod }}</dd></div>
+            <div style="display:flex;gap:12px"><dt style="flex:0 0 116px;font:600 9.5px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Candidates</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ diagCandidates }}</dd></div>
+            <div style="display:flex;gap:12px"><dt style="flex:0 0 116px;font:600 9.5px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Termination</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">converged</dd></div>
+            <div style="display:flex;gap:12px"><dt style="flex:0 0 116px;font:600 9.5px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Runtime</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ diagRuntime }}</dd></div>
+            <div style="display:flex;gap:12px"><dt style="flex:0 0 116px;font:600 9.5px/1.7 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:#8fa1b3">Orders in scope</dt><dd style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11.5px">{{ diagOrders }}</dd></div>
+          </dl>
+        </div>
+      </div>
+
+    </div>
+
+    <footer style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:12px 18px;background:#f4f7fa;border-top:1px solid #d5dce4;border-radius:0 0 8px 8px">
+      <span style="font-size:11.5px;color:#5d7186;max-width:52ch">Apply commits this candidate &mdash; still undoable with Ctrl+Z. Discard leaves the current schedule untouched.</span>
+      <div style="display:flex;gap:8px">
+        <button type="button" style="height:30px;padding:0 12px;border:1px solid #d5dce4;border-radius:4px;background:#ffffff;font:500 12.5px 'Public Sans',system-ui,sans-serif;color:#1c2b3a;cursor:pointer" style-hover="background:#f4f7fa">Discard</button>
+        <button type="button" style="{{ applyStyle }}" title="{{ applyTitle }}">Apply</button>
+      </div>
+    </footer>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { why: null, gaps: null, diag: null };
+
+  get stale() { return this.props.stale ?? false; }
+  get tone() { return this.props.verdict ?? 'mixed'; }
+  get big() { return this.props.scale === 'plant'; }
+  get whyOpen() { return this.state.why ?? true; }
+  get gapsOpen() { return this.state.gaps ?? false; }
+  get diagOpen() { return this.state.diag ?? false; }
+
+  /** Aggregate prune reasons for the whole run — not per line. Counts are what
+   *  the planner can act on ("missing setup time" is the only fixable class);
+   *  the rest explain why the search space collapsed the way it did. */
+  pruneData() {
+    return this.big
+      ? [
+          { label: 'Broke a color block', count: 9120, tip: 'Candidates that split a color block and added cleanouts without a due-date payoff.' },
+          { label: 'Exceeded calendar capacity', count: 4201, tip: 'Candidates that booked a line past its calendar capacity for at least one day.' },
+          { label: 'Missed a due date', count: 3860, tip: 'Candidates that pushed one or more orders past the SAP planning date.' },
+          { label: 'Fixed order conflict', count: 606, tip: 'Candidates that would have moved an order the planner pinned.' },
+          { label: 'Missing setup time', count: 612, tip: 'Candidates the optimizer could not cost because no setup time is recorded for a transition. This is the fixable class.' },
+        ]
+      : [
+          { label: 'Broke a color block', count: 640, tip: 'Candidates that split a color block and added cleanouts without a due-date payoff.' },
+          { label: 'Exceeded calendar capacity', count: 312, tip: 'Candidates that booked a line past its calendar capacity for at least one day.' },
+          { label: 'Missed a due date', count: 210, tip: 'Candidates that pushed one or more orders past the SAP planning date.' },
+          { label: 'Fixed order conflict', count: 51, tip: 'Candidates that would have moved an order the planner pinned.' },
+          { label: 'Missing setup time', count: 68, tip: 'Candidates the optimizer could not cost because no setup time is recorded for a transition. This is the fixable class.' },
+        ];
+  }
+
+  headStyle(open, first) {
+    return 'display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:10px 12px;'
+      + `border:0;${first ? '' : 'border-top:1px solid #d5dce4;'}`
+      + `background:${open ? '#eef1f5' : '#ffffff'};color:#5d7186;text-align:left;cursor:pointer;`
+      + 'transition:background .14s ease-out;';
+  }
+
+  bodyStyle(open) {
+    return open
+      ? 'padding:12px;border-top:1px solid #d5dce4;background:#ffffff'
+      : 'display:none';
+  }
+
+  /** Mirrors the shipped verdict banner: tinted gradient, 4px left rail,
+   *  44px white icon disc, and the x/5 score. */
+  verdict() {
+    const tone = this.tone;
+    if (tone === 'better') {
+      return {
+        rail: '#1e7a4a', border: 'rgba(30,122,74,.25)',
+        wash: 'linear-gradient(135deg,rgba(30,122,74,.06) 0%,rgba(30,122,74,.02) 100%)',
+        ring: 'rgba(30,122,74,.25)', icon: '\u2713', score: '5',
+        title: 'Big win — every KPI improved',
+        sub: '5 of 5 optimization KPIs moved in your favor with no regressions.',
+      };
+    }
+    if (tone === 'worse') {
+      return {
+        rail: '#b02a20', border: 'rgba(176,42,32,.25)',
+        wash: 'linear-gradient(135deg,rgba(176,42,32,.06) 0%,rgba(176,42,32,.02) 100%)',
+        ring: 'rgba(176,42,32,.25)', icon: '!', score: '1',
+        title: 'Net regression',
+        sub: '4 KPIs got worse, 1 improved. Discard recommended.',
+      };
+    }
+    if (tone === 'neutral') {
+      return {
+        rail: '#1f5fbf', border: '#d5dce4',
+        wash: 'linear-gradient(135deg,#dde9f8 0%,#ffffff 100%)',
+        ring: '#d5dce4', icon: '\u25D0', score: '0',
+        title: 'No measurable change',
+        sub: 'The optimizer ran but the KPIs are unchanged within tolerance.',
+      };
+    }
+    return {
+      rail: '#1e7a4a', border: 'rgba(30,122,74,.25)',
+      wash: 'linear-gradient(135deg,rgba(30,122,74,.06) 0%,rgba(30,122,74,.02) 100%)',
+      ring: 'rgba(30,122,74,.25)', icon: '\u2713', score: '4',
+      title: 'Net improvement, with trade-offs',
+      sub: '4 KPIs improved, 1 regressed. Review before applying.',
+    };
+  }
+
+  renderVals() {
+    const v = this.verdict();
+    const stale = this.stale;
+    const prunes = this.pruneData();
+    const total = prunes.reduce((sum, row) => sum + row.count, 0);
+    const max = Math.max(...prunes.map(row => row.count), 1);
+    const num = value => value.toLocaleString('en-US');
+    return {
+      staleStyle: stale
+        ? 'flex:0 0 auto;padding:11px 13px;border:1px solid #e0cfa8;border-top:3px solid #93610a;border-radius:4px;background:#f8ecd0;color:#93610a;font-size:12px;line-height:1.5;text-wrap:pretty'
+        : 'display:none',
+      verdictStyle: 'position:relative;flex:0 0 auto;display:grid;grid-template-columns:auto 1fr auto;'
+        + 'align-items:center;gap:16px;padding:16px 18px;border-radius:8px;overflow:hidden;'
+        + `border:1px solid ${v.border};background:${v.wash}`,
+      verdictRail: `content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:${v.rail}`,
+      verdictIconStyle: 'width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;'
+        + `font-size:20px;font-weight:700;background:#ffffff;flex-shrink:0;color:${v.rail};box-shadow:0 0 0 1px ${v.ring}`,
+      verdictIcon: v.icon,
+      verdictTitle: v.title,
+      verdictSub: v.sub,
+      verdictScore: v.score,
+      verdictScoreStyle: `font:700 22px/1 'JetBrains Mono',monospace;color:${v.rail}`,
+      applyStyle: stale
+        ? "height:30px;padding:0 16px;border:1px solid #d5dce4;border-radius:4px;background:#eef1f5;color:#8fa1b3;font:500 12.5px 'Public Sans',system-ui,sans-serif;cursor:not-allowed"
+        : "height:30px;padding:0 16px;border:1px solid #12263f;border-radius:4px;background:#12263f;color:#ffffff;font:500 12.5px 'Public Sans',system-ui,sans-serif;cursor:pointer",
+      applyTitle: stale ? 'Setup data changed. Run optimization again before applying.' : 'Commit this candidate schedule',
+
+      // Collapsed-header summaries and the body come from one source, so they
+      // can't disagree when the run scale changes.
+      whySummary: this.big
+        ? `3 finalists of ${num(total + 3)} candidates`
+        : `3 finalists of ${num(total + 3)} candidates`,
+      pruneNote: `${num(total)} pruned`,
+      pruneRows: prunes.map(row => ({
+        label: row.label,
+        tip: row.tip,
+        count: num(row.count),
+        barStyle: `display:block;height:100%;border-radius:3px;width:${Math.max(2, Math.round((row.count / max) * 100))}%;`
+          + (row.label === 'Missing setup time'
+            ? 'background:linear-gradient(90deg,#93610a,#bd9553)'
+            : 'background:#c6d0db'),
+      })),
+      pruneFootnote: this.big
+        ? 'Only the missing-setup-time class is fixable from here — 612 candidates could not be costed at all. The rest were rejected on merit.'
+        : 'Only the missing-setup-time class is fixable from here — 68 candidates could not be costed at all. The rest were rejected on merit.',
+      linesChanged: this.big ? '12 of 50' : '3 of 8',
+      sequencesChanged: this.big ? '284' : '41',
+
+      gapsSummary: this.big ? '31 pairs' : '4 pairs',
+      gapsNote: this.big ? 'Showing the 4 pairs that blocked the most orders, of 31.' : '',
+      diagSummary: this.big
+        ? 'beam search \u00b7 18,402 candidates \u00b7 6.1 s'
+        : 'beam search \u00b7 1,284 candidates \u00b7 412 ms',
+      diagMethod: this.big ? 'beam-search width 12' : 'beam-search width 8',
+      diagCandidates: this.big ? '18,402' : '1,284',
+      diagRuntime: this.big ? '6,140 ms' : '412 ms',
+      diagOrders: this.big ? '2,014 \u2192 2,014' : '312 \u2192 312',
+
+      whyHeadStyle: this.headStyle(this.whyOpen, true),
+      gapsHeadStyle: this.headStyle(this.gapsOpen, false),
+      diagHeadStyle: this.headStyle(this.diagOpen, false),
+      whyBodyStyle: this.bodyStyle(this.whyOpen),
+      gapsBodyStyle: this.bodyStyle(this.gapsOpen),
+      diagBodyStyle: this.bodyStyle(this.diagOpen),
+      whyCaret: this.whyOpen ? '\u25B2' : '\u25BC',
+      gapsCaret: this.gapsOpen ? '\u25B2' : '\u25BC',
+      diagCaret: this.diagOpen ? '\u25B2' : '\u25BC',
+      toggleWhy: () => this.setState({ why: !this.whyOpen }),
+      toggleGaps: () => this.setState({ gaps: !this.gapsOpen }),
+      toggleDiag: () => this.setState({ diag: !this.diagOpen }),
+    };
+  }
+}
+
+</script>
+</body>
+</html>
