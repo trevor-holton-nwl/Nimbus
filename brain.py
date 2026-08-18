@@ -2039,7 +2039,7 @@ def list_priority_fields():
     return {
         "fields": [
             {"field_key": key, **spec}
-            for key, spec in md.RANKABLE_FIELDS.items()
+            for key, spec in md.CONFIGURABLE_PRIORITY_FIELDS.items()
         ]
     }
 
@@ -2098,10 +2098,10 @@ def get_priority_lists_for_plant(
 
     rows, _total = db.list_priority_lists_meta(plant=plant)
     coverage = db.priority_list_coverage(
-        plant, {k: v["orders_column"] for k, v in md.RANKABLE_FIELDS.items()}
+        plant, {k: v["orders_column"] for k, v in md.CONFIGURABLE_PRIORITY_FIELDS.items()}
     )
     fields: dict = {}
-    for key, spec in md.RANKABLE_FIELDS.items():
+    for key, spec in md.CONFIGURABLE_PRIORITY_FIELDS.items():
         field_rows = [r for r in rows if r["field_key"] == key]
         plant_wide = next((r for r in field_rows if r["line"] == ""), None)
         line_overrides = [r for r in field_rows if r["line"] != ""]
@@ -2132,7 +2132,7 @@ async def upload_priority_list(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    spec = md.RANKABLE_FIELDS.get(field_key)
+    spec = md.CONFIGURABLE_PRIORITY_FIELDS.get(field_key)
     if spec is None:
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
 

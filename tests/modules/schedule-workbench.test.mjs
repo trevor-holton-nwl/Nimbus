@@ -215,7 +215,19 @@ test('Timeline omits zero setup but renders a leading-edge marker for missing se
   assert.equal(missing.length, 1);
   assert.equal(missing[0].kind, 'setup');
   assert.match(missing[0].className, /setup-missing/);
+  assert.match(missing[0].content, /ui\.setup_missing/);
+  assert.match(missing[0].content, /setup-missing-marker/);
   assert.equal(missing[0].end.getTime(), successor.start_date.getTime());
+});
+
+test('missing setup marker is pinned to the center of a narrow setup bar', () => {
+  // Regression target: vis-timeline could reflow the warning marker to an
+  // edge of a narrow bar, where it looked misplaced or overflowed.
+  const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.setup-missing-marker\s*\{[^}]*left:\s*50%[^}]*top:\s*50%[^}]*translate\(-50%,\s*-50%\)/s);
+  assert.match(css, /\.vis-item\.setup-item\.setup-missing\s*\{[^}]*overflow:\s*hidden/s);
+  const locale = readFileSync(new URL('../../web/locales/en.js', import.meta.url), 'utf8');
+  assert.match(locale, /'ui\.setup_missing':\s*'Missing setup matrix data'/);
 });
 
 test('Timeline preserves the full required setup duration when capacity conflicts', () => {
@@ -286,6 +298,69 @@ test('Inspector exposes keyboard-equivalent setup detail on the successor, inclu
   assert.equal(detail.shortMinutes, 15);
   assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
     'the successor detail must state available, required, and short capacity in text');
+});
+
+test('Inspector formats setup signatures in configured order with readable labels', () => {
+  const formatted = Inspector._formatSetupState([
+    { fieldKey: 'colorWheel', value: 'Ruby' },
+    { fieldKey: 'prt01', value: '7B10' },
+    { fieldKey: 'prt02', value: 'T-3' },
+  ], { fields: ['colorWheel', 'prt01', 'prt02'] });
+
+  assert.equal(formatted, 'Color: Ruby · PRT01: 7B10 · PRT02: T-3');
+});
+
+test('Inspector permits setup controls only on an active order or the earliest upcoming order on its line', () => {
+  const now = new Date('2026-08-17T10:00:00');
+  const earlier = { id: 'setup-earlier', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+    start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') };
+  const active = { id: 'setup-active', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+    start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') };
+  const later = { id: 'setup-later', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+    start_date: new Date('2026-08-17T11:00:00'), end_date: new Date('2026-08-17T12:00:00') };
+  const futureFirst = { id: 'setup-future-first', PRODUCTION_LINE: 'SETUP-FUTURE', RUN_TIME: 1,
+    start_date: new Date('2026-08-17T10:15:00'), end_date: new Date('2026-08-17T11:00:00') };
+  const futureLater = { id: 'setup-future-later', PRODUCTION_LINE: 'SETUP-FUTURE', RUN_TIME: 1,
+    start_date: new Date('2026-08-17T10:30:00'), end_date: new Date('2026-08-17T11:30:00') };
+  try {
+    Store.setTasks([earlier, active, later, futureLater, futureFirst], 'unit-test');
+    assert.equal(Inspector._isSetupActionTask(active, now), true);
+    assert.equal(Inspector._isSetupActionTask(later, now), false);
+    assert.equal(Inspector._isSetupActionTask(futureFirst, now), true);
+    assert.equal(Inspector._isSetupActionTask(futureLater, now), false);
+  } finally { Store.setTasks([], 'unit-test'); }
+});
+
+test('Inspector derives covered and uncovered exact-pair override values without permitting negative remaining minutes', () => {
+  assert.deepEqual(Inspector._setupOverrideValues(20, '-7', ''), { standardMin: 20, remainingMin: 13 });
+  assert.deepEqual(Inspector._setupOverrideValues(null, '', '35'), { standardMin: 35, remainingMin: 35 });
+  assert.equal(Inspector._setupOverrideValues(20, '-21', ''), null);
+  assert.equal(Inspector._setupOverrideValues(null, '', ''), null);
+});
+
+test('Inspector names missing setup matrix data instead of showing an unavailable-value dash', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorSetupDetail = Inspector._setupDetailForTask;
+  const priorTranslate = Util.t;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._setupDetailForTask = () => ({
+      predecessorOrderId: null, predecessorState: null, successorOrderId: 'missing-setup-inspector',
+      requiredMinutes: null, effectiveMinutes: null, standardMinutes: null, source: 'resolved',
+      overrideStatus: null, availableMinutes: null, shortMinutes: null, missingDetail: 'No matching matrix row.',
+    });
+    Util.t = key => key === 'ui.setup_missing' ? 'Missing setup matrix data' : key;
+    Inspector._render({ id: 'missing-setup-inspector', ORDER: '100002', PRODUCTION_LINE: 'L1', RUN_TIME: 1 });
+    const setupPanel = body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title'));
+    const missingTextCount = [...setupPanel.matchAll(/Missing setup matrix data/g)].length;
+    assert.equal(missingTextCount, 7,
+      'the six unavailable setup values and the explanatory warning should name the missing matrix data');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Inspector._setupDetailForTask = priorSetupDetail;
+    Util.t = priorTranslate;
+  }
 });
 
 test('alert-cell foreground dispatch treats setup items as non-business items', () => {

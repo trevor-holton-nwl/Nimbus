@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from psycopg.types.json import Jsonb
 
 from db import _pool
-from master_data import RANKABLE_FIELDS
+from master_data import CONFIGURABLE_PRIORITY_FIELDS, RANKABLE_FIELDS
 
 
 MAX_SETUP_MINUTES = 10_080
@@ -34,13 +34,13 @@ def _optional_text(value, label: str) -> str | None:
     return _required_text(value, label)
 
 
-def _normalise_fields(fields) -> list[str]:
+def _normalise_fields(fields, *, allowed_fields=RANKABLE_FIELDS) -> list[str]:
     if not isinstance(fields, list) or not fields:
         raise ValueError("At least one registered setup field is required")
     result = []
     for field in fields:
         key = field.get("fieldKey") if isinstance(field, dict) else field
-        if not isinstance(key, str) or key not in RANKABLE_FIELDS:
+        if not isinstance(key, str) or key not in allowed_fields:
             raise ValueError(f"Unknown setup field: {key!r}")
         if key in result:
             raise ValueError(f"Duplicate setup field: {key}")
@@ -243,7 +243,7 @@ def save_definition(plant, fields, strict_blanks, actor, *, expected_signature_v
     """Create or edit a definition without rewriting any old-version keys."""
     plant = _required_text(plant, "Plant")
     actor = _required_text(actor, "Actor")
-    field_keys = _normalise_fields(fields)
+    field_keys = _normalise_fields(fields, allowed_fields=CONFIGURABLE_PRIORITY_FIELDS)
     if not isinstance(strict_blanks, bool):
         raise ValueError("strict_blanks must be boolean")
     with _pool.connection() as conn, conn.cursor() as cur:

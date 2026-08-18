@@ -82,7 +82,6 @@ const _FALLBACK_PRIORITY_FIELDS: PriorityFieldMeta[] = [
   { field_key: 'colorWheel', mp_column: 'color', orders_column: 'color', task_field: 'COLOR', default_label: 'Color Wheel' },
   { field_key: 'prt01', mp_column: 'prt_01', orders_column: 'prt_01', task_field: 'PRT_01', default_label: 'Prod. Resource Tool (01)' },
   { field_key: 'prt02', mp_column: 'prt_02', orders_column: 'prt_02', task_field: 'PRT_02', default_label: 'Prod. Resource Tool (02)' },
-  { field_key: 'productionVersion', mp_column: 'default_production_version', orders_column: 'production_version', task_field: 'PRODUCTION_VERSION', default_label: 'Production Version' },
 ];
 
 /** Reserved key in `PriorityListFieldSummary.coverage` holding the true
@@ -127,7 +126,7 @@ type SetupGridModel = { fields: string[]; rowStates: SetupGridState[]; colStates
  */
 export const SetupAdmin = (() => {
   const API = Config.API_BASE;
-  const FALLBACK_REGISTERED_FIELDS = ['colorWheel', 'prt01', 'prt02', 'productionVersion'];
+  const FALLBACK_REGISTERED_FIELDS = ['colorWheel', 'prt01', 'prt02'];
   let _registeredFields = FALLBACK_REGISTERED_FIELDS.slice();
   let _linesByPlant: Record<string, string[]> = {};
   let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
@@ -253,6 +252,14 @@ export const SetupAdmin = (() => {
 
   function deleteRequest(row: SetupMatrixRow): { line: string; signature_version: number; rows: SetupMatrixRow[] } {
     return { line: row.line, signature_version: row.signature_version, rows: [row] };
+  }
+
+  /** Removes one field from an unsaved signature draft without allowing the
+   *  backend-invalid empty signature. Persisted definitions are only changed
+   *  by saveDefinition(), so this is deliberately a draft-only operation. */
+  function removeSignatureField(fields: readonly string[], index: number): string[] {
+    if (fields.length <= 1 || index < 0 || index >= fields.length) return [...fields];
+    return fields.filter((_, fieldIndex) => fieldIndex !== index);
   }
 
   // ── Setup Standard grid: from-state x to-state editor ─────────────────────
@@ -498,7 +505,7 @@ export const SetupAdmin = (() => {
   }
 
   function registeredFields(fields: Array<{ field_key: string }> | null | undefined): string[] {
-    return (fields || []).map(field => field.field_key).filter(Boolean);
+    return (fields || []).map(field => field.field_key).filter(field => field && field !== 'productionVersion');
   }
 
   function parseCsv(text: string): string[][] {
@@ -839,7 +846,7 @@ export const SetupAdmin = (() => {
               <span class="mono-eyebrow">${esc(Util.t('ui.setup_band_signature_label'))}</span>
               <div class="setup-signature-line">
                 <span class="setup-signature-chip">${signatureChipHtml}</span>
-                <button type="button" class="btn btn-ghost sm" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">${esc(Util.t('btn.setup_edit_signature'))} v${version ?? '—'}</button>
+                <button type="button" class="btn btn-ghost sm" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">${esc(Util.t('btn.setup_edit_signature'))}</button>
               </div>
               ${scaleReadoutHtml}
             </div>
@@ -857,7 +864,7 @@ export const SetupAdmin = (() => {
 
           <div class="setup-popover" data-setup-signature-popover ${_signaturePopoverOpen ? '' : 'hidden'}>
             <div class="panel-head"><span class="label">${esc(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-            <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button>` : ''}</div>`).join('')}</div>
+            <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" ${definitionFields.length === 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button>` : ''}</div>`).join('')}</div>
             <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
             ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
             <p class="setup-popover-hint">${esc(Util.t('ui.setup_version_note', { version: (version ?? 0) + 1 }))}</p>
@@ -975,20 +982,41 @@ export const SetupAdmin = (() => {
       });
     });
     target.querySelector<HTMLButtonElement>('[data-setup-save-definition]')?.addEventListener('click', () => saveDefinition(target, snapshot));
+    const syncSignatureFieldControls = (holder: HTMLElement): void => {
+      const fieldRows = Array.from(holder.querySelectorAll<HTMLElement>('.setup-field-row'));
+      fieldRows.forEach((row, index) => {
+        row.querySelector('span')!.textContent = String(index + 1);
+        const select = row.querySelector<HTMLSelectElement>('select')!;
+        select.dataset.setupField = String(index);
+        const up = row.querySelector<HTMLButtonElement>('[data-setup-field-up]');
+        const down = row.querySelector<HTMLButtonElement>('[data-setup-field-down]');
+        const remove = row.querySelector<HTMLButtonElement>('[data-setup-field-remove]');
+        if (up) { up.dataset.setupFieldUp = String(index); up.disabled = index === 0; }
+        if (down) { down.dataset.setupFieldDown = String(index); down.disabled = index === fieldRows.length - 1; }
+        if (remove) { remove.dataset.setupFieldRemove = String(index); remove.disabled = fieldRows.length === 1; }
+      });
+    };
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
-      const holder = target.querySelector('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
+      const holder = target.querySelector<HTMLElement>('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
       const index = holder.querySelectorAll('select').length;
-      holder.insertAdjacentHTML('beforeend', `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${option}</option>`).join('')}</select><button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" disabled aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button></div>`);
+      holder.insertAdjacentHTML('beforeend', `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${esc(fieldLabel(option))}</option>`).join('')}</select><button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" disabled aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" aria-label="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button></div>`);
+      syncSignatureFieldControls(holder);
     });
     // Reorder-by-value-swap: the field-row DOM nodes never move (so their
     // up/down disabled state stays tied to fixed position), only the
     // selected value swaps with the adjacent row.
     target.querySelector<HTMLElement>('[data-setup-field-order]')?.addEventListener('click', event => {
-      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-setup-field-up], [data-setup-field-down]');
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-setup-field-up], [data-setup-field-down], [data-setup-field-remove]');
       if (!button) return;
       const holder = button.closest<HTMLElement>('[data-setup-field-order]')!;
       const fieldRows = Array.from(holder.querySelectorAll<HTMLElement>('.setup-field-row'));
-      const currentIndex = fieldRows.indexOf(button.closest('.setup-field-row')!);
+      const currentIndex = fieldRows.indexOf(button.closest<HTMLElement>('.setup-field-row')!);
+      if (button.hasAttribute('data-setup-field-remove')) {
+        if (removeSignatureField(fieldRows.map(row => row.querySelector<HTMLSelectElement>('select')!.value), currentIndex).length === fieldRows.length) return;
+        fieldRows[currentIndex].remove();
+        syncSignatureFieldControls(holder);
+        return;
+      }
       const swapIndex = currentIndex + (button.hasAttribute('data-setup-field-up') ? -1 : 1);
       if (currentIndex < 0 || swapIndex < 0 || swapIndex >= fieldRows.length) return;
       const a = fieldRows[currentIndex].querySelector<HTMLSelectElement>('select')!;
@@ -1683,22 +1711,38 @@ export const SetupAdmin = (() => {
     finally { input.value = ''; }
   }
 
-  async function editState(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
-    const definition = snapshot.definition; if (!_lineScope || !definition) return;
-    const current = snapshot.line_states.find(state => state.line === _lineScope);
-    const panel = target.querySelector('.setup-state .panel-body'); if (!panel || panel.querySelector('[data-setup-state-editor]')) return;
+  function mountStateEditor(host: HTMLElement, snapshot: SetupSnapshot, line: string, onSaved?: () => void): void {
+    const definition = snapshot.definition; if (!line || !definition || host.querySelector('[data-setup-state-editor]')) return;
+    const current = snapshot.line_states.find(state => state.line === line);
     const initial = new Map((current?.state_key || []).map(pair => [pair.fieldKey, pair.value]));
     const editor = document.createElement('div'); editor.className = 'setup-state-editor'; editor.dataset.setupStateEditor = 'true';
-    editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
-    panel.appendChild(editor);
+    editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><label>Shop-floor reason<input class="input" data-setup-state-reason></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
+    host.appendChild(editor);
     const observed = editor.querySelector<HTMLInputElement>('[data-setup-observed-at]')!;
+    const reason = editor.querySelector<HTMLInputElement>('[data-setup-state-reason]')!;
     const fp = Util.fpDatetime(observed); fp.setDate(new Date(), false);
     editor.querySelector<HTMLButtonElement>('[data-setup-save-state]')!.addEventListener('click', async () => {
       const values = definition.fields.map(field => ({ fieldKey: field, value: editor.querySelector<HTMLInputElement>(`[data-setup-state-field="${CSS.escape(field)}"]`)?.value.trim() || '' }));
       if (values.some(pair => !pair.value)) { Toast.show(Util.t('ui.setup_state_fields_required'), 'error'); return; }
+      if (!observed.value.trim()) { Toast.show('Observed time is required.', 'error'); observed.focus(); return; }
+      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
       fp.destroy();
-      await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/state`, 'PUT', { values, signature_version: definition.signature_version, observed_at: observed.value, source: 'manual', reason: Util.t('ui.setup_state_manual_reason') });
+      saveStateAndRefresh(snapshot.plant, line, { values, signature_version: definition.signature_version, observed_at: observed.value, source: 'manual', reason: reason.value.trim() }).then(saved => { if (saved) onSaved?.(); });
     });
+  }
+
+  async function editState(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
+    if (!_lineScope) return;
+    const panel = target.querySelector<HTMLElement>('.setup-state .panel-body');
+    if (panel) mountStateEditor(panel, snapshot, _lineScope, () => render(target, snapshot.plant));
+  }
+
+  async function saveStateAndRefresh(plant: string, line: string, body: unknown): Promise<boolean> {
+    try {
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/lines/${encodeURIComponent(line)}/state`, { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
+      if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+      Persistence.noteSetupWrite(plant, 'state'); await Persistence.loadSetupSnapshot(plant); Toast.show(Util.t('toast.setup_saved'), 'success'); return true;
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); return false; }
   }
 
   async function wireCompatibility(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
@@ -1736,7 +1780,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, render,
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
     stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText };
@@ -2902,13 +2946,13 @@ export const Plant = {
     const subTab = Plant._currentSettingsSubTab;
     const subTabVisibility = Plant._settingsSubTabVisibility(subTab);
     pane.innerHTML = `
-      <div class="cal-scroll"><div class="cal-container">
-        <nav class="admin-subtabs" role="tablist" style="padding:0 24px;">
+        <nav class="admin-subtabs settings-inner-tabs" role="tablist">
           <button id="settings-subtab-rules-tab" class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}" aria-controls="settings-subtab-rules">${Util.t('ui.settings_subtab_rules')}</button>
           <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>
         </nav>
 
-        <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px;padding:8px 0 32px" ${subTabVisibility.rules ? '' : 'hidden'}>
+      <div class="settings-content-scroll"><div class="cal-container settings-content-container">
+        <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px" ${subTabVisibility.rules ? '' : 'hidden'}>
 
           <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.alert_horizon_title')}</h3></header>
@@ -2985,7 +3029,7 @@ export const Plant = {
         <!-- Stage 0 setup truth is maintained beside the plant's scheduling
              policy, never inside a timeline/optimizer flow. It remains
              observation-only until a later stage explicitly enables use. -->
-        <div id="settings-subtab-setup" role="tabpanel" aria-labelledby="settings-subtab-setup-tab" style="display:${subTabVisibility.setup ? 'block' : 'none'};padding:8px 0 32px" ${subTabVisibility.setup ? '' : 'hidden'}>
+        <div id="settings-subtab-setup" role="tabpanel" aria-labelledby="settings-subtab-setup-tab" style="display:${subTabVisibility.setup ? 'block' : 'none'}" ${subTabVisibility.setup ? '' : 'hidden'}>
           <div id="setup-admin-pane"></div>
         </div>
 

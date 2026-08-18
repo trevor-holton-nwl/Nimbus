@@ -1284,7 +1284,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag',
   'ui.setup_predecessor_state': 'Vorgängerzustand',
   'ui.setup_required': 'Erforderliches Setup', 'ui.setup_effective': 'Effektives Setup', 'ui.setup_standard': 'Standard-Setup',
-  'ui.setup_override': 'Vorgangsüberschreibung', 'ui.setup_missing': 'Setup-Details nicht verfügbar',
+  'ui.setup_override': 'Vorgangsüberschreibung', 'ui.setup_missing': 'Setup-Matrixdaten fehlen',
   'ui.setup_capacity_shortfall': 'Kapazitätslücke: {{available}} Min. verfügbar; {{required}} Min. erforderlich; {{short}} Min. fehlen.',
   'ui.setup_coverage_observed':       'Beobachtet: {{transitions}} Übergänge, {{missing}} fehlend',
   'ui.setup_coverage_reachable':      'Erreichbar: {{pairs}} Paare, {{missing}} fehlend',

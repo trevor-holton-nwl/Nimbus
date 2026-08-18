@@ -4501,6 +4501,14 @@ body.dark .cw-active-card {
 #md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0 0 12px; flex: 0 0 auto; }
 
+/* The System Settings inner tabs are navigation, not content: keep them
+   visible while the Rules or Setup Matrix panel scrolls independently. */
+.plant-settings-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.plant-settings-pane[hidden] { display: none; }
+.settings-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
+.settings-content-scroll { flex: 1; min-height: 0; overflow: auto; }
+.settings-content-container { padding-top: 16px; }
+
 /* =============================================================================
    MASTER DATA > MATERIAL / MATERIAL PLANT — plant-scoped AG Grid sub-tabs
    Mirrors #ag-grid's sizing (Orders table) — flex:1/min-height:0 so the grid
@@ -6037,13 +6045,30 @@ body.dark .sap-kind-orders { color: var(--accent); }
 }
 .vis-item.setup-item.setup-missing {
   min-width: 10px;
+  position: relative;
+  overflow: hidden;
+  padding: 0 !important;
   background: var(--warn-vivid) !important;
   border-color: var(--warn-vivid) !important;
   color: var(--bg-elev) !important;
 }
+.setup-missing-marker {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  line-height: 1;
+  white-space: nowrap;
+}
 .vis-item.setup-item.setup-drag-dim { opacity: 0.18; }
 .insp-setup-detail { border-color: var(--line-strong); }
 .insp-setup-warning { margin: 8px 0 0; padding-top: 7px; border-top: 1px dashed var(--line); color: var(--warn); font-size: 11px; line-height: 1.4; }
+.insp-setup-actions { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); display: flex; flex-wrap: wrap; gap: 6px; }
+.insp-setup-actions [data-setup-editor-host] { width: 100%; }
+.setup-state-editor { display: grid; gap: 7px; margin-top: 8px; }
+.setup-state-editor label { display: grid; gap: 3px; color: var(--fg-mute); font-size: 11px; font-weight: 600; }
+.setup-state-editor .input { width: 100%; box-sizing: border-box; }
+.setup-editor-note { margin: 0; color: var(--fg-mute); font-size: 11px; line-height: 1.4; }
 
 /* Setup matrix administration — two flat panels ("Setup standard",
    "Changeover minutes"), each a `.panel`/`.panel-head`/`.panel-body` card,

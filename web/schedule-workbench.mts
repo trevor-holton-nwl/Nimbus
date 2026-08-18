@@ -149,7 +149,8 @@ import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs'
 import type { CandidateDiagnostic, CandidateResult } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey } from './types.mjs';
+import { SetupAdmin } from './plant-and-administration.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey, SetupOccurrenceOverride } from './types.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
@@ -681,7 +682,7 @@ export const Timeline = {
         id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
         kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - 10 * Config.MS_MIN), end, editable: false,
         className: 'setup-item setup-missing', style: '',
-        content: `<span role="img" aria-label="${Util.t('ui.setup_missing')}">!</span>`,
+        content: `<span class="setup-missing-marker" role="img" aria-label="${Util.t('ui.setup_missing')}">!</span>`,
         title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
       });
     }
@@ -3218,6 +3219,64 @@ export const Inspector = {
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
 
+  _formatSetupState(state: SetupStateKey | null, definition: { fields: ReadonlyArray<string> } | null | undefined): string | null {
+    if (!state || !definition) return null;
+    const values = new Map(state.map(part => [part.fieldKey, part.value]));
+    const labels: Record<string, string> = { colorWheel: 'Color', prt01: 'PRT01', prt02: 'PRT02', productionVersion: 'Production version' };
+    return definition.fields.map(field => `${labels[field] || field}: ${values.get(field) || '—'}`).join(' · ');
+  },
+
+  _isSetupActionTask(task: NimbusTask, now: Date = new Date()): boolean {
+    const lineTasks = Store.tasksArr.filter(candidate => candidate.PRODUCTION_LINE === task.PRODUCTION_LINE)
+      .map(candidate => ({ task: candidate, start: Util.parseDate(candidate.start_date), end: Util.parseDate(candidate.end_date) }))
+      .filter((candidate): candidate is { task: NimbusTask; start: Date; end: Date } => !!candidate.start && !!candidate.end)
+      .sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
+    const active = lineTasks.find(candidate => candidate.start <= now && candidate.end > now);
+    const current = active || lineTasks.find(candidate => candidate.start >= now);
+    return String(current?.task.id || '') === String(task.id);
+  },
+
+  _setupOverrideValues(baseline: number | null, adjustmentText: string, totalText: string): { standardMin: number; remainingMin: number } | null {
+    if (baseline != null) {
+      if (!adjustmentText.trim()) return null;
+      const adjustment = Number(adjustmentText);
+      if (!Number.isInteger(adjustment)) return null;
+      const remainingMin = baseline + adjustment;
+      return remainingMin >= 0 ? { standardMin: baseline, remainingMin } : null;
+    }
+    if (!totalText.trim()) return null;
+    const total = Number(totalText);
+    return Number.isInteger(total) && total >= 0 ? { standardMin: total, remainingMin: total } : null;
+  },
+
+  _canWriteSetup(plant: string): boolean {
+    const permissions = Session.currentUser()?.role_settings?.permissions as Record<string, unknown> | undefined;
+    const allowed = Session.allowedPlants();
+    return Session.isAdmin() || (permissions?.setup_scheduler === true && (allowed === null || allowed?.includes(plant)));
+  },
+
+  _setupOverrideFor(task: NimbusTask): { predecessorOrderId: string | null; predecessorState: SetupStateKey; successorState: SetupStateKey; baseline: number | null; existing: SetupOccurrenceOverride | undefined } | null {
+    const snapshot = Store.setupSnapshot;
+    const definition = snapshot?.definition;
+    if (!snapshot || !definition) return null;
+    const observation = Timeline._setupObservation(Store.tasksForSelectedPlant());
+    const interval = observation.intervals.find(entry => String(entry.successorOrderId) === String(task.id));
+    const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === String(task.id));
+    const predecessorOrderId = interval?.predecessorOrderId ?? diagnostic?.predecessorOrderId ?? null;
+    const predecessor = predecessorOrderId ? Store.tasks[String(predecessorOrderId)] : null;
+    const predecessorState = predecessor ? stateForOrder(predecessor, definition)
+      : snapshot.line_states.find(state => state.line === task.PRODUCTION_LINE)?.state_key || null;
+    const successorState = stateForOrder(task, definition);
+    if (!predecessorState || !successorState) return null;
+    const resolved = resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
+      predecessorOrderId, successorOrderId: String(task.id), plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides });
+    const existing = snapshot.overrides.find(override => override.status === 'active' && override.line === task.PRODUCTION_LINE
+      && override.signature_version === definition.signature_version && override.predecessor_order_id === predecessorOrderId
+      && override.successor_order_id === String(task.id));
+    return { predecessorOrderId, predecessorState, successorState,
+      baseline: resolved.covered && resolved.standardMin != null ? resolved.standardMin : null, existing };
+  },
+
   /** Keyboard/screen-reader equivalent of a setup bar: detail belongs to the
    * successor order, never to a selectable synthetic timeline item. */
   _setupDetailForTask(task: NimbusTask, observation: SetupObservation = Timeline._setupObservation(Store.tasksForSelectedPlant())): SetupPresentationDetail | null {
@@ -3238,8 +3297,8 @@ export const Inspector = {
       ? resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
         plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides }) : null;
-    const predecessorStateText = entry.predecessorState || (predecessorState
-      ? predecessorState.map(part => `${part.fieldKey}=${part.value}`).join(' · ') : null);
+    const predecessorStateText = Inspector._formatSetupState(predecessorState ?? null, definition)
+      || entry.predecessorState || null;
     return {
       predecessorOrderId: entry.predecessorOrderId ?? null,
       predecessorState: predecessorStateText,
@@ -3282,6 +3341,9 @@ export const Inspector = {
     const impliedOrigStart = Util.impliedOriginalStart(task);
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
+    const missingSetupPlaceholder = setupDetail?.missingDetail ? esc(Util.t('ui.setup_missing')) : 'â€”';
+    const setupPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || Store.selectedPlant || '';
+    const canWriteSetup = Inspector._isSetupActionTask(task) && !!setupPlant && Inspector._canWriteSetup(setupPlant);
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
@@ -3385,15 +3447,16 @@ export const Inspector = {
 
       ${setupDetail ? `<div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
         <h4>${esc(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || 'â€”')}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || 'â€”')}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? 'â€”' : `${setupDetail.requiredMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? 'â€”' : `${setupDetail.effectiveMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? 'â€”' : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source)}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || 'â€”')}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || missingSetupPlaceholder)}</div></div>
         ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
         ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
+        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
       </div>` : ''}
 
       <div class="insp-actions">
@@ -3414,6 +3477,12 @@ export const Inspector = {
     const _id = String(task.id);
     body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS!.Table!._openOverrideModalForId!(_id));
     body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS!.Timeline!.focus!(_id));
+    body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
+      const snapshot = Store.setupSnapshot;
+      const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
+      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.PRODUCTION_LINE, () => Inspector._refreshSetupTruth(setupPlant));
+    });
+    body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
     // Notes char counter (oninput fires on every keystroke)
     const notesEl = body.querySelector('[data-field="notes"]') as HTMLTextAreaElement | null;
     const notesRemEl = body.querySelector('#insp-notes-rem');
@@ -3433,6 +3502,50 @@ export const Inspector = {
         onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
       });
     }
+  },
+
+  async _refreshSetupTruth(plant: string): Promise<void> {
+    await Persistence.loadSetupSnapshot(plant);
+    Timeline.rebuild();
+    Alerts.scheduleRecompute();
+    const current = Inspector._currentId ? Store.tasks[Inspector._currentId] : null;
+    if (current) Inspector._render(current);
+  },
+
+  _showSetupOverrideEditor(task: NimbusTask, plant: string): void {
+    const context = Inspector._setupOverrideFor(task);
+    const definition = Store.setupSnapshot?.definition;
+    if (!context || !definition) { Toast.show('Setup states are required before setup time can be adjusted.', 'warn'); return; }
+    const host = document.getElementById('inspector-body')?.querySelector<HTMLElement>('[data-setup-editor-host]');
+    if (!host || host.querySelector('[data-setup-override-editor]')) return;
+    const existing = context.existing;
+    const baseline = existing?.standard_min ?? context.baseline;
+    const initialAdjustment = existing && baseline != null ? existing.remaining_min - baseline : 0;
+    host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>Reason<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>Adjustment (minutes)<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">Matrix baseline: ${baseline} min. Remaining work is baseline plus adjustment.</p>` : `<label>Total setup duration (minutes)<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">No matrix baseline exists; this total applies only to this exact order pair.</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>Save setup time</button>${existing ? '<button class="btn btn-ghost sm" data-setup-reset-override>Reset to matrix</button>' : ''}</div></div>`;
+    const reason = host.querySelector<HTMLInputElement>('[data-setup-override-reason]')!;
+    reason.value = existing?.reason || '';
+    host.querySelector<HTMLButtonElement>('[data-setup-save-override]')!.addEventListener('click', async () => {
+      const values = Inspector._setupOverrideValues(baseline, host.querySelector<HTMLInputElement>('[data-setup-override-adjustment]')?.value || '', host.querySelector<HTMLInputElement>('[data-setup-override-total]')?.value || '');
+      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
+      if (!values) { Toast.show(baseline != null ? 'The remaining setup time cannot be below zero.' : 'Enter a whole-number total setup duration.', 'error'); return; }
+      const payload = { line: task.PRODUCTION_LINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
+      const url = existing ? `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}` : `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides`;
+      const body = existing ? payload : { ...payload, predecessor_order_id: context.predecessorOrderId, successor_order_id: String(task.id), predecessor_values: Object.fromEntries(context.predecessorState.map(part => [part.fieldKey, part.value])), successor_values: Object.fromEntries(context.successorState.map(part => [part.fieldKey, part.value])) };
+      try {
+        const response = await Util.fetchTraced(url, { method: existing ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify(body) });
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup time saved.', 'success');
+      } catch (error) { Toast.show(`Could not save setup time: ${(error as Error).message}`, 'error'); }
+    });
+    host.querySelector<HTMLButtonElement>('[data-setup-reset-override]')?.addEventListener('click', async () => {
+      if (!existing) return;
+      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
+      try {
+        const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ line: task.PRODUCTION_LINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup override reset to matrix.', 'success');
+      } catch (error) { Toast.show(`Could not reset setup time: ${(error as Error).message}`, 'error'); }
+    });
   },
 
   _varianceBadge(t: NimbusTask): string {

@@ -26,13 +26,14 @@ os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
 import master_data as md  # noqa: E402
+import setup_data  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # Pure-logic: RANKABLE_FIELDS registry (master_data.py)
 # ---------------------------------------------------------------------------
-def test_rankable_fields_has_exactly_four_entries_with_expected_columns():
-    assert set(md.RANKABLE_FIELDS) == {"colorWheel", "prt01", "prt02", "productionVersion"}
+def test_rankable_fields_exposes_only_three_configurable_entries():
+    assert set(md.CONFIGURABLE_PRIORITY_FIELDS) == {"colorWheel", "prt01", "prt02"}
     assert md.RANKABLE_FIELDS["colorWheel"] == {
         "mp_column": "color", "orders_column": "color", "task_field": "COLOR",
         "default_label": "Color Wheel",
@@ -44,10 +45,6 @@ def test_rankable_fields_has_exactly_four_entries_with_expected_columns():
     assert md.RANKABLE_FIELDS["prt02"] == {
         "mp_column": "prt_02", "orders_column": "prt_02", "task_field": "PRT_02",
         "default_label": "Prod. Resource Tool (02)",
-    }
-    assert md.RANKABLE_FIELDS["productionVersion"] == {
-        "mp_column": "default_production_version", "orders_column": "production_version",
-        "task_field": "PRODUCTION_VERSION", "default_label": "Production Version",
     }
 
 
@@ -103,23 +100,29 @@ def test_priority_list_write_route_is_registered_for_admin_audit_logging():
     assert brain._ADMIN_WRITE_OPERATIONS["/priority-list/{plant}/{field_key}"] == "priority_list.write"
 
 
-def test_rankable_fields_now_carry_a_default_label():
+def test_configurable_priority_fields_carry_default_labels():
     expected = {
         'colorWheel': 'Color Wheel',
         'prt01': 'Prod. Resource Tool (01)',
         'prt02': 'Prod. Resource Tool (02)',
-        'productionVersion': 'Production Version',
     }
     for key, label in expected.items():
-        assert md.RANKABLE_FIELDS[key]['default_label'] == label
+        assert md.CONFIGURABLE_PRIORITY_FIELDS[key]['default_label'] == label
 
 
-def test_priority_fields_endpoint_lists_four_fields(client):
+def test_new_setup_signatures_reject_retired_production_version():
+    with pytest.raises(ValueError, match="Unknown setup field"):
+        setup_data._normalise_fields(
+            ["productionVersion"], allowed_fields=md.CONFIGURABLE_PRIORITY_FIELDS
+        )
+
+
+def test_priority_fields_endpoint_lists_only_configurable_fields(client):
     r = client.get("/priority-fields")
     assert r.status_code == 200
     body = r.json()
     keys = [f["field_key"] for f in body["fields"]]
-    assert keys == ["colorWheel", "prt01", "prt02", "productionVersion"]
+    assert keys == ["colorWheel", "prt01", "prt02"]
     color = body["fields"][0]
     assert color == {
         "field_key": "colorWheel", "mp_column": "color", "orders_column": "color",

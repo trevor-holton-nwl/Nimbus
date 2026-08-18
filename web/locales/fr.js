@@ -1282,7 +1282,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur',
   'ui.setup_predecessor_state': 'État prédécesseur',
   'ui.setup_required': 'Réglage requis', 'ui.setup_effective': 'Réglage effectif', 'ui.setup_standard': 'Réglage standard',
-  'ui.setup_override': 'Remplacement d’occurrence', 'ui.setup_missing': 'Détail du réglage indisponible',
+  'ui.setup_override': 'Remplacement d’occurrence', 'ui.setup_missing': 'Données de matrice de réglage manquantes',
   'ui.setup_capacity_shortfall': 'Manque de capacité : {{available}} min disponibles ; {{required}} min requises ; manque de {{short}} min.',
   'ui.setup_coverage_observed':       'Observé : {{transitions}} transitions, {{missing}} manquantes',
   'ui.setup_coverage_reachable':      'Atteignable : {{pairs}} paires, {{missing}} manquantes',

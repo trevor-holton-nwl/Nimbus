@@ -365,10 +365,9 @@ export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' 
 
 export type StoreMode = 'live' | 'draft';
 
-/** Widened in Stage 2 — all four RANKABLE_FIELDS keys exist as upload targets;
- *  since Stage 3's term-factory rewrite all four are also wired into
- *  Engine._sortTerms generically (one ordinal term per enabled key). */
-export type ConstraintKey = 'colorWheel' | 'prt01' | 'prt02' | 'productionVersion';
+/** Configurable optimization and setup-signature fields. Production Version
+ * remains readable for legacy persisted data, but is not configurable. */
+export type ConstraintKey = 'colorWheel' | 'prt01' | 'prt02';
 
 export type StoreEventType =
   | 'tasks:bulk' | 'task:update' | 'task:remove' | 'tasks:bulkUpdate'

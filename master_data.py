@@ -126,6 +126,14 @@ RANKABLE_FIELDS = {
     },
 }
 
+# Production Version remains in RANKABLE_FIELDS solely so existing persisted
+# priority lists, constraints, and setup history can still be read safely.
+# New optimization uploads and setup signatures use this narrower registry.
+CONFIGURABLE_PRIORITY_FIELDS = {
+    key: spec for key, spec in RANKABLE_FIELDS.items()
+    if key != "productionVersion"
+}
+
 # Columns the Master Data > Material Plant grid joins in from `materials` for
 # display/filtering only. Never writable; never physically on material_plants.
 _MATERIAL_PLANT_JOINED = ('material_type', 'material_description')

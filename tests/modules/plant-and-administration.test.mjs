@@ -70,6 +70,33 @@ test('SetupAdmin keeps read, copy, and export available to non-writers', () => {
   });
 });
 
+test('SetupAdmin does not offer retired Production Version as a setup-signature field', () => {
+  // Regression target: a retired optimization dimension could still be added
+  // to a new signature when a stale registry response reached this editor.
+  assert.deepEqual(SetupAdmin.registeredFields([
+    { field_key: 'colorWheel' }, { field_key: 'prt01' },
+    { field_key: 'prt02' }, { field_key: 'productionVersion' },
+  ]), ['colorWheel', 'prt01', 'prt02']);
+});
+
+test('SetupAdmin removes a signature field from the draft but never empties the signature', () => {
+  // Regression target: the editor could only grow or reorder a signature,
+  // forcing an administrator to create a new definition to remove one field.
+  assert.deepEqual(SetupAdmin.removeSignatureField(['colorWheel', 'prt01', 'prt02'], 1), ['colorWheel', 'prt02']);
+  assert.deepEqual(SetupAdmin.removeSignatureField(['colorWheel'], 0), ['colorWheel']);
+});
+
+test('setup signature editor exposes accessible removal and settings has one fixed strip plus a scrollable body', () => {
+  // Regression target: a visible version suffix obscures the action label, and
+  // nesting the tab strip inside the scroll region lets navigation disappear.
+  const source = readFileSync(new URL('../../web/plant-and-administration.mts', import.meta.url), 'utf8');
+  assert.match(source, /data-setup-field-remove=.*aria-label=/);
+  assert.match(source, /data-setup-field-remove=.*definitionFields\.length === 1 \? 'disabled' : ''/);
+  assert.doesNotMatch(source, /data-setup-signature-edit[^>]*>[^<]*v\$\{version/);
+  assert.match(source, /<div class="settings-content-scroll">/);
+  assert.match(source, /<nav class="admin-subtabs settings-inner-tabs"/);
+});
+
 test('SetupAdmin bounds missing-setup review data and reserves the editor for writers', () => {
   // Regression target: exposing a matrix editor to readers, or handing an
   // unbounded candidate table across the preview/admin boundary.
