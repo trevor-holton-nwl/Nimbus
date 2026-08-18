@@ -354,6 +354,39 @@ test('Inspector exposes keyboard-equivalent setup detail on the successor, inclu
     'the successor detail must state available, required, and short capacity in text');
 });
 
+test('Inspector renders derived setup details for orders without setup observations and keeps notes last', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = {
+    innerHTML: '',
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  };
+  const task = {
+    id: 'detail-without-observation', ORDER: '100003', PLANT: 'P-SETUP',
+    PRODUCTION_LINE: 'L-SETUP', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00'),
+  };
+  try {
+    const detail = Inspector._setupDetailForTask(task, { intervals: [], diagnostics: [] });
+    assert.ok(detail, 'every order should expose a derived setup detail model');
+    assert.equal(detail.predecessorOrderId, null);
+    assert.equal(detail.requiredMinutes, null);
+    assert.equal(detail.missingDetail, null);
+
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(task);
+    const orderIndex = body.innerHTML.indexOf('ui.insp_order_section');
+    const scheduleIndex = body.innerHTML.indexOf('ui.insp_schedule_section');
+    const setupIndex = body.innerHTML.indexOf('ui.setup_detail_title');
+    const notesIndex = body.innerHTML.indexOf('ui.insp_notes_section');
+    assert.ok(orderIndex < scheduleIndex, 'Schedule follows Order');
+    assert.ok(scheduleIndex < setupIndex, 'Derived setup follows Schedule');
+    assert.ok(setupIndex < notesIndex, 'Notes follows Derived setup and remains last');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+  }
+});
+
 test('Inspector formats setup signatures in configured order with readable labels', () => {
   const formatted = Inspector._formatSetupState([
     { fieldKey: 'colorWheel', value: 'Ruby' },

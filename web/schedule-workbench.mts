@@ -193,7 +193,7 @@ interface SetupPresentationDetail {
   requiredMinutes: number | null;
   effectiveMinutes: number | null;
   standardMinutes: number | null;
-  source: string;
+  source: string | null;
   overrideStatus: string | null;
   availableMinutes: number | null;
   shortMinutes: number | null;
@@ -3302,12 +3302,14 @@ export const Inspector = {
 
   /** Keyboard/screen-reader equivalent of a setup bar: detail belongs to the
    * successor order, never to a selectable synthetic timeline item. */
-  _setupDetailForTask(task: NimbusTask, observation: SetupObservation = Timeline._setupObservation(Store.tasksForSelectedPlant())): SetupPresentationDetail | null {
+  _setupDetailForTask(task: NimbusTask, observation: SetupObservation = Timeline._setupObservation(Store.tasksForSelectedPlant())): SetupPresentationDetail {
     const id = String(task.id);
     const interval = observation.intervals.find(entry => String(entry.successorOrderId) === id);
     const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === id);
-    if (!interval && !diagnostic) return null;
-    const entry: any = interval || diagnostic;
+    // Keep a stable detail surface for every order. Positive setup intervals
+    // and diagnostics supply their existing facts; an order with neither still
+    // gets an honest, placeholder-only panel instead of losing the section.
+    const entry: any = interval || diagnostic || { successorOrderId: id };
     const snapshot = Store.setupSnapshot;
     const definition = snapshot?.definition;
     const predecessor = entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
@@ -3329,7 +3331,7 @@ export const Inspector = {
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
       effectiveMinutes: resolved?.effectiveMin ?? (Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
       standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
-      source: resolved?.source ?? (entry.source || 'resolved'), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
+      source: resolved?.source ?? (entry.source || null), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
       shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
         ? entry.requiredMinutes - entry.availableMinutes : null,
@@ -3411,14 +3413,6 @@ export const Inspector = {
       </div>
 
       <div class="insp-card">
-        <h4>${Util.t('ui.insp_notes_section')}</h4>
-        <div class="insp-notes-wrap">
-          <textarea data-field="notes" maxlength="500" placeholder="${Util.t('ph.add_note')}" rows="3">${esc(task.notes || '')}</textarea>
-          <div class="insp-notes-counter"><span id="insp-notes-rem">${500 - (task.notes || '').length}</span> ${Util.t('ui.remaining')}</div>
-        </div>
-      </div>
-
-      <div class="insp-card">
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
         ${Inspector._fieldVisible('original_start_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_orig_start')}</label>
@@ -3468,19 +3462,27 @@ export const Inspector = {
         </div>
       </div>` : ''}
 
-      ${setupDetail ? `<div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
+      <div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
         <h4>${esc(Util.t('ui.setup_detail_title'))}</h4>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source || missingSetupPlaceholder)}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || missingSetupPlaceholder)}</div></div>
         ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
         ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
         ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
-      </div>` : ''}
+      </div>
+
+      <div class="insp-card">
+        <h4>${Util.t('ui.insp_notes_section')}</h4>
+        <div class="insp-notes-wrap">
+          <textarea data-field="notes" maxlength="500" placeholder="${Util.t('ph.add_note')}" rows="3">${esc(task.notes || '')}</textarea>
+          <div class="insp-notes-counter"><span id="insp-notes-rem">${500 - (task.notes || '').length}</span> ${Util.t('ui.remaining')}</div>
+        </div>
+      </div>
 
       <div class="insp-actions">
         ${fixed
