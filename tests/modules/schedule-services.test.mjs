@@ -490,14 +490,14 @@ test('deriveSetupObservation never projects one plant setup truth onto another p
   assert.deepEqual(observation, { intervals: [], diagnostics: [] });
 });
 
-test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as predecessor-state-unknown (carrying the middle order\'s id), and the chain recovers on the next valid order', () => {
+test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as predecessor-state-unknown (showing the Order Number), and the chain recovers on the next valid order', () => {
   // The core regression this feature exists for. Before this fix, a null
   // stateForOrder() result on a real (non-first) predecessor was silently
   // treated the same as "genuinely no predecessor", misreporting
   // initial-state-unknown instead of naming the actual order whose setup
   // attributes are missing. Chain: red (valid) -> blank (unresolvable) ->
   // blue (valid) -> green (valid). The blank order breaks state continuity,
-  // so 'blue' must report predecessor-state-unknown pointing at 'blank', and
+  // so 'blue' must report predecessor-state-unknown pointing at 'blank', while
   // 'green' — once 'blue' re-establishes a valid state — must resolve
   // normally with no unknown-state diagnostic of its own.
   const observation = deriveSetupObservation({
@@ -505,13 +505,13 @@ test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as
     definition: { plant: 'P-CHAIN', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
     plant_rows: [], line_rows: [], line_states: [], overrides: [],
   }, [
-    { id: 'chain-red', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'RED', RUN_TIME: 1,
+    { id: 'chain-red', ORDER: '2021339583', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'RED', RUN_TIME: 1,
       start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
-    { id: 'chain-blank', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: '', RUN_TIME: 1,
+    { id: 'chain-blank', ORDER: '2021339584', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: '', RUN_TIME: 1,
       start_date: new Date('2026-08-03T09:00:00'), end_date: new Date('2026-08-03T10:00:00') },
-    { id: 'chain-blue', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'BLUE', RUN_TIME: 1,
+    { id: 'chain-blue', ORDER: '2021339585', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'BLUE', RUN_TIME: 1,
       start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
-    { id: 'chain-green', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'GREEN', RUN_TIME: 1,
+    { id: 'chain-green', ORDER: '2021339586', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'GREEN', RUN_TIME: 1,
       start_date: new Date('2026-08-03T11:00:00'), end_date: new Date('2026-08-03T12:00:00') },
   ], new Set(['L-CHAIN']));
 
@@ -528,13 +528,14 @@ test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as
 
   // 'chain-blue': the REAL regression target. Its predecessor (chain-blank)
   // exists but its state could not be derived — this must be
-  // predecessor-state-unknown, carrying chain-blank's id, NOT
+  // predecessor-state-unknown, carrying chain-blank's internal ID as data, NOT
   // initial-state-unknown (which would wrongly claim there's no real
   // predecessor at all).
   const blueDiagnostic = bySuccessor.get('chain-blue');
   assert.equal(blueDiagnostic?.type, 'predecessor-state-unknown');
   assert.equal(blueDiagnostic?.predecessorOrderId, 'chain-blank');
-  assert.match(blueDiagnostic?.message, /chain-blank/);
+  assert.match(blueDiagnostic?.message, /2021339584/);
+  assert.doesNotMatch(blueDiagnostic?.message, /chain-blank/);
 
   // 'chain-green': the chain recovers. chain-blue has a real, valid
   // (non-blank) state, so chain-green must NOT get any "unknown state"

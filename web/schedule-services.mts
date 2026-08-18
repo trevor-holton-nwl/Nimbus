@@ -332,6 +332,7 @@ export function deriveSetupObservation(
   const stateForLine = new Map(setup.line_states
     .filter(state => state.signature_version === definition.signature_version)
     .map(state => [state.line, state]));
+  const taskById = new Map(tasks.map(task => [String(task.id), task]));
   const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
   for (const task of tasks) {
     // A truthy-only PLANT check lets NULL/empty-PLANT orders leak into any
@@ -378,7 +379,7 @@ export function deriveSetupObservation(
       if (plannedState && setupStateKey(plannedState) !== setupStateKey(assertedState.state_key)) {
         observation.diagnostics.push({
           type: 'current-state-diverged', line, scope, successorOrderId: String(planned!.task.id), time: observationTime,
-          message: `Asserted state on ${line} differs from the state planned by ${String(planned!.task.id)} at observation time.`,
+          message: `Asserted state on ${line} differs from the state planned by order ${Util.orderNumber(planned!.task)} at observation time.`,
         });
       }
     }
@@ -392,7 +393,7 @@ export function deriveSetupObservation(
         // predecessor order exists to derive one from.
         observation.diagnostics.push({
           type: 'initial-state-unknown', line, scope, successorOrderId: String(order.task.id), time: order.start,
-          message: `The setup state before ${String(order.task.id)} on ${line} is unknown.`,
+          message: `The setup state before order ${Util.orderNumber(order.task)} on ${line} is unknown.`,
         });
       } else if (!predecessorState) {
         // A real predecessor order exists but stateForOrder couldn't derive
@@ -400,13 +401,13 @@ export function deriveSetupObservation(
         // let this null propagate as "no predecessor" to every later order.
         observation.diagnostics.push({
           type: 'predecessor-state-unknown', line, scope, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
-          message: `The order before ${String(order.task.id)} on ${line} (${predecessorOrderId}) is missing the setup attributes needed to determine its state.`,
+          message: `The order before ${Util.orderNumber(order.task)} on ${line} (${Util.orderNumber(taskById.get(String(predecessorOrderId)))}) is missing the setup attributes needed to determine its state.`,
         });
       } else if (!successorState) {
         observation.diagnostics.push({
           type: 'successor-state-unknown', line, scope,
           pairKey: `${setupStateKey(predecessorState)}->unknown`, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
-          message: `The setup attributes needed to determine the state of ${String(order.task.id)} on ${line} are missing.`,
+          message: `The setup attributes needed to determine the state of order ${Util.orderNumber(order.task)} on ${line} are missing.`,
         });
       } else {
         const resolved = resolveSetup({
@@ -444,7 +445,7 @@ export function deriveSetupObservation(
       if (!resolvedEdges.has(key)) observation.diagnostics.push({
         type: 'override-inactive', line, scope, predecessorOrderId: override.predecessor_order_id,
         successorOrderId: override.successor_order_id, time: orders[0]?.start,
-        message: `Active setup override ${key} no longer matches the scheduled adjacency on ${line}.`,
+        message: `Active setup override from ${override.predecessor_order_id == null ? 'the initial state' : `order ${Util.orderNumber(taskById.get(String(override.predecessor_order_id)))}`} to order ${Util.orderNumber(taskById.get(String(override.successor_order_id)))} on ${line} no longer matches the scheduled adjacency.`,
       });
     }
   }

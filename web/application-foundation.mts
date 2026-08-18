@@ -392,6 +392,14 @@ export const Util = {
   // Normalise a string for case-insensitive compares.
   norm(s: unknown): string { return (s ?? '').toString().trim().toUpperCase(); },
 
+  // User-facing order identifier. Backend task payloads expose the business
+  // order number as ORDER; PRODUCTION_ORDER remains a legacy compatibility
+  // field. Never fall back to the internal task ID in visible copy.
+  orderNumber(task: Pick<NimbusTask, 'ORDER' | 'PRODUCTION_ORDER'> | null | undefined, fallback = 'order number unavailable'): string {
+    const order = String(task?.ORDER ?? '').trim() || String(task?.PRODUCTION_ORDER ?? '').trim();
+    return order || fallback;
+  },
+
   // Get run-time (hours) from a task; 0 if missing.
   runHours(task: NimbusTask): number {
     const v = parseFloat(task?.RUN_TIME as string);

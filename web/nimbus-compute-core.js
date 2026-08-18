@@ -344,6 +344,12 @@
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
 
     const alerts = [];
+    const taskById = new Map(tasks.map(task => [String(task.id), task]));
+    const orderNumber = task => {
+      const order = String(task?.ORDER ?? '').trim() || String(task?.PRODUCTION_ORDER ?? '').trim();
+      return order || 'order number unavailable';
+    };
+    const orderNumberForId = id => orderNumber(id == null ? undefined : taskById.get(String(id)));
     const todayStart = startOfDay(new Date());
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
     let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStart);
@@ -365,7 +371,7 @@
           alerts.push({
             id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
-            msg: `Orders "${prev.task.PRODUCTION_ORDER || prev.task.ORDER || prev.task.id}" and "${cur.task.PRODUCTION_ORDER || cur.task.ORDER || cur.task.id}" overlap on ${line}.`,
+            msg: `Orders "${orderNumber(prev.task)}" and "${orderNumber(cur.task)}" overlap on ${line}.`,
             taskId: cur.task.id, line, time: cur.start
           });
         }
@@ -500,7 +506,7 @@
       if (conflict) {
         alerts.push({
           id:  `blk-${t.id}`, sev: 'err', type: 'blackout',
-          msg: `Order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" overlaps a blackout block on ${line}.`,
+          msg: `Order "${orderNumber(t)}" overlaps a blackout block on ${line}.`,
           taskId: t.id, line, time: conflictTime
         });
       }
@@ -515,7 +521,7 @@
       if (badInterval) {
         alerts.push({
           id:  `fixclosed-${t.id}`, sev: 'warn', type: 'fixed-closed',
-          msg: `Fixed order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" is on a day the ${line} calendar is closed.`,
+          msg: `Fixed order "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
           taskId: t.id, line, time: badInterval.start
         });
       }
@@ -542,7 +548,7 @@
       if (parts.length) {
         alerts.push({
           id:  `fixhours-${t.id}`, sev: 'warn', type: 'fixed-out-of-hours',
-          msg: `Fixed order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" ${parts.join(' and ')}.`,
+          msg: `Fixed order "${orderNumber(t)}" ${parts.join(' and ')}.`,
           taskId: t.id, line, time: alertTime
         });
       }
@@ -560,7 +566,7 @@
       const line = t.PRODUCTION_LINE || 'Unknown';
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
-        msg: `Order "${t.PRODUCTION_ORDER || t.ORDER || t.id}" has a runtime that no longer matches its saved schedule.`,
+        msg: `Order "${orderNumber(t)}" has a runtime that no longer matches its saved schedule.`,
         taskId: t.id, line, time: t.start_date || new Date(),
       });
     }
@@ -606,7 +612,7 @@
       const shortMinutes = requiredMinutes - availableMinutes;
       alerts.push({
         id: `setup-violated-${key}`, sev: 'err', type: 'setup-violated',
-        msg: `Not enough changeover time on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
+        msg: `Not enough changeover time before order "${orderNumberForId(interval.successorOrderId)}" on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
         taskId: interval.successorOrderId, line: interval.line, time: interval.start,
         requiredMinutes, availableMinutes, shortMinutes,
       });
@@ -620,12 +626,12 @@
       'setup-uncovered': 'err', 'predecessor-state-unknown': 'err', 'successor-state-unknown': 'err',
     };
     const SETUP_DIAGNOSTIC_DEFAULT_MSG = {
-      'initial-state-unknown': d => `Can't determine what needs to be set up before order ${d.successorOrderId} on ${d.line}.`,
+      'initial-state-unknown': d => `Can't determine what needs to be set up before order ${orderNumberForId(d.successorOrderId)} on ${d.line}.`,
       'override-inactive': d => `A manual changeover override on ${d.line} no longer matches the current schedule.`,
-      'current-state-diverged': d => `The recorded changeover state on ${d.line} doesn't match what order ${d.successorOrderId} expected.`,
+      'current-state-diverged': d => `The recorded changeover state on ${d.line} doesn't match what order ${orderNumberForId(d.successorOrderId)} expected.`,
       'setup-uncovered': (d, pair) => `No changeover time defined${pair} on ${d.line}. Add a setup rule to the matrix.`,
-      'predecessor-state-unknown': d => `Order ${d.predecessorOrderId} on ${d.line} is missing attributes needed to calculate the changeover before ${d.successorOrderId}.`,
-      'successor-state-unknown': d => `Order ${d.successorOrderId} on ${d.line} is missing attributes needed to calculate its changeover.`,
+      'predecessor-state-unknown': d => `Order ${orderNumberForId(d.predecessorOrderId)} on ${d.line} is missing attributes needed to calculate the changeover before ${orderNumberForId(d.successorOrderId)}.`,
+      'successor-state-unknown': d => `Order ${orderNumberForId(d.successorOrderId)} on ${d.line} is missing attributes needed to calculate its changeover.`,
     };
     const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
     for (const diagnostic of setupDiagnostics) {

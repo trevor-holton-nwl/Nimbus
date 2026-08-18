@@ -2952,7 +2952,7 @@ export const Table = {
     const rel = Store.alertsByTask().get(String(taskId)) || [];
     if (!rel.length) return;
     const t = Store.tasks[taskId];
-    const po = t?.PRODUCTION_ORDER || t?.ORDER || String(taskId).slice(0, 8);
+    const po = Util.orderNumber(t);
     const _esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
       (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
 
@@ -9142,12 +9142,12 @@ export const AlertsUIAdapter = {
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
     const taskPO = (id: string) => {
       const t = Store.tasks?.[id];
-      return t ? (t.PRODUCTION_ORDER || t.text || String(id).slice(0, 8)) : String(id).slice(0, 8);
+      return Util.orderNumber(t);
     };
     const taskFixed = (id: string) => !!Store.tasks?.[id]?.fixed;
 
     const renderChip = (id: string) => `
-      <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(id)}">${esc(taskPO(id))}</span>`;
+      <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(taskPO(id))}">${esc(taskPO(id))}</span>`;
 
     const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
