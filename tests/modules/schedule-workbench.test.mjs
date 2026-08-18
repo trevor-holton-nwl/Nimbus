@@ -220,12 +220,66 @@ test('Timeline omits zero setup but renders a leading-edge marker for missing se
   assert.equal(missing[0].end.getTime(), successor.start_date.getTime());
 });
 
+test('Timeline gives each setup diagnostic type a distinct marker label and className', () => {
+  // Regression target: SETUP_DIAGNOSTIC_PRESENTATION must actually vary the
+  // rendered label/className per diagnostic type instead of every type falling
+  // back to the same 'ui.setup_missing' text — and the three "state unknown"
+  // types (initial/predecessor/successor) must carry the shared
+  // 'setup-unrecorded' class the other three types do not.
+  const successors = [
+    { id: 'diag-initial', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') },
+    { id: 'diag-predecessor', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T09:00:00'), end_date: new Date('2026-08-14T10:00:00') },
+    { id: 'diag-successor', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T10:00:00'), end_date: new Date('2026-08-14T11:00:00') },
+    { id: 'diag-uncovered', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T11:00:00'), end_date: new Date('2026-08-14T12:00:00') },
+    { id: 'diag-diverged', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T12:00:00'), end_date: new Date('2026-08-14T13:00:00') },
+    { id: 'diag-override', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T13:00:00'), end_date: new Date('2026-08-14T14:00:00') },
+  ];
+  const items = Timeline._setupItemsForObservation(successors, {
+    intervals: [],
+    diagnostics: [
+      { type: 'initial-state-unknown', line: 'SETUP-DIAG', successorOrderId: 'diag-initial', time: successors[0].start_date },
+      { type: 'predecessor-state-unknown', line: 'SETUP-DIAG', successorOrderId: 'diag-predecessor', predecessorOrderId: 'mid', time: successors[1].start_date },
+      { type: 'successor-state-unknown', line: 'SETUP-DIAG', successorOrderId: 'diag-successor', time: successors[2].start_date },
+      { type: 'setup-uncovered', line: 'SETUP-DIAG', successorOrderId: 'diag-uncovered', time: successors[3].start_date },
+      { type: 'current-state-diverged', line: 'SETUP-DIAG', successorOrderId: 'diag-diverged', time: successors[4].start_date },
+      { type: 'override-inactive', line: 'SETUP-DIAG', successorOrderId: 'diag-override', time: successors[5].start_date },
+    ],
+  });
+  assert.equal(items.length, 6);
+  const byId = new Map(items.map(item => [item.setup.successorOrderId, item]));
+
+  const unrecordedIds = ['diag-initial', 'diag-predecessor', 'diag-successor'];
+  const otherIds = ['diag-uncovered', 'diag-diverged', 'diag-override'];
+  for (const id of unrecordedIds) {
+    assert.match(byId.get(id).className, /\bsetup-unrecorded\b/, `${id} must carry the shared unrecorded-state class`);
+  }
+  for (const id of otherIds) {
+    assert.doesNotMatch(byId.get(id).className, /\bsetup-unrecorded\b/, `${id} must NOT carry the unrecorded-state class`);
+  }
+
+  // Every type's aria-label (embedded in the marker content) must be distinct —
+  // no two diagnostic types collapse onto the same presentation text.
+  const labels = [...successors.map(s => byId.get(s.id))].map(item => {
+    const match = /aria-label="([^"]*)"/.exec(item.content);
+    return match ? match[1] : null;
+  });
+  assert.equal(new Set(labels).size, labels.length, 'each diagnostic type must render a distinct label');
+  assert.ok(labels.every(Boolean), 'every marker must carry a non-empty aria-label');
+});
+
 test('missing setup marker is pinned to the center of a narrow setup bar', () => {
   // Regression target: vis-timeline could reflow the warning marker to an
-  // edge of a narrow bar, where it looked misplaced or overflowed.
+  // edge of a narrow bar, where it looked misplaced or overflowed. Centring
+  // moved from the marker itself (absolute + translate(-50%,-50%)) to a flex
+  // rule on its containing `.vis-item-content`, so the marker no longer needs
+  // (or has) explicit positioning of its own.
   const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
-  assert.match(css, /\.setup-missing-marker\s*\{[^}]*left:\s*50%[^}]*top:\s*50%[^}]*translate\(-50%,\s*-50%\)/s);
-  assert.match(css, /\.vis-item\.setup-item\.setup-missing\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(css, /\.vis-item\.setup-item\.setup-missing\s*\{[^}]*overflow:\s*hidden/s,
+    'the setup-missing bar itself still clips overflow');
+  assert.match(css, /\.vis-item\.setup-item\.setup-missing \.vis-item-content\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*justify-content:\s*center[^}]*\}/s,
+    'the setup-missing item content must flex-center its children');
+  assert.match(css, /\.setup-missing-marker\s*\{[^}]*position:\s*static[^}]*transform:\s*none/s,
+    'the marker itself must no longer carry its own absolute/translate centring');
   const locale = readFileSync(new URL('../../web/locales/en.js', import.meta.url), 'utf8');
   assert.match(locale, /'ui\.setup_missing':\s*'Missing setup matrix data'/);
 });
@@ -310,7 +364,13 @@ test('Inspector formats setup signatures in configured order with readable label
   assert.equal(formatted, 'Color: Ruby · PRT01: 7B10 · PRT02: T-3');
 });
 
-test('Inspector permits setup controls only on an active order or the earliest upcoming order on its line', () => {
+test('Inspector._isSetupActionTask still identifies the active/earliest-upcoming order on its line (function retained, no longer gates setup controls)', () => {
+  // _isSetupActionTask itself is unchanged and still exported, so it is still
+  // tested directly here. What changed is that Inspector._render's
+  // canWriteSetup no longer calls it — canWriteSetup is now just
+  // `!!setupPlant && Inspector._canWriteSetup(setupPlant)`, so setup controls
+  // are no longer restricted to the active/earliest-upcoming order. This test
+  // intentionally does NOT assert anything about canWriteSetup/button gating.
   const now = new Date('2026-08-17T10:00:00');
   const earlier = { id: 'setup-earlier', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
     start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') };
@@ -338,7 +398,11 @@ test('Inspector derives covered and uncovered exact-pair override values without
   assert.equal(Inspector._setupOverrideValues(null, '', ''), null);
 });
 
-test('Inspector names missing setup matrix data instead of showing an unavailable-value dash', () => {
+test('Inspector shows a plain dash for unavailable setup values and names the missing matrix data only in the explanatory warning', () => {
+  // Regression target: missingSetupPlaceholder reverted from a translated
+  // 'ui.setup_missing' string back to a plain '—' (Inspector._render no longer
+  // calls Util.t for the six per-value placeholders) — only the standalone
+  // warning paragraph still names the missing matrix data via setupDiagnosticLabel.
   const priorGetElementById = globalThis.document.getElementById;
   const priorSetupDetail = Inspector._setupDetailForTask;
   const priorTranslate = Util.t;
@@ -353,9 +417,12 @@ test('Inspector names missing setup matrix data instead of showing an unavailabl
     Util.t = key => key === 'ui.setup_missing' ? 'Missing setup matrix data' : key;
     Inspector._render({ id: 'missing-setup-inspector', ORDER: '100002', PRODUCTION_LINE: 'L1', RUN_TIME: 1 });
     const setupPanel = body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title'));
+    const dashCount = [...setupPanel.matchAll(/—/g)].length;
+    assert.equal(dashCount, 6, 'the six unavailable setup values (predecessor, state, required, effective, standard, override) render a plain dash');
     const missingTextCount = [...setupPanel.matchAll(/Missing setup matrix data/g)].length;
-    assert.equal(missingTextCount, 7,
-      'the six unavailable setup values and the explanatory warning should name the missing matrix data');
+    assert.equal(missingTextCount, 1,
+      'only the standalone explanatory warning paragraph names the missing matrix data — the per-value placeholders no longer do');
+    assert.match(setupPanel, /No matching matrix row\./, 'the warning still surfaces the diagnostic message text');
   } finally {
     globalThis.document.getElementById = priorGetElementById;
     Inspector._setupDetailForTask = priorSetupDetail;

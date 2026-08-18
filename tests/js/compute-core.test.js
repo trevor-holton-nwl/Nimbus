@@ -161,6 +161,43 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
   ]);
 });
 
+test('computeAlerts recognizes predecessor-state-unknown/successor-state-unknown and assigns the new per-type severity map', () => {
+  // This fails if the two new diagnostic types are missing from the core's
+  // diagnosticTypes allowlist (silently dropped) or if severity regresses to
+  // the old "override-inactive is the only warn" blanket rule.
+  const time = new Date(Date.now() + 24 * 3600000);
+  const workHours = allDays([0, 24]);
+  const { alerts } = Core.computeAlerts({
+    tasks: [], blocks: [], plantBlocks: [], calendars: { L: { workHours } }, plants: {},
+    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ production_line: 'L', plant: 'P' }] },
+    dismissed: [], opts: {},
+    setup: {
+      intervals: [],
+      diagnostics: [
+        { type: 'predecessor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'mid', successorOrderId: 'after-mid', time },
+        { type: 'successor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'before', successorOrderId: 'unknown-successor', time },
+        { type: 'setup-uncovered', line: 'L', scope: 'P/L', pairKey: 'RED->BLUE', successorOrderId: 'uncovered-successor', time },
+        { type: 'initial-state-unknown', line: 'L', scope: 'P/L', successorOrderId: 'first', time },
+        { type: 'override-inactive', line: 'L', scope: 'P/L', successorOrderId: 'override-line', time },
+        { type: 'current-state-diverged', line: 'L', scope: 'P/L', successorOrderId: 'diverged-line', time },
+      ],
+    },
+  });
+
+  const sevByType = Object.fromEntries(
+    ['predecessor-state-unknown', 'successor-state-unknown', 'setup-uncovered', 'initial-state-unknown', 'override-inactive', 'current-state-diverged']
+      .map(type => [type, alerts.find(alert => alert.type === type)?.sev]),
+  );
+  assert.deepEqual(sevByType, {
+    'predecessor-state-unknown': 'err',
+    'successor-state-unknown': 'err',
+    'setup-uncovered': 'err',
+    'initial-state-unknown': 'warn',
+    'override-inactive': 'warn',
+    'current-state-diverged': 'warn',
+  }, 'each of the six setup diagnostic types must resolve its documented severity, not a blanket default');
+});
+
 test('computeAlerts ignores malformed setup diagnostics', () => {
   // This fails if an invalid observation payload can crash the normal alert
   // path instead of remaining fail-safe and diagnostic-only.

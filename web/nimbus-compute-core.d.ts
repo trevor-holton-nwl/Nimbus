@@ -120,7 +120,8 @@ declare global {
   }
 
   interface NimbusSetupDiagnostic {
-    type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+    type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
+      | 'predecessor-state-unknown' | 'successor-state-unknown';
     line: string;
     scope?: string;
     pairKey?: string;

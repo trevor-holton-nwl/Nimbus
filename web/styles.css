@@ -887,6 +887,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .alert-row.alert-calendar { background: rgba(45, 95, 140, 0.06); }
 .alert-row.alert-calendar:hover { background: rgba(45, 95, 140, 0.11); }
 .alert-row .msg { flex: 1; }
+.alert-row .alert-msg { flex: 1; min-width: 0; line-height: 1.4; }
 .alert-row .meta { font-size: 11px; color: var(--fg-mute); font-family: 'JetBrains Mono', monospace; }
 .alert-row .dismiss {
   background: transparent; border: none; color: var(--fg-faint);
@@ -6052,11 +6053,18 @@ body.dark .sap-kind-orders { color: var(--accent); }
   border-color: var(--warn-vivid) !important;
   color: var(--bg-elev) !important;
 }
+.vis-item.setup-item.setup-missing .vis-item-content {
+  position: static;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+}
 .setup-missing-marker {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  position: static;
+  transform: none;
   line-height: 1;
   white-space: nowrap;
 }

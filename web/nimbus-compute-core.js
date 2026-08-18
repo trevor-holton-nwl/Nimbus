@@ -568,6 +568,25 @@
     // Setup observations are intentionally supplied by the caller after its
     // one plant-scoped resolution pass.  Alerting validates/reporting only;
     // it does not read a matrix, change Store, or start an optimizer run.
+    const SETUP_FIELD_LABELS = { colorWheel: 'Color', prt01: 'PRT01', prt02: 'PRT02', productionVersion: 'Production Version' };
+    const formatSetupState = raw => {
+      if (raw === 'unknown') return 'an unrecorded state';
+      try {
+        const pairs = JSON.parse(raw);
+        if (!Array.isArray(pairs) || !pairs.length) return 'an unrecorded state';
+        return pairs.map(([k, v]) => `${SETUP_FIELD_LABELS[k] || k} ${v}`).join(', ');
+      } catch { return 'an unrecorded state'; }
+    };
+    const formatSetupPairKey = pairKey => {
+      // The left half is always either the literal 'unknown' or a JSON array
+      // ending in ']'; splitting on lastIndexOf('->') mis-parses a pairKey
+      // whose signature value itself contains the substring '->'. Find the
+      // '->' that immediately follows that boundary instead.
+      const boundary = pairKey.indexOf(']') >= 0 ? pairKey.indexOf(']') + 1
+        : pairKey.startsWith('unknown') ? 'unknown'.length : -1;
+      if (boundary < 0 || pairKey.slice(boundary, boundary + 2) !== '->') return pairKey;
+      return `${formatSetupState(pairKey.slice(0, boundary))} → ${formatSetupState(pairKey.slice(boundary + 2))}`;
+    };
     const setupSeen = new Set();
     const inScope = line => !onlyLines || onlyLines.has(line || 'Unknown');
     const setupKey = (type, entry, pairKey = '') => [
@@ -592,7 +611,20 @@
     }
     const diagnosticTypes = new Set([
       'setup-uncovered', 'initial-state-unknown', 'current-state-diverged', 'override-inactive',
+      'predecessor-state-unknown', 'successor-state-unknown',
     ]);
+    const SETUP_DIAGNOSTIC_SEVERITY = {
+      'initial-state-unknown': 'warn', 'override-inactive': 'warn', 'current-state-diverged': 'warn',
+      'setup-uncovered': 'err', 'predecessor-state-unknown': 'err', 'successor-state-unknown': 'err',
+    };
+    const SETUP_DIAGNOSTIC_DEFAULT_MSG = {
+      'initial-state-unknown': d => `The setup state before ${d.successorOrderId} on ${d.line} is unknown.`,
+      'override-inactive': d => `Active setup override no longer matches the scheduled adjacency on ${d.line}.`,
+      'current-state-diverged': d => `Asserted state on ${d.line} differs from the state planned by ${d.successorOrderId} at observation time.`,
+      'setup-uncovered': (d, pair) => `Setup${pair} on ${d.line} has no matching setup rule.`,
+      'predecessor-state-unknown': d => `The order before ${d.successorOrderId} on ${d.line} (${d.predecessorOrderId}) is missing the setup attributes needed to determine its state.`,
+      'successor-state-unknown': d => `The setup attributes needed to determine the state of ${d.successorOrderId} on ${d.line} are missing.`,
+    };
     const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
     for (const diagnostic of setupDiagnostics) {
       if (!diagnosticTypes.has(diagnostic?.type) || !inScope(diagnostic.line)) continue;
@@ -604,10 +636,11 @@
       if (setupSeen.has(key)) continue;
       setupSeen.add(key);
       const time = parseDate(diagnostic.time) || new Date();
-      const pair = diagnostic.pairKey ? ` for ${diagnostic.pairKey}` : '';
+      const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
+      const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
       alerts.push({
-        id: `${diagnostic.type}-${key}`, sev: diagnostic.type === 'override-inactive' ? 'warn' : 'err', type: diagnostic.type,
-        msg: diagnostic.message || `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`,
+        id: `${diagnostic.type}-${key}`, sev: SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err', type: diagnostic.type,
+        msg: diagnostic.message || (defaultMsg ? defaultMsg(diagnostic, pair) : `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`),
         taskId: diagnostic.successorOrderId, line: diagnostic.line, time,
       });
     }

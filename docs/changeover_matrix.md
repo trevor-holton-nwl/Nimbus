@@ -472,6 +472,25 @@ Use a fixed clock or relative dates in scheduling tests.
 - Setup labor/crew constraints.
 - Permanent optimization-reason storage.
 - A global mathematical solver.
+- Interval-level setup adjacency inside a split order (audited 2026-08-17; deliberately not built).
+  `deriveSetupObservation` collapses a multi-segment order to `first.start`/`last.end`
+  (`web/schedule-services.mts`, the `byLine` push in the task loop), so if another order is manually
+  dragged into a split order's idle gap, the setup needed to switch *back* to the split order is never
+  evaluated — the resumption edge is silently free, and the following order's predecessor becomes the
+  interleaved order rather than the split order's last segment.
+
+  This is left as-is on purpose, not overlooked. The optimizer models an order as **atomic**: the
+  candidate loop in `web/setup-scheduler.mts` resolves exactly one setup per task, then advances
+  `cursor = new Date(last.end)`, so it never interleaves another order inside a split envelope (matching
+  §6's "phase 1 does not interleave parents inside a split envelope"). Making the observation
+  interval-aware while the optimizer stays order-aware would raise setup requirements the optimizer
+  structurally cannot plan for or resolve — permanent, unfixable alerts. The two must move together, and
+  an occurrence override could not express a repeated adjacency anyway: `setup_occurrence_override` is
+  keyed on `(predecessor_order_id, successor_order_id)` with no occurrence discriminator.
+
+  Prerequisite before revisiting: decide whether the optimizer may interleave inside a split envelope at
+  all. If it may not, the correct fix is to block or alert on the manual drag that creates the interleave,
+  not to model the resumption setup.
 
 These are compatible future directions, not approximations v1 may silently claim to enforce.
 

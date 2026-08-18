@@ -200,6 +200,25 @@ interface SetupPresentationDetail {
   missingDetail: string | null;
 }
 
+/** Setup diagnostic type → presentation label/marker class. The single source
+ *  of truth for how each of the six diagnostic causes is described to the
+ *  user — shared by Timeline._setupItemsForObservation's marker rendering and
+ *  Inspector._setupDetailForTask's explanatory fallback text so the mapping
+ *  is never duplicated. Unknown/absent types fall back to 'ui.setup_missing'. */
+const SETUP_DIAGNOSTIC_PRESENTATION: Record<string, { i18nKey: string; extraClass: string }> = {
+  'initial-state-unknown':     { i18nKey: 'ui.setup_state_unrecorded',     extraClass: 'setup-unrecorded' },
+  'predecessor-state-unknown': { i18nKey: 'ui.setup_pred_attrs_missing',   extraClass: 'setup-unrecorded' },
+  'successor-state-unknown':   { i18nKey: 'ui.setup_order_attrs_missing', extraClass: 'setup-unrecorded' },
+  'setup-uncovered':           { i18nKey: 'ui.setup_missing',             extraClass: '' },
+  'current-state-diverged':    { i18nKey: 'ui.setup_state_diverged',      extraClass: '' },
+  'override-inactive':         { i18nKey: 'ui.setup_override_stale',      extraClass: '' },
+};
+
+function setupDiagnosticLabel(type: string | undefined | null): string {
+  const entry = type ? SETUP_DIAGNOSTIC_PRESENTATION[type] : undefined;
+  return Util.t(entry ? entry.i18nKey : 'ui.setup_missing');
+}
+
 /** A vis-timeline group — one row per production line. */
 interface TimelineGroupData {
   id: string;
@@ -671,19 +690,23 @@ export const Timeline = {
     for (const diagnostic of observation.diagnostics || []) {
       const successorId = diagnostic.successorOrderId ? String(diagnostic.successorOrderId) : '';
       const successor = byId.get(successorId);
-      if (!successor || positiveSuccessors.has(successorId) || marked.has(successorId)) continue;
-      const start = Array.isArray(successor.scheduleSegments) && successor.scheduleSegments.length
+      const markKey = `${diagnostic.line}|${successorId}`;
+      if (!successor || positiveSuccessors.has(successorId) || marked.has(markKey)) continue;
+      const start = Array.isArray(successor.scheduleSegments) && successor.scheduleSegments.length >= 2
         ? successor.scheduleSegments[0].startDate : successor.start_date;
       if (!start) continue;
-      marked.add(successorId);
       const end = new Date(start);
-      const detail = detailFor(diagnostic, diagnostic.message || Util.t('ui.setup_missing'));
+      if (!Number.isFinite(end.getTime())) continue;
+      marked.add(markKey);
+      const label = setupDiagnosticLabel(diagnostic.type);
+      const extraClass = (diagnostic.type && SETUP_DIAGNOSTIC_PRESENTATION[diagnostic.type]?.extraClass) || '';
+      const detail = detailFor(diagnostic, diagnostic.message || label);
       items.push({
         id: `setup-missing:${encodeURIComponent(diagnostic.line)}:${encodeURIComponent(successorId)}`,
         kind: 'setup', group: diagnostic.line, start: new Date(end.getTime() - 10 * Config.MS_MIN), end, editable: false,
-        className: 'setup-item setup-missing', style: '',
-        content: `<span class="setup-missing-marker" role="img" aria-label="${Util.t('ui.setup_missing')}">!</span>`,
-        title: `${Util.t('ui.setup_missing')}: ${detail.missingDetail}`, setup: detail,
+        className: `setup-item setup-missing${extraClass ? ` ${extraClass}` : ''}`, style: '',
+        content: `<span class="setup-missing-marker" role="img" aria-label="${label}">!</span>`,
+        title: `${label}: ${detail.missingDetail}`, setup: detail,
       });
     }
     return items;
@@ -3265,7 +3288,7 @@ export const Inspector = {
     const predecessorOrderId = interval?.predecessorOrderId ?? diagnostic?.predecessorOrderId ?? null;
     const predecessor = predecessorOrderId ? Store.tasks[String(predecessorOrderId)] : null;
     const predecessorState = predecessor ? stateForOrder(predecessor, definition)
-      : snapshot.line_states.find(state => state.line === task.PRODUCTION_LINE)?.state_key || null;
+      : snapshot.line_states.find(state => state.line === task.PRODUCTION_LINE && state.signature_version === definition.signature_version)?.state_key || null;
     const successorState = stateForOrder(task, definition);
     if (!predecessorState || !successorState) return null;
     const resolved = resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
@@ -3290,7 +3313,7 @@ export const Inspector = {
     const predecessor = entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
     const predecessorState = definition
       ? (predecessor ? stateForOrder(predecessor, definition)
-        : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE)?.state_key)
+        : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE && state.signature_version === definition.signature_version)?.state_key)
       : null;
     const successorState = definition ? stateForOrder(task, definition) : null;
     const resolved = definition && predecessorState && successorState && snapshot
@@ -3310,7 +3333,7 @@ export const Inspector = {
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
       shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
         ? entry.requiredMinutes - entry.availableMinutes : null,
-      missingDetail: diagnostic?.message || null,
+      missingDetail: diagnostic ? (diagnostic.message || setupDiagnosticLabel(diagnostic.type)) : null,
     };
   },
 
@@ -3341,9 +3364,9 @@ export const Inspector = {
     const impliedOrigStart = Util.impliedOriginalStart(task);
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
-    const missingSetupPlaceholder = setupDetail?.missingDetail ? esc(Util.t('ui.setup_missing')) : 'â€”';
+    const missingSetupPlaceholder = '—';
     const setupPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || Store.selectedPlant || '';
-    const canWriteSetup = Inspector._isSetupActionTask(task) && !!setupPlant && Inspector._canWriteSetup(setupPlant);
+    const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
@@ -3515,8 +3538,15 @@ export const Inspector = {
   _showSetupOverrideEditor(task: NimbusTask, plant: string): void {
     const context = Inspector._setupOverrideFor(task);
     const definition = Store.setupSnapshot?.definition;
-    if (!context || !definition) { Toast.show('Setup states are required before setup time can be adjusted.', 'warn'); return; }
     const host = document.getElementById('inspector-body')?.querySelector<HTMLElement>('[data-setup-editor-host]');
+    if (!context || !definition) {
+      Toast.show(Util.t('toast.setup_record_line_state_first'), 'warn');
+      const snapshot = Store.setupSnapshot;
+      if (host && snapshot && plant && Inspector._canWriteSetup(plant)) {
+        SetupAdmin.mountStateEditor(host, snapshot, task.PRODUCTION_LINE, () => Inspector._refreshSetupTruth(plant));
+      }
+      return;
+    }
     if (!host || host.querySelector('[data-setup-override-editor]')) return;
     const existing = context.existing;
     const baseline = existing?.standard_min ?? context.baseline;

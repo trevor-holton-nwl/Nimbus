@@ -363,8 +363,8 @@ test('deriveSetupObservation resolves one scoped override interval without invok
       standard_min: 60, remaining_min: 20, status: 'active', reason: 'already started',
     }],
   }, [
-    { id: 'red', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
-    { id: 'blue', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+    { id: 'red', PLANT: 'P-OBSERVE', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PLANT: 'P-OBSERVE', PRODUCTION_LINE: 'L-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
   ], new Set(['L-OBSERVE']));
 
   assert.deepEqual(observation.intervals.map(interval => ({
@@ -397,9 +397,9 @@ test('deriveSetupObservation keeps inactive setup truth visible without enabling
       standard_min: 30, remaining_min: 20, status: 'active', reason: 'already started',
     }],
   }, [
-    { id: 'red', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
-    { id: 'blue', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
-    { id: 'yellow', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'YELLOW', RUN_TIME: 1, start_date: new Date('2026-08-03T12:00:00'), end_date: new Date('2026-08-03T13:00:00') },
+    { id: 'red', PLANT: 'P-INACTIVE-OBSERVE', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PLANT: 'P-INACTIVE-OBSERVE', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+    { id: 'yellow', PLANT: 'P-INACTIVE-OBSERVE', PRODUCTION_LINE: 'L-INACTIVE-OBSERVE', COLOR: 'YELLOW', RUN_TIME: 1, start_date: new Date('2026-08-03T12:00:00'), end_date: new Date('2026-08-03T13:00:00') },
   ], new Set(['L-INACTIVE-OBSERVE']));
 
   assert.deepEqual(observation.intervals.map(interval => ({
@@ -463,8 +463,8 @@ test('deriveSetupObservation keeps a covered zero-minute override active', () =>
       standard_min: 30, remaining_min: 0, status: 'active', reason: 'complete',
     }],
   }, [
-    { id: 'red', PRODUCTION_LINE: 'L-ZERO', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
-    { id: 'blue', PRODUCTION_LINE: 'L-ZERO', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+    { id: 'red', PLANT: 'P-ZERO', PRODUCTION_LINE: 'L-ZERO', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'blue', PLANT: 'P-ZERO', PRODUCTION_LINE: 'L-ZERO', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
   ]);
 
   assert.deepEqual(observation.intervals, []);
@@ -490,6 +490,107 @@ test('deriveSetupObservation never projects one plant setup truth onto another p
   assert.deepEqual(observation, { intervals: [], diagnostics: [] });
 });
 
+test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as predecessor-state-unknown (carrying the middle order\'s id), and the chain recovers on the next valid order', () => {
+  // The core regression this feature exists for. Before this fix, a null
+  // stateForOrder() result on a real (non-first) predecessor was silently
+  // treated the same as "genuinely no predecessor", misreporting
+  // initial-state-unknown instead of naming the actual order whose setup
+  // attributes are missing. Chain: red (valid) -> blank (unresolvable) ->
+  // blue (valid) -> green (valid). The blank order breaks state continuity,
+  // so 'blue' must report predecessor-state-unknown pointing at 'blank', and
+  // 'green' — once 'blue' re-establishes a valid state — must resolve
+  // normally with no unknown-state diagnostic of its own.
+  const observation = deriveSetupObservation({
+    plant: 'P-CHAIN',
+    definition: { plant: 'P-CHAIN', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [], line_states: [], overrides: [],
+  }, [
+    { id: 'chain-red', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'RED', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'chain-blank', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: '', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T09:00:00'), end_date: new Date('2026-08-03T10:00:00') },
+    { id: 'chain-blue', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'BLUE', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00') },
+    { id: 'chain-green', PLANT: 'P-CHAIN', PRODUCTION_LINE: 'L-CHAIN', COLOR: 'GREEN', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T11:00:00'), end_date: new Date('2026-08-03T12:00:00') },
+  ], new Set(['L-CHAIN']));
+
+  const bySuccessor = new Map(observation.diagnostics.map(d => [d.successorOrderId, d]));
+
+  // 'chain-red' is genuinely the line's first order — the pre-existing
+  // initial-state-unknown case, unaffected by this fix.
+  assert.equal(bySuccessor.get('chain-red')?.type, 'initial-state-unknown');
+
+  // 'chain-blank' itself: its predecessor (red) had a real, valid state, so
+  // this is a plain successor-state-unknown (the blank order's own state
+  // can't be determined) — NOT predecessor-state-unknown.
+  assert.equal(bySuccessor.get('chain-blank')?.type, 'successor-state-unknown');
+
+  // 'chain-blue': the REAL regression target. Its predecessor (chain-blank)
+  // exists but its state could not be derived — this must be
+  // predecessor-state-unknown, carrying chain-blank's id, NOT
+  // initial-state-unknown (which would wrongly claim there's no real
+  // predecessor at all).
+  const blueDiagnostic = bySuccessor.get('chain-blue');
+  assert.equal(blueDiagnostic?.type, 'predecessor-state-unknown');
+  assert.equal(blueDiagnostic?.predecessorOrderId, 'chain-blank');
+  assert.match(blueDiagnostic?.message, /chain-blank/);
+
+  // 'chain-green': the chain recovers. chain-blue has a real, valid
+  // (non-blank) state, so chain-green must NOT get any "unknown state"
+  // diagnostic — whatever diagnostic it does get (if any) must be a
+  // different type entirely.
+  const greenDiagnostic = bySuccessor.get('chain-green');
+  if (greenDiagnostic) {
+    assert.notEqual(greenDiagnostic.type, 'initial-state-unknown');
+    assert.notEqual(greenDiagnostic.type, 'predecessor-state-unknown');
+    assert.notEqual(greenDiagnostic.type, 'successor-state-unknown');
+  }
+});
+
+test('deriveSetupObservation excludes a NULL/absent-PLANT order even when its PRODUCTION_LINE code belongs to another plant\'s setup', () => {
+  // This fails if a truthy-only PLANT check (the pre-fix behavior) lets a
+  // null/undefined-PLANT order leak into ANY plant's chain merely because its
+  // line code happens to match — the exact ambiguity db.reattribute_null_plant_orders
+  // leaves unresolved when a line code maps to more than one plant.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-NULLPLANT',
+    definition: { plant: 'P-NULLPLANT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 30 }],
+    line_rows: [],
+    line_states: [{ line: 'AMBIGUOUS-LINE', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, [{
+    // No PLANT (and no lowercase plant) field at all.
+    id: 'null-plant-order', PRODUCTION_LINE: 'AMBIGUOUS-LINE', COLOR: 'RED', RUN_TIME: 1,
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
+  }]);
+
+  assert.deepEqual(observation, { intervals: [], diagnostics: [] },
+    'an order with no resolvable PLANT must never enter any plant\'s setup chain, even on a matching line code');
+});
+
+test('deriveSetupObservation skips an order with an empty/absent PRODUCTION_LINE instead of bucketing it under \'Unknown\'', () => {
+  // This fails if the old `|| 'Unknown'` fallback is still in effect: it would
+  // chain every line-less order across the whole plant together, producing
+  // spurious cross-order diagnostics for orders that don't actually share a
+  // production line.
+  const observation = deriveSetupObservation({
+    plant: 'P-NOLINE',
+    definition: { plant: 'P-NOLINE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [], line_states: [], overrides: [],
+  }, [
+    { id: 'no-line-order', PLANT: 'P-NOLINE', PRODUCTION_LINE: '', COLOR: 'RED', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') },
+    { id: 'also-no-line-order', PLANT: 'P-NOLINE', COLOR: 'BLUE', RUN_TIME: 1,
+      start_date: new Date('2026-08-03T09:00:00'), end_date: new Date('2026-08-03T10:00:00') },
+  ]);
+
+  assert.deepEqual(observation, { intervals: [], diagnostics: [] },
+    'orders with no production line must be skipped entirely, never bucketed together under an implicit line');
+});
+
 test('deriveSetupObservation emits current-state-diverged when asserted state conflicts with the observed plan', () => {
   // This fails if the projection never compares a real asserted line state to
   // the planned state that completed before its observed-at timestamp.
@@ -510,9 +611,13 @@ test('deriveSetupObservation emits current-state-diverged when asserted state co
   assert.ok(observation.diagnostics.some(diagnostic => diagnostic.type === 'current-state-diverged'));
 });
 
-test('deriveSetupObservation marks an active override inactive when its line has no scheduled intervals', () => {
+test('deriveSetupObservation marks an active override inactive when its line has no scheduled intervals, but only when that line is explicitly in scope', () => {
   // This fails if override checks only iterate lines that happened to have a
-  // scheduled task, leaving orphaned active bindings invisible.
+  // scheduled task, leaving orphaned active bindings invisible when their
+  // line IS explicitly in scope. (Scoping itself is covered by the next test:
+  // an orphaned override's line outside the caller's scope must NOT be pulled
+  // in — that was the fix for the always-unscoped Timeline path spuriously
+  // surfacing override-inactive diagnostics for every off-screen line.)
   const state = value => [{ fieldKey: 'colorWheel', value }];
   const observation = deriveSetupObservation({
     plant: 'P-ORPHAN',
@@ -523,9 +628,31 @@ test('deriveSetupObservation marks an active override inactive when its line has
       predecessor_order_id: 'gone', successor_order_id: 'also-gone', predecessor_state_key: state('GREEN'), successor_state_key: state('RED'),
       standard_min: 30, remaining_min: 30, status: 'active', reason: 'unit test',
     }],
-  }, []);
+  }, [], new Set(['L-ORPHAN']));
 
   assert.deepEqual(observation.diagnostics.map(diagnostic => diagnostic.type), ['override-inactive']);
+});
+
+test('deriveSetupObservation does not surface an orphaned override diagnostic for a line outside the caller\'s scope', () => {
+  // This is the scoping half of the fix above: on the (always unscoped in the
+  // old code) caller path, pulling in EVERY active override's line — including
+  // ones with zero loaded orders and outside what the caller asked about —
+  // produced spurious override-inactive diagnostics with an undefined time.
+  // A line must now be either explicitly scoped-in or already have orders
+  // before an orphaned override on it is diagnosed.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const observation = deriveSetupObservation({
+    plant: 'P-ORPHAN-SCOPE',
+    definition: { plant: 'P-ORPHAN-SCOPE', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_rows: [], line_rows: [], line_states: [],
+    overrides: [{
+      id: 'out-of-scope-orphan', line: 'L-NOT-IN-SCOPE', signature_version: 1,
+      predecessor_order_id: 'gone', successor_order_id: 'also-gone', predecessor_state_key: state('GREEN'), successor_state_key: state('RED'),
+      standard_min: 30, remaining_min: 30, status: 'active', reason: 'unit test',
+    }],
+  }, [], new Set(['L-SOME-OTHER-LINE']));
+
+  assert.deepEqual(observation.diagnostics, [], 'a line neither in scope nor carrying loaded orders must not surface an orphaned-override diagnostic');
 });
 
 test('deriveSetupObservation measures setup availability against a preceding blackout', () => {

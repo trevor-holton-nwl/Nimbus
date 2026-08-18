@@ -208,7 +208,8 @@ export interface SetupComputeInterval {
 }
 
 export interface SetupComputeDiagnostic {
-  type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+  type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
+    | 'predecessor-state-unknown' | 'successor-state-unknown';
   line: string;
   scope: string;
   pairKey?: string;
@@ -333,8 +334,15 @@ export function deriveSetupObservation(
     .map(state => [state.line, state]));
   const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
   for (const task of tasks) {
-    if (task.PLANT && task.PLANT !== setup.plant) continue;
-    const line = task.PRODUCTION_LINE || 'Unknown';
+    // A truthy-only PLANT check lets NULL/empty-PLANT orders leak into any
+    // plant's chain, and `|| 'Unknown'` would chain every line-less order
+    // together across plants/lines. A line code can be reused across plants
+    // (db.reattribute_null_plant_orders deliberately leaves PLANT null when a
+    // line code maps to >1 plant), so both PLANT and PRODUCTION_LINE must be
+    // exact, non-empty matches — mirroring the optimizer's rule.
+    const taskPlant = String(task.PLANT ?? task.plant ?? '');
+    const line = String(task.PRODUCTION_LINE ?? '');
+    if (!line || taskPlant !== setup.plant) continue;
     if (scopedLines && !scopedLines.has(line)) continue;
     const intervals = setupOrderIntervals(task);
     if (!intervals.length) continue;
@@ -346,11 +354,20 @@ export function deriveSetupObservation(
 
   const lines = new Set(byLine.keys());
   for (const override of setup.overrides) {
-    if (override.status === 'active' && (!scopedLines || scopedLines.has(override.line))) lines.add(override.line);
+    // Only add an override's line when it's either explicitly in scope, or it
+    // already has loaded orders. Otherwise, on the (always) unscoped Timeline
+    // path, EVERY active override's line gets pulled in — including lines
+    // with zero loaded orders — producing override-inactive diagnostics with
+    // time: undefined for lines outside the caller's scope.
+    if (override.status === 'active' && (scopedLines?.has(override.line) || byLine.has(override.line))) lines.add(override.line);
   }
   for (const line of lines) {
     const orders = byLine.get(line) || [];
-    orders.sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
+    orders.sort((left, right) => (
+      left.start.getTime() - right.start.getTime()
+      || left.end.getTime() - right.end.getTime()
+      || String(left.task.id).localeCompare(String(right.task.id))
+    ));
     const scope = `${setup.plant}/${line}`;
     const resolvedEdges = new Set<string>();
     const assertedState = stateForLine.get(line);
@@ -370,15 +387,26 @@ export function deriveSetupObservation(
     let predecessorEnd: Date | null = null;
     for (const order of orders) {
       const successorState = stateForOrder(order.task, definition);
-      if (!predecessorState) {
+      if (!predecessorState && predecessorOrderId === null) {
+        // Genuinely the line's first order: no asserted line state and no
+        // predecessor order exists to derive one from.
         observation.diagnostics.push({
           type: 'initial-state-unknown', line, scope, successorOrderId: String(order.task.id), time: order.start,
           message: `The setup state before ${String(order.task.id)} on ${line} is unknown.`,
         });
+      } else if (!predecessorState) {
+        // A real predecessor order exists but stateForOrder couldn't derive
+        // its state (e.g. strict_blanks + a blank signature field). Do not
+        // let this null propagate as "no predecessor" to every later order.
+        observation.diagnostics.push({
+          type: 'predecessor-state-unknown', line, scope, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+          message: `The order before ${String(order.task.id)} on ${line} (${predecessorOrderId}) is missing the setup attributes needed to determine its state.`,
+        });
       } else if (!successorState) {
         observation.diagnostics.push({
-          type: 'setup-uncovered', line, scope,
+          type: 'successor-state-unknown', line, scope,
           pairKey: `${setupStateKey(predecessorState)}->unknown`, predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+          message: `The setup attributes needed to determine the state of ${String(order.task.id)} on ${line} are missing.`,
         });
       } else {
         const resolved = resolveSetup({
