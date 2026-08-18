@@ -606,7 +606,7 @@
       const shortMinutes = requiredMinutes - availableMinutes;
       alerts.push({
         id: `setup-violated-${key}`, sev: 'err', type: 'setup-violated',
-        msg: `Setup on ${interval.line} requires ${requiredMinutes}m but only ${availableMinutes}m is available (${shortMinutes}m short).`,
+        msg: `Not enough changeover time on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
         taskId: interval.successorOrderId, line: interval.line, time: interval.start,
         requiredMinutes, availableMinutes, shortMinutes,
       });
@@ -620,12 +620,12 @@
       'setup-uncovered': 'err', 'predecessor-state-unknown': 'err', 'successor-state-unknown': 'err',
     };
     const SETUP_DIAGNOSTIC_DEFAULT_MSG = {
-      'initial-state-unknown': d => `The setup state before ${d.successorOrderId} on ${d.line} is unknown.`,
-      'override-inactive': d => `Active setup override no longer matches the scheduled adjacency on ${d.line}.`,
-      'current-state-diverged': d => `Asserted state on ${d.line} differs from the state planned by ${d.successorOrderId} at observation time.`,
-      'setup-uncovered': (d, pair) => `Setup${pair} on ${d.line} has no matching setup rule.`,
-      'predecessor-state-unknown': d => `The order before ${d.successorOrderId} on ${d.line} (${d.predecessorOrderId}) is missing the setup attributes needed to determine its state.`,
-      'successor-state-unknown': d => `The setup attributes needed to determine the state of ${d.successorOrderId} on ${d.line} are missing.`,
+      'initial-state-unknown': d => `Can't determine what needs to be set up before order ${d.successorOrderId} on ${d.line}.`,
+      'override-inactive': d => `A manual changeover override on ${d.line} no longer matches the current schedule.`,
+      'current-state-diverged': d => `The recorded changeover state on ${d.line} doesn't match what order ${d.successorOrderId} expected.`,
+      'setup-uncovered': (d, pair) => `No changeover time defined${pair} on ${d.line}. Add a setup rule to the matrix.`,
+      'predecessor-state-unknown': d => `Order ${d.predecessorOrderId} on ${d.line} is missing attributes needed to calculate the changeover before ${d.successorOrderId}.`,
+      'successor-state-unknown': d => `Order ${d.successorOrderId} on ${d.line} is missing attributes needed to calculate its changeover.`,
     };
     const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
     for (const diagnostic of setupDiagnostics) {
