@@ -5136,6 +5136,10 @@ export const Dashboard = {
     const list = document.getElementById('alert-summary-list');
     const count = document.getElementById('alert-summary-count');
     if (!list || !count) return;
+    // Alert IDs are opaque data. Setup diagnostics include JSON state pairs,
+    // so compiling an ID into an inline handler corrupts the HTML attribute
+    // boundary and creates a DOM-injection sink.
+    list.onclick = AlertsUIAdapter._handleAction;
 
     const plantLines = new Set(Store.linesForSelectedPlant());
     const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
@@ -5165,12 +5169,14 @@ export const Dashboard = {
       : `${alerts.length} open`;
 
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
-    const _esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
+    const _esc = (s: unknown) => String(s).replace(/[&<>"']/g, (c: string) =>
+      (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Record<string, string>)[c]));
     list.innerHTML = alerts.slice(0, 8).map(a => `
-      <div class="alert-row sev-${a.sev}" onclick="if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId||''}'),200);}">          <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
+      <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${_esc(a.id)}">
+        <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
         <div class="msg">${_esc(a.msg)}</div>
         <span class="meta">${a.time ? Util.fmtDT(a.time).slice(5, 16) : ''}</span>
-        <button class="dismiss" onclick="event.stopPropagation(); NIMBUS.Alerts.dismiss('${a.id}')">×</button>
+        <button type="button" class="dismiss" data-alert-action="dismiss" data-alert-id="${_esc(a.id)}">×</button>
       </div>
     `).join('');
     if (alerts.length > 8) {
@@ -9023,6 +9029,33 @@ const VL_ALERT_ROW_H = 72;
    ========================================================================== */
 export const AlertsUIAdapter = {
   _drawerVL: null as VirtualList<NimbusAlert> | null,
+  _handleAction(e: MouseEvent): void {
+    const target = e.target as Element | null;
+    const trigger = target?.closest?.<HTMLElement>('[data-alert-action]') ?? null;
+    if (!trigger) return;
+
+    const action = trigger.dataset.alertAction;
+    if (action === 'override') {
+      const taskId = trigger.dataset.taskId;
+      if (!taskId) return;
+      AlertsUIAdapter.toggleDrawer();
+      Table._openOverrideModalForId(taskId);
+      return;
+    }
+
+    const alertId = trigger.dataset.alertId;
+    if (!alertId) return;
+    if (action === 'focus') {
+      AlertsUIAdapter.focus(alertId);
+    } else if (action === 'fix') {
+      Alerts.applyFix(alertId);
+    } else if (action === 'dismiss') {
+      // The Dashboard row itself is a focus target; a nested dismiss button
+      // must not bubble into that second action.
+      e.stopPropagation();
+      Alerts.dismiss(alertId);
+    }
+  },
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
   focus(alertId: string) {
@@ -9311,16 +9344,17 @@ export const AlertsUIAdapter = {
       `<span class="alert-ico">${ico}</span>` +
       `<span class="alert-msg">${esc(a.msg)}</span>` +
       `<div class="alert-actions">` +
-        ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" onclick="NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')">${Util.t('btn.go_to')}</button>` : '') +
-        (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" onclick="NIMBUS.Alerts.applyFix('${esc(a.id)}')">${Util.t('btn.fix_it')}</button>` : '') +
-        (override ? `<button class="btn btn-ghost sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')">${Util.t('btn.override')}</button>` : '') +
-        `<button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismiss('${esc(a.id)}')">${Util.t('btn.dismiss')}</button>` +
+        ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${esc(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
+        (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${esc(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
+        (override ? `<button class="btn btn-ghost sm" data-alert-action="override" data-task-id="${esc(a.taskId)}">${Util.t('btn.override')}</button>` : '') +
+        `<button class="btn btn-ghost sm" data-alert-action="dismiss" data-alert-id="${esc(a.id)}">${Util.t('btn.dismiss')}</button>` +
       `</div></div>`;
   },
 
   renderDrawer() {
     const body = document.getElementById('alert-drawer-body');
     if (!body) return;
+    body.onclick = AlertsUIAdapter._handleAction;
     // Store._state.masterData direct touch — deliberate, out of scope for this
     // task (see the file header comment above OptimizeDialog's own identical read).
     const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;

@@ -579,27 +579,7 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.applyFix('${esc(a.id)}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.dismiss('${esc(a.id)}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.focus('${esc(a.id)}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer();NIMBUS.Table._openOverrideModalForId('${esc(a.taskId)}')"
     },
     {
       "file": "schedule-workbench.mjs",
@@ -660,16 +640,6 @@
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "event.stopPropagation(); NIMBUS.Alerts.dismiss('${a.id}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "if(NIMBUS.AlertsUIAdapter.focus){NIMBUS.AlertsUIAdapter.focus('${a.id}');}else if(a&&a.taskId){NIMBUS.App.goto('gantt');setTimeout(()=>NIMBUS.Timeline.focus('${a.taskId || ''}'),200);}"
     }
   ],
   "htmlCommands": [
