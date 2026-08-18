@@ -2596,6 +2596,39 @@ export const Engine = {
       return true;
     };
 
+    // A pull-forward floor is a deliberate future eligibility boundary, not a
+    // permanent capacity failure. When every remaining order is below its
+    // floor, Calendar.nextAvailable() quite correctly returns the current
+    // open slot — but that leaves this dispatch loop with no way to advance.
+    // Find the next boundary so the no-admission path can make progress.
+    const nextPullForwardFloor = (at: Date): Date | null => {
+      let next: Date | null = null;
+      for (const t of queue) {
+        const floor = Engine.earliestAllowedStart(t, plant);
+        if (!floor || floor <= at) continue;
+        if (!next || floor < next) next = floor;
+      }
+      return next;
+    };
+
+    // Do not spend the permanently-unfittable-order escape-hatch budget while
+    // the queue is merely waiting for its configured pull-forward floor. The
+    // escape hatch intentionally bypasses fitsAt(), so counting these days
+    // would eventually place an order earlier than the plant rule allows.
+    const queueBlockedByPullForward = (through: Date): boolean => queue.length > 0 && queue.every(t => {
+      const floor = Engine.earliestAllowedStart(t, plant);
+      return !!floor && floor > through;
+    });
+
+    // A mixed queue can contain both a future-floor order and an order that is
+    // genuinely eligible but impossible to fit. The force-placement fallback
+    // may use the latter, but must never select the former just because it is
+    // ranked first in the queue.
+    const forcePlaceableTask = (at: Date): NimbusTask | null => queue.find(t => {
+      const floor = Engine.earliestAllowedStart(t, plant);
+      return !floor || floor <= at;
+    }) ?? null;
+
     // Phase-2 comparator: whatever `tieBreakTerms` holds, in its own order —
     // since Stage 3 that is one ordinal term per ACTIVE priority field, in the
     // plant's configured tree order (colorWheel is just one possible member, not
@@ -2655,9 +2688,9 @@ export const Engine = {
     // outer iteration by construction, so a permanently-unfittable order
     // would otherwise spin forever rather than merely hit the existing
     // 200-iteration per-day guard. After this many CONSECUTIVE days with
-    // zero admissions, force-place the top-ranked remaining order at the
-    // current cursor (bypassing fitsAt) and warn — one order at a time, so a
-    // handful of bad rows each pay their own 90-day search, not a compounded
+    // zero admissions, force-place the top-ranked remaining eligible order at
+    // the current cursor (bypassing fitsAt) and warn — one order at a time, so
+    // a handful of bad rows each pay their own 90-day search, not a compounded
     // one, and the loop is guaranteed to keep shrinking the queue.
     const FORCE_PLACE_AFTER_DAYS = 90;
     let emptyDayStreak = 0;
@@ -2724,6 +2757,10 @@ export const Engine = {
               fixIdx++;
             }
             if (respectCalendar) cursor = Calendar.nextAvailable(line, cursor, minDur);
+            if (cursor.getTime() === prevMs) {
+              const nextFloor = nextPullForwardFloor(cursor);
+              if (nextFloor) cursor = new Date(nextFloor);
+            }
             if (cursor.getTime() === prevMs) break;
           }
           if (guard >= 200) {
@@ -2766,11 +2803,12 @@ export const Engine = {
         queue = queue.filter(t => !admittedIds.has(t.id));
       }
 
-      if (placedToday > 0) emptyDayStreak = 0;
+      if (placedToday > 0 || queueBlockedByPullForward(dayEnd)) emptyDayStreak = 0;
       else emptyDayStreak++;
 
-      if (emptyDayStreak > FORCE_PLACE_AFTER_DAYS && queue.length) {
-        const t = queue[0]; // top-ranked remaining under this day's ordering
+      const forceable = emptyDayStreak > FORCE_PLACE_AFTER_DAYS ? forcePlaceableTask(cursor) : null;
+      if (forceable) {
+        const t = forceable; // top-ranked remaining order that is eligible now
         const durMs = Util.runHours(t) * Config.MS_HOUR;
         const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
         const end   = new Date(start.getTime() + durMs);

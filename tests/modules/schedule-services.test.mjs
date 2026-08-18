@@ -15,6 +15,7 @@
 // it never calls into NimbusComputeCore until a function is invoked.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
@@ -55,6 +56,94 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN', BASIC_FINISH_DATE: new Date('2026-08-17') }, 'OPEN'), null);
   Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: 0 }], lines: [] }, 'unit-test');
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN' }, 'OPEN'), null);
+});
+
+test('changeover advances to a future order pull-forward floor instead of stalling on an ineligible queue', () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./web/schedule-state.mjs');
+    const { Engine, snapshotSchedule } = await import('./web/schedule-services.mjs');
+    const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
+    const now = new Date('2035-08-06T08:00:00');
+    Store.setMasterData({
+      plants: [{ plant: 'PULL', max_pull_forward_days: 7 }],
+      lines: [{ plant: 'PULL', production_line: 'L1' }],
+    }, 'child-test');
+    Store.setSelectedPlant('PULL', 'child-test');
+    Store.replaceCalendars({ L1: { workHours: hours } }, 'child-test');
+    Store.replacePlants({ PULL: { workHours: hours } }, 'child-test');
+    Store.setTasks([{
+      id: 'future-order', PLANT: 'PULL', PRODUCTION_LINE: 'L1', RUN_TIME: 2,
+      original_end_date: new Date('2035-08-17T18:00:00'),
+      start_date: new Date('2035-08-17T16:00:00'), end_date: new Date('2035-08-17T18:00:00'),
+    }], 'child-test');
+    const result = Engine.evaluateSchedule('changeover', {
+      plant: 'PULL', startDate: now, endDate: new Date('2035-08-31T18:00:00'), now,
+      respectFixed: true, respectCalendar: true,
+    }, snapshotSchedule());
+    const patch = result.patches.find(candidate => candidate.id === 'future-order');
+    const start = patch?.changes.start_date;
+    console.log(JSON.stringify({
+      year: start?.getFullYear(), month: start?.getMonth(), date: start?.getDate(), hour: start?.getHours(),
+    }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  assert.deepEqual(JSON.parse(run.stdout.trim()), { year: 2035, month: 7, date: 10, hour: 8 });
+});
+
+test('changeover never uses the force-placement escape hatch before a long pull-forward floor', () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./web/schedule-state.mjs');
+    const { Engine, snapshotSchedule } = await import('./web/schedule-services.mjs');
+    const closed = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, null]));
+    const now = new Date('2035-08-06T08:00:00');
+    Store.setMasterData({
+      plants: [{ plant: 'PULL', max_pull_forward_days: 100 }],
+      lines: [{ plant: 'PULL', production_line: 'L1' }],
+    }, 'child-test');
+    Store.setSelectedPlant('PULL', 'child-test');
+    Store.replaceCalendars({ L1: { workHours: closed } }, 'child-test');
+    Store.replacePlants({ PULL: { workHours: closed } }, 'child-test');
+    Store.setTasks([{
+      id: 'long-wait-order', PLANT: 'PULL', PRODUCTION_LINE: 'L1', RUN_TIME: 2,
+      original_end_date: new Date('2036-02-22T18:00:00'),
+      start_date: new Date('2036-02-22T16:00:00'), end_date: new Date('2036-02-22T18:00:00'),
+    }, {
+      id: 'undated-order', PLANT: 'PULL', PRODUCTION_LINE: 'L1', RUN_TIME: 2,
+      original_end_date: null,
+      start_date: new Date('2036-02-22T12:00:00'), end_date: new Date('2036-02-22T14:00:00'),
+    }], 'child-test');
+    const result = Engine.evaluateSchedule('changeover', {
+      plant: 'PULL', startDate: now, endDate: new Date('2036-04-01T18:00:00'), now,
+      respectFixed: true, respectCalendar: true,
+    }, snapshotSchedule());
+    const patch = result.patches.find(candidate => candidate.id === 'long-wait-order');
+    console.log(JSON.stringify({ start: patch?.changes.start_date?.getTime() }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  const output = JSON.parse(run.stdout.trim());
+  assert.ok(Number.isFinite(output.start), 'the escape hatch must eventually produce a placement');
+  assert.ok(output.start >= new Date('2035-11-14T00:00:00').getTime(),
+    'a 100-day limit must not be bypassed by the 90-day force-placement guard');
 });
 
 test('Calendar exposes capacity-math methods only (no render/openBlockModal/DOM)', () => {
