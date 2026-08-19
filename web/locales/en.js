@@ -43,6 +43,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',
   'toast.optimize_missing_setup_summary': 'Optimized. {{orders}} order(s) on {{lines}} line(s) were scheduled without setup data (no changeover bar) — see Alerts.',
+  'toast.optimize_orders_left_in_place': '{{orders}} order(s) on {{lines}} line(s) were left at their existing dates — no capacity remained in the horizon. Check for overlaps.',
   'toast.optimize_lines_guarded':      '{{count}} line(s) were left unchanged — protected by a fixed order or an inactive override, or had nothing schedulable.',
   'toast.scenario_applied':            'Scenario "{{name}}" applied — Ctrl+Z to revert',
   'toast.scenario_discarded':          'Scenario discarded — schedule restored',

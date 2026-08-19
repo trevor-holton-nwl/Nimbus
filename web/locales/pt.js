@@ -43,6 +43,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.opt_applied':                 'Otimização aplicada — Ctrl+Z para desfazer',
   'toast.opt_discarded':               'Otimização descartada — programação restaurada',
   'toast.optimize_missing_setup_summary': 'Otimizado. {{orders}} pedido(s) em {{lines}} linha(s) foram programados sem dados de setup (sem barra de troca) — veja Alertas.',
+  'toast.optimize_orders_left_in_place': '{{orders}} pedido(s) em {{lines}} linha(s) permaneceram em suas datas existentes — não restou capacidade no horizonte. Verifique sobreposições.',
   'toast.optimize_lines_guarded':      '{{count}} linha(s) permaneceram inalteradas — protegidas por um pedido fixado ou uma substituição inativa, ou não havia nada para agendar.',
   'toast.scenario_applied':            'Cenário "{{name}}" aplicado — Ctrl+Z para reverter',
   'toast.scenario_discarded':          'Cenário descartado — programação restaurada',

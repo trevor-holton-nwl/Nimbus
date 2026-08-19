@@ -43,6 +43,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',
   'toast.optimize_missing_setup_summary': 'Optimisé. {{orders}} ordre(s) sur {{lines}} ligne(s) ont été planifiés sans données de réglage (aucune barre de changement) — voir Alertes.',
+  'toast.optimize_orders_left_in_place': "{{orders}} ordre(s) sur {{lines}} ligne(s) sont restés à leurs dates existantes — plus aucune capacité disponible dans l'horizon. Vérifiez les chevauchements.",
   'toast.optimize_lines_guarded':      "{{count}} ligne(s) sont restées inchangées — protégées par un ordre fixé ou une dérogation inactive, ou n'avaient rien à planifier.",
   'toast.scenario_applied':            'Scénario "{{name}}" appliqué — Ctrl+Z pour annuler',
   'toast.scenario_discarded':          'Scénario annulé — programme restauré',

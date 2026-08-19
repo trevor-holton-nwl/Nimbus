@@ -7619,13 +7619,22 @@ interface PreviewExplanation {
   missingPairsTotal: number;
   unchangedLines: string[];
   /** Tally of orders actually placed in this candidate without a resolvable
-   *  setup transition (no changeover bar) — the never-freeze tail-placement
-   *  fallback, counted from the dedicated `'scheduled-without-setup'`
-   *  missingEdge reason `placeUnknownTail` emits for each order it places.
-   *  Derived from `candidate.missingEdges` restricted to ids that appear in
+   *  setup transition (no changeover bar) — the never-freeze fallback,
+   *  counted from the dedicated `'scheduled-without-setup'` missingEdge
+   *  reason, which `placeUnknownTail` emits for a tail-placed order and (since
+   *  A1) `candidateForSequence` also emits directly for a known-but-uncovered
+   *  transition admitted into the covered-core sequence. Derived from
+   *  `candidate.missingEdges` restricted to ids that appear in
    *  `candidate.patches`, so a rejected/unplaced edge never inflates this
    *  count (see `missingPairs` for the full uncovered-transition list). */
   scheduledWithoutSetup: { orders: number; lines: number };
+  /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
+   *  that ended up with neither a patch nor a fixed/pinned exemption — i.e.
+   *  "not scheduled". Derived by set difference against `candidate.patches`,
+   *  never a field threaded through CandidateResult (see runAndApply's own
+   *  B3 comment in schedule-services.mts for why: the worst drops produce no
+   *  diagnostic object at all, so there is nothing else to collect from). */
+  unplacedOrders: { orders: number; lines: number };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
   /** Aggregate prune tally for the whole run (§4.3 OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
@@ -7639,6 +7648,12 @@ interface PreviewExplanationInput {
   productionAfter: number;
   preKpis: OptimizerKpis;
   postKpis: OptimizerKpis;
+  /** B3: the run-scoped candidate pool (plant + opts.lines + excludeFromOpt,
+   *  using the same plant resolution as B7) that `unplacedOrders` is diffed
+   *  against. Omitted only by callers that don't want the tally (none today). */
+  unplacedCandidates?: ReadonlyArray<{ id: string; line: string }>;
+  /** Fixed/pinned ids — deliberately never moved, so never counted as unplaced. */
+  fixedIds?: ReadonlySet<string> | ReadonlyArray<string>;
 }
 
 const PREVIEW_REASON_LIMIT = 8;
@@ -7663,6 +7678,7 @@ const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'fixed' | 'capacity' | 'oth
   'fixed-boundary-fallback-ambiguous': 'fixed',
   'due-work-unadmitted': 'capacity',
   'trailing-fragment-unadmitted': 'capacity',
+  'unknown-setup-tail-unplaced': 'capacity',
   'initial-state-unknown': 'other',
 };
 
@@ -7786,16 +7802,32 @@ export const OptimizerPreview = {
     const patchedIds = new Set(candidate.patches.map(patch => String(patch.id)));
     const scheduledWithoutSetupOrders = new Set<string>();
     const scheduledWithoutSetupLines = new Set<string>();
-    // 'scheduled-without-setup' (F1) is the single dedicated reason
-    // `placeUnknownTail` emits for an order it actually placed — counting
-    // that instead of the raw 'successor-state-unknown'/'initial-state-unknown'
-    // partition edges avoids double-counting a rejected permutation's edge
-    // that happens to name the same patched id.
+    // 'scheduled-without-setup' (F1) is the single dedicated reason for an
+    // order actually placed without a resolvable setup transition — emitted
+    // both by `placeUnknownTail` (tail placement) and, since A1, by
+    // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
+    // transition. Counting this reason instead of the raw
+    // 'successor-state-unknown'/'initial-state-unknown' partition edges
+    // avoids double-counting a rejected permutation's edge that happens to
+    // name the same patched id.
     for (const edge of candidate.missingEdges) {
       if (edge.reason !== 'scheduled-without-setup') continue;
       if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
       scheduledWithoutSetupOrders.add(String(edge.successorOrderId));
       scheduledWithoutSetupLines.add(edge.line);
+    }
+    // B3: derive the unplaced set by difference from candidate.patches, not
+    // from a threaded CandidateResult field — see the interface comment on
+    // PreviewExplanation.unplacedOrders for why.
+    const fixedIdSet = input.fixedIds instanceof Set
+      ? input.fixedIds
+      : new Set(Array.from(input.fixedIds ?? [], String));
+    const unplacedOrderIds = new Set<string>();
+    const unplacedLines = new Set<string>();
+    for (const candidateTask of input.unplacedCandidates ?? []) {
+      if (patchedIds.has(candidateTask.id) || fixedIdSet.has(candidateTask.id)) continue;
+      unplacedOrderIds.add(candidateTask.id);
+      unplacedLines.add(candidateTask.line);
     }
     return {
       impact: {
@@ -7812,6 +7844,7 @@ export const OptimizerPreview = {
       missingPairsTotal: 0,
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
+      unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
       prunes: tallyPrunes(candidate.explanation),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
@@ -7980,11 +8013,22 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
+        // B3: the same run-scoped candidate pool used for the KPI comparison
+        // (plant, via `scopedTasks` above using the B7 line→plant fallback,
+        // plus opts.lines and excludeFromOpt) — NOT the time-windowed
+        // `inScope`, since an order outside the KPI window can still be
+        // legitimately "not scheduled" by this run.
+        const unplacedCandidates = scopedTasks
+          .filter(t => !lineSet || lineSet.has(t.PRODUCTION_LINE))
+          .filter(t => !candidateSnapshot.lineSettings[t.PRODUCTION_LINE || '']?.excludeFromOpt)
+          .map(t => ({ id: String(t.id), line: t.PRODUCTION_LINE || 'Unknown' }));
         const explanation = OptimizerPreview.summarizeCandidate(candidate, {
           productionBefore: snapshot.filter(inScope).length,
           productionAfter: postTasks.length,
           preKpis,
           postKpis,
+          unplacedCandidates,
+          fixedIds: candidateSnapshot.fixedIds,
         });
         const described = OptimizerPreview.describeMissingPairs(
           candidate,

@@ -153,6 +153,19 @@ test('Setup Matrix grid redesign keys exist in all 5 locales', () => {
   }
 });
 
+test('setup-aware optimizer never-freeze toast key exists in all 5 locales', () => {
+  // B4 (quiet-wandering-lerdorf.md): the never-freeze rework added a second
+  // toast, alongside toast.optimize_missing_setup_summary, for orders left
+  // at their existing dates because no capacity remained in the horizon.
+  const REQUIRED_NEVER_FREEZE = ['toast.optimize_orders_left_in_place'];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_NEVER_FREEZE) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

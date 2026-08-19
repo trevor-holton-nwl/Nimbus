@@ -43,6 +43,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',
   'toast.optimize_missing_setup_summary': 'Optimiert. {{orders}} Auftrag/Aufträge auf {{lines}} Linie(n) wurden ohne Rüstdaten eingeplant (kein Rüstbalken) — siehe Warnungen.',
+  'toast.optimize_orders_left_in_place': '{{orders}} Auftrag/Aufträge auf {{lines}} Linie(n) blieben an ihren bisherigen Terminen — im Horizont war keine Kapazität mehr verfügbar. Auf Überschneidungen prüfen.',
   'toast.optimize_lines_guarded':      '{{count}} Linie(n) blieben unverändert — geschützt durch einen fixierten Auftrag oder eine inaktive Überschreibung, oder es gab nichts zu planen.',
   'toast.scenario_applied':            'Szenario "{{name}}" angewendet — Strg+Z zum Rückgängigmachen',
   'toast.scenario_discarded':          'Szenario verworfen — Plan wiederhergestellt',

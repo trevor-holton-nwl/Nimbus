@@ -522,7 +522,12 @@ function sourceIsFixed(id: string | number): boolean {
   return fixed.map(String).includes(String(id));
 }
 
-function candidateDefaultWorkHours(): WorkHours {
+// B6: exported so setup-scheduler.mts's freeIntervalsFor can fall back to the
+// same default work hours as the alerts path (setupDefaultWorkHours above)
+// and the detached-candidate path (sourceLineWorkHours/sourcePlantWorkHours
+// below), instead of returning [] and silently placing nothing for a whole
+// plant/line missing a calendar.
+export function candidateDefaultWorkHours(): WorkHours {
   const workHours: WorkHours = {};
   for (let day = 0; day < 7; day++) {
     workHours[day] = Config.WEEKEND_OFF && (day === 0 || day === 6)
@@ -556,7 +561,10 @@ function detachedCandidateResult(
 ): CandidateResult {
   return {
     patches,
-    score: [0, 0, 0, 0, 0, patches.length],
+    // A2: 7th element is the uncovered-edge-count tier (SCORE_UNCOVERED in
+    // setup-scheduler.mts) — a detached legacy result has no coverage concept
+    // of its own, so it contributes 0.
+    score: [0, 0, 0, 0, 0, patches.length, 0],
     explanation: [],
     diagnostics: {
       candidateCount: termination === 'completed' ? 1 : 0,
@@ -2984,8 +2992,11 @@ export const Engine = {
       // line-scoped run or an opted-out line still behaves as promised.
       const optsLines = opts.lines as string[] | undefined;
       const allowedLines = Array.isArray(optsLines) && optsLines.length ? new Set(optsLines) : null;
+      // Hoisted so an unfiltered run can still resolve a patched/unplaced id
+      // back to its line below (B3/B4) — previously scoped inside the filter
+      // guard, so an unfiltered run had no map to consult.
+      const byId = new Map(snapshot.tasks.map(t => [String(t.id), t]));
       if (allowedLines || Object.values(sourceLineSettings()).some(setting => setting?.excludeFromOpt)) {
-        const byId = new Map(snapshot.tasks.map(t => [String(t.id), t]));
         result = {
           ...result,
           patches: result.patches.filter(patch => {
@@ -3012,11 +3023,14 @@ export const Engine = {
       const patchedIds = new Set(result.patches.map(patch => String(patch.id)));
       const unknownSetupOrderIds = new Set<string>();
       const unknownSetupLines = new Set<string>();
-      // 'scheduled-without-setup' (F1) is the single dedicated reason
-      // `placeUnknownTail` emits for an order it actually placed — counting
-      // that instead of the raw 'successor-state-unknown'/'initial-state-unknown'
-      // partition edges avoids double-counting a rejected permutation's edge
-      // that happens to name the same patched id.
+      // 'scheduled-without-setup' (F1) is the single dedicated reason for an
+      // order actually placed without a resolvable setup transition — emitted
+      // both by `placeUnknownTail` (tail placement) and, since A1, by
+      // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
+      // transition. Counting this reason instead of the raw
+      // 'successor-state-unknown'/'initial-state-unknown' partition edges
+      // avoids double-counting a rejected permutation's edge that happens to
+      // name the same patched id.
       for (const edge of result.missingEdges) {
         if (edge.reason !== 'scheduled-without-setup') continue;
         if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
@@ -3027,6 +3041,38 @@ export const Engine = {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: unknownSetupOrderIds.size,
           lines: unknownSetupLines.size,
+        }), 'warn');
+      }
+      // B3: derive the unplaced set by difference, in this one place, rather
+      // than threading an unplacedOrderIds field through CandidateResult —
+      // the worst drops (plant/line mismatch, this same opts.lines/
+      // excludeFromOpt post-filter, a fixed order the setup-aware path never
+      // touches) produce no diagnostic object at all, so there is nothing for
+      // a threaded field to collect. An order that places successfully
+      // always yields a patch — even when its dates are unchanged — so
+      // "in scope, not fixed, not patched" is exactly "not scheduled".
+      // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
+      // sourceGetPlantForLine(t.PRODUCTION_LINE)`) so this reporting and the
+      // setup-aware evaluators' own scoping agree on which orders exist for
+      // this plant.
+      const unplacedLines = new Set<string>();
+      let unplacedCount = 0;
+      for (const task of snapshot.tasks) {
+        const id = String(task.id);
+        if (patchedIds.has(id)) continue;
+        if (sourceIsFixed(task.id)) continue;
+        const taskPlant = task.PLANT || sourceGetPlantForLine(task.PRODUCTION_LINE);
+        if (taskPlant !== plant) continue;
+        const line = task.PRODUCTION_LINE || 'Unknown';
+        if (allowedLines && !allowedLines.has(line)) continue;
+        if (sourceLineSettings()[line]?.excludeFromOpt) continue;
+        unplacedCount += 1;
+        unplacedLines.add(line);
+      }
+      if (unplacedCount) {
+        Toast.show(Util.t('toast.optimize_orders_left_in_place', {
+          orders: unplacedCount,
+          lines: unplacedLines.size,
         }), 'warn');
       }
       if (result.unchangedLines.length) {

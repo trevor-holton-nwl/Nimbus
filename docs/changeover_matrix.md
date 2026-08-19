@@ -80,16 +80,15 @@ states and remain uncovered.
 
 ### Missing non-diagonal transitions
 
-For `A != B`, missing means unknown, never zero. Optimization treats the edge as unavailable.
+For `A != B`, missing means unknown, never zero. Optimization treats the edge as unavailable. Two cases:
 
-- If another fully covered feasible sequence exists, continue and report excluded alternatives.
-- The optimizer never freezes a line for missing setup data. An order whose setup placement cannot be
-  computed (blank signature field, missing matrix pair, unknowable starting state) is still scheduled: it is
-  placed at the tail of its day bucket, ordered among tail orders by the normal priority terms; it contributes
-  no setup bar; and it raises a missing-setup-data alert. Unknown orders are excluded from the min-changeover
-  permutation search over the covered core — they are never charged a fake zero-minute setup — and are
-  appended after that core once the search completes.
-- Never block unaffected lines solely because another line is incomplete.
+**Orders with blank or unresolvable setup signatures** (signature field missing, signature incompatible with line) are placed at the tail of their day bucket, ordered among tail orders by the normal priority terms; they contribute no setup bar; and they raise an initial-state-unknown or signature-incompatible alert.
+
+**Orders with a resolvable setup signature but an uncovered transition** (known predecessor and successor states, missing matrix pair) are admitted *in sequence* near other orders sharing the same signature state, charged zero setup minutes, placed with no changeover bar, and raise a setup-uncovered alert. They are de-preferred in candidate selection by a dedicated coverage-tier comparison (fewer uncovered edges is better), guaranteeing that a fully-covered sequence still wins whenever one exists. This tier is compared immediately after policy key and outside the mode-permuted terms list, ensuring uncovered orders cluster with their signature peers rather than being scattered throughout a sequence.
+
+The optimizer never freezes a line for missing setup data. Both kinds of missing-setup orders are excluded from the min-changeover permutation search over the covered core — they are never charged a fake zero-minute setup. Once search and coverage-tier ranking complete, each order places via real capacity and split-policy logic.
+
+Never block unaffected lines solely because another line is incomplete.
 
 The preview provides a selectable/`Ctrl+C`-friendly and CSV-exportable table containing from/to states, affected
 lines/orders, excluded alternatives, and the orders scheduled without setup bars because of missing setup data
@@ -107,7 +106,7 @@ Coverage reports both:
 1. **Observed pairs:** edges in the current schedule.
 2. **Reachable pairs:** edges the active policy may legally create.
 
-Reachable coverage is the optimization safety gate. Missing edges cannot win a solve.
+Reachable coverage is the optimization safety gate. Missing edges cannot win a solve when a covered alternative exists.
 
 ### Resolution precedence
 
