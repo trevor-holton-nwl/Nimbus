@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.select_lines_to_opt':         'Seleccione al menos una línea para optimizar, o cambie a Planta completa.',
   'toast.opt_applied':                 'Optimización aplicada — Ctrl+Z para deshacer',
   'toast.opt_discarded':               'Optimización descartada — programa restaurado',
+  'toast.optimize_missing_setup_summary': 'Optimizado. {{orders}} pedido(s) en {{lines}} línea(s) se programaron sin datos de preparación (sin barra de cambio) — vea Alertas.',
+  'toast.optimize_lines_guarded':      '{{count}} línea(s) quedaron sin cambios — protegidas por un pedido fijado o una anulación inactiva, o no había nada que programar.',
   'toast.scenario_applied':            'Escenario "{{name}}" aplicado — Ctrl+Z para revertir',
   'toast.scenario_discarded':          'Escenario descartado — programa restaurado',
   'toast.what_if_mode':                'Modo ¿Qué pasaría si? — los cambios no se guardan. Aplique o descarte cuando termine.',
@@ -1308,6 +1310,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_unchanged_lines_none':    'ninguna',
   'ui.setup_reasons_none':            'No se reportaron motivos específicos para este candidato.',
   'ui.setup_missing_pairs_none':      'No hay pares de preparación faltantes en este candidato.',
+  'ui.opt_pv_scheduled_without_setup': '{{orders}} pedido(s) en {{lines}} línea(s) se programaron sin una transición de preparación resoluble — no se colocó una barra de cambio para ellos.',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Reglas de programación',

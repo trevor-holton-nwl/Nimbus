@@ -83,12 +83,19 @@ states and remain uncovered.
 For `A != B`, missing means unknown, never zero. Optimization treats the edge as unavailable.
 
 - If another fully covered feasible sequence exists, continue and report excluded alternatives.
-- If no covered sequence exists for a line, leave that line unchanged.
+- The optimizer never freezes a line for missing setup data. An order whose setup placement cannot be
+  computed (blank signature field, missing matrix pair, unknowable starting state) is still scheduled: it is
+  placed at the tail of its day bucket, ordered among tail orders by the normal priority terms; it contributes
+  no setup bar; and it raises a missing-setup-data alert. Unknown orders are excluded from the min-changeover
+  permutation search over the covered core — they are never charged a fake zero-minute setup — and are
+  appended after that core once the search completes.
 - Never block unaffected lines solely because another line is incomplete.
 
 The preview provides a selectable/`Ctrl+C`-friendly and CSV-exportable table containing from/to states, affected
-lines/orders, excluded alternatives, and unchanged lines. Preview users cannot enter standards there; authorized
-master-data owners update the matrix, which invalidates the preview and requires a rerun.
+lines/orders, excluded alternatives, and the orders scheduled without setup bars because of missing setup data
+(no line is left unchanged solely for that reason — see the never-freeze rule above). Preview users cannot enter
+standards there; authorized master-data owners update the matrix, which invalidates the preview and requires a
+rerun.
 
 The preview provides a **Review missing setups** action that opens the matrix editor filtered to the relevant
 pairs for an authorized master-data owner. Users without matrix-write permission retain copy and export access
@@ -260,6 +267,12 @@ lexicographic objective:
 
 This prevents oscillation such as `A-B-C -> A-C-B -> A-B-C`.
 
+Search budget is scoped **per line**, not shared plant-wide: a large first line exhausting its iteration cap must
+never starve or freeze the lines behind it. Min Changeover's due-safe baseline pass and its candidate pass split
+one wall-clock deadline rather than each claiming the full window against a shared clock; the baseline runs first
+and the candidate gets whatever remains. A candidate pass that is starved or empty can never be preferred over a
+non-empty baseline — the baseline wins outright in that case.
+
 ### Setup groups
 
 A group is eligible orders on one line sharing one fully known setup state—not a plant, line, batch, or physical
@@ -289,8 +302,9 @@ Smart, Min Changeover, Throughput first, manual reflow, and ordinary setup-aware
 
 All modes charge covered setup as capacity:
 
-- **SPT:** remain pure shortest productive processing time. A missing edge leaves the line unchanged rather than
-  secretly changing SPT order.
+- **SPT:** remain pure shortest productive processing time. A missing edge never secretly changes SPT order and
+  never freezes the line: the affected order is scheduled at the tail of its day bucket with no setup bar and a
+  missing-setup-data alert, rather than being left in place or given an invented zero-minute transition.
 - **Smart / Due-date first:** minimize setup only within due-safe choices; no additional sequencing-induced
   lateness beyond unavoidable setup capacity.
 - **Min Changeover / Use available slack:** may pull future work forward while creating no new lateness.
@@ -315,8 +329,10 @@ optimization preview is open. Apply, discard, or close destroys them; nothing is
 the audit log, or a permanent cache.
 
 The preview shows before/after production, setup, occupied time, lateness, utilization, chosen line sequences,
-concise reasons, a few meaningful rejected alternatives, fixed/override constraints, missing edges, unchanged
-lines, candidate count, search method, termination reason, runtime, and whether a limit was reached.
+concise reasons, a few meaningful rejected alternatives, fixed/override constraints, missing edges, the tally of
+orders scheduled without setup bars for missing setup data, candidate count, search method, termination reason,
+runtime, and whether a limit was reached. Lines are reported as unchanged only when a fail-closed guard genuinely
+protects a pinned/fixed order (§7, §11) — never merely because setup data was incomplete.
 
 ```text
 Rejected A -> C -> B: setup was 15 minutes lower, but B would finish 42 minutes late.

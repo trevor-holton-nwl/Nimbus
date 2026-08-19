@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.select_lines_to_opt':         'Sélectionnez au moins une ligne à optimiser, ou passez à Usine entière.',
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',
+  'toast.optimize_missing_setup_summary': 'Optimisé. {{orders}} ordre(s) sur {{lines}} ligne(s) ont été planifiés sans données de réglage (aucune barre de changement) — voir Alertes.',
+  'toast.optimize_lines_guarded':      "{{count}} ligne(s) sont restées inchangées — protégées par un ordre fixé ou une dérogation inactive, ou n'avaient rien à planifier.",
   'toast.scenario_applied':            'Scénario "{{name}}" appliqué — Ctrl+Z pour annuler',
   'toast.scenario_discarded':          'Scénario annulé — programme restauré',
   'toast.what_if_mode':                'Mode Hypothèse — les modifications ne sont pas enregistrées. Appliquez ou annulez quand vous avez terminé.',
@@ -1308,6 +1310,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_unchanged_lines_none':    'aucune',
   'ui.setup_reasons_none':            'Aucun motif spécifique n’a été signalé pour ce candidat.',
   'ui.setup_missing_pairs_none':      'Aucune paire de réglage manquante pour ce candidat.',
+  'ui.opt_pv_scheduled_without_setup': "{{orders}} commande(s) sur {{lines}} ligne(s) ont été planifiées sans transition de réglage résoluble — aucune barre de changement n'a été placée pour elles.",
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Règles de planification',

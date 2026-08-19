@@ -1,5 +1,10 @@
 # Changeover Matrix Stage 2 Implementation Plan
 
+> **Behavior revised 2026-08-18:** the fail-closed rule ("missing edges leave the line unchanged") is
+> superseded — the optimizer now schedules orders with missing setup data at the tail of their day bucket
+> with no setup bar plus an alert; lines are never frozen. See `docs/changeover_matrix.md` and
+> `docs/architecture/optimizer-dispatch.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the validated setup-aware scheduler from Due-date first to Min Changeover / available slack and Throughput first with explicit, testable savings and lateness limits.
@@ -16,7 +21,7 @@
 - Min Changeover may pull future work only when it creates no new lateness.
 - Throughput first defaults require at least 60 setup minutes saved and no order slipping more than one day.
 - Thresholds are explicit plant policy configuration, validated server-side and shown in preview explanations.
-- Missing setup edges never win; infeasible lines remain unchanged without blocking unaffected lines.
+- Missing setup edges never win; infeasible lines remain unchanged without blocking unaffected lines. **(Revised 2026-08-18 — superseded, see top-of-doc note: lines are no longer left unchanged; affected orders are tail-placed with no setup bar plus an alert.)**
 - Candidate evaluation remains immutable, bounded, deterministic, and one-commit-per-user-action.
 - No policy may introduce an alert-to-optimizer feedback loop.
 - Do not add shared molds, global mathematical solving, material-pair exceptions, or other deferred scope.

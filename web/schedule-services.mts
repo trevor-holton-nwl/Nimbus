@@ -1794,6 +1794,14 @@ export const Engine = {
    * it so stale diagnostics cannot leak into their shared preview. */
   lastBacklogResult: null as RemoveBacklogResult | null,
 
+  /** Full `CandidateResult` from the latest applied setup-aware run (mirrors
+   * `lastBacklogResult`). Lets the preview / diagnostics UI inspect the same
+   * `missingEdges`/`unchangedLines` the live toast summary was derived from,
+   * without re-running the evaluator. Only set on a live (non-candidateRun)
+   * setup-aware apply — never cleared by other modes since it is read
+   * on-demand, not consumed-and-wiped like `lastBacklogResult`. */
+  lastSetupAwareResult: null as CandidateResult | null,
+
   /** Evaluate the established legacy placement algorithm against a deep,
    * detached snapshot. This is synchronous, so the private source selector is
    * always cleared before another caller can observe it. */
@@ -2897,6 +2905,10 @@ export const Engine = {
   runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
     const candidateRun = opts.__candidateRun === true;
+    // Mirrors lastBacklogResult's lifecycle: cleared at the top of every real
+    // (non-candidate) run so it never goes stale after a later non-setup-aware
+    // run, and always reflects the most recent live apply (F8).
+    if (!candidateRun) Engine.lastSetupAwareResult = null;
     let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
     if (!sourceTasks().length) {
       if (!candidateRun) Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
@@ -2986,9 +2998,40 @@ export const Engine = {
       }
       if (candidateRun) return result;
       applySchedulePatches(result.patches);
+      Engine.lastSetupAwareResult = result;
       Store.setLastOptimize(new Date(), 'engine');
       Alerts.clearDismissed();
       Alerts.scheduleRecompute();
+      // Surface the never-freeze fallbacks that actually landed in this apply:
+      // orders scheduled without a resolvable setup transition (no changeover
+      // bar) and, separately, any line still guarded off entirely (only
+      // fixed/override protection can do that now — see Part 1f). Both are
+      // derived from the applied patches, never the whole-run diagnostics, so
+      // a line-scoped/excludeFromOpt run only reports what it actually
+      // touched.
+      const patchedIds = new Set(result.patches.map(patch => String(patch.id)));
+      const unknownSetupOrderIds = new Set<string>();
+      const unknownSetupLines = new Set<string>();
+      // 'scheduled-without-setup' (F1) is the single dedicated reason
+      // `placeUnknownTail` emits for an order it actually placed — counting
+      // that instead of the raw 'successor-state-unknown'/'initial-state-unknown'
+      // partition edges avoids double-counting a rejected permutation's edge
+      // that happens to name the same patched id.
+      for (const edge of result.missingEdges) {
+        if (edge.reason !== 'scheduled-without-setup') continue;
+        if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
+        unknownSetupOrderIds.add(String(edge.successorOrderId));
+        unknownSetupLines.add(edge.line);
+      }
+      if (unknownSetupOrderIds.size) {
+        Toast.show(Util.t('toast.optimize_missing_setup_summary', {
+          orders: unknownSetupOrderIds.size,
+          lines: unknownSetupLines.size,
+        }), 'warn');
+      }
+      if (result.unchangedLines.length) {
+        Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');
+      }
       PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
       return;
     }

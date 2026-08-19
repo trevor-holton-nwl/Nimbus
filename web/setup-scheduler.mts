@@ -423,6 +423,12 @@ interface DueDateCandidate {
   unadmitted: NimbusTask[];
   explanation: CandidateReason[];
   missingEdges: MissingSetupEdge[];
+  /** The predecessor identity/state this covered core actually ended on, set
+   * only on a feasible result. A subsequent `placeUnknownTail` call or a
+   * fixed boundary's incoming-setup reservation chains from this rather than
+   * re-deriving it from the fragment's original predecessor. */
+  finalState?: SetupStateKey | null;
+  finalPredecessorOrderId?: string | null;
 }
 
 interface SearchRun {
@@ -431,9 +437,20 @@ interface SearchRun {
   termination: 'completed' | 'deadline' | 'iteration-cap';
   winner: DueDateCandidate | null;
   missingEdges: MissingSetupEdge[];
+  /** Orders whose setup state (or matrix coverage) could not be resolved
+   * inside this fragment's covered-core search — never charged into the
+   * min-changeover objective (no fake zero-cost edge). Placed afterward via
+   * `placeUnknownTail`, strictly after the covered core and never
+   * interleaved: an unknown order mid-chain would make every downstream
+   * covered transition's predecessor unknown too. */
+  unknownTail: NimbusTask[];
 }
 
-/** A run-scoped counter shared by every line and fixed-boundary fragment. */
+/** A per-line counter. Constructed fresh inside the per-line loop of both
+ * `evaluateDueDateFirst` and `evaluateSptWithSetup` (Part 2b) so one large
+ * line's search can never exhaust the budget for every other line on the
+ * plant; a fixed-boundary fragment run still shares it with every other
+ * fragment on the same line. */
 interface SearchBudget {
   remainingIterations: number;
 }
@@ -448,7 +465,11 @@ interface FixedBoundary {
 interface FragmentContext {
   start: Date;
   end: Date;
-  predecessorState: SetupStateKey;
+  /** Nullable: an unknown line-initial state (no persisted state, no
+   * scheduled anchor) no longer skips the whole line. The first known order
+   * in a fragment whose predecessor state is null places via the same
+   * zero-minute mechanism as an unknown-tail order (Part 1d). */
+  predecessorState: SetupStateKey | null;
   predecessorOrderId: string | null;
   /** Every order still present on the immutable line snapshot, including a
    * preserved unknown-state anchor that is deliberately absent from this
@@ -667,7 +688,7 @@ function orderedByPolicyThenDue(
 function inactiveOverrideForTransition(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
-  predecessorState: SetupStateKey,
+  predecessorState: SetupStateKey | null,
   successorState: SetupStateKey,
   predecessorOrderId: string | null,
   successorOrderId: string,
@@ -692,6 +713,9 @@ function inactiveOverrideForTransition(
       continue;
     }
     if (override.predecessor_order_id !== predecessorOrderId
+      // An unknown predecessor state can never confirm a bound override; treat
+      // it as a mismatch rather than skipping the check.
+      || predecessorState === null
       || stateKey(override.predecessor_state_key) !== stateKey(predecessorState)
       || stateKey(override.successor_state_key) !== stateKey(successorState)) {
       return { line, predecessorOrderId, successorOrderId, reason: 'override-inactive' };
@@ -810,7 +834,7 @@ function initialFreeOverrideLock(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   free: ReadonlyArray<NimbusTask>,
-  initialState: SetupStateKey,
+  initialState: SetupStateKey | null,
   initialPredecessorOrderId: string | null,
 ): InitialFreeOverrideLock {
   const definition = bounds.setup.definition!;
@@ -832,6 +856,7 @@ function initialFreeOverrideLock(
     if (!successor) continue;
     const successorState = stateForOrder(successor, definition);
     if (!successorState
+      || initialState === null
       || stateKey(initialState) !== stateKey(override.predecessor_state_key)
       || stateKey(successorState) !== stateKey(override.successor_state_key)
       || (requiredFirstOrderId && requiredFirstOrderId !== successorOrderId)) {
@@ -881,6 +906,7 @@ function fragmentAdjacency(
     const predecessorId = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
     if (predecessorId === null) {
       if (fragment.predecessorOrderId !== null
+        || fragment.predecessorState === null
         || stateKey(fragment.predecessorState) !== stateKey(override.predecessor_state_key)
         || (requiredInitialSuccessorId && requiredInitialSuccessorId !== successorId)) {
         markIssue(null, successorId);
@@ -897,6 +923,7 @@ function fragmentAdjacency(
       // this fragment's free list. A truly deleted predecessor is diagnosed
       // at line scope and is not allowed to freeze unrelated later work.
       if (predecessorId === fragment.predecessorOrderId
+        && fragment.predecessorState !== null
         && stateKey(fragment.predecessorState) === stateKey(override.predecessor_state_key)
         && (!requiredInitialSuccessorId || requiredInitialSuccessorId === successorId)) {
         requiredInitialSuccessorId = successorId;
@@ -1347,27 +1374,43 @@ function candidateForSequence(
         feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
-    const resolved = resolveSetup({
-      definition,
-      line,
-      predecessorState,
-      successorState,
-      predecessorOrderId,
-      successorOrderId: taskId(task),
-      plantRows: bounds.setup.plant_rows,
-      lineRows: bounds.setup.line_rows,
-      overrides: bounds.setup.overrides,
-    });
-    if (!resolved.covered || resolved.effectiveMin === null) {
-      missingEdges.push({
+
+    // An unknown line-initial predecessor state (Part 1d) is a missing-data
+    // fact, not a reason to reject the whole permutation: place this order
+    // via the same zero-minute mechanism as an unknown-tail order, charge
+    // nothing into setupMinutes, and keep chaining from its own known state.
+    const unknownPredecessor = predecessorState === null;
+    let effectiveSetupMinutes = 0;
+    let setupRequirement: SetupRequirement;
+    if (unknownPredecessor) {
+      missingEdges.push(unknownInitialStateEdge(line, task));
+      explanation.push(unknownInitialStateReason(line, task));
+      setupRequirement = { kind: 'resolved', minutes: 0 };
+    } else {
+      const resolved = resolveSetup({
+        definition,
         line,
+        predecessorState,
+        successorState,
         predecessorOrderId,
         successorOrderId: taskId(task),
-        reason: resolved.reason,
+        plantRows: bounds.setup.plant_rows,
+        lineRows: bounds.setup.line_rows,
+        overrides: bounds.setup.overrides,
       });
-      return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
-      };
+      if (!resolved.covered || resolved.effectiveMin === null) {
+        missingEdges.push({
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(task),
+          reason: resolved.reason,
+        });
+        return {
+          feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
+        };
+      }
+      effectiveSetupMinutes = resolved.effectiveMin;
+      setupRequirement = { kind: 'resolved', minutes: resolved.effectiveMin };
     }
 
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
@@ -1375,7 +1418,7 @@ function candidateForSequence(
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
-      setup: { kind: 'resolved', minutes: resolved.effectiveMin },
+      setup: setupRequirement,
       policy: splitPolicy,
       ...(splitPolicy === 'overlong_only' ? {
         isInherentlyOverlong: !hasNominalWindow(
@@ -1438,18 +1481,20 @@ function candidateForSequence(
           : [],
       },
     });
-    setupMinutes += resolved.effectiveMin;
+    setupMinutes += effectiveSetupMinutes;
     const due = dueTimestamp(task);
     if (Number.isFinite(due) && last.end.getTime() > due) {
       lateCount += 1;
       latenessMinutes += Math.ceil((last.end.getTime() - due) / (60 * 1000));
     }
-    explanation.push({
-      code: 'due-date-first-placement',
-      message: `Placed ${taskId(task)} after ${resolved.effectiveMin} minutes of setup.`,
-      line,
-      taskId: taskId(task),
-    });
+    if (!unknownPredecessor) {
+      explanation.push({
+        code: 'due-date-first-placement',
+        message: `Placed ${taskId(task)} after ${effectiveSetupMinutes} minutes of setup.`,
+        line,
+        taskId: taskId(task),
+      });
+    }
     cursor = new Date(last.end);
     predecessorState = successorState;
     predecessorOrderId = taskId(task);
@@ -1473,52 +1518,57 @@ function candidateForSequence(
         feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
       };
     }
-    const resolved = resolveSetup({
-      definition,
-      line,
-      predecessorState,
-      successorState: fixed.state,
-      predecessorOrderId,
-      successorOrderId: taskId(fixed.task),
-      plantRows: bounds.setup.plant_rows,
-      lineRows: bounds.setup.line_rows,
-      overrides: bounds.setup.overrides,
-    });
-    if (!resolved.covered || resolved.effectiveMin === null) {
-      missingEdges.push({
+    // An uncovered matrix pair or a temporally infeasible reservation
+    // (`incoming-fixed-setup-infeasible`) is a missing-setup-data fact, not a
+    // reason to freeze the whole line (Part 1f): skip the reservation, keep
+    // the diagnostic edge, and stay feasible. `deriveSetupObservation`/alerts
+    // surface it against the applied schedule instead of a fake bar here.
+    if (predecessorState === null) {
+      missingEdges.push(unknownInitialStateEdge(line, fixed.task));
+    } else {
+      const resolved = resolveSetup({
+        definition,
         line,
+        predecessorState,
+        successorState: fixed.state,
         predecessorOrderId,
         successorOrderId: taskId(fixed.task),
-        reason: resolved.reason,
+        plantRows: bounds.setup.plant_rows,
+        lineRows: bounds.setup.line_rows,
+        overrides: bounds.setup.overrides,
       });
-      return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
-      };
+      if (!resolved.covered || resolved.effectiveMin === null) {
+        missingEdges.push({
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(fixed.task),
+          reason: resolved.reason,
+        });
+      } else {
+        const setupStart = new Date(fixed.start.getTime() - resolved.effectiveMin * 60 * 1000);
+        const fitsIncomingSetup = resolved.effectiveMin === 0
+          ? cursor <= fixed.start
+          : setupStart >= cursor && freeIntervalsFor(
+            snapshot, line, bounds.setup.plant, cursor, fixed.start,
+          ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
+        if (!fitsIncomingSetup) {
+          missingEdges.push({
+            line,
+            predecessorOrderId,
+            successorOrderId: taskId(fixed.task),
+            reason: 'incoming-fixed-setup-infeasible',
+          });
+        } else {
+          setupMinutes += resolved.effectiveMin;
+          explanation.push({
+            code: 'fixed-incoming-setup',
+            message: `Reserved ${resolved.effectiveMin} minutes of setup before fixed ${taskId(fixed.task)}.`,
+            line,
+            taskId: taskId(fixed.task),
+          });
+        }
+      }
     }
-    const setupStart = new Date(fixed.start.getTime() - resolved.effectiveMin * 60 * 1000);
-    const fitsIncomingSetup = resolved.effectiveMin === 0
-      ? cursor <= fixed.start
-      : setupStart >= cursor && freeIntervalsFor(
-        snapshot, line, bounds.setup.plant, cursor, fixed.start,
-      ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
-    if (!fitsIncomingSetup) {
-      missingEdges.push({
-        line,
-        predecessorOrderId,
-        successorOrderId: taskId(fixed.task),
-        reason: 'incoming-fixed-setup-infeasible',
-      });
-      return {
-        feasible: false, patches: [], score: [1, 0, 0, 0, 0, 0], policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
-      };
-    }
-    setupMinutes += resolved.effectiveMin;
-    explanation.push({
-      code: 'fixed-incoming-setup',
-      message: `Reserved ${resolved.effectiveMin} minutes of setup before fixed ${taskId(fixed.task)}.`,
-      line,
-      taskId: taskId(fixed.task),
-    });
   }
 
   return {
@@ -1532,6 +1582,8 @@ function candidateForSequence(
     unadmitted,
     explanation,
     missingEdges,
+    finalState: predecessorState,
+    finalPredecessorOrderId: predecessorOrderId,
   };
 }
 
@@ -1552,6 +1604,7 @@ function exactSearch(
       termination: 'completed',
       winner: null,
       missingEdges: [adjacency.issue],
+      unknownTail: [],
     };
   }
   let candidateCount = 0;
@@ -1690,7 +1743,7 @@ function exactSearch(
     child.previousNormalCursor = previousNormalCursor;
     frames.push(child);
   }
-  return { candidateCount, method: 'due-date-first-exact', termination, winner, missingEdges };
+  return { candidateCount, method: 'due-date-first-exact', termination, winner, missingEdges, unknownTail: [] };
 }
 
 function greedySearch(
@@ -1705,17 +1758,17 @@ function greedySearch(
 ): SearchRun {
   if (adjacency.issue) {
     return {
-      candidateCount: 0, method: 'due-date-first-greedy', termination: 'completed', winner: null, missingEdges: [adjacency.issue],
+      candidateCount: 0, method: 'due-date-first-greedy', termination: 'completed', winner: null, missingEdges: [adjacency.issue], unknownTail: [],
     };
   }
   if (bounds.clock() >= bounds.deadline) {
     return {
-      candidateCount: 0, method: 'due-date-first-greedy', termination: 'deadline', winner: null, missingEdges: [],
+      candidateCount: 0, method: 'due-date-first-greedy', termination: 'deadline', winner: null, missingEdges: [], unknownTail: [],
     };
   }
   if (budget.remainingIterations <= 0) {
     return {
-      candidateCount: 0, method: 'due-date-first-greedy', termination: 'iteration-cap', winner: null, missingEdges: [],
+      candidateCount: 0, method: 'due-date-first-greedy', termination: 'iteration-cap', winner: null, missingEdges: [], unknownTail: [],
     };
   }
   const orderedTasks = groups.flatMap(group => group.tasks).sort((left, right) => (
@@ -1767,6 +1820,7 @@ function greedySearch(
       termination: 'completed',
       winner: null,
       missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
+      unknownTail: [],
     };
   }
   let currentOrder = protectedOrder;
@@ -1799,6 +1853,7 @@ function greedySearch(
     termination,
     winner,
     missingEdges,
+    unknownTail: [],
   };
 }
 
@@ -1844,6 +1899,113 @@ function appendRejectedCoverageDiagnostics(
   }
 }
 
+/** F4: every id participating in an active occurrence override binding for
+ * this fragment — both endpoints of every `predecessorBySuccessor` pair, the
+ * fragment's required-first order (persisted-state override or an inherited
+ * boundary requirement), and its required-last order (an override crossing
+ * the next fixed boundary). The coverage-demotion backstop must never demote
+ * any of these: `sequenceAdjacencyFailure` already rejects every permutation
+ * that breaks such a binding, so silently demoting a bound order out from
+ * under it would either fabricate a bogus override-conflict failure or (once
+ * tail-placed) physically separate it from its required neighbour — exactly
+ * the assertion the override exists to protect. */
+function boundOrderIds(
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): ReadonlySet<string> {
+  const bound = new Set<string>();
+  for (const [successorId, predecessorId] of adjacency.predecessorBySuccessor) {
+    bound.add(successorId);
+    bound.add(predecessorId);
+  }
+  const first = requiredFirstOrderId(fragment, adjacency);
+  if (first) bound.add(first);
+  if (fragment.requiredLastOrderId) bound.add(fragment.requiredLastOrderId);
+  return bound;
+}
+
+/** Find the order most responsible for uncovered-transition rejections across
+ * every attempted permutation, tallied from the accumulated missing edges of
+ * a fragment run that produced no winner. Ties favor the latest due date,
+ * then the higher task id, for a fully deterministic demotion order.
+ * `boundIds` (F4) are never counted or chosen — an override-bound order is
+ * off-limits to this backstop regardless of how many uncovered pairs name
+ * it; if every candidate is bound, this returns null and the caller's
+ * existing fail-closed path applies. */
+function mostUncoveredOrderId(
+  tasksById: ReadonlyMap<string, NimbusTask>,
+  missingEdges: ReadonlyArray<MissingSetupEdge>,
+  boundIds: ReadonlySet<string>,
+): string | null {
+  const counts = new Map<string, number>();
+  const bump = (id: string | null | undefined): void => {
+    if (!id || !tasksById.has(id) || boundIds.has(id)) return;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  };
+  for (const edge of missingEdges) {
+    if (edge.reason !== UNCOVERED_SETUP_TRANSITION_REASON) continue;
+    bump(edge.predecessorOrderId);
+    bump(edge.successorOrderId);
+  }
+  let chosenId: string | null = null;
+  for (const [id, count] of counts) {
+    if (!chosenId) { chosenId = id; continue; }
+    const chosenCount = counts.get(chosenId)!;
+    const chosenTask = tasksById.get(chosenId)!;
+    const task = tasksById.get(id)!;
+    const better = count > chosenCount
+      || (count === chosenCount && (
+        dueTimestamp(task) > dueTimestamp(chosenTask)
+        || (dueTimestamp(task) === dueTimestamp(chosenTask) && id.localeCompare(chosenId) > 0)
+      ));
+    if (better) chosenId = id;
+  }
+  return chosenId;
+}
+
+/** Coverage-demotion backstop (Part 1b): when no permutation over `groups`
+ * covers every transition, demote the order most responsible for uncovered
+ * pairs from the covered-core search into the unknown tail and let the
+ * caller retry. Repeating this can never freeze a fragment: an empty
+ * `groups` still yields a legitimate empty-sequence winner. `fragment`/
+ * `adjacency` (F4) exclude any override-bound order from demotion. */
+function demoteMostUncoveredOrder(
+  groups: ReadonlyArray<DueDateGroup>,
+  missingEdges: ReadonlyArray<MissingSetupEdge>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): { groups: DueDateGroup[]; demoted: NimbusTask } | null {
+  const byId = new Map<string, NimbusTask>();
+  for (const group of groups) for (const task of group.tasks) byId.set(taskId(task), task);
+  const chosenId = mostUncoveredOrderId(byId, missingEdges, boundOrderIds(fragment, adjacency));
+  if (!chosenId) return null;
+  const demoted = byId.get(chosenId)!;
+  const nextGroups = groups
+    .map(group => ({ ...group, tasks: group.tasks.filter(task => taskId(task) !== chosenId) }))
+    .filter(group => group.tasks.length > 0);
+  return { groups: nextGroups, demoted };
+}
+
+/** Flat-list counterpart of `demoteMostUncoveredOrder`, used by the pure-SPT
+ * path, which orders by productive runtime rather than state groups.
+ * `fragment`/`adjacency` (F4) exclude any override-bound order from
+ * demotion. */
+function demoteMostUncoveredTask(
+  tasks: ReadonlyArray<NimbusTask>,
+  missingEdges: ReadonlyArray<MissingSetupEdge>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): { tasks: NimbusTask[]; demoted: NimbusTask } | null {
+  const byId = new Map(tasks.map(task => [taskId(task), task]));
+  const chosenId = mostUncoveredOrderId(byId, missingEdges, boundOrderIds(fragment, adjacency));
+  if (!chosenId) return null;
+  return { tasks: tasks.filter(task => taskId(task) !== chosenId), demoted: byId.get(chosenId)! };
+}
+
+function allUncoveredTransitions(missingEdges: ReadonlyArray<MissingSetupEdge>): boolean {
+  return missingEdges.length > 0 && missingEdges.every(edge => edge.reason === UNCOVERED_SETUP_TRANSITION_REASON);
+}
+
 function searchFragment(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
@@ -1852,14 +2014,33 @@ function searchFragment(
   fragment: Readonly<FragmentContext>,
   budget: SearchBudget,
   mode: FragmentMode = 'due-date-first',
+  // F3: while `evaluateLineWithFixedBoundaries` still owns boundary
+  // arbitration for a per-boundary/fallback run, the coverage-demotion
+  // backstop (Part 1b) must stay off — otherwise it silently resolves
+  // exactly the ambiguity the caller's fallback-enumeration/ambiguity-guard
+  // logic exists to arbitrate (see `supportsBoundaryFallback`), making the
+  // whole fixed-boundary fallback subsystem unreachable. Callers pass
+  // `false` for every per-boundary/fallback run; the trailing fragment (no
+  // arbitration owner) and a final "no arbitration produced a winner"
+  // re-run keep the default `true`.
+  allowDemotion = true,
 ): SearchRun {
   const definition = bounds.setup.definition!;
   const groupsByState = new Map<string, DueDateGroup>();
   const missingEdges: MissingSetupEdge[] = [];
+  // Unknown-state orders are partitioned out here rather than poisoning the
+  // whole fragment (Part 1a): the covered-core search below never sees them,
+  // so the min-changeover objective never charges a fake zero-cost edge for
+  // one. They are appended strictly after the covered core by the caller via
+  // `placeUnknownTail` — never interleaved, because an unknown order
+  // mid-chain would make every downstream covered transition's predecessor
+  // unknown too.
+  const unknownTail: NimbusTask[] = [];
   for (const task of tasks) {
     const state = stateForOrder(task, definition);
     if (!state) {
       missingEdges.push({ line, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
+      unknownTail.push(task);
       continue;
     }
     const key = stateKey(state);
@@ -1867,23 +2048,17 @@ function searchFragment(
     group.tasks.push(task);
     groupsByState.set(key, group);
   }
-  if (missingEdges.length) {
-    return {
-      candidateCount: 0,
-      method: 'due-date-first-exact',
-      termination: 'completed',
-      winner: null,
-      missingEdges,
-    };
-  }
   const adjacency = fragmentAdjacency(bounds, line, tasks, fragment);
   if (adjacency.issue) {
+    // An active-override conflict is an explicit user assertion and stays
+    // fail-closed (Part 1f); it is not a missing-data fact to route around.
     return {
       candidateCount: 0,
       method: 'due-date-first-exact',
       termination: 'completed',
       winner: null,
-      missingEdges: [adjacency.issue],
+      missingEdges: [...missingEdges, adjacency.issue],
+      unknownTail,
     };
   }
   const groups = [...groupsByState.values()]
@@ -1897,41 +2072,105 @@ function searchFragment(
   if (mode === 'spt') {
     if (bounds.clock() >= bounds.deadline) {
       return {
-        candidateCount: 0, method: 'due-date-first-exact', termination: 'deadline', winner: null, missingEdges: [],
+        candidateCount: 0, method: 'due-date-first-exact', termination: 'deadline', winner: null, missingEdges, unknownTail,
       };
     }
     if (budget.remainingIterations <= 0) {
       return {
-        candidateCount: 0, method: 'due-date-first-exact', termination: 'iteration-cap', winner: null, missingEdges: [],
+        candidateCount: 0, method: 'due-date-first-exact', termination: 'iteration-cap', winner: null, missingEdges, unknownTail,
       };
     }
-    budget.remainingIterations -= 1;
-    const sequence = orderWithAdjacency(
-      orderedByProductiveRuntime(groups.flatMap(group => group.tasks)),
-      fragment,
-      adjacency,
-    );
-    if (!sequence) {
-      return {
-        candidateCount: 0,
-        method: 'due-date-first-exact',
-        termination: 'completed',
-        winner: null,
-        missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
-      };
+    let workingTasks = groups.flatMap(group => group.tasks);
+    const demoted: NimbusTask[] = [];
+    // Accumulates every demoted attempt's rejected-permutation edges (F1):
+    // each iteration below only produces `candidate.missingEdges` for the
+    // permutation it just tried, and demotion removes that permutation's
+    // worst-offending order from `workingTasks` before the next iteration
+    // even sees it — without this, an uncovered pair's edge would vanish the
+    // moment its own demotion made the winning run not name it anymore.
+    const attemptedEdges: MissingSetupEdge[] = [];
+    let candidateCount = 0;
+    for (;;) {
+      if (budget.remainingIterations <= 0) {
+        return {
+          candidateCount, method: 'due-date-first-exact', termination: 'iteration-cap', winner: null,
+          missingEdges: [...missingEdges, ...attemptedEdges], unknownTail: [...unknownTail, ...demoted],
+        };
+      }
+      budget.remainingIterations -= 1;
+      candidateCount += 1;
+      const sequence = orderWithAdjacency(orderedByProductiveRuntime(workingTasks), fragment, adjacency);
+      if (!sequence) {
+        return {
+          candidateCount,
+          method: 'due-date-first-exact',
+          termination: 'completed',
+          winner: null,
+          missingEdges: [...missingEdges, ...attemptedEdges, inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
+          unknownTail: [...unknownTail, ...demoted],
+        };
+      }
+      const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
+      if (candidate.feasible) {
+        return {
+          candidateCount, method: 'due-date-first-exact', termination: 'completed', winner: candidate,
+          missingEdges: [...missingEdges, ...attemptedEdges], unknownTail: [...unknownTail, ...demoted],
+        };
+      }
+      // Coverage-demotion backstop (Part 1b) for pure SPT: an uncovered
+      // transition demotes its worst-offending order into the unknown tail
+      // and retries, rather than freezing the fragment. Gated off (F3) while
+      // the caller still owns boundary arbitration for this run.
+      if (!allowDemotion || !allUncoveredTransitions(candidate.missingEdges) || !workingTasks.length) {
+        return {
+          candidateCount, method: 'due-date-first-exact', termination: 'completed', winner: null,
+          missingEdges: [...missingEdges, ...attemptedEdges, ...candidate.missingEdges], unknownTail: [...unknownTail, ...demoted],
+        };
+      }
+      const demotion = demoteMostUncoveredTask(workingTasks, candidate.missingEdges, fragment, adjacency);
+      if (!demotion) {
+        return {
+          candidateCount, method: 'due-date-first-exact', termination: 'completed', winner: null,
+          missingEdges: [...missingEdges, ...attemptedEdges, ...candidate.missingEdges], unknownTail: [...unknownTail, ...demoted],
+        };
+      }
+      attemptedEdges.push(...candidate.missingEdges);
+      workingTasks = demotion.tasks;
+      demoted.push(demotion.demoted);
     }
-    const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
-    return {
-      candidateCount: 1,
-      method: 'due-date-first-exact',
-      termination: 'completed',
-      winner: candidate.feasible ? candidate : null,
-      missingEdges: candidate.feasible ? [] : candidate.missingEdges,
-    };
   }
-  return groups.length <= bounds.exactSearchThreshold
-    ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode)
-    : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode);
+
+  let workingGroups = groups;
+  const demoted: NimbusTask[] = [];
+  // Accumulates every demoted iteration's rejected edges (F1): `run` is
+  // reassigned each pass, so without this, only the FINAL run's missingEdges
+  // would survive — the uncovered-transition edge that actually caused each
+  // demotion is discarded the moment its named order is no longer in
+  // `workingGroups` to produce it again.
+  const attemptedEdges: MissingSetupEdge[] = [];
+  let run: SearchRun;
+  for (;;) {
+    run = workingGroups.length <= bounds.exactSearchThreshold
+      ? exactSearch(snapshot, bounds, line, workingGroups, fragment, adjacency, budget, mode)
+      : greedySearch(snapshot, bounds, line, workingGroups, fragment, adjacency, budget, mode);
+    if (run.winner || run.termination !== 'completed') break;
+    // Coverage-demotion backstop (Part 1b): no permutation over the current
+    // working set covered every transition. Demote the worst offender into
+    // the unknown tail and retry; an empty working set still yields a
+    // legitimate empty-sequence winner, so this always terminates. Gated off
+    // (F3) while the caller still owns boundary arbitration for this run.
+    if (!allowDemotion || !allUncoveredTransitions(run.missingEdges)) break;
+    const demotion = demoteMostUncoveredOrder(workingGroups, run.missingEdges, fragment, adjacency);
+    if (!demotion) break;
+    attemptedEdges.push(...run.missingEdges);
+    workingGroups = demotion.groups;
+    demoted.push(demotion.demoted);
+  }
+  return {
+    ...run,
+    missingEdges: [...missingEdges, ...attemptedEdges, ...run.missingEdges],
+    unknownTail: [...unknownTail, ...demoted],
+  };
 }
 
 function unchangedLineResult(
@@ -2034,7 +2273,7 @@ function boundaryOverrideLocks(
   line: string,
   fixed: ReadonlyArray<FixedBoundary>,
   free: ReadonlyArray<NimbusTask>,
-  initialState: SetupStateKey,
+  initialState: SetupStateKey | null,
   initialPredecessorOrderId: string | null,
 ): ReadonlyMap<string, BoundaryOverrideLocks> {
   const definition = bounds.setup.definition!;
@@ -2067,6 +2306,7 @@ function boundaryOverrideLocks(
       const successorIndex = fixedIndexById.get(successorId);
       const lock = lockFor(successorId);
       if (successorIndex !== 0
+        || initialState === null
         || stateKey(override.predecessor_state_key) !== stateKey(initialState)
         || stateKey(override.successor_state_key) !== stateKey(successorFixed.state)
         || lock.requiredFixedPredecessorId
@@ -2152,7 +2392,7 @@ function auditOutOfHorizonFixedOverrides(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
-  initialState: SetupStateKey,
+  initialState: SetupStateKey | null,
   initial: Readonly<LineInitialContext>,
 ): OutOfHorizonFixedOverrideAudit {
   const definition = bounds.setup.definition!;
@@ -2257,6 +2497,26 @@ function supportsBoundaryFallback(run: Readonly<SearchRun>): boolean {
   return run.missingEdges.length > 0 && run.missingEdges.every(edge => (
     edge.reason === UNCOVERED_SETUP_TRANSITION_REASON
     || edge.reason === 'incoming-fixed-setup-infeasible'
+  ));
+}
+
+/** F3b secondary hardening: Part 1f's incoming-boundary leniency means
+ * `candidateForSequence` still reports `feasible: true` for a fragment whose
+ * LAST order's transition into `fragment.nextFixed` is uncovered — it just
+ * skips the reservation and pushes a diagnostic edge rather than freezing.
+ * That is correct for the covered-core search itself, but the non-terminal
+ * fallback-ambiguity count below must not treat such a "leniently tolerated"
+ * route as equally genuine to one whose incoming reservation is actually
+ * covered — otherwise a single order that can never really enter this
+ * boundary (e.g. RED when only BLUE -> fixed is covered) counts as a second
+ * "feasible" route and manufactures a false ambiguity where only one real
+ * route exists. */
+function candidateEntersBoundaryUncovered(
+  candidate: Readonly<DueDateCandidate>,
+  boundaryTaskId: string,
+): boolean {
+  return candidate.missingEdges.some(edge => (
+    edge.successorOrderId === boundaryTaskId && edge.reason === UNCOVERED_SETUP_TRANSITION_REASON
   ));
 }
 
@@ -2480,12 +2740,245 @@ function compareBoundaryFallback(
   return left.option.deferred.map(taskId).join('\u0000').localeCompare(right.option.deferred.map(taskId).join('\u0000'));
 }
 
+export interface UnknownTailPlacement {
+  patches: SchedulePatch[];
+  explanation: CandidateReason[];
+  /** Orders that could not be placed within `[start, capacityEnd)`. They
+   * defer like covered overflow work — to the next fragment, or (in the
+   * trailing fragment / whole-line fallback) stay at their current dates
+   * with a diagnostic rather than freezing the line. */
+  unadmitted: NimbusTask[];
+  /** One `'scheduled-without-setup'` edge per order actually placed by this
+   * call (F1) — the only source of truth for how many orders/lines the live
+   * run and OptimizerPreview report as "scheduled without a changeover bar". */
+  missingEdges: MissingSetupEdge[];
+}
+
+/**
+ * Place unknown/uncovered orders at the tail of a fragment, strictly after
+ * its covered core (Part 1c). Setup is charged as zero minutes purely as a
+ * `placeWithSetup` placement mechanism — never a real changeover, and never
+ * added to `score[5]`/setupMinutes — so no fake bar is ever charged for a
+ * transition nobody actually knows. Capacity, the split policy, and
+ * `bounds.notBefore` are the real, unmodified mechanisms used elsewhere.
+ *
+ * Note (F10): this function does not contribute to `score[2]`/`score[3]`
+ * (lateness) either — those tiers are diagnostics-fidelity only within
+ * `DueDateCandidate`/the min-changeover objective, not read back from the
+ * applied schedule. This is safe because every caller re-derives real
+ * lateness from the fully applied patches afterward (see
+ * `evaluateMinChangeover`'s `lateOrderFacts(applyPatchesToSnapshot(...))`),
+ * so a tail placement's lateness is never silently lost — it just isn't
+ * double-counted into this candidate's own score vector.
+ */
+export function placeUnknownTail(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+  start: Date,
+  capacityEnd: Date,
+  mode: FragmentMode,
+  // The covered core's actual final predecessor (or the previous tail
+  // fragment's last placed order), used only to label the `missingEdges`
+  // this call emits (F1) — never consumed by the zero-minute placement
+  // mechanism above, which is state-agnostic by design.
+  initialPredecessorOrderId: string | null = null,
+): UnknownTailPlacement {
+  const ordered = mode === 'spt'
+    ? orderedByProductiveRuntime(tasks)
+    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks);
+  const splitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+  const patches: SchedulePatch[] = [];
+  const explanation: CandidateReason[] = [];
+  const missingEdges: MissingSetupEdge[] = [];
+  let cursor = new Date(start);
+  let previousOrderId = initialPredecessorOrderId;
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const task = ordered[index];
+    const pullForwardFloor = bounds.notBefore?.(task);
+    if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
+    const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+    const placement = placeWithSetup({
+      earliestStart: cursor,
+      runtimeMinutes,
+      setup: { kind: 'resolved', minutes: 0 },
+      policy: splitPolicy,
+      ...(splitPolicy === 'overlong_only' ? {
+        isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes),
+      } : {}),
+      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, capacityEnd),
+    });
+    if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
+      const deferred = ordered.slice(index);
+      explanation.push({
+        code: 'unknown-setup-tail-placement',
+        message: `Deferred ${deferred.length} order(s) missing setup data after available tail capacity ended.`,
+        line,
+        taskId: taskId(task),
+      });
+      return { patches, explanation, unadmitted: deferred, missingEdges };
+    }
+    const first = placement.productiveSegments[0];
+    const last = placement.productiveSegments.at(-1)!;
+    patches.push({
+      id: taskId(task),
+      changes: {
+        start_date: new Date(first.start),
+        end_date: new Date(last.end),
+        scheduleSegments: placement.productiveSegments.length > 1
+          ? placement.productiveSegments.map((segment, segIndex) => ({
+            sequence: segIndex + 1, startDate: new Date(segment.start), endDate: new Date(segment.end),
+          }))
+          : [],
+      },
+    });
+    explanation.push({
+      code: 'unknown-setup-tail-placement',
+      message: `Placed ${taskId(task)} at the tail without a changeover bar; setup data is missing or uncovered.`,
+      line,
+      taskId: taskId(task),
+    });
+    // Dedicated reason (F1) so the live-run toast and OptimizerPreview's tally
+    // can count exactly the orders actually scheduled without setup — never
+    // conflated with a rejected-permutation `UNCOVERED_SETUP_TRANSITION_REASON`
+    // edge that may happen to name the same id.
+    missingEdges.push({ line, predecessorOrderId: previousOrderId, successorOrderId: taskId(task), reason: 'scheduled-without-setup' });
+    previousOrderId = taskId(task);
+    cursor = new Date(last.end);
+  }
+  return { patches, explanation, unadmitted: [], missingEdges };
+}
+
+/** The incoming setup a covered core reserved before a fixed boundary stays
+ * authoritative (Part 1c): tail capacity for the same fragment must end at
+ * that reservation's start, never inside it. Re-derives the same reservation
+ * `candidateForSequence` already validated, from the covered core's actual
+ * final predecessor rather than the fragment's original one. An unknown
+ * final predecessor state means the reservation itself cannot be computed —
+ * the fixed order's own incoming setup then also becomes a diagnostic
+ * further downstream, and tail capacity simply runs to the boundary. */
+function tailCapacityEnd(
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  fragmentEnd: Date,
+  nextFixed: FixedBoundary | undefined,
+  finalState: SetupStateKey | null,
+  finalPredecessorOrderId: string | null,
+): Date {
+  if (!nextFixed || finalState === null) return fragmentEnd;
+  const definition = bounds.setup.definition!;
+  const resolved = resolveSetup({
+    definition,
+    line,
+    predecessorState: finalState,
+    successorState: nextFixed.state,
+    predecessorOrderId: finalPredecessorOrderId,
+    successorOrderId: taskId(nextFixed.task),
+    plantRows: bounds.setup.plant_rows,
+    lineRows: bounds.setup.line_rows,
+    overrides: bounds.setup.overrides,
+  });
+  const reserveMinutes = resolved.covered && resolved.effectiveMin !== null ? resolved.effectiveMin : 0;
+  return new Date(nextFixed.start.getTime() - reserveMinutes * 60 * 1000);
+}
+
+/** Cursor to start tail placement from: the covered core's last placed
+ * order, or the fragment start when the core is empty. */
+function tailCursorFor(candidate: Readonly<DueDateCandidate> | null, fallbackStart: Date): Date {
+  const end = candidate?.patches.at(-1)?.changes.end_date;
+  return end instanceof Date ? new Date(end) : new Date(fallbackStart);
+}
+
+/** Place unknown-tail orders and merge the result directly into the
+ * caller's accumulators, mirroring `applyCandidate`'s merge shape. */
+function applyUnknownTail(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  mode: FragmentMode,
+  tasks: ReadonlyArray<NimbusTask>,
+  start: Date,
+  capacityEnd: Date,
+  patches: SchedulePatch[],
+  explanation: CandidateReason[],
+  missingEdges: MissingSetupEdge[],
+  initialPredecessorOrderId: string | null = null,
+): NimbusTask[] {
+  if (!tasks.length) return [];
+  const placement = placeUnknownTail(snapshot, bounds, line, tasks, start, capacityEnd, mode, initialPredecessorOrderId);
+  patches.push(...placement.patches);
+  explanation.push(...placement.explanation);
+  missingEdges.push(...placement.missingEdges);
+  return placement.unadmitted;
+}
+
+/**
+ * Whole-line fallback (Part 1e) for a line that cannot be evaluated as
+ * setup-aware at all — no compatible setup definition, or the line is
+ * explicitly `setup_compatible === false`. Free orders are still placed
+ * (policy-then-due or SPT order, zero setup capacity) around whatever fixed
+ * orders exist, rather than skipping the line; overflow at the very end
+ * stays at its current dates with a diagnostic.
+ */
+function placeWholeLineAsTail(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+  mode: FragmentMode,
+): { patches: SchedulePatch[]; explanation: CandidateReason[]; missingEdges: MissingSetupEdge[] } {
+  const free = tasks.filter(task => !taskIsFixed(snapshot, task));
+  const fixedWindows = tasks
+    .filter(task => taskIsFixed(snapshot, task))
+    .flatMap(task => {
+      const start = timestamp(task.start_date);
+      const end = timestamp(task.end_date);
+      return start && end && end > start && start <= bounds.horizonEnd ? [{ start, end }] : [];
+    })
+    .sort((left, right) => left.start.getTime() - right.start.getTime());
+
+  const patches: SchedulePatch[] = [];
+  const explanation: CandidateReason[] = [];
+  const missingEdges: MissingSetupEdge[] = [];
+  let remaining = free;
+  let cursor = new Date(bounds.now);
+  // Track the last order actually placed by this function's own tail calls —
+  // there is no covered core here, so this is the only predecessor chain
+  // `missingEdges` (F1) has to work with across fixed windows.
+  let previousOrderId: string | null = null;
+  for (const window of fixedWindows) {
+    if (remaining.length && cursor < window.start) {
+      remaining = applyUnknownTail(
+        snapshot, bounds, line, mode, remaining, cursor, window.start, patches, explanation, missingEdges, previousOrderId,
+      );
+      if (patches.length) previousOrderId = String(patches.at(-1)!.id);
+    }
+    if (window.end > cursor) cursor = new Date(window.end);
+  }
+  if (remaining.length) {
+    remaining = applyUnknownTail(
+      snapshot, bounds, line, mode, remaining, cursor, bounds.horizonEnd, patches, explanation, missingEdges, previousOrderId,
+    );
+  }
+  for (const task of remaining) {
+    explanation.push({
+      code: 'unknown-setup-tail-placement',
+      message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
+      line,
+      taskId: taskId(task),
+    });
+  }
+  return { patches, explanation, missingEdges };
+}
+
 function evaluateLineWithFixedBoundaries(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   tasks: ReadonlyArray<NimbusTask>,
-  initialState: SetupStateKey,
+  initialState: SetupStateKey | null,
   initial: Readonly<LineInitialContext>,
   budget: SearchBudget,
   mode: FragmentMode = 'due-date-first',
@@ -2624,6 +3117,15 @@ function evaluateLineWithFixedBoundaries(
 
   for (let boundaryIndex = 0; boundaryIndex < fixed.length; boundaryIndex += 1) {
     const boundary = fixed[boundaryIndex];
+    // F3: only a fragment before a LATER fixed boundary needs the caller to
+    // own arbitration — that is the "cannot legitimately rank two
+    // alternatives ahead of later fixed boundaries" scenario the ambiguity
+    // guard below exists for. The terminal boundary's local fallback already
+    // compares every complete candidate directly (no separate ambiguity
+    // guard is needed there), so letting its own per-boundary run resolve
+    // coverage via demotion first — exactly like the trailing fragment —
+    // is safe and matches every other never-freeze fragment's behavior.
+    const isTerminalBoundary = boundaryIndex === fixed.length - 1;
     if (boundary.start < fragmentStart) {
       return unchangedLineResult(
         line,
@@ -2750,11 +3252,20 @@ function evaluateLineWithFixedBoundaries(
       requiredFirstOrderId,
       requiredLastOrderId: boundaryLock?.requiredLastOrderId,
     };
-    const run = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode);
+    // allowDemotion (F3): only false before a LATER fixed boundary, where the
+    // caller owns arbitration via the fallback-enumeration/ambiguity-guard
+    // logic below — silently resolving coverage-demotion here would make
+    // that subsystem unreachable. The terminal boundary keeps demotion on,
+    // same as the trailing fragment.
+    const run = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode, isTerminalBoundary);
     // A failed pre-fixed sequence may still have a fully covered route after
     // the fixed run. Search bounded whole-component deferrals under the same
     // shared budget; the rejected edge stays visible when a later route wins.
     let winner = accept(run, false);
+    // Tracks whichever run's unknown-tail set actually corresponds to the
+    // admitted batch that produced `winner` (Part 1c) — the plain run, or
+    // whichever fallback run below replaces it.
+    let tailSource: ReadonlyArray<NimbusTask> = run.unknownTail;
     let deferredAcrossFixed: NimbusTask[] = [];
     const fallbackRuns: SearchRun[] = [];
     const continuationRuns: SearchRun[] = [];
@@ -2767,11 +3278,13 @@ function evaluateLineWithFixedBoundaries(
           snapshot, bounds, line, admitted, fragment, freeComponents,
         );
         for (const option of fallbackOptions) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
+          // allowDemotion (F3): mirrors the per-boundary run's gate above.
+          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode, isTerminalBoundary);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
           if (fallbackRun.winner) {
             winner = applyWinner(fallbackRun);
+            tailSource = fallbackRun.unknownTail;
             deferredAcrossFixed = option.deferred;
             missingEdges.push(...run.missingEdges);
             explanation.push({
@@ -2794,7 +3307,11 @@ function evaluateLineWithFixedBoundaries(
         );
         let completeEnumeration = true;
         for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
+          // allowDemotion (F3): always true here — this branch only runs for
+          // the terminal boundary (isTerminalBoundary), which compares every
+          // complete candidate directly rather than needing the ambiguity
+          // guard the non-terminal branch below relies on.
+          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode, isTerminalBoundary);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
           if (fallbackRun.termination !== 'completed') {
@@ -2871,6 +3388,37 @@ function evaluateLineWithFixedBoundaries(
             line,
             taskId: taskId(boundary.task),
           });
+          // This complete candidate already spans the fixed boundary through
+          // to the horizon end (Part 1c): place each half's unknown tail
+          // against its own capacity — the pre-fixed half up to fixed's
+          // reserved incoming setup, the continuation half up to the
+          // horizon, since there is no further fragment to defer to.
+          const preFixedTailUnadmitted = applyUnknownTail(
+            snapshot, bounds, line, mode, selectedFallback.run.unknownTail,
+            tailCursorFor(selectedFallback.run.winner, fragmentStart),
+            tailCapacityEnd(
+              bounds, line, boundary.start, boundary,
+              selectedFallback.run.winner!.finalState ?? predecessorState,
+              selectedFallback.run.winner!.finalPredecessorOrderId ?? predecessorOrderId,
+            ),
+            patches, explanation, missingEdges,
+            selectedFallback.run.winner!.finalPredecessorOrderId ?? predecessorOrderId,
+          );
+          const continuationTailUnadmitted = applyUnknownTail(
+            snapshot, bounds, line, mode, selectedFallback.continuation!.unknownTail,
+            tailCursorFor(selectedFallback.continuation!.winner, boundary.end),
+            bounds.horizonEnd,
+            patches, explanation, missingEdges,
+            selectedFallback.continuation!.winner!.finalPredecessorOrderId ?? taskId(boundary.task),
+          );
+          for (const task of [...preFixedTailUnadmitted, ...continuationTailUnadmitted]) {
+            explanation.push({
+              code: 'unknown-setup-tail-placement',
+              message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
+              line,
+              taskId: taskId(task),
+            });
+          }
           return {
             patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false,
           };
@@ -2886,10 +3434,17 @@ function evaluateLineWithFixedBoundaries(
         );
         let completeEnumeration = true;
         for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
+          // allowDemotion:false (F3): same arbitration-ownership reason as
+          // the per-boundary run above — this fallback option is being
+          // compared against sibling options by the caller.
+          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode, false);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
-          if (fallbackRun.winner) {
+          // F3b secondary hardening: only count a route whose incoming
+          // reservation into this boundary is genuinely covered — not one
+          // merely tolerated by Part 1f's leniency (see
+          // `candidateEntersBoundaryUncovered`).
+          if (fallbackRun.winner && !candidateEntersBoundaryUncovered(fallbackRun.winner, taskId(boundary.task))) {
             feasibleFallbacks.push({ option, run: fallbackRun, candidate: fallbackRun.winner });
             if (feasibleFallbacks.length > 1) break;
           }
@@ -2921,6 +3476,7 @@ function evaluateLineWithFixedBoundaries(
         if (feasibleFallbacks.length === 1) {
           const selectedFallback = feasibleFallbacks[0];
           winner = applyWinner(selectedFallback.run);
+          tailSource = selectedFallback.run.unknownTail;
           deferredAcrossFixed = selectedFallback.option.deferred;
           missingEdges.push(...run.missingEdges);
           appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
@@ -2934,23 +3490,72 @@ function evaluateLineWithFixedBoundaries(
       }
     }
     if (!winner) {
-      missingEdges.push(
+      const attemptedEdges = [
         ...run.missingEdges,
         ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges),
         ...continuationRuns.flatMap(continuation => continuation.missingEdges),
-      );
-      explanation.push({
-        code: 'fixed-boundary-infeasible',
-        message: `Cannot preserve the required incoming setup before fixed ${taskId(boundary.task)}.`,
-        line,
-        taskId: taskId(boundary.task),
-      });
-      return {
-        patches: [], score: [0, 0, 0, 0, 0, 0], explanation, missingEdges,
-        candidateCount, method, termination, unchanged: true,
-      };
+      ];
+      missingEdges.push(...attemptedEdges);
+      // An active-override conflict is an explicit user assertion and stays
+      // fail-closed (Part 1f). Anything else — unresolved coverage/capacity,
+      // or the shared budget running out before any covered sequence
+      // completed — is a missing-data fact, not a reason to freeze.
+      // An active-override conflict must still fail closed even mixed in with
+      // other (missing-data) causes — otherwise a fragment with one blank-
+      // signature order alongside a genuine override conflict would silently
+      // discard the override and tail-place the bound order away from its
+      // required neighbour (F4/F5).
+      const isOverrideConflict = attemptedEdges.some(edge => edge.reason === 'override-inactive');
+      if (isOverrideConflict) {
+        explanation.push({
+          code: 'fixed-boundary-infeasible',
+          message: `Cannot preserve the required incoming setup before fixed ${taskId(boundary.task)}.`,
+          line,
+          taskId: taskId(boundary.task),
+        });
+        return {
+          patches: [], score: [0, 0, 0, 0, 0, 0], explanation, missingEdges,
+          candidateCount, method, termination, unchanged: true,
+        };
+      }
+      // F3 point 3: no arbitrated fallback route won this fragment, and it is
+      // not an override conflict — re-run with the coverage-demotion
+      // backstop enabled (allowDemotion:true) so orders that ARE coverable
+      // still get a real setup-aware placement, rather than dumping the
+      // whole admitted batch straight into the zero-minute tail mechanism.
+      // `accept` merges this exactly like the original per-boundary run.
+      const demotionRun = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode, true);
+      winner = accept(demotionRun, true);
+      tailSource = demotionRun.unknownTail;
+      if (!winner) {
+        // Even with demotion enabled the shared budget ran out before any
+        // covered sequence completed — place the whole admitted+later set as
+        // a tail up to this boundary's reserved incoming setup instead.
+        const tailEnd = tailCapacityEnd(bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+        // `admitted` already contains `run.unknownTail` (searchFragment was
+        // called with `admitted` above) — concatenating both would duplicate
+        // every unknown/demoted order into two positional patches.
+        const tailUnadmitted = applyUnknownTail(
+          snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
+          predecessorOrderId,
+        );
+        remaining = [...tailUnadmitted, ...later];
+        fragmentStart = new Date(boundary.end);
+        predecessorState = boundary.state;
+        predecessorOrderId = taskId(boundary.task);
+        requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+        continue;
+      }
     }
-    remaining = [...winner.unadmitted, ...deferredAcrossFixed, ...later];
+    const tailEnd = tailCapacityEnd(
+      bounds, line, boundary.start, boundary,
+      winner.finalState ?? predecessorState, winner.finalPredecessorOrderId ?? predecessorOrderId,
+    );
+    const tailUnadmitted = applyUnknownTail(
+      snapshot, bounds, line, mode, tailSource, tailCursorFor(winner, fragmentStart), tailEnd, patches, explanation,
+      missingEdges, winner.finalPredecessorOrderId ?? predecessorOrderId,
+    );
+    remaining = [...winner.unadmitted, ...deferredAcrossFixed, ...tailUnadmitted, ...later];
     fragmentStart = new Date(boundary.end);
     predecessorState = boundary.state;
     predecessorOrderId = taskId(boundary.task);
@@ -2966,31 +3571,49 @@ function evaluateLineWithFixedBoundaries(
     allowsDeletedPredecessorBinding: initial.preservedAnchor !== undefined,
     requiredFirstOrderId,
   }, budget, mode);
-  const trailingWinner = accept(trailing);
-  if (!trailingWinner || trailingWinner.unadmitted.length) {
-    if (trailingWinner?.unadmitted.length) {
-      const firstUnadmitted = trailingWinner.unadmitted[0];
-      missingEdges.push({
-        line,
-        predecessorOrderId,
-        successorOrderId: taskId(firstUnadmitted),
-        reason: 'trailing-fragment-unadmitted',
-      });
-      explanation.push({
-        code: 'trailing-fragment-unadmitted',
-        message: 'Terminal capacity cannot safely apply a partial candidate; the line remains unchanged.',
-        line,
-        taskId: taskId(firstUnadmitted),
-      });
+  recordRun(trailing);
+  // Terminal discard guard (Part 1f): a partial or absent trailing winner no
+  // longer discards every patch the earlier fragments already produced. The
+  // covered winner (if any) is applied, its own unadmitted overflow and the
+  // fragment's unknown-state/uncovered orders are placed as a tail up to the
+  // horizon, and whatever still cannot fit stays at its current dates with a
+  // diagnostic — the line is never frozen.
+  let tailStart = fragmentStart;
+  let tailTasks: ReadonlyArray<NimbusTask> = trailing.unknownTail;
+  let tailPredecessorOrderId = predecessorOrderId;
+  if (trailing.winner) {
+    if (mode === 'due-date-first') appendRejectedCoverageDiagnostics(missingEdges, explanation, trailing.missingEdges);
+    applyCandidate(trailing.winner);
+    tailStart = tailCursorFor(trailing.winner, fragmentStart);
+    tailTasks = [...tailTasks, ...trailing.winner.unadmitted];
+    tailPredecessorOrderId = trailing.winner.finalPredecessorOrderId ?? predecessorOrderId;
+  } else {
+    missingEdges.push(...trailing.missingEdges);
+    // .some, not .every (F5): an override conflict must fail closed even
+    // alongside missing-data edges from the same trailing fragment.
+    const isOverrideConflict = trailing.missingEdges.some(edge => edge.reason === 'override-inactive');
+    if (isOverrideConflict) {
+      explanation.push({ code: 'setup-sequence-infeasible', message: 'No covered feasible setup sequence was found.', line });
+      return {
+        patches: [], score: [0, 0, 0, 0, 0, 0], explanation, missingEdges,
+        candidateCount, method, termination, unchanged: true,
+      };
     }
-    const incompatible = missingEdges.some(edge => edge.reason === 'successor-state-unknown');
-    explanation.push(incompatible
-      ? { code: 'setup-incompatible', message: 'Line has an order without a complete setup state.', line }
-      : { code: 'setup-sequence-infeasible', message: 'No covered feasible setup sequence was found.', line });
-    return {
-      patches: [], score: [0, 0, 0, 0, 0, 0], explanation, missingEdges,
-      candidateCount, method, termination, unchanged: true,
-    };
+    // Budget exhaustion or unresolved coverage before any covered sequence
+    // completed (Part 2b): never freeze — place the entire remaining
+    // fragment as an unknown tail instead.
+    tailTasks = [...tailTasks, ...remaining];
+  }
+  const tailUnadmitted = applyUnknownTail(
+    snapshot, bounds, line, mode, tailTasks, tailStart, bounds.horizonEnd, patches, explanation, missingEdges, tailPredecessorOrderId,
+  );
+  for (const task of tailUnadmitted) {
+    explanation.push({
+      code: 'unknown-setup-tail-placement',
+      message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
+      line,
+      taskId: taskId(task),
+    });
   }
   return { patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false };
 }
@@ -3042,12 +3665,21 @@ export function evaluateSptWithSetup(
   const unchangedLines: string[] = [];
   const missingEdges: MissingSetupEdge[] = [];
   const score = [0, 0, 0, 0, 0, 0];
-  const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
 
   for (const [line, tasks] of [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    // Part 2b: a fresh per-line budget so one large line's search can never
+    // exhaust the iteration cap for every other line on the plant.
+    const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
     if (!definition || definition.plant !== plant) {
-      unchangedLines.push(line);
+      // Part 1e: no setup definition at all means setup-awareness cannot run
+      // for this line, but the line is never frozen — free orders still get
+      // a policy/due-ordered tail placement around any fixed orders.
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
+      patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
+      explanation.push(...wholeLine.explanation);
+      missingEdges.push(...wholeLine.missingEdges);
+      if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
     const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
@@ -3056,13 +3688,12 @@ export function evaluateSptWithSetup(
     const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
-      unchangedLines.push(line);
-      missingEdges.push(
-        ...missingSuccessorEdgesForLine,
-        ...missingPredecessorEdgesForLine,
-        { line, reason: 'setup-compatibility-disabled' },
-      );
-      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
+      // Part 1e: an explicit setup_compatible=false opt-out still never
+      // freezes the line — whole-line tail placement, one line-level edge,
+      // no per-order override-diagnostic noise.
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
+      patches.push(...wholeLine.patches);
+      missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
         code: 'setup-incompatible',
         message: compatibility.reason
@@ -3070,6 +3701,9 @@ export function evaluateSptWithSetup(
           : 'This line is marked incompatible with the active setup signature.',
         line,
       });
+      explanation.push(...wholeLine.explanation);
+      missingEdges.push(...wholeLine.missingEdges);
+      if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
@@ -3079,17 +3713,18 @@ export function evaluateSptWithSetup(
       ? initialScheduledAnchor(tasks, definition)
       : null;
     const anchor = preservedInitialAnchor(initialScheduled);
+    // Part 1d: an unknown line-initial state (no persisted state, no
+    // scheduled anchor) no longer skips the line. Proceed with a null
+    // initial state — its diagnostic is retained either way.
+    const initialDiagnosticEdges: MissingSetupEdge[] = [];
+    const initialDiagnosticReasons: CandidateReason[] = [];
     if (!initial.state && !anchor) {
-      unchangedLines.push(line);
-      missingEdges.push(
-        ...missingSuccessorEdgesForLine,
-        ...missingPredecessorEdgesForLine,
+      initialDiagnosticEdges.push(
         initial.reason === 'initial-state-unknown'
           ? unknownInitialStateEdge(line, initialScheduled?.task)
           : { line, predecessorOrderId: null, reason: initial.reason },
       );
-      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
-      explanation.push({
+      initialDiagnosticReasons.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'
           ? 'The line state uses a different setup-signature version.'
@@ -3099,7 +3734,6 @@ export function evaluateSptWithSetup(
           ? { taskId: taskId(initialScheduled.task) }
           : {}),
       });
-      continue;
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFixedBoundaries(
@@ -3107,7 +3741,7 @@ export function evaluateSptWithSetup(
       bounds,
       line,
       candidateTasks,
-      initial.state ?? anchor!.state,
+      initial.state ?? anchor?.state ?? null,
       {
         predecessorOrderId: anchor ? taskId(anchor.task) : null,
         fragmentStart: anchor
@@ -3123,14 +3757,14 @@ export function evaluateSptWithSetup(
     if (result.termination !== 'completed') termination = result.termination;
     if (result.unchanged) {
       unchangedLines.push(line);
-      missingEdges.push(...result.missingEdges);
-      explanation.push(...result.explanation);
+      missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
+      explanation.push(...initialDiagnosticReasons, ...result.explanation);
       explanation.push({ code: 'spt-sequence-infeasible', message: 'Pure SPT sequence has no covered feasible setup path.', line });
       continue;
     }
     patches.push(...result.patches);
-    explanation.push(...result.explanation);
-    missingEdges.push(...result.missingEdges);
+    explanation.push(...initialDiagnosticReasons, ...result.explanation);
+    missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
     for (let index = 0; index < score.length; index += 1) score[index] += result.score[index] ?? 0;
   }
 
@@ -3184,12 +3818,21 @@ export function evaluateDueDateFirst(
   const unchangedLines: string[] = [];
   const missingEdges: MissingSetupEdge[] = [];
   const score = [0, 0, 0, 0, 0, 0];
-  const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
 
   for (const [line, tasks] of [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    // Part 2b: a fresh per-line budget so one large line's search can never
+    // exhaust the iteration cap for every other line on the plant.
+    const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
     if (!definition || definition.plant !== plant) {
-      unchangedLines.push(line);
+      // Part 1e: no setup definition at all means setup-awareness cannot run
+      // for this line, but the line is never frozen — free orders still get
+      // a policy/due-ordered tail placement around any fixed orders.
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
+      patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
+      explanation.push(...wholeLine.explanation);
+      missingEdges.push(...wholeLine.missingEdges);
+      if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
     const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
@@ -3198,13 +3841,12 @@ export function evaluateDueDateFirst(
     const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
-      unchangedLines.push(line);
-      missingEdges.push(
-        ...missingSuccessorEdgesForLine,
-        ...missingPredecessorEdgesForLine,
-        { line, reason: 'setup-compatibility-disabled' },
-      );
-      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
+      // Part 1e: an explicit setup_compatible=false opt-out still never
+      // freezes the line — whole-line tail placement, one line-level edge,
+      // no per-order override-diagnostic noise.
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
+      patches.push(...wholeLine.patches);
+      missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
         code: 'setup-incompatible',
         message: compatibility.reason
@@ -3212,6 +3854,9 @@ export function evaluateDueDateFirst(
           : 'This line is marked incompatible with the active setup signature.',
         line,
       });
+      explanation.push(...wholeLine.explanation);
+      missingEdges.push(...wholeLine.missingEdges);
+      if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
     const initial = initialStateForLine(bounds, line, definition.signature_version);
@@ -3221,17 +3866,19 @@ export function evaluateDueDateFirst(
       ? initialScheduledAnchor(tasks, definition)
       : null;
     const anchor = preservedInitialAnchor(initialScheduled);
+    // Part 1d: an unknown line-initial state (no persisted state, no
+    // scheduled anchor) no longer skips the line — including the stale
+    // signature-incompatible case. Proceed with a null initial state; the
+    // diagnostic is retained either way.
+    const initialDiagnosticEdges: MissingSetupEdge[] = [];
+    const initialDiagnosticReasons: CandidateReason[] = [];
     if (!initial.state && !anchor) {
-      unchangedLines.push(line);
-      missingEdges.push(
-        ...missingSuccessorEdgesForLine,
-        ...missingPredecessorEdgesForLine,
+      initialDiagnosticEdges.push(
         initial.reason === 'initial-state-unknown'
           ? unknownInitialStateEdge(line, initialScheduled?.task)
           : { line, predecessorOrderId: null, reason: initial.reason },
       );
-      explanation.push(...missingSuccessorReasonsForLine, ...missingPredecessorReasonsForLine);
-      explanation.push({
+      initialDiagnosticReasons.push({
         code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
         message: initial.reason === 'signature-incompatible'
           ? 'The line state uses a different setup-signature version.'
@@ -3241,7 +3888,6 @@ export function evaluateDueDateFirst(
           ? { taskId: taskId(initialScheduled.task) }
           : {}),
       });
-      continue;
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
 
@@ -3250,7 +3896,7 @@ export function evaluateDueDateFirst(
       bounds,
       line,
       candidateTasks,
-      initial.state ?? anchor!.state,
+      initial.state ?? anchor?.state ?? null,
       {
         predecessorOrderId: anchor ? taskId(anchor.task) : null,
         fragmentStart: anchor
@@ -3267,13 +3913,13 @@ export function evaluateDueDateFirst(
     if (result.termination !== 'completed') termination = result.termination;
     if (result.unchanged) {
       unchangedLines.push(line);
-      missingEdges.push(...result.missingEdges);
-      explanation.push(...result.explanation);
+      missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
+      explanation.push(...initialDiagnosticReasons, ...result.explanation);
       continue;
     }
     patches.push(...result.patches);
-    explanation.push(...result.explanation);
-    missingEdges.push(...result.missingEdges);
+    explanation.push(...initialDiagnosticReasons, ...result.explanation);
+    missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
     for (let index = 0; index < score.length; index += 1) score[index] += result.score[index] ?? 0;
   }
 
@@ -3320,8 +3966,14 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
-  const baseline = evaluateDueDateFirst(snapshot, bounds);
-  const candidate = evaluateDueDateFirst(snapshot, bounds, 'min-changeover');
+  // Part 2a: the baseline pass only gets half of whatever wall-clock remains
+  // right now. The candidate pass runs against the caller's own unmodified
+  // `bounds.deadline` — i.e. everything left in the original budget — rather
+  // than splitting the same window twice.
+  const now = bounds.clock();
+  const remainingMs = Math.max(0, bounds.deadline - now);
+  const baseline = evaluateDueDateFirst(snapshot, { ...bounds, deadline: now + remainingMs / 2 });
+  const candidate = evaluateDueDateFirst(snapshot, { ...bounds, deadline: bounds.deadline }, 'min-changeover');
   const before = lateOrderFacts(snapshot.tasks);
   const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
   const after = lateOrderFacts(afterTasks);
@@ -3329,6 +3981,24 @@ export function evaluateMinChangeover(
   const afterLate = [...after.values()].filter(fact => fact.late).length;
   const newlyLate = [...after.entries()].filter(([id, fact]) => fact.late && !before.get(id)?.late);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
+
+  // Starvation guard: a candidate pass that hit its own deadline/iteration
+  // cap and produced no patches (or strictly fewer patched lines than the
+  // baseline) can never beat a non-empty baseline. This also covers a
+  // candidate that terminates 'completed' with zero patches (F6) — that case
+  // creates no new lateness and would otherwise fall through to the
+  // min-changeover-due-safe return below, silently discarding a good baseline.
+  const candidateStarved = (candidate.diagnostics.termination === 'deadline'
+    || candidate.diagnostics.termination === 'iteration-cap')
+    && (candidate.patches.length === 0 || candidate.unchangedLines.length > baseline.unchangedLines.length);
+  if (baseline.patches.length > 0 && (candidateStarved || candidate.patches.length === 0)) {
+    return withPolicyReason(
+      baseline,
+      'min-changeover-starved',
+      'The min-changeover candidate pass was starved of search budget; kept the baseline schedule.',
+    );
+  }
+
   if (afterLate > beforeLate || newlyLate.length) {
     return withPolicyReason(
       baseline,

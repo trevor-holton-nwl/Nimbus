@@ -7618,6 +7618,14 @@ interface PreviewExplanation {
   missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string }>;
   missingPairsTotal: number;
   unchangedLines: string[];
+  /** Tally of orders actually placed in this candidate without a resolvable
+   *  setup transition (no changeover bar) — the never-freeze tail-placement
+   *  fallback, counted from the dedicated `'scheduled-without-setup'`
+   *  missingEdge reason `placeUnknownTail` emits for each order it places.
+   *  Derived from `candidate.missingEdges` restricted to ids that appear in
+   *  `candidate.patches`, so a rejected/unplaced edge never inflates this
+   *  count (see `missingPairs` for the full uncovered-transition list). */
+  scheduledWithoutSetup: { orders: number; lines: number };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
   /** Aggregate prune tally for the whole run (§4.3 OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
@@ -7775,6 +7783,20 @@ export const OptimizerPreview = {
       code: reason.code, message: reason.message, line: reason.line, taskId: reason.taskId,
       outcome: rejected.test(`${reason.code} ${reason.message}`) ? 'rejected' as const : 'accepted' as const,
     }));
+    const patchedIds = new Set(candidate.patches.map(patch => String(patch.id)));
+    const scheduledWithoutSetupOrders = new Set<string>();
+    const scheduledWithoutSetupLines = new Set<string>();
+    // 'scheduled-without-setup' (F1) is the single dedicated reason
+    // `placeUnknownTail` emits for an order it actually placed — counting
+    // that instead of the raw 'successor-state-unknown'/'initial-state-unknown'
+    // partition edges avoids double-counting a rejected permutation's edge
+    // that happens to name the same patched id.
+    for (const edge of candidate.missingEdges) {
+      if (edge.reason !== 'scheduled-without-setup') continue;
+      if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
+      scheduledWithoutSetupOrders.add(String(edge.successorOrderId));
+      scheduledWithoutSetupLines.add(edge.line);
+    }
     return {
       impact: {
         production: { before: input.productionBefore, after: input.productionAfter },
@@ -7789,6 +7811,7 @@ export const OptimizerPreview = {
       missingPairs: [],
       missingPairsTotal: 0,
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
+      scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
       prunes: tallyPrunes(candidate.explanation),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
@@ -8282,6 +8305,18 @@ export const OptimizerPreview = {
       ? `<div class="opt-pv-stale">${esc(Util.t('ui.opt_stale_banner'))}</div>`
       : '';
 
+    // Never-freeze fallback banner — orders this candidate actually placed
+    // without a resolvable setup transition (no changeover bar). Sits beside
+    // the "Why this plan" (unchanged lines) and "Setup gaps" (missingPairs)
+    // sections rather than inside either, since it summarizes what got
+    // scheduled anyway, not what's still missing from the matrix.
+    const scheduledWithoutSetupHtml = (explanation && explanation.scheduledWithoutSetup.orders > 0)
+      ? `<div class="opt-pv-backlog-warning">${esc(Util.t('ui.opt_pv_scheduled_without_setup', {
+          orders: explanation.scheduledWithoutSetup.orders,
+          lines: explanation.scheduledWithoutSetup.lines,
+        }))}</div>`
+      : '';
+
     // Per-card markup
     const cardsHtml = cards.map(c => {
       const preV  = pre[c.k]  ?? 0;
@@ -8373,6 +8408,8 @@ export const OptimizerPreview = {
         <div class="opt-pv-grid">${cardsHtml}</div>
 
         ${backlogHtml}
+
+        ${scheduledWithoutSetupHtml}
 
         <div class="opt-pv-sections">
           ${whyHtml}

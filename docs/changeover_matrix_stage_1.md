@@ -1,5 +1,10 @@
 # Changeover Matrix Stage 1 Implementation Plan
 
+> **Behavior revised 2026-08-18:** the fail-closed rule ("missing edges leave the line unchanged") is
+> superseded — the optimizer now schedules orders with missing setup data at the tail of their day bucket
+> with no setup bar plus an alert; lines are never frozen. See `docs/changeover_matrix.md` and
+> `docs/architecture/optimizer-dispatch.md`.
+
 > **Status: shipped.** Every task below reads as an unticked checkbox, but this entire vertical slice
 > landed across ~50 commits well before this note was added (see `docs/changeover_matrix.md`'s "Status"
 > line and §1.1's correction, and `docs/Setup_matrix_redesign.md` §15 for what changed on top of it).
@@ -24,7 +29,7 @@
 - Setup occurrences are derived; never persist pseudo-orders or adjacency links.
 - Candidate search operates on immutable snapshots. Intermediate candidates never enter Store, render, persist, publish alerts, or trigger autosave.
 - One explicit user action creates at most one candidate run and one commit. Alerts never recursively invoke optimization.
-- Missing non-diagonal edges cannot win. If a line has no covered feasible sequence, leave that line unchanged without blocking unaffected lines.
+- Missing non-diagonal edges cannot win. If a line has no covered feasible sequence, leave that line unchanged without blocking unaffected lines. **(Revised 2026-08-18 — superseded, see top-of-doc note: the line is no longer left unchanged; uncovered orders are tail-placed with no setup bar plus an alert.)**
 - Valid occurrence overrides protect their exact adjacency. Fixed-order boundaries and Remove Backlog's documented exception remain intact.
 - Signature-incompatible lines are excluded from setup-aware optimization with a reported reason; they do not block unaffected lines.
 - Setup bars are non-editable/non-selectable, but equivalent detail must be keyboard-accessible through the successor order.
@@ -220,7 +225,7 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 - Modify: `tests/modules/plant-and-administration.test.mjs`
 
 **Interfaces:**
-- Preview shows before/after production, setup, occupied time, lateness, utilization, sequences, concise accepted/rejected reasons, constraints, missing edges, unchanged lines, candidate count, method, termination, runtime, and limit status.
+- Preview shows before/after production, setup, occupied time, lateness, utilization, sequences, concise accepted/rejected reasons, constraints, missing edges, unchanged lines, candidate count, method, termination, runtime, and limit status. **(Revised 2026-08-18 — superseded, see top-of-doc note: the never-freeze rework added a separate `scheduledWithoutSetup {orders, lines}` tally for orders scheduled without setup bars, rendered as its own banner alongside — not instead of — "unchanged lines," which still means lines actually left in place.)**
 - `Review missing setups` opens the editor filtered to relevant pairs for writers; readers retain copy/export only.
 
 - [ ] **Step 1: Add tests for bounded/aggregated explanations and confirm full per-candidate schedule snapshots are not retained.**
@@ -258,7 +263,7 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 
 - Preview candidates never mutate Store before Apply.
 - Due-date-first charges setup and sequences with the same setup truth.
-- SPT remains pure shortest productive processing time while covered setup consumes real capacity; missing setup leaves its line unchanged.
+- SPT remains pure shortest productive processing time while covered setup consumes real capacity; missing setup leaves its line unchanged. **(Revised 2026-08-18 — superseded, see top-of-doc note: missing setup no longer leaves the line unchanged; the affected order is tail-placed with no setup bar plus an alert.)**
 - Split policies, fixed boundaries, current state, missing edges, and active overrides match the authoritative design.
 - Worker/main-thread alerts and utilization are parity-pinned.
 - Setup items are exact-time, semantic, non-business items with accessible successor detail.

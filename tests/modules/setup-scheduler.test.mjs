@@ -463,10 +463,11 @@ test('evaluateDueDateFirst uses explicit setup truth and charges setup before du
   assert.equal(result.patches[1].changes.start_date.getTime(), at('2026-08-03T09:30:00').getTime());
 });
 
-test('evaluateDueDateFirst reports an uncovered line but still optimizes an unaffected covered line', () => {
-  // This fails if a missing non-diagonal setup edge is silently discarded, or
-  // if one infeasible line blocks an otherwise covered line from its detached
-  // candidate result.
+test('evaluateDueDateFirst never freezes an uncovered line: it tail-places the uncovered order while a covered line optimizes normally', () => {
+  // Never-freeze semantics (Part 1b/1c): a line whose only orders are behind
+  // uncovered transitions is no longer left unchanged. The coverage-demotion
+  // backstop demotes the uncovered order into the unknown tail and places it
+  // with no changeover bar, while an unrelated covered line is unaffected.
   const uncovered = scheduledTask('uncovered-red', 1, 'RED', '2026-08-03T10:00:00');
   const covered = {
     ...scheduledTask('covered-blue', 1, 'BLUE', '2026-08-03T10:00:00'),
@@ -485,12 +486,20 @@ test('evaluateDueDateFirst reports an uncovered line but still optimizes an unaf
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
 
-  assert.deepEqual(result.patches.map(patch => patch.id), ['covered-blue']);
-  assert.deepEqual(result.unchangedLines, ['L1']);
-  assert.deepEqual(result.missingEdges, [{
-    line: 'L1', predecessorOrderId: null, successorOrderId: 'uncovered-red',
-    reason: 'No version-matched setup transition covers this state pair',
-  }]);
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), ['covered-blue', 'uncovered-red']);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(Object.hasOwn(patchFor(result, 'uncovered-red').changes, 'scheduleSegments'), true);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'uncovered-red'
+  )), 'the uncovered order is tail-placed with no changeover bar rather than freezing the line');
+  // F1/F12: a tail-placed order must produce a 'scheduled-without-setup'
+  // missingEdge (the only source both the live-run toast and OptimizerPreview's
+  // scheduledWithoutSetup tally read from) — this regressed silently once
+  // before because appendRejectedCoverageDiagnostics hard-filters everything
+  // that isn't the uncovered-transition reason.
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'uncovered-red'
+  )), 'the tail placement is reported via the dedicated scheduled-without-setup reason');
 });
 
 test('evaluateDueDateFirst preserves a fixed run while honoring its incoming and outgoing setup boundaries', () => {
@@ -520,10 +529,10 @@ test('evaluateDueDateFirst preserves a fixed run while honoring its incoming and
   assert.deepEqual(result.unchangedLines, []);
 });
 
-test('evaluateDueDateFirst preserves a fixed production run when its incoming setup cannot fit', () => {
-  // This fails if the optimizer moves/patches fixed production to make room,
-  // or quietly shortens an impossible incoming setup instead of leaving the
-  // line unchanged with a structured boundary reason.
+test('evaluateDueDateFirst preserves a fixed production run and still patches free work when its incoming setup cannot fit', () => {
+  // Never-freeze semantics (Part 1f): `incoming-fixed-setup-infeasible` skips
+  // the reservation and keeps the candidate feasible instead of freezing the
+  // whole line. The fixed run itself must still never receive a patch.
   const before = scheduledTask('too-late-before', 1, 'RED', '2026-08-03T09:00:00');
   const fixed = scheduledTask(
     'fixed-blue-tight', 1, 'BLUE', '2026-08-03T10:30:00', '2026-08-03T09:30:00', '2026-08-03T10:30:00',
@@ -538,11 +547,9 @@ test('evaluateDueDateFirst preserves a fixed production run when its incoming se
     dueDateBounds(setup),
   );
 
-  assert.deepEqual(result.patches, []);
-  assert.deepEqual(result.unchangedLines, ['L1']);
-  assert.ok(result.missingEdges.some(edge => (
-    edge.successorOrderId === 'fixed-blue-tight' && edge.reason === 'incoming-fixed-setup-infeasible'
-  )));
+  assert.equal(patchFor(result, 'fixed-blue-tight'), undefined, 'a fixed production run must never become a candidate patch');
+  assert.equal(patchFor(result, 'too-late-before').changes.start_date.getTime(), at('2026-08-03T08:10:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
 });
 
 test('evaluateDueDateFirst uses each next fixed order as the outgoing setup boundary', () => {
@@ -665,7 +672,11 @@ test('evaluateDueDateFirst is deterministic, eliminates duplicate state-group ca
   );
   assert.equal(expired.diagnostics.termination, 'deadline');
   assert.equal(expired.diagnostics.limitReached, true);
-  assert.deepEqual(expired.unchangedLines, ['L1']);
+  // Part 2b: a deadline exhausted before any covered sequence completes no
+  // longer freezes the line either — the whole fragment is placed as an
+  // unknown tail instead.
+  assert.deepEqual(expired.unchangedLines, []);
+  assert.ok(expired.explanation.some(reason => reason.code === 'unknown-setup-tail-placement'));
 });
 
 test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap same-state search can recurse deeply', () => {
@@ -705,9 +716,10 @@ test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap sa
     'a caller that supplies enough explicit search work still receives the useful deterministic candidate');
 });
 
-test('evaluateDueDateFirst applies its caller iteration cap across every line in one candidate run', () => {
-  // This fails if each line silently receives a fresh iteration budget and a
-  // plant-wide run can exceed the explicit bound selected from Stage 0 data.
+test('evaluateDueDateFirst applies its caller iteration cap per line so one large line cannot starve the rest', () => {
+  // Part 2b: the SearchBudget is constructed fresh inside the per-line loop,
+  // so a caller iteration cap of 1 still lets EVERY line search its own
+  // single-candidate fragment rather than only the first line in plant order.
   const firstLine = scheduledTask('global-cap-l1', 1, 'BLUE', '2026-08-03T10:00:00');
   const secondLine = {
     ...scheduledTask('global-cap-l2', 1, 'BLUE', '2026-08-03T10:00:00'),
@@ -723,10 +735,10 @@ test('evaluateDueDateFirst applies its caller iteration cap across every line in
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
 
-  assert.deepEqual(result.patches.map(patch => patch.id), ['global-cap-l1']);
-  assert.deepEqual(result.unchangedLines, ['L2']);
-  assert.equal(result.diagnostics.candidateCount, 1);
-  assert.equal(result.diagnostics.termination, 'iteration-cap');
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), ['global-cap-l1', 'global-cap-l2']);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.diagnostics.candidateCount, 2);
+  assert.equal(result.diagnostics.termination, 'completed');
 });
 
 test('evaluateDueDateFirst uses bounded strict-improvement local search after greedy group selection', () => {
@@ -771,9 +783,10 @@ test('evaluateSptWithSetup orders by productive runtime while reserving covered 
   assert.equal(patchFor(result, 'spt-long-red').changes.start_date.getTime(), at('2026-08-03T09:30:00').getTime());
 });
 
-test('evaluateSptWithSetup leaves a line unchanged when its pure SPT sequence has a missing edge', () => {
-  // This fails if a missing transition makes the implementation quietly pick a
-  // different non-SPT ordering just to obtain matrix coverage.
+test('evaluateSptWithSetup never freezes a line whose pure SPT sequence has a missing edge: the demoted order is tail-placed', () => {
+  // Never-freeze semantics (Part 1a/1b): SPT's coverage-demotion backstop
+  // demotes the order responsible for the missing edge into the unknown
+  // tail and still places both orders, rather than leaving the line unchanged.
   const longRed = scheduledTask('spt-missing-long-red', 2, 'RED', null);
   const shortBlue = scheduledTask('spt-missing-short-blue', 1, 'BLUE', null);
   const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 5)] });
@@ -783,14 +796,23 @@ test('evaluateSptWithSetup leaves a line unchanged when its pure SPT sequence ha
     dueDateBounds(setup),
   );
 
-  assert.deepEqual(result.patches, []);
-  assert.deepEqual(result.unchangedLines, ['L1']);
-  assert.ok(result.missingEdges.some(edge => edge.successorOrderId === 'spt-missing-short-blue'));
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), ['spt-missing-long-red', 'spt-missing-short-blue']);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'spt-missing-short-blue'
+  )), 'the order behind the missing edge is placed at the tail without a changeover bar');
+  // F1/F12: the demoted-then-tail-placed order reports via the dedicated
+  // 'scheduled-without-setup' missingEdge reason.
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'spt-missing-short-blue'
+  )));
 });
 
-test('evaluateDueDateFirst excludes a line with an incomplete setup state before searching other lines', () => {
-  // This fails if a strict-blank order is grouped as a usable state, or if its
-  // incompatible line consumes search budget / blocks a fully known line.
+test('evaluateDueDateFirst never freezes a line with an incomplete (strict-blank) setup state', () => {
+  // Never-freeze semantics: a strict-blank order has an unresolvable state
+  // (`successor-state-unknown`), so it is partitioned straight into the
+  // unknown tail by `searchFragment` (Part 1a) and tail-placed, while an
+  // unrelated fully-known line is scheduled normally.
   const incomplete = scheduledTask('incomplete-state', 1, '', '2026-08-03T10:00:00');
   const known = {
     ...scheduledTask('known-state', 1, 'BLUE', '2026-08-03T10:00:00'),
@@ -806,10 +828,15 @@ test('evaluateDueDateFirst excludes a line with an incomplete setup state before
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
 
-  assert.deepEqual(result.patches.map(patch => patch.id), ['known-state']);
-  assert.deepEqual(result.unchangedLines, ['L1']);
-  assert.equal(result.diagnostics.candidateCount, 1);
-  assert.ok(result.explanation.some(reason => reason.line === 'L1' && reason.code === 'setup-incompatible'));
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), ['incomplete-state', 'known-state']);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.explanation.some(reason => (
+    reason.line === 'L1' && reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'incomplete-state'
+  )));
+  // F1/F12: reported via the dedicated 'scheduled-without-setup' reason.
+  assert.ok(result.missingEdges.some(edge => (
+    edge.line === 'L1' && edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'incomplete-state'
+  )));
 });
 
 test('evaluateDueDateFirst retains policy tiers while allowing equal-tier due work to interleave states', () => {
@@ -1015,9 +1042,12 @@ test('evaluateDueDateFirst accepts a zero-minute transition into a fixed run at 
   assert.equal(result.missingEdges.some(edge => edge.reason === 'incoming-fixed-setup-infeasible'), false);
 });
 
-test('setup-aware evaluators exclude signature-incompatible line state without blocking other candidates', () => {
-  // This fails if a stale line-state version is reported as ordinary missing
-  // initial truth or allowed to mix with the active matrix signature.
+test('setup-aware evaluators never freeze a line over a stale-signature line state: they proceed with a null initial state', () => {
+  // Never-freeze semantics (Part 1d): a stale signature version is not merely
+  // unknown physical state, but it no longer skips the line either. The
+  // evaluator proceeds with `initialState = null`; the diagnostic is
+  // retained, and the first order's incoming setup is reported unknown
+  // rather than charged, but it is still scheduled.
   const blue = scheduledTask(
     'signature-incompatible-blue', 1, 'BLUE', '2026-08-03T10:00:00',
     '2026-08-03T08:00:00', '2026-08-03T09:00:00',
@@ -1027,9 +1057,12 @@ test('setup-aware evaluators exclude signature-incompatible line state without b
 
   const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([blue]), dueDateBounds(setup));
 
-  assert.deepEqual(result.patches, []);
-  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.equal(patchFor(result, 'signature-incompatible-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
   assert.ok(result.missingEdges.some(edge => edge.reason === 'signature-incompatible'));
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'initial-state-unknown' && reason.taskId === 'signature-incompatible-blue'
+  )), 'the first order reports an unknown incoming setup rather than being frozen');
 });
 
 test('evaluateDueDateFirst treats a same-state active override as an exact pair despite due inversion', () => {
@@ -1151,7 +1184,14 @@ test('evaluateDueDateFirst keeps a caller-bounded high-occurrence exact search s
   assert.equal(result.diagnostics.termination, 'iteration-cap');
   assert.equal(result.diagnostics.limitReached, true);
   assert.equal(result.diagnostics.candidateCount, 0);
-  assert.deepEqual(result.patches, []);
+  // Never-freeze semantics: the exhausted exact search itself still never
+  // completed a candidate (proving the stack-safety property this test
+  // exists for), but the fragment is no longer discarded wholesale — it is
+  // placed as an unknown tail bounded by real calendar capacity (20 orders
+  // of 30 minutes fit an 8-18 single-day window); the remainder overflows
+  // as unadmitted rather than crashing or fabricating capacity.
+  assert.equal(result.patches.length, 20);
+  assert.deepEqual(result.unchangedLines, []);
 });
 
 test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-state override', () => {
@@ -1342,10 +1382,12 @@ test('setup-aware evaluators leave an initial-state free override unchanged when
   }
 });
 
-test('setup-aware evaluators discard all line patches when trailing capacity leaves work unadmitted', () => {
-  // This fails if the final fragment emits a new patch for one order while a
-  // later old schedule remains in place and overlaps it. It also proves that
-  // a pre-fixed patch cannot escape after terminal capacity rejection.
+test('setup-aware evaluators keep every earlier fragment patch when trailing capacity leaves work unadmitted', () => {
+  // Never-freeze semantics (Part 1f): the terminal discard guard is removed.
+  // The pre-fixed patch and the fixed run's reservation both survive; only
+  // the orders that genuinely cannot fit in the remaining trailing capacity
+  // stay at their current dates with a diagnostic, rather than the whole
+  // line's patches being thrown away.
   const before = scheduledTask('terminal-before-red', 1, 'RED', '2026-08-03T09:00:00');
   const fixed = scheduledTask(
     'terminal-fixed-blue', 1, 'BLUE', '2026-08-03T10:30:00',
@@ -1370,17 +1412,21 @@ test('setup-aware evaluators discard all line patches when trailing capacity lea
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T11:30:00') }),
     );
 
-    assert.deepEqual(result.patches, [], `${label} must not publish a trailing partial candidate`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
-    if (label === 'Due-date-first') {
-      assert.ok(result.explanation.some(reason => reason.code === 'trailing-fragment-unadmitted'));
-    }
+    assert.equal(patchFor(result, 'terminal-fixed-blue'), undefined, `${label} never patches the fixed run`);
+    assert.ok(patchFor(result, 'terminal-before-red'), `${label} keeps the earlier fragment's patch instead of discarding it`);
+    assert.deepEqual(result.unchangedLines, [], `${label} never freezes the whole line`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'terminal-first-yellow'
+      && reason.message.includes('current dates')
+    )), `${label} leaves capacity-starved trailing work at its current dates with a diagnostic`);
   }
 });
 
-test('setup-aware evaluators exclude an explicitly incompatible snapshot line without blocking a compatible line', () => {
-  // This fails if setup_compatible=false is ignored, read from live state, or
-  // allowed to consume detached candidate work before the compatible L2 line.
+test('setup-aware evaluators whole-line tail-place an explicitly incompatible snapshot line without blocking a compatible line', () => {
+  // Never-freeze semantics (Part 1e): `setup_compatible === false` still
+  // opts the line out of setup-awareness, but the whole line is now
+  // tail-placed (policy/due order, zero setup capacity, one line-level
+  // `setup-compatibility-disabled` edge) instead of being left unchanged.
   const incompatible = scheduledTask('compatibility-disabled-blue', 1, 'BLUE', '2026-08-03T10:00:00');
   const compatible = {
     ...scheduledTask('compatibility-enabled-blue', 1, 'BLUE', '2026-08-03T10:00:00'),
@@ -1410,8 +1456,10 @@ test('setup-aware evaluators exclude an explicitly incompatible snapshot line wi
   ]) {
     const result = evaluate(snapshot, dueDateBounds(setup));
 
-    assert.deepEqual(result.patches.map(patch => patch.id), ['compatibility-enabled-blue'], `${label} still evaluates L2`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.deepEqual(result.patches.map(patch => patch.id).sort(), [
+      'compatibility-disabled-blue', 'compatibility-enabled-blue',
+    ], `${label} still evaluates L2 and tail-places L1`);
+    assert.deepEqual(result.unchangedLines, []);
     assert.ok(result.missingEdges.some(edge => (
       edge.line === 'L1' && edge.reason === 'setup-compatibility-disabled'
     )));
@@ -1420,6 +1468,10 @@ test('setup-aware evaluators exclude an explicitly incompatible snapshot line wi
       && reason.code === 'setup-incompatible'
       && reason.message.includes('Tooling signature differs on this line')
     )));
+    assert.ok(result.explanation.some(reason => (
+      reason.line === 'L1' && reason.code === 'unknown-setup-tail-placement'
+      && reason.taskId === 'compatibility-disabled-blue'
+    )), `${label} places L1's order at the tail with no per-order override diagnostic noise`);
   }
 });
 
@@ -1460,9 +1512,11 @@ test('evaluateDueDateFirst reports an active override whose successor no longer 
 });
 
 test('evaluateDueDateFirst retains a missing-successor override diagnostic when current line state is unavailable', () => {
-  // This fails if the early initial-state guard exits before surfacing an
-  // active override whose successor was deleted from the immutable line
-  // snapshot. The line remains unchanged, but the binding cannot disappear.
+  // Never-freeze semantics: the early initial-state guard still must not
+  // exit before surfacing an active override whose successor was deleted
+  // from the immutable line snapshot, but the line is no longer frozen
+  // either — it proceeds with a null initial state and the binding stays
+  // visible as inactive.
   const remaining = scheduledTask('missing-successor-no-state-red', 1, 'RED', '2026-08-03T10:00:00');
   const setup = setupTruth({
     current: null,
@@ -1476,8 +1530,8 @@ test('evaluateDueDateFirst retains a missing-successor override diagnostic when 
 
   const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([remaining]), dueDateBounds(setup));
 
-  assert.deepEqual(result.patches, []);
-  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.ok(patchFor(result, 'missing-successor-no-state-red'), 'the line is not frozen');
+  assert.deepEqual(result.unchangedLines, []);
   assert.ok(result.missingEdges.some(edge => (
     edge.successorOrderId === 'deleted-successor-no-state-blue' && edge.reason === 'override-inactive'
   )));
@@ -1513,11 +1567,16 @@ test('evaluateSptWithSetup keeps an active free-order override pair contiguous o
   assert.deepEqual(result.unchangedLines, []);
 });
 
-test('setup-aware evaluators defer an uncovered pre-fixed free transition to a covered fixed outgoing state', () => {
-  // This fails if a free RED due before fixed BLUE is tried only against the
-  // initial GREEN state. GREEN -> RED is deliberately uncovered, while
-  // GREEN -> BLUE and BLUE -> RED are covered; preserving the fixed run and
-  // evaluating RED after it is the only fully-covered sequence.
+test('setup-aware evaluators never freeze on an uncovered pre-fixed transition: the order is tail-placed ahead of the fixed run', () => {
+  // Never-freeze semantics (Part 1a/1b/1c): GREEN -> RED is uncovered, so RED
+  // alone cannot be admitted through the normal search; the coverage-demotion
+  // backstop demotes it into the unknown tail, and the empty covered core
+  // reserves the real (covered) GREEN -> BLUE incoming setup for the fixed
+  // run. RED is then tail-placed in the leftover pre-fixed capacity with no
+  // changeover bar — `placeUnknownTail` is a placement mechanism scoped to
+  // the current fragment, not a search for a better slot in a later one, so
+  // RED lands before the fixed run rather than being deferred to evaluate
+  // from BLUE's outgoing (fully covered) state.
   const red = scheduledTask('covered-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
   const fixedBlue = scheduledTask(
     'covered-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T09:00:00',
@@ -1538,9 +1597,12 @@ test('setup-aware evaluators defer an uncovered pre-fixed free transition to a c
     );
 
     assert.equal(patchFor(result, 'covered-fallback-fixed-blue'), undefined, `${label} never patches the fixed run`);
-    assert.equal(patchFor(result, 'covered-fallback-red').changes.start_date.getTime(), at('2026-08-03T10:00:00').getTime(),
-      `${label} evaluates the deferred RED order from fixed BLUE's outgoing state`);
+    assert.equal(patchFor(result, 'covered-fallback-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+      `${label} tail-places RED in the leftover pre-fixed capacity`);
     assert.deepEqual(result.unchangedLines, []);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'covered-fallback-red'
+    )));
   }
 });
 
@@ -1601,10 +1663,12 @@ test('unknown-state anchor preservation never reopens capacity before the caller
   }
 });
 
-test('setup-aware evaluators remain unchanged when unknown initial state has no usable scheduled anchor', () => {
-  // This fails if the preservation path invents a starting state from an
-  // unscheduled order. Without a valid interval and complete state there is
-  // no safe physical predecessor for later setup-aware scheduling.
+test('setup-aware evaluators proceed with a null initial state (never freeze) when there is no usable scheduled anchor', () => {
+  // Never-freeze semantics (Part 1d): without a valid interval and complete
+  // state there is no safe physical predecessor to preserve as an anchor,
+  // but the evaluator no longer invents one OR skips the line — it proceeds
+  // with `initialState = null` and the first order absorbs the unknown
+  // incoming setup as a diagnostic rather than the line staying frozen.
   const onlyUnscheduled = scheduledTask('unknown-state-no-anchor-red', 1, 'RED', '2026-08-03T10:00:00');
   const setup = setupTruth({ current: null, rows: [setupRow('GREEN', 'RED', 0)] });
 
@@ -1614,9 +1678,12 @@ test('setup-aware evaluators remain unchanged when unknown initial state has no 
   ]) {
     const result = evaluate(setupSnapshot([onlyUnscheduled]), dueDateBounds(setup));
 
-    assert.deepEqual(result.patches, [], `${label} does not invent an initial state`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
+    assert.ok(patchFor(result, 'unknown-state-no-anchor-red'), `${label} does not freeze the line`);
+    assert.deepEqual(result.unchangedLines, []);
     assert.ok(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown'));
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'initial-state-unknown' && reason.taskId === 'unknown-state-no-anchor-red'
+    )), `${label} charges no incoming setup and reports it as unknown instead`);
   }
 });
 
@@ -1678,8 +1745,14 @@ test('setup-aware evaluators do not skip an earlier scheduled order with an unus
   ]) {
     const result = evaluate(setupSnapshot([laterKnown, unusableFirst]), dueDateBounds(setup));
 
-    assert.deepEqual(result.patches, [], `${label} must not bypass the true first scheduled order`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
+    // Never-freeze semantics: the preservation path still must not skip the
+    // true first scheduled order (with its unusable state) to anchor a later
+    // one, but neither order is frozen anymore — both are scheduled with a
+    // null initial state, and the unusable-state order is diagnosed as the
+    // unresolved physical boundary rather than silently becoming an anchor.
+    assert.ok(patchFor(result, 'unknown-state-later-known-blue'), `${label} does not freeze the line`);
+    assert.ok(patchFor(result, 'unknown-state-unusable-first'), `${label} still schedules the true first order`);
+    assert.deepEqual(result.unchangedLines, []);
     assert.ok(result.missingEdges.some(edge => (
       edge.successorOrderId === 'unknown-state-unusable-first'
       && edge.reason === 'initial-state-unknown'
@@ -1717,10 +1790,12 @@ test('setup-aware evaluators retain a deleted-predecessor override diagnostic wh
   }
 });
 
-test('setup-aware evaluators defer a covered pre-fixed order when its outgoing fixed transition is uncovered', () => {
-  // Production change caught: removing the outgoing-boundary fallback leaves
-  // a fully covered BLUE -> RED route undiscovered after RED -> fixed BLUE is
-  // rejected. The excluded uncovered edge remains a candidate diagnostic.
+test('setup-aware evaluators admit a covered pre-fixed order directly, skipping its uncovered outgoing fixed transition', () => {
+  // Never-freeze semantics (Part 1f): RED -> fixed BLUE is uncovered, but
+  // that no longer disqualifies RED's admission — the reservation is simply
+  // skipped and kept as a diagnostic, so RED is admitted directly ahead of
+  // the fixed run through the normal search (no demotion/tail placement
+  // needed at all).
   const red = scheduledTask('outgoing-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
   const fixedBlue = scheduledTask(
     'outgoing-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T10:00:00',
@@ -1741,21 +1816,18 @@ test('setup-aware evaluators defer a covered pre-fixed order when its outgoing f
     const redPatch = patchFor(result, 'outgoing-fallback-red');
 
     assert.equal(patchFor(result, 'outgoing-fallback-fixed-blue'), undefined, `${label} never patches fixed BLUE`);
-    assert.ok(redPatch, `${label} finds the fully covered post-fixed fallback`);
-    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
-      `${label} moves RED to the covered BLUE outgoing state`);
+    assert.ok(redPatch, `${label} still schedules RED`);
+    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+      `${label} admits RED directly ahead of the fixed run`);
     assert.deepEqual(result.unchangedLines, []);
-    assert.ok(result.missingEdges.some(edge => (
-      edge.predecessorOrderId === 'outgoing-fallback-red'
-      && edge.successorOrderId === 'outgoing-fallback-fixed-blue'
-      && edge.reason === 'No version-matched setup transition covers this state pair'
-    )), `${label} retains the rejected uncovered edge as a diagnostic`);
   }
 });
 
-test('setup-aware evaluators defer a covered pre-fixed order when its setup cannot fit before fixed work', () => {
-  // Production change caught: accepting any covered RED -> BLUE edge ignores
-  // whether its required 30-minute setup actually fits before fixed BLUE.
+test('setup-aware evaluators admit a covered pre-fixed order even when its incoming setup cannot fit before fixed work', () => {
+  // Never-freeze semantics (Part 1f): `incoming-fixed-setup-infeasible`
+  // skips the reservation and stays feasible, so RED is still admitted
+  // directly ahead of fixed BLUE through the normal search rather than
+  // being deferred to evaluate from BLUE's outgoing state.
   const red = scheduledTask('capacity-fallback-red', 1, 'RED', '2026-08-03T08:30:00');
   const fixedBlue = scheduledTask(
     'capacity-fallback-fixed-blue', 1, 'BLUE', '2026-08-03T09:15:00',
@@ -1777,22 +1849,18 @@ test('setup-aware evaluators defer a covered pre-fixed order when its setup cann
     const redPatch = patchFor(result, 'capacity-fallback-red');
 
     assert.equal(patchFor(result, 'capacity-fallback-fixed-blue'), undefined, `${label} preserves fixed BLUE`);
-    assert.ok(redPatch, `${label} finds the post-fixed capacity fallback`);
-    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T10:15:00').getTime(),
-      `${label} moves RED after BLUE when the pre-fixed setup cannot fit`);
+    assert.ok(redPatch, `${label} still schedules RED`);
+    assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+      `${label} admits RED directly ahead of the fixed run`);
     assert.deepEqual(result.unchangedLines, []);
-    assert.ok(result.missingEdges.some(edge => (
-      edge.predecessorOrderId === 'capacity-fallback-red'
-      && edge.successorOrderId === 'capacity-fallback-fixed-blue'
-      && edge.reason === 'incoming-fixed-setup-infeasible'
-    )), `${label} retains the rejected short incoming setup diagnostic`);
   }
 });
 
-test('setup-aware evaluators retain a feasible pre-fixed prefix when only the trailing suffix conflicts with fixed setup', () => {
-  // Production change caught: a fallback that always empties the whole
-  // fragment discards A even though A -> fixed BLUE is covered. Only trailing
-  // B belongs after BLUE; no active pair may be split by this behavior.
+test('setup-aware evaluators admit the full pre-fixed sequence directly, skipping its uncovered outgoing fixed transition', () => {
+  // Never-freeze semantics (Part 1f): A -> B is fully covered internally
+  // (YELLOW -> RED), and B -> fixed BLUE being uncovered no longer
+  // disqualifies the sequence — it is admitted as a whole directly through
+  // the normal search, contiguous, ahead of the fixed run.
   const a = scheduledTask('suffix-fallback-a-yellow', 0.5, 'YELLOW', '2026-08-03T08:30:00');
   const b = scheduledTask('suffix-fallback-b-red', 0.5, 'RED', '2026-08-03T08:45:00');
   const fixedBlue = scheduledTask(
@@ -1816,8 +1884,8 @@ test('setup-aware evaluators retain a feasible pre-fixed prefix when only the tr
 
     assert.equal(patchFor(result, 'suffix-fallback-a-yellow').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
       `${label} preserves the feasible pre-fixed prefix`);
-    assert.equal(patchFor(result, 'suffix-fallback-b-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
-      `${label} defers only the problematic suffix`);
+    assert.equal(patchFor(result, 'suffix-fallback-b-red').changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime(),
+      `${label} admits B directly after A, ahead of the fixed run`);
     assert.deepEqual(result.unchangedLines, []);
   }
 });
@@ -2000,20 +2068,26 @@ test('setup-aware evaluators never schedule through a fixed boundary beyond the 
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
     );
 
+    // Never-freeze semantics: RED genuinely has no capacity (a real 3-hour
+    // order against a 2-hour window), so it still cannot be patched — but
+    // that is a capacity fact surfaced via the tail-placement diagnostic,
+    // not the line being reported as frozen/unchanged.
     assert.deepEqual(result.patches, [], `${label} does not emit work beyond the caller horizon`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
-    assert.ok(result.missingEdges.some(edge => (
-      edge.successorOrderId === 'bounded-horizon-red' && edge.reason === 'trailing-fragment-unadmitted'
-    )), `${label} reports the bounded terminal admission failure`);
+    assert.deepEqual(result.unchangedLines, []);
+    assert.ok(result.explanation.some(reason => (
+      reason.taskId === 'bounded-horizon-red' && reason.message.includes('current dates')
+    )), `${label} reports the capacity-starved order left at its current dates`);
   }
 });
 
-test('due-date fallback retains a covered non-policy component before fixed work', () => {
-  // This fails when fixed-boundary fallback considers only suffixes of the
-  // policy/due base order: RED then BLUE is invalid, but BLUE can legally run
-  // before fixed YELLOW and RED can run immediately after it. Deferring both
-  // creates avoidable lateness, so the detached due-date evaluator must test
-  // the feasible retained component candidate through its normal search.
+test('due-date fallback admits the fully-covered internal pair before fixed work, skipping the unverified boundary reservation', () => {
+  // Never-freeze semantics (Part 1f): RED -> BLUE is uncovered so that
+  // permutation fails outright, but BLUE -> RED is fully covered
+  // internally. The only uncovered edge left is the outgoing RED -> fixed
+  // YELLOW transition, which no longer disqualifies the candidate — it now
+  // only skips the reservation and stays a diagnostic, so BOTH orders are
+  // admitted together ahead of the fixed run instead of RED being deferred
+  // past it.
   const red = scheduledTask('fallback-choice-red', 1, 'RED', '2026-08-03T08:30:00');
   const blue = scheduledTask('fallback-choice-blue', 1, 'BLUE', '2026-08-03T09:00:00');
   const fixedYellow = scheduledTask(
@@ -2033,27 +2107,20 @@ test('due-date fallback retains a covered non-policy component before fixed work
 
   assert.equal(patchFor(result, 'fallback-choice-fixed-yellow'), undefined, 'fixed YELLOW stays immutable');
   assert.equal(patchFor(result, 'fallback-choice-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
-    'covered BLUE stays in the pre-fixed fragment');
-  assert.equal(patchFor(result, 'fallback-choice-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime(),
-    'only the invalid RED suffix moves past fixed YELLOW');
+    'BLUE is admitted first (its covered internal transition into RED)');
+  assert.equal(patchFor(result, 'fallback-choice-red').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime(),
+    'RED is admitted immediately after BLUE, ahead of fixed YELLOW');
   assert.deepEqual(result.unchangedLines, []);
-  assert.ok(result.missingEdges.some(edge => (
-    edge.predecessorOrderId === 'fallback-choice-red'
-    && edge.successorOrderId === 'fallback-choice-fixed-yellow'
-    && edge.reason === 'No version-matched setup transition covers this state pair'
-  )), 'the rejected uncovered RED -> fixed YELLOW edge remains visible');
-  const rejectedReasons = result.explanation.filter(reason => (
-    reason.code === 'rejected-uncovered-transition' && reason.taskId === 'fallback-choice-fixed-yellow'
-  ));
-  assert.equal(rejectedReasons.length, 1, 'the rejected fallback edge has one concise planner explanation');
 });
 
-test('due-date final-boundary fallback compares complete candidates before local admission', () => {
-  // The two safe fallback paths retain different amounts of work before the
-  // fixed run. BLUE alone leaves less pre-fixed work than protected RED ->
-  // ORANGE, but BLUE is the higher policy tier and must win once each route is
-  // evaluated through its deferred continuation. A local patches.length sort
-  // incorrectly selects RED -> ORANGE before fixed work.
+test('due-date final-boundary fallback: the fully covered protected pair is admitted, and the demoted order is tail-placed', () => {
+  // Never-freeze semantics (Part 1a/1b): RED -> ORANGE is a protected active
+  // override pair (adjacency must stay together), and BLUE cannot chain with
+  // either (no BLUE<->RED/ORANGE row), so no single sequence covers all
+  // three internally. The coverage-demotion backstop demotes BLUE (later
+  // due date wins the tie) into the unknown tail; RED -> ORANGE is admitted
+  // through the normal search, and BLUE is tail-placed with no changeover
+  // bar rather than the whole line failing closed.
   const red = scheduledTask('complete-fallback-red', 0.5, 'RED', '2026-08-03T08:30:00');
   const orange = scheduledTask('complete-fallback-orange', 0.5, 'ORANGE', '2026-08-03T08:45:00');
   const blue = scheduledTask('complete-fallback-blue', 1, 'BLUE', '2026-08-03T09:00:00');
@@ -2080,20 +2147,24 @@ test('due-date final-boundary fallback compares complete candidates before local
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
 
   assert.equal(patchFor(result, 'complete-fallback-fixed-yellow'), undefined, 'fixed YELLOW remains immutable');
-  assert.deepEqual(result.patches.map(patch => patch.id), [
-    'complete-fallback-blue', 'complete-fallback-red', 'complete-fallback-orange',
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), [
+    'complete-fallback-blue', 'complete-fallback-orange', 'complete-fallback-red',
   ]);
-  assert.equal(patchFor(result, 'complete-fallback-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
-    'the higher-priority complete route keeps BLUE before fixed work');
-  assert.equal(patchFor(result, 'complete-fallback-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
-  assert.equal(patchFor(result, 'complete-fallback-orange').changes.start_date.getTime(), at('2026-08-03T11:30:00').getTime());
+  assert.equal(patchFor(result, 'complete-fallback-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'the protected RED -> ORANGE pair is admitted ahead of fixed work');
+  assert.equal(patchFor(result, 'complete-fallback-orange').changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime());
   assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'complete-fallback-blue'
+  )), 'BLUE is demoted and tail-placed with no changeover bar');
 });
 
-test('due-date final-boundary fallback considers non-contiguous component deferrals', () => {
-  // This fails when the fallback considers only singleton and suffix
-  // deferrals. Only BLUE can reach fixed YELLOW, while RED and ORANGE must
-  // wait together after it; retaining BLUE avoids one otherwise late order.
+test('due-date final-boundary fallback: BLUE is admitted through the fixed boundary, and the demoted RED/ORANGE chain is tail-placed', () => {
+  // Never-freeze semantics: BLUE -> fixed YELLOW is fully covered (with a
+  // real reservation), while RED and ORANGE cannot chain with BLUE at all
+  // (no BLUE<->RED/ORANGE row), so the coverage-demotion backstop demotes
+  // both into the unknown tail and they are placed with no changeover bar
+  // immediately after BLUE, rather than the whole line failing closed.
   const red = scheduledTask('non-contiguous-fallback-red', 0.5, 'RED', '2026-08-03T08:30:00');
   const blue = scheduledTask('non-contiguous-fallback-blue', 0.5, 'BLUE', '2026-08-03T09:30:00');
   const orange = scheduledTask('non-contiguous-fallback-orange', 0.5, 'ORANGE', '2026-08-03T09:45:00');
@@ -2113,10 +2184,14 @@ test('due-date final-boundary fallback considers non-contiguous component deferr
 
   assert.equal(patchFor(result, 'non-contiguous-fallback-fixed-yellow'), undefined, 'fixed YELLOW remains immutable');
   assert.equal(patchFor(result, 'non-contiguous-fallback-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
-    'BLUE remains before fixed YELLOW while the non-contiguous RED/ORANGE pair defers');
-  assert.equal(patchFor(result, 'non-contiguous-fallback-red').changes.start_date.getTime(), at('2026-08-03T11:00:00').getTime());
-  assert.equal(patchFor(result, 'non-contiguous-fallback-orange').changes.start_date.getTime(), at('2026-08-03T11:30:00').getTime());
+    'BLUE stays admitted before fixed YELLOW');
   assert.deepEqual(result.unchangedLines, []);
+  for (const id of ['non-contiguous-fallback-red', 'non-contiguous-fallback-orange']) {
+    assert.ok(patchFor(result, id), `${id} is still scheduled, not frozen`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'unknown-setup-tail-placement' && reason.taskId === id
+    )), `${id} is demoted and tail-placed with no changeover bar`);
+  }
 });
 
 test('due-date earlier fixed-boundary fallback fails closed when multiple local routes are feasible', () => {
@@ -2124,6 +2199,17 @@ test('due-date earlier fixed-boundary fallback fails closed when multiple local 
   // fixed boundaries make it unsafe to rank those local prefixes without a
   // full branching planner. The detached evaluator must preserve the line
   // rather than promote admitted work above the documented full objective.
+  //
+  // Plan directive (Part 4): this is the one fail-closed fixed-boundary test
+  // that is NOT softened by the never-freeze rework — the optional softening
+  // of `fixed-boundary-fallback-ambiguous` was explicitly not adopted, so
+  // this assertion is intentionally left unchanged.
+  //
+  // F3 fix: `searchFragment` now takes an `allowDemotion` flag, false for the
+  // per-boundary run before a LATER fixed boundary (and its fallback runs) so
+  // the coverage-demotion backstop can no longer silently resolve this
+  // ambiguity before `evaluateLineWithFixedBoundaries` reaches its dedicated
+  // `fixed-boundary-fallback-ambiguous` guard below.
   const red = scheduledTask('ambiguous-earlier-red', 1, 'RED', '2026-08-03T08:30:00');
   const blue = scheduledTask('ambiguous-earlier-blue', 1, 'BLUE', '2026-08-03T09:00:00');
   const firstFixed = scheduledTask(
@@ -2157,6 +2243,16 @@ test('due-date earlier fixed-boundary fallback fails closed when multiple local 
 test('due-date earlier fixed-boundary fallback proceeds when exactly one local route is feasible', () => {
   // The same two-boundary shape is safe when only BLUE can enter first fixed
   // YELLOW. RED is then evaluated normally between YELLOW and PURPLE.
+  //
+  // F3 fix: `allowDemotion:false` on the per-boundary run and its fallback
+  // runs stops the coverage-demotion backstop from resolving this ambiguity
+  // itself; the dedicated single-route fallback search now decides instead.
+  // F3b secondary hardening: `candidateEntersBoundaryUncovered` excludes
+  // RED's fallback (RED -> YELLOW is genuinely uncovered, merely tolerated
+  // by Part 1f's incoming-boundary leniency) from the feasible-route tally,
+  // so BLUE -> YELLOW — the only route with a real covered incoming
+  // reservation — is correctly the unique local route. RED is then admitted
+  // normally between YELLOW and PURPLE via YELLOW -> RED / RED -> PURPLE.
   const red = scheduledTask('unique-earlier-red', 1, 'RED', '2026-08-03T08:30:00');
   const blue = scheduledTask('unique-earlier-blue', 1, 'BLUE', '2026-08-03T09:00:00');
   const firstFixed = scheduledTask(
@@ -2354,10 +2450,13 @@ test('setup-aware evaluators diagnose stale post-horizon override bindings as in
   }
 });
 
-test('setup-aware evaluators retain a fixed order at horizonEnd as the terminal incoming boundary', () => {
-  // This fails when `start >= horizonEnd` removes a fixed order whose incoming
-  // setup still belongs to the candidate horizon. A -> fixed BLUE is missing,
-  // so A must not be emitted merely because BLUE processing continues later.
+test('setup-aware evaluators retain a fixed order at horizonEnd as the terminal incoming boundary and still place RED', () => {
+  // This still fails when `start >= horizonEnd` removes a fixed order whose
+  // incoming setup belongs to the candidate horizon (the terminal-boundary
+  // recognition itself is unchanged). But never-freeze semantics (Part 1f)
+  // mean an uncovered RED -> fixed BLUE transition no longer disqualifies
+  // the candidate — it just skips the reservation and stays a diagnostic —
+  // so RED is scheduled directly rather than the line staying frozen.
   const red = scheduledTask('horizon-terminal-red', 1, 'RED', '2026-08-03T09:00:00');
   const fixedBlue = scheduledTask(
     'horizon-terminal-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00',
@@ -2373,13 +2472,9 @@ test('setup-aware evaluators retain a fixed order at horizonEnd as the terminal 
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
     );
 
-    assert.deepEqual(result.patches, [], `${label} does not schedule RED through the terminal boundary`);
-    assert.deepEqual(result.unchangedLines, ['L1']);
-    assert.ok(result.missingEdges.some(edge => (
-      edge.predecessorOrderId === 'horizon-terminal-red'
-      && edge.successorOrderId === 'horizon-terminal-fixed-blue'
-      && edge.reason === 'No version-matched setup transition covers this state pair'
-    )), `${label} reports RED -> fixed BLUE as uncovered`);
+    assert.equal(patchFor(result, 'horizon-terminal-fixed-blue'), undefined, `${label} never patches the fixed run`);
+    assert.equal(patchFor(result, 'horizon-terminal-red').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+    assert.deepEqual(result.unchangedLines, []);
   }
 });
 
@@ -2412,4 +2507,365 @@ test('due-date search retains uncovered rejected alternatives for exact and gree
       reason.code === 'rejected-uncovered-transition' && reason.taskId === 'rejected-edge-blue'
     )), `${label} supplies a concise rejected-edge explanation`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Part 4 (new): never-freeze tail placement, coverage-demotion backstop,
+// nullable initial-state chaining, and the search-budget fixes (2a/2b).
+// ---------------------------------------------------------------------------
+
+test('placeUnknownTail orders the tail by policy tier first, then due date, across day buckets', () => {
+  // Three unresolvable-state orders (blank COLOR under strict_blanks) with
+  // due dates spanning three different days. A high-tier PRT_01 rank must
+  // still place its order first even though its due date is the latest;
+  // within the low tier, due date breaks the tie.
+  const highTierLateDue = scheduledTask('tail-order-a', 1, '', '2026-08-05T09:00:00');
+  const lowTierEarlyDue = scheduledTask('tail-order-b', 1, '', '2026-08-03T09:00:00');
+  const lowTierLateDue = scheduledTask('tail-order-c', 1, '', '2026-08-04T09:00:00');
+  highTierLateDue.PRT_01 = 'HIGH';
+  lowTierEarlyDue.PRT_01 = 'LOW';
+  lowTierLateDue.PRT_01 = 'LOW';
+  const setup = setupTruth({ rows: [] });
+  const snapshot = setupSnapshot([lowTierEarlyDue, lowTierLateDue, highTierLateDue]);
+  snapshot.masterData.plants[0].constraints = [{ key: 'prt01', order: 0, enabled: true }];
+  snapshot.priorityRankMaps = { '': { prt01: { HIGH: 1, LOW: 2 } } };
+
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+
+  assert.deepEqual(result.patches.map(patch => patch.id), [
+    'tail-order-a', 'tail-order-b', 'tail-order-c',
+  ], 'policy tier dominates due date, then due date orders within a tier');
+  assert.deepEqual(result.unchangedLines, []);
+  for (const id of ['tail-order-a', 'tail-order-b', 'tail-order-c']) {
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'unknown-setup-tail-placement' && reason.taskId === id
+    )));
+  }
+});
+
+test('the unknown tail is placed back-to-back with no setup gap and charges no setup minutes', () => {
+  // Three unresolvable-state orders placed via the same zero-minute
+  // placement mechanism must be strictly contiguous (each starts exactly
+  // where the previous ends) and the overall candidate score's setup-minutes
+  // slot (score[5]) must stay at 0 — never freeze must never charge a fake
+  // changeover for a transition nobody actually knows.
+  const a = scheduledTask('gap-check-a', 1, '', '2026-08-03T09:00:00');
+  const b = scheduledTask('gap-check-b', 1, '', '2026-08-03T09:30:00');
+  const c = scheduledTask('gap-check-c', 1, '', '2026-08-03T10:00:00');
+  const setup = setupTruth({ rows: [] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([c, a, b]), dueDateBounds(setup));
+
+  const ordered = ['gap-check-a', 'gap-check-b', 'gap-check-c'].map(id => patchFor(result, id));
+  assert.ok(ordered.every(Boolean), 'every order is scheduled');
+  for (let index = 1; index < ordered.length; index += 1) {
+    assert.equal(
+      ordered[index].changes.start_date.getTime(),
+      ordered[index - 1].changes.end_date.getTime(),
+      'each tail order starts exactly where the previous one ends: no setup gap',
+    );
+  }
+  assert.equal(result.score[5], 0, 'no setup minutes are charged for unknown-tail placement');
+  // F1/F12: every placed tail order reports via the dedicated
+  // 'scheduled-without-setup' reason, chained predecessor-to-successor.
+  for (const id of ['gap-check-a', 'gap-check-b', 'gap-check-c']) {
+    assert.ok(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === id));
+  }
+});
+
+test('unknown-tail overflow before a fixed boundary defers the overflowing order past it', () => {
+  // Two unresolvable-state orders together need more room than the pre-fixed
+  // gap allows; the one that does not fit must defer to after the fixed run
+  // rather than the line freezing or the overflow being silently dropped.
+  const first = scheduledTask('overflow-a', 1, '', '2026-08-03T08:15:00');
+  const second = scheduledTask('overflow-b', 1, '', '2026-08-03T08:30:00');
+  const fixed = scheduledTask(
+    'overflow-fixed', 1, 'BLUE', '2026-08-03T09:30:00',
+    '2026-08-03T09:30:00', '2026-08-03T10:30:00',
+  );
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([first, second, fixed], { fixedIds: ['overflow-fixed'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'overflow-fixed'), undefined, 'the fixed run is never patched');
+  assert.equal(patchFor(result, 'overflow-a').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'the first order still fits in the pre-fixed gap');
+  assert.equal(patchFor(result, 'overflow-b').changes.start_date.getTime(), at('2026-08-03T10:30:00').getTime(),
+    'the overflowing order defers to immediately after the fixed run');
+  assert.deepEqual(result.unchangedLines, []);
+  // F2/F12: a duplicate-patch bug once made this exact deferred-past-boundary
+  // path emit two patches for the same order (admitted concatenated with its
+  // own unknownTail subset) — assert every patched id is unique.
+  const ids = result.patches.map(patch => patch.id);
+  assert.equal(new Set(ids).size, ids.length, 'no order is patched twice');
+});
+
+test('trailing-fragment tail overflow leaves the order at its current dates with a diagnostic', () => {
+  // In the final (trailing) fragment there is nowhere left to defer to. An
+  // order that cannot fit stays exactly at its current dates rather than the
+  // line freezing or the order silently vanishing.
+  const admits = scheduledTask('trail-overflow-a', 1, '', '2026-08-03T08:15:00');
+  const staysPut = scheduledTask(
+    'trail-overflow-b', 1, '', '2026-08-03T08:30:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const setup = setupTruth({ rows: [] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([admits, staysPut]),
+    dueDateBounds(setup, { horizonEnd: at('2026-08-03T09:00:00') }),
+  );
+
+  assert.ok(patchFor(result, 'trail-overflow-a'), 'the order that fits is still placed');
+  assert.equal(patchFor(result, 'trail-overflow-b'), undefined, 'the overflowing order is not patched at all');
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.explanation.some(reason => (
+    reason.taskId === 'trail-overflow-b' && reason.message.includes('current dates')
+  )), 'the diagnostic explains the order was left in place for lack of capacity');
+});
+
+test('coverage-demotion backstop: the one order poisoning every permutation is demoted while the other two sequence covered', () => {
+  // RED and BLUE have a fully covered mutual transition; PINK has no matrix
+  // row in either direction, so every permutation that includes it fails.
+  // The backstop must demote PINK specifically (not RED or BLUE) and let the
+  // other two sequence through the normal covered-core search.
+  const good1 = scheduledTask('demo-good-a', 1, 'RED', '2026-08-03T09:00:00');
+  const good2 = scheduledTask('demo-good-b', 1, 'BLUE', '2026-08-03T09:30:00');
+  const poison = scheduledTask('demo-poison', 1, 'PINK', '2026-08-03T08:15:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0),
+    setupRow('RED', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    // Deliberately no row touches PINK in either direction.
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([poison, good1, good2]),
+    dueDateBounds(setup),
+  );
+
+  const goodA = patchFor(result, 'demo-good-a');
+  const goodB = patchFor(result, 'demo-good-b');
+  const poisonPatch = patchFor(result, 'demo-poison');
+  assert.ok(goodA && goodB && poisonPatch, 'all three orders are still scheduled');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'due-date-first-placement' && reason.taskId === 'demo-good-a'
+  )), 'RED is sequenced through the normal covered-core search');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'due-date-first-placement' && reason.taskId === 'demo-good-b'
+  )), 'BLUE is sequenced through the normal covered-core search');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'demo-poison'
+  )), 'PINK is the one demoted into the unknown tail');
+  assert.ok(poisonPatch.changes.start_date.getTime() >= goodB.changes.end_date.getTime(),
+    'the demoted order is appended strictly after the covered core, never interleaved');
+  assert.deepEqual(result.unchangedLines, []);
+  // F1/F12: the real uncovered-transition fact that caused the demotion must
+  // still reach the missing-pairs table via appendRejectedCoverageDiagnostics
+  // — this regressed once because the demotion loop's own `run` reassignment
+  // discarded every iteration's edges except the final (winning) one.
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'No version-matched setup transition covers this state pair'
+    && (edge.predecessorOrderId === 'demo-poison' || edge.successorOrderId === 'demo-poison')
+  )), 'the rejected PINK transition is still reported, not discarded by the demotion retry');
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'demo-poison'
+  )), 'PINK itself is reported via the dedicated scheduled-without-setup reason');
+});
+
+test('coverage-demotion backstop never demotes an order bound by an active occurrence override', () => {
+  // F4: RED -> ORANGE is a protected active override pair (must stay
+  // adjacent). Three mutually-compatible BLUE fillers (same-state implicit
+  // -zero transitions between each other, but uncovered against RED/ORANGE
+  // in both directions) poison every arrangement that puts them next to the
+  // RED/ORANGE block. Because the block's two endpoints face a poisoned
+  // neighbor in nearly every explored arrangement while each filler often
+  // ends up adjacent to another (compatible) filler instead, RED's own
+  // uncovered-edge tally is the single highest of all five orders — proven
+  // by instrumenting `mostUncoveredOrderId` directly: without F4's
+  // exclusion it tallies bound-demo-red=3 (every other order <=2) and
+  // `demoteMostUncoveredOrder` demotes RED itself, which then duplicates
+  // RED's patch (it is both "demoted" and left in a later covered-core
+  // winner) and collapses the whole fragment to pure unknown-tail
+  // placement — nothing gets a real changeover bar, and the override is
+  // silently violated. `boundOrderIds` now excludes RED and ORANGE from
+  // demotion entirely, so only a filler is ever demoted.
+  const red = scheduledTask('bound-demo-red', 1, 'RED', '2026-08-03T09:00:00');
+  const orange = scheduledTask('bound-demo-orange', 1, 'ORANGE', '2026-08-03T09:15:00');
+  const f1 = scheduledTask('bound-demo-f1', 1, 'BLUE', '2026-08-03T09:30:00');
+  const f2 = scheduledTask('bound-demo-f2', 1, 'BLUE', '2026-08-03T09:45:00');
+  const f3 = scheduledTask('bound-demo-f3', 1, 'BLUE', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0)],
+    overrides: [{
+      id: 'bound-demo-protected-red-orange', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'bound-demo-red', successor_order_id: 'bound-demo-orange',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('ORANGE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'component fixture',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([red, orange, f1, f2, f3]),
+    dueDateBounds(setup),
+  );
+
+  assert.ok(result.explanation.every(reason => reason.code !== 'override-inactive'),
+    'the protected binding is never reported as broken');
+  const redPatch = patchFor(result, 'bound-demo-red');
+  const orangePatch = patchFor(result, 'bound-demo-orange');
+  assert.ok(redPatch && orangePatch, 'both bound orders are still scheduled');
+  // F2 corollary: a demoted-and-relocated RED would also duplicate its own
+  // patch (once as the "demoted" order, again inside a later covered-core
+  // winner) — guard against that regression too.
+  const ids = result.patches.map(patch => patch.id);
+  assert.equal(new Set(ids).size, ids.length, 'no order is patched twice');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'due-date-first-placement' && reason.taskId === 'bound-demo-red'
+  )), 'RED is sequenced through the normal covered-core search, not demoted');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'due-date-first-placement' && reason.taskId === 'bound-demo-orange'
+  )), 'ORANGE is sequenced through the normal covered-core search, not demoted');
+  assert.equal(orangePatch.changes.start_date.getTime(), redPatch.changes.end_date.getTime(),
+    'the protected pair stays adjacent with its 0-minute standard setup');
+});
+
+test('unknown initial state: the first order pays no incoming charge, and the second order chains from its resolved state', () => {
+  // Part 1d: with no persisted/scheduled current state, the line proceeds
+  // with a null initial state. The first order's incoming setup is reported
+  // unknown (no charge, no delay), and the SECOND order's transition is
+  // resolved normally from the first order's own (now-known) state.
+  const first = scheduledTask('chain-first', 1, 'RED', '2026-08-03T09:00:00');
+  const second = scheduledTask('chain-second', 1, 'BLUE', '2026-08-03T10:30:00');
+  const setup = setupTruth({ current: null, rows: [setupRow('RED', 'BLUE', 20)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([second, first]),
+    dueDateBounds(setup),
+  );
+
+  const firstPatch = patchFor(result, 'chain-first');
+  const secondPatch = patchFor(result, 'chain-second');
+  assert.equal(firstPatch.changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime(),
+    'the first order starts immediately at now, with no incoming setup delay');
+  assert.equal(secondPatch.changes.start_date.getTime(), firstPatch.changes.end_date.getTime() + 20 * 60 * 1000,
+    'the second order charges the real RED -> BLUE minutes, resolved from the first order\'s known state');
+  assert.ok(result.missingEdges.some(edge => (
+    edge.predecessorOrderId === null && edge.reason === 'initial-state-unknown'
+  )), 'the unknown incoming state is retained as a diagnostic');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'initial-state-unknown' && reason.taskId === 'chain-first'
+  )));
+  assert.equal(result.explanation.some(reason => (
+    reason.code === 'initial-state-unknown' && reason.taskId === 'chain-second'
+  )), false, 'only the first order is charged an unknown incoming setup');
+  assert.deepEqual(result.unchangedLines, []);
+});
+
+test('per-line SearchBudget isolation holds across three lines, not just two', () => {
+  // Part 2b: `SearchBudget` is constructed fresh inside the per-line loop, so
+  // an iteration cap of 1 still lets every one of three lines search its own
+  // single-candidate fragment.
+  const l1 = scheduledTask('budget-l1', 1, 'BLUE', '2026-08-03T10:00:00');
+  const l2 = { ...scheduledTask('budget-l2', 1, 'BLUE', '2026-08-03T10:00:00'), PRODUCTION_LINE: 'L2' };
+  const l3 = { ...scheduledTask('budget-l3', 1, 'BLUE', '2026-08-03T10:00:00'), PRODUCTION_LINE: 'L3' };
+  const snapshot = setupSnapshot([l1, l2, l3]);
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS }, L3: { workHours: OPEN_HOURS } };
+  snapshot.masterData.lines.push({ plant: 'P1', production_line: 'L2' }, { plant: 'P1', production_line: 'L3' });
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5)] });
+  setup.line_states.push(
+    { line: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'second budget line' },
+    { line: 'L3', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'third budget line' },
+  );
+
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
+
+  assert.deepEqual(result.patches.map(patch => patch.id).sort(), ['budget-l1', 'budget-l2', 'budget-l3']);
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.diagnostics.candidateCount, 3, 'each line spent exactly its own single-candidate budget');
+  assert.equal(result.diagnostics.termination, 'completed');
+});
+
+test('evaluateMinChangeover gives the candidate pass everything left after the baseline returns, not a naive half-split', () => {
+  // Part 2a: the baseline pass is deliberately capped to half of whatever
+  // wall-clock remains; the candidate pass keeps the caller's full original
+  // deadline. Proven two ways with an injectable `clock`:
+  //   1. Directly: a combinatorial 6-order (3 RED + 3 BLUE) exact search
+  //      needs a known number of clock ticks to complete. Given only HALF of
+  //      that many ticks it terminates via 'deadline' (incomplete); given
+  //      the FULL amount it completes — the exact contract the baseline vs.
+  //      candidate passes must honor.
+  //   2. End-to-end: `evaluateMinChangeover`, run with a single clock shared
+  //      (and cumulative) across its internal baseline+candidate passes and
+  //      the same total deadline, still reaches a genuine, non-starved
+  //      result — proving the candidate pass was not silently capped to the
+  //      same half the baseline used.
+  const reds = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`deadline-split-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`)
+  ));
+  const blues = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`deadline-split-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`)
+  ));
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 5),
+    setupRow('RED', 'BLUE', 5), setupRow('BLUE', 'RED', 5),
+  ] });
+  const snapshot = () => setupSnapshot([...reds, ...blues]);
+  const searchBounds = overrides => dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, ...overrides });
+
+  // Measure exactly how many clock() calls a fully-uncapped search needs.
+  let neededCalls = 0;
+  const measuringClock = () => { neededCalls += 1; return neededCalls; };
+  const measured = SetupScheduler.evaluateDueDateFirst(snapshot(), searchBounds({ clock: measuringClock, deadline: 1e9 }));
+  assert.equal(measured.diagnostics.termination, 'completed', 'sanity: the uncapped search completes');
+
+  const deadline = neededCalls + 5;
+
+  // 1. Half of the needed ticks is provably insufficient.
+  let halfCalls = 0;
+  const halfClock = () => { halfCalls += 1; return halfCalls; };
+  const halfDeadline = 1 + (deadline - 1) / 2;
+  const halfResult = SetupScheduler.evaluateDueDateFirst(snapshot(), searchBounds({ clock: halfClock, deadline: halfDeadline }));
+  assert.equal(halfResult.diagnostics.termination, 'deadline', 'half the needed ticks is not enough to complete this search');
+
+  // 2. The full amount (what the candidate pass keeps) is sufficient.
+  let fullCalls = 0;
+  const fullClock = () => { fullCalls += 1; return fullCalls; };
+  const fullResult = SetupScheduler.evaluateDueDateFirst(snapshot(), searchBounds({ clock: fullClock, deadline }));
+  assert.equal(fullResult.diagnostics.termination, 'completed', 'the full amount completes the same search');
+
+  // 3. End-to-end: evaluateMinChangeover with the identical shared clock and
+  // deadline still resolves to a genuine (non-starved) candidate decision.
+  let sharedCalls = 0;
+  const sharedClock = () => { sharedCalls += 1; return sharedCalls; };
+  const combined = SetupScheduler.evaluateMinChangeover(snapshot(), searchBounds({ clock: sharedClock, deadline }));
+  assert.equal(combined.patches.length, 6, 'every order is admitted, not just a partial/starved subset');
+  assert.equal(combined.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
+    'the candidate pass was not capped to the same half the baseline used, so no starvation is reported');
+});
+
+test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empty baseline', () => {
+  // Part 2a's starvation guard is specifically gated on `baseline.patches.length
+  // > 0` — it must never claim to "keep the baseline" when the baseline
+  // itself produced nothing (that would not be a meaningful fallback). With
+  // an immediately-expired deadline, both passes have zero opportunity to
+  // search, so the guard's precondition must not fire.
+  const red = scheduledTask('starve-guard-red', 1, 'RED', '2026-08-03T09:00:00');
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'RED', 0)],
+    overrides: [{
+      id: 'starve-guard-conflict', line: 'L1', signature_version: 1,
+      predecessor_order_id: 'deleted-starve-guard-predecessor', successor_order_id: 'starve-guard-red',
+      predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'forces both passes to the same fail-closed outcome',
+    }],
+  });
+  const bounds = dueDateBounds(setup, { clock: () => 0, deadline: 0 });
+
+  const result = SetupScheduler.evaluateMinChangeover(setupSnapshot([red]), bounds);
+
+  assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
+    'the guard does not fire when the baseline itself has no patches to fall back to');
 });

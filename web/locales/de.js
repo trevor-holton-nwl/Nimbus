@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.select_lines_to_opt':         'Bitte mindestens eine Linie auswählen oder auf Gesamtwerk wechseln.',
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',
+  'toast.optimize_missing_setup_summary': 'Optimiert. {{orders}} Auftrag/Aufträge auf {{lines}} Linie(n) wurden ohne Rüstdaten eingeplant (kein Rüstbalken) — siehe Warnungen.',
+  'toast.optimize_lines_guarded':      '{{count}} Linie(n) blieben unverändert — geschützt durch einen fixierten Auftrag oder eine inaktive Überschreibung, oder es gab nichts zu planen.',
   'toast.scenario_applied':            'Szenario "{{name}}" angewendet — Strg+Z zum Rückgängigmachen',
   'toast.scenario_discarded':          'Szenario verworfen — Plan wiederhergestellt',
   'toast.what_if_mode':                'Was-wäre-wenn-Modus — Änderungen werden nicht gespeichert. Anwenden oder verwerfen wenn fertig.',
@@ -1310,6 +1312,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_unchanged_lines_none':    'keine',
   'ui.setup_reasons_none':            'Für diesen Kandidaten wurden keine spezifischen Gründe gemeldet.',
   'ui.setup_missing_pairs_none':      'Keine fehlenden Setup-Paare für diesen Kandidaten.',
+  'ui.opt_pv_scheduled_without_setup': '{{orders}} Auftrag(e) auf {{lines}} Linie(n) wurden ohne lösbaren Rüstübergang eingeplant — für sie wurde kein Rüstbalken platziert.',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Planungsregeln',

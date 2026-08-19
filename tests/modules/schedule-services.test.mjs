@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
+import { Toast } from '../../web/application-foundation.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
@@ -1466,4 +1467,106 @@ test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list'
   const term2 = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
   assert.equal(term2.get({ COLOR: 'RED', PRODUCTION_LINE: 'L01' }), '0000001|RED',
     'a real line override must still beat the plant-wide list');
+});
+
+// ---------------------------------------------------------------------------
+// F12 gap 3 (Part 3 integration): Engine.runAndApply's setup-aware live-run
+// surfacing — Engine.lastSetupAwareResult and the toast.optimize_missing_setup_summary
+// warn toast, both landing at F1's dedicated 'scheduled-without-setup' reason.
+
+test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast for a live setup-aware run', () => {
+  const plant = 'SETUP-LIVE-PLANT';
+  const line = 'SETUP-LIVE-LINE';
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorLastSetupAware = Engine.lastSetupAwareResult;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    // GREEN -> BLUE is the only covered transition; the blank-signature order
+    // below has no resolvable state at all, so it can never be part of the
+    // covered-core search (Part 1a) and lands in the never-freeze tail
+    // instead — the exact condition that must emit a 'scheduled-without-setup'
+    // missingEdge and drive both live-run surfaces under test.
+    plant_rows: [{ line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    line_rows: [],
+    line_states: [{ line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    {
+      id: 'setup-live-blue', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-17T12:00:00'),
+    },
+    {
+      id: 'setup-live-blank', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: '',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-17T13:00:00'),
+    },
+  ], 'unit-test');
+
+  const toastCalls = [];
+  const originalShow = Toast.show;
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  try {
+    Engine.runAndApply('changeover', {
+      plant, respectFixed: true, respectCalendar: false,
+      startDate: new Date('2026-08-17T00:00:00'), endDate: new Date('2026-08-20T00:00:00'),
+    });
+
+    assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
+    assert.ok(Engine.lastSetupAwareResult.missingEdges.some(edge => (
+      edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'setup-live-blank'
+    )), 'the blank-signature order is reported via the dedicated scheduled-without-setup reason');
+    assert.ok(Store.tasks['setup-live-blue'].start_date, 'the covered order was actually applied to Store');
+    assert.ok(Store.tasks['setup-live-blank'].start_date, 'the tail-placed order was also applied to Store, never frozen');
+
+    assert.ok(toastCalls.some(call => call.msg.includes('toast.optimize_missing_setup_summary') && call.type === 'warn'),
+      'the missing-setup-data warn toast fires with the plan-mandated i18n key');
+  } finally {
+    Toast.show = originalShow;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
+});
+
+test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup-aware run', () => {
+  // F8: lastSetupAwareResult must mirror lastBacklogResult's clear-then-set
+  // lifecycle — a later run that does NOT go through the setup-aware branch
+  // (no active setup definition for the run's plant) must not leave a stale
+  // result from an earlier setup-aware run lying around.
+  const plant = 'SETUP-STALE-PLANT';
+  const line = 'SETUP-STALE-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorLastSetupAware = Engine.lastSetupAwareResult;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  // No Store.replaceSetupSnapshot call: this plant has no active setup
+  // definition, so runAndApply takes the legacy (non-setup-aware) path.
+  Store.setTasks([
+    { id: 'stale-check-a', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: '1' },
+  ], 'unit-test');
+  Engine.lastSetupAwareResult = { patches: [], score: [], explanation: [], diagnostics: {}, unchangedLines: [], missingEdges: [] };
+
+  try {
+    Engine.runAndApply('changeover', { plant, respectFixed: true, respectCalendar: false });
+    assert.equal(Engine.lastSetupAwareResult, null, 'a later non-setup-aware run clears the stale result, not just leaves it');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
 });
