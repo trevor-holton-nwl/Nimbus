@@ -269,7 +269,15 @@ export const Timeline = {
   _cachedRowH:  null as number | null,
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
-  _initialVerticalScrollPending: true,
+  // Remembered vertical scroll offset (vis-timeline's internal scrollTop
+  // convention — see _setVScroll/_getVScroll). Replaces the old one-shot
+  // _initialVerticalScrollPending guard: "start at the top" is simply the
+  // initial value 0, and — unlike the old guard, which only ever fired
+  // once — it is now re-applied (clamped) on EVERY rebuild, right after
+  // _fitHeight() sets the new height. An explicit navigation (scrollToLine,
+  // Part B's alert focus) overwrites this directly so a subsequent rebuild
+  // restores to the just-navigated position instead of fighting it.
+  _vScrollTop: 0,
   _itemIdsByTask: {} as Record<string, string[]>,
 
   init(): void {
@@ -790,6 +798,13 @@ export const Timeline = {
     Timeline._renderEmptyOverlay();
     // Save the current viewport so groups.clear() + re-add doesn't auto-fit.
     const savedWindow = Timeline._tl ? Timeline._tl.getWindow() : null;
+    // Capture whatever vertical position the user is actually at right now
+    // (before the group/item diff below can shrink content and clamp it) —
+    // this is what _vScrollTop gets re-applied to at the end of rebuild(),
+    // so a plain re-render preserves position same as before. An explicit
+    // navigation between now and the restore below (scrollToLine et al.)
+    // overwrites _vScrollTop directly and wins, since it runs later.
+    if (Timeline._tl) Timeline._vScrollTop = Timeline._getVScroll();
     const all = Store.tasksForSelectedPlant();
     const tasks = all.filter(t => t.start_date && t.end_date);
     const dropped = all.length - tasks.length;
@@ -1022,19 +1037,48 @@ export const Timeline = {
     if (savedWindow && Timeline._tl) {
       Timeline._tl.setWindow(savedWindow.start, savedWindow.end, { animation: false });
     }
-    // vis-timeline may retain its own initial group-scroll offset after it lays
-    // out the first set of rows. Start the board on the first line, but only
-    // once: later rebuilds deliberately preserve the scheduler's scroll position.
-    if (visibleLines.length) requestAnimationFrame(() => Timeline._resetInitialVerticalScroll());
+    // Re-apply the remembered vertical offset AFTER _fitHeight() has set the
+    // new height — must be rAF-deferred because setOptions({height}) doesn't
+    // take effect (and thus doesn't clamp scrollTop to the new max) until
+    // vis-timeline's next internal redraw. Clamp against the now-current
+    // scroll range rather than trusting _vScrollTop blindly: fewer visible
+    // lines than last rebuild means a smaller max, and writing a stale
+    // larger value would just get silently clamped anyway, so clamp here
+    // for clarity. This replaces the old one-shot _resetInitialVerticalScroll
+    // guard — "start at the top" is just the initial _vScrollTop = 0, now
+    // honoured on every rebuild instead of only the first.
+    if (visibleLines.length) {
+      requestAnimationFrame(() => {
+        if (!Timeline._tl) return;
+        Timeline._setVScroll(Timeline._vScrollTop);
+      });
+    }
     PerfMonitor.record('Timeline.rebuild', performance.now() - _pmT0t);
   },
 
-  _resetInitialVerticalScroll(): void {
-    if (!Timeline._initialVerticalScrollPending || !Timeline._tl) return;
-    const tl = Timeline._tl as unknown as VisInternalTimeline;
-    if (!tl._setScrollTop) return;
-    tl._setScrollTop(0);
-    Timeline._initialVerticalScrollPending = false;
+  // Prefer vis-timeline's internal scroll API (typed at VisInternalTimeline,
+  // below — undocumented and upgrade-fragile, but the only way to read/write
+  // vertical position without depending on which DOM node vis-timeline
+  // currently uses for the vertical scroller). Falls back to a direct DOM
+  // query for whichever wrapper element vis-timeline happens to render
+  // (varies by verticalScroll mode) if the internal method isn't there.
+  // scrollToLine, rebuild(), and the marquee edge-scroll all route through
+  // these two so there is exactly one mechanism for "vertical position",
+  // not two that can silently disagree.
+  _setVScroll(px: number): void {
+    const tl = Timeline._tl as unknown as VisInternalTimeline | null;
+    if (tl?._setScrollTop) { tl._setScrollTop(px); return; }
+    const scrollEl = document.querySelector('.vis-vertical-scroll') ||
+                     document.querySelector('.vis-panel.vis-center .vis-content');
+    if (scrollEl) (scrollEl as HTMLElement).scrollTop = px;
+  },
+
+  _getVScroll(): number {
+    const tl = Timeline._tl as unknown as VisInternalTimeline | null;
+    if (tl?._getScrollTop) return tl._getScrollTop();
+    const scrollEl = document.querySelector('.vis-vertical-scroll') ||
+                     document.querySelector('.vis-panel.vis-center .vis-content');
+    return scrollEl ? (scrollEl as HTMLElement).scrollTop : 0;
   },
 
   _fitHeight(groupCount: number): void {
@@ -1205,20 +1249,29 @@ export const Timeline = {
     for (let i = 0; i < lineIdx && i < groups.length; i++) {
       targetY += groups[i].getBoundingClientRect().height;
     }
-    const scrollEl = document.querySelector('.vis-vertical-scroll') ||
-                     document.querySelector('.vis-panel.vis-center .vis-content');
-    if (scrollEl) scrollEl.scrollTop = targetY;
+    // Explicit navigation wins over whatever rebuild() would otherwise
+    // restore — set _vScrollTop directly (not just the DOM/internal write)
+    // so a rebuild triggered shortly after this (e.g. GanttFilter revealing
+    // a previously-hidden line) re-applies THIS position rather than
+    // whatever _getVScroll() happened to read before the reveal.
+    Timeline._vScrollTop = targetY;
+    Timeline._setVScroll(targetY);
     return true;
   },
 
   // Shared "pan to a day + scroll to a line row" navigation, used by
-  // Dashboard._gotoLine (heatmap cell clicks) and AlertsUIAdapter.focus's fallback
-  // for line/day-level alerts (overload, closed) that have no taskId to
-  // focus() on. Forces the Gantt to the Timeline sub-tab first — plain
+  // Dashboard._gotoLine (heatmap cell clicks) and AlertsUIAdapter.focus (B1 —
+  // now the universal line+day path for every alert, not just the taskId-less
+  // ones). Forces the Gantt to the Timeline sub-tab first — plain
   // App.goto('gantt') alone preserves whatever Gantt sub-tab was last
   // active, so without this the pan/scroll below can happen invisibly
   // behind a hidden #gantt-sub-timeline pane.
-  gotoLineDay(line: string, dateStr: string): void {
+  //
+  // `onWindowSet` (B1) fires once the day window is applied, before the
+  // scroll-to-line retry below — AlertsUIAdapter.focus uses it to layer
+  // task selection/Inspector on top without re-centering the window a
+  // second time.
+  gotoLineDay(line: string, dateStr: string, onWindowSet?: () => void): void {
     NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => {
       if (Timeline._tl) {
@@ -1230,7 +1283,23 @@ export const Timeline = {
           b.classList.toggle('active', b.dataset.view === 'day');
         });
       }
-      setTimeout(() => { Timeline.scrollToLine(line); }, 100);
+      onWindowSet?.();
+      // B2: scrollToLine can legitimately fail on the first frame(s) here —
+      // AlertsUIAdapter.focus's reveal (Store.setSelectedLines, just before
+      // this call) triggers a 'lines:selected' → Timeline.rebuild() chain
+      // whose group DOM isn't necessarily painted yet by the time we get
+      // here. Retry across a few animation frames rather than a single
+      // fire-and-forget timeout; bounded so a persistently-missing line
+      // (bad data, an unanticipated race) can't spin forever, and it stops
+      // the instant scrollToLine succeeds so it never fights a user's own
+      // scroll that happens afterward.
+      let attempts = 0;
+      const MAX_SCROLL_ATTEMPTS = 20; // a handful of rebuild/render cycles' worth
+      const tryScroll = () => {
+        if (Timeline.scrollToLine(line)) return;
+        if (++attempts < MAX_SCROLL_ATTEMPTS) requestAnimationFrame(tryScroll);
+      };
+      requestAnimationFrame(tryScroll);
     }, 250);
   }
 };
@@ -3769,6 +3838,12 @@ export const Hierarchy = {
   _open:      new Set<string>(),
   _lineItems: [] as HierarchyLineItem[],
   _vl:        null as VirtualList<HierarchyLineItem> | null,
+  // Last "identity" (plant + line-filter selection) _vl was populated for
+  // (Part A1/A2) — mirrors Dashboard._lsVLPlant: the instance persists
+  // across a plant switch or filter change (only destroyed on plant
+  // deselect), so without this the remembered scroll offset would be
+  // re-applied against an entirely different set of rows.
+  _vlIdentity: null as string | null,
   _wired:     false,
   _todayCache: null as { key: string; matrix: HierarchyUtilMatrix } | null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
 
@@ -3925,7 +4000,10 @@ export const Hierarchy = {
       });
     }
 
-    Hierarchy._vl.update(Hierarchy._lineItems);
+    const identityKey = `${Store.selectedPlant}|${visibleNames.join(',')}`;
+    const identityChanged = Hierarchy._vlIdentity !== identityKey;
+    Hierarchy._vlIdentity = identityKey;
+    Hierarchy._vl.update(Hierarchy._lineItems, identityChanged ? { anchor: 'top' } : undefined);
   }
 };
 
@@ -4431,6 +4509,11 @@ export const Dashboard = {
   _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
   _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
   _lsVL:         null as VirtualList<DashboardLineStatusRow> | null,
+  // Last plant _lsVL was populated for (Part A1/A2) — the instance is never
+  // destroyed on a plant switch (unlike AlertsUIAdapter._drawerVL, which
+  // destroys on an empty list), so without this its remembered scroll
+  // offset would carry over from a completely different plant's line list.
+  _lsVLPlant:    null as string | null,
 
   _latenessHorizon: 14,                  // days; toggled by 7/14/28 segment buttons
   _latenessDrillKey: null as string | null,     // 'LINE|YYYY-MM-DD' for the currently-drilled cell
@@ -5133,7 +5216,9 @@ export const Dashboard = {
         mountEl: el,
       });
     }
-    Dashboard._lsVL.update(rowData);
+    const identityChanged = Dashboard._lsVLPlant !== Store.selectedPlant;
+    Dashboard._lsVLPlant = Store.selectedPlant;
+    Dashboard._lsVL.update(rowData, identityChanged ? { anchor: 'top' } : undefined);
   },
 
   _renderAlertSummary(): void {
@@ -6165,17 +6250,20 @@ export const Interaction = {
           scrolled = true;
         }
 
-        // Vertical scroll — read props.scrollTop before AND after the call so
-        // we accumulate the actual clamped delta without any DOM/BCR timing issues.
-        const tlInternal = tl as unknown as VisInternalTimeline | null;
+        // Vertical scroll — read scrollTop before AND after the call so we
+        // accumulate the actual clamped delta without any DOM/BCR timing
+        // issues. Routed through Timeline._setVScroll/_getVScroll (A3) —
+        // same unified accessor scrollToLine and rebuild() use — instead of
+        // reaching into the internal API directly.
         let vfraction = 0;
         if (my < cr.top + ZONE)         vfraction = -((cr.top + ZONE - my) / ZONE);
         else if (my > cr.bottom - ZONE) vfraction =  (my - (cr.bottom - ZONE)) / ZONE;
-        if (vfraction !== 0 && tlInternal?._setScrollTop) {
-          const before = tlInternal._getScrollTop ? tlInternal._getScrollTop() : 0;
-          tlInternal._setScrollTop(before - vfraction * MAX_VPXL);
-          const after = tlInternal._getScrollTop ? tlInternal._getScrollTop() : before;
+        if (vfraction !== 0 && tl) {
+          const before = Timeline._getVScroll();
+          Timeline._setVScroll(before - vfraction * MAX_VPXL);
+          const after = Timeline._getVScroll();
           s.scrollDelta = (s.scrollDelta ?? 0) + (after - before);
+          Timeline._vScrollTop = after;
           scrolled = true;
         }
 
@@ -9114,6 +9202,11 @@ const VL_ALERT_ROW_H = 72;
    ========================================================================== */
 export const AlertsUIAdapter = {
   _drawerVL: null as VirtualList<NimbusAlert> | null,
+  // Last plant _drawerVL was populated for (Part A1/A2) — destroyed on an
+  // empty alert list (see renderDrawer below), but a plant switch that
+  // still leaves alerts non-empty wouldn't otherwise reset the remembered
+  // scroll offset against the new plant's (differently-ordered) alert list.
+  _drawerVLPlant: null as string | null,
   _handleAction(e: MouseEvent): void {
     const target = e.target as Element | null;
     const trigger = target?.closest?.<HTMLElement>('[data-alert-action]') ?? null;
@@ -9143,37 +9236,42 @@ export const AlertsUIAdapter = {
   },
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
+  //
+  // B1: line+day navigation now happens UNCONDITIONALLY — every alert carries
+  // required `line`/`time` fields (nimbus-compute-core.d.ts), so it's always
+  // resolvable. Previously a taskId alert took a different path entirely
+  // (vis-timeline's native focus(), which centers the item's own extent
+  // rather than the alert's day) and produced a visibly different landing
+  // spot than the taskless path. Task selection + Inspector now layer on
+  // top of the same navigation instead of replacing it.
   focus(alertId: string) {
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return;
+    if (!a.line || !a.time) return; // defensive only — contract guarantees both
 
-    if (!a.taskId) {
-      // Line/day-level alerts (overload, closed) carry no taskId — reuse the
-      // dashboard heatmap's line+day navigation instead of silently no-oping.
-      // Timeline.gotoLineDay already forces the Timeline sub-tab visible.
-      if (a.line && a.time) Timeline.gotoLineDay(a.line, Util.dayKey(a.time));
-      return;
+    // B2: reveal a line hidden by an active Gantt line filter before
+    // navigating — ADD to the existing selection (never clear/replace) so
+    // the rest of the planner's filter survives. Silent per approved
+    // decision (no toast). Store.setSelectedLines no-ops if the line is
+    // already selected, so this is safe to call unconditionally when the
+    // filter is active.
+    const sel = Store.selectedLines;
+    if (sel.size > 0 && !sel.has(a.line)) {
+      Store.setSelectedLines([...sel, a.line], 'alert-focus');
     }
 
-    NIMBUS!.App!.gotoGanttTimeline!();
-    setTimeout(() => {
-      const t = Store.tasks[a.taskId!];
+    // gotoLineDay forces the Timeline sub-tab visible, sets the 3-day window
+    // for the alert's day, and (bounded-retries until) scrolls to the line's
+    // row — see gotoLineDay for why the reveal above needs that retry.
+    // Task selection/Inspector piggyback on its "window is set" callback
+    // rather than re-centering the window a second time.
+    Timeline.gotoLineDay(a.line, Util.dayKey(a.time), () => {
+      if (!a.taskId) return;
+      const t = Store.tasks[a.taskId];
       if (!t || !Timeline._tl) return;
-      // 3-day window centered on the task's start — matches the Hour/Day/Week
-      // toolbar's "day" mode (3 × 24h) so the segmented control stays honest.
-      if (t.start_date) {
-        const center = t.start_date.getTime();
-        const start = new Date(center - 1.5 * 24 * Config.MS_HOUR);
-        const end   = new Date(center + 1.5 * 24 * Config.MS_HOUR);
-        Timeline._syncViewWindow(start.getTime(), end.getTime());
-        Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
-      }
       Timeline._tl.setSelection([String(a.taskId)]);
       Inspector.show(t);
-      document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach((b) => {
-        b.classList.toggle('active', b.dataset.view === 'day');
-      });
-    }, 250);
+    });
   },
 
   // Open a categorized, scrollable cell-briefing modal listing the alerts for
@@ -9468,7 +9566,9 @@ export const AlertsUIAdapter = {
         mountEl: body,
       });
     }
-    AlertsUIAdapter._drawerVL.update(alerts);
+    const identityChanged = AlertsUIAdapter._drawerVLPlant !== Store.selectedPlant;
+    AlertsUIAdapter._drawerVLPlant = Store.selectedPlant;
+    AlertsUIAdapter._drawerVL.update(alerts, identityChanged ? { anchor: 'top' } : undefined);
 
     if (hiddenCount > 0) {
       const hzDays = Math.max(1, Math.round((hz as number) / 1440));

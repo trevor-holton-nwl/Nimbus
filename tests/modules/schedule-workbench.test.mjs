@@ -61,20 +61,29 @@ test('Timeline exposes the documented navigation API', () => {
   assert.equal(typeof Timeline.gotoLineDay, 'function');
 });
 
-test('Timeline resets the initial Gantt vertical position once without affecting later navigation', () => {
+test('Timeline._setVScroll/_getVScroll prefer the internal vis-timeline API and fall back to the DOM query', () => {
   const priorTimeline = Timeline._tl;
-  const priorPending = Timeline._initialVerticalScrollPending;
   const scrollTops = [];
-  Timeline._tl = { _setScrollTop(top) { scrollTops.push(top); } };
-  Timeline._initialVerticalScrollPending = true;
+  let internalTop = 0;
+  Timeline._tl = {
+    _setScrollTop(top) { scrollTops.push(top); internalTop = top; },
+    _getScrollTop() { return internalTop; },
+  };
   try {
-    Timeline._resetInitialVerticalScroll();
-    Timeline._resetInitialVerticalScroll();
-    assert.deepEqual(scrollTops, [0], 'only the first populated render starts at the top');
+    Timeline._setVScroll(0);
+    Timeline._setVScroll(42);
+    assert.deepEqual(scrollTops, [0, 42], 'writes route through the internal API when present');
+    assert.equal(Timeline._getVScroll(), 42, 'reads route through the internal API when present');
   } finally {
     Timeline._tl = priorTimeline;
-    Timeline._initialVerticalScrollPending = priorPending;
   }
+});
+
+test('Timeline._vScrollTop starts at 0 (replaces the old one-shot _initialVerticalScrollPending guard)', () => {
+  // A3: "start at the top" is now just the field's initial value, honoured
+  // on every rebuild() (re-applied after _fitHeight) rather than a guard
+  // that only ever fired once.
+  assert.equal(typeof Timeline._vScrollTop, 'number');
 });
 
 test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {

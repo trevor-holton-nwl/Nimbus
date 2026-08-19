@@ -853,6 +853,17 @@ export class VirtualList<T = unknown> {
   _offsets: Float64Array | null;
   _inner: HTMLDivElement;
   _onScroll: () => void;
+  // Remembered scroll offset, independent of whatever the browser clamps
+  // scrollTop to when the list shrinks. _onScroll only updates this on a
+  // genuine user-driven scroll (guarded by _applying below); update() then
+  // re-applies it after painting instead of trusting the post-clamp value.
+  _desiredTop: number;
+  _applying: boolean;
+  // Set when update() runs against a zero-height container (tab panel is
+  // display:none). The anchor restore is deferred — computing it against
+  // the `|| 600` fallback viewport would land at a bogus position — until
+  // the next update() or an explicit restoreTop() call finds real layout.
+  _pendingAnchor: boolean;
 
   constructor(scrollEl: HTMLElement, { rowH, getRowH, renderFn, mountEl, buffer = 5 }: VirtualListOptions<T>) {
     this._scroll   = scrollEl;
@@ -865,12 +876,22 @@ export class VirtualList<T = unknown> {
     this._offsets  = null;
     this._inner    = document.createElement('div');
     this._mount.appendChild(this._inner);
-    this._onScroll = () => this._paint();
+    this._desiredTop    = 0;
+    this._applying      = false;
+    this._pendingAnchor = false;
+    this._onScroll = () => {
+      // A programmatic write (from update()'s re-anchor, or scrollToTop/
+      // restoreTop) also fires 'scroll' — ignore those so they don't
+      // clobber the just-set _desiredTop with the same value re-read.
+      if (!this._applying) this._desiredTop = this._scroll.scrollTop;
+      this._paint();
+    };
     scrollEl.addEventListener('scroll', this._onScroll, { passive: true });
   }
 
-  update(items: T[]): void {
+  update(items: T[], opts?: { anchor?: 'preserve' | 'top' }): void {
     this._items = items;
+    if (opts && opts.anchor === 'top') this._desiredTop = 0;
     if (this._getRowH) {
       const n = items.length;
       this._offsets = new Float64Array(n + 1);
@@ -878,6 +899,65 @@ export class VirtualList<T = unknown> {
         this._offsets[i + 1] = this._offsets[i] + this._getRowH(items[i]);
       }
     }
+    this._paint();
+
+    // Zero-height guard: painted while the tab panel is display:none.
+    // clientHeight would read 0, so the max-scroll clamp below would be
+    // computed against the `|| 600` fallback in _paint() and land wrong.
+    // Defer the anchor write until a real update()/restoreTop() sees layout.
+    if (this._scroll.clientHeight === 0) {
+      this._pendingAnchor = true;
+      return;
+    }
+    this._pendingAnchor = false;
+
+    // Re-anchor to the remembered offset, clamped to the list's new max
+    // scroll. This is what stops a shrinking list from sticking to the
+    // browser's post-clamp scrollTop (which is the bottom).
+    const maxTop = Math.max(0, this._totalH() - (this._scroll.clientHeight || 600));
+    const clamped = Math.max(0, Math.min(this._desiredTop, maxTop));
+    this._desiredTop = clamped;
+    if (this._scroll.scrollTop !== clamped) {
+      this._applying = true;
+      this._scroll.scrollTop = clamped;
+      this._applying = false;
+      this._paint();
+    }
+  }
+
+  // Force the list to the top — used on first population or when the list's
+  // identity changes (different plant, different filter) so a stale offset
+  // from the previous content isn't re-applied.
+  scrollToTop(): void {
+    this._desiredTop = 0;
+    this._pendingAnchor = false;
+    this._applying = true;
+    this._scroll.scrollTop = 0;
+    this._applying = false;
+    this._paint();
+  }
+
+  // Session-scoped scroll memory (A2): callers capture/replay _desiredTop
+  // around a tab switch rather than reading/writing this._scroll directly,
+  // so the list's own window repaints to match instead of just the raw pixel.
+  saveTop(): number {
+    return this._desiredTop;
+  }
+
+  restoreTop(top: number): void {
+    this._desiredTop = top;
+    if (this._scroll.clientHeight === 0) {
+      // Still hidden — defer, same as the update() guard above.
+      this._pendingAnchor = true;
+      return;
+    }
+    this._pendingAnchor = false;
+    const maxTop = Math.max(0, this._totalH() - (this._scroll.clientHeight || 600));
+    const clamped = Math.max(0, Math.min(top, maxTop));
+    this._desiredTop = clamped;
+    this._applying = true;
+    this._scroll.scrollTop = clamped;
+    this._applying = false;
     this._paint();
   }
 

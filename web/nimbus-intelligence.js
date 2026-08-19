@@ -557,8 +557,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
             if (!err) { Toast.show(t('toast.no_active_conflicts'), 'info', 1800); return; }
-            NIMBUS.App.gotoGanttTimeline();
-            setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
+            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
+            // this also works for taskId-less alerts (every overload/closed/calendar
+            // alert) instead of silently no-oping on them — see B3.
+            NIMBUS.AlertsUIAdapter.focus(err.id);
           }
         },
         {
@@ -732,8 +734,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
             if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            NIMBUS.App.gotoGanttTimeline();
-            setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
+            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
+            // this also works for taskId-less alerts (every overload/closed/calendar
+            // alert) instead of silently no-oping on them — see B3.
+            NIMBUS.AlertsUIAdapter.focus(err.id);
           }
         },
       ];
@@ -1672,7 +1676,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
                 <span class="ni-conf-msg">${_esc(a.msg)}</span>
                 <span class="ni-conf-date">${a.time ? a.time.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</span>
-                ${a.taskId ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
+                ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
               </div>`).join('')}
           </div>
         </details>` : '';

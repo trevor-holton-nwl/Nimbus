@@ -59,6 +59,7 @@
 // above (the same "no further change needed" idiom Phase 3/4 used for every
 // other now-same-file forward reference).
 import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
+import type { VirtualList } from './application-foundation.mjs';
 import { Store } from './schedule-state.mjs';
 import { Alerts, Engine } from './schedule-services.mjs';
 import { Persistence, Session } from './schedule-data.mjs';
@@ -1786,6 +1787,16 @@ const App = {
   // DOMContentLoaded gate both call it. Never set from within this file.
   _bootMain: undefined as (() => void) | undefined,
 
+  // Session-scoped scroll-position memory (Part A2). Keyed by the same
+  // tab/sub identity goto/gotoGanttSub/gotoMasterSub/gotoLaborSub already
+  // compute (e.g. 'home', 'gantt:timeline', 'masterdata:plant',
+  // 'labor:capacity'). Deliberately a plain in-memory Map, not Store.pref
+  // or localStorage — mirrors Timeline._viewWindow's existing idiom of a
+  // module-level variable for session-only UI state that shouldn't survive
+  // a reload. Cleared on plant switch (see Store.subscribe below) since a
+  // remembered offset means nothing once the content is entirely different.
+  _scrollMemory: new Map<string, number>(),
+
   // Register any object with pause()/resume() to be auto-paused on tab hide.
   registerPausable(obj: { pause?(): void; resume?(): void } | null | undefined): void {
     if (obj && (typeof obj.pause === 'function' || typeof obj.resume === 'function')) {
@@ -2181,6 +2192,17 @@ const App = {
       }
     }, 'Persistence.plantLoad');
 
+    /* Part A2: a remembered scroll offset means nothing once the plant
+       switch has replaced the content underneath it — clear so every pane
+       falls back to "scroll to top" on next visit, rather than restoring a
+       stale position from the previous plant's (likely different-length)
+       data. Fires for every 'plant:selected', including the initial boot
+       selection and 'restore' — the memory is empty at boot either way, and
+       clearing is idempotent. */
+    Store.subscribe(evt => {
+      if (evt.type === 'plant:selected') App._scrollMemory.clear();
+    }, 'App.scrollMemoryReset');
+
     /* Keep alerts + dashboard in sync */
     Store.subscribe(evt => {
       // Any change touching schedule/fixed/calendar → recompute alerts.
@@ -2289,6 +2311,81 @@ const App = {
     return order.find(t => Session.canAccessTab(t)) ?? 'home';
   },
 
+  // Current tab/sub identity as a scroll-memory key. Mirrors the shape each
+  // goto*Sub already tracks in its own _currentTab/_ganttSub/etc fields, so
+  // this stays correct even if a caller saves/restores at a point where the
+  // sub hasn't been reassigned yet (compute it explicitly, don't cache it).
+  _scrollKeyFor(tab: TopLevelTab | null): string | null {
+    if (!tab) return null;
+    if (tab === 'gantt')      return `gantt:${App._ganttSub}`;
+    if (tab === 'masterdata') return `masterdata:${App._currentMasterSub}`;
+    if (tab === 'labor')      return `labor:${App._laborSub}`;
+    return tab;
+  },
+
+  // The concrete scroll container(s) for a given pane key, plus the
+  // VirtualList that owns one of them when applicable. Only panes with an
+  // identifiable, persistent scroll container are listed — ag-grid-backed
+  // panes (Orders sub-tab, Labor grids, Master Data material grids) manage
+  // their own internal viewport and are left alone; nothing here disturbs
+  // them. `vl` is a getter (not the instance itself) because the VirtualList
+  // may not exist yet the first time a key is saved/restored.
+  _paneScrollTargets(key: string): Array<{ el: HTMLElement; vl?: () => VirtualList<any> | null }> {
+    switch (key) {
+      case 'home': {
+        const out: Array<{ el: HTMLElement; vl?: () => VirtualList<any> | null }> = [];
+        const page = document.querySelector<HTMLElement>('.home-scroll');
+        if (page) out.push({ el: page });
+        const list = document.getElementById('line-status-panel');
+        if (list) out.push({ el: list, vl: () => Dashboard._lsVL });
+        return out;
+      }
+      case 'gantt:timeline': {
+        // The Gantt's own horizontal/vertical timeline scroll is handled
+        // separately by Timeline._vScrollTop (Part A3) — this is only the
+        // sidebar line list next to it.
+        const el = document.getElementById('hierarchy');
+        return el ? [{ el, vl: () => Hierarchy._vl }] : [];
+      }
+      case 'admin': {
+        const el = document.querySelector<HTMLElement>('.admin-scroll');
+        return el ? [{ el }] : [];
+      }
+      case 'masterdata:plant': {
+        const el = document.querySelector<HTMLElement>('#md-master-plant-pane .cal-scroll');
+        return el ? [{ el }] : [];
+      }
+      default:
+        return [];
+    }
+  },
+
+  // Save the outgoing pane's scroll offset(s) before a tab/sub switch.
+  _saveScroll(key: string | null): void {
+    if (!key) return;
+    App._paneScrollTargets(key).forEach((t, i) => {
+      const vl = t.vl ? t.vl() : null;
+      const top = vl ? vl.saveTop() : t.el.scrollTop;
+      App._scrollMemory.set(`${key}#${i}`, top);
+    });
+  },
+
+  // Restore (or default to top) the incoming pane's scroll offset(s). Routed
+  // through restoreTop()/scrollToTop() for VirtualList-owned targets so the
+  // list repaints its visible window to match, not just the raw pixel.
+  _restoreScroll(key: string | null): void {
+    if (!key) return;
+    App._paneScrollTargets(key).forEach((t, i) => {
+      const vl = t.vl ? t.vl() : null;
+      const remembered = App._scrollMemory.get(`${key}#${i}`);
+      if (vl) {
+        if (remembered !== undefined) vl.restoreTop(remembered); else vl.scrollToTop();
+      } else {
+        t.el.scrollTop = remembered !== undefined ? remembered : 0;
+      }
+    });
+  },
+
   goto(tab: TopLevelTab | 'table'): void {
     // Per-role page access (Security > Roles "Page Access" toggles) — blocks
     // the tab button, the Log button's click handler, and the Ctrl+Alt+L
@@ -2313,7 +2410,13 @@ const App = {
     if (App._currentTab === 'admin' && tab !== 'admin') {
       try { AdminCockpit._stopHealthPolling(); } catch {}
     }
-    if (App._currentTab && App._currentTab !== tab) App._prevTab = App._currentTab;
+    // Save the outgoing pane's scroll offset before its content is torn down.
+    // Only when actually changing tabs — re-entering the same tab (e.g. the
+    // 'table' redirect above going gantt -> gantt) has no "outgoing" pane.
+    if (App._currentTab && App._currentTab !== tab) {
+      App._saveScroll(App._scrollKeyFor(App._currentTab));
+      App._prevTab = App._currentTab;
+    }
     App._currentTab = tab;
     App._updateSectionLabel(tab);
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
@@ -2324,7 +2427,14 @@ const App = {
     if (tab === 'gantt') {
       App.gotoGanttSub(App._ganttSub || 'timeline');
     } else if (tab === 'home') {
-      setTimeout(() => Dashboard.render(), 30);
+      setTimeout(() => {
+        Dashboard.render();
+        // rAF, not inline: the restore must run after the browser has laid
+        // out whatever Dashboard.render() just painted, or the max-scroll
+        // clamp in restoreTop()/scrollToTop() is computed against stale
+        // (often zero) scrollHeight.
+        requestAnimationFrame(() => App._restoreScroll('home'));
+      }, 30);
     } else if (tab === 'masterdata') {
       // Delegating instead of re-deciding: gotoMasterSub owns the whole
       // sub-pane registry (visibility + render dispatch), so a new sub-tab
@@ -2333,7 +2443,10 @@ const App = {
       // (set above), so the render timing is unchanged.
       App.gotoMasterSub(App._currentMasterSub || 'lines');
     } else if (tab === 'admin') {
-      setTimeout(() => AdminCockpit.render(), 30);
+      setTimeout(() => {
+        AdminCockpit.render();
+        requestAnimationFrame(() => App._restoreScroll('admin'));
+      }, 30);
     } else if (tab === 'labor') {
       setTimeout(() => App.gotoLaborSub(App._laborSub || 'aggregate'), 30);
     }
@@ -2341,6 +2454,12 @@ const App = {
 
   gotoGanttSub(sub: GanttSubTab): void {
     if (!['timeline', 'orders'].includes(sub)) return;
+    // Only a genuine within-tab sub switch (not the initial gantt-tab entry,
+    // where App._ganttSub already equals `sub` and there's no outgoing pane)
+    // has anything worth saving.
+    if (App._currentTab === 'gantt' && App._ganttSub !== sub) {
+      App._saveScroll(App._scrollKeyFor('gantt'));
+    }
     App._ganttSub = sub;
     document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(b => {
       b.classList.toggle('active', b.dataset.ganttSub === sub);
@@ -2355,13 +2474,17 @@ const App = {
       if (el) el.style.display = show ? '' : 'none';
     });
     if (sub === 'orders') {
-      setTimeout(() => { if (Table._api) Table._api.sizeColumnsToFit(); }, 30);
+      setTimeout(() => {
+        if (Table._api) Table._api.sizeColumnsToFit();
+        requestAnimationFrame(() => App._restoreScroll('gantt:orders'));
+      }, 30);
     } else {
       setTimeout(() => {
         Timeline.redraw(); Timeline.rebuild(); Hierarchy.render();
         GanttFilter._apply!();
         TimelineNav.render();
         if (DependencyOverlay._enabled) DependencyOverlay.render();
+        requestAnimationFrame(() => App._restoreScroll('gantt:timeline'));
       }, 30);
     }
   },
@@ -2418,6 +2541,12 @@ const App = {
   gotoLaborSub(sub: LaborSubTab): void {
     const valid: LaborSubTab[] = ['aggregate','line-plan','capacity','exceptions','inputs'];
     if (!valid.includes(sub)) return;
+    // Same "genuine switch only" guard as gotoGanttSub — App._laborSub
+    // already equals `sub` on plain tab entry, so this only fires when the
+    // user actually clicks a different labor sub-tab while already there.
+    if (App._currentTab === 'labor' && App._laborSub !== sub) {
+      App._saveScroll(App._scrollKeyFor('labor'));
+    }
     App._laborSub = sub;
     document.querySelectorAll<HTMLElement>('.labor-toolbar .seg-btn[data-labor-sub]').forEach(b => {
       b.classList.toggle('active', b.dataset.laborSub === sub);
@@ -2428,7 +2557,10 @@ const App = {
     });
     if (App._currentTab === 'labor') {
       const plant = Store.selectedPlant;
-      if (plant) setTimeout(() => LaborPlanning.render(), 30);
+      if (plant) setTimeout(() => {
+        LaborPlanning.render();
+        requestAnimationFrame(() => App._restoreScroll(`labor:${sub}`));
+      }, 30);
     }
   },
 
@@ -2447,6 +2579,10 @@ const App = {
   gotoMasterSub(sub: MasterSubTab): void {
     const entry = App._MASTER_SUBS.find(e => e.sub === sub);
     if (!entry) return;
+    // Same "genuine switch only" guard as gotoGanttSub/gotoLaborSub.
+    if (App._currentTab === 'masterdata' && App._currentMasterSub !== sub) {
+      App._saveScroll(App._scrollKeyFor('masterdata'));
+    }
     // Collapse line accordions when switching away from the lines sub-tab
     if (App._currentMasterSub === 'lines' && sub !== 'lines') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
@@ -2462,7 +2598,10 @@ const App = {
     });
     // Only trigger render when the masterdata tab is currently visible
     if (App._currentTab === 'masterdata') {
-      setTimeout(() => entry.render(), 30);
+      setTimeout(() => {
+        entry.render();
+        requestAnimationFrame(() => App._restoreScroll(`masterdata:${sub}`));
+      }, 30);
     }
   },
 
