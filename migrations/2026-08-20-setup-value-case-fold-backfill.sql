@@ -102,9 +102,9 @@ BEGIN;
 WITH folded AS (
     SELECT
         plant, machine, signature_version, from_key, to_key, updated_at,
-        COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                     FROM jsonb_array_elements(from_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb) AS folded_from_key,
-        COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                     FROM jsonb_array_elements(to_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb) AS folded_to_key
     FROM setup_matrix
 ),
@@ -135,9 +135,9 @@ SELECT 'setup_matrix', 'setup_value_case_fold_backfill',
 FROM deleted_setup_matrix;
 
 UPDATE setup_matrix
-   SET from_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+   SET from_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                FROM jsonb_array_elements(from_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb),
-       to_key   = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+       to_key   = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                FROM jsonb_array_elements(to_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb);
 
 -- ----------------------------------------------------------------------------
@@ -149,9 +149,9 @@ UPDATE setup_matrix
 -- ----------------------------------------------------------------------------
 WITH updated_machine_setup_state AS (
     UPDATE machine_setup_state
-       SET state_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+       SET state_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                     FROM jsonb_array_elements(state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb)
-     WHERE state_key <> COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+     WHERE state_key <> COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                     FROM jsonb_array_elements(state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb)
     RETURNING 1
 )
@@ -172,9 +172,9 @@ FROM updated_machine_setup_state;
 -- ----------------------------------------------------------------------------
 WITH folded AS (
     SELECT id, plant, machine, signature_version, predecessor_order_id, successor_order_id, updated_at,
-           COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+           COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                        FROM jsonb_array_elements(predecessor_state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb) AS folded_pred,
-           COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+           COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                        FROM jsonb_array_elements(successor_state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb) AS folded_succ
       FROM setup_occurrence_override
      WHERE status = 'active'
@@ -201,9 +201,9 @@ SELECT 'setup_occurrence_override', 'setup_value_case_fold_backfill',
 FROM deleted_setup_occurrence_override;
 
 UPDATE setup_occurrence_override
-   SET predecessor_state_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+   SET predecessor_state_key = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                             FROM jsonb_array_elements(predecessor_state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb),
-       successor_state_key   = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', upper(e ->> 'value')) ORDER BY ord)
+       successor_state_key   = COALESCE((SELECT jsonb_agg(jsonb_build_object('fieldKey', e ->> 'fieldKey', 'value', CASE WHEN lower(e ->> 'value') IN ('true', 'false') THEN lower(e ->> 'value') ELSE upper(e ->> 'value') END) ORDER BY ord)
                                             FROM jsonb_array_elements(successor_state_key) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb);
 
 COMMIT;
