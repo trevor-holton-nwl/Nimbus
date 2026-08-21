@@ -2083,6 +2083,60 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
   }
 });
 
+test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so an inactive plant\'s Timeline shows no setup bars after a changeover run', () => {
+  // Timeline draws setup bars/diagnostics from deriveSetupObservation(
+  // Store.setupSnapshot, ...) (schedule-workbench.mts's Timeline.
+  // _setupObservation) — a path entirely independent of runAndApply's
+  // internal effectiveSetupSnapshot. This pins two things at once: (1)
+  // Store.setupSnapshot is untouched (still exactly what it was before —
+  // here, null) by a 'changeover' run that used the synthetic snapshot
+  // internally, and (2) feeding that untouched value through
+  // deriveSetupObservation (exactly what Timeline does) produces no
+  // intervals and no 'setup-uncovered' diagnostics, i.e. no bars, for a
+  // plant that never configured setup at all.
+  const plant = 'B3A-NOBAR-PLANT';
+  const line = 'B3A-NOBAR-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  Store.setTasks([
+    { id: 'nobar-red', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'RED',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-03T12:00:00') },
+    { id: 'nobar-blue', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'BLUE',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-03T13:00:00') },
+  ], 'unit-test');
+
+  try {
+    Engine.runAndApply('changeover', {
+      plant, respectFixed: true, respectCalendar: false,
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    });
+
+    assert.equal(Store.setupSnapshot, null,
+      'the synthetic snapshot built inside runAndApply must stay a local value, never assigned onto Store.setupSnapshot');
+
+    const observation = deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, undefined, {
+      calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+      masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+    });
+    assert.equal(observation.intervals.length, 0, 'no setup bars are drawn for a plant with no setup definition at all');
+    assert.equal(observation.diagnostics.filter(d => d.type === 'setup-uncovered').length, 0,
+      'no setup-uncovered "!" markers are drawn either');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
 // manual commit path. manualSchedulePatchFor no longer branches on
