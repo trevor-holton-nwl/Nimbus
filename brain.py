@@ -2595,7 +2595,7 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
     _set_admin_log_details(request, plant=plant, machine=machine, row_count=len(rows) if isinstance(rows, list) else 0)
     try:
         if machine:
-            result = setup_data.upsert_line_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
+            result = setup_data.upsert_machine_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
         else:
             result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor)
     except ValueError as exc:
@@ -2623,7 +2623,7 @@ def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(def
                            row_count=len(rows) if isinstance(rows, list) else 0)
     try:
         if machine:
-            result = setup_data.delete_line_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
+            result = setup_data.delete_machine_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
         else:
             result = setup_data.delete_plant_matrix_rows(plant, rows, body.get("signature_version"), actor)
     except ValueError as exc:
@@ -2640,7 +2640,7 @@ def save_setup_line_state(plant: str, machine: str, request: Request, body: dict
     _setup_plant_guard(plant, allowed_plants)
     _set_admin_log_details(request, plant=plant, machine=machine)
     try:
-        result = setup_data.set_line_state(
+        result = setup_data.set_machine_state(
             plant, machine, body.get("values"), body.get("signature_version"),
             _setup_observed_at(body.get("observed_at")), body.get("source"), body.get("reason"), actor,
             body.get("physical_mold_id"),

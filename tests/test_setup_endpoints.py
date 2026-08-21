@@ -41,7 +41,7 @@ class _SetupService:
         self._check_rows(rows, signature_version)
         return {"plant": plant, "machine": "", "signature_version": self.version, "rows": len(rows)}
 
-    def upsert_line_matrix_rows(self, plant, machine, rows, signature_version, actor):
+    def upsert_machine_matrix_rows(self, plant, machine, rows, signature_version, actor):
         if machine != "LINE-1":
             raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_rows(rows, signature_version)
@@ -51,13 +51,13 @@ class _SetupService:
         self._check_rows(rows, signature_version)
         return {"plant": plant, "machine": "", "signature_version": self.version, "deleted": len(rows)}
 
-    def delete_line_matrix_rows(self, plant, machine, rows, signature_version, actor):
+    def delete_machine_matrix_rows(self, plant, machine, rows, signature_version, actor):
         if machine != "LINE-1":
             raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_rows(rows, signature_version)
         return {"plant": plant, "machine": machine, "signature_version": self.version, "deleted": len(rows)}
 
-    def set_line_state(self, plant, machine, values, signature_version, observed_at, source, reason, actor,
+    def set_machine_state(self, plant, machine, values, signature_version, observed_at, source, reason, actor,
                        physical_mold_id=None):
         if machine != "LINE-1":
             raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
@@ -174,7 +174,7 @@ def tc(monkeypatch):
     service = _SetupService()
     for name in (
         "get_setup_snapshot", "save_definition", "set_definition_active", "replace_plant_matrix",
-        "upsert_line_matrix_rows", "delete_plant_matrix_rows", "delete_line_matrix_rows", "set_line_state",
+        "upsert_machine_matrix_rows", "delete_plant_matrix_rows", "delete_machine_matrix_rows", "set_machine_state",
         "upsert_occurrence_override", "update_occurrence_override", "clear_occurrence_override",
     ):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)

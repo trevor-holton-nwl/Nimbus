@@ -121,15 +121,15 @@ def test_should_replace_derived_state_never_overwrites_newer_manual_or_actual_st
     captured = datetime(2026, 8, 13, 10, 0)
     newer_manual = {"observed_at": datetime(2026, 8, 13, 10, 1), "source": "manual"}
     older_actual = {"observed_at": datetime(2026, 8, 13, 9, 59), "source": "actual"}
-    assert not setup_data.should_replace_line_state(newer_manual, captured, "derived")
-    assert not setup_data.should_replace_line_state(older_actual, captured, "derived")
+    assert not setup_data.should_replace_machine_state(newer_manual, captured, "derived")
+    assert not setup_data.should_replace_machine_state(older_actual, captured, "derived")
 
 
 def test_manual_line_state_requires_a_nonblank_reason_before_database_access(monkeypatch):
     """An unauditable manual floor assertion must be rejected before it can be persisted."""
     monkeypatch.setattr(setup_data, "_pool", _FailPool())
     with pytest.raises(ValueError, match="reason"):
-        setup_data.set_line_state("5512", "LINE-1", {"colorWheel": "RED"}, 1,
+        setup_data.set_machine_state("5512", "LINE-1", {"colorWheel": "RED"}, 1,
                                   datetime(2026, 8, 13, 10), "manual", " ", "owner@example.com")
 
 
@@ -184,7 +184,7 @@ def test_public_line_matrix_write_rejects_line_outside_plant(monkeypatch):
     """Sparse line setup values cannot be written under a plant that does not own the line."""
     monkeypatch.setattr(setup_data, "_pool", _Pool(_MissingLineCursor()))
     with pytest.raises(ValueError, match="does not belong"):
-        setup_data.upsert_line_matrix_rows(
+        setup_data.upsert_machine_matrix_rows(
             "5512", "OTHER-PLANT-LINE", [], 1, "owner@example.com"
         )
 
@@ -347,7 +347,7 @@ def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(mo
     cursor = _PairsCursor()
     monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
     calls = []
-    monkeypatch.setattr(setup_data, "derive_line_state_before_replacement",
+    monkeypatch.setattr(setup_data, "derive_machine_state_before_replacement",
                         lambda plant, line, **kwargs: calls.append((plant, line, kwargs)) or {})
     setup_data.capture_setup_states_before_schedule_mutation(actor="system", reason="purge")
     assert [(plant, line) for plant, line, _kwargs in calls] == [("5512", "LINE-1"), ("5512", "LINE-2")]

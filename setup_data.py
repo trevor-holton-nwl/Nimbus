@@ -184,7 +184,7 @@ def last_completed_order(rows: list[dict], captured_at: datetime) -> dict | None
     return max(eligible, key=lambda row: row["completed_at"], default=None)
 
 
-def should_replace_line_state(existing: dict | None, observed_at: datetime, source: str) -> bool:
+def should_replace_machine_state(existing: dict | None, observed_at: datetime, source: str) -> bool:
     """Keep physical state monotonic in both observed time and source trust."""
     if source not in _STATE_SOURCES:
         raise ValueError(f"Unknown machine-state source: {source!r}")
@@ -242,7 +242,7 @@ def set_definition_active(plant: str, active: bool, actor: str, *, expected_sign
             "strict_blanks": definition["strict_blanks"], "active": active}
 
 
-def _assert_line_owned(cur, plant: str, machine: str) -> None:
+def _assert_machine_owned(cur, plant: str, machine: str) -> None:
     cur.execute(
         "SELECT 1 FROM machine WHERE plant = %s AND machine = %s LIMIT 1",
         (plant, machine),
@@ -330,12 +330,12 @@ def replace_plant_matrix(plant, rows, signature_version, actor) -> dict:
     return {"plant": plant, "machine": "", "signature_version": signature_version, "rows": len(normalized)}
 
 
-def upsert_line_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
+def upsert_machine_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
     plant = _required_text(plant, "Plant")
     machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
         _insert_matrix_rows(cur, plant, machine, signature_version, normalized, actor)
@@ -343,12 +343,12 @@ def upsert_line_matrix_rows(plant, machine, rows, signature_version, actor) -> d
     return {"plant": plant, "machine": machine, "signature_version": signature_version, "rows": len(normalized)}
 
 
-def delete_line_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
+def delete_machine_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
     plant = _required_text(plant, "Plant")
     machine = _required_text(machine, "Machine")
     _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
         deleted = 0
@@ -382,13 +382,13 @@ def delete_plant_matrix_rows(plant, rows, signature_version, actor) -> dict:
     return {"plant": plant, "machine": "", "signature_version": signature_version, "deleted": deleted}
 
 
-def _set_line_state_cur(cur, plant: str, machine: str, state_key: list[dict[str, str]], signature_version: int,
+def _set_machine_state_cur(cur, plant: str, machine: str, state_key: list[dict[str, str]], signature_version: int,
                         observed_at: datetime, source: str, reason: str | None, actor: str,
                         physical_mold_id: str | None = None) -> bool:
     cur.execute("SELECT observed_at, source FROM machine_setup_state WHERE plant = %s AND machine = %s FOR UPDATE",
                 (plant, machine))
     existing = cur.fetchone()
-    if existing and not should_replace_line_state({"observed_at": existing[0], "source": existing[1]}, observed_at, source):
+    if existing and not should_replace_machine_state({"observed_at": existing[0], "source": existing[1]}, observed_at, source):
         return False
     cur.execute(
         """INSERT INTO machine_setup_state
@@ -405,7 +405,7 @@ def _set_line_state_cur(cur, plant: str, machine: str, state_key: list[dict[str,
     return True
 
 
-def set_line_state(plant, machine, values, signature_version, observed_at, source, reason, actor,
+def set_machine_state(plant, machine, values, signature_version, observed_at, source, reason, actor,
                    physical_mold_id=None) -> dict:
     plant = _required_text(plant, "Plant")
     machine = _required_text(machine, "Machine")
@@ -417,12 +417,12 @@ def set_line_state(plant, machine, values, signature_version, observed_at, sourc
     if not isinstance(observed_at, datetime):
         raise ValueError("observed_at must be a datetime")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         state_key = canonical_state_key(definition["fields"], values)
         if definition["strict_blanks"] and any(not item["value"] for item in state_key):
             raise ValueError("Blank setup-state values are not allowed by this definition")
-        accepted = _set_line_state_cur(cur, plant, machine, state_key, signature_version, observed_at,
+        accepted = _set_machine_state_cur(cur, plant, machine, state_key, signature_version, observed_at,
                                        source, reason, actor, physical_mold_id)
         conn.commit()
     return {"plant": plant, "machine": machine, "accepted": accepted, "state_key": state_key,
@@ -447,14 +447,14 @@ def _plant_local_capture(cur, plant: str, captured_at: datetime | None) -> datet
         return captured_at.replace(tzinfo=None)
 
 
-def derive_line_state_before_replacement(plant, machine, *, captured_at: datetime | None = None,
+def derive_machine_state_before_replacement(plant, machine, *, captured_at: datetime | None = None,
                                          actor: str = "system", reason: str = "schedule replacement") -> dict:
     """Capture the last already-completed planned order before its source can disappear."""
     plant = _required_text(plant, "Plant")
     machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _definition(cur, plant, lock=True)
         if definition is None:
             conn.commit()
@@ -488,7 +488,7 @@ def derive_line_state_before_replacement(plant, machine, *, captured_at: datetim
         if definition["strict_blanks"] and any(not item["value"] for item in state_key):
             conn.commit()
             return {"plant": plant, "machine": machine, "accepted": False, "reason": "incomplete_state"}
-        accepted = _set_line_state_cur(
+        accepted = _set_machine_state_cur(
             cur, plant, machine, state_key, definition["signature_version"], row[5], "derived",
             f"Derived immediately before {reason} from planned order {row[0]}", actor,
         )
@@ -518,7 +518,7 @@ def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reas
                                    if timezone_name else datetime.now())
             except ZoneInfoNotFoundError:
                 captures[plant] = datetime.now()
-        results.append(derive_line_state_before_replacement(
+        results.append(derive_machine_state_before_replacement(
             plant, machine, captured_at=captures[plant], actor=actor, reason=reason
         ))
     return results
@@ -536,7 +536,7 @@ def upsert_occurrence_override(plant, machine, predecessor_order_id, successor_o
     predecessor_order_id = _optional_text(predecessor_order_id, "Predecessor order id")
     successor_order_id = _required_text(successor_order_id, "Successor order id")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         predecessor_key = canonical_state_key(definition["fields"], predecessor_values)
         successor_key = canonical_state_key(definition["fields"], successor_values)
@@ -578,7 +578,7 @@ def update_occurrence_override(plant, machine, override_id, standard_min, remain
     if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         cur.execute(
             """SELECT signature_version, status FROM setup_occurrence_override
@@ -613,7 +613,7 @@ def clear_occurrence_override(plant, machine, override_id, signature_version, ac
     if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, machine)
+        _assert_machine_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         cur.execute(
             """SELECT signature_version FROM setup_occurrence_override
