@@ -17,7 +17,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation } from '../../web/schedule-services.mjs';
+import {
+  Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation,
+  MIN_PRODUCTIVE_SEGMENT_MINUTES,
+} from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 import { Toast, Util, Config } from '../../web/application-foundation.mjs';
 
@@ -57,6 +60,27 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN', BASIC_FINISH_DATE: new Date('2026-08-17') }, 'OPEN'), null);
   Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: 0 }], lines: [] }, 'unit-test');
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN' }, 'OPEN'), null);
+});
+
+// ---------------------------------------------------------------------------
+// B3 (2026-08-21) — plant-configurable productive-segment floor.
+// ---------------------------------------------------------------------------
+
+test('Engine.minProductiveSegmentMinutesFor resolves the plant override and falls back to the default', () => {
+  Store.setMasterData({ plants: [{ plant: 'SEG', min_productive_segment_minutes: 15 }], lines: [] }, 'unit-test');
+  assert.equal(Engine.minProductiveSegmentMinutesFor('SEG'), 15,
+    'a plant-configured positive integer floor must be honored');
+
+  Store.setMasterData({ plants: [{ plant: 'SEG', min_productive_segment_minutes: null }], lines: [] }, 'unit-test');
+  assert.equal(Engine.minProductiveSegmentMinutesFor('SEG'), MIN_PRODUCTIVE_SEGMENT_MINUTES,
+    'a null override must fall back to the exported default');
+
+  Store.setMasterData({ plants: [{ plant: 'SEG', min_productive_segment_minutes: 0 }], lines: [] }, 'unit-test');
+  assert.equal(Engine.minProductiveSegmentMinutesFor('SEG'), MIN_PRODUCTIVE_SEGMENT_MINUTES,
+    'a non-positive override must fall back to the exported default, not disable the floor');
+
+  assert.equal(Engine.minProductiveSegmentMinutesFor('UNKNOWN'), MIN_PRODUCTIVE_SEGMENT_MINUTES,
+    'an absent plant row must fall back to the exported default');
 });
 
 // ---------------------------------------------------------------------------

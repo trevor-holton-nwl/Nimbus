@@ -184,6 +184,33 @@ test('placeWithSetup applies never, overlong_only, and partial_allowed without s
     'a complete under-30-minute order remains legal only when it is unsplit');
 });
 
+test('placeWithSetup respects a non-default configured productive-segment floor (B3)', () => {
+  // Two 20-minute windows: neither alone meets the hardcoded 30-minute
+  // default, but together (20+15) they satisfy a plant-configured 15-minute
+  // floor. This fails if minProductiveSegmentMinutes threading is incomplete
+  // and the request field is silently ignored in favor of the module default.
+  const windows = [
+    interval('2026-08-12T08:00', '2026-08-12T08:20'),
+    interval('2026-08-13T08:00', '2026-08-13T08:20'),
+  ];
+  const base = {
+    earliestStart: at('2026-08-12T08:00'),
+    runtimeMinutes: 35,
+    setup: resolvedSetup(0),
+    policy: 'partial_allowed',
+    freeIntervals: windows,
+  };
+
+  const underDefaultFloor = SetupScheduler.placeWithSetup(base);
+  assert.equal(underDefaultFloor.kind, 'infeasible',
+    'neither 20-minute window alone meets the hardcoded 30-minute default floor');
+
+  const withConfiguredFloor = SetupScheduler.placeWithSetup({ ...base, minProductiveSegmentMinutes: 15 });
+  assert.equal(withConfiguredFloor.kind, 'placed');
+  assert.deepEqual(segmentMinutes(withConfiguredFloor), [20, 15],
+    'a plant-configured 15-minute floor allows a productive piece the default 30-minute floor would reject');
+});
+
 test('Min Changeover stays detached and reports its due-safe setup savings decision', () => {
   const red = scheduledTask('red-due', 1, 'RED', '2026-08-03T09:30:00');
   const blue = scheduledTask('blue-future', 1, 'BLUE', '2026-08-03T13:00:00');
