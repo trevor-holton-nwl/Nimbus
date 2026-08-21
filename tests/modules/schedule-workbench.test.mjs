@@ -276,6 +276,77 @@ test('Timeline gives each setup diagnostic type a distinct marker label and clas
   assert.ok(labels.every(Boolean), 'every marker must carry a non-empty aria-label');
 });
 
+// ---------------------------------------------------------------------------
+// Workstream B — Task 6 (B3b, 2026-08-21): every setup-missing test above
+// feeds Timeline._setupItemsForObservation a HAND-BUILT diagnostics array —
+// a synthetic assertion that would pass even if deriveSetupObservation itself
+// were broken. This test instead drives the full, real presentation pipeline
+// end to end: a genuine Store.setupSnapshot (active, with a matrix that
+// covers one transition but genuinely lacks a row for another — the same
+// non-synthetic coverage-gap shape as the Task 6 schedule-services.test.mjs
+// fixture, kept independent of it here since this file's tests must not
+// depend on another test file's run) feeding the REAL
+// Timeline._setupObservation -> Timeline._setupItemsForObservation chain, to
+// prove the presentation layer still actually consumes a genuine
+// deriveSetupObservation() diagnostic after Task 5's rewrite -- not just that
+// a hand-built diagnostic object renders correctly in isolation.
+// ---------------------------------------------------------------------------
+
+test('Task 6 (B3b): Timeline renders a real setup-missing marker end-to-end from a genuine Store.setupSnapshot coverage gap (not a hand-built diagnostics fixture)', () => {
+  const plant = 'B3B-TIMELINE-PLANT';
+  const line = 'B3B-TIMELINE-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    // Covers GREEN -> BLUE (the matrix is genuinely non-empty) but has no row
+    // for BLUE -> RED -- a real coverage gap, not Task 5's synthetic stand-in.
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const blueTask = { id: 'tl-cov-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const redTask = { id: 'tl-cov-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([blueTask, redTask], 'unit-test');
+
+  try {
+    // The real derivation, not a fixture -- exactly what Timeline.rebuild()
+    // and Timeline.rebuildSetupForLines() call internally.
+    const observation = Timeline._setupObservation([blueTask, redTask]);
+    const uncovered = observation.diagnostics.find(d => d.successorOrderId === 'tl-cov-red');
+    assert.ok(uncovered, 'deriveSetupObservation must genuinely report the BLUE -> RED gap, not just an empty diagnostics list');
+    assert.equal(uncovered.type, 'setup-uncovered');
+
+    const items = Timeline._setupItemsForObservation([blueTask, redTask], observation);
+    const missingItem = items.find(item => item.id === 'setup-missing:B3B-TIMELINE-LINE:tl-cov-red');
+    assert.ok(missingItem, 'the setup-missing item must actually be rendered for the affected order -- not silently omitted');
+    assert.match(missingItem.className, /\bsetup-missing\b/);
+    assert.match(missingItem.content, /setup-missing-marker/, 'the "!" marker glyph must be present, not blanked');
+    assert.match(missingItem.content, /aria-label="[^"]+"/, 'the marker must carry a non-empty accessible label, not a bare placeholder');
+
+    // The genuinely covered GREEN -> BLUE transition must NOT also render a
+    // missing marker -- proving this isn't a blanket fallback that marks
+    // every order, only the one with an actual gap.
+    const blueMissingItem = items.find(item => item.id === 'setup-missing:B3B-TIMELINE-LINE:tl-cov-blue');
+    assert.equal(blueMissingItem, undefined, 'the covered transition must never render a setup-missing marker of its own');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('missing setup marker is pinned to the center of a narrow setup bar', () => {
   // Regression target: vis-timeline could reflow the warning marker to an
   // edge of a narrow bar, where it looked misplaced or overflowed. Centring
@@ -423,6 +494,68 @@ test('Inspector does not infer setup values for an order absent from the observa
     assert.equal(detail.source, null);
   } finally {
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+  }
+});
+
+test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real) observation, still surfaces missingDetail for a genuine active-plant coverage gap', () => {
+  // Every other Inspector setup-detail test above passes a HAND-BUILT
+  // { intervals, diagnostics } observation directly, bypassing
+  // Timeline._setupObservation/deriveSetupObservation entirely. This test
+  // instead relies on _setupDetailForTask's DEFAULT parameter
+  // (`= Timeline._setupObservation(Store.tasksForSelectedPlant())`) — the
+  // exact call Inspector._render makes with no override — so the real setup
+  // snapshot and real tasks in Store drive the whole chain, proving the
+  // presentation layer still actually consumes a genuine, non-synthetic
+  // coverage-gap diagnostic after Task 5's rewrite.
+  const plant = 'B3B-INSPECTOR-PLANT';
+  const line = 'B3B-INSPECTOR-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorGetElementById = globalThis.document.getElementById;
+
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    // GREEN -> BLUE is covered (the matrix is genuinely non-empty); BLUE ->
+    // RED has no row at all -- the same real coverage-gap shape as the
+    // Timeline test above, kept independent so this test does not depend on
+    // Store state left by another test.
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const blueTask = { id: 'insp-cov-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const redTask = { id: 'insp-cov-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([blueTask, redTask], 'unit-test');
+
+  try {
+    // No observation argument -- exercises _setupDetailForTask's own default,
+    // i.e. the real Store.setupSnapshot / Store.tasksForSelectedPlant() path.
+    const detail = Inspector._setupDetailForTask(redTask);
+    assert.equal(detail.predecessorOrderId, 'insp-cov-blue', 'the real predecessor is identified, not blanked to null');
+    assert.equal(detail.requiredMinutes, null, 'a genuinely uncovered transition has no required-minutes fact to report');
+    assert.ok(detail.missingDetail, 'missingDetail must be populated with the real diagnostic message, not silently omitted');
+    assert.match(detail.missingDetail, /setup|missing|uncovered|transition/i);
+
+    const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(redTask);
+    assert.match(body.innerHTML, /insp-setup-warning/, 'the rendered Inspector card must surface a setup warning, not just the bare "—" placeholder');
+    assert.match(body.innerHTML, /ui\.setup_missing/, 'the warning paragraph carries the real missing-setup label, not an empty tag');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
 

@@ -2138,6 +2138,118 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
 });
 
 // ---------------------------------------------------------------------------
+// Workstream B — Task 6 (B3b, 2026-08-21): pin that the missing-setup
+// diagnostic pipeline for a REAL, active-and-matching plant with a genuine
+// matrix coverage gap survives Task 5/B3a's rewrite unchanged. This is
+// deliberately the mirror image of the B3a tests above: those prove an
+// inactive/never-configured plant sees ZERO new diagnostics (the synthetic
+// snapshot's suppression); this proves a genuinely active plant with partial
+// real matrix coverage still sees its diagnostics exactly as before —
+// runAndApply's gate (`setupSnapshotActiveAndMatching`) sets
+// `effectiveSetupSnapshot = Store.setupSnapshot` verbatim for this case (see
+// schedule-services.mts around the `effectiveSetupSnapshot` ternary), so
+// nothing about Task 5's synthetic-fallback mechanism is even reachable here.
+//
+// Also deliberately distinct from the pre-existing 'SETUP-LIVE-PLANT' test
+// above (F12 gap 3): that fixture's tail-placed order has a BLANK/
+// unresolvable signature (routes through placeUnknownTail's tail placement).
+// This fixture's two orders both have real, resolvable signatures — the gap
+// is a genuinely missing matrix row for one specific state pair — so the
+// 'scheduled-without-setup' edge here is produced by candidateForSequence's
+// in-sequence uncovered-admission branch (setup-scheduler.mts ~line 1503),
+// the OTHER of the two producers of that reason string, and the affected
+// order stays admitted in sequence rather than being demoted to the tail.
+// ---------------------------------------------------------------------------
+
+test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovered matrix pair still surfaces scheduled-without-setup and places both orders in sequence', () => {
+  const plant = 'B3B-COVERAGE-PLANT';
+  const line = 'B3B-COVERAGE-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorLastSetupAware = Engine.lastSetupAwareResult;
+  const priorPriorityRankMaps = Store.priorityRankMaps;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  // Explicitly neutralize the priority-rank map rather than relying on
+  // whatever an earlier test in this file happened to leave behind — several
+  // nearby tests (e.g. the "empty override must not shadow the plant-wide
+  // rank" test) set a GLOBAL ('') colorWheel rank map and do not restore it,
+  // which would otherwise reorder RED ahead of BLUE here and turn this
+  // fixture's single deliberate coverage gap into two.
+  Store.setPriorityRankMaps({}, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    // The matrix genuinely covers GREEN -> BLUE (proving this plant's matrix
+    // is not empty, unlike Task 5's synthetic stand-in) but has no row at all
+    // for BLUE -> RED -- that single pair is the deliberate coverage gap.
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    // Due earlier, and its incoming transition (GREEN -> BLUE) is covered --
+    // the coverage tier (index 6 of the candidate score vector) prefers
+    // sequencing this order first because doing so leaves only ONE uncovered
+    // edge (BLUE -> RED) rather than two (GREEN -> RED, then RED -> BLUE).
+    { id: 'cov-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-21T12:00:00') },
+    { id: 'cov-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-21T13:00:00') },
+  ], 'unit-test');
+
+  const toastCalls = [];
+  const originalShow = Toast.show;
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  try {
+    Engine.runAndApply('changeover', {
+      plant, respectFixed: true, respectCalendar: false,
+      startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'),
+    });
+
+    assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
+    assert.ok(Engine.lastSetupAwareResult.missingEdges.some(edge => (
+      edge.reason === 'scheduled-without-setup'
+      && edge.successorOrderId === 'cov-red'
+      && edge.predecessorOrderId === 'cov-blue'
+    )), 'the genuinely uncovered BLUE -> RED transition is reported via the dedicated scheduled-without-setup reason');
+    // Confirm it is NOT the tail-placement producer's shape: candidateForSequence's
+    // in-sequence admission never marks the order "unadmitted" -- both orders
+    // are simply patched, in due-date order, with no order left behind.
+    assert.ok(Store.tasks['cov-blue'].start_date && Store.tasks['cov-red'].start_date,
+      'both orders were actually applied to Store -- the never-freeze invariant holds, and neither was exiled to a tail');
+    assert.ok(Store.tasks['cov-blue'].start_date.getTime() < Store.tasks['cov-red'].start_date.getTime(),
+      'the covered-first sequence won the coverage-tier tie-break, so BLUE is still sequenced ahead of RED');
+
+    // Unlike a synthetic/inactive-plant run (B3a tests above), this plant's
+    // effectiveSetupSnapshot is the genuine Store.setupSnapshot, not
+    // Engine._syntheticZeroCostSetupSnapshot, so the diagnostic-suppression
+    // guards (`!effectiveSetupSnapshot.synthetic`) do NOT apply here -- the
+    // warn toast must actually fire. This is the direct, positive contrast to
+    // the B3a "raises zero missing-setup diagnostics" test's toastCalls.length
+    // === 0 assertion for the inactive-plant case.
+    assert.ok(toastCalls.some(call => call.msg.includes('toast.optimize_missing_setup_summary') && call.type === 'warn'),
+      'a real active-and-matching plant with a genuine coverage gap must still see the missing-setup-data warn toast');
+  } finally {
+    Toast.show = originalShow;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setPriorityRankMaps(priorPriorityRankMaps, 'unit-test');
+    Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
 // manual commit path. manualSchedulePatchFor no longer branches on
 // split_order_policy at all -- only on whether the task already carries
