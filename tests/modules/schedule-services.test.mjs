@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
-import { Toast } from '../../web/application-foundation.mjs';
+import { Toast, Util, Config } from '../../web/application-foundation.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
@@ -1893,6 +1893,126 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
     else delete Store.calendars[line];
     Store.setSelectedPlant(priorPlant, 'unit-test');
     Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
+// manual commit path. manualSchedulePatchFor no longer branches on
+// split_order_policy at all -- only on whether the task already carries
+// >=2 scheduleSegments (placed there by a prior optimizer run).
+// ---------------------------------------------------------------------------
+
+test('Engine.manualSchedulePatchFor is policy-independent: a non-"never" plant with an all-closed calendar still commits verbatim, no calendar lookup at all', () => {
+  // Before this task, a non-"never" split_order_policy routed through
+  // Engine.schedulePatchFor -> Calendar.allocateRuntime, a real
+  // calendar-aware regeneration. An all-closed calendar makes that
+  // regeneration path provably fail (Calendar.allocateRuntime can never find
+  // an open slot), so if manualSchedulePatchFor still produced a clean patch
+  // landing exactly at the requested (snapped) start, that proves no
+  // calendar lookup happened at all -- policy is truly ignored.
+  const plant = 'B1-POLICY-PLANT';
+  const line = 'B1-POLICY-LINE';
+  const priorMasterData = Store.masterData;
+  const priorCalendar = Store.calendars[line];
+  const ALL_CLOSED = { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null };
+
+  Store.setMasterData({
+    plants: [{ plant, split_order_policy: 'overlong_only' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setCalendar(line, ALL_CLOSED, 'unit-test');
+
+  try {
+    const requestedStart = new Date('2026-08-24T09:00:00');
+    const task = { id: 'b1-policy-task', PLANT: plant, MACHINE: line, RUN_TIME: '4' };
+
+    // Sanity check: the OLD regeneration path (still reachable directly via
+    // schedulePatchFor, which stays in place for reconcileRuntimeSchedules)
+    // genuinely fails against this all-closed calendar under the non-"never"
+    // policy -- proving the calendar-lookup path really would have blocked
+    // this edit before this task.
+    const wouldHaveRegenerated = Engine.schedulePatchFor(task, line, requestedStart, 'overlong_only');
+    assert.equal(wouldHaveRegenerated, null,
+      'sanity check: the old calendar-aware regeneration path cannot allocate on an all-closed calendar');
+
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    assert.ok(patch, 'manualSchedulePatchFor must still produce a patch despite the all-closed calendar and non-"never" policy');
+    assert.equal(patch.start_date.getTime(), Util.snap(requestedStart).getTime(),
+      'the new start lands EXACTLY at the snapped requested start -- no calendar lookup, policy ignored');
+    assert.equal(patch.end_date.getTime(), Util.snap(requestedStart).getTime() + 4 * Config.MS_HOUR);
+    assert.deepEqual(patch.scheduleSegments, [], 'a task with fewer than two existing segments always collapses to a clean continuous block');
+    assert.equal(patch.MACHINE, line);
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegments) task by the requested delta, preserving segment count and relative spacing', () => {
+  const plant = 'B1-SHIFT-PLANT';
+  const line = 'B1-SHIFT-LINE';
+  const priorMasterData = Store.masterData;
+
+  Store.setMasterData({
+    plants: [{ plant, split_order_policy: 'partial_allowed' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+
+  try {
+    // Three segments spanning three consecutive days, each 8 hours long with
+    // a 16-hour gap between segments (a realistic overnight-closed split).
+    const seg1Start = new Date('2026-08-20T08:00:00');
+    const seg1End   = new Date('2026-08-20T16:00:00');
+    const seg2Start = new Date('2026-08-21T08:00:00');
+    const seg2End   = new Date('2026-08-21T16:00:00');
+    const seg3Start = new Date('2026-08-22T08:00:00');
+    const seg3End   = new Date('2026-08-22T16:00:00');
+    const task = {
+      id: 'b1-shift-task', PLANT: plant, MACHINE: line, RUN_TIME: '24',
+      start_date: seg1Start, end_date: seg3End,
+      scheduleSegments: [
+        { sequence: 1, startDate: seg1Start, endDate: seg1End },
+        { sequence: 2, startDate: seg2Start, endDate: seg2End },
+        { sequence: 3, startDate: seg3Start, endDate: seg3End },
+      ],
+    };
+
+    // Requested start is 2 calendar days later than the current start.
+    const requestedStart = new Date('2026-08-22T08:00:00');
+    const deltaMs = Util.snap(requestedStart).getTime() - seg1Start.getTime();
+
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    assert.ok(patch, 'a shift patch must be produced');
+    assert.equal(patch.scheduleSegments.length, 3, 'segment count is preserved -- never collapsed, never re-derived');
+
+    // Every segment shifted by EXACTLY the same delta -- relative spacing
+    // (8h duration, 16h gap) is untouched.
+    for (let i = 0; i < 3; i++) {
+      const original = task.scheduleSegments[i];
+      const shifted = patch.scheduleSegments[i];
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
+        `segment ${i + 1} start shifted by exactly deltaMs`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
+        `segment ${i + 1} end shifted by exactly deltaMs`);
+      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
+        original.endDate.getTime() - original.startDate.getTime(),
+        `segment ${i + 1} duration is unchanged`);
+      assert.equal(shifted.sequence, original.sequence);
+    }
+    // Gap between segment 1 and segment 2 (and 2 and 3) is unchanged.
+    assert.equal(patch.scheduleSegments[1].startDate.getTime() - patch.scheduleSegments[0].endDate.getTime(),
+      seg2Start.getTime() - seg1End.getTime());
+    assert.equal(patch.scheduleSegments[2].startDate.getTime() - patch.scheduleSegments[1].endDate.getTime(),
+      seg3Start.getTime() - seg2End.getTime());
+
+    // Parent start/end mirror the shifted first/last segment.
+    assert.equal(patch.start_date.getTime(), patch.scheduleSegments[0].startDate.getTime());
+    assert.equal(patch.end_date.getTime(), patch.scheduleSegments[2].endDate.getTime());
+    assert.equal(patch.MACHINE, line);
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
 

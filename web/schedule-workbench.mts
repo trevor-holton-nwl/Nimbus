@@ -6520,15 +6520,6 @@ export const Interaction = {
     if (Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') (Modal as ModalWithOpenEdit).openEdit!(t);
   },
 
-  _dragRequiresRegeneration(task: NimbusTask, targetLine: string): boolean {
-    const policy = Engine.splitOrderPolicyFor(Store.getPlantForLine(targetLine) ?? task.PLANT ?? Store.selectedPlant);
-    return policy !== 'never' || !!(task.scheduleSegments && task.scheduleSegments.length >= 2);
-  },
-
-  _regenerateDragPatch(task: NimbusTask, targetLine: string, requestedStart: Date): Partial<NimbusTask> | null {
-    return Engine.manualSchedulePatchFor(task, targetLine, requestedStart);
-  },
-
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a fixed order still commits (see the corrected header
@@ -6591,46 +6582,6 @@ export const Interaction = {
       // CENTER_ON_CLICK focus() pan that would revert this commit (see _onClick).
       this._lastDragEndTs = Date.now();
 
-      if (Interaction._dragRequiresRegeneration(t, newLine)
-          || Selection.ids().some(selectedId => {
-            const selected = Store.tasks[selectedId];
-            return !!selected && Interaction._dragRequiresRegeneration(
-              selected, newLine !== t.MACHINE ? newLine : (selected.MACHINE || 'Unknown')
-            );
-          })) {
-        const deltaMs = newStart.getTime() - expectedItem.start.getTime();
-        const companionIds = Selection.ids().filter(sid => sid !== id && !Store.isFixed(sid));
-        const allIds = [id, ...companionIds];
-        const snap = UndoStack.snapshotTasks(allIds);
-        const regenerationPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-        for (const taskId of allIds) {
-          const parent = Store.tasks[taskId];
-          if (!parent?.start_date) continue;
-          const targetLine = taskId === id
-            ? newLine
-            : (newLine !== t.MACHINE ? newLine : (parent.MACHINE || 'Unknown'));
-          // A segment drag explicitly establishes the new FIRST start for its
-          // parent. Companion parents retain the user's relative drag delta.
-          const requestedStart = taskId === id
-            ? newStart
-            : new Date(parent.start_date.getTime() + deltaMs);
-          const changes = Interaction._regenerateDragPatch(parent, targetLine, requestedStart);
-          if (!changes?.start_date || !changes.end_date) {
-            Toast.show('Could not regenerate the order in the available calendar window.', 'error');
-            Timeline._scheduleRebuild();
-            return;
-          }
-          regenerationPatches.push({ id: taskId, changes });
-        }
-        if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
-        Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
-        Timeline._scheduleRebuild();
-        UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
-          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
-        this._clearGhosts();
-        return;
-      }
-
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-fixed selected items by the same time + line delta.
       const deltaMs  = newStart.getTime() - t.start_date.getTime();
@@ -6642,8 +6593,16 @@ export const Interaction = {
         const allIds = [id, ...selIds];
         const snap = UndoStack.snapshotTasks(allIds);
 
-        // Apply the dragged item
-        Store.updateTask(id, { start_date: newStart, end_date: newEnd, MACHINE: newLine }, 'timeline');
+        // Apply the dragged item — routed through manualSchedulePatchFor so an
+        // already-split order (>=2 scheduleSegments) is shifted rather than
+        // collapsed or re-derived (OD-B1a).
+        const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+        if (!draggedPatch?.start_date || !draggedPatch.end_date) {
+          Toast.show('Could not commit the order to the requested start.', 'error');
+          Timeline._scheduleRebuild();
+          continue;
+        }
+        Store.updateTask(id, draggedPatch, 'timeline');
 
         // Apply the same delta to each companion
         // (skippedFixed stays empty today — selIds above already excludes fixed
@@ -6675,14 +6634,19 @@ export const Interaction = {
         return;
       }
 
-      // Single-item drag (original behaviour)
+      // Single-item drag (original behaviour) — routed through
+      // manualSchedulePatchFor so an already-split order (>=2
+      // scheduleSegments) is shifted by the drag delta rather than
+      // collapsed or re-derived (OD-B1a).
       const snap = UndoStack.snapshotTasks([id]);
 
-      Store.updateTask(id, {
-        start_date:      newStart,
-        end_date:        newEnd,
-        MACHINE: newLine
-      }, 'timeline');
+      const patch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+      if (!patch?.start_date || !patch.end_date) {
+        Toast.show('Could not commit the order to the requested start.', 'error');
+        Timeline._scheduleRebuild();
+        continue;
+      }
+      Store.updateTask(id, patch, 'timeline');
       Engine.autoReflow(id);
       Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 

@@ -856,6 +856,100 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
   }
 });
 
+// ---------------------------------------------------------------------------
+// Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
+// manual commit path. Before this task, a Timeline drag on an order that
+// already had >=2 scheduleSegments routed through
+// Interaction._dragRequiresRegeneration/_regenerateDragPatch, a SEPARATE
+// branch in _onDataSetUpdate that has been deleted; every drag now goes
+// through the same two branches (multi-select / single-item), both of which
+// call the rewritten Engine.manualSchedulePatchFor.
+// ---------------------------------------------------------------------------
+
+test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=2 segments) order shifts EVERY segment by the drag delta instead of collapsing it (OD-B1a)', () => {
+  // Engine.autoReflow (called by the single-item drag branch) unconditionally
+  // arms Alerts' debounced recompute timer at the end of its walk. Stubbed to
+  // a no-op for the duration of this test -- same established pattern as the
+  // OptimizerPreview tests below -- so no setTimeout callback fires after the
+  // test has already completed and reached for the real (unstubbed in this
+  // file) NimbusComputeCore global.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+
+  const id = 'split-drag-1';
+  const line = 'SPLIT-DRAG-LINE';
+  const seg1Start = new Date('2026-08-20T08:00:00');
+  const seg1End   = new Date('2026-08-20T16:00:00');
+  const seg2Start = new Date('2026-08-21T08:00:00');
+  const seg2End   = new Date('2026-08-21T16:00:00');
+  const seg3Start = new Date('2026-08-22T08:00:00');
+  const seg3End   = new Date('2026-08-22T16:00:00');
+  const originalSegments = [
+    { sequence: 1, startDate: seg1Start, endDate: seg1End },
+    { sequence: 2, startDate: seg2Start, endDate: seg2End },
+    { sequence: 3, startDate: seg3Start, endDate: seg3End },
+  ];
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'PSPLIT1', MATERIAL_NUMBER: 'MSPLIT1', MACHINE: line,
+    plant: '5512', RUN_TIME: 24,
+    start_date: seg1Start, end_date: seg3End,
+    scheduleSegments: originalSegments,
+  }], 'test');
+  Selection.clear();
+
+  // Simulate the user dragging segment 3's own bar forward by two days —
+  // the real vis-timeline item id for that bar is the segment sub-item id
+  // Timeline._itemsForTask already produces for a >=2-segment task.
+  const draggedSegmentItemId = Timeline._segmentItemId(id, 3);
+  const droppedSeg3Start = new Date('2026-08-24T08:00:00');
+  const droppedSeg3End   = new Date('2026-08-24T16:00:00');
+
+  Timeline._items = {
+    get: (i) => (i === draggedSegmentItemId
+      ? { start: droppedSeg3Start, end: droppedSeg3End, group: line, parentId: id }
+      : undefined),
+  };
+  try {
+    Interaction._onDataSetUpdate({ items: [draggedSegmentItemId] });
+
+    const updated = Store.tasks[id];
+    assert.equal(updated.scheduleSegments.length, 3,
+      'the order is NOT collapsed to a single continuous block just because a segment was dragged');
+
+    // OD-B1a's resolved contract (same semantics the deleted regeneration
+    // branch already used at :6614-6616): the dropped position becomes the
+    // new FIRST-segment start, so the delta is measured against the task's
+    // ORIGINAL parent start_date (segment 1's original start) — not against
+    // the dragged segment's own prior position.
+    const deltaMs = Util.snap(droppedSeg3Start).getTime() - seg1Start.getTime();
+    assert.notEqual(deltaMs, 0, 'sanity: the drag must have actually requested a different start');
+
+    for (let i = 0; i < 3; i++) {
+      const original = originalSegments[i];
+      const shifted = updated.scheduleSegments[i];
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
+        `segment ${i + 1} start shifted by exactly the drag delta`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
+        `segment ${i + 1} end shifted by exactly the drag delta`);
+      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
+        original.endDate.getTime() - original.startDate.getTime(),
+        `segment ${i + 1} duration is unchanged`);
+    }
+    assert.equal(updated.start_date.getTime(), updated.scheduleSegments[0].startDate.getTime(),
+      'parent start_date mirrors the shifted first segment');
+    assert.equal(updated.end_date.getTime(), updated.scheduleSegments[2].endDate.getTime(),
+      'parent end_date mirrors the shifted last segment');
+    assert.equal(updated.MACHINE, line);
+  } finally {
+    Timeline._items = undefined;
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
 test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');

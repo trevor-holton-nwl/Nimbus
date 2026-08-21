@@ -2003,16 +2003,18 @@ export const Engine = {
       : null;
   },
 
-  /** Apply a planner-requested parent start/line edit without ever treating a
-   * child interval as an independently movable order.  `never` deliberately
-   * retains the established direct, continuous edit behavior; enabled plants
-   * derive a complete productive aggregate from the requested parent start. */
+  /** Apply a planner-requested parent start/line edit verbatim — no
+   * calendar-aware recomputation ever happens on a manual edit, and this is
+   * policy-independent by design (OD-B1a). A task with fewer than two
+   * existing schedule segments commits directly at the requested start; a
+   * task that already has two or more segments (placed there by a prior
+   * optimizer run) has its existing shape translated by the requested delta
+   * rather than destroyed or re-derived. */
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    const plant = sourceGetPlantForLine(line) ?? task.PLANT ?? sourceSelectedPlant();
-    const policy = Engine.splitOrderPolicyFor(plant);
-    if (policy === 'never') {
+    const segments = task.scheduleSegments;
+    if (!segments || segments.length < 2 || !task.start_date) {
       const start = Util.snap(requestedStart);
       return {
         start_date: start,
@@ -2021,13 +2023,18 @@ export const Engine = {
         scheduleSegments: [],
       };
     }
-    Calendar._beginRun(plant);
-    try {
-      const patch = Engine.schedulePatchFor(task, line, requestedStart, policy);
-      return patch ? { ...patch, MACHINE: line } : null;
-    } finally {
-      Calendar._endRun();
-    }
+    const deltaMs = Util.snap(requestedStart).getTime() - task.start_date.getTime();
+    const shifted = segments.map(segment => ({
+      ...segment,
+      startDate: new Date(segment.startDate.getTime() + deltaMs),
+      endDate: new Date(segment.endDate.getTime() + deltaMs),
+    }));
+    return {
+      start_date: shifted[0].startDate,
+      end_date: shifted[shifted.length - 1].endDate,
+      MACHINE: line,
+      scheduleSegments: shifted,
+    };
   },
 
   /** Repair schedules whose authoritative runtime changed after their last
