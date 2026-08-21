@@ -197,6 +197,7 @@ async def lifespan(app: FastAPI):
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_max_pull_forward_days_column()
+    md.ensure_plant_min_productive_segment_minutes_column()
     md.ensure_plant_visibility_horizon_columns()
     md.ensure_plant_frozen_horizon_column()
     md.ensure_plant_setup_active_column()
@@ -569,6 +570,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/plants/{plant}/max-pull-forward-days": "plant.max_pull_forward_days_update",
+    "/master-data/plants/{plant}/min-productive-segment-minutes": "plant.min_productive_segment_minutes_update",
     "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
     "/master-data/plants/{plant}/frozen-horizon-days": "plant.frozen_horizon_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
@@ -3120,6 +3122,22 @@ def md_set_plant_max_pull_forward_days(plant: str, request: Request, body: dict 
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             value=body.get("max_pull_forward_days"),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/plants/{plant}/min-productive-segment-minutes", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_min_productive_segment_minutes(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist the B3 plant productive-segment floor: a required positive
+    integer minute count (the column is NOT NULL DEFAULT 30 — pass 30 to
+    reset to the system default rather than omitting the field)."""
+    try:
+        return md.set_plant_min_productive_segment_minutes(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            value=body.get("min_productive_segment_minutes"),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

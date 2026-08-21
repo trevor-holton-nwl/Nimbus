@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
 import { Util, ErrorLog } from '../../web/application-foundation.mjs';
-import { Alerts, Utilization } from '../../web/schedule-services.mjs';
+import { Alerts, Utilization, Engine } from '../../web/schedule-services.mjs';
 import { Persistence } from '../../web/schedule-data.mjs';
 
 const require = createRequire(import.meta.url);
@@ -276,6 +276,77 @@ test('Timeline gives each setup diagnostic type a distinct marker label and clas
   assert.ok(labels.every(Boolean), 'every marker must carry a non-empty aria-label');
 });
 
+// ---------------------------------------------------------------------------
+// Workstream B — Task 6 (B3b, 2026-08-21): every setup-missing test above
+// feeds Timeline._setupItemsForObservation a HAND-BUILT diagnostics array —
+// a synthetic assertion that would pass even if deriveSetupObservation itself
+// were broken. This test instead drives the full, real presentation pipeline
+// end to end: a genuine Store.setupSnapshot (active, with a matrix that
+// covers one transition but genuinely lacks a row for another — the same
+// non-synthetic coverage-gap shape as the Task 6 schedule-services.test.mjs
+// fixture, kept independent of it here since this file's tests must not
+// depend on another test file's run) feeding the REAL
+// Timeline._setupObservation -> Timeline._setupItemsForObservation chain, to
+// prove the presentation layer still actually consumes a genuine
+// deriveSetupObservation() diagnostic after Task 5's rewrite -- not just that
+// a hand-built diagnostic object renders correctly in isolation.
+// ---------------------------------------------------------------------------
+
+test('Task 6 (B3b): Timeline renders a real setup-missing marker end-to-end from a genuine Store.setupSnapshot coverage gap (not a hand-built diagnostics fixture)', () => {
+  const plant = 'B3B-TIMELINE-PLANT';
+  const line = 'B3B-TIMELINE-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    // Covers GREEN -> BLUE (the matrix is genuinely non-empty) but has no row
+    // for BLUE -> RED -- a real coverage gap, not Task 5's synthetic stand-in.
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const blueTask = { id: 'tl-cov-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const redTask = { id: 'tl-cov-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([blueTask, redTask], 'unit-test');
+
+  try {
+    // The real derivation, not a fixture -- exactly what Timeline.rebuild()
+    // and Timeline.rebuildSetupForLines() call internally.
+    const observation = Timeline._setupObservation([blueTask, redTask]);
+    const uncovered = observation.diagnostics.find(d => d.successorOrderId === 'tl-cov-red');
+    assert.ok(uncovered, 'deriveSetupObservation must genuinely report the BLUE -> RED gap, not just an empty diagnostics list');
+    assert.equal(uncovered.type, 'setup-uncovered');
+
+    const items = Timeline._setupItemsForObservation([blueTask, redTask], observation);
+    const missingItem = items.find(item => item.id === 'setup-missing:B3B-TIMELINE-LINE:tl-cov-red');
+    assert.ok(missingItem, 'the setup-missing item must actually be rendered for the affected order -- not silently omitted');
+    assert.match(missingItem.className, /\bsetup-missing\b/);
+    assert.match(missingItem.content, /setup-missing-marker/, 'the "!" marker glyph must be present, not blanked');
+    assert.match(missingItem.content, /aria-label="[^"]+"/, 'the marker must carry a non-empty accessible label, not a bare placeholder');
+
+    // The genuinely covered GREEN -> BLUE transition must NOT also render a
+    // missing marker -- proving this isn't a blanket fallback that marks
+    // every order, only the one with an actual gap.
+    const blueMissingItem = items.find(item => item.id === 'setup-missing:B3B-TIMELINE-LINE:tl-cov-blue');
+    assert.equal(blueMissingItem, undefined, 'the covered transition must never render a setup-missing marker of its own');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('missing setup marker is pinned to the center of a narrow setup bar', () => {
   // Regression target: vis-timeline could reflow the warning marker to an
   // edge of a narrow bar, where it looked misplaced or overflowed. Centring
@@ -423,6 +494,68 @@ test('Inspector does not infer setup values for an order absent from the observa
     assert.equal(detail.source, null);
   } finally {
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+  }
+});
+
+test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real) observation, still surfaces missingDetail for a genuine active-plant coverage gap', () => {
+  // Every other Inspector setup-detail test above passes a HAND-BUILT
+  // { intervals, diagnostics } observation directly, bypassing
+  // Timeline._setupObservation/deriveSetupObservation entirely. This test
+  // instead relies on _setupDetailForTask's DEFAULT parameter
+  // (`= Timeline._setupObservation(Store.tasksForSelectedPlant())`) — the
+  // exact call Inspector._render makes with no override — so the real setup
+  // snapshot and real tasks in Store drive the whole chain, proving the
+  // presentation layer still actually consumes a genuine, non-synthetic
+  // coverage-gap diagnostic after Task 5's rewrite.
+  const plant = 'B3B-INSPECTOR-PLANT';
+  const line = 'B3B-INSPECTOR-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorGetElementById = globalThis.document.getElementById;
+
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    // GREEN -> BLUE is covered (the matrix is genuinely non-empty); BLUE ->
+    // RED has no row at all -- the same real coverage-gap shape as the
+    // Timeline test above, kept independent so this test does not depend on
+    // Store state left by another test.
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const blueTask = { id: 'insp-cov-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const redTask = { id: 'insp-cov-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([blueTask, redTask], 'unit-test');
+
+  try {
+    // No observation argument -- exercises _setupDetailForTask's own default,
+    // i.e. the real Store.setupSnapshot / Store.tasksForSelectedPlant() path.
+    const detail = Inspector._setupDetailForTask(redTask);
+    assert.equal(detail.predecessorOrderId, 'insp-cov-blue', 'the real predecessor is identified, not blanked to null');
+    assert.equal(detail.requiredMinutes, null, 'a genuinely uncovered transition has no required-minutes fact to report');
+    assert.ok(detail.missingDetail, 'missingDetail must be populated with the real diagnostic message, not silently omitted');
+    assert.match(detail.missingDetail, /setup|missing|uncovered|transition/i);
+
+    const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(redTask);
+    assert.match(body.innerHTML, /insp-setup-warning/, 'the rendered Inspector card must surface a setup warning, not just the bare "—" placeholder');
+    assert.match(body.innerHTML, /ui\.setup_missing/, 'the warning paragraph carries the real missing-setup label, not an empty tag');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
 
@@ -856,6 +989,272 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
   }
 });
 
+// ---------------------------------------------------------------------------
+// Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
+// manual commit path. Before this task, a Timeline drag on an order that
+// already had >=2 scheduleSegments routed through
+// Interaction._dragRequiresRegeneration/_regenerateDragPatch, a SEPARATE
+// branch in _onDataSetUpdate that has been deleted; every drag now goes
+// through the same two branches (multi-select / single-item), both of which
+// call the rewritten Engine.manualSchedulePatchFor.
+// ---------------------------------------------------------------------------
+
+test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=2 segments) order shifts EVERY segment by the drag delta instead of collapsing it (OD-B1a)', () => {
+  // Engine.autoReflow (called by the single-item drag branch) unconditionally
+  // arms Alerts' debounced recompute timer at the end of its walk. Stubbed to
+  // a no-op for the duration of this test -- same established pattern as the
+  // OptimizerPreview tests below -- so no setTimeout callback fires after the
+  // test has already completed and reached for the real (unstubbed in this
+  // file) NimbusComputeCore global.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+
+  const id = 'split-drag-1';
+  const line = 'SPLIT-DRAG-LINE';
+  const seg1Start = new Date('2026-08-20T08:00:00');
+  const seg1End   = new Date('2026-08-20T16:00:00');
+  const seg2Start = new Date('2026-08-21T08:00:00');
+  const seg2End   = new Date('2026-08-21T16:00:00');
+  const seg3Start = new Date('2026-08-22T08:00:00');
+  const seg3End   = new Date('2026-08-22T16:00:00');
+  const originalSegments = [
+    { sequence: 1, startDate: seg1Start, endDate: seg1End },
+    { sequence: 2, startDate: seg2Start, endDate: seg2End },
+    { sequence: 3, startDate: seg3Start, endDate: seg3End },
+  ];
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'PSPLIT1', MATERIAL_NUMBER: 'MSPLIT1', MACHINE: line,
+    plant: '5512', RUN_TIME: 24,
+    start_date: seg1Start, end_date: seg3End,
+    scheduleSegments: originalSegments,
+  }], 'test');
+  Selection.clear();
+
+  // Simulate the user dragging segment 3's own bar forward by two days —
+  // the real vis-timeline item id for that bar is the segment sub-item id
+  // Timeline._itemsForTask already produces for a >=2-segment task.
+  const draggedSegmentItemId = Timeline._segmentItemId(id, 3);
+  const droppedSeg3Start = new Date('2026-08-24T08:00:00');
+  const droppedSeg3End   = new Date('2026-08-24T16:00:00');
+
+  Timeline._items = {
+    get: (i) => (i === draggedSegmentItemId
+      ? { start: droppedSeg3Start, end: droppedSeg3End, group: line, parentId: id }
+      : undefined),
+  };
+  try {
+    Interaction._onDataSetUpdate({ items: [draggedSegmentItemId] });
+
+    const updated = Store.tasks[id];
+    assert.equal(updated.scheduleSegments.length, 3,
+      'the order is NOT collapsed to a single continuous block just because a segment was dragged');
+
+    // OD-B1a's resolved contract (same semantics the deleted regeneration
+    // branch already used at :6614-6616): the dropped position becomes the
+    // new FIRST-segment start, so the delta is measured against the task's
+    // ORIGINAL parent start_date (segment 1's original start) — not against
+    // the dragged segment's own prior position.
+    const deltaMs = Util.snap(droppedSeg3Start).getTime() - seg1Start.getTime();
+    assert.notEqual(deltaMs, 0, 'sanity: the drag must have actually requested a different start');
+
+    for (let i = 0; i < 3; i++) {
+      const original = originalSegments[i];
+      const shifted = updated.scheduleSegments[i];
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
+        `segment ${i + 1} start shifted by exactly the drag delta`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
+        `segment ${i + 1} end shifted by exactly the drag delta`);
+      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
+        original.endDate.getTime() - original.startDate.getTime(),
+        `segment ${i + 1} duration is unchanged`);
+    }
+    assert.equal(updated.start_date.getTime(), updated.scheduleSegments[0].startDate.getTime(),
+      'parent start_date mirrors the shifted first segment');
+    assert.equal(updated.end_date.getTime(), updated.scheduleSegments[2].endDate.getTime(),
+      'parent end_date mirrors the shifted last segment');
+    assert.equal(updated.MACHINE, line);
+  } finally {
+    Timeline._items = undefined;
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s existing >=2 scheduleSegments by the GROUP delta too (whole-branch review fix)', () => {
+  // Before this fix, the multi-select branch's companion loop built a plain
+  // {start_date, end_date, MACHINE} object directly -- never consulting
+  // manualSchedulePatchFor -- so a companion that was itself already split
+  // into >=2 scheduleSegments had its PARENT boundaries moved while its
+  // CHILD segments stayed stale at their old absolute positions. The
+  // companion loop now routes every companion through the same
+  // manualSchedulePatchFor the dragged item uses, so this is a real
+  // regression check on the same shift contract Step 6 already pins for
+  // the dragged item, applied to a companion instead.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+
+  const line = 'MULTI-DRAG-LINE';
+  const anchorId = 'multi-anchor';
+  const companionId = 'multi-companion';
+
+  const anchorStart = new Date('2026-08-20T08:00:00');
+  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
+
+  const seg1Start = new Date('2026-09-01T08:00:00');
+  const seg1End   = new Date('2026-09-01T16:00:00');
+  const seg2Start = new Date('2026-09-02T08:00:00');
+  const seg2End   = new Date('2026-09-02T16:00:00');
+  const seg3Start = new Date('2026-09-03T08:00:00');
+  const seg3End   = new Date('2026-09-03T16:00:00');
+  const companionOriginalSegments = [
+    { sequence: 1, startDate: seg1Start, endDate: seg1End },
+    { sequence: 2, startDate: seg2Start, endDate: seg2End },
+    { sequence: 3, startDate: seg3Start, endDate: seg3End },
+  ];
+
+  Store.setTasks([
+    {
+      id: anchorId, PRODUCTION_ORDER: 'PANCHOR', MATERIAL_NUMBER: 'MANCHOR', MACHINE: line,
+      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+    },
+    {
+      id: companionId, PRODUCTION_ORDER: 'PCOMP', MATERIAL_NUMBER: 'MCOMP', MACHINE: line,
+      plant: '5512', RUN_TIME: 24, start_date: seg1Start, end_date: seg3End,
+      scheduleSegments: companionOriginalSegments,
+    },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+
+  // The anchor (dragged item) is dropped two days later; the companion is
+  // NOT dragged directly -- it must move by the same group delta.
+  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
+
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: droppedAnchorStart, end: droppedAnchorEnd, group: line } : undefined),
+    update: () => {},
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+
+    const updatedAnchor = Store.tasks[anchorId];
+    assert.equal(updatedAnchor.start_date.getTime(), Util.snap(droppedAnchorStart).getTime(),
+      'the dragged anchor commits at the dropped position');
+
+    const updatedCompanion = Store.tasks[companionId];
+    assert.equal(updatedCompanion.scheduleSegments.length, 3,
+      'the companion is NOT collapsed to a single continuous block just because it was dragged as part of a group');
+
+    const deltaMs = Util.snap(droppedAnchorStart).getTime() - anchorStart.getTime();
+    assert.notEqual(deltaMs, 0, 'sanity: the group drag must have actually moved');
+
+    for (let i = 0; i < 3; i++) {
+      const original = companionOriginalSegments[i];
+      const shifted = updatedCompanion.scheduleSegments[i];
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
+        `companion segment ${i + 1} start shifted by exactly the GROUP drag delta, not left stale`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
+        `companion segment ${i + 1} end shifted by exactly the GROUP drag delta, not left stale`);
+      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
+        original.endDate.getTime() - original.startDate.getTime(),
+        `companion segment ${i + 1} duration is unchanged`);
+    }
+    assert.equal(updatedCompanion.start_date.getTime(), updatedCompanion.scheduleSegments[0].startDate.getTime(),
+      'companion parent start_date mirrors its own shifted first segment');
+    assert.equal(updatedCompanion.end_date.getTime(), updatedCompanion.scheduleSegments[2].endDate.getTime(),
+      'companion parent end_date mirrors its own shifted last segment');
+    assert.equal(updatedCompanion.MACHINE, line);
+  } finally {
+    Timeline._items = undefined;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion patch commits NOTHING — the dragged item is not partially committed (final-review fix 1)', () => {
+  // Regression target: before this fix, Store.updateTask(id, draggedPatch, ...)
+  // ran BEFORE the companion loop validated every companion's
+  // manualSchedulePatchFor call. A companion with a non-finite/<=0
+  // Util.runHours (e.g. RUN_TIME: 0, a real NIMBUS data-quality pattern)
+  // makes manualSchedulePatchFor return null, which set companionFailed and
+  // broke out -- but the dragged item's Store mutation from earlier was never
+  // rolled back and had no UndoStack entry. The fix defers ALL Store/Timeline
+  // mutation in this branch until both the dragged item's patch AND every
+  // companion's patch have validated successfully.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorRaf = globalThis.requestAnimationFrame;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  // The failure path calls Timeline._scheduleRebuild(), which schedules via
+  // requestAnimationFrame -- not defined in this Node test environment.
+  globalThis.requestAnimationFrame = callback => { callback(performance.now()); return 1; };
+
+  const line = 'MULTI-DRAG-FAIL-LINE';
+  const anchorId = 'multi-anchor-fail';
+  const companionId = 'multi-companion-fail';
+
+  const anchorStart = new Date('2026-08-20T08:00:00');
+  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
+  const companionStart = new Date('2026-08-20T08:00:00');
+  const companionEnd   = new Date('2026-08-20T12:00:00');
+
+  Store.setTasks([
+    {
+      id: anchorId, PRODUCTION_ORDER: 'PANCHORF', MATERIAL_NUMBER: 'MANCHORF', MACHINE: line,
+      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+    },
+    {
+      // RUN_TIME: 0 -> Util.runHours returns 0 -> manualSchedulePatchFor
+      // computes runtimeMinutes <= 0 and returns null for this companion.
+      id: companionId, PRODUCTION_ORDER: 'PCOMPF', MATERIAL_NUMBER: 'MCOMPF', MACHINE: line,
+      plant: '5512', RUN_TIME: 0, start_date: companionStart, end_date: companionEnd,
+    },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+
+  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
+
+  let timelineItemUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: droppedAnchorStart, end: droppedAnchorEnd, group: line } : undefined),
+    update: () => { timelineItemUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+
+    const stillAnchor = Store.tasks[anchorId];
+    assert.equal(stillAnchor.start_date.getTime(), anchorStart.getTime(),
+      'the dragged anchor must NOT be partially committed when a companion patch fails validation');
+    assert.equal(stillAnchor.end_date.getTime(), anchorEnd.getTime());
+    assert.equal(stillAnchor.MACHINE, line, 'the anchor MACHINE must be unchanged (it was already on this line, but must not be re-stamped mid-failure)');
+
+    const stillCompanion = Store.tasks[companionId];
+    assert.equal(stillCompanion.start_date.getTime(), companionStart.getTime(),
+      'the companion must also be completely unchanged');
+    assert.equal(stillCompanion.end_date.getTime(), companionEnd.getTime());
+
+    assert.equal(timelineItemUpdateCalled, false,
+      'no Timeline._items.update call should happen for any companion when the batch fails validation');
+  } finally {
+    Timeline._items = undefined;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
 test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');
@@ -1237,4 +1636,131 @@ test('PriorityListViewer exposes open/close/search', () => {
   assert.equal(typeof PriorityListViewer.open, 'function');
   assert.equal(typeof PriorityListViewer.close, 'function');
   assert.equal(typeof PriorityListViewer.search, 'function');
+});
+
+test('Task 3: B2 — Table._onCellChanged no longer calls autoReflow (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow call from Table._onCellChanged.
+  // This test calls the real handler (not Store.updateTask) and verifies autoReflow is NOT invoked.
+  const line = 'NO-REFLOW-TABLE-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAutoReflow = Engine.autoReflow;
+  const priorTableApi = Table._api;
+
+  let autoReflowCalls = [];
+  Engine.autoReflow = (id) => autoReflowCalls.push(id);
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'table-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'table-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+
+  try {
+    const peerBefore = Store.tasks['table-peer'].start_date.getTime();
+    // Call the real handler with a start_date cell change that creates an overlap
+    Table._onCellChanged({
+      colDef: { field: 'start_date' },
+      data: Store.tasks['table-anchor'],
+      newValue: '2026-08-25 07:00',
+      node: { refreshCells: () => {} },
+    });
+    const peerAfter = Store.tasks['table-peer'].start_date.getTime();
+    // Peer should NOT have moved and autoReflow should NOT have been called
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Table cell edit');
+    assert.equal(autoReflowCalls.length, 0, 'Engine.autoReflow must NOT be called from Table._onCellChanged (Task 3: B2 deleted this call)');
+  } finally {
+    Engine.autoReflow = priorAutoReflow;
+    Table._api = priorTableApi;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Task 3: B2 — Inspector._onFieldChange no longer calls autoReflow (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow call from Inspector._onFieldChange.
+  // This test calls the real handler (not Store.updateTask) and verifies autoReflow is NOT invoked.
+  const line = 'NO-REFLOW-INSPECTOR-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAutoReflow = Engine.autoReflow;
+  const priorCurrentId = Inspector._currentId;
+
+  let autoReflowCalls = [];
+  Engine.autoReflow = (id) => autoReflowCalls.push(id);
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'inspector-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'inspector-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+
+  try {
+    Inspector._currentId = 'inspector-anchor';
+    const peerBefore = Store.tasks['inspector-peer'].start_date.getTime();
+    // Call the real handler with a start_date field change that creates an overlap
+    Inspector._onFieldChange('start_date', '2026-08-25 07:00');
+    const peerAfter = Store.tasks['inspector-peer'].start_date.getTime();
+    // Peer should NOT have moved and autoReflow should NOT have been called
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Inspector field change');
+    assert.equal(autoReflowCalls.length, 0, 'Engine.autoReflow must NOT be called from Inspector._onFieldChange (Task 3: B2 deleted this call)');
+  } finally {
+    Engine.autoReflow = priorAutoReflow;
+    Inspector._currentId = priorCurrentId;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Task 3: B2 — Interaction._onDataSetUpdate no longer calls autoReflow (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow call from Interaction._onDataSetUpdate (single-item drag branch).
+  // This test calls the real handler (not Store.updateTask) and verifies autoReflow is NOT invoked.
+  // Pattern from schedule-workbench.test.mjs ~line 869.
+  const line = 'NO-REFLOW-TIMELINE-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const draggedStart = new Date('2026-08-25T07:00:00'); // creates overlap when moved
+  const draggedEnd = new Date('2026-08-25T09:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAutoReflow = Engine.autoReflow;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+
+  let autoReflowCalls = [];
+  Engine.autoReflow = (id) => autoReflowCalls.push(id);
+  Alerts.scheduleRecompute = () => {}; // stub to avoid setTimeout
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'timeline-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'timeline-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+  Selection.clear();
+
+  Timeline._items = {
+    get: (i) => (i === 'timeline-anchor' ? { start: draggedStart, end: draggedEnd, group: line } : undefined),
+  };
+  try {
+    const peerBefore = Store.tasks['timeline-peer'].start_date.getTime();
+    // Call the real handler — this is the single-item drag that used to call autoReflow
+    Interaction._onDataSetUpdate({ items: ['timeline-anchor'] });
+    const peerAfter = Store.tasks['timeline-peer'].start_date.getTime();
+    // Peer should NOT have moved and autoReflow should NOT have been called
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Timeline drag');
+    assert.equal(autoReflowCalls.length, 0, 'Engine.autoReflow must NOT be called from Interaction._onDataSetUpdate (Task 3: B2 deleted this call)');
+  } finally {
+    Engine.autoReflow = priorAutoReflow;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Timeline._items = undefined;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
 });

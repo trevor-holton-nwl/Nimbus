@@ -2876,7 +2876,6 @@ export const Table = {
 
     Store.updateTask(id, changes, 'table');
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
-    Engine.autoReflow(id);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
   },
@@ -3813,9 +3812,6 @@ export const Inspector = {
       Object.assign(changes, schedule);
     }
     Store.updateTask(id, changes, 'inspector');
-    if (field === 'start_date' || field === 'RUN_TIME' || field === 'MACHINE') {
-      Engine.autoReflow(id);
-    }
     Alerts.scheduleRecompute();
   },
 
@@ -6520,15 +6516,6 @@ export const Interaction = {
     if (Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') (Modal as ModalWithOpenEdit).openEdit!(t);
   },
 
-  _dragRequiresRegeneration(task: NimbusTask, targetLine: string): boolean {
-    const policy = Engine.splitOrderPolicyFor(Store.getPlantForLine(targetLine) ?? task.PLANT ?? Store.selectedPlant);
-    return policy !== 'never' || !!(task.scheduleSegments && task.scheduleSegments.length >= 2);
-  },
-
-  _regenerateDragPatch(task: NimbusTask, targetLine: string, requestedStart: Date): Partial<NimbusTask> | null {
-    return Engine.manualSchedulePatchFor(task, targetLine, requestedStart);
-  },
-
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a fixed order still commits (see the corrected header
@@ -6591,46 +6578,6 @@ export const Interaction = {
       // CENTER_ON_CLICK focus() pan that would revert this commit (see _onClick).
       this._lastDragEndTs = Date.now();
 
-      if (Interaction._dragRequiresRegeneration(t, newLine)
-          || Selection.ids().some(selectedId => {
-            const selected = Store.tasks[selectedId];
-            return !!selected && Interaction._dragRequiresRegeneration(
-              selected, newLine !== t.MACHINE ? newLine : (selected.MACHINE || 'Unknown')
-            );
-          })) {
-        const deltaMs = newStart.getTime() - expectedItem.start.getTime();
-        const companionIds = Selection.ids().filter(sid => sid !== id && !Store.isFixed(sid));
-        const allIds = [id, ...companionIds];
-        const snap = UndoStack.snapshotTasks(allIds);
-        const regenerationPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-        for (const taskId of allIds) {
-          const parent = Store.tasks[taskId];
-          if (!parent?.start_date) continue;
-          const targetLine = taskId === id
-            ? newLine
-            : (newLine !== t.MACHINE ? newLine : (parent.MACHINE || 'Unknown'));
-          // A segment drag explicitly establishes the new FIRST start for its
-          // parent. Companion parents retain the user's relative drag delta.
-          const requestedStart = taskId === id
-            ? newStart
-            : new Date(parent.start_date.getTime() + deltaMs);
-          const changes = Interaction._regenerateDragPatch(parent, targetLine, requestedStart);
-          if (!changes?.start_date || !changes.end_date) {
-            Toast.show('Could not regenerate the order in the available calendar window.', 'error');
-            Timeline._scheduleRebuild();
-            return;
-          }
-          regenerationPatches.push({ id: taskId, changes });
-        }
-        if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
-        Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
-        Timeline._scheduleRebuild();
-        UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
-          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
-        this._clearGhosts();
-        return;
-      }
-
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-fixed selected items by the same time + line delta.
       const deltaMs  = newStart.getTime() - t.start_date.getTime();
@@ -6642,29 +6589,68 @@ export const Interaction = {
         const allIds = [id, ...selIds];
         const snap = UndoStack.snapshotTasks(allIds);
 
-        // Apply the dragged item
-        Store.updateTask(id, { start_date: newStart, end_date: newEnd, MACHINE: newLine }, 'timeline');
+        // Apply the dragged item — routed through manualSchedulePatchFor so an
+        // already-split order (>=2 scheduleSegments) is shifted rather than
+        // collapsed or re-derived (OD-B1a).
+        // Compute and validate the dragged item's patch, but do NOT commit it
+        // to Store yet — atomicity requires every companion's patch to also
+        // validate successfully before ANY mutation (Store or Timeline item)
+        // happens. See the (now-deleted) regeneration branch's contract: all
+        // patches computed first, one atomic Store.updateMany after.
+        const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+        if (!draggedPatch?.start_date || !draggedPatch.end_date) {
+          Toast.show(Util.t('toast.commit_failed'), 'error');
+          Timeline._scheduleRebuild();
+          continue;
+        }
 
-        // Apply the same delta to each companion
+        // Apply the same delta to each companion — routed through
+        // manualSchedulePatchFor (not a hand-rolled {start_date, end_date,
+        // MACHINE} object) so a companion that is itself already split
+        // (>=2 scheduleSegments) has its segments shifted too, instead of
+        // its parent boundaries moving while its child segments go stale at
+        // their old absolute positions. Mirrors the deleted regeneration
+        // branch's own contract: "Companion parents retain the user's
+        // relative drag delta."
         // (skippedFixed stays empty today — selIds above already excludes fixed
         // tasks — but is preserved as-is; not this task's scope to remove.)
+        // This loop only computes and validates each companion's patch — no
+        // Store or Timeline mutation happens here, since a later companion
+        // failing must leave earlier companions (and the dragged item)
+        // untouched too.
         const skippedFixed: string[] = [];
         const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+        const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
+        let companionFailed = false;
         for (const sid of selIds) {
           const st = Store.tasks[sid];
           if (!st || !st.start_date) continue;
-          const sNewStart = new Date(st.start_date.getTime() + deltaMs);
-          const sNewEnd   = new Date(st.end_date  ? st.end_date.getTime() + deltaMs : sNewStart.getTime() + Util.runHours(st) * Config.MS_HOUR);
           const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
-          companionPatches.push({ id: sid, changes: { start_date: sNewStart, end_date: sNewEnd, MACHINE: sNewLine } });
+          const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
+          const changes = Engine.manualSchedulePatchFor(st, sNewLine, sRequestedStart);
+          if (!changes?.start_date || !changes.end_date) {
+            companionFailed = true;
+            break;
+          }
+          companionPatches.push({ id: sid, changes });
+          companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
+        }
+        if (companionFailed) {
+          Toast.show(Util.t('toast.commit_failed'), 'error');
+          Timeline._scheduleRebuild();
+          continue;
+        }
 
-          // Update the vis item too
+        // Every patch validated — commit atomically: dragged item, then
+        // companions, then their Timeline item mirrors.
+        Store.updateTask(id, draggedPatch, 'timeline');
+        if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
+        for (const upd of companionItemUpdates) {
           Timeline._suppressEvents = true;
           try {
-            Timeline._items!.update({ id: sid, start: sNewStart, end: sNewEnd, group: sNewLine });
+            Timeline._items!.update({ id: upd.id, start: upd.start, end: upd.end, group: upd.group });
           } finally { Timeline._suppressEvents = false; }
         }
-        if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
         Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
         if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
@@ -6675,15 +6661,19 @@ export const Interaction = {
         return;
       }
 
-      // Single-item drag (original behaviour)
+      // Single-item drag (original behaviour) — routed through
+      // manualSchedulePatchFor so an already-split order (>=2
+      // scheduleSegments) is shifted by the drag delta rather than
+      // collapsed or re-derived (OD-B1a).
       const snap = UndoStack.snapshotTasks([id]);
 
-      Store.updateTask(id, {
-        start_date:      newStart,
-        end_date:        newEnd,
-        MACHINE: newLine
-      }, 'timeline');
-      Engine.autoReflow(id);
+      const patch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+      if (!patch?.start_date || !patch.end_date) {
+        Toast.show(Util.t('toast.commit_failed'), 'error');
+        Timeline._scheduleRebuild();
+        continue;
+      }
+      Store.updateTask(id, patch, 'timeline');
       Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
@@ -9490,10 +9480,10 @@ export const AlertsUIAdapter = {
         headline = 'Blackout violation';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'fixed-closed') {
-        headline = 'Fixed order on closed day';
+        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order on closed day' : 'Order on closed day';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'fixed-out-of-hours') {
-        headline = 'Fixed order outside work hours';
+        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order outside work hours' : 'Order outside work hours';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'closed') {
         headline = 'Line closed';

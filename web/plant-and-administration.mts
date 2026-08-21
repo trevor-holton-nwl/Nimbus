@@ -3217,6 +3217,18 @@ export const Plant = {
           </div>
 
           <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.min_productive_segment_title')}</h3></header>
+            <div class="panel-body split-policy-body">
+              <p class="panel-help-text">${Util.t('ui.min_productive_segment_help')}</p>
+              <label class="split-policy-control" for="sys-min-productive-segment-minutes">
+                <span>${Util.t('ui.min_productive_segment_label')}</span>
+                <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" step="1" inputmode="numeric" aria-describedby="sys-min-productive-segment-help">
+              </label>
+              <p id="sys-min-productive-segment-help" class="split-policy-help">${Util.t('ui.min_productive_segment_help_detail')}</p>
+            </div>
+          </div>
+
+          <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.visibility_horizon_title')}</h3></header>
             <div class="panel-body split-policy-body">
               <p id="sys-visibility-horizon-help" class="panel-help-text">${Util.t('ui.visibility_horizon_help')}</p>
@@ -3298,6 +3310,7 @@ export const Plant = {
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
     const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
     const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
+    const minProductiveSegmentInp = pane.querySelector('#sys-min-productive-segment-minutes') as HTMLInputElement;
     const visibilityHorizonDaysInp = pane.querySelector('#sys-visibility-horizon-days') as HTMLInputElement;
     const horizonRollHourInp = pane.querySelector('#sys-horizon-roll-hour') as HTMLInputElement;
     const frozenHorizonDaysInp = pane.querySelector('#sys-frozen-horizon-days') as HTMLInputElement;
@@ -3309,6 +3322,8 @@ export const Plant = {
       ? savedSplitPolicy : 'never';
     maxPullForwardInp.value = Number.isInteger(plantRow?.max_pull_forward_days) && (plantRow!.max_pull_forward_days as number) >= 0
       ? String(plantRow!.max_pull_forward_days) : '';
+    minProductiveSegmentInp.value = Number.isInteger(plantRow?.min_productive_segment_minutes) && (plantRow!.min_productive_segment_minutes as number) > 0
+      ? String(plantRow!.min_productive_segment_minutes) : '30';
     visibilityHorizonDaysInp.value = Number.isInteger(plantRow?.visibility_horizon_days) && (plantRow!.visibility_horizon_days as number) >= 0
       ? String(plantRow!.visibility_horizon_days) : '';
     horizonRollHourInp.value = Number.isInteger(plantRow?.horizon_roll_hour_utc)
@@ -3430,6 +3445,37 @@ export const Plant = {
         maxPullForwardInp.value = previous === null ? '' : String(previous);
         Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
       } finally { maxPullForwardInp.disabled = false; }
+    });
+
+    // B3 (2026-08-21): min_productive_segment_minutes — same fetch/toast/
+    // revert shape as max-pull-forward-days above, but the column is NOT
+    // NULL DEFAULT 30 (never null), so an empty/invalid entry reverts rather
+    // than clearing to null.
+    minProductiveSegmentInp.addEventListener('change', async () => {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previous = Number.isInteger(plantRow.min_productive_segment_minutes) && (plantRow.min_productive_segment_minutes as number) > 0
+        ? (plantRow.min_productive_segment_minutes as number) : 30;
+      const raw = minProductiveSegmentInp.value.trim();
+      const next = Number(raw);
+      if (raw === '' || !Number.isInteger(next) || next <= 0) {
+        minProductiveSegmentInp.value = String(previous);
+        Toast.show(Util.t('ui.min_productive_segment_invalid'), 'error');
+        return;
+      }
+      minProductiveSegmentInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/min-productive-segment-minutes`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, min_productive_segment_minutes: next }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        plantRow.min_productive_segment_minutes = next;
+        Toast.show(Util.t('ui.min_productive_segment_saved'), 'success');
+      } catch (error) {
+        minProductiveSegmentInp.value = String(previous);
+        Toast.show(`${Util.t('ui.min_productive_segment_failed')}: ${(error as Error).message}`, 'error');
+      } finally { minProductiveSegmentInp.disabled = false; }
     });
 
     // C2 (2026-08-20): frozen_horizon_days — same fetch/toast/revert shape as

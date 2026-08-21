@@ -74,6 +74,36 @@ def test_max_pull_forward_rejects_invalid_values():
             raise AssertionError(f"{value!r} must be rejected")
 
 
+def test_min_productive_segment_minutes_write_persists_positive_integer_and_audits(monkeypatch):
+    """B3 (2026-08-21): the plant-configurable productive-segment floor must
+    be persisted and attributed to the admin actor, mirroring
+    set_plant_max_pull_forward_days's validated-write shape."""
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_min_productive_segment_minutes("SN", "5512", 15, "owner@example.com")
+
+    assert result == {"status": "ok", "plant": "5512", "min_productive_segment_minutes": 15}
+    update = next(
+        (item for item in cursor.executed if "UPDATE plants SET min_productive_segment_minutes" in item[0]), None,
+    )
+    assert update is not None
+    assert update[1] == [15, "5512", "SN"]
+    assert any("set_min_productive_segment_minutes" in statement for statement, _ in cursor.executed)
+
+
+def test_min_productive_segment_minutes_rejects_invalid_values():
+    """Unlike max_pull_forward_days, this column is NOT NULL — null, zero,
+    negative, non-integer, and bool values must all be rejected."""
+    for value in (-1, 0, 1.5, "30", True, None):
+        try:
+            md.set_plant_min_productive_segment_minutes("SN", "5512", value)
+        except ValueError as error:
+            assert "min_productive_segment_minutes" in str(error)
+        else:
+            raise AssertionError(f"{value!r} must be rejected")
+
+
 def test_setup_active_write_persists_bool_and_audits(monkeypatch):
     """The relocated plant-level "include setup times" flag must persist to
     plants.setup_active and land in admin_audit, mirroring

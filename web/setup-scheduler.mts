@@ -7,7 +7,7 @@
  */
 
 import type { RemoveBacklogResult } from './schedule-services.mjs';
-import { Engine, candidateDefaultWorkHours } from './schedule-services.mjs';
+import { Engine, candidateDefaultWorkHours, MIN_PRODUCTIVE_SEGMENT_MINUTES } from './schedule-services.mjs';
 import { normalizedValue, resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
   NimbusBlock,
@@ -28,10 +28,6 @@ export interface SchedulePatch {
   id: string;
   changes: Partial<NimbusTask>;
 }
-
-/** Phase-1 split policy: productive pieces are never shorter than this fixed
- * system boundary, except one complete unsplit order below the boundary. */
-export const MIN_PRODUCTIVE_SEGMENT_MINUTES = 30;
 
 export interface PlacementInterval {
   start: Date;
@@ -69,6 +65,12 @@ export interface PlaceWithSetupRequest {
   /** Relevant only to `overlong_only`; Calendar derives it from nominal
    * operating windows so a blackout does not make ordinary work splitable. */
   isInherentlyOverlong?: boolean;
+  /** B3 (2026-08-21): the plant's configured productive-segment floor
+   * (schedule-services.mjs's MIN_PRODUCTIVE_SEGMENT_MINUTES default when
+   * omitted or not a positive integer). Callers resolve this from the
+   * snapshot's masterData — see minProductiveSegmentMinutesForSnapshot below
+   * — so this primitive stays Store-free. */
+  minProductiveSegmentMinutes?: number;
 }
 
 export interface PlacementSuccess {
@@ -171,11 +173,13 @@ function rangeContains(ranges: ReadonlyArray<IntegerRange>, target: number): boo
  * seen so far, so this remains bounded by calendar fragments rather than
  * runtime length. The first interval is deliberately non-skippable: setup
  * cannot be placed without productive work immediately after it. */
-function productiveAllocations(capacities: ReadonlyArray<number>, totalMinutes: number): number[] | null {
+function productiveAllocations(
+  capacities: ReadonlyArray<number>, totalMinutes: number, minProductiveSegmentMinutes: number,
+): number[] | null {
   const firstCapacity = capacities[0] ?? 0;
-  if (firstCapacity < MIN_PRODUCTIVE_SEGMENT_MINUTES) return null;
+  if (firstCapacity < minProductiveSegmentMinutes) return null;
   const states: IntegerRange[][] = [[{
-    lo: MIN_PRODUCTIVE_SEGMENT_MINUTES,
+    lo: minProductiveSegmentMinutes,
     hi: Math.min(firstCapacity, totalMinutes),
   }]];
   if (rangeContains(states[0], totalMinutes)) return [totalMinutes];
@@ -184,10 +188,10 @@ function productiveAllocations(capacities: ReadonlyArray<number>, totalMinutes: 
     const capacity = capacities[index];
     const prior = states[index - 1];
     const next = prior.map(range => ({ ...range })); // skip this fragment
-    if (capacity >= MIN_PRODUCTIVE_SEGMENT_MINUTES) {
+    if (capacity >= minProductiveSegmentMinutes) {
       for (const range of prior) {
         next.push({
-          lo: range.lo + MIN_PRODUCTIVE_SEGMENT_MINUTES,
+          lo: range.lo + minProductiveSegmentMinutes,
           hi: Math.min(totalMinutes, range.hi + capacity),
         });
       }
@@ -208,7 +212,7 @@ function productiveAllocations(capacities: ReadonlyArray<number>, totalMinutes: 
     const capacity = capacities[index];
     let chosen: number | null = null;
     for (const range of prior) {
-      const lo = Math.max(MIN_PRODUCTIVE_SEGMENT_MINUTES, remaining - range.hi);
+      const lo = Math.max(minProductiveSegmentMinutes, remaining - range.hi);
       const hi = Math.min(capacity, remaining - range.lo);
       if (lo <= hi) {
         // Prefer the smallest later piece: it leaves the earliest productive
@@ -221,7 +225,7 @@ function productiveAllocations(capacities: ReadonlyArray<number>, totalMinutes: 
     allocations[index] = chosen;
     remaining -= chosen;
   }
-  if (remaining < MIN_PRODUCTIVE_SEGMENT_MINUTES || remaining > firstCapacity) return null;
+  if (remaining < minProductiveSegmentMinutes || remaining > firstCapacity) return null;
   allocations[0] = remaining;
   return allocations;
 }
@@ -259,6 +263,10 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
   if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return capacityFailure('invalid-runtime');
   const intervals = normalizedIntervals(request.freeIntervals, request.earliestStart);
   if (!intervals.length) return capacityFailure();
+  const minProductiveSegmentMinutes = Number.isInteger(request.minProductiveSegmentMinutes)
+    && (request.minProductiveSegmentMinutes as number) > 0
+    ? (request.minProductiveSegmentMinutes as number)
+    : MIN_PRODUCTIVE_SEGMENT_MINUTES;
 
   const place = (start: Date, productiveMinutes: number, productiveSegments: PlacementInterval[]): PlacementSuccess => {
     const productiveStart = new Date(start.getTime() + setup.minutes * 60 * 1000);
@@ -284,9 +292,9 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     return capacityFailure();
   }
 
-  // The under-30 exemption is explicitly complete-and-unsplit. It does not
+  // The under-floor exemption is explicitly complete-and-unsplit. It does not
   // permit a setup-only tail followed by a tiny continuation.
-  if (runtimeMinutes < MIN_PRODUCTIVE_SEGMENT_MINUTES) {
+  if (runtimeMinutes < minProductiveSegmentMinutes) {
     for (const interval of intervals) {
       if (interval.minutes >= setup.minutes + runtimeMinutes) return place(interval.start, runtimeMinutes, []);
     }
@@ -297,11 +305,11 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     const firstInterval = intervals[first];
     const firstProductiveStart = new Date(firstInterval.start.getTime() + setup.minutes * 60 * 1000);
     const firstCapacity = Math.floor((firstInterval.end.getTime() - firstProductiveStart.getTime()) / (60 * 1000));
-    if (firstCapacity < MIN_PRODUCTIVE_SEGMENT_MINUTES) continue;
+    if (firstCapacity < minProductiveSegmentMinutes) continue;
 
     const slots: MinuteInterval[] = [{ start: firstProductiveStart, end: firstInterval.end, minutes: firstCapacity }];
     for (let index = first + 1; index < intervals.length; index += 1) slots.push(intervals[index]);
-    const allocations = productiveAllocations(slots.map(slot => slot.minutes), runtimeMinutes);
+    const allocations = productiveAllocations(slots.map(slot => slot.minutes), runtimeMinutes, minProductiveSegmentMinutes);
     if (!allocations) continue;
 
     const productiveSegments = allocations.flatMap((minutes, index) => {
@@ -630,7 +638,7 @@ function normalizedPriorityValue(value: unknown): string {
  * A detached candidate must consume only the master-data and rank snapshot it
  * was supplied, otherwise a plant switch can make a private search compare
  * against another plant's policy. */
-function activePriorityKeys(snapshot: Readonly<ScheduleSnapshot>, plant: string): string[] {
+export function activePriorityKeys(snapshot: Readonly<ScheduleSnapshot>, plant: string): string[] {
   const tree = snapshot.masterData?.plants.find(row => row.plant === plant)?.constraints;
   if (!tree?.length) return ['colorWheel'];
 
@@ -1320,6 +1328,17 @@ function splitOrderPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant
   return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
 }
 
+/** B3 (2026-08-21): mirrors splitOrderPolicyForSnapshot above — resolves the
+ * plant's configured productive-segment floor from the snapshot's
+ * masterData rather than Engine.minProductiveSegmentMinutesFor's live Store
+ * read, so this detached evaluator stays Store-free even though it shares
+ * the same fallback default (MIN_PRODUCTIVE_SEGMENT_MINUTES) Engine's
+ * version falls back to. */
+function minProductiveSegmentMinutesForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): number {
+  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.min_productive_segment_minutes;
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+}
+
 /** The Task 2 overlong decision is based on nominal line/plant operating
  * windows, not dated blackouts. Keep that same 90-day bounded definition in
  * the detached snapshot evaluator so policy routing remains Store-free. */
@@ -1522,6 +1541,7 @@ function candidateForSequence(
         ),
       } : {}),
       freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, fragment.end),
+      minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       if (placement.kind === 'infeasible' && placement.reason === 'no-feasible-capacity') {
@@ -2829,6 +2849,7 @@ export function placeUnknownTail(
         isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes),
       } : {}),
       freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, capacityEnd),
+      minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       // B2: this order alone doesn't fit at the current cursor — defer it

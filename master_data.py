@@ -318,15 +318,18 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 if page_plants:
                     cur.execute(
                         "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, "
-                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days "
+                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days, "
+                        "min_productive_segment_minutes "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in cur.fetchall()}
                     for row in rows:
                         (constraints, policy, max_pull_forward_days, setup_active,
-                         visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days) = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False, None, 19, None)
+                         visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days,
+                         min_productive_segment_minutes) = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')),
+                            (None, 'never', None, False, None, 19, None, 30)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
@@ -335,6 +338,9 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                         row['visibility_horizon_days'] = visibility_horizon_days
                         row['horizon_roll_hour_utc'] = horizon_roll_hour_utc if horizon_roll_hour_utc is not None else 19
                         row['frozen_horizon_days'] = frozen_horizon_days
+                        row['min_productive_segment_minutes'] = (
+                            min_productive_segment_minutes if min_productive_segment_minutes is not None else 30
+                        )
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -1013,6 +1019,34 @@ def ensure_plant_max_pull_forward_days_column() -> None:
         conn.commit()
 
 
+def ensure_plant_min_productive_segment_minutes_column() -> None:
+    """Idempotent B3 (2026-08-21) column: the plant-configurable productive-
+    segment floor both Calendar.allocateRuntime (frontend, non-setup-aware)
+    and placeWithSetup (frontend, setup-aware) enforce, and db.py's
+    _validate_schedule_segments (the real persistence gate) reads via a
+    batched per-plant lookup. NOT NULL DEFAULT 30 preserves the prior fixed
+    system-wide 30-minute behavior for every plant that never opts into an
+    override. Redeploy-safe counterpart to schema.sql's ALTER TABLE block,
+    same dual-provisioning pattern as split_order_policy/max_pull_forward_days
+    above — including the positive-value CHECK constraint, so all three
+    provisioning paths (schema.sql, migrations/, this boot-hook) stay in
+    parity. Kept out of the grid, same as its siblings."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS min_productive_segment_minutes "
+            "INTEGER NOT NULL DEFAULT 30"
+        )
+        cur.execute(
+            "SELECT 1 FROM pg_constraint WHERE conname = 'plants_min_productive_segment_minutes_positive'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE plants ADD CONSTRAINT plants_min_productive_segment_minutes_positive "
+                "CHECK (min_productive_segment_minutes > 0)"
+            )
+        conn.commit()
+
+
 def ensure_plant_visibility_horizon_columns() -> None:
     """Idempotent Workstream C1 (2026-08-20) columns: how far into the future a
     planner can see on the Gantt/Orders tab. Redeploy-safe counterpart to
@@ -1254,6 +1288,38 @@ def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | No
         )
         conn.commit()
     return {"status": "ok", "plant": plant, "max_pull_forward_days": value}
+
+
+def set_plant_min_productive_segment_minutes(subnetwork: str, plant: str, value: int,
+                                             user_email: str | None = None) -> dict:
+    """Persist the plant's B3 productive-segment floor (minutes). Unlike
+    max_pull_forward_days/frozen_horizon_days this is NOT nullable — the
+    column is NOT NULL DEFAULT 30, so every plant always has a well-defined
+    floor even before an admin ever visits the Scheduling Rules panel; a
+    caller wanting to reset to the system default passes 30 explicitly."""
+    if not plant:
+        raise ValueError("plant is required")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("min_productive_segment_minutes must be a positive integer")
+
+    params: list = [value, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET min_productive_segment_minutes = %s, updated_at = NOW() WHERE {where}", params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_min_productive_segment_minutes', %s, %s)",
+            (Jsonb({"plant": plant, "min_productive_segment_minutes": value}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "min_productive_segment_minutes": value}
 
 
 def set_plant_visibility_horizon(subnetwork: str, plant: str, visibility_horizon_days: int | None,

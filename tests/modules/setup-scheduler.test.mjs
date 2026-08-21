@@ -5,6 +5,7 @@ import { evaluateSchedule } from '../../web/setup-scheduler.mjs';
 import * as SetupScheduler from '../../web/setup-scheduler.mjs';
 import { ErrorLog } from '../../web/application-foundation.mjs';
 import { Store } from '../../web/schedule-state.mjs';
+import { Engine } from '../../web/schedule-services.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
@@ -182,6 +183,33 @@ test('placeWithSetup applies never, overlong_only, and partial_allowed without s
   assert.equal(completeShort.kind, 'placed');
   assert.deepEqual(segmentMinutes(completeShort), [20],
     'a complete under-30-minute order remains legal only when it is unsplit');
+});
+
+test('placeWithSetup respects a non-default configured productive-segment floor (B3)', () => {
+  // Two 20-minute windows: neither alone meets the hardcoded 30-minute
+  // default, but together (20+15) they satisfy a plant-configured 15-minute
+  // floor. This fails if minProductiveSegmentMinutes threading is incomplete
+  // and the request field is silently ignored in favor of the module default.
+  const windows = [
+    interval('2026-08-12T08:00', '2026-08-12T08:20'),
+    interval('2026-08-13T08:00', '2026-08-13T08:20'),
+  ];
+  const base = {
+    earliestStart: at('2026-08-12T08:00'),
+    runtimeMinutes: 35,
+    setup: resolvedSetup(0),
+    policy: 'partial_allowed',
+    freeIntervals: windows,
+  };
+
+  const underDefaultFloor = SetupScheduler.placeWithSetup(base);
+  assert.equal(underDefaultFloor.kind, 'infeasible',
+    'neither 20-minute window alone meets the hardcoded 30-minute default floor');
+
+  const withConfiguredFloor = SetupScheduler.placeWithSetup({ ...base, minProductiveSegmentMinutes: 15 });
+  assert.equal(withConfiguredFloor.kind, 'placed');
+  assert.deepEqual(segmentMinutes(withConfiguredFloor), [20, 15],
+    'a plant-configured 15-minute floor allows a productive piece the default 30-minute floor would reject');
 });
 
 test('Min Changeover stays detached and reports its due-safe setup savings decision', () => {
@@ -2925,4 +2953,87 @@ test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empt
 
   assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
     'the guard does not fire when the baseline itself has no patches to fall back to');
+});
+
+// ---------------------------------------------------------------------------
+// Workstream B — Task 7 (B4): parity pin between Engine.flattenConstraints
+// (web/schedule-services.mts:2484, Store-coupled, drives _sortTerms/'spt') and
+// this module's own activePriorityKeys (:641, snapshot-pure, drives
+// policyKeyForTask/'changeover'). docs/architecture/optimizer-dispatch.md's
+// "Setup-aware dispatch" section documents these as a DELIBERATE pair of
+// independent tree-walk implementations -- setup-scheduler.mts must never
+// import Store, so it cannot simply call flattenConstraints itself. This test
+// cannot merge them (that would defeat the reason they're separate); it only
+// proves the same plants.constraints tree can never make them disagree.
+//
+// Both functions read the identical NimbusMasterData shape
+// (`{ plants: [{ plant, constraints }], lines: [] }`) -- flattenConstraints
+// via Store.masterData (set with Store.setMasterData), activePriorityKeys via
+// ScheduleSnapshot.masterData (a plain object literal) -- so "the same logical
+// tree" here is literally the same `constraints` array reused in both places.
+// ---------------------------------------------------------------------------
+
+test('activePriorityKeys and Engine.flattenConstraints agree on the same plants.constraints tree, across 5 representative shapes', () => {
+  const priorMasterData = Store.masterData;
+  try {
+    const shapes = [
+      {
+        label: 'empty tree (never configured)',
+        plant: 'B4-PARITY-EMPTY',
+        tree: [],
+      },
+      {
+        label: 'single-node tree',
+        plant: 'B4-PARITY-SINGLE',
+        tree: [{ key: 'prt02', enabled: true, order: 1 }],
+      },
+      {
+        label: 'multi-node tree, mixed enabled/order (order not array-position)',
+        plant: 'B4-PARITY-MULTI',
+        tree: [
+          { key: 'prt01', enabled: true, order: 2 },
+          { key: 'colorWheel', enabled: true, order: 1 },
+          { key: 'productionVersion', enabled: false, order: 3 },
+        ],
+      },
+      {
+        label: 'a disabled node skips its entire subtree',
+        plant: 'B4-PARITY-DISABLED-SUBTREE',
+        tree: [
+          { key: 'colorWheel', enabled: false, order: 1, children: [
+            { key: 'prt01', enabled: true, order: 1 },
+          ] },
+          { key: 'prt02', enabled: true, order: 2 },
+        ],
+      },
+      {
+        label: 'a duplicate key dedupes, but its children still get walked',
+        plant: 'B4-PARITY-DUPLICATE',
+        tree: [
+          { key: 'colorWheel', enabled: true, order: 1 },
+          { key: 'colorWheel', enabled: true, order: 2, children: [
+            { key: 'prt01', enabled: true, order: 1 },
+          ] },
+        ],
+      },
+    ];
+
+    for (const { label, plant, tree } of shapes) {
+      // (a) the NimbusMasterPlant-shaped row Engine.flattenConstraints reads
+      // off Store.masterData.
+      Store.setMasterData({ plants: [{ plant, constraints: tree }], lines: [] }, 'unit-test');
+      const fromEngine = Engine.flattenConstraints(plant);
+
+      // (b) the equivalent ScheduleSnapshot.masterData-shaped row
+      // activePriorityKeys reads -- same NimbusMasterData shape, just held on
+      // a detached snapshot object instead of Store.
+      const snapshot = { masterData: { plants: [{ plant, constraints: tree }], lines: [] } };
+      const fromSetupScheduler = SetupScheduler.activePriorityKeys(snapshot, plant);
+
+      assert.deepEqual(fromSetupScheduler, fromEngine,
+        `${label}: activePriorityKeys and Engine.flattenConstraints must return identical, identically-ordered key arrays`);
+    }
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+  }
 });

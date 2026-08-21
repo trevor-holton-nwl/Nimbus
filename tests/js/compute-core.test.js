@@ -82,6 +82,55 @@ test('computeAlerts honours the dismissed set', () => {
   assert.equal(res.alerts.filter(a => a.type === 'overlap').length, 0);
 });
 
+// B1 (part 2): the fixed-closed/fixed-out-of-hours rules used to `continue` on
+// any task that wasn't `t.fixed`, so an unpinned order sitting outside working
+// hours or on a closed day raised nothing. These pin the dropped guard staying
+// dropped, plus the message wording still telling fixed apart from unpinned.
+test('computeAlerts raises fixed-out-of-hours for an UNPINNED task scheduled outside working hours', () => {
+  const base = Date.now() + 24 * 3600000; // tomorrow → "active"
+  const start = new Date(base); start.setHours(18, 0, 0, 0); // outside the 08:00-16:00 window below
+  const end = new Date(start.getTime() + 2 * 3600000);
+  const t = { id: 'u1', MACHINE: 'L', RUN_TIME: 2, fixed: false, start_date: start, end_date: end };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: { L: { workHours: allDays([8, 16]) } }, plants: {},
+    lineSettings: { L: { plant: null } }, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(a => a.type === 'fixed-out-of-hours');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].taskId, 'u1');
+  assert.match(hits[0].msg, /^Order "/);
+});
+
+test('computeAlerts raises fixed-closed for an UNPINNED task scheduled on a closed day', () => {
+  const base = Date.now() + 24 * 3600000; // tomorrow → "active"
+  const start = new Date(base); start.setHours(10, 0, 0, 0);
+  const end = new Date(start.getTime() + 2 * 3600000);
+  const t = { id: 'u2', MACHINE: 'L', RUN_TIME: 2, fixed: false, start_date: start, end_date: end };
+  const res = Core.computeAlerts({
+    // Every day-of-week closed, so whatever day "tomorrow" lands on is closed.
+    tasks: [t], blocks: [], plantBlocks: [], calendars: { L: { workHours: allDays(null) } }, plants: {},
+    lineSettings: { L: { plant: null } }, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(a => a.type === 'fixed-closed');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].taskId, 'u2');
+  assert.match(hits[0].msg, /^Order "/);
+});
+
+test('computeAlerts keeps "Fixed order..." wording for a FIXED task outside working hours (regression guard)', () => {
+  const base = Date.now() + 24 * 3600000; // tomorrow → "active"
+  const start = new Date(base); start.setHours(18, 0, 0, 0); // outside the 08:00-16:00 window below
+  const end = new Date(start.getTime() + 2 * 3600000);
+  const t = { id: 'f1', MACHINE: 'L', RUN_TIME: 2, fixed: true, start_date: start, end_date: end };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: { L: { workHours: allDays([8, 16]) } }, plants: {},
+    lineSettings: { L: { plant: null } }, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(a => a.type === 'fixed-out-of-hours');
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].msg, /^Fixed order "/);
+});
+
 test('computeUtilization buckets scheduled hours onto the task line/day', () => {
   const start = new Date(2026, 6, 7); // local midnight
   const t = { id: 'x', MACHINE: 'L', RUN_TIME: 4,

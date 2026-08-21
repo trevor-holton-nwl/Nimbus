@@ -239,6 +239,24 @@ _EFF_END_WITH_RUNTIME_MISMATCH_SQL = (
 MIN_SEGMENT_MINUTES = 30
 
 
+def _min_segment_minutes_by_plant(cur, plants) -> dict[str, int]:
+    """Batch-resolve plants.min_productive_segment_minutes for a distinct
+    plant set (B3 review fix, 2026-08-21) — one query for the whole set
+    update_task_dates_bulk needs, not N+1 per item. A NULL value (or a plant
+    absent from the result, e.g. an unmigrated column) is not included, so
+    callers should read via `.get(plant, MIN_SEGMENT_MINUTES)`; a non-NULL
+    value is always returned as-is (the column is NOT NULL at the schema
+    level, so NULL here only arises pre-migration)."""
+    clean_plants = sorted({p for p in plants if p})
+    if not clean_plants:
+        return {}
+    cur.execute(
+        "SELECT plant, min_productive_segment_minutes FROM plants WHERE plant = ANY(%s)",
+        (clean_plants,),
+    )
+    return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
+
 def _canonical_runtime_minutes(value) -> int | None:
     """Return the scheduling runtime in integral minutes, or None when absent.
 
@@ -256,12 +274,22 @@ def _canonical_runtime_minutes(value) -> int | None:
         return None
 
 
-def _validate_schedule_segments(segments: list[dict], runtime_value) -> tuple[list[dict], object, object] | None:
+def _validate_schedule_segments(
+    segments: list[dict], runtime_value, min_segment_minutes: int = MIN_SEGMENT_MINUTES,
+) -> tuple[list[dict], object, object] | None:
     """Validate and normalize a caller-supplied parent aggregate.
 
     The caller supplies only values (never child row identities).  We rebuild
     segment numbers from their ordered boundaries, which prevents a stale or
     malicious client from addressing a child independently of its parent.
+
+    `min_segment_minutes` (B3 review fix, 2026-08-21) is the productive-
+    segment floor to enforce below — defaults to the module-level
+    MIN_SEGMENT_MINUTES for a caller with no plant context, but
+    update_task_dates_bulk passes the specific plant's configured
+    plants.min_productive_segment_minutes (resolved via
+    _min_segment_minutes_by_plant) so a plant that configures a lower floor
+    isn't rejected against the hardcoded default.
     """
     runtime_minutes = _canonical_runtime_minutes(runtime_value)
     if runtime_minutes is None or runtime_minutes <= 0:
@@ -303,13 +331,14 @@ def _validate_schedule_segments(segments: list[dict], runtime_value) -> tuple[li
         return None
 
     # One productive interval is deliberately stored as the legacy continuous
-    # parent shape.  It is exempt from the 30-minute child minimum because a
-    # genuinely short order has no "partial" segment to protect.
+    # parent shape.  It is exempt from the plant's configured (or default
+    # 30-minute) child minimum because a genuinely short order has no
+    # "partial" segment to protect.
     if len(clean) == 1:
         only = clean[0]
         return [], only["start"], only["end"]
 
-    if len(clean) >= 2 and any(item["minutes"] < MIN_SEGMENT_MINUTES for item in clean):
+    if len(clean) >= 2 and any(item["minutes"] < min_segment_minutes for item in clean):
         return None
 
     normalized = [
@@ -845,7 +874,8 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                    COALESCE(seg.last_end, {_EFF_END_SQL}) AS eff_end,
                    o.run_time,
                    o.xmin::text::bigint AS row_version,
-                   seg.segment_count
+                   seg.segment_count,
+                   o.plant
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             WHERE o.id = ANY(%s)
@@ -856,10 +886,17 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
         eff = {
             r[0]: {
                 "start": r[1], "end": r[2], "run_time": r[3],
-                "row_version": r[4], "segment_count": int(r[5] or 0),
+                "row_version": r[4], "segment_count": int(r[5] or 0), "plant": r[6],
             }
             for r in cur.fetchall()
         }
+        # B3 review fix (2026-08-21): _validate_schedule_segments's productive-
+        # segment floor must honor each plant's plants.min_productive_segment_minutes,
+        # not the hardcoded module default — resolved once for the whole
+        # distinct plant set in this batch, not N+1 per item.
+        min_segment_minutes_by_plant = _min_segment_minutes_by_plant(
+            cur, (row["plant"] for row in eff.values()),
+        )
 
         update_rows: list[dict] = []
         seen_ids: set[str] = set()
@@ -902,7 +939,10 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                     invalid_ids.append(tid)
                     continue
                 if raw_segments:
-                    validated = _validate_schedule_segments(raw_segments, requested_runtime)
+                    validated = _validate_schedule_segments(
+                        raw_segments, requested_runtime,
+                        min_segment_minutes_by_plant.get(current["plant"], MIN_SEGMENT_MINUTES),
+                    )
                     if validated is None:
                         invalid_ids.append(tid)
                         continue

@@ -114,9 +114,17 @@ export type RuntimeAllocation =
   | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
   | { kind: 'unavailable' | 'exhausted' };
 
-/** Phase-1 policy decision: segment minimum is deliberately fixed system-wide,
- * not a per-plant option. Keep allocator arithmetic on this named boundary. */
-const MIN_SPLIT_SEGMENT_MINUTES = 30;
+/** B3 (2026-08-21): default productive-segment floor (minutes) — no split
+ * piece may be shorter than this, except one complete unsplit order below
+ * the boundary. Phase-1 shipped this fixed system-wide; it is now the
+ * DEFAULT ONLY, plant-overridable via `plants.min_productive_segment_minutes`
+ * — see `Engine.minProductiveSegmentMinutesFor`, which resolves the per-plant
+ * value and falls back to this default when unset/null. Keep allocator
+ * arithmetic on this named boundary. Canonical for both this file's
+ * `Calendar.allocateRuntime` (non-setup-aware) path and setup-scheduler.mjs's
+ * `placeWithSetup` (setup-aware) path, which pulls this in through its
+ * existing import of this module rather than declaring its own copy. */
+export const MIN_PRODUCTIVE_SEGMENT_MINUTES = 30;
 
 /** Fields common to both the ALERTS and UTILIZATION worker payloads (Compute._snap's return). */
 interface WorkerSnapshotBase {
@@ -1087,20 +1095,22 @@ export const Calendar = {
     }
     if (!Calendar._hasNominalOperatingWindow(line, from)) return { kind: 'unavailable' };
 
+    const minSegmentMinutes = Engine.minProductiveSegmentMinutesFor(sourceGetPlantForLine(line));
     const pieces: Array<{ start: Date; end: Date }> = [];
     let remaining = totalMinutes;
     for (const free of Calendar._freeIntervals(line, from)) {
       const capacity = Math.floor((free.end.getTime() - free.start.getTime()) / Config.MS_MIN);
       if (capacity <= 0) continue;
       let take = Math.min(remaining, capacity);
-      if (remaining > take && remaining - take < MIN_SPLIT_SEGMENT_MINUTES) {
-        take = remaining - MIN_SPLIT_SEGMENT_MINUTES;
+      if (remaining > take && remaining - take < minSegmentMinutes) {
+        take = remaining - minSegmentMinutes;
       }
-      // A partial piece must never be smaller than the fixed 30-minute policy.
-      // Skip a tiny fragment and continue the bounded search for a usable one.
-      if (take < MIN_SPLIT_SEGMENT_MINUTES
+      // A partial piece must never be smaller than the plant's configured (or
+      // default 30-minute) floor. Skip a tiny fragment and continue the
+      // bounded search for a usable one.
+      if (take < minSegmentMinutes
           && !(pieces.length === 0 && remaining === totalMinutes
-               && totalMinutes < MIN_SPLIT_SEGMENT_MINUTES && take === totalMinutes)) {
+               && totalMinutes < minSegmentMinutes && take === totalMinutes)) {
         continue;
       }
       const end = new Date(free.start.getTime() + take * Config.MS_MIN);
@@ -1885,6 +1895,59 @@ export const Engine = {
     });
   },
 
+  /** B3a: fabricates a `plant_active: true`, zero-cost `SetupSnapshot` so
+   *  `runAndApply`'s `'changeover'` path can route an inactive (or
+   *  never-configured) plant through `evaluateSetupAware` exactly like an
+   *  active plant, instead of falling through to the now-retired legacy
+   *  day-integrity walk. `evaluateSetupAware` throws unless
+   *  `bounds.setup.plant_active` is truthy — that's the whole reason this
+   *  sets it `true` here, even though nothing was actually activated.
+   *
+   *  Field selection (Step 1): a plant that configured a setup signature but
+   *  never flipped the "include setup times" checkbox still has a real,
+   *  persisted `setup_definition.fields` row — `GET /setup/{plant}`
+   *  (`setup_data.get_setup_snapshot`) returns `fields` regardless of
+   *  activation, so `Store.setupSnapshot` already carries them whenever it's
+   *  loaded for this plant. Prefer those real fields so priority grouping
+   *  still reflects what the plant actually configured; a plant with no
+   *  stored definition at all falls back to `['colorWheel']` — the same
+   *  default `setup-scheduler.mts`'s `activePriorityKeys` already uses when a
+   *  plant has no configured constraint tree, not a new convention.
+   *
+   *  `signature_version: 0` and `definition.active: true` are internal-only
+   *  shape-satisfiers for `hasUsableDefinition` (setup-domain.mts) — never
+   *  persisted, never sent to the backend. `plant_rows`/`machine_rows`/
+   *  `overrides` are deliberately empty: every transition then resolves via
+   *  `resolveSetup`'s `uncovered(...)` branch, which the never-freeze
+   *  invariant already treats as zero setup minutes, never a block.
+   *  `synthetic: true` marks this for diagnostic suppression — see
+   *  `SetupSnapshot.synthetic`'s doc comment in types.mts. This is a pure
+   *  builder: it never reads or writes `Store.setupSnapshot` itself beyond
+   *  the one read below, and callers must never assign its result back onto
+   *  `Store.setupSnapshot` (Step 6 depends on this staying a local-only
+   *  value). */
+  _syntheticZeroCostSetupSnapshot(plant: string): SetupSnapshot {
+    const stored = Store.setupSnapshot;
+    const storedFields = stored && stored.plant === plant ? stored.definition?.fields : undefined;
+    const fields = storedFields && storedFields.length ? storedFields : ['colorWheel'];
+    return {
+      plant,
+      definition: {
+        plant,
+        fields,
+        signature_version: 0,
+        strict_blanks: false,
+        active: true,
+      },
+      plant_rows: [],
+      machine_rows: [],
+      machine_states: [],
+      overrides: [],
+      plant_active: true,
+      synthetic: true,
+    };
+  },
+
   /** Apply a selected candidate exactly once.  Preview callers use this rather
    * than calling Store.updateMany themselves so the mutation boundary remains
    * visible and auditable. */
@@ -1897,6 +1960,18 @@ export const Engine = {
   splitOrderPolicyFor(plant: string | null): SplitOrderPolicy {
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.split_order_policy;
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+  },
+
+  /** B3 (2026-08-21): the plant's configured productive-segment floor
+   *  (plants.min_productive_segment_minutes), falling back to the exported
+   *  MIN_PRODUCTIVE_SEGMENT_MINUTES default when the plant row is missing or
+   *  the value is null/not a positive integer — same lookup shape as
+   *  splitOrderPolicyFor above. Consulted by both Calendar.allocateRuntime
+   *  here and, via setup-scheduler.mjs's own snapshot-scoped mirror of this
+   *  lookup, by placeWithSetup. */
+  minProductiveSegmentMinutesFor(plant: string | null): number {
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.min_productive_segment_minutes;
+    return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
   },
 
   /** C2 (2026-08-20): the plant's frozen-horizon boundary, as computed
@@ -2003,16 +2078,18 @@ export const Engine = {
       : null;
   },
 
-  /** Apply a planner-requested parent start/line edit without ever treating a
-   * child interval as an independently movable order.  `never` deliberately
-   * retains the established direct, continuous edit behavior; enabled plants
-   * derive a complete productive aggregate from the requested parent start. */
+  /** Apply a planner-requested parent start/line edit verbatim — no
+   * calendar-aware recomputation ever happens on a manual edit, and this is
+   * policy-independent by design (OD-B1a). A task with fewer than two
+   * existing schedule segments commits directly at the requested start; a
+   * task that already has two or more segments (placed there by a prior
+   * optimizer run) has its existing shape translated by the requested delta
+   * rather than destroyed or re-derived. */
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    const plant = sourceGetPlantForLine(line) ?? task.PLANT ?? sourceSelectedPlant();
-    const policy = Engine.splitOrderPolicyFor(plant);
-    if (policy === 'never') {
+    const segments = task.scheduleSegments;
+    if (!segments || segments.length < 2 || !task.start_date) {
       const start = Util.snap(requestedStart);
       return {
         start_date: start,
@@ -2021,13 +2098,18 @@ export const Engine = {
         scheduleSegments: [],
       };
     }
-    Calendar._beginRun(plant);
-    try {
-      const patch = Engine.schedulePatchFor(task, line, requestedStart, policy);
-      return patch ? { ...patch, MACHINE: line } : null;
-    } finally {
-      Calendar._endRun();
-    }
+    const deltaMs = Util.snap(requestedStart).getTime() - task.start_date.getTime();
+    const shifted = segments.map(segment => ({
+      ...segment,
+      startDate: new Date(segment.startDate.getTime() + deltaMs),
+      endDate: new Date(segment.endDate.getTime() + deltaMs),
+    }));
+    return {
+      start_date: shifted[0].startDate,
+      end_date: shifted[shifted.length - 1].endDate,
+      MACHINE: line,
+      scheduleSegments: shifted,
+    };
   },
 
   /** Repair schedules whose authoritative runtime changed after their last
@@ -2581,9 +2663,9 @@ export const Engine = {
    *  equal/unranked values GROUP by value instead of interleaving (999999
    *  unranked sorts after any real rank; two orders both at 999999 still sort
    *  deterministically against each other by value). Each term yields one
-   *  scalar string key (a single allocation, not a decorate object) for
-   *  _dispatchDayIntegrity's Schwartzian sort — same shape as before, just
-   *  built generically instead of only for color.
+   *  scalar string key (a single allocation, not a decorate object) for a
+   *  Schwartzian sort — same shape as before, just built generically instead
+   *  of only for color.
    *
    *  opts.plant selects which plant's constraint tree applies. The line scope
    *  is resolved PER TASK inside each term's get(), off the task's *current*
@@ -2654,342 +2736,17 @@ export const Engine = {
 
   /** Comparator built from _sortTerms — kept for callers that want a plain
    *  comparator. runAndApply uses the decorate variant for the Schwartzian win.
-   *  For 'changeover' this reflects only the legacy color/form-grouping
-   *  order — runAndApply no longer uses it for the actual
-   *  mode; see _dispatchDayIntegrity for the actual (day-integrity, tiered
-   *  admit-then-resequence) logic. */
+   *  For 'changeover' this reflects only the color/form-grouping tie-break
+   *  order those terms encode — B3a (2026-08-21): 'changeover' no longer
+   *  dispatches through any comparator-driven walk at all; it always routes
+   *  through Engine.evaluateSetupAware('min-changeover', ...) instead (see
+   *  runAndApply). */
   _comparator(mode: string, opts: { plant?: string | null } = {}): (a: NimbusTask, b: NimbusTask) => number {
     const terms = Engine._sortTerms(mode, opts);
     return (a, b) => {
       for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
       return 0;
     };
-  },
-
-  /** Day-integrity dispatch for changeover mode. A calendar
-   *  day's own orders (dueDay === that day, per `Util.sapDueDate`) get first
-   *  refusal on every fragment of their day before any overdue carry-over or
-   *  pulled-in future order is considered, so a native order can never be
-   *  pushed to a later day while its own day still has room for it — it can
-   *  only be pulled EARLIER (by an emptier prior day) or bumped by an
-   *  overdue arrival from a prior day that legitimately needs the room.
-   *
-   *  Outer loop walks calendar days forward from `cursorInit`. Per day: rank
-   *  the remaining queue into 4 tiers (native / carry / pull-in / floater —
-   *  see `_rankForDay`), then run the same admit-then-resequence two-phase
-   *  placement as before, but bounded to that day's window so nothing can
-   *  bleed past midnight (or shift close, under respectCalendar) into a day
-   *  it doesn't belong to. Phase 1 admits ranked candidates by concrete
-   *  `fitsAt` simulation (fixed order / blackout / shift close still hard
-   *  obstacles, exactly as before — a day can fragment into multiple
-   *  sub-bucket admission passes). Phase 2 resequences each admitted
-   *  fragment by color/form and places it. Unplaced natives simply remain in
-   *  the queue — on the next day's ranking pass their dueDay is now in the
-   *  past, so they become tier-1 carry automatically; no separate "carry"
-   *  bookkeeping is needed.
-   *
-   *  Returns patches in the same {id, changes:{start_date,end_date}} shape
-   *  the decorated-sort path produces. */
-  _dispatchDayIntegrity(
-    line: string,
-    freeTasksIn: NimbusTask[],
-    fixedTasks: NimbusTask[],
-    cursorInit: Date,
-    opts: { respectCalendar: boolean; tieBreakTerms: SortTerm[]; plant?: string | null }
-  ): Array<{ id: string; changes: Partial<NimbusTask> }> {
-    const { respectCalendar, tieBreakTerms, plant = sourceSelectedPlant() } = opts;
-    const dueMs = (t: any): number => { const d = Util.sapDueDate(t); return d ? d.getTime() : Infinity; };
-    const dueDayKey = (t: any): string | null => { const d = Util.sapDueDate(t); return d ? Util.dayKey(d) : null; };
-
-    let queue = freeTasksIn.filter(t => Util.runHours(t) > 0);
-    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-    let cursor = new Date(cursorInit);
-    let fixIdx = 0;
-
-    // Pure — takes/returns a fixIdx rather than closing over mutable state, so
-    // it can advance a scratch copy during phase-1 simulation without touching
-    // the real `fixIdx`, and also drive the real one after phase 2 places.
-    const nextFixIdx = (atCursor: any, fIdx: number): number => {
-      while (fIdx < fixedTasks.length) {
-        const f = fixedTasks[fIdx];
-        if (!f.start_date || !f.end_date || atCursor >= f.end_date) { fIdx++; continue; }
-        break;
-      }
-      return fIdx;
-    };
-    fixIdx = nextFixIdx(cursor, fixIdx);
-
-    // Concrete-range feasibility: does `t` fit starting exactly at `at`,
-    // without crossing `dayEndMs`? Reuses the same primitives
-    // Calendar.nextAvailable already uses safely (workWindow + _overlapsBlock
-    // against a SPECIFIC [start,end) range). Deliberately never asks Calendar
-    // for an abstract "boundary time" instead — _overlapsBlock returns *some*
-    // overlapping block, not necessarily the chronologically first one when a
-    // line-specific and a plant-wide blackout coexist, so it's only safe to
-    // use as a yes/no check on one concrete candidate range, not to derive a
-    // single "bucket end" timestamp. `dayEndMs` is the actual day-integrity
-    // enforcement: with respectCalendar it's redundant with the work window's
-    // own close, but it's the ONLY day wall when respectCalendar is off.
-    const fitsAt = (at: Date, t: any, fIdx: number, dayEndMs: number): boolean => {
-      const floor = Engine.earliestAllowedStart(t, plant);
-      if (floor && at < floor) return false;
-      const durMs = Util.runHours(t) * Config.MS_HOUR;
-      const endMs = at.getTime() + durMs;
-      if (endMs > dayEndMs) return false;
-      if (fIdx < fixedTasks.length) {
-        const f = fixedTasks[fIdx];
-        if (f.start_date && endMs > f.start_date.getTime()) return false;
-      }
-      if (respectCalendar) {
-        const win = Calendar.workWindow(line, at);
-        if (!win || at < win[0] || at >= win[1]) return false;
-        if (endMs > win[1].getTime()) return false;
-        if (Calendar._overlapsBlock(line, at, new Date(endMs))) return false;
-      }
-      return true;
-    };
-
-    // A pull-forward floor is a deliberate future eligibility boundary, not a
-    // permanent capacity failure. When every remaining order is below its
-    // floor, Calendar.nextAvailable() quite correctly returns the current
-    // open slot — but that leaves this dispatch loop with no way to advance.
-    // Find the next boundary so the no-admission path can make progress.
-    // (C2, 2026-08-20: Engine.earliestAllowedStart also folds in the plant's
-    // frozen-horizon floor, so this same helper — despite its name — also
-    // advances the cursor past a frozen window with no separate code path.)
-    const nextPullForwardFloor = (at: Date): Date | null => {
-      let next: Date | null = null;
-      for (const t of queue) {
-        const floor = Engine.earliestAllowedStart(t, plant);
-        if (!floor || floor <= at) continue;
-        if (!next || floor < next) next = floor;
-      }
-      return next;
-    };
-
-    // Do not spend the permanently-unfittable-order escape-hatch budget while
-    // the queue is merely waiting for its configured pull-forward floor. The
-    // escape hatch intentionally bypasses fitsAt(), so counting these days
-    // would eventually place an order earlier than the plant rule allows.
-    const queueBlockedByPullForward = (through: Date): boolean => queue.length > 0 && queue.every(t => {
-      const floor = Engine.earliestAllowedStart(t, plant);
-      return !!floor && floor > through;
-    });
-
-    // A mixed queue can contain both a future-floor order and an order that is
-    // genuinely eligible but impossible to fit. The force-placement fallback
-    // may use the latter, but must never select the former just because it is
-    // ranked first in the queue.
-    const forcePlaceableTask = (at: Date): NimbusTask | null => queue.find(t => {
-      const floor = Engine.earliestAllowedStart(t, plant);
-      return !floor || floor <= at;
-    }) ?? null;
-
-    // Phase-2 comparator: whatever `tieBreakTerms` holds, in its own order —
-    // since Stage 3 that is one ordinal term per ACTIVE priority field, in the
-    // plant's configured tree order (colorWheel is just one possible member, not
-    // a guaranteed first), followed by the intrinsic FORM_SIZE /
-    // MATERIAL_NUMBER / runHours tail. Then due date, then id, as final
-    // tie-breaks so items identical on every term still land in a fully
-    // deterministic order among themselves.
-    const seqCompare = (a: any, b: any): number => {
-      for (const tm of tieBreakTerms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
-      const d = dueMs(a) - dueMs(b);
-      if (d) return d;
-      return String(a.id).localeCompare(String(b.id));
-    };
-
-    // Ranks `list` for calendar day `dayKeyD`: tier 0 = native (due today),
-    // tier 1 = carry (overdue from a prior day), tier 2 = pull-in (due later),
-    // tier 3 = floater (no due date). Within-tier order per mode — see the
-    // table in the function doc comment above _dispatchDayIntegrity's caller
-    // (Engine.runAndApply). Final tie-break (current start_date, then id) is
-    // what keeps re-running optimize with no edits deterministic, and keeps a
-    // single drag from reshuffling unrelated same-tier orders.
-    const rankForDay = (list: any[], dayKeyD: string): any[] => {
-      const wheelFirst = (a: any, b: any): number => {
-        for (let i = 0; i < tieBreakTerms.length; i++) {
-          const c = tieBreakTerms[i].cmp(a.k[i], b.k[i]);
-          if (c) return c;
-        }
-        return 0;
-      };
-      const decorated = list.map(t => {
-        const dk = dueDayKey(t);
-        const tier = dk === null ? 3 : (dk === dayKeyD ? 0 : (dk < dayKeyD ? 1 : 2));
-        return { t, tier, due: dueMs(t), k: tieBreakTerms.map(tm => tm.get(t)) };
-      });
-      decorated.sort((a, b) => {
-        if (a.tier !== b.tier) return a.tier - b.tier;
-        let c;
-        if (a.tier === 1) {
-          c = (a.due - b.due) || wheelFirst(a, b);
-        } else if (a.tier === 2) {
-          c = wheelFirst(a, b) || (a.due - b.due);
-        } else {
-          c = wheelFirst(a, b); // tier 0 (native) and tier 3 (floater)
-        }
-        if (c) return c;
-        const as = a.t.start_date ? a.t.start_date.getTime() : Infinity;
-        const bs = b.t.start_date ? b.t.start_date.getTime() : Infinity;
-        if (as !== bs) return as - bs;
-        return String(a.t.id).localeCompare(String(b.t.id));
-      });
-      return decorated.map(d => d.t);
-    };
-
-    // Escape hatch for an order that can never be admitted (e.g. RUN_TIME
-    // exceeds every day's total capacity on this line — a data problem, not
-    // a scheduling one): the day loop below advances one calendar day per
-    // outer iteration by construction, so a permanently-unfittable order
-    // would otherwise spin forever rather than merely hit the existing
-    // 200-iteration per-day guard. After this many CONSECUTIVE days with
-    // zero admissions, force-place the top-ranked remaining eligible order at
-    // the current cursor (bypassing fitsAt) and warn — one order at a time, so
-    // a handful of bad rows each pay their own 90-day search, not a compounded
-    // one, and the loop is guaranteed to keep shrinking the queue.
-    const FORCE_PLACE_AFTER_DAYS = 90;
-    let emptyDayStreak = 0;
-
-    while (queue.length) {
-      const dayKeyD = Util.dayKey(cursor);
-      let dayStart: Date, dayEnd: Date;
-      if (respectCalendar) {
-        const win = Calendar.workWindow(line, cursor);
-        if (win) {
-          dayStart = win[0]; dayEnd = win[1];
-          if (cursor < dayStart) cursor = new Date(dayStart);
-        } else {
-          // Closed all day (weekend/holiday) — zero-width window, contributes
-          // no placements; still counts toward the force-place streak below.
-          dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
-          dayEnd = dayStart;
-        }
-      } else {
-        dayStart = new Date(cursor); dayStart.setHours(0, 0, 0, 0);
-        dayEnd = new Date(dayStart.getTime() + Config.MS_DAY);
-      }
-      fixIdx = nextFixIdx(cursor, fixIdx);
-
-      queue = rankForDay(queue, dayKeyD);
-
-      let placedToday = 0;
-      while (cursor.getTime() < dayEnd.getTime() && queue.length) {
-        // ---- Phase 1 (admission): one linear pass over the remaining queue,
-        // in this day's tiered rank order, against a SCRATCH cursor/fixIdx.
-        // Admit whatever fits (bounded by dayEnd) at the scratch position and
-        // advance it; skip (leave in queue) whatever doesn't, and keep
-        // scanning the rest — remaining space only shrinks as items are
-        // admitted, so a skipped item can never retroactively fit later in
-        // THIS fragment. Native (tier-0) candidates are scanned first, so
-        // they can only ever be denied a fragment by an obstacle every
-        // native has already failed to fit around, never by a lower-tier
-        // item cutting in line.
-        let simCursor = new Date(cursor), simFixIdx = fixIdx;
-        const admitted: any[] = [];
-        for (const t of queue) {
-          if (fitsAt(simCursor, t, simFixIdx, dayEnd.getTime())) {
-            admitted.push(t);
-            simCursor = new Date(simCursor.getTime() + Util.runHours(t) * Config.MS_HOUR);
-            simFixIdx = nextFixIdx(simCursor, simFixIdx);
-          }
-        }
-
-        if (!admitted.length) {
-          // Nothing in the queue fits from here today — jump the REAL cursor
-          // forward (mirrors the legacy walk's convergence guard), sized to
-          // the SMALLEST remaining duration so we don't overshoot a smaller
-          // gap further out that a shorter order could still fill.
-          const minDur = Math.min(...queue.map(t => Util.runHours(t) * Config.MS_HOUR));
-          let guard = 0;
-          for (; guard < 200; guard++) {
-            const prevMs = cursor.getTime();
-            while (fixIdx < fixedTasks.length) {
-              const f = fixedTasks[fixIdx];
-              if (!f.start_date || !f.end_date) { fixIdx++; continue; }
-              if (cursor >= f.end_date) { fixIdx++; continue; }
-              if (cursor.getTime() + minDur <= f.start_date.getTime()) break;
-              cursor = new Date(f.end_date);
-              fixIdx++;
-            }
-            if (respectCalendar) cursor = Calendar.nextAvailable(line, cursor, minDur);
-            if (cursor.getTime() === prevMs) {
-              const nextFloor = nextPullForwardFloor(cursor);
-              if (nextFloor) cursor = new Date(nextFloor);
-            }
-            if (cursor.getTime() === prevMs) break;
-          }
-          if (guard >= 200) {
-            reportSchedulerDiagnostic(
-              'warn', 'engine', 'engine.day-integrity-guard',
-              `Day-integrity dispatch guard hit 200 iterations on "${line}" (day ${dayKeyD}) — schedule may be suboptimal; check fixed orders / blackouts on this line.`,
-              { line, day: dayKeyD },
-            );
-          }
-          fixIdx = nextFixIdx(cursor, fixIdx);
-          // Explicit day-wall check (covers respectCalendar === false, where
-          // nothing above stops the cursor at midnight): if the smallest
-          // remaining order still can't fit before dayEnd from wherever the
-          // jump landed, today is exhausted regardless of the reason.
-          if (cursor.getTime() + minDur > dayEnd.getTime() || Util.dayKey(cursor) !== dayKeyD) {
-            cursor = new Date(dayEnd);
-            break;
-          }
-          continue;
-        }
-
-        // ---- Phase 2 (sequencing): resort ONLY this fragment's admitted set
-        // by color/form and place back-to-back for real, starting at the
-        // real cursor. Safe regardless of internal order: phase 1 only
-        // admitted this exact set because it fits, in SOME order, within one
-        // obstacle-free span bounded by dayEnd — total duration is
-        // order-independent, and there is by construction no obstacle
-        // between here and wherever this set's total duration ends.
-        admitted.sort(seqCompare);
-        for (const t of admitted) {
-          const durMs = Util.runHours(t) * Config.MS_HOUR;
-          const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
-          const end   = new Date(start.getTime() + durMs);
-          patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
-          cursor = new Date(end);
-        }
-        placedToday += admitted.length;
-        fixIdx = nextFixIdx(cursor, fixIdx);
-        const admittedIds = new Set(admitted.map(t => t.id));
-        queue = queue.filter(t => !admittedIds.has(t.id));
-      }
-
-      if (placedToday > 0 || queueBlockedByPullForward(dayEnd)) emptyDayStreak = 0;
-      else emptyDayStreak++;
-
-      const forceable = emptyDayStreak > FORCE_PLACE_AFTER_DAYS ? forcePlaceableTask(cursor) : null;
-      if (forceable) {
-        const t = forceable; // top-ranked remaining order that is eligible now
-        const durMs = Util.runHours(t) * Config.MS_HOUR;
-        const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
-        const end   = new Date(start.getTime() + durMs);
-        patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
-        reportSchedulerDiagnostic(
-          'warn', 'engine', 'engine.forced-placement',
-          `Order "${t.text || t.id}" on "${line}" would never fit any working day (${FORCE_PLACE_AFTER_DAYS}-day search exhausted) — forced placement at ${Util.fmtDTReadable(start)}. Check RUN_TIME against available daily capacity.`,
-          { line, taskId: t.id },
-        );
-        queue = queue.filter(x => x !== t);
-        cursor = new Date(end);
-        fixIdx = nextFixIdx(cursor, fixIdx);
-        emptyDayStreak = 0;
-        continue;
-      }
-
-      // Advance to the next calendar day for the next outer iteration. Guard
-      // against moving backward — a force-placed multi-day-spanning order,
-      // or a >24h work window, can already leave cursor past "tomorrow."
-      const nextDay = new Date(dayStart);
-      nextDay.setDate(nextDay.getDate() + 1);
-      nextDay.setHours(0, 0, 0, 0);
-      if (nextDay.getTime() > cursor.getTime()) cursor = nextDay;
-    }
-    return patches;
   },
 
   /** Allocate a sequence already selected by an optimizer strategy. The
@@ -3113,8 +2870,22 @@ export const Engine = {
     // the same live gate Engine.autoReflow already reads for incremental
     // reflow. Search-safety limits are hardcoded (see SETUP_AWARE_* above) —
     // the perf-measurement gate this was meant to come from was never run.
+    //
+    // B3a (2026-08-21): 'changeover' no longer falls through to the legacy
+    // per-line walk at all, active-and-matching setup snapshot or not — that
+    // walk (and its Engine._dispatchDayIntegrity tiering) is retired. When
+    // there's no genuine active-and-matching snapshot, a fabricated
+    // zero-cost one (Engine._syntheticZeroCostSetupSnapshot) stands in so the
+    // SAME evaluator ('min-changeover') always decides changeover's
+    // sequencing — the two dispatchers can no longer disagree about it.
+    // 'spt' is untouched: it still only takes this branch when genuinely
+    // active-and-matching, exactly as before B3a.
     const setupSnapshot = Store.setupSnapshot;
-    if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active) {
+    const setupSnapshotActiveAndMatching = !!(setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active);
+    const effectiveSetupSnapshot: SetupSnapshot | null = mode === 'changeover' && !setupSnapshotActiveAndMatching
+      ? Engine._syntheticZeroCostSetupSnapshot(plant)
+      : setupSnapshot;
+    if (mode === 'changeover' || setupSnapshotActiveAndMatching) {
       const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
       const baseSnapshot = _candidateSnapshot ?? snapshotSchedule();
       // C2: fold any frozen-window order into the SAME fixedIds set the
@@ -3130,7 +2901,11 @@ export const Engine = {
         ? { ...baseSnapshot, fixedIds: new Set([...Array.from(baseSnapshot.fixedIds, String), ...frozenIds]) }
         : baseSnapshot;
       const bounds: DueDateFirstBounds = {
-        setup: setupSnapshot,
+        // Non-null by construction: this branch is only reached when either
+        // mode === 'changeover' (effectiveSetupSnapshot is always the real
+        // active-and-matching snapshot or the synthetic fallback) or the real
+        // snapshot is genuinely active-and-matching ('spt').
+        setup: effectiveSetupSnapshot!,
         exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
         iterationCap: SETUP_AWARE_ITERATION_CAP,
         clock: () => performance.now(),
@@ -3191,7 +2966,21 @@ export const Engine = {
         unknownSetupOrderIds.add(String(edge.successorOrderId));
         unknownSetupLines.add(edge.line);
       }
-      if (unknownSetupOrderIds.size) {
+      // B3a: a synthetic (fabricated zero-cost) snapshot's matrix is always
+      // empty by construction, so its uncovered-but-admitted edges are an
+      // artifact of routing an inactive/never-configured plant through this
+      // evaluator at all — never a real data gap the plant needs to fix.
+      // Suppress ONLY this missing-setup-summary toast for a synthetic run.
+      // The two toasts below (orders left in place / lines guarded) are NOT
+      // setup-specific — they report genuine unplaced orders or untouched
+      // lines for reasons that have nothing to do with setup data (e.g. a
+      // permanently-uncalendarable order), so they must fire regardless of
+      // `synthetic`. Blanket-suppressing them for every setup-inactive plant
+      // would silently violate the never-freeze invariant's own "drops can't
+      // happen silently" guarantee for the majority of NIMBUS plants — those
+      // that haven't activated setup tracking. A genuinely active-and-
+      // matching snapshot (synthetic undefined/false) is unaffected either way.
+      if (unknownSetupOrderIds.size && !effectiveSetupSnapshot!.synthetic) {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: unknownSetupOrderIds.size,
           lines: unknownSetupLines.size,
@@ -3268,8 +3057,8 @@ export const Engine = {
       // window is routed into the SAME obstacle bucket as a genuine manual
       // pin / aged / out-of-window task — unconditionally (not gated by
       // respectFixed, same as isAged/isOutOfWin) — so every dispatcher fed
-      // by this split (_dispatchDayIntegrity, _dispatchPolicyAware, the SPT
-      // walk below) leaves it untouched. Engine.isFrozenHorizon carries its
+      // by this split (_dispatchPolicyAware, the SPT walk below) leaves it
+      // untouched. Engine.isFrozenHorizon carries its
       // own distinct reason for the UI; this split itself doesn't care why
       // a task is immovable, only that it is. Passes horizonStart as this
       // check's "now" — the SAME reference isAged/isOutOfWin already use —
@@ -3300,49 +3089,28 @@ export const Engine = {
         cursor = new Date(cursorFloor);
       }
 
+      // B3a: 'changeover' always exits via the setup-aware branch above —
+      // it can never reach the splitPolicy fork or the plain walk below.
+      // Only 'spt' reaches either of them now (Engine._dispatchPolicyAware
+      // remains 'spt''s split-policy-aware placement mechanism).
       if (splitPolicy !== 'never') {
-        let selectedOrder: NimbusTask[];
-        if (mode === 'changeover') {
-          // Let the established tiered dispatcher choose the parent sequence
-          // first, then replace only its continuous placement phase. This keeps
-          // due-date admission / priority / changeover ordering intact while
-          // allowing a selected parent to span valid operating intervals.
-          const legacySequence = Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-            respectCalendar, tieBreakTerms: sortTerms, plant,
-          });
-          const byId = new Map(freeTasks.map(task => [task.id, task]));
-          selectedOrder = legacySequence.map(patch => byId.get(patch.id)).filter((task): task is NimbusTask => !!task);
-        } else {
-          const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
-          decorated.sort((a, b) => {
-            for (let i = 0; i < sortTerms.length; i++) {
-              const c = sortTerms[i].cmp(a.k[i], b.k[i]);
-              if (c) return c;
-            }
-            return 0;
-          });
-          selectedOrder = decorated.map(d => d.t);
-        }
+        const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
+        decorated.sort((a, b) => {
+          for (let i = 0; i < sortTerms.length; i++) {
+            const c = sortTerms[i].cmp(a.k[i], b.k[i]);
+            if (c) return c;
+          }
+          return 0;
+        });
+        const selectedOrder = decorated.map(d => d.t);
         patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, fixedTasks, cursor, splitPolicy, plant));
-        continue;
-      }
-
-      if (mode === 'changeover') {
-        // Day-integrity, tiered admit-then-resequence dispatch — see
-        // Engine._dispatchDayIntegrity. sortTerms here already IS
-        // Engine._sortTerms(mode, { plant }), so it doubles as both
-        // the pull-in/floater tie-break and the phase-2 color/form sequencer.
-        patches.push(...Engine._dispatchDayIntegrity(line, freeTasks, fixedTasks, cursor, {
-          respectCalendar, tieBreakTerms: sortTerms, plant,
-        }));
         continue;
       }
 
       // Schwartzian transform: decorate each task once with its ordered sort
       // keys (from Engine._sortTerms — the single source of truth, so this can
       // no longer drift from _comparator), then sort by comparing keys
-      // positionally. 'changeover' returns above via _dispatchDayIntegrity —
-      // only 'spt' reaches this walk now.
+      // positionally.
       const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
       decorated.sort((a, b) => {
         for (let i = 0; i < sortTerms.length; i++) {

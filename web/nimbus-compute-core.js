@@ -514,14 +514,13 @@
 
     /* 4. FIXED-BUT-ON-CLOSED-DAY */
     for (const t of activeTasks) {
-      if (!t.fixed) continue;
       const line = t.MACHINE || 'Unknown';
       const badInterval = scheduleIntervals(t).find(interval =>
         !workWindow(line, interval.start, calendars, plants, lineSettings, masterData));
       if (badInterval) {
         alerts.push({
           id:  `fixclosed-${t.id}`, sev: 'warn', type: 'fixed-closed',
-          msg: `Fixed order "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
+          msg: `${t.fixed ? 'Fixed order' : 'Order'} "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
           taskId: t.id, line, time: badInterval.start
         });
       }
@@ -529,7 +528,6 @@
 
     /* 5. FIXED-OUT-OF-HOURS */
     for (const t of activeTasks) {
-      if (!t.fixed) continue;
       const line = t.MACHINE || 'Unknown';
       const parts = [];
       let alertTime = t.start_date;
@@ -548,7 +546,7 @@
       if (parts.length) {
         alerts.push({
           id:  `fixhours-${t.id}`, sev: 'warn', type: 'fixed-out-of-hours',
-          msg: `Fixed order "${orderNumber(t)}" ${parts.join(' and ')}.`,
+          msg: `${t.fixed ? 'Fixed order' : 'Order'} "${orderNumber(t)}" ${parts.join(' and ')}.`,
           taskId: t.id, line, time: alertTime
         });
       }

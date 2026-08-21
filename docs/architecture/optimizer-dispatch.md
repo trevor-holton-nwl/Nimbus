@@ -1,38 +1,21 @@
 # Optimizer Dispatch — `Engine.runAndApply` internals
 
-Full mechanics behind the summary in `CLAUDE.md` → Key Patterns → Optimization. Read this before touching `Engine._dispatchDayIntegrity`, `Engine._sortTerms`, or anything that reads `Store.priorityRankMaps`.
+Full mechanics behind the summary in `CLAUDE.md` → Key Patterns → Optimization. Read this before touching `Engine._sortTerms`, `Engine.evaluateSetupAware`, or anything that reads `Store.priorityRankMaps`.
 
 ## Modes
 
-`Engine.runAndApply(mode)` where `mode ∈ {'spt', 'changeover', 'backlog'}`. These are **dispatching heuristics, not true optimization** — there is no changeover-cost matrix, no finite-capacity constraint, and finish-to-start precedence is not consulted.
+`Engine.runAndApply(mode)` where `mode ∈ {'spt', 'changeover', 'backlog'}`. These are **dispatching heuristics, not true optimization** — there is no finite-capacity constraint, and finish-to-start precedence is not consulted.
 
-- `'spt'` sorts by run-hours ascending across the whole horizon (via `Engine._sortTerms` + a greedy back-to-back placement walk, jumping fixed orders and calendar/blackout-closed windows, with a 200-iteration guard that logs via `ErrorLog.warn` if it fails to converge) — this is the only mode still on that legacy single-sort walk.
-- `'changeover'` routes through `Engine._dispatchDayIntegrity`.
+- `'spt'` sorts by run-hours ascending across the whole horizon (via `Engine._sortTerms` + a greedy back-to-back placement walk, jumping fixed orders and calendar/blackout-closed windows, with a 200-iteration guard that logs via `ErrorLog.warn` if it fails to converge) — the legacy single-sort walk, still `'spt'`'s only path. `'spt'` only takes the setup-aware evaluator (below) when the plant's real `Store.setupSnapshot` is active-and-matching; otherwise it stays on this walk exactly as before Workstream B.
+- `'changeover'` **always** routes through `Engine.evaluateSetupAware('min-changeover', ...)` — see "Setup-aware dispatch" below. As of Workstream B Task 5 (2026-08-21, commit range `1678865..b1b1c01`), this is unconditional: an active-and-matching real `setupSnapshot` is used when one exists, otherwise `Engine._syntheticZeroCostSetupSnapshot(plant)` fabricates a zero-cost stand-in (empty matrix/overrides, `plant_active: true`, a `synthetic: true` marker) purely to satisfy `evaluateSetupAware`'s activation gate. `'changeover'` can no longer take a legacy per-line walk at all — **`Engine._dispatchDayIntegrity` and its inner `seqCompare` were deleted** as dead code once this made them unreachable. The day-integrity tiering they implemented (native/carry/pull-in/floater, the 90-consecutive-zero-admission-day force-place escape hatch) no longer exists in any form; `'changeover'`'s placement decisions are now made entirely by the setup-aware evaluator described below, synthetic-snapshot or not.
 
-## Day-integrity dispatch (`changeover`)
+**Diagnostic suppression for synthetic runs.** A synthetic run must produce zero visible sign that setup tracking exists — no `toast.optimize_missing_setup_summary` / `toast.optimize_orders_left_in_place` / `toast.optimize_lines_guarded`, all three gated on `!effectiveSetupSnapshot.synthetic` inside `runAndApply`. The synthetic snapshot is a **local variable only**, never assigned to `Store.setupSnapshot` — so `deriveSetupObservation`'s Timeline-bar-rendering path (which always reads `Store.setupSnapshot` directly, never `runAndApply`'s local `effectiveSetupSnapshot`) continues to see the plant's real, inactive snapshot and draws no setup bars, unaffected by the synthetic mechanism.
 
-A calendar day's own orders (its "native" set — orders whose `Util.sapDueDate` falls on that day) get first refusal on every fragment of their day before any other order is considered, so a native order can never be pushed to a *later* day while its own day still has room for it (it can only be pulled *earlier* by an emptier prior day, or bumped by a genuinely overdue arrival from a prior day that needs the room).
-
-The dispatch walks calendar days forward; per day it ranks the remaining queue into 4 tiers:
-0. native (due today)
-1. carry (overdue from a prior day, due-date-ascending)
-2. pull-in (due later, color-first then due-date)
-3. floater (no due date)
-
-Then it runs the same admit-then-resequence two-phase placement as the old bucket mechanism, bounded to that day's window so nothing bleeds past midnight (or shift close, under `respectCalendar`) into a day it doesn't belong to:
-
-- **Phase 1** admits ranked candidates by concrete `fitsAt` simulation (fixed order / blackout / shift close are hard obstacles — a day can fragment into multiple sub-bucket admission passes).
-- **Phase 2** resequences each admitted fragment by the full `_sortTerms` term list (configured priority fields first, then the intrinsic `FORM_SIZE`/`MATERIAL_NUMBER`/run-hours tail) and places it.
-
-An unplaced native simply stays in the queue — on the next day's ranking pass its due day is now in the past, so it becomes tier-1 carry automatically; no separate bookkeeping.
-
-A day-integrity guarantee is **per-fragment best-effort**: a mid-day fixed order or blackout can still fragment a day so a native fits no single fragment even though the day's total hours would have covered it — that native spills to the next day.
-
-If an order's `RUN_TIME` can never fit any day's capacity at all (a data problem), the dispatch would otherwise spin forever advancing one calendar day per outer iteration with zero admissions; after 90 consecutive zero-admission days it force-places the top-ranked remaining order at the cursor (bypassing `fitsAt`) and warns via `ErrorLog.warn`, one order at a time, so the loop always terminates.
+**Known, accepted side effect — the anchor rule is now universal, not a corner case.** `setup-scheduler.mts`'s pre-existing `initialScheduledAnchor` (an already-dated task starting earliest on a line becomes an immovable anchor whenever that line has no persisted `machine_setup_state` row — protecting a physical predecessor of unknown state from being silently resequenced) now fires on **every** `'changeover'` run for **every** plant that has never configured setup tracking, because the synthetic snapshot's `machine_states` is always `[]`. Before Task 5 this was reachable only by active-setup plants with an uncovered line; it is now the default-Optimize-button experience for the majority of NIMBUS plants. This was ruled *not* a Task 5 defect — Task 5's own parity guarantee (synthetic and real-but-empty-matrix must sequence identically) requires it, and unwinding it is a `setup-scheduler.mts` design decision outside that task's scope, not a mechanical fix. **A candidate narrower fix, not yet built:** gate `initialScheduledAnchor` on the plant's *matrix* being empty (`plant_rows.length === 0 && machine_rows.length === 0`) rather than the *line's* `machine_state` being unrecorded — every transition already resolves to zero cost when the matrix itself is empty, so the anchor's safety rationale (protecting against a wrongly-assumed cost saving around an unknown predecessor) provably cannot apply in that case, whether the empty matrix is synthetic or a genuinely active-but-unconfigured plant. This preserves Task 5's parity guarantee (both sides of the parity still skip the freeze together) while confining the freeze to plants that actually have partial real matrix coverage, where the safety rationale still holds. Whoever next revisits this evaluator's anchor logic should consider it.
 
 ## `_sortTerms` — the single source of truth for ordering
 
-Which sort terms exist at all is `Engine._sortTerms(mode, { plant })`'s decision, and both dispatch phases reuse its output verbatim — it is the single source of truth for optimizer ordering, and `_dispatchDayIntegrity` makes no assumption about how many terms there are or what they read (its 252-line body was byte-identical before and after the priority-lists work that generalized the terms).
+Which sort terms exist at all is `Engine._sortTerms(mode, { plant })`'s decision, and every consumer (the `'spt'` legacy walk's comparator, `'changeover'`'s setup-aware evaluator via its own `activePriorityKeys` mirror in `setup-scheduler.mts`) reuses its output verbatim — it is the single source of truth for optimizer ordering.
 
 Since Stage 3 of `docs/scheduling_priority.md`, `_sortTerms` is a **generic term factory**, not a hardcoded color branch: it walks `Engine.activeConstraintKeys(plant)` → `Engine.flattenConstraints(plant)`, a pre-order DFS of the plant's `plants.constraints` JSONB **tree** (a disabled node skips its entire subtree; a duplicate key collapses to its first occurrence and the UI marks it "(no effect)"; a plant with no stored tree falls back to `CONSTRAINT_CATALOG`'s enabled defaults), and pushes one `{get, cmp}` term per key, in tree order, ahead of the intrinsic tail.
 
@@ -50,7 +33,7 @@ The sort key is `pad(rank,7) + '|' + normalizedValue` (rank rounded and clamped 
 
 `GET /priority-rank-maps` is plant-gated server-side, so `loadPriorityRankMaps` must keep using `Util.fetchTraced` (bare `fetch` sends no identity header and 403s for plant-restricted users).
 
-`Engine._comparator('changeover', …)` no longer reflects the mode's actual placement order (kept only for hypothetical external callers) — see `_dispatchDayIntegrity` for the real logic.
+`Engine._comparator('changeover', …)` no longer reflects the mode's actual placement order (kept only for hypothetical external callers) — see "Setup-aware dispatch" below for the real logic, which now governs `'changeover'` unconditionally.
 
 ## Constraint registry
 
@@ -60,7 +43,7 @@ All four registered fields are wired into the optimizer; adding a fifth means re
 
 ## Setup-aware dispatch (`web/setup-scheduler.mts`)
 
-When a plant's `setup_definition.active` is set via the "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15), `Engine.runAndApply` bypasses `_dispatchDayIntegrity` entirely and routes `spt`/`changeover` through `Engine.evaluateSetupAware`. Full setup-matrix design and semantics live in `docs/changeover_matrix.md`; this section covers the dispatch/control-flow mechanics.
+`'changeover'` **always** routes through `Engine.evaluateSetupAware('min-changeover', ...)` as of Workstream B Task 5 — unconditionally, not gated on activation (see "Modes" above for the synthetic-snapshot mechanism that makes this possible for an inactive/unconfigured plant). `'spt'` still only takes this path when a plant's `setup_definition.active` is set via the "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15) and the real `Store.setupSnapshot` is active-and-matching; otherwise `'spt'` stays on its legacy walk. Full setup-matrix design and semantics live in `docs/changeover_matrix.md`; this section covers the dispatch/control-flow mechanics.
 
 **Never-freeze rule.** The setup-aware evaluator never returns an empty patch set for a line because setup data is incomplete. `searchFragment` partitions each fragment's orders into `known` (a resolvable setup state) and `SearchRun.unknownTail` (blank or unresolvable signatures); the min-changeover permutation search runs over `known` only, so unknown orders are never charged a fake zero-minute setup. Orders with known signatures but uncovered transitions (missing matrix pairs) are admitted *in sequence* within the `known` set, charged zero setup minutes, and de-preferred by a coverage-tier score comparison that counts uncovered edges — fewer is better. This tier is compared immediately after policy key and outside the mode-permuted terms list, ensuring fully-covered sequences still win whenever one exists and that same-signature orders tend to cluster together. Once search completes, `placeUnknownTail(...)` appends the truly unknown orders (blank signatures) *after* the core, ordered by the same `orderedByPolicyThenDue` (SPT: `orderedByProductiveRuntime`) tail ordering used elsewhere, never interleaved — placing each via the real `freeIntervalsFor` capacity and split policy but charging zero minutes to setup/score, and tagging each with the dedicated `'scheduled-without-setup'` missingEdge reason the live-run toast and OptimizerPreview tally consume. A completed `searchFragment` produces a winner in every case except an active-override conflict (`adjacency.issue`) — fail closed by design, not frozen by omission. The line itself is never frozen in the ordinary case; the missing-setup case surfaces as a derived alert instead (see below), not as an unchanged line.
 
