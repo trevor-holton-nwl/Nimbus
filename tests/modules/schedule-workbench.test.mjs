@@ -1179,6 +1179,82 @@ test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s ex
   }
 });
 
+test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion patch commits NOTHING — the dragged item is not partially committed (final-review fix 1)', () => {
+  // Regression target: before this fix, Store.updateTask(id, draggedPatch, ...)
+  // ran BEFORE the companion loop validated every companion's
+  // manualSchedulePatchFor call. A companion with a non-finite/<=0
+  // Util.runHours (e.g. RUN_TIME: 0, a real NIMBUS data-quality pattern)
+  // makes manualSchedulePatchFor return null, which set companionFailed and
+  // broke out -- but the dragged item's Store mutation from earlier was never
+  // rolled back and had no UndoStack entry. The fix defers ALL Store/Timeline
+  // mutation in this branch until both the dragged item's patch AND every
+  // companion's patch have validated successfully.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorRaf = globalThis.requestAnimationFrame;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  // The failure path calls Timeline._scheduleRebuild(), which schedules via
+  // requestAnimationFrame -- not defined in this Node test environment.
+  globalThis.requestAnimationFrame = callback => { callback(performance.now()); return 1; };
+
+  const line = 'MULTI-DRAG-FAIL-LINE';
+  const anchorId = 'multi-anchor-fail';
+  const companionId = 'multi-companion-fail';
+
+  const anchorStart = new Date('2026-08-20T08:00:00');
+  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
+  const companionStart = new Date('2026-08-20T08:00:00');
+  const companionEnd   = new Date('2026-08-20T12:00:00');
+
+  Store.setTasks([
+    {
+      id: anchorId, PRODUCTION_ORDER: 'PANCHORF', MATERIAL_NUMBER: 'MANCHORF', MACHINE: line,
+      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+    },
+    {
+      // RUN_TIME: 0 -> Util.runHours returns 0 -> manualSchedulePatchFor
+      // computes runtimeMinutes <= 0 and returns null for this companion.
+      id: companionId, PRODUCTION_ORDER: 'PCOMPF', MATERIAL_NUMBER: 'MCOMPF', MACHINE: line,
+      plant: '5512', RUN_TIME: 0, start_date: companionStart, end_date: companionEnd,
+    },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+
+  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
+
+  let timelineItemUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: droppedAnchorStart, end: droppedAnchorEnd, group: line } : undefined),
+    update: () => { timelineItemUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+
+    const stillAnchor = Store.tasks[anchorId];
+    assert.equal(stillAnchor.start_date.getTime(), anchorStart.getTime(),
+      'the dragged anchor must NOT be partially committed when a companion patch fails validation');
+    assert.equal(stillAnchor.end_date.getTime(), anchorEnd.getTime());
+    assert.equal(stillAnchor.MACHINE, line, 'the anchor MACHINE must be unchanged (it was already on this line, but must not be re-stamped mid-failure)');
+
+    const stillCompanion = Store.tasks[companionId];
+    assert.equal(stillCompanion.start_date.getTime(), companionStart.getTime(),
+      'the companion must also be completely unchanged');
+    assert.equal(stillCompanion.end_date.getTime(), companionEnd.getTime());
+
+    assert.equal(timelineItemUpdateCalled, false,
+      'no Timeline._items.update call should happen for any companion when the batch fails validation');
+  } finally {
+    Timeline._items = undefined;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
 test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');

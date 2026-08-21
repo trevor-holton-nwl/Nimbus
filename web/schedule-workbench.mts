@@ -6592,13 +6592,17 @@ export const Interaction = {
         // Apply the dragged item — routed through manualSchedulePatchFor so an
         // already-split order (>=2 scheduleSegments) is shifted rather than
         // collapsed or re-derived (OD-B1a).
+        // Compute and validate the dragged item's patch, but do NOT commit it
+        // to Store yet — atomicity requires every companion's patch to also
+        // validate successfully before ANY mutation (Store or Timeline item)
+        // happens. See the (now-deleted) regeneration branch's contract: all
+        // patches computed first, one atomic Store.updateMany after.
         const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
         if (!draggedPatch?.start_date || !draggedPatch.end_date) {
           Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
           continue;
         }
-        Store.updateTask(id, draggedPatch, 'timeline');
 
         // Apply the same delta to each companion — routed through
         // manualSchedulePatchFor (not a hand-rolled {start_date, end_date,
@@ -6610,8 +6614,13 @@ export const Interaction = {
         // relative drag delta."
         // (skippedFixed stays empty today — selIds above already excludes fixed
         // tasks — but is preserved as-is; not this task's scope to remove.)
+        // This loop only computes and validates each companion's patch — no
+        // Store or Timeline mutation happens here, since a later companion
+        // failing must leave earlier companions (and the dragged item)
+        // untouched too.
         const skippedFixed: string[] = [];
         const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+        const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
         let companionFailed = false;
         for (const sid of selIds) {
           const st = Store.tasks[sid];
@@ -6624,19 +6633,24 @@ export const Interaction = {
             break;
           }
           companionPatches.push({ id: sid, changes });
-
-          // Update the vis item too
-          Timeline._suppressEvents = true;
-          try {
-            Timeline._items!.update({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
-          } finally { Timeline._suppressEvents = false; }
+          companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
         }
         if (companionFailed) {
           Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
           continue;
         }
+
+        // Every patch validated — commit atomically: dragged item, then
+        // companions, then their Timeline item mirrors.
+        Store.updateTask(id, draggedPatch, 'timeline');
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
+        for (const upd of companionItemUpdates) {
+          Timeline._suppressEvents = true;
+          try {
+            Timeline._items!.update({ id: upd.id, start: upd.start, end: upd.end, group: upd.group });
+          } finally { Timeline._suppressEvents = false; }
+        }
         Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
         if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
