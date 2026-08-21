@@ -1454,13 +1454,14 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
             line_plants = md.plants_for_line(machine)
             if line_plants and not (set(line_plants) & set(allowed_plants)):
                 raise HTTPException(status_code=403, detail=f"Machine {machine!r} is not on any of your assigned plants")
-    df = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
-    # C1 (2026-08-20): the same bound query_orders/count_orders just applied
-    # internally (plant-scoped only — see their docstrings), resolved once
-    # more here purely to report it. Sent down rather than have the frontend
-    # keep its own copy of the plant-local-midnight/roll-hour clock math
-    # (Step 2) — Timeline.rebuild reads this to clamp the Gantt's far edge.
-    visibility_horizon_end = db.get_visibility_horizon_end(plant) if plant else None
+    # C1 (2026-08-20): query_orders resolves the plant's visibility-horizon
+    # bound internally (to filter its own WHERE) and hands it back here too,
+    # so this response's `meta.visibility_horizon_end` reuses that ALREADY-
+    # resolved value instead of a third round-trip re-resolving the same
+    # plant config from scratch. Sent down rather than have the frontend keep
+    # its own copy of the plant-local-midnight/roll-hour clock math (Step 2)
+    # — Timeline.rebuild reads this to clamp the Gantt's far edge.
+    df, visibility_horizon_end = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,

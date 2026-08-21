@@ -384,16 +384,6 @@ def _visibility_horizon_end_for_plant(cur, plant: str) -> datetime | None:
     )
 
 
-def get_visibility_horizon_end(plant: str) -> datetime | None:
-    """Public, own-connection counterpart to _visibility_horizon_end_for_plant —
-    for callers (brain.py's GET /tasks meta) that need the same bound
-    query_orders/count_orders just applied, without duplicating the lookup logic."""
-    if not plant:
-        return None
-    with _pool.connection() as conn, conn.cursor() as cur:
-        return _visibility_horizon_end_for_plant(cur, plant)
-
-
 # Shared projection for the orders read path. Column aliases are the contract the
 # frontend/brain.py rely on; user scheduling overrides take precedence over the
 # SAP-source dates via COALESCE so callers only ever see one start/end per order.
@@ -445,7 +435,7 @@ def load_orders_df() -> pd.DataFrame:
 
 def query_orders(plant: str | None = None, line: str | None = None,
                  limit: int | None = None, offset: int | None = None,
-                 allowed_plants: list[str] | None = None) -> pd.DataFrame:
+                 allowed_plants: list[str] | None = None) -> tuple[pd.DataFrame, datetime | None]:
     """
     Server-side-scoped orders read for the stateless /tasks path.
 
@@ -471,6 +461,12 @@ def query_orders(plant: str | None = None, line: str | None = None,
     the horizon is a per-plant setting and every real caller of this path
     already scopes by plant (the frontend always does; unscoped pulls are the
     documented coarse tooling guard rail, a different use case).
+
+    Returns `(df, visibility_horizon_end)` — the resolved bound (or None) is
+    handed back alongside the rows so a caller that also needs to REPORT the
+    value (brain.py's GET /tasks `meta.visibility_horizon_end`) doesn't have
+    to pay for a third round-trip re-resolving the exact same plant config
+    from scratch.
     """
     sql = _ORDERS_SELECT
     where, params = [], []
@@ -500,7 +496,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=cols)
+    return pd.DataFrame(rows, columns=cols), horizon_end
 
 
 def count_orders(plant: str | None = None, line: str | None = None,
