@@ -300,6 +300,30 @@ test('SetupAdmin loads every plant-line page without requesting an unbounded lis
   assert.deepEqual(calls, [{ offset: 0, limit: 2 }, { offset: 2, limit: 2 }]);
 });
 
+test('SetupAdmin.collectAllScopeRows scopes the "delete all" fetch by machine, not the stale "line" param', async () => {
+  // Regression target: GET /setup/{plant}/matrix-rows reads `machine`, not
+  // `line` (renamed by an earlier workstream) — FastAPI silently ignores an
+  // unrecognized query param, so a `line=` request always returns the
+  // plant-default rows regardless of which machine is selected, making
+  // "delete all rows in this scope" delete the wrong rows for any
+  // machine-scoped view.
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    seen.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [], meta: { total: 0 } }) });
+  };
+  try {
+    await SetupAdmin.collectAllScopeRows('5512', 'L-10');
+    assert.equal(seen.length, 1);
+    const query = new URL(seen[0], 'http://localhost').searchParams;
+    assert.equal(query.get('machine'), 'L-10', 'must send machine=, not line=');
+    assert.equal(query.get('line'), null, 'must not send a line= param at all');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // Setup Matrix grid redesign (docs/setup_matrix_ui_redesign.md) — the
 // from-state x to-state grid replacing the old flat edge-list table.
 

@@ -692,7 +692,7 @@ export const SetupAdmin = (() => {
     const limit = 500;
     let offset = 0; let total = Number.POSITIVE_INFINITY;
     while (offset < total) {
-      const params = new URLSearchParams({ line: machine, offset: String(offset), limit: String(limit) });
+      const params = new URLSearchParams({ machine, offset: String(offset), limit: String(limit) });
       const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/matrix-rows?${params.toString()}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.json() as { rows: typeof _listRows; meta: { total: number } };
@@ -1987,7 +1987,13 @@ export const SetupAdmin = (() => {
   return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
-    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText };
+    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,
+    // Exported for direct unit testing of the "delete all rows in scope"
+    // request shape (mock Util.fetchTraced's underlying fetch and assert on
+    // the URL) — same rationale as the grid helpers above, extended to this
+    // one network-calling function because its query-param name is exactly
+    // the kind of regression a DOM-level test wouldn't catch here.
+    collectAllScopeRows };
 })();
 
 /* =============================================================================
