@@ -21,7 +21,7 @@
 
 ---
 
-## C1 — Plant visibility horizon
+## Task 1: C1 — Plant visibility horizon
 
 **Files:** `schema.sql`, `master_data.py` (or wherever plant-scoped scheduling settings like `split_order_policy`/`max_pull_forward_days` are read/written — follow that exact precedent), `db.py` (`query_orders`, `count_orders`), `brain.py` (`GET /tasks`), `web/schedule-workbench.mts` (Gantt `max` clamp), `web/schedule-data.mts`/wherever the Orders grid's date filter lives, `web/plant-and-administration.mts` (Scheduling Rules panel), `web/locales/*.js`.
 
@@ -36,7 +36,7 @@
 
 ---
 
-## C2 — Plant frozen horizon
+## Task 2: C2 — Plant frozen horizon
 
 **Files:** `schema.sql`, `master_data.py`, `brain.py`, `web/schedule-services.mts` (the shared placement-floor helper + every one of its ~8 call sites), `web/schedule-workbench.mts` (`Timeline`'s new `.frozen-horizon-zone` band, `Timeline._frozenHorizonIds`), `web/styles.css` (new band color — "darker green... layered above the existing alert-horizon band"), `web/plant-and-administration.mts` (Scheduling Rules panel), `web/locales/*.js`.
 
@@ -49,7 +49,7 @@
 - [ ] **Step 7.** New i18n keys (field label, help text, and whatever surfaces the "didn't move — inside the frozen window" reason to a planner, e.g. an Inspector or alert-adjacent explanation) in all 5 locale files.
 - [ ] **Step 8.** Add a test proving an order whose start is inside the frozen window survives every one of the ~8 placement sites without being rescheduled into or through the window, across at least the legacy walk and `autoReflow`.
 
-## Validation checklist (mirror prior workstreams' bar, don't skip)
+## Task 3: Validation checklist (mirror prior workstreams' bar, don't skip)
 
 - [ ] `npm run typecheck`, `npm run build`, `npm run lint`, `npm run check:static-assets`, `npm run check:legacy-surface` all clean.
 - [ ] `node --test tests/modules/*.test.mjs tests/js/*.test.js` — no new failures beyond the now-established 5 pre-existing ones (documented in the D+E workstream's completion report: 2 date-hardcoding `autoReflow` tests, 2 `OptimizerPreview` quirks, 1 pre-existing `runAndApply`/rank-resolution bug — all confirmed via a pristine-HEAD `git worktree` check, not assumed).
