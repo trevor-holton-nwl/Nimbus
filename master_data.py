@@ -1720,8 +1720,10 @@ def ensure_labor_plan_machine_table() -> None:
                 PRIMARY KEY (subnetwork, plant, machine, day)
             )
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant ON labor_plan_machine(plant)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant_line ON labor_plan_machine(plant, machine)")
+        cur.execute("DROP INDEX IF EXISTS idx_lpl_plant")
+        cur.execute("DROP INDEX IF EXISTS idx_lpl_plant_line")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_labor_plan_machine_plant ON labor_plan_machine(plant)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_labor_plan_machine_plant_machine ON labor_plan_machine(plant, machine)")
         conn.commit()
 
 
