@@ -71,23 +71,61 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
 
 test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozenHorizonEnd directly', () => {
   const priorEnd = Store.frozenHorizonEnd;
+  // A fixed reference "now" passed explicitly to isFrozenHorizon throughout,
+  // so this test is deterministic regardless of the real wall clock (no
+  // reliance on real-time "today" the way an earlier version implicitly did).
+  const now = new Date('2026-08-20T08:00:00');
   try {
     Store.setFrozenHorizonEnd(null, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd(), null);
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }), false);
-    assert.equal(Engine.isFrozenHorizon({ start_date: null }), false, 'an order with no start is never frozen');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), false);
+    assert.equal(Engine.isFrozenHorizon({ start_date: null }, now), false, 'an order with no start is never frozen');
     assert.deepEqual(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')), new Date('2026-08-22T09:00:00'));
 
     const frozenEnd = new Date('2026-08-25T00:00:00');
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd().getTime(), frozenEnd.getTime());
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }), true, 'start before the boundary is frozen (OD-C2a)');
-    assert.equal(Engine.isFrozenHorizon({ start_date: frozenEnd }), false, 'start AT the boundary is not frozen -- it is the earliest allowed instant');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-26T00:00:00') }), false);
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), true,
+      'start inside [now, end) is frozen (OD-C2a)');
+    assert.equal(Engine.isFrozenHorizon({ start_date: now }, now), true, 'start exactly AT now is frozen -- inclusive lower bound');
+    assert.equal(Engine.isFrozenHorizon({ start_date: frozenEnd }, now), false,
+      'start AT the boundary is not frozen -- it is the earliest allowed instant');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-26T00:00:00') }, now), false);
+    // C2 fix (regression this closes): an already-overdue order -- however
+    // long ago -- must NOT read as frozen just because it's also before the
+    // upper bound. The frozen window is [now, end), not (-infinity, end).
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-18T00:00:00') }, now), false,
+      'already-overdue (before now) is not frozen even though it is before the boundary too');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2020-01-01T00:00:00') }, now), false,
+      'an order overdue by years is still not frozen -- no lower bound would wrongly pin it forever');
     assert.equal(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')).getTime(), frozenEnd.getTime(),
       'a candidate before the boundary is pushed forward to it');
     assert.equal(Engine.applyFrozenFloor(new Date('2026-08-26T09:00:00')).getTime(), new Date('2026-08-26T09:00:00').getTime(),
       'a candidate already past the boundary is left alone');
+  } finally {
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+test('Engine.isFrozenHorizon requires BOTH bounds — an already-overdue order is never frozen, no matter how old (regression closed)', () => {
+  // This is the exact defect the C2 review caught: an earlier version of
+  // isFrozenHorizon checked only `start_date < end`, which is trivially true
+  // for ANY past date, silently treating every genuinely-overdue order as
+  // frozen/immovable at all ~11 placement sites this task touches (not just
+  // removeBacklog). The frozen window is a near-term BAND [now, end) --
+  // matching the Timeline's `.frozen-horizon-zone` band shape exactly -- not
+  // a from-time-zero cutoff like C1's visibility gate.
+  const priorEnd = Store.frozenHorizonEnd;
+  const now = new Date('2026-08-20T08:00:00');
+  const frozenEnd = new Date('2026-08-23T00:00:00');
+  try {
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-19T09:00:00') }, now), false,
+      'yesterday is not frozen');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-01T00:00:00') }, now), false,
+      'three weeks overdue is not frozen');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-21T09:00:00') }, now), true,
+      'tomorrow, genuinely inside [now, end), IS frozen -- the lower bound does not overcorrect into never firing');
   } finally {
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
@@ -168,8 +206,13 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   Store.setCalendar(line, ALL_DAY, 'unit-test');
   const frozenEnd = new Date('2026-08-25T00:00:00');
   Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+  // Pinned explicitly via opts.startDate below (this run's "now" for
+  // isAged/isOutOfWin/isFrozenHorizon alike) so this test is deterministic
+  // regardless of the real wall clock -- not implicitly tied to whatever day
+  // it happens to run on.
+  const horizonStart = new Date('2026-08-20T08:00:00');
 
-  const frozenStart = new Date('2026-08-22T09:00:00'); // inside the frozen window
+  const frozenStart = new Date('2026-08-22T09:00:00'); // inside [horizonStart, frozenEnd)
   const frozenTaskEnd = new Date('2026-08-22T10:00:00');
   Store.setTasks([
     { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
@@ -177,7 +220,7 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   ], 'unit-test');
 
   try {
-    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: true });
+    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: true, startDate: horizonStart });
     assert.equal(Store.tasks['spt-frozen-in-place'].start_date.getTime(), frozenStart.getTime(),
       'an order already starting inside the frozen window is left EXACTLY where it was -- never rescheduled into or through the window');
     assert.equal(Store.tasks['spt-frozen-in-place'].end_date.getTime(), frozenTaskEnd.getTime());
@@ -212,18 +255,29 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
     lines: [{ machine: line, plant }],
   }, 'unit-test');
   Store.setCalendar(line, ALL_DAY, 'unit-test');
-  const frozenEnd = new Date('2026-08-25T00:00:00');
+  // autoReflow has no injectable "now" (unlike runAndApply/removeBacklog),
+  // so this test's dates are built RELATIVE to the real wall clock at run
+  // time (Date.now()) rather than hardcoded calendar literals -- a fixed
+  // "near future" date would eventually become "already past" as real time
+  // advances, which is exactly the kind of fixture the C2 review flagged.
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const frozenEnd = new Date(Date.now() + 3 * DAY);
   Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
 
-  const peerStart = new Date('2026-08-22T09:15:00'); // inside the frozen window
-  const peerEnd = new Date('2026-08-22T10:15:00');
+  const anchor = new Date(Date.now() + 1 * DAY); // tomorrow -- genuinely inside [now, frozenEnd)
+  anchor.setMinutes(0, 0, 0);
+  const changedStart = anchor;
+  const changedEnd = new Date(anchor.getTime() + 1.5 * HOUR);
+  const peerStart = new Date(anchor.getTime() + 1.25 * HOUR); // 15 min before changedEnd -- genuine overlap
+  const peerEnd = new Date(peerStart.getTime() + 1 * HOUR);
   Store.setTasks([
     // The manually-dragged trigger: OD-C2c means the drag itself is never
-    // blocked, and it is extended (08:00-09:30) so it genuinely OVERLAPS the
+    // blocked, and it is extended (1.5h) so it genuinely OVERLAPS the
     // frozen peer below -- without the C2 pinning check, autoReflow's
     // "already fits" shortcut would not apply and the peer would be pushed.
     { id: 'reflow-changed', PLANT: plant, MACHINE: line, RUN_TIME: '1.5',
-      start_date: new Date('2026-08-22T08:00:00'), end_date: new Date('2026-08-22T09:30:00') },
+      start_date: changedStart, end_date: changedEnd },
     { id: 'reflow-frozen-peer', PLANT: plant, MACHINE: line, RUN_TIME: '1',
       start_date: peerStart, end_date: peerEnd },
   ], 'unit-test');

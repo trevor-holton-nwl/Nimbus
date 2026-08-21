@@ -194,30 +194,49 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
 // genuinely Store.isFixed-pinned order is still moved "when reached".
 // ---------------------------------------------------------------------------
 
+// "now" (plant-local, America/New_York, per opts()' default runAt) is
+// 2026-08-12T08:00 -- Engine.isFrozenHorizon's lower bound is evaluated
+// against THIS instant (removeBacklog passes its own plant-wall-clock `now`
+// through explicitly), not the real wall clock, so these fixtures stay
+// deterministic regardless of when the suite actually runs.
+
 test('Engine.removeBacklog leaves an order starting inside the frozen window exactly in place, unpatched', () => {
+  const frozenEnd = at('2026-08-15T00:00');
   seed({
-    tasks: [task('frozen-past', '2026-08-12T06:00', 2)],
+    hours: allDays(0, 24),
+    tasks: [
+      // Genuinely overdue (before "now") -- needed just to give removeBacklog
+      // a backlog item to enter this line's processing at all; NOT itself
+      // frozen (start is before now, not inside [now, frozenEnd)).
+      task('trigger-overdue', '2026-08-12T06:00', 1),
+      // Starts AFTER "now" (2026-08-13, genuinely inside [now, frozenEnd)) --
+      // this is the one under test.
+      task('frozen-inside-window', '2026-08-13T09:00', 1),
+    ],
   });
-  // "now" (plant-local, America/New_York, per opts()' runAt) is 2026-08-12T08:00.
-  // The frozen window runs through 2026-08-15 -- well past this backlog
-  // item's own (already-past) start, so it must be left untouched instead of
-  // compressed forward the way 'Engine compresses backlogged gaps...' above
-  // proves it otherwise would be.
-  Store.setFrozenHorizonEnd(at('2026-08-15T00:00'), 'test');
-  const result = Engine.removeBacklog(opts());
-  assert.equal(patch(result, 'frozen-past'), undefined,
+  Store.setFrozenHorizonEnd(frozenEnd, 'test');
+  const result = Engine.removeBacklog(opts({ endDate: at('2026-08-20T00:00') }));
+  assert.equal(patch(result, 'frozen-inside-window'), undefined,
     'an order already starting inside the frozen window gets NO patch at all -- not even a floored one');
 });
 
-test('Engine.removeBacklog never places any order to start before the frozen-horizon boundary', () => {
+test('Engine.removeBacklog never places any order to start before the frozen-horizon boundary, and still repairs an already-overdue order instead of freezing it too', () => {
   const frozenEnd = at('2026-08-14T00:00');
   seed({
+    hours: allDays(0, 24),
     tasks: [
-      // Genuinely backlogged AND starts inside the frozen window -- pinned,
-      // but its artificially long runtime (4 days) pushes removeBacklog's
-      // internal obstacle cursor well PAST frozenEnd, so the next task below
-      // still needs genuine de-overlap repositioning against it.
-      task('frozen-obstacle', '2026-08-12T06:00', 96),
+      // Genuinely overdue (before "now", 2026-08-12T08:00) -- per the C2 fix,
+      // this must NOT read as frozen just because it's also before frozenEnd;
+      // it's the regression this fix closes (see the dedicated isFrozenHorizon
+      // test in schedule-services.test.mjs for the pure-predicate version).
+      // It still gets repaired -- just floored to no earlier than frozenEnd,
+      // same as it would with no active frozen window except for the floor.
+      task('trigger-overdue', '2026-08-12T06:00', 0.5),
+      // Genuinely inside [now, frozenEnd) -- pinned, but its artificially
+      // long runtime (4 days) pushes removeBacklog's internal obstacle
+      // cursor well PAST frozenEnd, so the next task below still needs
+      // genuine de-overlap repositioning against it.
+      task('frozen-obstacle', '2026-08-13T06:00', 96),
       // Starts AFTER frozenEnd (not itself frozen) but overlaps the
       // long-running frozen obstacle above -- this one DOES get moved,
       // proving C2 doesn't disable removeBacklog outright for orders whose
@@ -227,12 +246,18 @@ test('Engine.removeBacklog never places any order to start before the frozen-hor
   });
   Store.setFrozenHorizonEnd(frozenEnd, 'test');
   // opts()' default endDate (2026-08-12T23:59) only scopes same-day orders;
-  // both tasks above run well past that, so widen it or scopedTasks would
-  // filter 'beyond-window-overlap' out before removeBacklog ever sees it.
+  // these tasks run well past that, so widen it or scopedTasks would filter
+  // the later ones out before removeBacklog ever sees them.
   const result = Engine.removeBacklog(opts({ endDate: at('2026-08-20T00:00') }));
 
   assert.equal(patch(result, 'frozen-obstacle'), undefined,
     'the frozen-window order itself is never patched');
+
+  const overdue = patch(result, 'trigger-overdue');
+  assert.ok(overdue, 'an already-overdue order is NOT treated as frozen -- it still gets repaired, unlike frozen-obstacle above');
+  assert.ok(overdue.changes.start_date.getTime() >= frozenEnd.getTime(),
+    'but wherever it lands, it never starts before the frozen-horizon boundary either');
+
   const moved = patch(result, 'beyond-window-overlap');
   assert.ok(moved, 'an order whose OWN start is beyond the frozen window can still be repositioned');
   assert.ok(moved.changes.start_date.getTime() >= frozenEnd.getTime(),

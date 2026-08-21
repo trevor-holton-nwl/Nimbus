@@ -1910,18 +1910,39 @@ export const Engine = {
   },
 
   /** True when `task`'s CURRENT start already falls inside the plant's
-   *  frozen window (OD-C2a: frozen iff start is inside — an upper-bound-only
-   *  check, same shape as C1's visibility gate). Such an order is treated as
-   *  implicitly pinned by every placement call site below — a reason
-   *  DISTINCT from Store.isFixed (a genuine manual pin) so the UI can
-   *  explain why it didn't move without conflating the two. This check
-   *  alone never blocks anything — callers decide what "pinned" means in
-   *  their own context (excluded from the free/movable set, an obstacle for
-   *  peers, etc). Manual drags never consult this (OD-C2c): only optimizer/
-   *  auto-reflow placement code does. */
-  isFrozenHorizon(task: NimbusTask): boolean {
+   *  frozen window (OD-C2a: frozen iff start is inside). Unlike C1's
+   *  visibility gate (a legitimate from-the-beginning-of-time cutoff — the
+   *  past is always visible), C2's frozen window is a near-term protection
+   *  BAND, not a from-time-zero cutoff: it's drawn on the Gantt as
+   *  `[now, Store.frozenHorizonEnd]` (Timeline's `.frozen-horizon-zone`,
+   *  advancing every second, same shape as the alert-horizon band it layers
+   *  above) — bounded on BOTH sides. This check must agree with that visual
+   *  band: `[now, end)`, not `(-infinity, end)`. An earlier version checked
+   *  only the upper bound, which silently treated every already-overdue
+   *  order (however long ago) as frozen/immovable everywhere this is
+   *  consulted — a real regression, caught in review, not merely a
+   *  removeBacklog-specific quirk. `now` defaults to the current moment at
+   *  call time (not plant-local midnight, not cached, no new value needed
+   *  from the backend) — but callers that already carry their OWN
+   *  authoritative "now" pass it explicitly instead, so this stays
+   *  consistent with the rest of that call site's own scoping rather than
+   *  splitting into two different clocks in the same run:
+   *  runAndApply's isAged/isOutOfWin (its horizonStart, itself already
+   *  injectedNow-aware for candidate runs) and removeBacklog's plant-local
+   *  wall-clock `now` (Engine._plantWallNow) both thread their own value
+   *  through; autoReflow has no such concept and relies on the default.
+   *
+   *  Such an order is treated as implicitly pinned by every placement call
+   *  site below — a reason DISTINCT from Store.isFixed (a genuine manual
+   *  pin) so the UI can explain why it didn't move without conflating the
+   *  two. This check alone never blocks anything — callers decide what
+   *  "pinned" means in their own context (excluded from the free/movable
+   *  set, an obstacle for peers, etc). Manual drags never consult this
+   *  (OD-C2c): only optimizer/auto-reflow placement code does. */
+  isFrozenHorizon(task: NimbusTask, now: Date = new Date()): boolean {
     const end = Engine.frozenHorizonEnd();
-    return !!end && !!task.start_date && task.start_date < end;
+    if (!end || !task.start_date) return false;
+    return task.start_date >= now && task.start_date < end;
   },
 
   /** Push `at` forward to the frozen-horizon boundary when it falls short —
@@ -2154,8 +2175,11 @@ export const Engine = {
           // NOT touch removeBacklog's separate, pre-existing, intentionally
           // out-of-scope behavior of moving a genuinely Store.isFixed-pinned
           // order "when reached" (tracked only via diagnostics.fixedMoved
-          // below, never gated here).
-          if (Engine.isFrozenHorizon(item.task)) {
+          // below, never gated here). Passes this function's own plant-local
+          // wall-clock `now` (Engine._plantWallNow) rather than the
+          // real-time default, so removeBacklog's timezone-aware clock and
+          // its frozen-window check always agree on the same instant.
+          if (Engine.isFrozenHorizon(item.task, now)) {
             const obstacleEnd = item.task.end_date ?? new Date(item.snapshotStart.getTime() + runtimeMs);
             cursor = new Date(Math.max(cursor.getTime(), obstacleEnd.getTime()));
             continue;
@@ -3098,7 +3122,10 @@ export const Engine = {
       // isFrozenHorizon carries its own distinct reason for the UI (never
       // written to Store.isFixed itself), this is purely an internal input
       // to the evaluator so it never re-sequences an order it shouldn't touch.
-      const frozenIds = baseSnapshot.tasks.filter(t => Engine.isFrozenHorizon(t)).map(t => String(t.id));
+      // Passes horizonStart (this run's own "now", injectedNow-aware for
+      // candidate runs) rather than the real-time default, so a detached
+      // preview evaluated at a simulated instant agrees with itself.
+      const frozenIds = baseSnapshot.tasks.filter(t => Engine.isFrozenHorizon(t, horizonStart)).map(t => String(t.id));
       const snapshot: ScheduleSnapshot = frozenIds.length
         ? { ...baseSnapshot, fixedIds: new Set([...Array.from(baseSnapshot.fixedIds, String), ...frozenIds]) }
         : baseSnapshot;
@@ -3244,12 +3271,14 @@ export const Engine = {
       // by this split (_dispatchDayIntegrity, _dispatchPolicyAware, the SPT
       // walk below) leaves it untouched. Engine.isFrozenHorizon carries its
       // own distinct reason for the UI; this split itself doesn't care why
-      // a task is immovable, only that it is.
+      // a task is immovable, only that it is. Passes horizonStart as this
+      // check's "now" — the SAME reference isAged/isOutOfWin already use —
+      // so all three agree on one clock for this run instead of splitting.
       const fixedTasks = tasks.filter(t =>
-        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t)
+        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, horizonStart)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t)
+        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, horizonStart)
       );
 
       fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
