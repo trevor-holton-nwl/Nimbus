@@ -247,6 +247,32 @@ def test_fetch_rows_rejects_unknown_filter_column(pg):
         at.fetch_rows("plants", limit=10, offset=0, filters={"not_a_real_column": ["x"]})
 
 
+# ---------------------------------------------------------------------------
+# Adversarial injection-shaped names — the allowlist-based validation must
+# treat these identically to any other unknown name (UnknownTable/
+# UnknownColumn), never attempting to build SQL with them.
+# ---------------------------------------------------------------------------
+_INJECTION_PAYLOADS = [
+    "plants; DROP TABLE orders; --",
+    '"><script>alert(1)</script>',
+    "plants' OR '1'='1",
+]
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("payload", _INJECTION_PAYLOADS)
+def test_fetch_rows_rejects_injection_shaped_table_name(pg, payload):
+    with pytest.raises(at.UnknownTable):
+        at.fetch_rows(payload, limit=10, offset=0)
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("payload", _INJECTION_PAYLOADS)
+def test_fetch_rows_rejects_injection_shaped_filter_column(pg, payload):
+    with pytest.raises(at.UnknownColumn):
+        at.fetch_rows("plants", limit=10, offset=0, filters={payload: ["x"]})
+
+
 @pytest.mark.pg
 def test_export_csv_produces_parseable_csv_matching_filtered_rows(zz_plants):
     sub, plant_codes = zz_plants
