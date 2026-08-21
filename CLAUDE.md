@@ -130,7 +130,7 @@ Credentials come from `.env` (loaded by `python-dotenv`): `PG_HOST`, `PG_PORT`, 
 | State | `Store` | Reactive pub/sub; single source of truth. All state lives here. |
 | Domain | `Calendar`, `Alerts`, `Utilization`, `Engine` | Business logic reading/writing Store |
 | Setup | `setup-domain.mts`, `setup-scheduler.mts` | Pure setup resolution; detached candidate scheduler (Key Patterns) |
-| Infrastructure | `ErrorLog`, `DataIntegrity`, `Toast`, `Modal`, `UndoStack` | Cross-cutting concerns |
+| Infrastructure | `ErrorLog`, `Toast`, `Modal`, `UndoStack` | Cross-cutting concerns |
 | Admin / Master Data UI | `Plant`, `ProdLines`, `LaborPlanning`, `MasterData`, `MaterialGrids`, `SetupAdmin`, `SystemConfig`, `Security`, `Interface`, `CalendarUI`, `PriorityListMapping` | Plant/line management, labor plan editor, CRUD grids, Setup Matrix admin, System Configuration, users/roles, SAP interface |
 | UI components | `Timeline`, `Table`, `Inspector`, `Hierarchy`, `Dashboard`, `UtilStrip`, `TimelineNav`, `GanttFilter`, `DependencyOverlay`, `ContextMenu`, `Selection` | Render and respond to Store changes |
 | What-if | `Sandbox` | Edits the **live** Store directly, keeping a deep-cloned pre-edit snapshot (tasks/blocks/calendars/fixedIds) reverted on discard — **not** an isolated Store copy. Autosave is suppressed while `Sandbox.active`, but live in-memory state IS mutated. |

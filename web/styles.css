@@ -5532,7 +5532,7 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .nb-note-preview { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; color: var(--fg); }
 
 /* Editable cell hover affordance */
-.ag-theme-quartz .ag-cell[col-id="PRODUCTION_LINE"]:hover:not(.ag-cell-inline-editing),
+.ag-theme-quartz .ag-cell[col-id="MACHINE"]:hover:not(.ag-cell-inline-editing),
 .ag-theme-quartz .ag-cell[col-id="RUN_TIME"]:hover:not(.ag-cell-inline-editing),
 .ag-theme-quartz .ag-cell[col-id="start_date"]:hover:not(.ag-cell-inline-editing),
 .ag-theme-quartz .ag-cell[col-id="notes"]:hover:not(.ag-cell-inline-editing) {
