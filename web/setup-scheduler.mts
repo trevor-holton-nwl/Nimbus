@@ -638,7 +638,7 @@ function normalizedPriorityValue(value: unknown): string {
  * A detached candidate must consume only the master-data and rank snapshot it
  * was supplied, otherwise a plant switch can make a private search compare
  * against another plant's policy. */
-function activePriorityKeys(snapshot: Readonly<ScheduleSnapshot>, plant: string): string[] {
+export function activePriorityKeys(snapshot: Readonly<ScheduleSnapshot>, plant: string): string[] {
   const tree = snapshot.masterData?.plants.find(row => row.plant === plant)?.constraints;
   if (!tree?.length) return ['colorWheel'];
 

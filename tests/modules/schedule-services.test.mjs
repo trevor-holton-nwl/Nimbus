@@ -2250,6 +2250,235 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
 });
 
 // ---------------------------------------------------------------------------
+// Workstream B — Task 7 (B4, 2026-08-21): pin that the priority sort is the
+// changeover OBJECTIVE, not the setup matrix. `compareCandidate`
+// (setup-scheduler.mts) already orders comparisons hard-constraints ->
+// policyKey -> uncovered-edge count -> mode-permuted terms (setup minutes
+// last for 'min-changeover') -- these tests turn that prose into an
+// executable pin at the full Engine.runAndApply('changeover', ...) level.
+//
+// Both tests below share one fixture: two orders (BLUE, higher colorWheel
+// priority; RED, lower) whose DUE DATES are deliberately reversed (RED due
+// earlier) so a due-date/insertion-order explanation for "BLUE first" is
+// ruled out, and whose SETUP MATRIX cost is deliberately reversed too (a
+// RED-then-BLUE sequence is drastically cheaper than BLUE-then-RED) so a
+// setup-savings explanation is ruled out as well. Only the configured
+// priority rank explains "BLUE first".
+// ---------------------------------------------------------------------------
+
+test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion order, due-date proximity, or a fixed algorithm order', () => {
+  const plant = 'B4-FIELD-ORDER-PLANT';
+  const line = 'B4-FIELD-ORDER-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorMasterData = Store.masterData;
+  const priorPriorityRankMaps = Store.priorityRankMaps;
+
+  const openHours = () => { for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test'); };
+  const runOpts = {
+    plant, respectFixed: true, respectCalendar: false,
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+  };
+  const positions = () => ({
+    blue: Store.tasks['field-order-blue'].start_date?.getTime(),
+    red: Store.tasks['field-order-red'].start_date?.getTime(),
+  });
+  const tasks = () => ([
+    // RED is due EARLIER than BLUE -- a due-date-first or insertion-order
+    // explanation for "BLUE first" would have RED win instead.
+    { id: 'field-order-blue', PLANT: plant, MACHINE: line, COLOR: 'BLUE', PRT_01: 'SAME', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-25T15:00:00') },
+    { id: 'field-order-red', PLANT: plant, MACHINE: line, COLOR: 'RED', PRT_01: 'SAME', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-25T09:00:00') },
+  ]);
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  openHours();
+  Store.replaceSetupSnapshot(null, 'unit-test'); // no real setup tracking -> synthetic zero-cost path; irrelevant to policyKey either way
+
+  try {
+    // Phase 1: colorWheel configured FIRST, prt01 second. Both orders share
+    // the same PRT_01 value, so only colorWheel can decide the order --
+    // colorWheel ranks BLUE (1) ahead of RED (2).
+    Store.setMasterData({
+      plants: [{ plant, constraints: [
+        { key: 'colorWheel', enabled: true, order: 1 },
+        { key: 'prt01', enabled: true, order: 2 },
+      ] }],
+      lines: [{ machine: line, plant }],
+    }, 'unit-test');
+    Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 }, prt01: { SAME: 1 } } }, 'unit-test');
+    Store.setTasks(tasks(), 'unit-test');
+
+    Engine.runAndApply('changeover', runOpts);
+    const phase1 = positions();
+    assert.ok(Number.isFinite(phase1.blue) && Number.isFinite(phase1.red), 'both orders were placed');
+    assert.ok(phase1.blue < phase1.red,
+      'colorWheel is the configured FIRST field and ranks BLUE ahead, so BLUE goes first despite its later due date');
+
+    // Phase 2: reverse the tree order (prt01 first, colorWheel second) and
+    // reverse which field actually distinguishes the two orders -- BLUE now
+    // gets the BETTER prt01 rank (LOW=1) while its colorWheel rank is worse
+    // (2) than RED's (1). If "BLUE first" in phase 1 were an artifact of a
+    // fixed internal algorithm order (e.g. always colorWheel, or always
+    // whichever field appears first in PRIORITY_TASK_FIELDS) rather than the
+    // genuinely CONFIGURED tree order, this phase would flip to RED-first
+    // (colorWheel now favors RED) or produce some other order. It must not:
+    // prt01 is now field #1, and BLUE's prt01 rank is better, so BLUE must
+    // still be first.
+    Store.setMasterData({
+      plants: [{ plant, constraints: [
+        { key: 'prt01', enabled: true, order: 1 },
+        { key: 'colorWheel', enabled: true, order: 2 },
+      ] }],
+      lines: [{ machine: line, plant }],
+    }, 'unit-test');
+    Store.setPriorityRankMaps({ '': {
+      prt01: { LOW: 1, HIGH: 2 },
+      colorWheel: { RED: 1, BLUE: 2 },
+    } }, 'unit-test');
+    Store.setTasks([
+      { id: 'field-order-blue', PLANT: plant, MACHINE: line, COLOR: 'BLUE', PRT_01: 'LOW', RUN_TIME: '1',
+        start_date: null, end_date: null, original_end_date: new Date('2026-08-25T15:00:00') },
+      { id: 'field-order-red', PLANT: plant, MACHINE: line, COLOR: 'RED', PRT_01: 'HIGH', RUN_TIME: '1',
+        start_date: null, end_date: null, original_end_date: new Date('2026-08-25T09:00:00') },
+    ], 'unit-test');
+
+    Engine.runAndApply('changeover', runOpts);
+    const phase2 = positions();
+    assert.ok(phase2.blue < phase2.red,
+      'prt01 is now the configured FIRST field and ranks BLUE (LOW) ahead of RED (HIGH), so BLUE still goes first -- ' +
+      'proving the ordering follows the CONFIGURED field order, not a hardcoded colorWheel-always-decides shortcut');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setPriorityRankMaps(priorPriorityRankMaps, 'unit-test');
+  }
+});
+
+test('B4: priority rank wins over a cheaper setup reorder under a REAL active-and-matching snapshot, and the identical ordering holds under Task 5\'s synthetic snapshot too', () => {
+  const plant = 'B4-PRIORITY-VS-COST-PLANT';
+  const line = 'B4-PRIORITY-VS-COST-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorMasterData = Store.masterData;
+  const priorPriorityRankMaps = Store.priorityRankMaps;
+
+  const runOpts = {
+    plant, respectFixed: true, respectCalendar: false,
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+  };
+  const positions = () => ({
+    blue: Store.tasks['cost-blue'].start_date?.getTime(),
+    red: Store.tasks['cost-red'].start_date?.getTime(),
+  });
+  // RED is due EARLIER than BLUE, ruling out a due-date explanation for
+  // "BLUE first" in every phase below.
+  const tasks = () => ([
+    { id: 'cost-blue', PLANT: plant, MACHINE: line, COLOR: 'BLUE', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-25T15:00:00') },
+    { id: 'cost-red', PLANT: plant, MACHINE: line, COLOR: 'RED', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-08-25T09:00:00') },
+  ]);
+  // A real, active-and-matching matrix that makes RED-then-BLUE drastically
+  // CHEAPER (5 total minutes) than BLUE-then-RED (180 total minutes) --
+  // GREEN is the line's current/initial state.
+  const costMatrix = () => ({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_active: true,
+    plant_rows: [
+      { machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 0 },
+      { machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 60 },
+      { machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 5 },
+      { machine: '', signature_version: 1, from_key: state('BLUE'), to_key: state('RED'), setup_min: 120 },
+    ],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  });
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  Store.setMasterData({
+    plants: [{ plant, constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+
+  try {
+    // Control: with NO priority rank configured, the cheaper RED-then-BLUE
+    // reorder genuinely IS taken -- proving the cheaper alternative this test
+    // resists is real, not hypothetical.
+    Store.setPriorityRankMaps({}, 'unit-test');
+    Store.replaceSetupSnapshot(costMatrix(), 'unit-test');
+    Store.setTasks(tasks(), 'unit-test');
+    Engine.runAndApply('changeover', runOpts);
+    const noPriority = positions();
+    assert.ok(noPriority.red < noPriority.blue,
+      'control: with no priority rank configured, the drastically cheaper RED-then-BLUE reorder is taken');
+
+    // Step 3: a REAL active-and-matching plant with that same cost-favoring
+    // matrix, but colorWheel now ranks BLUE (1) ahead of RED (2). Because
+    // compareCandidate compares policyKey before setup minutes, BLUE must
+    // still be sequenced first even though that is the drastically MORE
+    // expensive ordering.
+    Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 } } }, 'unit-test');
+    Store.replaceSetupSnapshot(costMatrix(), 'unit-test');
+    Store.setTasks(tasks(), 'unit-test');
+    Engine.runAndApply('changeover', runOpts);
+    const realActive = positions();
+    assert.ok(realActive.blue < realActive.red,
+      'a real active-and-matching plant must still place higher-priority BLUE first, even though the setup matrix ' +
+      'would make the reverse order (RED-then-BLUE) 175 minutes cheaper -- the priority sort is the objective, ' +
+      'setup cost is respected only for capacity, never as a reason to reorder');
+
+    // Step 4: the identical scenario, but this plant has never configured or
+    // activated setup tracking at all -- 'changeover' routes through
+    // Engine._syntheticZeroCostSetupSnapshot instead of a real matrix.
+    const synthetic = Engine._syntheticZeroCostSetupSnapshot(plant);
+    assert.deepEqual(synthetic.plant_rows, [], 'sanity: the synthetic snapshot fabricates an empty matrix (zero cost everywhere)');
+    assert.equal(synthetic.plant_active, true, 'sanity: the synthetic snapshot fabricates plant_active so evaluateSetupAware\'s gate passes');
+
+    Store.replaceSetupSnapshot(null, 'unit-test'); // no real Store.setupSnapshot -> runAndApply's gate falls back to the synthetic snapshot above
+    Store.setTasks(tasks(), 'unit-test');
+    Engine.runAndApply('changeover', runOpts);
+    const syntheticRun = positions();
+    // NOTE: absolute clock positions legitimately differ from realActive's --
+    // the real matrix actually consumes 60 (GREEN->BLUE) + 120 (BLUE->RED)
+    // setup minutes of real calendar time, while the synthetic matrix is
+    // zero-cost everywhere, so the two runs' tasks land back-to-back at
+    // different wall-clock offsets. What must be IDENTICAL is the relative
+    // ORDERING -- proving policyKeyForTask's priority computation (which
+    // reads snapshot.masterData/priorityRankMaps) is genuinely independent of
+    // snapshot.setup, whose content is wildly different (a real cost-favoring
+    // matrix vs. a fabricated empty one) between these two runs.
+    assert.ok(syntheticRun.blue < syntheticRun.red,
+      'under the synthetic zero-cost snapshot (fabricated plant_rows: [] / plant_active: true), BLUE must still be ' +
+      'sequenced ahead of RED -- the same priority-driven ordering as the real active-and-matching matrix run, despite ' +
+      'the two runs\' setup snapshots having completely different content');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setPriorityRankMaps(priorPriorityRankMaps, 'unit-test');
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
 // manual commit path. manualSchedulePatchFor no longer branches on
 // split_order_policy at all -- only on whether the task already carries
