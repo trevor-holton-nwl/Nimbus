@@ -267,6 +267,7 @@ export const Timeline = {
   _viewWindow: null as TimelineWindowMs | null,            // { start: ms, end: ms } — current viewport, kept in sync via rangechanged
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
   _alertHorizonIds: [] as string[],
+  _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
   _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
   _nextColorIdx: 0,
   _unsubStore:   null as (() => void) | null,
@@ -384,7 +385,9 @@ export const Timeline = {
      * orders look like they were being re-scheduled on every click.
      * ----------------------------------------------------------------- */
 
-    /* ----- live ticker: advance past-zone and alert-horizon-zone every second -- */
+    /* ----- live ticker: advance past-zone, alert-horizon-zone, and the C2
+     * frozen-horizon-zone every second (one interval, shared — never add a
+     * second one for a new band) -- */
     setInterval(() => {
       if (document.hidden) return; // skip ticker work while the tab is backgrounded
       if (!Timeline._items || !Timeline._pastZoneIds.length) return;
@@ -400,6 +403,15 @@ export const Timeline = {
           for (const id of Timeline._alertHorizonIds) {
             if (Timeline._items!.get(id)) updates.push({ id, start: now, end: hzEnd });
           }
+        }
+      }
+      // C2: only the near edge tracks "now" — the far edge (Store.frozenHorizonEnd)
+      // is a fixed absolute instant recomputed server-side on the next /tasks
+      // load, not a rolling duration, so it is deliberately left alone here.
+      if (Timeline._frozenHorizonIds.length && Store.frozenHorizonEnd) {
+        const frozenEnd = Store.frozenHorizonEnd;
+        for (const id of Timeline._frozenHorizonIds) {
+          if (Timeline._items!.get(id)) updates.push({ id, start: now, end: frozenEnd });
         }
       }
       if (updates.length) Timeline._items!.update(updates);
@@ -955,6 +967,36 @@ export const Timeline = {
         Timeline._alertHorizonIds = visibleLines.map(l => `alert-horizon-zone-${l}`);
       } else {
         Timeline._alertHorizonIds = [];
+      }
+    }
+
+    // C2 (2026-08-20): frozen-horizon zone — darker green band from now through
+    // the plant's frozen-horizon end (Store.frozenHorizonEnd, already computed
+    // server-side by db.compute_frozen_horizon_end — see schedule-data.mts),
+    // one per visible line, inserted AFTER (so painted above, DOM order = paint
+    // order) the alert-horizon zone above. Unlike that band, the far edge here
+    // is a fixed absolute instant, not a rolling now+duration window — only the
+    // near edge tracks "now" (see the ticker below). Absent when the plant has
+    // no frozen window (frozen_horizon_days NULL/0 -> Store.frozenHorizonEnd null).
+    {
+      const frozenEnd = Store.frozenHorizonEnd;
+      if (frozenEnd) {
+        const frozenNow = new Date();
+        for (const line of visibleLines) {
+          desired.set(`frozen-horizon-zone-${line}`, {
+            id:        `frozen-horizon-zone-${line}`,
+            group:     line,
+            kind:      'zone',
+            start:     frozenNow,
+            end:       frozenEnd,
+            type:      'background',
+            className: 'frozen-horizon-zone',
+            editable:  false,
+          });
+        }
+        Timeline._frozenHorizonIds = visibleLines.map(l => `frozen-horizon-zone-${l}`);
+      } else {
+        Timeline._frozenHorizonIds = [];
       }
     }
 
@@ -3477,6 +3519,13 @@ export const Inspector = {
     // Order fields originate from uploaded Excel — escape before innerHTML.
     const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const fixed = Store.isFixed(task.id);
+    // C2 (2026-08-20): a distinct reason from `fixed` above — Engine.
+    // isFrozenHorizon reads Store.frozenHorizonEnd (server-computed) against
+    // this order's CURRENT start, so a planner can tell "the optimizer left
+    // this alone because it starts inside the plant's frozen window" apart
+    // from "someone manually pinned this." Manual drags are never blocked by
+    // either banner — OD-C2c — this is purely explanatory.
+    const frozenHorizon = Engine.isFrozenHorizon(task);
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
@@ -3493,6 +3542,7 @@ export const Inspector = {
 
     body.innerHTML = `
       ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
+      ${frozenHorizon ? `<div class="insp-fix-banner insp-frozen-banner">${Util.t('ui.insp_frozen_horizon_banner')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${esc(a.msg)}</div>`).join('')}

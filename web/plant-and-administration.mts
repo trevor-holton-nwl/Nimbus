@@ -3233,6 +3233,17 @@ export const Plant = {
           </div>
 
           <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.frozen_horizon_title')}</h3></header>
+            <div class="panel-body split-policy-body">
+              <label class="split-policy-control" for="sys-frozen-horizon-days">
+                <span>${Util.t('ui.frozen_horizon_days_label')}</span>
+                <input type="number" id="sys-frozen-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-frozen-horizon-help" placeholder="${Util.t('ui.frozen_horizon_days_none')}">
+              </label>
+              <p id="sys-frozen-horizon-help" class="split-policy-help">${Util.t('ui.frozen_horizon_help')}</p>
+            </div>
+          </div>
+
+          <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.setup_active_panel_title')}</h3></header>
             <div class="panel-body split-policy-body">
               <p class="panel-help-text">${Util.t('ui.setup_active_panel_help')}</p>
@@ -3289,6 +3300,7 @@ export const Plant = {
     const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
     const visibilityHorizonDaysInp = pane.querySelector('#sys-visibility-horizon-days') as HTMLInputElement;
     const horizonRollHourInp = pane.querySelector('#sys-horizon-roll-hour') as HTMLInputElement;
+    const frozenHorizonDaysInp = pane.querySelector('#sys-frozen-horizon-days') as HTMLInputElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
@@ -3301,6 +3313,8 @@ export const Plant = {
       ? String(plantRow!.visibility_horizon_days) : '';
     horizonRollHourInp.value = Number.isInteger(plantRow?.horizon_roll_hour_utc)
       ? String(plantRow!.horizon_roll_hour_utc) : '19';
+    frozenHorizonDaysInp.value = Number.isInteger(plantRow?.frozen_horizon_days) && (plantRow!.frozen_horizon_days as number) >= 0
+      ? String(plantRow!.frozen_horizon_days) : '';
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -3416,6 +3430,37 @@ export const Plant = {
         maxPullForwardInp.value = previous === null ? '' : String(previous);
         Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
       } finally { maxPullForwardInp.disabled = false; }
+    });
+
+    // C2 (2026-08-20): frozen_horizon_days — same fetch/toast/revert shape as
+    // max-pull-forward-days above, but NULL/0 both mean "off" (unlike C1's
+    // visibility_horizon_days) — so an explicit "0" is a VALID, non-null save,
+    // not normalized away here or server-side (master_data.set_plant_frozen_horizon_days).
+    frozenHorizonDaysInp.addEventListener('change', async () => {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previous = Number.isInteger(plantRow.frozen_horizon_days) && (plantRow.frozen_horizon_days as number) >= 0
+        ? plantRow.frozen_horizon_days : null;
+      const raw = frozenHorizonDaysInp.value.trim();
+      const next = raw === '' ? null : Number(raw);
+      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+        frozenHorizonDaysInp.value = previous === null ? '' : String(previous);
+        Toast.show(Util.t('ui.frozen_horizon_days_invalid'), 'error');
+        return;
+      }
+      frozenHorizonDaysInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/frozen-horizon-days`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, frozen_horizon_days: next }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        plantRow.frozen_horizon_days = next;
+        Toast.show(Util.t('ui.frozen_horizon_days_saved'), 'success');
+      } catch (error) {
+        frozenHorizonDaysInp.value = previous === null ? '' : String(previous);
+        Toast.show(`${Util.t('ui.frozen_horizon_days_failed')}: ${(error as Error).message}`, 'error');
+      } finally { frozenHorizonDaysInp.disabled = false; }
     });
 
     // C1 (2026-08-20): visibility_horizon_days + horizon_roll_hour_utc are one
@@ -5536,6 +5581,9 @@ interface PlantRow extends MasterDataRow {
   conf_score_horizon?: number;
   split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
   max_pull_forward_days?: number | null;
+  /** C2 (2026-08-20): nullable whole calendar days of the plant's frozen
+   *  horizon; NULL/0 both mean "off" (unlike visibility_horizon_days). */
+  frozen_horizon_days?: number | null;
   /** Attached by master_data.py's get_table_data for the 'plants' table only. */
   constraints?: ConstraintConfig[] | null;
   /** plants.setup_active — see NimbusMasterPlant's field of the same name. */

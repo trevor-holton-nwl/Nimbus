@@ -145,7 +145,7 @@ class TestQueryAndCountAgreeUnderHorizonBound:
 
     def test_count_orders_agrees_with_query_orders_row_count(self, pg):
         db_ = pg
-        df, horizon_end = db_.query_orders(plant=self.PLANT)
+        df, horizon_end, _frozen_end = db_.query_orders(plant=self.PLANT)
         total = db_.count_orders(plant=self.PLANT)
         assert total == len(df), (
             f"count_orders ({total}) disagrees with query_orders ({len(df)}) under an "
@@ -158,7 +158,7 @@ class TestQueryAndCountAgreeUnderHorizonBound:
 
     def test_horizon_excludes_orders_starting_beyond_the_bound(self, pg):
         db_ = pg
-        df, _horizon_end = db_.query_orders(plant=self.PLANT)
+        df, _horizon_end, _frozen_end = db_.query_orders(plant=self.PLANT)
         ids = set(df["id"])
         oid_in = db_.make_id(self.ORD_INSIDE, self.MAT_INSIDE)
         oid_out = db_.make_id(self.ORD_OUTSIDE, self.MAT_OUTSIDE)

@@ -205,6 +205,25 @@ BEGIN
       CHECK (horizon_roll_hour_utc >= 0 AND horizon_roll_hour_utc <= 23);
   END IF;
 END $$;
+-- Workstream C2 (2026-08-20): plant-level frozen horizon — the near-term
+-- window (same anchor-day/UTC-roll-hour clock as visibility_horizon_days
+-- above, via db.compute_frozen_horizon_end / db._horizon_boundary_core)
+-- inside which the optimizer may not place or move any order. UNLIKE
+-- visibility_horizon_days, NULL *and* 0 both mean "off" — a 0-day frozen
+-- window is meaningless, so it must disable the feature outright rather than
+-- resolve to a same-instant boundary. Deliberately unregistered (no
+-- column_metadata row), same as its horizon siblings above — never appears
+-- in the generic Master Data grid; changed only through the validated
+-- POST /master-data/plants/{plant}/frozen-horizon-days route. See
+-- docs/multi_change_spec_08.20.26.md's C2 section.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS frozen_horizon_days INTEGER;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_frozen_horizon_days_nonnegative') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_frozen_horizon_days_nonnegative
+      CHECK (frozen_horizon_days IS NULL OR frozen_horizon_days >= 0);
+  END IF;
+END $$;
 -- Changeover Matrix Stage 2 policy sidecar. Kept separate from the priority
 -- tree; all policies start disabled until plant validation gates are met.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_policy_config JSONB NOT NULL DEFAULT

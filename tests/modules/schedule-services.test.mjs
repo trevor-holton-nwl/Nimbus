@@ -59,6 +59,191 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN' }, 'OPEN'), null);
 });
 
+// ---------------------------------------------------------------------------
+// Workstream C2 (2026-08-20) — plant frozen horizon.
+//
+// Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor and the extended
+// Engine.earliestAllowedStart read Store.frozenHorizonEnd — a plain Date the
+// frontend never computes itself (see db.compute_frozen_horizon_end). These
+// tests set/restore that field directly, mirroring how the pull-forward
+// tests above set/restore Store.masterData.
+// ---------------------------------------------------------------------------
+
+test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozenHorizonEnd directly', () => {
+  const priorEnd = Store.frozenHorizonEnd;
+  try {
+    Store.setFrozenHorizonEnd(null, 'unit-test');
+    assert.equal(Engine.frozenHorizonEnd(), null);
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }), false);
+    assert.equal(Engine.isFrozenHorizon({ start_date: null }), false, 'an order with no start is never frozen');
+    assert.deepEqual(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')), new Date('2026-08-22T09:00:00'));
+
+    const frozenEnd = new Date('2026-08-25T00:00:00');
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+    assert.equal(Engine.frozenHorizonEnd().getTime(), frozenEnd.getTime());
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }), true, 'start before the boundary is frozen (OD-C2a)');
+    assert.equal(Engine.isFrozenHorizon({ start_date: frozenEnd }), false, 'start AT the boundary is not frozen -- it is the earliest allowed instant');
+    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-26T00:00:00') }), false);
+    assert.equal(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')).getTime(), frozenEnd.getTime(),
+      'a candidate before the boundary is pushed forward to it');
+    assert.equal(Engine.applyFrozenFloor(new Date('2026-08-26T09:00:00')).getTime(), new Date('2026-08-26T09:00:00').getTime(),
+      'a candidate already past the boundary is left alone');
+  } finally {
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+test('Engine.earliestAllowedStart folds the frozen-horizon floor in as an ADDITIONAL floor, maxed with pull-forward (C2)', () => {
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  try {
+    // No pull-forward, no due date -- floor comes ONLY from the frozen window.
+    Store.setMasterData({ plants: [{ plant: 'FZ', max_pull_forward_days: null }], lines: [] }, 'unit-test');
+    const frozenEnd = new Date('2026-08-25T00:00:00');
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+    assert.equal(Engine.earliestAllowedStart({ PLANT: 'FZ' }, 'FZ').getTime(), frozenEnd.getTime());
+
+    // Pull-forward floor is LATER than the frozen floor -- pull-forward wins.
+    Store.setMasterData({ plants: [{ plant: 'FZ', max_pull_forward_days: 2 }], lines: [] }, 'unit-test');
+    const laterDue = { PLANT: 'FZ', original_end_date: new Date('2026-09-05T18:00:00') };
+    const pullForwardFloor = Engine.earliestAllowedStart(laterDue, 'FZ');
+    assert.ok(pullForwardFloor.getTime() > frozenEnd.getTime());
+
+    // Frozen floor is LATER than the pull-forward floor -- frozen wins.
+    const soonDue = { PLANT: 'FZ', original_end_date: new Date('2026-08-21T18:00:00') };
+    const frozenWins = Engine.earliestAllowedStart(soonDue, 'FZ');
+    assert.equal(frozenWins.getTime(), frozenEnd.getTime());
+
+    // Frozen horizon off -- reverts to pure pull-forward behavior (parity
+    // with the pre-C2 test above).
+    Store.setFrozenHorizonEnd(null, 'unit-test');
+    assert.equal(Engine.earliestAllowedStart({ PLANT: 'FZ' }, 'FZ'), null,
+      'no due date and frozen horizon off -- unrestricted, exactly as before C2');
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free)', () => {
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  const plant = 'FZ-MANUAL-PLANT';
+  const line = 'FZ-MANUAL-LINE';
+  Store.setMasterData({
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00'), 'unit-test');
+  try {
+    const requestedStart = new Date('2026-08-22T09:00:00'); // inside the frozen window
+    const task = { id: 'manual-drag-task', PLANT: plant, MACHINE: line, RUN_TIME: '1' };
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    assert.ok(patch, 'a manual drag must still produce a patch even though the target start is inside the frozen window');
+    assert.equal(patch.start_date.getTime(), requestedStart.getTime(),
+      'the manual drag lands EXACTLY where requested, unfloored -- proving OD-C2c');
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+test('Engine.runAndApply("spt") leaves an order starting inside the frozen window untouched and never places another order into it (Step 8: legacy walk)', () => {
+  const plant = 'FZ-SPT-PLANT';
+  const line = 'FZ-SPT-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  const priorCalendar = Store.calendars[line];
+  const priorSetup = Store.setupSnapshot;
+  const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test'); // no active setup -- takes the legacy (non-setup-aware) path
+  Store.setMasterData({
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setCalendar(line, ALL_DAY, 'unit-test');
+  const frozenEnd = new Date('2026-08-25T00:00:00');
+  Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+
+  const frozenStart = new Date('2026-08-22T09:00:00'); // inside the frozen window
+  const frozenTaskEnd = new Date('2026-08-22T10:00:00');
+  Store.setTasks([
+    { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
+    { id: 'spt-movable-free', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00'), end_date: new Date('2026-08-30T10:00:00') },
+  ], 'unit-test');
+
+  try {
+    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: true });
+    assert.equal(Store.tasks['spt-frozen-in-place'].start_date.getTime(), frozenStart.getTime(),
+      'an order already starting inside the frozen window is left EXACTLY where it was -- never rescheduled into or through the window');
+    assert.equal(Store.tasks['spt-frozen-in-place'].end_date.getTime(), frozenTaskEnd.getTime());
+    assert.ok(Store.tasks['spt-movable-free'].start_date.getTime() >= frozenEnd.getTime(),
+      'a movable order is never (re)placed with a start inside the frozen window');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Engine.autoReflow leaves a frozen-window peer exactly in place even when it would otherwise be pushed by an overlapping predecessor (Step 8: autoReflow)', () => {
+  const plant = 'FZ-REFLOW-PLANT';
+  const line = 'FZ-REFLOW-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  const priorCalendar = Store.calendars[line];
+  const priorSetup = Store.setupSnapshot;
+  const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  Store.setMasterData({
+    plants: [{ plant, split_order_policy: 'never' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setCalendar(line, ALL_DAY, 'unit-test');
+  const frozenEnd = new Date('2026-08-25T00:00:00');
+  Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+
+  const peerStart = new Date('2026-08-22T09:15:00'); // inside the frozen window
+  const peerEnd = new Date('2026-08-22T10:15:00');
+  Store.setTasks([
+    // The manually-dragged trigger: OD-C2c means the drag itself is never
+    // blocked, and it is extended (08:00-09:30) so it genuinely OVERLAPS the
+    // frozen peer below -- without the C2 pinning check, autoReflow's
+    // "already fits" shortcut would not apply and the peer would be pushed.
+    { id: 'reflow-changed', PLANT: plant, MACHINE: line, RUN_TIME: '1.5',
+      start_date: new Date('2026-08-22T08:00:00'), end_date: new Date('2026-08-22T09:30:00') },
+    { id: 'reflow-frozen-peer', PLANT: plant, MACHINE: line, RUN_TIME: '1',
+      start_date: peerStart, end_date: peerEnd },
+  ], 'unit-test');
+
+  try {
+    Engine.autoReflow('reflow-changed');
+    assert.equal(Store.tasks['reflow-frozen-peer'].start_date.getTime(), peerStart.getTime(),
+      'a peer already starting inside the frozen window is never moved by autoReflow, even to resolve a genuine overlap');
+    assert.equal(Store.tasks['reflow-frozen-peer'].end_date.getTime(), peerEnd.getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('changeover advances to a future order pull-forward floor instead of stalling on an ineligible queue', () => {
   const child = String.raw`
     import { createRequire } from 'node:module';

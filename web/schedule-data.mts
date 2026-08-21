@@ -302,6 +302,7 @@ export const Persistence = {
       stats.source = 'backend';
       Store.setTasks([], 'persistence');
       Store.setVisibilityHorizonEnd(null, 'persistence');
+      Store.setFrozenHorizonEnd(null, 'persistence');
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
       return Promise.all([
@@ -341,6 +342,13 @@ export const Persistence = {
         // Store.visibilityHorizonEnd.
         const horizonEndIso = (payload?.meta?.visibility_horizon_end as string | null | undefined) ?? null;
         Store.setVisibilityHorizonEnd(horizonEndIso ? new Date(horizonEndIso) : null, 'persistence');
+        // C2 (2026-08-20): same reasoning, for the plant's frozen-horizon
+        // boundary (db.compute_frozen_horizon_end) — Engine.earliestAllowedStart/
+        // isFrozenHorizon (schedule-services.mts) and Timeline's
+        // .frozen-horizon-zone band both read Store.frozenHorizonEnd rather
+        // than each carrying their own copy of the clock math.
+        const frozenEndIso = (payload?.meta?.frozen_horizon_end as string | null | undefined) ?? null;
+        Store.setFrozenHorizonEnd(frozenEndIso ? new Date(frozenEndIso) : null, 'persistence');
         ErrorLog.info('persistence',
           `Backend returned ${stats.raw_received} rows`,
           { meta: stats.backend_meta });

@@ -563,6 +563,13 @@ window.__NIMBUS_LOCALES.en = {
   'ui.horizon_roll_hour_invalid':      'Enter a whole number of hours, 0 through 23.',
   'ui.visibility_horizon_saved':       'Visibility horizon saved for this plant.',
   'ui.visibility_horizon_failed':      'Could not save visibility horizon',
+  'ui.frozen_horizon_title':           'Frozen Horizon',
+  'ui.frozen_horizon_help':            'A near-term window the optimizer will not schedule into. Orders that already start inside it are left untouched. Leave blank or zero for no frozen window. Manual drags are never blocked by this setting.',
+  'ui.frozen_horizon_days_label':      'Freeze the next (days)',
+  'ui.frozen_horizon_days_none':       'No frozen window',
+  'ui.frozen_horizon_days_invalid':    'Enter a whole number of days, zero or greater.',
+  'ui.frozen_horizon_days_saved':      'Frozen horizon saved for this plant.',
+  'ui.frozen_horizon_days_failed':     'Could not save frozen horizon',
 
   // Stage 2 of docs/scheduling_priority.md — priority-list field labels
   // (shared namespace with Stage 3's Scheduling Constraints tree, Decision 4).
@@ -637,6 +644,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.insp_updated_end':               'Updated End',
   'ui.insp_run_time':                  'Run time (h)',
   'ui.insp_fixed_banner':              '🔒 This order is fixed — the optimiser will schedule around it.',
+  'ui.insp_frozen_horizon_banner':     '🧊 This order starts inside the plant\'s frozen window — the optimiser will not move it. Manual drags are still allowed.',
   'ui.insp_alerts_title':              '⚐ Alerts ({{count}})',
   'ui.insp_variance_shifted':          'Shifted from original',
   'ui.order_note_title':               'Order Note',

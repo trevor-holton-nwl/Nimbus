@@ -257,6 +257,16 @@ export interface NimbusMasterPlant {
   /** UTC hour (0-23) at which the visibility window rolls forward a day;
    *  schema.sql: NOT NULL DEFAULT 19. */
   horizon_roll_hour_utc?: number;
+  /** C2 (2026-08-20): nullable whole calendar days of the plant's frozen
+   *  horizon — the near-term window (same anchor-day/roll-hour clock as
+   *  visibility_horizon_days above, via db.compute_frozen_horizon_end) the
+   *  optimizer may not place or move any order into. UNLIKE
+   *  visibility_horizon_days, NULL *and* 0 both mean "off". Server-enforced
+   *  at every optimizer placement site — this field only backs the
+   *  Scheduling Rules panel's editable input (see Store.frozenHorizonEnd,
+   *  computed server-side and sent down per-request instead of duplicating
+   *  this plus a "now" into a client copy of the same clock math). */
+  frozen_horizon_days?: number | null;
 }
 
 export interface NimbusMasterData {

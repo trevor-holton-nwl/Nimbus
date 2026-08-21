@@ -411,6 +411,13 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.horizon_roll_hour_invalid':      'Saisissez un nombre entier d\'heures, de 0 à 23.',
   'ui.visibility_horizon_saved':       'Horizon de visibilité enregistré pour cette usine.',
   'ui.visibility_horizon_failed':      'Impossible d\'enregistrer l\'horizon de visibilité',
+  'ui.frozen_horizon_title':           'Horizon gelé',
+  'ui.frozen_horizon_help':            'Une fenêtre à court terme dans laquelle l\'optimiseur ne planifiera rien. Les commandes qui commencent déjà à l\'intérieur restent inchangées. Laissez vide ou zéro pour aucune fenêtre gelée. Les glissements manuels ne sont jamais bloqués par ce paramètre.',
+  'ui.frozen_horizon_days_label':      'Geler les (jours) suivants',
+  'ui.frozen_horizon_days_none':       'Aucune fenêtre gelée',
+  'ui.frozen_horizon_days_invalid':    'Saisissez un nombre entier de jours, zéro ou plus.',
+  'ui.frozen_horizon_days_saved':      'Horizon gelé enregistré pour cette usine.',
+  'ui.frozen_horizon_days_failed':     'Impossible d\'enregistrer l\'horizon gelé',
 
   // Phase 2 de docs/scheduling_priority.md — libellés de champs pour les listes de priorités
   // (espace de noms partagé avec l'arborescence des Contraintes de Planification de la Phase 3, Décision 4).
@@ -1003,6 +1010,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.insp_updated_end':               'Fin mise à jour',
   'ui.insp_run_time':                  'Durée (h)',
   'ui.insp_fixed_banner':              '🔒 Cette commande est fixe — l\'optimiseur planifiera autour d\'elle.',
+  'ui.insp_frozen_horizon_banner':     '🧊 Cette commande commence dans la fenêtre gelée de l\'usine — l\'optimiseur ne la déplacera pas. Le glissement manuel reste autorisé.',
   'ui.insp_alerts_title':              '⚐ Alertes ({{count}})',
   'ui.insp_variance_shifted':          'Décalé par rapport à l\'original',
   'ui.order_note_title':               'Note de commande',

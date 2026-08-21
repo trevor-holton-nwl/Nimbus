@@ -415,6 +415,13 @@ window.__NIMBUS_LOCALES.es = {
   'ui.horizon_roll_hour_invalid':      'Introduzca un número entero de horas, de 0 a 23.',
   'ui.visibility_horizon_saved':       'Horizonte de visibilidad guardado para esta planta.',
   'ui.visibility_horizon_failed':      'No se pudo guardar el horizonte de visibilidad',
+  'ui.frozen_horizon_title':           'Horizonte congelado',
+  'ui.frozen_horizon_help':            'Una ventana a corto plazo en la que el optimizador no programará. Los pedidos que ya empiezan dentro de ella permanecen sin cambios. Déjelo en blanco o en cero para no tener ventana congelada. Los arrastres manuales nunca se bloquean por esta configuración.',
+  'ui.frozen_horizon_days_label':      'Congelar los próximos (días)',
+  'ui.frozen_horizon_days_none':       'Sin ventana congelada',
+  'ui.frozen_horizon_days_invalid':    'Introduzca un número entero de días, cero o mayor.',
+  'ui.frozen_horizon_days_saved':      'Horizonte congelado guardado para esta planta.',
+  'ui.frozen_horizon_days_failed':     'No se pudo guardar el horizonte congelado',
 
   // Fase 2 de docs/scheduling_priority.md — etiquetas de campo para listas de prioridades
   // (espacio de nombres compartido con el árbol de Restricciones de Programación de la Fase 3, Decisión 4).
@@ -1007,6 +1014,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.insp_updated_end':               'Fin actualizado',
   'ui.insp_run_time':                  'Tiempo de ejecución (h)',
   'ui.insp_fixed_banner':              '🔒 Este pedido es fijo — el optimizador planificará en torno a él.',
+  'ui.insp_frozen_horizon_banner':     '🧊 Este pedido empieza dentro de la ventana congelada de la planta — el optimizador no lo moverá. El arrastre manual sigue permitido.',
   'ui.insp_alerts_title':              '⚐ Alertas ({{count}})',
   'ui.insp_variance_shifted':          'Desplazado del original',
   'ui.order_note_title':               'Nota del pedido',

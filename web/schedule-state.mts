@@ -71,6 +71,14 @@ interface StoreState {
    *  already-computed instant instead of each carrying their own copy of the
    *  plant-local-midnight/roll-hour clock math the backend already did. */
   visibilityHorizonEnd: Date | null;
+  /** C2 (2026-08-20): the currently-selected plant's frozen-horizon end
+   *  instant, as computed server-side and echoed in GET /tasks' `meta.
+   *  frozen_horizon_end` — null when off (frozen_horizon_days NULL/0) or
+   *  before any load. Same reasoning as visibilityHorizonEnd above: read by
+   *  Engine.frozenHorizonEnd/isFrozenHorizon (schedule-services.mts) and
+   *  Timeline's `.frozen-horizon-zone` band (schedule-workbench.mts) instead
+   *  of either carrying its own copy of the anchor-day/roll-hour clock math. */
+  frozenHorizonEnd: Date | null;
 }
 
 interface SelectionEmitPayload {
@@ -131,7 +139,8 @@ export const Store = {
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {},
     orderFieldVisibility: {},
-    visibilityHorizonEnd: null
+    visibilityHorizonEnd: null,
+    frozenHorizonEnd: null
   } as StoreState,
   _listeners: new Set<((event: StoreEvent) => void) & { _pmLabel?: string }>(),
   // Lazily populated by alertsByTask() below — declared here (not left to first
@@ -174,6 +183,7 @@ export const Store = {
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
   get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
   get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
+  get frozenHorizonEnd(): Date | null { return this._state.frozenHorizonEnd; },
 
   isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
 
@@ -241,6 +251,14 @@ export const Store = {
    *  for signature symmetry with the other setters. */
   setVisibilityHorizonEnd(end: Date | null, _source?: string): void {
     this._state.visibilityHorizonEnd = end;
+  },
+
+  /** Replace the C2 frozen-horizon end instant for whichever plant just
+   *  loaded (schedule-data.mts's Persistence.load, from GET /tasks' `meta.
+   *  frozen_horizon_end`). No `emit()` — same reasoning as
+   *  setVisibilityHorizonEnd above. */
+  setFrozenHorizonEnd(end: Date | null, _source?: string): void {
+    this._state.frozenHorizonEnd = end;
   },
 
   /** Replace the one active plant's read-only setup snapshot. Unlike priority

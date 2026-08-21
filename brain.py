@@ -198,6 +198,7 @@ async def lifespan(app: FastAPI):
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_max_pull_forward_days_column()
     md.ensure_plant_visibility_horizon_columns()
+    md.ensure_plant_frozen_horizon_column()
     md.ensure_plant_setup_active_column()
     md.ensure_work_hours_columns()
     md.ensure_machine_calendar_table()
@@ -569,6 +570,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/plants/{plant}/max-pull-forward-days": "plant.max_pull_forward_days_update",
     "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
+    "/master-data/plants/{plant}/frozen-horizon-days": "plant.frozen_horizon_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/system-settings": "system_settings.update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
@@ -1461,7 +1463,13 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     # plant config from scratch. Sent down rather than have the frontend keep
     # its own copy of the plant-local-midnight/roll-hour clock math (Step 2)
     # — Timeline.rebuild reads this to clamp the Gantt's far edge.
-    df, visibility_horizon_end = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    # C2 (2026-08-20): query_orders resolves the plant's frozen-horizon bound
+    # the SAME way (same shared clock, see db._horizon_bounds_for_plant) —
+    # it does not filter this query, only rides along for reporting, so
+    # `meta.frozen_horizon_end` reaches Store.frozenHorizonEnd for the
+    # Timeline band and the optimizer's placement-floor helper without a
+    # second copy of the clock math on either side.
+    df, visibility_horizon_end, frozen_horizon_end = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,
@@ -1471,7 +1479,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                       "total": (db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else 0),
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
                       "source_file": "postgres://nimbus/orders",
-                      "visibility_horizon_end": visibility_horizon_end.isoformat() if visibility_horizon_end else None}
+                      "visibility_horizon_end": visibility_horizon_end.isoformat() if visibility_horizon_end else None,
+                      "frozen_horizon_end": frozen_horizon_end.isoformat() if frozen_horizon_end else None}
         return {"data": [], "links": [], "meta": empty_meta}
 
     # Drop rows with no usable start date (query can't enforce this without
@@ -1549,6 +1558,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["unique_id_count"] = len(data)
     meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
+    meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -3130,6 +3140,22 @@ def md_set_plant_visibility_horizon(plant: str, request: Request, body: dict = B
             plant=plant,
             visibility_horizon_days=body.get("visibility_horizon_days"),
             horizon_roll_hour_utc=body.get("horizon_roll_hour_utc"),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/plants/{plant}/frozen-horizon-days", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_frozen_horizon_days(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist the C2 plant frozen-horizon setting: a nullable whole-calendar-day
+    window (NULL or 0 = off, unlike C1's visibility_horizon_days) inside which
+    the optimizer may not place or move any order."""
+    try:
+        return md.set_plant_frozen_horizon_days(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            value=body.get("frozen_horizon_days"),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

@@ -411,6 +411,13 @@ window.__NIMBUS_LOCALES.de = {
   'ui.horizon_roll_hour_invalid':      'Geben Sie eine ganze Stundenzahl von 0 bis 23 ein.',
   'ui.visibility_horizon_saved':       'Sichtbarkeitshorizont für dieses Werk gespeichert.',
   'ui.visibility_horizon_failed':      'Sichtbarkeitshorizont konnte nicht gespeichert werden',
+  'ui.frozen_horizon_title':           'Sperrhorizont',
+  'ui.frozen_horizon_help':            'Ein kurzfristiges Zeitfenster, in das der Optimierer nicht einplant. Aufträge, die bereits darin beginnen, bleiben unverändert. Leer oder null lassen für kein Sperrfenster. Manuelles Verschieben wird durch diese Einstellung nie blockiert.',
+  'ui.frozen_horizon_days_label':      'Die nächsten (Tage) sperren',
+  'ui.frozen_horizon_days_none':       'Kein Sperrfenster',
+  'ui.frozen_horizon_days_invalid':    'Geben Sie eine ganze Zahl von Tagen ein, null oder größer.',
+  'ui.frozen_horizon_days_saved':      'Sperrhorizont für dieses Werk gespeichert.',
+  'ui.frozen_horizon_days_failed':     'Sperrhorizont konnte nicht gespeichert werden',
 
   // Phase 2 von docs/scheduling_priority.md — Feldbezeichnungen für Prioritätslisten
   // (gemeinsamer Namensraum mit dem Scheduling-Constraints-Baum aus Phase 3, Entscheidung 4).
@@ -1002,6 +1009,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.insp_updated_end':               'Aktualisiertes Ende',
   'ui.insp_run_time':                  'Laufzeit (h)',
   'ui.insp_fixed_banner':              '🔒 Dieser Auftrag ist fixiert — der Optimierer plant um ihn herum.',
+  'ui.insp_frozen_horizon_banner':     '🧊 Dieser Auftrag beginnt innerhalb des Sperrfensters des Werks — der Optimierer verschiebt ihn nicht. Manuelles Verschieben ist weiterhin möglich.',
   'ui.insp_alerts_title':              '⚐ Warnungen ({{count}})',
   'ui.insp_variance_shifted':          'Vom Original verschoben',
   'ui.order_note_title':               'Auftragsnotiz',

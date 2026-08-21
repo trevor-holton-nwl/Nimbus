@@ -1181,6 +1181,16 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border-right: 3px solid #1a7a2e !important;
   pointer-events: none !important;
 }
+/* Frozen-horizon zone (Workstream C2, 2026-08-20) — darker green wash from now
+   through the plant's frozen horizon, layered ABOVE .alert-horizon-zone above
+   (later in DOM/paint order — see Timeline.rebuild). The optimizer may not
+   place or move anything into this band; a manual drag still can (OD-C2c). */
+.vis-item.frozen-horizon-zone {
+  background: rgba(20, 120, 40, 0.24) !important;
+  border-color: transparent !important;
+  border-right: 3px solid #0f5c1f !important;
+  pointer-events: none !important;
+}
 
 /* Ctrl+drag marquee rubber-band — drawn into .vis-panel.vis-center */
 .nimbus-marquee {
@@ -1441,6 +1451,15 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   margin-bottom: 10px;
   display: flex; align-items: center; gap: 8px;
   font-weight: 500;
+}
+/* Frozen-horizon banner (Workstream C2, 2026-08-20) — same shape as
+   .insp-fix-banner above but green-toned (matches the Gantt's
+   .frozen-horizon-zone band) so a planner reads it as a DISTINCT reason from
+   a genuine manual pin, not a restyled duplicate of the same banner. */
+.insp-frozen-banner {
+  background: var(--ok-soft);
+  border: 1px solid var(--ok);
+  color: var(--ok);
 }
 
 /* =============================================================================

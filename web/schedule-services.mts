@@ -1899,15 +1899,69 @@ export const Engine = {
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
   },
 
-  /** Local due-date calendar-day floor for a plant's optional pull-forward limit. */
+  /** C2 (2026-08-20): the plant's frozen-horizon boundary, as computed
+   *  server-side (db.compute_frozen_horizon_end, the SAME anchor-day/
+   *  roll-hour clock C1's visibility horizon uses) and cached in
+   *  Store.frozenHorizonEnd — the frontend deliberately carries no copy of
+   *  that clock math, same reasoning as Store.visibilityHorizonEnd. null
+   *  when the plant has no frozen window (frozen_horizon_days NULL/0). */
+  frozenHorizonEnd(): Date | null {
+    return Store.frozenHorizonEnd;
+  },
+
+  /** True when `task`'s CURRENT start already falls inside the plant's
+   *  frozen window (OD-C2a: frozen iff start is inside — an upper-bound-only
+   *  check, same shape as C1's visibility gate). Such an order is treated as
+   *  implicitly pinned by every placement call site below — a reason
+   *  DISTINCT from Store.isFixed (a genuine manual pin) so the UI can
+   *  explain why it didn't move without conflating the two. This check
+   *  alone never blocks anything — callers decide what "pinned" means in
+   *  their own context (excluded from the free/movable set, an obstacle for
+   *  peers, etc). Manual drags never consult this (OD-C2c): only optimizer/
+   *  auto-reflow placement code does. */
+  isFrozenHorizon(task: NimbusTask): boolean {
+    const end = Engine.frozenHorizonEnd();
+    return !!end && !!task.start_date && task.start_date < end;
+  },
+
+  /** Push `at` forward to the frozen-horizon boundary when it falls short —
+   *  the one clamp every OPTIMIZER-side placement call site (autoReflow,
+   *  the legacy walk via earliestAllowedStart below, setup-scheduler's
+   *  bounds.notBefore) applies before committing a NEW start for a task
+   *  that isn't itself frozen-pinned. Manual-path code
+   *  (manualSchedulePatchFor, Alerts.applyFix) deliberately never calls
+   *  this (OD-C2c). */
+  applyFrozenFloor(at: Date): Date {
+    const end = Engine.frozenHorizonEnd();
+    return (end && at < end) ? new Date(end) : at;
+  },
+
+  /** Local due-date calendar-day floor for a plant's optional pull-forward
+   *  limit, MAXED with the plant's C2 frozen-horizon floor (Engine.
+   *  frozenHorizonEnd) so every one of this function's existing callers —
+   *  the legacy walk's fitsAt/nextPullForwardFloor/queueBlockedByPullForward/
+   *  forcePlaceableTask, _dispatchPolicyAware, the SPT cursor floor, and
+   *  setup-scheduler's bounds.notBefore seam — gets the frozen floor for
+   *  free, with no call site needing to know a second floor exists. This is
+   *  the "single shared floor helper" the C2 placement-floor fix hangs on:
+   *  the originally-proposed reuse of `bounds.notBefore` didn't generalize
+   *  (it's per-order, due-date-derived, null without a due date), but THIS
+   *  function is already consulted at every legacy-walk placement site, so
+   *  folding the frozen floor in here — rather than a second, parallel
+   *  check scattered across those same sites — is the actual fix. */
   earliestAllowedStart(task: NimbusTask, plant: string | null): Date | null {
+    let floor: Date | null = null;
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
-    if (!Number.isInteger(value) || (value as number) < 0) return null;
-    const due = Util.sapDueDate(task);
-    if (!due) return null;
-    const floor = new Date(due);
-    floor.setHours(0, 0, 0, 0);
-    floor.setDate(floor.getDate() - (value as number));
+    if (Number.isInteger(value) && (value as number) >= 0) {
+      const due = Util.sapDueDate(task);
+      if (due) {
+        floor = new Date(due);
+        floor.setHours(0, 0, 0, 0);
+        floor.setDate(floor.getDate() - (value as number));
+      }
+    }
+    const frozenEnd = Engine.frozenHorizonEnd();
+    if (frozenEnd && (!floor || frozenEnd > floor)) floor = new Date(frozenEnd);
     return floor;
   },
 
@@ -2651,6 +2705,9 @@ export const Engine = {
     // floor, Calendar.nextAvailable() quite correctly returns the current
     // open slot — but that leaves this dispatch loop with no way to advance.
     // Find the next boundary so the no-admission path can make progress.
+    // (C2, 2026-08-20: Engine.earliestAllowedStart also folds in the plant's
+    // frozen-horizon floor, so this same helper — despite its name — also
+    // advances the cursor past a frozen window with no separate code path.)
     const nextPullForwardFloor = (at: Date): Date | null => {
       let next: Date | null = null;
       for (const t of queue) {
@@ -3010,7 +3067,16 @@ export const Engine = {
     const setupSnapshot = Store.setupSnapshot;
     if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active) {
       const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
-      const snapshot = _candidateSnapshot ?? snapshotSchedule();
+      const baseSnapshot = _candidateSnapshot ?? snapshotSchedule();
+      // C2: fold any frozen-window order into the SAME fixedIds set the
+      // setup-aware evaluators already treat as immovable — Engine.
+      // isFrozenHorizon carries its own distinct reason for the UI (never
+      // written to Store.isFixed itself), this is purely an internal input
+      // to the evaluator so it never re-sequences an order it shouldn't touch.
+      const frozenIds = baseSnapshot.tasks.filter(t => Engine.isFrozenHorizon(t)).map(t => String(t.id));
+      const snapshot: ScheduleSnapshot = frozenIds.length
+        ? { ...baseSnapshot, fixedIds: new Set([...Array.from(baseSnapshot.fixedIds, String), ...frozenIds]) }
+        : baseSnapshot;
       const bounds: DueDateFirstBounds = {
         setup: setupSnapshot,
         exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
@@ -3146,11 +3212,19 @@ export const Engine = {
       if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
       const { tasks } = groups[line];
 
+      // C2: an order whose start already falls inside the plant's frozen
+      // window is routed into the SAME obstacle bucket as a genuine manual
+      // pin / aged / out-of-window task — unconditionally (not gated by
+      // respectFixed, same as isAged/isOutOfWin) — so every dispatcher fed
+      // by this split (_dispatchDayIntegrity, _dispatchPolicyAware, the SPT
+      // walk below) leaves it untouched. Engine.isFrozenHorizon carries its
+      // own distinct reason for the UI; this split itself doesn't care why
+      // a task is immovable, only that it is.
       const fixedTasks = tasks.filter(t =>
-        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t)
+        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t)
+        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t)
       );
 
       fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
@@ -3346,16 +3420,19 @@ export const Engine = {
           const requiredSetupMinutes = setupMinutes(predecessor, p);
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
-            // Fixed or aged orders don't move — if there's a conflict, an alert
-            // will fire — but later unfixed peers must still be de-overlapped,
-            // and the immovable order becomes the setup predecessor they pay for.
+          if (Store.isFixed(p.id) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+            // Fixed, frozen-window, or aged orders don't move — if there's a
+            // conflict, an alert will fire — but later unfixed peers must
+            // still be de-overlapped, and the immovable order becomes the
+            // setup predecessor they pay for.
             cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
             predecessor = p;
             continue;
           }
+          // C2: this peer is about to be MOVED (not merely left in place) —
+          // its new start must never land inside the plant's frozen window.
           const placement = Calendar.placeWithSetup(line, {
-            earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+            earliestStart: Engine.applyFrozenFloor(cursor), runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
             setup: { kind: 'resolved', minutes: requiredSetupMinutes },
           });
           const changes: Partial<NimbusTask> | null = placement.kind === 'placed' && placement.productiveSegments.length
@@ -3390,16 +3467,19 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFixed(p.id) || p.end_date! < _horizonStart) {
-        // Fixed or aged orders don't move — if there's a conflict, an alert
-        // will fire — but later unfixed peers must still be de-overlapped, and
-        // the immovable order becomes the setup predecessor they pay for.
+      if (Store.isFixed(p.id) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+        // Fixed, frozen-window, or aged orders don't move — if there's a
+        // conflict, an alert will fire — but later unfixed peers must still
+        // be de-overlapped, and the immovable order becomes the setup
+        // predecessor they pay for.
         cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
         predecessor = p;
         continue;
       }
+      // C2: this peer is about to be MOVED (not merely left in place) — its
+      // new start must never land inside the plant's frozen window.
       const placement = Calendar.placeWithSetup(line, {
-        earliestStart: cursor, runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
+        earliestStart: Engine.applyFrozenFloor(cursor), runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
         setup: { kind: 'resolved', minutes: requiredSetupMinutes },
       });
       if (placement.kind !== 'placed' || !placement.productiveSegments.length) {

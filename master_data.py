@@ -318,15 +318,15 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 if page_plants:
                     cur.execute(
                         "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, "
-                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc "
+                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8]) for r in cur.fetchall()}
                     for row in rows:
                         (constraints, policy, max_pull_forward_days, setup_active,
-                         visibility_horizon_days, horizon_roll_hour_utc) = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False, None, 19)
+                         visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days) = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False, None, 19, None)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
@@ -334,6 +334,7 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                         row['setup_active'] = bool(setup_active)
                         row['visibility_horizon_days'] = visibility_horizon_days
                         row['horizon_roll_hour_utc'] = horizon_roll_hour_utc if horizon_roll_hour_utc is not None else 19
+                        row['frozen_horizon_days'] = frozen_horizon_days
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -1029,6 +1030,20 @@ def ensure_plant_visibility_horizon_columns() -> None:
         conn.commit()
 
 
+def ensure_plant_frozen_horizon_column() -> None:
+    """Idempotent Workstream C2 (2026-08-20) column: the near-term window
+    inside which the optimizer may not place or move any order. Nullable,
+    NO default, and — unlike visibility_horizon_days — NULL/0 both mean
+    "off" (validated in set_plant_frozen_horizon_days; this column itself
+    stays a plain INTEGER, same shape as max_pull_forward_days). Redeploy-safe
+    counterpart to schema.sql's ALTER TABLE block, same dual-provisioning
+    pattern as visibility_horizon_days/max_pull_forward_days above. Kept out
+    of the grid, same as its siblings."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS frozen_horizon_days INTEGER")
+        conn.commit()
+
+
 def ensure_plant_setup_active_column() -> None:
     """Idempotent plant-level "include setup times in optimizer" flag
     (Workstream D2, 2026-08-20) — relocated off the per-signature-version
@@ -1280,6 +1295,39 @@ def set_plant_visibility_horizon(subnetwork: str, plant: str, visibility_horizon
         conn.commit()
     return {"status": "ok", "plant": plant, "visibility_horizon_days": visibility_horizon_days,
             "horizon_roll_hour_utc": horizon_roll_hour_utc}
+
+
+def set_plant_frozen_horizon_days(subnetwork: str, plant: str, value: int | None,
+                                  user_email: str | None = None) -> dict:
+    """Persist a nullable whole-calendar-day frozen-horizon window for one
+    plant (Workstream C2, 2026-08-20). NULL or 0 both mean "off" — the
+    optimizer-facing consumer (db.compute_frozen_horizon_end) already treats
+    them identically, but this setter itself just validates non-negative-or-
+    null the same shape as set_plant_max_pull_forward_days; it does not
+    normalize 0 to NULL, so an admin who explicitly types 0 sees 0 persist."""
+    if not plant:
+        raise ValueError("plant is required")
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise ValueError("frozen_horizon_days must be a non-negative integer or null")
+
+    params: list = [value, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET frozen_horizon_days = %s, updated_at = NOW() WHERE {where}", params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_frozen_horizon_days', %s, %s)",
+            (Jsonb({"plant": plant, "frozen_horizon_days": value}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "frozen_horizon_days": value}
 
 
 def set_plant_setup_active(plant: str, active: bool, subnetwork: str | None = None,

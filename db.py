@@ -331,11 +331,15 @@ def _validate_schedule_segments(segments: list[dict], runtime_value) -> tuple[li
 # of clock math; the frontend deliberately carries no copy of it (Step 2) —
 # GET /tasks sends the already-computed instant down in `meta`.
 # ---------------------------------------------------------------------------
-def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
-                                    horizon_roll_hour_utc: int,
-                                    visibility_horizon_days: int | None) -> datetime | None:
-    """Return the plant-local-midnight instant beyond which orders are hidden,
-    or None when the horizon is unlimited (visibility_horizon_days is None).
+def _horizon_boundary_core(now_utc: datetime, timezone_name: str | None,
+                            horizon_roll_hour_utc: int, days: int) -> datetime:
+    """The one anchor-day/roll-hour clock implementation shared by the plant
+    visibility horizon (C1) and the plant frozen horizon (C2, 2026-08-20) —
+    see the controller ruling in that workstream's task brief: reuse this
+    exact math, parameterized by day-count, rather than inventing a second
+    clock. Callers (compute_visibility_horizon_end / compute_frozen_horizon_end)
+    own their own "what does an absent/zero day-count mean" convention and
+    call this only once they've already decided the horizon is active.
 
     anchor_day is "today" in the plant's timezone, advanced one calendar day
     once `now_utc`'s UTC hour reaches `horizon_roll_hour_utc` — a deliberate
@@ -350,8 +354,6 @@ def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
     as the local clock (UTC), same fallback setup_data.py already uses for
     plant-local captures — never raises on bad master data.
     """
-    if visibility_horizon_days is None:
-        return None
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
     try:
@@ -361,27 +363,66 @@ def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
     anchor_day = local_now.date()
     if now_utc.astimezone(timezone.utc).hour >= int(horizon_roll_hour_utc):
         anchor_day += timedelta(days=1)
-    horizon_date = anchor_day + timedelta(days=int(visibility_horizon_days))
+    horizon_date = anchor_day + timedelta(days=int(days))
     return datetime.combine(horizon_date, dt_time.min)
 
 
-def _visibility_horizon_end_for_plant(cur, plant: str) -> datetime | None:
-    """Look up one plant's C1 config on the caller's own cursor (so
-    query_orders/count_orders spend no extra pool checkout) and resolve it to
-    a concrete bound via compute_visibility_horizon_end. Returns None for an
-    unknown plant or an unlimited (NULL days) horizon — both mean "no bound"."""
+def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
+                                    horizon_roll_hour_utc: int,
+                                    visibility_horizon_days: int | None) -> datetime | None:
+    """Return the plant-local-midnight instant beyond which orders are hidden,
+    or None when the horizon is unlimited (visibility_horizon_days is None).
+    See `_horizon_boundary_core` for the shared clock math.
+    """
+    if visibility_horizon_days is None:
+        return None
+    return _horizon_boundary_core(now_utc, timezone_name, horizon_roll_hour_utc, visibility_horizon_days)
+
+
+def compute_frozen_horizon_end(now_utc: datetime, timezone_name: str | None,
+                                horizon_roll_hour_utc: int,
+                                frozen_horizon_days: int | None) -> datetime | None:
+    """Workstream C2 (2026-08-20) — the plant-local-midnight instant through
+    which the optimizer may not place or move any order (the "frozen
+    window" is [now, this instant)); an order whose own start already falls
+    inside it is treated as implicitly pinned rather than moved.
+
+    Reuses the EXACT SAME anchor-day/roll-hour clock as
+    compute_visibility_horizon_end (`_horizon_boundary_core`) — one clock
+    implementation, not two. The only difference is the null convention:
+    unlike visibility_horizon_days (NULL alone means unlimited),
+    frozen_horizon_days treats BOTH NULL and 0 as "off" (per this
+    workstream's controller ruling and docs/multi_change_spec_08.20.26.md's
+    C2 section) — a 0-day frozen window is meaningless and must disable the
+    feature outright rather than resolve to some same-instant boundary.
+    """
+    if not frozen_horizon_days:
+        return None
+    return _horizon_boundary_core(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days)
+
+
+def _horizon_bounds_for_plant(cur, plant: str) -> tuple[datetime | None, datetime | None]:
+    """Look up one plant's C1 + C2 horizon config on the caller's own cursor
+    (so query_orders/count_orders spend no extra pool checkout) and resolve
+    both to concrete bounds. Returns `(visibility_horizon_end, frozen_horizon_end)`
+    — either may be None (unknown plant, or that horizon is off)."""
     cur.execute(
-        "SELECT visibility_horizon_days, horizon_roll_hour_utc, timezone "
+        "SELECT visibility_horizon_days, horizon_roll_hour_utc, timezone, frozen_horizon_days "
         "FROM plants WHERE plant = %s LIMIT 1",
         (plant,),
     )
     row = cur.fetchone()
     if row is None:
-        return None
-    visibility_horizon_days, horizon_roll_hour_utc, timezone_name = row
-    return compute_visibility_horizon_end(
-        datetime.now(timezone.utc), timezone_name, horizon_roll_hour_utc, visibility_horizon_days,
+        return None, None
+    visibility_horizon_days, horizon_roll_hour_utc, timezone_name, frozen_horizon_days = row
+    now_utc = datetime.now(timezone.utc)
+    visibility_end = compute_visibility_horizon_end(
+        now_utc, timezone_name, horizon_roll_hour_utc, visibility_horizon_days,
     )
+    frozen_end = compute_frozen_horizon_end(
+        now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days,
+    )
+    return visibility_end, frozen_end
 
 
 # Shared projection for the orders read path. Column aliases are the contract the
@@ -435,7 +476,7 @@ def load_orders_df() -> pd.DataFrame:
 
 def query_orders(plant: str | None = None, line: str | None = None,
                  limit: int | None = None, offset: int | None = None,
-                 allowed_plants: list[str] | None = None) -> tuple[pd.DataFrame, datetime | None]:
+                 allowed_plants: list[str] | None = None) -> tuple[pd.DataFrame, datetime | None, datetime | None]:
     """
     Server-side-scoped orders read for the stateless /tasks path.
 
@@ -462,11 +503,15 @@ def query_orders(plant: str | None = None, line: str | None = None,
     already scopes by plant (the frontend always does; unscoped pulls are the
     documented coarse tooling guard rail, a different use case).
 
-    Returns `(df, visibility_horizon_end)` — the resolved bound (or None) is
-    handed back alongside the rows so a caller that also needs to REPORT the
-    value (brain.py's GET /tasks `meta.visibility_horizon_end`) doesn't have
-    to pay for a third round-trip re-resolving the exact same plant config
-    from scratch.
+    Returns `(df, visibility_horizon_end, frozen_horizon_end)` — the resolved
+    bounds (either may be None) are handed back alongside the rows so a
+    caller that also needs to REPORT them (brain.py's GET /tasks
+    `meta.visibility_horizon_end` / `meta.frozen_horizon_end`) doesn't have to
+    pay for extra round-trips re-resolving the exact same plant config from
+    scratch. C2 (2026-08-20): frozen_horizon_end is resolved here purely for
+    that reporting purpose — unlike the visibility bound, it does NOT gate
+    this query's WHERE clause; the frozen window constrains the client-side
+    optimizer's placement, not which rows /tasks returns.
     """
     sql = _ORDERS_SELECT
     where, params = [], []
@@ -480,7 +525,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
         where.append('o.plant = ANY(%s)')
         params.append(allowed_plants)
     with _pool.connection() as conn, conn.cursor() as cur:
-        horizon_end = _visibility_horizon_end_for_plant(cur, plant) if plant else None
+        horizon_end, frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
             where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
             params.append(horizon_end)
@@ -496,7 +541,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=cols), horizon_end
+    return pd.DataFrame(rows, columns=cols), horizon_end, frozen_end
 
 
 def count_orders(plant: str | None = None, line: str | None = None,
@@ -526,7 +571,7 @@ def count_orders(plant: str | None = None, line: str | None = None,
         where.append('o.plant = ANY(%s)')
         params.append(allowed_plants)
     with _pool.connection() as conn, conn.cursor() as cur:
-        horizon_end = _visibility_horizon_end_for_plant(cur, plant) if plant else None
+        horizon_end, _frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
             where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
             params.append(horizon_end)

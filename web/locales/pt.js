@@ -411,6 +411,13 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.horizon_roll_hour_invalid':      'Informe um número inteiro de horas, de 0 a 23.',
   'ui.visibility_horizon_saved':       'Horizonte de visibilidade salvo para esta planta.',
   'ui.visibility_horizon_failed':      'Não foi possível salvar o horizonte de visibilidade',
+  'ui.frozen_horizon_title':           'Horizonte congelado',
+  'ui.frozen_horizon_help':            'Uma janela de curto prazo na qual o otimizador não agendará nada. Pedidos que já começam dentro dela permanecem inalterados. Deixe em branco ou zero para nenhuma janela congelada. Arrastes manuais nunca são bloqueados por esta configuração.',
+  'ui.frozen_horizon_days_label':      'Congelar os próximos (dias)',
+  'ui.frozen_horizon_days_none':       'Nenhuma janela congelada',
+  'ui.frozen_horizon_days_invalid':    'Informe um número inteiro de dias, zero ou maior.',
+  'ui.frozen_horizon_days_saved':      'Horizonte congelado salvo para esta planta.',
+  'ui.frozen_horizon_days_failed':     'Não foi possível salvar o horizonte congelado',
 
   // Fase 2 de docs/scheduling_priority.md — rótulos de campo para listas de prioridades
   // (namespace compartilhado com a árvore de Restrições de Programação da Fase 3, Decisão 4).
@@ -1002,6 +1009,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.insp_updated_end':               'Fim atualizado',
   'ui.insp_run_time':                  'Tempo de execução (h)',
   'ui.insp_fixed_banner':              '🔒 Este pedido é fixo — o otimizador planejará em torno dele.',
+  'ui.insp_frozen_horizon_banner':     '🧊 Este pedido começa dentro da janela congelada da planta — o otimizador não o moverá. Arrastes manuais ainda são permitidos.',
   'ui.insp_alerts_title':              '⚐ Alertas ({{count}})',
   'ui.insp_variance_shifted':          'Deslocado do original',
   'ui.order_note_title':               'Nota do pedido',
