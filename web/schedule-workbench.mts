@@ -9471,10 +9471,10 @@ export const AlertsUIAdapter = {
         headline = 'Blackout violation';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'fixed-closed') {
-        headline = 'Fixed order on closed day';
+        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order on closed day' : 'Order on closed day';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'fixed-out-of-hours') {
-        headline = 'Fixed order outside work hours';
+        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order outside work hours' : 'Order outside work hours';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'closed') {
         headline = 'Line closed';
