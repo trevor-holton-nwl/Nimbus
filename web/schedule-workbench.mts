@@ -3497,7 +3497,7 @@ export const Inspector = {
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
       shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
         ? entry.requiredMinutes - entry.availableMinutes : null,
-      missingDetail: diagnostic ? (diagnostic.message || setupDiagnosticLabel(diagnostic.type)) : null,
+      missingDetail: diagnostic && diagnostic.type !== 'setup-no-change' ? (diagnostic.message || setupDiagnosticLabel(diagnostic.type)) : null,
     };
   },
 

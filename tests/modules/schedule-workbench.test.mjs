@@ -559,6 +559,59 @@ test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real
   }
 });
 
+test('Fix 2: Inspector renders no missingDetail for a genuine setup-no-change diagnostic (identical-signature, zero-minute transition)', () => {
+  // Regression target: the D4 'setup-no-change' diagnostic never sets
+  // .message and has no SETUP_DIAGNOSTIC_PRESENTATION entry, so the old
+  // unconditional `diagnostic ? (diagnostic.message || setupDiagnosticLabel(...)) : null`
+  // fell through setupDiagnosticLabel's default to 'ui.setup_missing' --
+  // rendering a spurious "missing setup data" warning under an otherwise
+  // clean, fully-covered, zero-minute no-change transition. Same real
+  // end-to-end shape as the "Task 6 (B3b)" test above (default observation
+  // param, driving deriveSetupObservation for real), and same diagnostic
+  // shape as schedule-services.test.mjs's D4 no-change test (two same-color
+  // orders, no matrix rows/overrides at all -> resolves via the
+  // 'implicit-zero' branch).
+  const plant = 'FIX2-NOCHANGE-PLANT';
+  const line = 'FIX2-NOCHANGE-LINE';
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+
+  globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+  }, 'unit-test');
+  const firstTask = { id: 'fix2-nochange-a', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const secondTask = { id: 'fix2-nochange-b', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T10:00:00'), end_date: new Date('2026-08-21T11:00:00') };
+  Store.setTasks([firstTask, secondTask], 'unit-test');
+
+  try {
+    // No observation argument -- exercises _setupDetailForTask's own default
+    // (the real Store.setupSnapshot / Store.tasksForSelectedPlant() path),
+    // proving the actual diagnostic deriveSetupObservation produces for this
+    // identical-signature pair is type 'setup-no-change', not something the
+    // test hand-picked.
+    const observation = Timeline._setupObservation(Store.tasksForSelectedPlant());
+    const noChange = observation.diagnostics.find(d => d.successorOrderId === 'fix2-nochange-b');
+    assert.equal(noChange?.type, 'setup-no-change', 'this fixture must genuinely produce the no-change diagnostic under test');
+
+    const detail = Inspector._setupDetailForTask(secondTask);
+    assert.equal(detail.missingDetail, null, 'a no-change transition must never render a missing-setup-data warning');
+    assert.equal(detail.overrideStatus, 'none', 'regression guard for the whole no-change detail-card path, not just missingDetail');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Inspector formats setup signatures in configured order with readable labels', () => {
   const formatted = Inspector._formatSetupState([
     { fieldKey: 'colorWheel', value: 'Ruby' },
