@@ -2466,7 +2466,8 @@ def get_setup(plant: str, request: Request,
 
 
 @api.put("/plant/{plant}/setup-active", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body(default={})):
+def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body(default={}),
+                                  actor: str = Depends(auth.require_authenticated)):
     """Persist the plant-level "include setup times in optimizer" flag.
 
     Payload: { subnetwork?, active: bool }. Relocated off the per-signature-
@@ -2483,7 +2484,7 @@ def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body
         return md.set_plant_setup_active(
             plant, active,
             subnetwork=body.get("subnetwork", ""),
-            user_email=request.headers.get("x-user-email"),
+            user_email=actor,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

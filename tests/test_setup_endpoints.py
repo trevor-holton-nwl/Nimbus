@@ -326,6 +326,25 @@ def test_plant_setup_active_write_requires_admin(tc):
     assert response.status_code == 403
 
 
+def test_plant_setup_active_write_requires_authenticated_actor(monkeypatch):
+    """Fix 3 regression: the endpoint must depend on auth.require_authenticated
+    (matching the machine.setup_compatible precedent's exact shape -- see
+    test_setup_write_requires_authenticated_actor above for the same pattern
+    applied to a different setup route), not just read the x-user-email
+    header directly. A request lacking a genuine authenticated identity must
+    be rejected before it ever reaches the handler."""
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "owner@example.com"
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=401, detail="Not signed in")
+    )
+    try:
+        response = TestClient(brain.api).put("/plant/5512/setup-active", json={"active": True})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 401
+
+
 def test_setup_snapshot_surfaces_plant_active_independently_of_definition_active(tc, monkeypatch):
     """plant_active (the real gate) must never be conflated with the vestigial
     setup_definition.active — the service double always returns active=False
