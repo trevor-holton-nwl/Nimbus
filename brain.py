@@ -3736,7 +3736,7 @@ def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={
 
 @api.post("/plant-calendar/line-blackouts", dependencies=[Depends(require_admin)])
 def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(default={})):
-    """Delta write of line blackouts. Payload:
+    """Delta write of machine blackouts. Payload:
     { plant, upserts:[{id, machine?, start, end, reason?}], deletes?:[id] }.
     machine omitted/null = all machines in this plant."""
     try:
