@@ -114,9 +114,17 @@ export type RuntimeAllocation =
   | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
   | { kind: 'unavailable' | 'exhausted' };
 
-/** Phase-1 policy decision: segment minimum is deliberately fixed system-wide,
- * not a per-plant option. Keep allocator arithmetic on this named boundary. */
-const MIN_SPLIT_SEGMENT_MINUTES = 30;
+/** B3 (2026-08-21): default productive-segment floor (minutes) — no split
+ * piece may be shorter than this, except one complete unsplit order below
+ * the boundary. Phase-1 shipped this fixed system-wide; it is now the
+ * DEFAULT ONLY, plant-overridable via `plants.min_productive_segment_minutes`
+ * — see `Engine.minProductiveSegmentMinutesFor`, which resolves the per-plant
+ * value and falls back to this default when unset/null. Keep allocator
+ * arithmetic on this named boundary. Canonical for both this file's
+ * `Calendar.allocateRuntime` (non-setup-aware) path and setup-scheduler.mjs's
+ * `placeWithSetup` (setup-aware) path, which pulls this in through its
+ * existing import of this module rather than declaring its own copy. */
+export const MIN_PRODUCTIVE_SEGMENT_MINUTES = 30;
 
 /** Fields common to both the ALERTS and UTILIZATION worker payloads (Compute._snap's return). */
 interface WorkerSnapshotBase {
@@ -1087,20 +1095,22 @@ export const Calendar = {
     }
     if (!Calendar._hasNominalOperatingWindow(line, from)) return { kind: 'unavailable' };
 
+    const minSegmentMinutes = Engine.minProductiveSegmentMinutesFor(sourceGetPlantForLine(line));
     const pieces: Array<{ start: Date; end: Date }> = [];
     let remaining = totalMinutes;
     for (const free of Calendar._freeIntervals(line, from)) {
       const capacity = Math.floor((free.end.getTime() - free.start.getTime()) / Config.MS_MIN);
       if (capacity <= 0) continue;
       let take = Math.min(remaining, capacity);
-      if (remaining > take && remaining - take < MIN_SPLIT_SEGMENT_MINUTES) {
-        take = remaining - MIN_SPLIT_SEGMENT_MINUTES;
+      if (remaining > take && remaining - take < minSegmentMinutes) {
+        take = remaining - minSegmentMinutes;
       }
-      // A partial piece must never be smaller than the fixed 30-minute policy.
-      // Skip a tiny fragment and continue the bounded search for a usable one.
-      if (take < MIN_SPLIT_SEGMENT_MINUTES
+      // A partial piece must never be smaller than the plant's configured (or
+      // default 30-minute) floor. Skip a tiny fragment and continue the
+      // bounded search for a usable one.
+      if (take < minSegmentMinutes
           && !(pieces.length === 0 && remaining === totalMinutes
-               && totalMinutes < MIN_SPLIT_SEGMENT_MINUTES && take === totalMinutes)) {
+               && totalMinutes < minSegmentMinutes && take === totalMinutes)) {
         continue;
       }
       const end = new Date(free.start.getTime() + take * Config.MS_MIN);
@@ -1897,6 +1907,18 @@ export const Engine = {
   splitOrderPolicyFor(plant: string | null): SplitOrderPolicy {
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.split_order_policy;
     return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+  },
+
+  /** B3 (2026-08-21): the plant's configured productive-segment floor
+   *  (plants.min_productive_segment_minutes), falling back to the exported
+   *  MIN_PRODUCTIVE_SEGMENT_MINUTES default when the plant row is missing or
+   *  the value is null/not a positive integer — same lookup shape as
+   *  splitOrderPolicyFor above. Consulted by both Calendar.allocateRuntime
+   *  here and, via setup-scheduler.mjs's own snapshot-scoped mirror of this
+   *  lookup, by placeWithSetup. */
+  minProductiveSegmentMinutesFor(plant: string | null): number {
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.min_productive_segment_minutes;
+    return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
   },
 
   /** C2 (2026-08-20): the plant's frozen-horizon boundary, as computed
