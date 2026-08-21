@@ -2045,10 +2045,10 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
   }
 });
 
-test('Alerts.applyFix still calls Engine.autoReflow for overlap and blackout alerts (Task 3: B2)', () => {
+test('Alerts.applyFix still calls Engine.autoReflow for overlap alerts (Task 3: B2)', () => {
   // Task 3: B2 deleted manual-edit autoReflow calls but kept Alerts.applyFix's.
-  // This verifies Engine.autoReflow is still called from applyFix for overlap/blackout types.
-  const line = 'REFLOW-TEST-LINE';
+  // This verifies Engine.autoReflow is still called from applyFix for overlap type.
+  const line = 'REFLOW-OVERLAP-TEST-LINE';
   const plant = '5512';
   const start1 = new Date('2026-08-25T08:00:00');
   const end1 = new Date('2026-08-25T10:00:00');
@@ -2065,7 +2065,7 @@ test('Alerts.applyFix still calls Engine.autoReflow for overlap and blackout ale
 
   Store.setSelectedPlant(plant, 'unit-test');
   Store.setTasks([
-    { id: 'anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'overlap-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
     { id: 'overlap-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
   ], 'unit-test');
 
@@ -2080,6 +2080,50 @@ test('Alerts.applyFix still calls Engine.autoReflow for overlap and blackout ale
       'Engine.autoReflow must be called inside applyFix for overlap alerts (Task 3: B2 kept this call)');
   } finally {
     Engine.autoReflow = priorAutoReflow;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Alerts.applyFix still calls Engine.autoReflow for blackout alerts (Task 3: B2)', () => {
+  // Task 3: B2 deleted manual-edit autoReflow calls but kept Alerts.applyFix's.
+  // applyFix handles both 'overlap' and 'blackout' via the same branch (line 1476),
+  // calling Engine.autoReflow at line 1515. This test verifies the call path by
+  // mocking an alert and confirming autoReflow is invoked for 'blackout' type.
+  const line = 'REFLOW-BLACKOUT-TEST-LINE';
+  const plant = '5512';
+  const taskId = 'blackout-test-task';
+  const start = new Date('2026-08-25T08:00:00');
+  const end = new Date('2026-08-25T10:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAutoReflow = Engine.autoReflow;
+  const priorAlerts = structuredClone(Store.alerts);
+
+  let autoReflowCallCount = 0;
+  Engine.autoReflow = (id) => {
+    autoReflowCallCount++;
+    return priorAutoReflow.call(Engine, id);
+  };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: taskId, PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
+  ], 'unit-test');
+  // Manually inject a blackout alert to avoid complex setup
+  const fakeAlert = {
+    id: 'blackout-test-alert',
+    type: 'blackout',
+    taskId: taskId,
+  };
+  Store.setAlerts([fakeAlert], 'unit-test');
+
+  try {
+    const callCountBefore = autoReflowCallCount;
+    Alerts.applyFix(fakeAlert.id);
+    assert.ok(autoReflowCallCount > callCountBefore,
+      'Engine.autoReflow must be called inside applyFix for blackout alerts (Task 3: B2 kept this call)');
+  } finally {
+    Engine.autoReflow = priorAutoReflow;
+    Store.setAlerts(priorAlerts, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
