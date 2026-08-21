@@ -1022,17 +1022,28 @@ def ensure_plant_max_pull_forward_days_column() -> None:
 def ensure_plant_min_productive_segment_minutes_column() -> None:
     """Idempotent B3 (2026-08-21) column: the plant-configurable productive-
     segment floor both Calendar.allocateRuntime (frontend, non-setup-aware)
-    and placeWithSetup (frontend, setup-aware) enforce. NOT NULL DEFAULT 30
-    preserves the prior fixed system-wide 30-minute behavior for every plant
-    that never opts into an override. Redeploy-safe counterpart to
-    schema.sql's ALTER TABLE block, same dual-provisioning pattern as
-    split_order_policy/max_pull_forward_days above. Kept out of the grid,
-    same as its siblings."""
+    and placeWithSetup (frontend, setup-aware) enforce, and db.py's
+    _validate_schedule_segments (the real persistence gate) reads via a
+    batched per-plant lookup. NOT NULL DEFAULT 30 preserves the prior fixed
+    system-wide 30-minute behavior for every plant that never opts into an
+    override. Redeploy-safe counterpart to schema.sql's ALTER TABLE block,
+    same dual-provisioning pattern as split_order_policy/max_pull_forward_days
+    above — including the positive-value CHECK constraint, so all three
+    provisioning paths (schema.sql, migrations/, this boot-hook) stay in
+    parity. Kept out of the grid, same as its siblings."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "ALTER TABLE plants ADD COLUMN IF NOT EXISTS min_productive_segment_minutes "
             "INTEGER NOT NULL DEFAULT 30"
         )
+        cur.execute(
+            "SELECT 1 FROM pg_constraint WHERE conname = 'plants_min_productive_segment_minutes_positive'"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE plants ADD CONSTRAINT plants_min_productive_segment_minutes_positive "
+                "CHECK (min_productive_segment_minutes > 0)"
+            )
         conn.commit()
 
 
