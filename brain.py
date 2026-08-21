@@ -3698,11 +3698,7 @@ def plant_calendar_get(plant: str):
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
     try:
-        result = md.load_plant_calendar(plant)
-        for block in result.get("machine_blackouts") or []:
-            if "line" in block:
-                block["machine"] = block.pop("line")
-        return result
+        return md.load_plant_calendar(plant)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
