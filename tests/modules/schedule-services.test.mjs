@@ -1949,6 +1949,141 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
 });
 
 // ---------------------------------------------------------------------------
+// Workstream B3a (2026-08-21) — 'changeover' always routes through
+// Engine.evaluateSetupAware now, using Engine._syntheticZeroCostSetupSnapshot
+// when the plant has no real active-and-matching Store.setupSnapshot. These
+// pin the two acceptance guarantees the task exists to deliver: (1) a
+// synthetic run can never disagree with what a real-but-inactive-matrix
+// active plant would produce for the same tasks, and (2) an inactive/
+// never-configured plant sees ZERO new "missing setup data" diagnostics from
+// this change — the single most important regression guard for this task.
+// ---------------------------------------------------------------------------
+
+test('B3a: an inactive plant\'s changeover run produces identical sequencing to a real active plant with an empty matrix', () => {
+  const plant = 'B3A-PARITY-PLANT';
+  const line = 'B3A-PARITY-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorPriorityRankMaps = Store.priorityRankMaps;
+
+  const freshTasks = () => ([
+    { id: 'parity-a', PLANT: plant, MACHINE: line, COLOR: 'RED', FORM_SIZE: 'A', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-01T12:00:00') },
+    { id: 'parity-b', PLANT: plant, MACHINE: line, COLOR: 'BLUE', FORM_SIZE: 'A', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-01T13:00:00') },
+  ]);
+  const opts = {
+    plant, respectFixed: true, respectCalendar: false,
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+  };
+  const positions = () => ({
+    a: Store.tasks['parity-a'].start_date?.getTime(),
+    b: Store.tasks['parity-b'].start_date?.getTime(),
+  });
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  // Priority ranks differ between the two tasks' COLOR values so the
+  // resulting sequence actually depends on priority ordering, not merely on
+  // due-date/id tie-breaks.
+  Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 } } });
+
+  try {
+    // Scenario A: no Store.setupSnapshot at all (this plant never configured
+    // or activated setup tracking) -- 'changeover' must route through
+    // Engine._syntheticZeroCostSetupSnapshot.
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    Store.setTasks(freshTasks(), 'unit-test');
+    Engine.runAndApply('changeover', opts);
+    const synthetic = positions();
+    assert.ok(Number.isFinite(synthetic.a) && Number.isFinite(synthetic.b), 'both orders were placed under the synthetic path');
+    assert.ok(synthetic.b < synthetic.a, 'the higher-priority (BLUE, rank 1) order is sequenced first');
+
+    // Scenario B: a REAL, active-and-matching snapshot whose matrix is simply
+    // empty (plant configured a signature but never uploaded any matrix
+    // rows) -- the two dispatchers this task unifies must agree exactly.
+    Store.replaceSetupSnapshot({
+      plant,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: false, active: true },
+      plant_active: true,
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    Store.setTasks(freshTasks(), 'unit-test');
+    Engine.runAndApply('changeover', opts);
+    const realEmpty = positions();
+
+    assert.deepEqual(synthetic, realEmpty,
+      'a synthetic zero-cost snapshot and a real active plant with an empty matrix must produce identical sequencing');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setPriorityRankMaps(priorPriorityRankMaps);
+  }
+});
+
+test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnostics (no toast, no reported uncovered edges)', () => {
+  const plant = 'B3A-QUIET-PLANT';
+  const line = 'B3A-QUIET-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorLastSetupAware = Engine.lastSetupAwareResult;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  // No Store.replaceSetupSnapshot call at all: this plant has never
+  // configured or activated setup tracking (the important, common case this
+  // task must not regress). Two tasks with DIFFERENT COLOR values guarantee
+  // every real matrix would report their transition as uncovered -- exactly
+  // the shape that produces a 'scheduled-without-setup' missingEdge and,
+  // pre-suppression, the toast.optimize_missing_setup_summary warn toast.
+  Store.setTasks([
+    { id: 'quiet-red', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'RED',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-02T12:00:00') },
+    { id: 'quiet-blue', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'BLUE',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-02T13:00:00') },
+  ], 'unit-test');
+
+  const toastCalls = [];
+  const originalShow = Toast.show;
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  try {
+    Engine.runAndApply('changeover', {
+      plant, respectFixed: true, respectCalendar: false,
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    });
+
+    assert.ok(Store.tasks['quiet-red'].start_date && Store.tasks['quiet-blue'].start_date,
+      'both orders were actually placed -- the never-freeze invariant still holds for a synthetic run');
+    // The evaluator itself still legitimately reports the uncovered
+    // transition internally (Engine.lastSetupAwareResult is never
+    // suppressed -- only the diagnostic REPORTING built from it is), so this
+    // asserts on the toast layer, which IS the thing that must go quiet.
+    assert.ok(Engine.lastSetupAwareResult, 'a live run still records its result for the preview/diagnostics UI');
+
+    assert.equal(toastCalls.length, 0,
+      `an inactive plant must see zero toasts from this run; got: ${JSON.stringify(toastCalls)}`);
+  } finally {
+    Toast.show = originalShow;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
 // manual commit path. manualSchedulePatchFor no longer branches on
 // split_order_policy at all -- only on whether the task already carries
