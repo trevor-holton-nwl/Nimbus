@@ -40,6 +40,10 @@ tests
 *.xlsx
 *.XLSX
 
+# Ad-hoc local documents (specs, notes) — not runtime content, and can be
+# locked by Office while open, which breaks the ACR build's tar-upload step.
+*.docx
+
 # Editor / OS noise & scratch
 .vscode
 .idea
