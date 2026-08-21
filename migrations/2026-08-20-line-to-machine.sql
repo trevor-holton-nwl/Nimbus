@@ -50,12 +50,13 @@
 -- ORDERING
 -- --------
 -- Table renames happen first, then column renames (referencing tables by
--- their NEW names throughout, for internal consistency), then the four
--- GENERATED machine_key columns are rebuilt (they must come after their
--- table's own machine column has already been renamed from
--- production_line, since the generated expression references it), then the
--- new workcenter_mapping table, then data-only repoints of column_metadata
--- and the SAP interface tables.
+-- their NEW names throughout, for internal consistency), then the 12 plain
+-- indexes Postgres auto-repointed but left under their old names are renamed
+-- to match schema.sql, then the four GENERATED machine_key columns are
+-- rebuilt (they must come after their table's own machine column has
+-- already been renamed from production_line, since the generated
+-- expression references it), then the new workcenter_mapping table, then
+-- data-only repoints of column_metadata and the SAP interface tables.
 --
 -- TRANSACTION SAFETY
 -- -------------------
@@ -85,14 +86,17 @@ ALTER TABLE line_setup_state  RENAME TO machine_setup_state;
 --    resolves table renames immediately within the same transaction, so this
 --    is safe. Column PKs/FKs/CHECKs/plain indexes that reference a renamed
 --    column are automatically repointed by Postgres to the new column name
---    and KEEP THEIR EXISTING NAMES (e.g. idx_orders_line stays named
---    idx_orders_line even though it now indexes orders.machine) — this file
---    does not rename those purely-cosmetic index/constraint names to match
---    current schema.sql, only the table/column names that the application
---    and schema.sql's CREATE statements actually reference by name. The one
---    exception (generated machine_key identity columns) is handled
---    separately in section 3 below, because those columns cannot survive a
---    plain RENAME COLUMN.
+--    but KEEP THEIR EXISTING NAMES (e.g. idx_orders_line stays named
+--    idx_orders_line even though it now indexes orders.machine) until
+--    explicitly renamed. Plain indexes ARE renamed to match current
+--    schema.sql — see section 2.5 below for the 12 `ALTER INDEX ... RENAME`
+--    statements that do it — with exactly two deliberate exceptions:
+--    idx_lines_plant and idx_lines_plant_only on the `machine` table, which
+--    schema.sql itself keeps under their pre-rename names (a separate,
+--    already-ruled-on cosmetic call, not this migration's decision). The
+--    generated machine_key identity columns are handled separately in
+--    section 3 below, because those columns cannot survive a plain RENAME
+--    COLUMN and their indexes must be dropped/recreated rather than renamed.
 -- ----------------------------------------------------------------------------
 ALTER TABLE machine               RENAME COLUMN production_line TO machine;
 ALTER TABLE machine               RENAME COLUMN pl_group        TO wc_group;
@@ -117,6 +121,34 @@ ALTER TABLE setup_matrix          RENAME COLUMN line TO machine;
 ALTER TABLE setup_occurrence_override RENAME COLUMN line TO machine;
 
 ALTER TABLE material_plants       RENAME COLUMN default_workcenter TO default_machine;
+
+-- ----------------------------------------------------------------------------
+-- 2.5. RENAME PLAIN INDEXES AUTO-REPOINTED BY THE COLUMN RENAMES ABOVE
+--      Postgres keeps a plain index's original name across a RENAME COLUMN
+--      on a column it references, so after section 2 these 12 indexes still
+--      carry their pre-rename names even though they now index the renamed
+--      columns/tables. Rename each to the name schema.sql's current CREATE
+--      INDEX statements use, verified by direct diff of every CREATE
+--      INDEX/CREATE UNIQUE INDEX statement between the pre-rename and
+--      post-rename schema.sql. idx_lines_plant / idx_lines_plant_only on
+--      `machine` are deliberately NOT included — schema.sql itself keeps
+--      those two under their pre-rename names. The generated machine_key
+--      indexes are out of scope here too; they're dropped and recreated
+--      (not renamed) in section 3 below because the underlying columns are
+--      GENERATED and must be rebuilt, not just renamed.
+-- ----------------------------------------------------------------------------
+ALTER INDEX idx_orders_line RENAME TO idx_orders_machine;
+ALTER INDEX idx_orders_line_start RENAME TO idx_orders_machine_start;
+ALTER INDEX idx_orders_line_eff_start RENAME TO idx_orders_machine_eff_start;
+ALTER INDEX idx_orders_line_key RENAME TO idx_orders_machine_key;
+ALTER INDEX idx_orders_line_key_null RENAME TO idx_orders_machine_key_null;
+ALTER INDEX idx_lines_production_line RENAME TO idx_lines_machine;
+ALTER INDEX idx_labor_plan_line_plant RENAME TO idx_labor_plan_machine_plant;
+ALTER INDEX idx_labor_plan_line_plant_line RENAME TO idx_labor_plan_machine_plant_machine;
+ALTER INDEX idx_line_calendar_plant RENAME TO idx_machine_calendar_plant;
+ALTER INDEX idx_line_blackout_plant RENAME TO idx_machine_blackout_plant;
+ALTER INDEX idx_setup_matrix_plant_line_version RENAME TO idx_setup_matrix_plant_machine_version;
+ALTER INDEX idx_setup_occurrence_override_plant_line RENAME TO idx_setup_occurrence_override_plant_machine;
 
 -- ----------------------------------------------------------------------------
 -- 3. REBUILD THE 4 GENERATED machine_key IDENTITY COLUMNS
