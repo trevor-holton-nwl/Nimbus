@@ -669,7 +669,7 @@ CREATE INDEX IF NOT EXISTS idx_labor_plan_machine_plant_machine ON labor_plan_ma
 -- above). This table already carries its own subnetwork/plant/machine,
 -- so it self-populates on ALTER — no lookup/backfill needed. NOT a startup-hook
 -- table for this column: schema.sql only reaches a pre-existing prod DB once at
--- provisioning (see master_data.py's ensure_line_key_columns() for the
+-- provisioning (see master_data.py's ensure_machine_key_columns() for the
 -- redeploy-safe path that also covers this table).
 ALTER TABLE labor_plan_machine DROP COLUMN IF EXISTS line_key;
 DROP INDEX IF EXISTS idx_lpl_line_key;
@@ -714,7 +714,7 @@ CREATE TABLE IF NOT EXISTS machine_calendar (
 );
 CREATE INDEX IF NOT EXISTS idx_machine_calendar_plant ON machine_calendar(plant);
 -- machine_key: same generated identity string as machine.machine_key.
--- See master_data.py's ensure_line_key_columns() for the redeploy-safe path
+-- See master_data.py's ensure_machine_key_columns() for the redeploy-safe path
 -- (this table is startup-hook-authoritative for prod, not schema.sql).
 ALTER TABLE machine_calendar DROP COLUMN IF EXISTS line_key;
 DROP INDEX IF EXISTS idx_line_calendar_line_key;
@@ -744,7 +744,7 @@ CREATE INDEX IF NOT EXISTS idx_machine_blackout_plant ON machine_blackout(plant)
 -- machine is nullable here (NULL = all machines in plant) — '||'
 -- propagates NULL automatically, so machine_key correctly comes out NULL for
 -- plant-wide blocks with no special-casing. See master_data.py's
--- ensure_line_key_columns() for the redeploy-safe path (startup-hook table).
+-- ensure_machine_key_columns() for the redeploy-safe path (startup-hook table).
 -- NOTE: unlike machine/machine_calendar, this index is deliberately NOT unique
 -- (kept as the original non-unique index, just renamed) — machine_blackout's
 -- real PK is (subnetwork, plant, block_id), and multiple blackout blocks
