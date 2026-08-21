@@ -355,6 +355,19 @@ export interface SetupSnapshot {
    *  inspectable — never conflated into one meaning. */
   plant_active: boolean;
   freshness?: { signature_version: number | null; request_id: string };
+  /** B3a (2026-08-21): marks a fabricated, zero-cost snapshot that
+   *  `Engine._syntheticZeroCostSetupSnapshot` builds so an inactive (or
+   *  never-configured) plant's `'changeover'` optimizer run can still route
+   *  through `evaluateSetupAware` instead of the retired legacy day-integrity
+   *  walk — never a real persisted snapshot, and never assigned onto
+   *  `Store.setupSnapshot`. Its `plant_rows`/`machine_rows`/`overrides` are
+   *  always empty, so every transition resolves as uncovered-but-admitted
+   *  (never-freeze invariant, zero minutes). Consumers that surface "missing
+   *  setup data" diagnostics (the live-run toast, the `'setup-uncovered'`
+   *  bar/diagnostic) MUST suppress that reporting when this is `true` — the
+   *  gaps it reports are an artifact of the synthetic matrix being
+   *  intentionally empty, not a real data problem the plant needs to fix. */
+  synthetic?: boolean;
 }
 
 export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'uncovered';
