@@ -163,7 +163,7 @@ test('Engine.earliestAllowedStart folds the frozen-horizon floor in as an ADDITI
   }
 });
 
-test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free)', () => {
+test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free) -- dragging INTO the window', () => {
   const priorMasterData = Store.masterData;
   const priorEnd = Store.frozenHorizonEnd;
   const plant = 'FZ-MANUAL-PLANT';
@@ -180,6 +180,40 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
     assert.ok(patch, 'a manual drag must still produce a patch even though the target start is inside the frozen window');
     assert.equal(patch.start_date.getTime(), requestedStart.getTime(),
       'the manual drag lands EXACTLY where requested, unfloored -- proving OD-C2c');
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free) -- dragging OUT of the window', () => {
+  // Whole-branch review companion to the INTO case above: the C2 brief asked for
+  // coverage "dragging a task into/out of the frozen window", and the exemption
+  // is direction-agnostic -- manualSchedulePatchFor never reads the task's
+  // CURRENT start_date at all (only RUN_TIME/PLANT), so a task that is already
+  // sitting inside the frozen window must land exactly at a requested start
+  // OUTSIDE the window too, with no special-casing either way.
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  const plant = 'FZ-MANUAL-PLANT-OUT';
+  const line = 'FZ-MANUAL-LINE-OUT';
+  Store.setMasterData({
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  const frozenEnd = new Date('2026-08-25T00:00:00');
+  Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+  try {
+    const currentStart = new Date('2026-08-22T09:00:00'); // currently inside the frozen window
+    const requestedStart = new Date('2026-08-27T09:00:00'); // requested drag target OUTSIDE the window
+    const task = {
+      id: 'manual-drag-task-out', PLANT: plant, MACHINE: line, RUN_TIME: '1',
+      start_date: currentStart, end_date: new Date(currentStart.getTime() + 60 * 60 * 1000),
+    };
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    assert.ok(patch, 'a manual drag out of the frozen window must still produce a patch');
+    assert.equal(patch.start_date.getTime(), requestedStart.getTime(),
+      'the manual drag lands EXACTLY where requested, unfloored -- same unconditional exemption as the into-window case');
   } finally {
     Store.setMasterData(priorMasterData, 'unit-test');
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');

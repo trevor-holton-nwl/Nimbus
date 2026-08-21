@@ -986,6 +986,17 @@ export const Persistence = {
       // actually optimizes.
       Persistence._rankMapsPlant = null;
       Store.setPriorityRankMaps({}, 'persistence');
+      // Same class of bug, same fix: the cache holds whatever plant was last
+      // persisted, so Store.visibilityHorizonEnd/frozenHorizonEnd — both set only
+      // on a successful /tasks response (see load() above) — cannot be trusted to
+      // match the plant this cache restore is about to render. Left stale, a plant
+      // with a configured frozen/visibility horizon would leak it onto a DIFFERENT
+      // plant's cached tasks after an offline plant switch (Timeline's clamp/band
+      // and Engine.earliestAllowedStart would apply the wrong plant's bound). Clear
+      // to null — "no horizon known yet" — same safe-default posture as the rank
+      // maps reset just above.
+      Store.setVisibilityHorizonEnd(null, 'persistence');
+      Store.setFrozenHorizonEnd(null, 'persistence');
       // Restore all non-task state first so alerts compute with correct context
       Persistence._restoreNonTaskState(data);
       // Sync plant from task data for any lines not yet in lineSettings
@@ -1069,6 +1080,12 @@ export const Persistence = {
     // categorically wrong for them.
     Persistence._rankMapsPlant = null;
     Store.setPriorityRankMaps({}, 'persistence');
+    // Same reasoning as _loadCache(): the demo's synthetic orders belong to no
+    // real plant's horizon config either, so any horizon bound left over from
+    // whatever plant was on screen before the backend became unreachable would
+    // be categorically wrong here too.
+    Store.setVisibilityHorizonEnd(null, 'persistence');
+    Store.setFrozenHorizonEnd(null, 'persistence');
     const lines = ['Line 1', 'Line 2', 'Line 3', 'Line 4'];
     const colors = ['WHITE', 'IVORY', 'TAN', 'BROWN', 'CHARCOAL', 'BLACK'];
     const forms  = ['SM', 'MD', 'LG', 'XL'];

@@ -3219,10 +3219,10 @@ export const Plant = {
           <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.visibility_horizon_title')}</h3></header>
             <div class="panel-body split-policy-body">
-              <p class="panel-help-text">${Util.t('ui.visibility_horizon_help')}</p>
+              <p id="sys-visibility-horizon-help" class="panel-help-text">${Util.t('ui.visibility_horizon_help')}</p>
               <label class="split-policy-control" for="sys-visibility-horizon-days">
                 <span>${Util.t('ui.visibility_horizon_days_label')}</span>
-                <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
+                <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-visibility-horizon-help" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
               </label>
               <label class="split-policy-control" for="sys-horizon-roll-hour">
                 <span>${Util.t('ui.horizon_roll_hour_label')}</span>

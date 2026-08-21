@@ -473,6 +473,45 @@ test('Persistence._loadDemo clears the rank cache — it hydrates and emits sche
   assert.equal(Persistence._rankMapsPlant, null);
 });
 
+// ---------------------------------------------------------------------------
+// Whole-branch review fix — the same stale-plant exposure applies to the C1/C2
+// horizon fields. Store.visibilityHorizonEnd/frozenHorizonEnd are set only on a
+// successful /tasks 2xx (see load() above); the offline fallback paths
+// (_loadCache/_loadDemo) hydrate a DIFFERENT plant's tasks without ever
+// touching them, so a stale horizon from whatever plant was on screen before
+// the backend went unreachable would otherwise leak onto the newly-rendered
+// plant (wrongly clamping the Gantt/hiding grid rows, or wrongly refusing to
+// schedule into a window the new plant never configured).
+// ---------------------------------------------------------------------------
+
+test('Persistence._loadCache clears stale visibility/frozen horizon state from a previously-loaded plant', () => {
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
+    _schemaVersion: Config.SCHEMA_VERSION,
+    tasks: [],
+  }));
+  Store.setVisibilityHorizonEnd(new Date('2026-09-01T00:00:00Z'), 'unit-test');
+  Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00Z'), 'unit-test');
+  try {
+    assert.equal(Persistence._loadCache(), true, 'a schema-current cache must restore');
+    assert.equal(Store.visibilityHorizonEnd, null,
+      'a stale visibility horizon from the previously-loaded plant must not carry over to the cache-restored plant');
+    assert.equal(Store.frozenHorizonEnd, null,
+      'a stale frozen horizon from the previously-loaded plant must not carry over to the cache-restored plant');
+  } finally {
+    globalThis.localStorage.removeItem(Config.LS_KEY);
+  }
+});
+
+test('Persistence._loadDemo clears stale visibility/frozen horizon state from a previously-loaded plant', () => {
+  Store.setVisibilityHorizonEnd(new Date('2026-09-01T00:00:00Z'), 'unit-test');
+  Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00Z'), 'unit-test');
+  Persistence._loadDemo();
+  assert.equal(Store.visibilityHorizonEnd, null,
+    'demo orders belong to no real plant, so any retained visibility horizon is categorically wrong for them');
+  assert.equal(Store.frozenHorizonEnd, null,
+    'demo orders belong to no real plant, so any retained frozen horizon is categorically wrong for them');
+});
+
 test('Session exposes only the pure session/pref API (no DOM-rendering methods)', () => {
   assert.equal(typeof Session.currentUser, 'function');
   assert.equal(typeof Session.actor, 'function');
