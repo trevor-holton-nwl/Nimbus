@@ -5,7 +5,7 @@
 // material_plants rows renders an empty grid even if the global materials
 // catalog is non-empty — see brain.py GET /master-data/_material-grid).
 // Material is fully read-only; Material Plant is read-only except prt_01,
-// prt_02, color, default_workcenter (POST /master-data/material-plants/attributes).
+// prt_02, color, default_machine (POST /master-data/material-plants/attributes).
 //
 // New, standalone module (not folded into plant-and-administration.mts,
 // which is already 8000+ lines carrying 8 other modules) — bridged as an 8th
@@ -39,7 +39,7 @@ interface MaterialGridRow {
   prt_01?: string | null;
   prt_02?: string | null;
   color?: string | null;
-  default_workcenter?: string | null;
+  default_machine?: string | null;
   [key: string]: unknown;
 }
 
@@ -91,7 +91,7 @@ interface MatPlantPatch {
   prt_01?: string;
   prt_02?: string;
   color?: string;
-  default_workcenter?: string;
+  default_machine?: string;
 }
 
 interface GridState {
@@ -104,7 +104,7 @@ interface GridState {
   distinctSet: Map<string, Set<string>>;
   search: Map<string, string>;
   dirty: Map<string, MatPlantPatch>;
-  baseline: Map<string, { prt_01: string; prt_02: string; color: string; default_workcenter: string }>;
+  baseline: Map<string, { prt_01: string; prt_02: string; color: string; default_machine: string }>;
   readOnly: boolean;
   saving: boolean;
   loaded: boolean;
@@ -157,7 +157,7 @@ const SPECS: Record<GridId, GridSpec> = {
       { field: 'prt_01',                      i18n: 'col.prt_01', width: 170, editable: true },
       { field: 'prt_02',                      i18n: 'col.prt_02', width: 170, editable: true },
       { field: 'color',                       i18n: 'col.color',  width: 130, editable: true },
-      { field: 'default_workcenter',          i18n: 'col.default_workcenter', width: 170, editable: true },
+      { field: 'default_machine',          i18n: 'col.default_machine', width: 170, editable: true },
     ],
     filters: [
       { field: 'material_id',                i18n: 'col.material_id',   mode: 'bigset' },
@@ -166,13 +166,13 @@ const SPECS: Record<GridId, GridSpec> = {
       { field: 'prt_02',                     i18n: 'col.prt_02',        mode: 'checklist' },
       { field: 'color',                      i18n: 'col.color',         mode: 'checklist' },
     ],
-    editableFields: ['prt_01', 'prt_02', 'color', 'default_workcenter'] as const,
+    editableFields: ['prt_01', 'prt_02', 'color', 'default_machine'] as const,
     saveUrl: '/master-data/material-plants/attributes',
   },
 };
 
-const MP_EDITABLE: readonly ('prt_01' | 'prt_02' | 'color' | 'default_workcenter')[] =
-  ['prt_01', 'prt_02', 'color', 'default_workcenter'];
+const MP_EDITABLE: readonly ('prt_01' | 'prt_02' | 'color' | 'default_machine')[] =
+  ['prt_01', 'prt_02', 'color', 'default_machine'];
 
 function _mkState(): GridState {
   return {
@@ -267,7 +267,7 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
       for (const r of st.rows) {
         st.baseline.set(spec.rowKey(r), {
           prt_01: String(r.prt_01 ?? ''), prt_02: String(r.prt_02 ?? ''), color: String(r.color ?? ''),
-          default_workcenter: String(r.default_workcenter ?? ''),
+          default_machine: String(r.default_machine ?? ''),
         });
       }
     }
@@ -551,7 +551,7 @@ function _createGrid(spec: GridSpec): void {
 
 function _onCellChanged(spec: GridSpec, p: unknown): void {
   const params = p as { colDef: { field: string }; data: MaterialGridRow; newValue: unknown; api: NimbusVendor.AgGridApi; node: unknown };
-  const field = params.colDef.field as 'prt_01' | 'prt_02' | 'color' | 'default_workcenter';
+  const field = params.colDef.field as 'prt_01' | 'prt_02' | 'color' | 'default_machine';
   if (!spec.editableFields.includes(field)) return;
   const st = _state[spec.id];
   const key = spec.rowKey(params.data);
@@ -614,7 +614,7 @@ async function _save(id: GridId): Promise<void> {
       for (const f of MP_EDITABLE) if (f in u) (row as Record<string, unknown>)[f] = (u as unknown as Record<string, unknown>)[f] ?? '';
       st.baseline.set(key, {
         prt_01: String(row.prt_01 ?? ''), prt_02: String(row.prt_02 ?? ''), color: String(row.color ?? ''),
-        default_workcenter: String(row.default_workcenter ?? ''),
+        default_machine: String(row.default_machine ?? ''),
       });
     }
     try {
@@ -654,7 +654,7 @@ function _discard(id: GridId): void {
     const base = st.baseline.get(key);
     if (!row || !base) continue;
     row.prt_01 = base.prt_01; row.prt_02 = base.prt_02; row.color = base.color;
-    row.default_workcenter = base.default_workcenter;
+    row.default_machine = base.default_machine;
   }
   st.dirty.clear();
   try {

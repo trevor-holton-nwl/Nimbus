@@ -14,7 +14,7 @@ function task(id, runHours) {
     id,
     PLANT: 'P1',
     plant: 'P1',
-    PRODUCTION_LINE: 'L1',
+    MACHINE: 'L1',
     RUN_TIME: runHours,
     start_date: null,
     end_date: null,
@@ -38,7 +38,7 @@ function legacySnapshot(tasks) {
     calendars: {},
     plants: {},
     lineSettings: {},
-    masterData: { plants: [{ plant: 'P1' }], lines: [{ plant: 'P1', production_line: 'L1' }] },
+    masterData: { plants: [{ plant: 'P1' }], lines: [{ plant: 'P1', machine: 'L1' }] },
     priorityRankMaps: {},
   };
 }
@@ -55,17 +55,17 @@ function setupDefinition() {
   };
 }
 
-function setupRow(from, to, minutes, line = '') {
-  return { line, signature_version: 1, from_key: setupState(from), to_key: setupState(to), setup_min: minutes };
+function setupRow(from, to, minutes, machine = '') {
+  return { machine, signature_version: 1, from_key: setupState(from), to_key: setupState(to), setup_min: minutes };
 }
 
 function setupTruth({ current = 'GREEN', rows = [], overrides = [], definition = setupDefinition() } = {}) {
   return {
     plant: 'P1', definition,
     plant_rows: rows,
-    line_rows: [],
-    line_states: current === null ? [] : [{
-      line: 'L1', state_key: setupState(current), signature_version: 1,
+    machine_rows: [],
+    machine_states: current === null ? [] : [{
+      machine: 'L1', state_key: setupState(current), signature_version: 1,
       source: 'manual', reason: 'unit-test current state',
     }],
     overrides,
@@ -440,12 +440,12 @@ test('evaluateDueDateFirst uses explicit setup truth and charges setup before du
       plant: 'P1',
       definition,
       plant_rows: [
-        { line: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 20 },
-        { line: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 10 },
+        { machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('RED'), setup_min: 20 },
+        { machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 10 },
       ],
-      line_rows: [],
-      line_states: [{
-        line: 'L1', state_key: state('GREEN'), signature_version: 1,
+      machine_rows: [],
+      machine_states: [{
+        machine: 'L1', state_key: state('GREEN'), signature_version: 1,
         source: 'manual', reason: 'unit-test current state',
       }],
       overrides: [],
@@ -472,7 +472,7 @@ test('evaluateDueDateFirst never freezes an uncovered line: it tail-places the u
   const uncovered = scheduledTask('uncovered-red', 1, 'RED', '2026-08-03T10:00:00');
   const covered = {
     ...scheduledTask('covered-blue', 1, 'BLUE', '2026-08-03T10:00:00'),
-    PRODUCTION_LINE: 'L2',
+    MACHINE: 'L2',
   };
   const snapshot = setupSnapshot([uncovered, covered]);
   snapshot.calendars = {
@@ -480,8 +480,8 @@ test('evaluateDueDateFirst never freezes an uncovered line: it tail-places the u
     L2: { workHours: OPEN_HOURS },
   };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 10)] });
-  setup.line_states.push({
-    line: 'L2', state_key: setupState('GREEN'), signature_version: 1,
+  setup.machine_states.push({
+    machine: 'L2', state_key: setupState('GREEN'), signature_version: 1,
     source: 'manual', reason: 'second line current state',
   });
 
@@ -592,7 +592,7 @@ test('evaluateDueDateFirst protects an active occurrence override’s exact adja
       setupRow('BLUE', 'RED', 0),
     ],
     overrides: [{
-      id: 'override-1', line: 'L1', signature_version: 1,
+      id: 'override-1', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'override-red', successor_order_id: 'override-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 20, remaining_min: 4, status: 'active', reason: 'crew already changed tooling',
@@ -617,7 +617,7 @@ test('evaluateDueDateFirst reports an override inactive when its bound predecess
       setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
     ],
     overrides: [{
-      id: 'stale-override', line: 'L1', signature_version: 1,
+      id: 'stale-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'deleted-red', successor_order_id: 'bound-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 20, remaining_min: 4, status: 'active', reason: 'stale binding fixture',
@@ -724,13 +724,13 @@ test('evaluateDueDateFirst applies its caller iteration cap per line so one larg
   const firstLine = scheduledTask('global-cap-l1', 1, 'BLUE', '2026-08-03T10:00:00');
   const secondLine = {
     ...scheduledTask('global-cap-l2', 1, 'BLUE', '2026-08-03T10:00:00'),
-    PRODUCTION_LINE: 'L2',
+    MACHINE: 'L2',
   };
   const snapshot = setupSnapshot([firstLine, secondLine]);
   snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5)] });
-  setup.line_states.push({
-    line: 'L2', state_key: setupState('GREEN'), signature_version: 1,
+  setup.machine_states.push({
+    machine: 'L2', state_key: setupState('GREEN'), signature_version: 1,
     source: 'manual', reason: 'second global-cap line',
   });
 
@@ -817,13 +817,13 @@ test('evaluateDueDateFirst never freezes a line with an incomplete (strict-blank
   const incomplete = scheduledTask('incomplete-state', 1, '', '2026-08-03T10:00:00');
   const known = {
     ...scheduledTask('known-state', 1, 'BLUE', '2026-08-03T10:00:00'),
-    PRODUCTION_LINE: 'L2',
+    MACHINE: 'L2',
   };
   const snapshot = setupSnapshot([incomplete, known]);
   snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5)] });
-  setup.line_states.push({
-    line: 'L2', state_key: setupState('GREEN'), signature_version: 1,
+  setup.machine_states.push({
+    machine: 'L2', state_key: setupState('GREEN'), signature_version: 1,
     source: 'manual', reason: 'known second line state',
   });
 
@@ -931,7 +931,7 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
   const beforeSetup = setupTruth({ rows: [
     setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0), setupRow('GREEN', 'BLUE', 0),
   ], overrides: [{
-    id: 'override-before-fixed', line: 'L1', signature_version: 1,
+    id: 'override-before-fixed', machine: 'L1', signature_version: 1,
     predecessor_order_id: 'override-before-fixed-red', successor_order_id: 'override-fixed-blue',
     predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
     standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected pre-fixed adjacency',
@@ -952,7 +952,7 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
   const afterSetup = setupTruth({ rows: [
     setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
   ], overrides: [{
-    id: 'override-after-fixed', line: 'L1', signature_version: 1,
+    id: 'override-after-fixed', machine: 'L1', signature_version: 1,
     predecessor_order_id: 'override-fixed-blue-again', successor_order_id: 'override-after-fixed-red',
     predecessor_state_key: setupState('BLUE'), successor_state_key: setupState('RED'),
     standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected post-fixed adjacency',
@@ -981,7 +981,7 @@ test('evaluateDueDateFirst honors an active override already bound between adjac
   const setup = setupTruth({
     rows: [setupRow('GREEN', 'RED', 0)],
     overrides: [{
-      id: 'override-fixed-to-fixed', line: 'L1', signature_version: 1,
+      id: 'override-fixed-to-fixed', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'override-fixed-red', successor_order_id: 'override-fixed-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 10, remaining_min: 10, status: 'active', reason: 'protected fixed adjacency',
@@ -1054,7 +1054,7 @@ test('setup-aware evaluators never freeze a line over a stale-signature line sta
     '2026-08-03T08:00:00', '2026-08-03T09:00:00',
   );
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
-  setup.line_states[0].signature_version = 2;
+  setup.machine_states[0].signature_version = 2;
 
   const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([blue]), dueDateBounds(setup));
 
@@ -1075,7 +1075,7 @@ test('evaluateDueDateFirst treats a same-state active override as an exact pair 
   const setup = setupTruth({
     rows: [setupRow('GREEN', 'RED', 0)],
     overrides: [{
-      id: 'same-state-active-override', line: 'L1', signature_version: 1,
+      id: 'same-state-active-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'same-state-predecessor', successor_order_id: 'same-state-successor',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('RED'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected same-state occurrence',
@@ -1109,7 +1109,7 @@ test('evaluateDueDateFirst rejects an orphaned protected predecessor when its su
       setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
     ],
     overrides: [{
-      id: 'capacity-pair-active-override', line: 'L1', signature_version: 1,
+      id: 'capacity-pair-active-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'capacity-pair-predecessor', successor_order_id: 'capacity-pair-successor',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected capacity-bound occurrence',
@@ -1143,7 +1143,7 @@ test('evaluateDueDateFirst keeps a free active override pair on one side of a fi
       setupRow('RED', 'YELLOW', 0), setupRow('YELLOW', 'BLUE', 0),
     ],
     overrides: [{
-      id: 'cross-boundary-active-override', line: 'L1', signature_version: 1,
+      id: 'cross-boundary-active-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'cross-boundary-pair-predecessor', successor_order_id: 'cross-boundary-pair-successor',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected across due partition',
@@ -1207,7 +1207,7 @@ test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-
   const setup = setupTruth({
     rows: [setupRow('BLUE', 'RED', 0)],
     overrides: [{
-      id: 'initial-to-fixed-override', line: 'L1', signature_version: 1,
+      id: 'initial-to-fixed-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: null, successor_order_id: 'initial-override-fixed-blue',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('BLUE'),
       standard_min: 10, remaining_min: 10, status: 'active', reason: 'line is already staged for fixed run',
@@ -1249,7 +1249,7 @@ test('setup-aware evaluators reject invalid null-predecessor overrides on fixed 
   const laterSetup = setupTruth({
     rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0)],
     overrides: [{
-      id: 'invalid-null-later', line: 'L1', signature_version: 1,
+      id: 'invalid-null-later', machine: 'L1', signature_version: 1,
       predecessor_order_id: null, successor_order_id: 'invalid-null-later-yellow',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('YELLOW'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'invalid later-boundary binding',
@@ -1261,7 +1261,7 @@ test('setup-aware evaluators reject invalid null-predecessor overrides on fixed 
   const staleStateSetup = setupTruth({
     current: 'RED', rows: [setupRow('RED', 'BLUE', 0)],
     overrides: [{
-      id: 'invalid-null-state', line: 'L1', signature_version: 1,
+      id: 'invalid-null-state', machine: 'L1', signature_version: 1,
       predecessor_order_id: null, successor_order_id: 'invalid-null-state-blue',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'stale initial-state binding',
@@ -1308,13 +1308,13 @@ test('setup-aware evaluators admit an initial-state free override and its protec
     rows: [setupRow('BLUE', 'YELLOW', 0), setupRow('GREEN', 'YELLOW', 0)],
     overrides: [
       {
-        id: 'initial-free-override', line: 'L1', signature_version: 1,
+        id: 'initial-free-override', machine: 'L1', signature_version: 1,
         predecessor_order_id: null, successor_order_id: 'initial-free-red',
         predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'line is staged for red',
       },
       {
-        id: 'initial-free-component-override', line: 'L1', signature_version: 1,
+        id: 'initial-free-component-override', machine: 'L1', signature_version: 1,
         predecessor_order_id: 'initial-free-red', successor_order_id: 'initial-free-blue',
         predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'red and blue are one physical setup occurrence',
@@ -1355,13 +1355,13 @@ test('setup-aware evaluators leave an initial-state free override unchanged when
     rows: [setupRow('BLUE', 'YELLOW', 0)],
     overrides: [
       {
-        id: 'initial-free-tight-override', line: 'L1', signature_version: 1,
+        id: 'initial-free-tight-override', machine: 'L1', signature_version: 1,
         predecessor_order_id: null, successor_order_id: 'initial-free-tight-red',
         predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'line is staged for red',
       },
       {
-        id: 'initial-free-tight-component', line: 'L1', signature_version: 1,
+        id: 'initial-free-tight-component', machine: 'L1', signature_version: 1,
         predecessor_order_id: 'initial-free-tight-red', successor_order_id: 'initial-free-tight-blue',
         predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'red and blue are one occurrence',
@@ -1444,7 +1444,7 @@ test('setup-aware evaluators whole-line tail-place an explicitly incompatible sn
   const incompatible = scheduledTask('compatibility-disabled-blue', 1, 'BLUE', '2026-08-03T10:00:00');
   const compatible = {
     ...scheduledTask('compatibility-enabled-blue', 1, 'BLUE', '2026-08-03T10:00:00'),
-    PRODUCTION_LINE: 'L2',
+    MACHINE: 'L2',
   };
   const snapshot = setupSnapshot([incompatible, compatible]);
   snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
@@ -1452,15 +1452,15 @@ test('setup-aware evaluators whole-line tail-place an explicitly incompatible sn
     plants: [{ plant: 'P1' }],
     lines: [
       {
-        plant: 'P1', production_line: 'L1', setup_compatible: false,
+        plant: 'P1', machine: 'L1', setup_compatible: false,
         setup_compatibility_reason: 'Tooling signature differs on this line',
       },
-      { plant: 'P1', production_line: 'L2' },
+      { plant: 'P1', machine: 'L2' },
     ],
   };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
-  setup.line_states.push({
-    line: 'L2', state_key: setupState('GREEN'), signature_version: 1,
+  setup.machine_states.push({
+    machine: 'L2', state_key: setupState('GREEN'), signature_version: 1,
     source: 'manual', reason: 'compatible second-line state',
   });
 
@@ -1498,7 +1498,7 @@ test('evaluateDueDateFirst reports an active override whose successor no longer 
   const setup = setupTruth({
     rows: [setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0)],
     overrides: [{
-      id: 'missing-successor-override', line: 'L1', signature_version: 1,
+      id: 'missing-successor-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'missing-successor-predecessor-red', successor_order_id: 'deleted-successor-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'the successor was removed from this line',
@@ -1535,7 +1535,7 @@ test('evaluateDueDateFirst retains a missing-successor override diagnostic when 
   const setup = setupTruth({
     current: null,
     overrides: [{
-      id: 'missing-successor-no-state-override', line: 'L1', signature_version: 1,
+      id: 'missing-successor-no-state-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'missing-successor-no-state-red', successor_order_id: 'deleted-successor-no-state-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'the successor was removed from this line',
@@ -1565,7 +1565,7 @@ test('evaluateSptWithSetup keeps an active free-order override pair contiguous o
       setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
     ],
     overrides: [{
-      id: 'spt-pair-active-override', line: 'L1', signature_version: 1,
+      id: 'spt-pair-active-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'spt-pair-long-red', successor_order_id: 'spt-pair-short-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected SPT occurrence',
@@ -1715,7 +1715,7 @@ test('unknown-state preservation reports a stale deleted predecessor override wh
     current: null,
     rows: [setupRow('BLUE', 'RED', 0)],
     overrides: [{
-      id: 'unknown-state-stale-predecessor', line: 'L1', signature_version: 1,
+      id: 'unknown-state-stale-predecessor', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'deleted-predecessor-green', successor_order_id: 'unknown-state-stale-successor-red',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'predecessor removed before planning',
@@ -1782,7 +1782,7 @@ test('setup-aware evaluators retain a deleted-predecessor override diagnostic wh
   const setup = setupTruth({
     current: null,
     overrides: [{
-      id: 'unknown-no-anchor-stale-predecessor', line: 'L1', signature_version: 1,
+      id: 'unknown-no-anchor-stale-predecessor', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'deleted-no-anchor-predecessor', successor_order_id: 'unknown-no-anchor-stale-successor-red',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'predecessor no longer exists',
@@ -1920,7 +1920,7 @@ test('unknown-state anchor preservation reports an active later-predecessor over
     current: null,
     rows: [setupRow('BLUE', 'RED', 0)],
     overrides: [{
-      id: 'anchor-target-stale-override', line: 'L1', signature_version: 1,
+      id: 'anchor-target-stale-override', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'anchor-target-later-red', successor_order_id: 'anchor-target-blue',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'later work cannot precede the preserved anchor',
@@ -1963,7 +1963,7 @@ test('fixed-boundary failure retains preserved-anchor and stale-override diagnos
     current: null,
     rows: [],
     overrides: [{
-      id: 'early-exit-stale-fixed', line: 'L1', signature_version: 1,
+      id: 'early-exit-stale-fixed', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'deleted-early-exit-green', successor_order_id: 'early-exit-fixed-red',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'deleted predecessor fixture',
@@ -2007,7 +2007,7 @@ test('setup-aware evaluators honor a configured partial_allowed plant policy', (
   snapshot.plants = { P1: { workHours: oneHourWindows } };
   snapshot.masterData = {
     plants: [{ plant: 'P1', split_order_policy: 'partial_allowed' }],
-    lines: [{ plant: 'P1', production_line: 'L1' }],
+    lines: [{ plant: 'P1', machine: 'L1' }],
   };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
 
@@ -2040,7 +2040,7 @@ test('setup-aware evaluators derive immutable overlong_only eligibility from sna
   snapshot.plants = { P1: { workHours: oneHourWindows } };
   snapshot.masterData = {
     plants: [{ plant: 'P1', split_order_policy: 'overlong_only' }],
-    lines: [{ plant: 'P1', production_line: 'L1' }],
+    lines: [{ plant: 'P1', machine: 'L1' }],
   };
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
 
@@ -2156,7 +2156,7 @@ test('due-date final-boundary fallback: the fully covered protected pair is admi
       setupRow('YELLOW', 'RED', 0), setupRow('YELLOW', 'BLUE', 0),
     ],
     overrides: [{
-      id: 'complete-fallback-protected-red-orange', line: 'L1', signature_version: 1,
+      id: 'complete-fallback-protected-red-orange', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'complete-fallback-red', successor_order_id: 'complete-fallback-orange',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('ORANGE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'component fixture',
@@ -2371,7 +2371,7 @@ test('setup-aware evaluators preserve active relations crossing a strictly post-
       successorState: 'YELLOW',
       rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('RED', 'YELLOW', 0)],
       additionalOverrides: [{
-        id: 'post-horizon-chain-free-pair', line: 'L1', signature_version: 1,
+        id: 'post-horizon-chain-free-pair', machine: 'L1', signature_version: 1,
         predecessor_order_id: 'post-horizon-chain-blue', successor_order_id: 'post-horizon-chain-red',
         predecessor_state_key: setupState('BLUE'), successor_state_key: setupState('RED'),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected free component fixture',
@@ -2381,7 +2381,7 @@ test('setup-aware evaluators preserve active relations crossing a strictly post-
 
   for (const fixture of cases) {
     const override = {
-      id: `post-horizon-${fixture.label}`, line: 'L1', signature_version: 1,
+      id: `post-horizon-${fixture.label}`, machine: 'L1', signature_version: 1,
       predecessor_order_id: fixture.predecessorOrderId, successor_order_id: fixture.successorOrderId,
       predecessor_state_key: setupState(fixture.predecessorState), successor_state_key: setupState(fixture.successorState),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'post-horizon fixed boundary fixture',
@@ -2453,7 +2453,7 @@ test('setup-aware evaluators diagnose stale post-horizon override bindings as in
     const setup = setupTruth({
       rows: [setupRow('GREEN', 'BLUE', 0)],
       overrides: [{
-        id: `post-horizon-stale-${fixture.label}`, line: 'L1', signature_version: 1,
+        id: `post-horizon-stale-${fixture.label}`, machine: 'L1', signature_version: 1,
         predecessor_order_id: fixture.predecessorOrderId, successor_order_id: fixture.successorOrderId,
         predecessor_state_key: setupState(fixture.predecessorState), successor_state_key: setupState(fixture.successorState),
         standard_min: 0, remaining_min: 0, status: 'active', reason: 'stale post-horizon fixture',
@@ -2757,7 +2757,7 @@ test('an override-bound pair stays adjacent when surrounded by uncovered fillers
   const setup = setupTruth({
     rows: [setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0)],
     overrides: [{
-      id: 'bound-demo-protected-red-orange', line: 'L1', signature_version: 1,
+      id: 'bound-demo-protected-red-orange', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'bound-demo-red', successor_order_id: 'bound-demo-orange',
       predecessor_state_key: setupState('RED'), successor_state_key: setupState('ORANGE'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'component fixture',
@@ -2826,15 +2826,15 @@ test('per-line SearchBudget isolation holds across three lines, not just two', (
   // an iteration cap of 1 still lets every one of three lines search its own
   // single-candidate fragment.
   const l1 = scheduledTask('budget-l1', 1, 'BLUE', '2026-08-03T10:00:00');
-  const l2 = { ...scheduledTask('budget-l2', 1, 'BLUE', '2026-08-03T10:00:00'), PRODUCTION_LINE: 'L2' };
-  const l3 = { ...scheduledTask('budget-l3', 1, 'BLUE', '2026-08-03T10:00:00'), PRODUCTION_LINE: 'L3' };
+  const l2 = { ...scheduledTask('budget-l2', 1, 'BLUE', '2026-08-03T10:00:00'), MACHINE: 'L2' };
+  const l3 = { ...scheduledTask('budget-l3', 1, 'BLUE', '2026-08-03T10:00:00'), MACHINE: 'L3' };
   const snapshot = setupSnapshot([l1, l2, l3]);
   snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS }, L3: { workHours: OPEN_HOURS } };
-  snapshot.masterData.lines.push({ plant: 'P1', production_line: 'L2' }, { plant: 'P1', production_line: 'L3' });
+  snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' }, { plant: 'P1', machine: 'L3' });
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5)] });
-  setup.line_states.push(
-    { line: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'second budget line' },
-    { line: 'L3', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'third budget line' },
+  setup.machine_states.push(
+    { machine: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'second budget line' },
+    { machine: 'L3', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'third budget line' },
   );
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
@@ -2913,7 +2913,7 @@ test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empt
   const setup = setupTruth({
     rows: [setupRow('GREEN', 'RED', 0)],
     overrides: [{
-      id: 'starve-guard-conflict', line: 'L1', signature_version: 1,
+      id: 'starve-guard-conflict', machine: 'L1', signature_version: 1,
       predecessor_order_id: 'deleted-starve-guard-predecessor', successor_order_id: 'starve-guard-red',
       predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('RED'),
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'forces both passes to the same fail-closed outcome',

@@ -327,8 +327,8 @@ _ORDERS_SELECT = f"""
         production_order      AS "PRODUCTION_ORDER",
         material_number       AS "MATERIAL_NUMBER",
         material_description  AS "MATERIAL_DESCRIPTION",
-        o.production_line     AS "PRODUCTION_LINE",
-        o.plant               AS "PLANT",
+        o.machine              AS "MACHINE",
+        o.plant                AS "PLANT",
         COALESCE(seg.first_start, scheduled_start, basic_start_date) AS "BASIC_START_DATE",
         COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS "BASIC_FINISH_DATE",
         basic_start_date      AS "ORIGINAL_START_DATE",
@@ -383,7 +383,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
     never widens, the result.
 
     All filter values are bound as parameters (no string interpolation).
-    Rows are ordered by (production_line, effective start) so brain.py's
+    Rows are ordered by (machine, effective start) so brain.py's
     per-line link builder sees each line contiguously.
     """
     sql = _ORDERS_SELECT
@@ -392,14 +392,14 @@ def query_orders(plant: str | None = None, line: str | None = None,
         where.append('o.plant = %s')
         params.append(plant)
     if line:
-        where.append('o.production_line = %s')
+        where.append('o.machine = %s')
         params.append(line)
     if allowed_plants is not None:
         where.append('o.plant = ANY(%s)')
         params.append(allowed_plants)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += '\n    ORDER BY o.production_line, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
+    sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
     if limit is not None:
         sql += " LIMIT %s"
         params.append(int(limit))
@@ -422,7 +422,7 @@ def count_orders(plant: str | None = None, line: str | None = None,
         where.append('o.plant = %s')
         params.append(plant)
     if line:
-        where.append('o.production_line = %s')
+        where.append('o.machine = %s')
         params.append(line)
     if allowed_plants is not None:
         where.append('o.plant = ANY(%s)')
@@ -449,15 +449,15 @@ def distinct_order_colors() -> list[str]:
 
 def reattribute_null_plant_orders() -> int:
     """
-    Re-derive orders.plant where it is still NULL, from the line->plant master-data
-    mapping. Call this after production_lines change so orders uploaded BEFORE their
-    line existed in master data become plant-attributed and stop being invisible to
+    Re-derive orders.plant where it is still NULL, from the machine->plant master-data
+    mapping. Call this after machine table changes so orders uploaded BEFORE their
+    machine existed in master data become plant-attributed and stop being invisible to
     the plant-scoped read path. The old LEFT-JOIN read path self-healed automatically
     on every request; a materialized plant does not, so this is the explicit hook.
-    Idempotent: only NULL-plant rows whose line now exists are touched. Returns the
+    Idempotent: only NULL-plant rows whose machine now exists are touched. Returns the
     number of orders re-attributed.
 
-    A line code shared across plants CANNOT be attributed correctly from the code
+    A machine code shared across plants CANNOT be attributed correctly from the code
     alone, so such rows are left NULL (and logged) rather than silently assigned to
     the lexically-lowest plant. The authoritative fix is an explicit plant column on
     upload + a plant-aware make_id (see MIGRATION.md).
@@ -465,80 +465,80 @@ def reattribute_null_plant_orders() -> int:
     sql = """
         UPDATE orders o
            SET plant = (
-               SELECT MIN(pl.plant) FROM production_lines pl
-                WHERE pl.production_line = o.production_line
+               SELECT MIN(m.plant) FROM machine m
+                WHERE m.machine = o.machine
            )
          WHERE o.plant IS NULL
            AND (
-               SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                WHERE pl.production_line = o.production_line
+               SELECT COUNT(DISTINCT m.plant) FROM machine m
+                WHERE m.machine = o.machine
            ) = 1
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql)
         n = cur.rowcount
-        # Report (don't guess) lines that map to >1 plant and so stay unattributed.
+        # Report (don't guess) machines that map to >1 plant and so stay unattributed.
         cur.execute(
             """
-            SELECT o.production_line, COUNT(*)
+            SELECT o.machine, COUNT(*)
               FROM orders o
              WHERE o.plant IS NULL
                AND (
-                   SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                    WHERE pl.production_line = o.production_line
+                   SELECT COUNT(DISTINCT m.plant) FROM machine m
+                    WHERE m.machine = o.machine
                ) > 1
-             GROUP BY o.production_line
+             GROUP BY o.machine
             """
         )
         ambiguous = cur.fetchall()
         conn.commit()
     if ambiguous:
         total = sum(int(r[1]) for r in ambiguous)
-        lines = ", ".join(str(r[0]) for r in ambiguous)
+        machines = ", ".join(str(r[0]) for r in ambiguous)
         log.warning(
             "reattribute_null_plant_orders: %d order(s) left unattributed — "
-            "line code(s) shared across multiple plants: %s", total, lines,
+            "machine code(s) shared across multiple plants: %s", total, machines,
         )
     return n
 
 
-def backfill_line_keys() -> int:
+def backfill_machine_keys() -> int:
     """
-    Re-derive orders.line_key where it is still NULL, from production_lines.line_key
-    for the matching (plant, production_line) pair. Whole-table sibling of the
-    batch-scoped backfill in upsert_orders() — call this after production_lines
-    change, same trigger as reattribute_null_plant_orders(). Strictly downstream
+    Re-derive orders.machine_key where it is still NULL, from machine.machine_key
+    for the matching (plant, machine) pair. Whole-table sibling of the
+    batch-scoped backfill in upsert_orders() — call this after machine table
+    changes, same trigger as reattribute_null_plant_orders(). Strictly downstream
     of orders.plant: a row still NULL there is skipped here too (see MIGRATION.md
     for the pre-existing plant-ambiguity gap this inherits rather than fixes).
     Idempotent. Returns the number of orders re-attributed.
     """
     sql = """
         UPDATE orders o
-           SET line_key = (
-               SELECT pl.line_key FROM production_lines pl
-                WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+           SET machine_key = (
+               SELECT m.machine_key FROM machine m
+                WHERE m.plant = o.plant AND m.machine = o.machine
            )
-         WHERE o.line_key IS NULL AND o.plant IS NOT NULL
+         WHERE o.machine_key IS NULL AND o.plant IS NOT NULL
            AND (
-               SELECT COUNT(*) FROM production_lines pl
-                WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+               SELECT COUNT(*) FROM machine m
+                WHERE m.plant = o.plant AND m.machine = o.machine
            ) = 1
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql)
         n = cur.rowcount
-        # Report (don't guess) rows left NULL because (plant, production_line) matches
-        # zero or more than one production_lines row.
+        # Report (don't guess) rows left NULL because (plant, machine) matches
+        # zero or more than one machine row.
         cur.execute(
             """
-            SELECT o.plant, o.production_line, COUNT(*)
+            SELECT o.plant, o.machine, COUNT(*)
               FROM orders o
-             WHERE o.line_key IS NULL AND o.plant IS NOT NULL
+             WHERE o.machine_key IS NULL AND o.plant IS NOT NULL
                AND (
-                   SELECT COUNT(*) FROM production_lines pl
-                    WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+                   SELECT COUNT(*) FROM machine m
+                    WHERE m.plant = o.plant AND m.machine = o.machine
                ) <> 1
-             GROUP BY o.plant, o.production_line
+             GROUP BY o.plant, o.machine
             """
         )
         unresolved = cur.fetchall()
@@ -547,8 +547,8 @@ def backfill_line_keys() -> int:
         total = sum(int(r[2]) for r in unresolved)
         pairs = ", ".join(f"{r[0]}/{r[1]}" for r in unresolved)
         log.warning(
-            "backfill_line_keys: %d order(s) left without a line_key — "
-            "(plant, line) pair(s) not uniquely resolved in production_lines: %s", total, pairs,
+            "backfill_machine_keys: %d order(s) left without a machine_key — "
+            "(plant, machine) pair(s) not uniquely resolved in machine: %s", total, pairs,
         )
     return n
 
@@ -1058,7 +1058,13 @@ def get_health_stats() -> dict:
 
 
 def get_db_deep_stats() -> dict:
-    """Per-column null analysis, date range, and per-line breakdown."""
+    """Per-column null analysis, date range, and per-machine breakdown.
+
+    NOTE (machine-domain rename): the returned dict keys `null_line`/`by_line`
+    stay as-is deliberately — they're consumed by
+    web/plant-and-administration.mjs (AdminCockpit diagnostics panel), which
+    is out of scope for this pass. Only the underlying SQL column reference
+    (orders.machine) changed."""
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -1067,8 +1073,8 @@ def get_db_deep_stats() -> dict:
                     COUNT(CASE WHEN basic_start_date  IS NULL THEN 1 END)      AS null_start,
                     COUNT(CASE WHEN basic_finish_date IS NULL THEN 1 END)      AS null_end,
                     COUNT(CASE WHEN color IS NULL OR color = '' THEN 1 END)    AS null_color,
-                    COUNT(CASE WHEN production_line IS NULL
-                               OR  production_line = '' THEN 1 END)            AS null_line,
+                    COUNT(CASE WHEN machine IS NULL
+                               OR  machine = '' THEN 1 END)            AS null_line,
                     COUNT(CASE WHEN material_description IS NULL
                                OR  material_description = '' THEN 1 END)       AS null_desc,
                     COUNT(CASE WHEN run_time IS NULL THEN 1 END)               AS null_runtime,
@@ -1079,9 +1085,9 @@ def get_db_deep_stats() -> dict:
             r = cur.fetchone()
 
             cur.execute("""
-                SELECT production_line, COUNT(*) AS cnt
+                SELECT machine, COUNT(*) AS cnt
                 FROM orders
-                GROUP BY production_line
+                GROUP BY machine
                 ORDER BY cnt DESC
             """)
             by_line = {(row[0] or "unknown"): int(row[1]) for row in cur.fetchall()}
@@ -1450,7 +1456,7 @@ def run_analyze(table: str) -> dict:
 _UPSERT_SQL = """
     INSERT INTO orders (
         id, production_order, material_number, material_description,
-        production_line, plant, basic_start_date, basic_finish_date,
+        machine, plant, basic_start_date, basic_finish_date,
         run_time, color, prt_01, prt_02, production_version,
         order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
     )
@@ -1459,25 +1465,25 @@ _UPSERT_SQL = """
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
         material_description  = EXCLUDED.material_description,
-        production_line       = EXCLUDED.production_line,
-        -- Plant: an explicitly uploaded plant always wins; otherwise, if the LINE
+        machine                = EXCLUDED.machine,
+        -- Plant: an explicitly uploaded plant always wins; otherwise, if the MACHINE
         -- changed on this re-upload, reset to NULL so the post-upsert derivation
-        -- re-resolves it from the NEW line (matches the old join's self-healing);
+        -- re-resolves it from the NEW machine (matches the old join's self-healing);
         -- otherwise keep the existing (already-derived) plant.
         plant                 = CASE
             WHEN EXCLUDED.plant IS NOT NULL THEN EXCLUDED.plant
-            WHEN EXCLUDED.production_line IS DISTINCT FROM orders.production_line THEN NULL
+            WHEN EXCLUDED.machine IS DISTINCT FROM orders.machine THEN NULL
             ELSE orders.plant
         END,
-        -- line_key has no EXCLUDED counterpart (it's derived, never uploaded), so unlike
+        -- machine_key has no EXCLUDED counterpart (it's derived, never uploaded), so unlike
         -- plant it never gets a "trust the new explicit value" branch — just reset to
         -- NULL on either input actually changing, else keep. The post-upsert backfill
         -- below re-derives it. Plant-changed check is NULL-safe (EXCLUDED.plant IS NOT
         -- NULL guard) so a plain re-upload with no WERKS/PLANT column doesn't null it.
-        line_key              = CASE
-            WHEN EXCLUDED.production_line IS DISTINCT FROM orders.production_line THEN NULL
+        machine_key            = CASE
+            WHEN EXCLUDED.machine IS DISTINCT FROM orders.machine THEN NULL
             WHEN EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant THEN NULL
-            ELSE orders.line_key
+            ELSE orders.machine_key
         END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
@@ -1513,12 +1519,12 @@ _UPSERT_SQL = """
 
 # Build the per-row tuple in the exact _UPSERT_SQL column order. The SQL VALUES
 # clause expects: id, production_order, material_number, material_description,
-# production_line, plant, basic_start_date, basic_finish_date, run_time, color,
+# machine, plant, basic_start_date, basic_finish_date, run_time, color,
 # prt_01, prt_02, production_version, order_quantity, form_size, firming_indicator,
 # upload_batch_id.
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
-    "production_line", "plant", "basic_start_date", "basic_finish_date",
+    "machine", "plant", "basic_start_date", "basic_finish_date",
     "run_time", "color", "prt_01", "prt_02", "production_version",
     "order_quantity", "form_size", "firming_indicator",
 )
@@ -1532,7 +1538,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
     or to a whole plant (plant — called from POST /master-data/resync-order-attributes).
 
     Must run AFTER orders.plant is derived, since it reads the derived value —
-    callers scoped by batch_id must call this after the plant/line_key backfill,
+    callers scoped by batch_id must call this after the plant/machine_key backfill,
     not before. Runs LAST and wins over anything sap_field_map ever maps to
     orders.color (R5): sap_sync shares this same upsert_orders path. When PRT_02
     moves from a single TEXT value to a production-version-keyed table, this
@@ -1676,13 +1682,13 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     """Shared orders upsert for both the Excel and SAP ingest paths.
 
     `rows` is a list of dicts keyed by orders columns (production_order,
-    material_number, material_description, production_line, plant,
+    material_number, material_description, machine, plant,
     basic_start_date, basic_finish_date, run_time, color, order_quantity,
     form_size, firming_indicator). The id is computed via make_id() when absent,
     and a cumulative-count suffix dedups colliding ids (ORDER|MATERIAL not
     unique). Then a chunked, idempotent ON CONFLICT upsert persists the rows,
-    plant is backfilled from the line→plant master-data mapping for rows that
-    didn't carry one, ambiguous (multi-plant) line codes are surfaced as a
+    plant is backfilled from the machine→plant master-data mapping for rows that
+    didn't carry one, ambiguous (multi-plant) machine codes are surfaced as a
     warning, and an upload_audit row is written.
 
     The scheduled_start/scheduled_end/notes non-overwrite lives in _UPSERT_SQL
@@ -1774,38 +1780,39 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         break
                 conn.commit()
             # Materialize plant for rows this upload didn't carry one for, deriving it from
-            # the line→plant master-data mapping. Only derive when the line maps to EXACTLY
-            # ONE plant; a line code shared across plants is left NULL (and warned) rather
-            # than silently mis-attributed to the lowest plant code. Scoped to this batch.
+            # the machine→plant master-data mapping. Only derive when the machine maps to
+            # EXACTLY ONE plant; a machine code shared across plants is left NULL (and
+            # warned) rather than silently mis-attributed to the lowest plant code. Scoped
+            # to this batch.
             cur.execute(
                 """
                 UPDATE orders o
                    SET plant = (
-                       SELECT MIN(pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
+                       SELECT MIN(m.plant) FROM machine m
+                        WHERE m.machine = o.machine
                    )
                  WHERE o.upload_batch_id = %s AND o.plant IS NULL
                    AND (
-                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
+                       SELECT COUNT(DISTINCT m.plant) FROM machine m
+                        WHERE m.machine = o.machine
                    ) = 1
                 """,
                 (batch_id,),
             )
             conn.commit()
-            # Same idea for line_key, scoped to this batch, strictly downstream of the
+            # Same idea for machine_key, scoped to this batch, strictly downstream of the
             # plant backfill just above (a row still NULL there stays NULL here too).
             cur.execute(
                 """
                 UPDATE orders o
-                   SET line_key = (
-                       SELECT pl.line_key FROM production_lines pl
-                        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+                   SET machine_key = (
+                       SELECT m.machine_key FROM machine m
+                        WHERE m.plant = o.plant AND m.machine = o.machine
                    )
-                 WHERE o.upload_batch_id = %s AND o.line_key IS NULL AND o.plant IS NOT NULL
+                 WHERE o.upload_batch_id = %s AND o.machine_key IS NULL AND o.plant IS NOT NULL
                    AND (
-                       SELECT COUNT(*) FROM production_lines pl
-                        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+                       SELECT COUNT(*) FROM machine m
+                        WHERE m.plant = o.plant AND m.machine = o.machine
                    ) = 1
                 """,
                 (batch_id,),
@@ -1832,28 +1839,28 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                             f"missing-master-data for the full list."),
                     "exceptions": missing_master_data,
                 })
-            # Surface (don't guess) rows left NULL because their line maps to >1 plant.
+            # Surface (don't guess) rows left NULL because their machine maps to >1 plant.
             cur.execute(
                 """
-                SELECT o.production_line, COUNT(*)
+                SELECT o.machine, COUNT(*)
                   FROM orders o
                  WHERE o.upload_batch_id = %s AND o.plant IS NULL
                    AND (
-                       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-                        WHERE pl.production_line = o.production_line
+                       SELECT COUNT(DISTINCT m.plant) FROM machine m
+                        WHERE m.machine = o.machine
                    ) > 1
-                 GROUP BY o.production_line
+                 GROUP BY o.machine
                 """,
                 (batch_id,),
             )
             ambiguous = cur.fetchall()
             if ambiguous:
                 n_amb = sum(int(r[1]) for r in ambiguous)
-                lines_amb = ", ".join(str(r[0]) for r in ambiguous)
+                machines_amb = ", ".join(str(r[0]) for r in ambiguous)
                 warnings.append({
                     "level": "warn",
-                    "msg": (f"{n_amb} order(s) left plant-unattributed — line code(s) "
-                            f"shared across multiple plants: {lines_amb}. Provide an "
+                    "msg": (f"{n_amb} order(s) left plant-unattributed — machine code(s) "
+                            f"shared across multiple plants: {machines_amb}. Provide an "
                             f"explicit plant column on upload to resolve."),
                 })
             cur.execute(
@@ -1934,9 +1941,18 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     if "ORDER" in df.columns and "PRODUCTION_ORDER" not in df.columns:
         df = df.rename(columns={"ORDER": "PRODUCTION_ORDER"})
     # SAP plant column is commonly "WERKS"; normalize to PLANT. When neither is
-    # present the per-order plant is derived from the line→plant mapping after upsert.
+    # present the per-order plant is derived from the machine→plant mapping after upsert.
     if "WERKS" in df.columns and "PLANT" not in df.columns:
         df = df.rename(columns={"WERKS": "PLANT"})
+    # Machine-domain rename: the SAP-side spreadsheet format still ships the
+    # legacy "PRODUCTION_LINE" header (unchanged on that side of the fence), so
+    # it stays a permanently valid incoming alias — normalize it to the new
+    # internal "MACHINE" header. "MACHINE" itself is equally accepted so a
+    # re-exported/updated template works too. If a file somehow carries both,
+    # the already-canonical "MACHINE" column wins and PRODUCTION_LINE is left
+    # alone (dropped downstream — no column in _UPSERT_ROW_COLS reads it).
+    if "PRODUCTION_LINE" in df.columns and "MACHINE" not in df.columns:
+        df = df.rename(columns={"PRODUCTION_LINE": "MACHINE"})
 
     required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
     missing = required - set(df.columns)
@@ -2015,7 +2031,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "production_order": _str_id(r.get("PRODUCTION_ORDER", "")),
             "material_number": _str_id(r.get("MATERIAL_NUMBER", "")),
             "material_description": _v(r, "MATERIAL_DESCRIPTION"),
-            "production_line": _v(r, "PRODUCTION_LINE"),
+            "machine": _v(r, "MACHINE"),
             "plant": _v(r, "PLANT"),
             "basic_start_date": _ts(r["BASIC_START_DATE"]),
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
@@ -2039,8 +2055,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         # persist failure; this branch covers any defensive non-ok return.
         return result
 
-    lines = sorted({str(v) for v in df["PRODUCTION_LINE"].dropna().unique()}) \
-        if "PRODUCTION_LINE" in df.columns else []
+    lines = sorted({str(v) for v in df["MACHINE"].dropna().unique()}) \
+        if "MACHINE" in df.columns else []
 
     # Preserve the historical return shape exactly: include raw_row_count + lines
     # alongside the upsert_orders result (which carries status/batch_id/
@@ -2209,14 +2225,22 @@ def ensure_order_schedule_segments_table() -> None:
 
 
 # Generalizes color_wheel to any field in master_data.RANKABLE_FIELDS. One row
-# per (plant, line, field_key); line = '' means plant-wide, a specific
-# production_line overrides the plant-wide list for that line only (mirrors
-# line_calendar / line_blackout's line: null convention). `entries` is a
+# per (plant, machine, field_key); machine = '' means plant-wide, a specific
+# machine overrides the plant-wide list for that machine only (mirrors
+# machine_calendar / machine_blackout's machine: null convention). `entries` is a
 # {NORMALIZED_VALUE: RANK} map, the same shape color_wheel already used for
 # {COLOR: ORDER_Y}. This module owns persistence only — brain.py owns the
 # upload parsing and the PLANT_LISTS in-memory cache, same split as
 # color_wheel above. Deliberately mirrors that block's function shapes
 # one-for-one so a caller familiar with color_wheel needs nothing new.
+#
+# NOTE (machine-domain rename): schema.sql renamed this table's `line` column
+# to `machine`. The Python-facing parameter name and dict/JSON key in this
+# module stay `line` deliberately — brain.py's HTTP API (`?line=` query
+# params, `"line"` JSON fields) and the frontend both consume that name today
+# and are out of scope for this pass. The SQL below binds the `line` value
+# into the real `machine` column (and aliases `machine AS line` on read)
+# so the contract is unchanged while the schema column is actually `machine`.
 def ensure_priority_list_table() -> None:
     """Idempotent: create the priority_list table if missing (mirrors schema.sql /
     migrations/2026-08-11-priority-lists.sql). Lets the app self-bootstrap even
@@ -2225,7 +2249,7 @@ def ensure_priority_list_table() -> None:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS priority_list (
                 plant         TEXT NOT NULL,
-                line          TEXT NOT NULL DEFAULT '',
+                machine       TEXT NOT NULL DEFAULT '',
                 field_key     TEXT NOT NULL,
                 entries       JSONB NOT NULL,
                 source_column TEXT NOT NULL,
@@ -2236,7 +2260,7 @@ def ensure_priority_list_table() -> None:
                 uploaded_by   TEXT,
                 uploaded_at   TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at    TIMESTAMP NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (plant, line, field_key)
+                PRIMARY KEY (plant, machine, field_key)
             )
         """)
         conn.commit()
@@ -2251,11 +2275,11 @@ def upsert_priority_list(plant: str, field_key: str, entries: dict, *, line: str
     existing list was replaced. `line=""` (the default) is plant-wide."""
     q = """
         INSERT INTO priority_list (
-            plant, line, field_key, entries, source_column, value_column,
+            plant, machine, field_key, entries, source_column, value_column,
             rank_column, filename, row_count, uploaded_by, updated_at
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        ON CONFLICT (plant, line, field_key) DO UPDATE SET
+        ON CONFLICT (plant, machine, field_key) DO UPDATE SET
             entries       = EXCLUDED.entries,
             source_column = EXCLUDED.source_column,
             value_column  = EXCLUDED.value_column,
@@ -2279,7 +2303,7 @@ def delete_priority_list(plant: str, field_key: str, line: str = "") -> dict | N
     for the deleted row, or None if there was nothing to delete."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM priority_list WHERE plant = %s AND line = %s AND field_key = %s"
+            "DELETE FROM priority_list WHERE plant = %s AND machine = %s AND field_key = %s"
             " RETURNING filename",
             (plant, line, field_key),
         )
@@ -2293,9 +2317,9 @@ def get_priority_list(plant: str, field_key: str, line: str = "") -> dict | None
     auto-decoded to a dict), or None if it doesn't exist."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT plant, line, field_key, entries, source_column, value_column,"
+            "SELECT plant, machine AS line, field_key, entries, source_column, value_column,"
             " rank_column, filename, row_count, uploaded_by, uploaded_at"
-            " FROM priority_list WHERE plant = %s AND line = %s AND field_key = %s",
+            " FROM priority_list WHERE plant = %s AND machine = %s AND field_key = %s",
             (plant, line, field_key),
         )
         row = cur.fetchone()
@@ -2315,7 +2339,7 @@ def load_all_priority_lists() -> dict:
     after any upload/resync. `line=""` is the plant-wide scope."""
     out: dict = {}
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT plant, line, field_key, entries FROM priority_list")
+        cur.execute("SELECT plant, machine, field_key, entries FROM priority_list")
         for plant, line, field_key, entries in cur.fetchall():
             out.setdefault(plant, {}).setdefault(line, {})[field_key] = entries or {}
     return out
@@ -2342,8 +2366,8 @@ def list_priority_lists_meta(plant: str | None = None, field_key: str | None = N
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM priority_list{where_sql}", params)
         total = cur.fetchone()[0]
-        q = (f"SELECT plant, line, field_key, uploaded_at, uploaded_by, filename, row_count"
-             f" FROM priority_list{where_sql} ORDER BY plant, field_key, line")
+        q = (f"SELECT plant, machine AS line, field_key, uploaded_at, uploaded_by, filename, row_count"
+             f" FROM priority_list{where_sql} ORDER BY plant, field_key, machine")
         page_params = list(params)
         if limit is not None:
             q += " LIMIT %s"
@@ -2365,18 +2389,18 @@ def list_priority_lists_meta(plant: str | None = None, field_key: str | None = N
 
 # Reserved key in priority_list_coverage()'s per-field map for the true
 # plant-wide roll-up. Deliberately NOT '' — '' is already a real, different
-# bucket in that map (orders whose production_line is NULL/blank), and it is
-# also the plant-wide *scope* value in the priority_list table's `line`
+# bucket in that map (orders whose machine is NULL/blank), and it is
+# also the plant-wide *scope* value in the priority_list table's `machine`
 # column, so reusing it here conflated three distinct meanings and made the
 # plant-wide coverage ratio silently blank on every plant where every order
-# has a line. Production line codes can never collide with this token.
+# has a machine. Machine codes can never collide with this token.
 PLANT_TOTAL_COVERAGE_KEY = "__plant_total__"
 
 
 def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
-    """ONE aggregate query per plant (N3: 70 lines x 4 fields must not become up
+    """ONE aggregate query per plant (N3: 70 machines x 4 fields must not become up
     to 280 separate lookups) — a UNION ALL of two SELECTs per field, returning
-    (a) for every production line with orders at this plant how many distinct
+    (a) for every machine with orders at this plant how many distinct
     values that field has and how many of those are covered by a rank, and
     (b) one true plant-wide roll-up row per field under the reserved
     PLANT_TOTAL_COVERAGE_KEY ('__plant_total__') key.
@@ -2386,24 +2410,24 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
     mapping, N19; this function stays agnostic of what fields exist to avoid
     db.py importing master_data, which already imports db.py).
 
-    A line's "covered by a rank" set falls back plant-wide when no
-    line-specific list exists — COALESCE(line row, plant-wide row) — the same
-    resolution Stage 3's client-side rank lookup will use. In Stage 1 no
+    A machine's "covered by a rank" set falls back plant-wide when no
+    machine-specific list exists — COALESCE(machine row, plant-wide row) — the
+    same resolution Stage 3's client-side rank lookup will use. In Stage 1 no
     upload path exists yet (Stage 2), so every priority_list row today is
-    plant-wide (line=''); the per-line breakdown already works correctly for
-    that case (every line falls back to the one plant-wide row) and needs no
-    change once Stage 2 starts writing line-scoped rows.
+    plant-wide (machine=''); the per-machine breakdown already works correctly
+    for that case (every machine falls back to the one plant-wide row) and
+    needs no change once Stage 2 starts writing machine-scoped rows.
 
     Why the plant total needs its own query branch rather than being summed
-    client-side from the per-line rows: the per-line numbers are
-    COUNT(DISTINCT ...) *within* a line, so adding them up double-counts every
-    value that appears on more than one line (with 70 lines per plant, that is
-    the common case, not an edge case). The '__plant_total__' branch drops the
-    GROUP BY entirely so COUNT(DISTINCT ...) de-duplicates across the whole
-    plant. Its `ranked_values` uses the SAME per-row COALESCE(line list, plant
-    list) resolution as the per-line rows, so a value counts as ranked when at
-    least one of its occurrences resolves to a rank under the resolution the
-    scheduler will actually use.
+    client-side from the per-machine rows: the per-machine numbers are
+    COUNT(DISTINCT ...) *within* a machine, so adding them up double-counts
+    every value that appears on more than one machine (with 70 machines per
+    plant, that is the common case, not an edge case). The '__plant_total__'
+    branch drops the GROUP BY entirely so COUNT(DISTINCT ...) de-duplicates
+    across the whole plant. Its `ranked_values` uses the SAME per-row
+    COALESCE(machine list, plant list) resolution as the per-machine rows, so
+    a value counts as ranked when at least one of its occurrences resolves to
+    a rank under the resolution the scheduler will actually use.
 
     Note the ungrouped branch always returns exactly one row per field, even
     for a plant with no orders at all (0/0) — callers that treat "no coverage
@@ -2412,24 +2436,26 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
 
     Returns {field_key: {line_or_empty_string_or___plant_total__:
     {"distinct_values": int, "ranked_values": int}}}. Caller should cache this
-    (R12).
+    (R12). NOTE: the returned per-machine key is still named/described as
+    "line" here because it is the raw machine-code string value, not a
+    fieldname — see the machine-domain-rename note above ensure_priority_list_table.
     """
     if not fields:
         return {}
-    # Shared FROM/JOIN/WHERE tail — identical for the per-line and plant-total
+    # Shared FROM/JOIN/WHERE tail — identical for the per-machine and plant-total
     # branches; only the SELECT's `line` expression and the GROUP BY differ.
     body = sql.SQL("""
                    COUNT(DISTINCT UPPER(TRIM(o.{col}))) AS distinct_values,
                    COUNT(DISTINCT UPPER(TRIM(o.{col}))) FILTER (
-                       WHERE COALESCE(pl_line.entries, pl_plant.entries, '{{}}'::jsonb)
+                       WHERE COALESCE(pl_machine.entries, pl_plant.entries, '{{}}'::jsonb)
                              ? UPPER(TRIM(o.{col}))
                    ) AS ranked_values
               FROM orders o
-              LEFT JOIN priority_list pl_line
-                ON pl_line.plant = o.plant AND pl_line.line = o.production_line
-               AND pl_line.field_key = %s
+              LEFT JOIN priority_list pl_machine
+                ON pl_machine.plant = o.plant AND pl_machine.machine = o.machine
+               AND pl_machine.field_key = %s
               LEFT JOIN priority_list pl_plant
-                ON pl_plant.plant = o.plant AND pl_plant.line = ''
+                ON pl_plant.plant = o.plant AND pl_plant.machine = ''
                AND pl_plant.field_key = %s
              WHERE o.plant = %s
                AND o.{col} IS NOT NULL AND o.{col} <> ''
@@ -2438,9 +2464,9 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
     for field_key, source_column in fields.items():
         col = sql.Identifier(source_column)
         parts.append(
-            sql.SQL("SELECT %s AS field_key, COALESCE(o.production_line, '') AS line,")
+            sql.SQL("SELECT %s AS field_key, COALESCE(o.machine, '') AS line,")
             + body.format(col=col)
-            + sql.SQL(" GROUP BY COALESCE(o.production_line, '')")
+            + sql.SQL(" GROUP BY COALESCE(o.machine, '')")
         )
         params.extend([field_key, field_key, field_key, plant])
         parts.append(

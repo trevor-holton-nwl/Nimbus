@@ -22,8 +22,18 @@ const ORDER_FIELD_BY_SIGNATURE_FIELD: Readonly<Record<string, string>> = {
   productionVersion: 'PRODUCTION_VERSION',
 };
 
-function normalizedValue(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : value == null ? '' : String(value).trim();
+/**
+ * Canonicalizes one setup-attribute value to the same fold `setup_data._normalise_value`
+ * applies server-side: trimmed and uppercased, except the literal booleans `"true"`/`"false"`
+ * (case-insensitive), which pass through lowercase so they agree with `String(true)`/`String(false)`
+ * and with the Python side's early bool-typed return. This is the single source of truth for
+ * setup state-value canonicalization on the client — see `setup-scheduler.mts`'s
+ * `normalizedPriorityValue`, which reuses this fold for rank-lookup values.
+ */
+export function normalizedValue(value: unknown): string {
+  const trimmed = typeof value === 'string' ? value.trim() : value == null ? '' : String(value).trim();
+  const lowered = trimmed.toLowerCase();
+  return lowered === 'true' || lowered === 'false' ? lowered : trimmed.toUpperCase();
 }
 
 function hasUsableDefinition(definition: SetupDefinition): boolean {
@@ -62,13 +72,13 @@ function validMinutes(value: number): boolean {
 
 function matchingMatrixRow(
   rows: ReadonlyArray<SetupMatrixRow>,
-  line: string,
+  machine: string,
   predecessorState: SetupStateKey,
   successorState: SetupStateKey,
   definition: SetupDefinition,
 ): SetupMatrixRow | undefined {
   return rows.find(row => (
-    row.line === line
+    row.machine === machine
     && row.signature_version === definition.signature_version
     && validMinutes(row.setup_min)
     && hasCanonicalShape(row.from_key, definition)
@@ -87,7 +97,7 @@ function matchingOverride(
 
   return overrides.find(override => (
     override.status === 'active'
-    && override.line === input.line
+    && override.machine === input.machine
     && override.signature_version === definition.signature_version
     && override.predecessor_order_id === (input.predecessorOrderId ?? null)
     && override.successor_order_id === input.successorOrderId
@@ -154,7 +164,7 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     return uncovered(signatureVersion);
   }
 
-  const lineRow = matchingMatrixRow(input.lineRows, input.line, predecessorState, successorState, definition);
+  const lineRow = matchingMatrixRow(input.machineRows, input.machine, predecessorState, successorState, definition);
   const plantRow = matchingMatrixRow(input.plantRows, '', predecessorState, successorState, definition);
   const override = matchingOverride(input.overrides, input);
   if (override) {
@@ -206,7 +216,7 @@ export function computeShadowDiagnostics(
     plant: string;
     definition: SetupDefinition | null;
     plant_rows: ReadonlyArray<SetupMatrixRow>;
-    line_rows: ReadonlyArray<SetupMatrixRow>;
+    machine_rows: ReadonlyArray<SetupMatrixRow>;
     overrides: ReadonlyArray<SetupOccurrenceOverride>;
   },
   tasks: ReadonlyArray<NimbusTask>,
@@ -232,7 +242,7 @@ export function computeShadowDiagnostics(
   const density = new Map<string, Set<string>>();
   for (const task of tasks) {
     if (task.PLANT && task.PLANT !== snapshot.plant) continue;
-    const line = task.PRODUCTION_LINE;
+    const line = task.MACHINE;
     if (!line) continue;
     const state = stateForOrder(task, definition);
     const stamp = task.start_date instanceof Date ? task.start_date : null;
@@ -260,9 +270,9 @@ export function computeShadowDiagnostics(
       const successorState = stateForOrder(successor, definition);
       if (!predecessorState || !successorState) continue;
       const result = resolveSetup({
-        definition, line, predecessorState, successorState,
+        definition, machine: line, predecessorState, successorState,
         predecessorOrderId: predecessor.id, successorOrderId: successor.id,
-        plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides,
+        plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides,
       });
       if (result.covered) {
         coveredTransitions += 1;

@@ -20,10 +20,10 @@ class _SetupService:
             "plant": plant,
             "definition": {"plant": plant, "signature_version": self.version,
                            "fields": ["colorWheel"], "strict_blanks": True, "active": False},
-            "plant_rows": [{"line": "", "setup_min": 12}],
-            "line_rows": [{"line": "LINE-1", "setup_min": 9}],
-            "line_states": [{"line": "LINE-1", "source": "manual"}],
-            "overrides": [{"id": 7, "line": "LINE-1", "status": "inactive"}],
+            "plant_rows": [{"machine": "", "setup_min": 12}],
+            "machine_rows": [{"machine": "LINE-1", "setup_min": 9}],
+            "machine_states": [{"machine": "LINE-1", "source": "manual"}],
+            "overrides": [{"id": 7, "machine": "LINE-1", "status": "inactive"}],
         }
 
     def save_definition(self, plant, fields, strict_blanks, actor, expected_signature_version):
@@ -39,58 +39,58 @@ class _SetupService:
 
     def replace_plant_matrix(self, plant, rows, signature_version, actor):
         self._check_rows(rows, signature_version)
-        return {"plant": plant, "line": "", "signature_version": self.version, "rows": len(rows)}
+        return {"plant": plant, "machine": "", "signature_version": self.version, "rows": len(rows)}
 
-    def upsert_line_matrix_rows(self, plant, line, rows, signature_version, actor):
-        if line != "LINE-1":
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+    def upsert_line_matrix_rows(self, plant, machine, rows, signature_version, actor):
+        if machine != "LINE-1":
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_rows(rows, signature_version)
-        return {"plant": plant, "line": line, "signature_version": self.version, "rows": len(rows)}
+        return {"plant": plant, "machine": machine, "signature_version": self.version, "rows": len(rows)}
 
     def delete_plant_matrix_rows(self, plant, rows, signature_version, actor):
         self._check_rows(rows, signature_version)
-        return {"plant": plant, "line": "", "signature_version": self.version, "deleted": len(rows)}
+        return {"plant": plant, "machine": "", "signature_version": self.version, "deleted": len(rows)}
 
-    def delete_line_matrix_rows(self, plant, line, rows, signature_version, actor):
-        if line != "LINE-1":
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+    def delete_line_matrix_rows(self, plant, machine, rows, signature_version, actor):
+        if machine != "LINE-1":
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_rows(rows, signature_version)
-        return {"plant": plant, "line": line, "signature_version": self.version, "deleted": len(rows)}
+        return {"plant": plant, "machine": machine, "signature_version": self.version, "deleted": len(rows)}
 
-    def set_line_state(self, plant, line, values, signature_version, observed_at, source, reason, actor,
+    def set_line_state(self, plant, machine, values, signature_version, observed_at, source, reason, actor,
                        physical_mold_id=None):
-        if line != "LINE-1":
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        if machine != "LINE-1":
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_version(signature_version)
-        return {"plant": plant, "line": line, "accepted": True, "state_key": [],
+        return {"plant": plant, "machine": machine, "accepted": True, "state_key": [],
                 "signature_version": self.version}
 
-    def upsert_occurrence_override(self, plant, line, predecessor_order_id, successor_order_id,
+    def upsert_occurrence_override(self, plant, machine, predecessor_order_id, successor_order_id,
                                    predecessor_values, successor_values, standard_min, remaining_min,
                                    signature_version, reason, actor):
-        if line != "LINE-1":
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        if machine != "LINE-1":
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         self._check_version(signature_version)
         if remaining_min < 0:
             raise ValueError("Override minutes must be nonnegative")
-        return {"id": 9, "plant": plant, "line": line, "signature_version": self.version,
+        return {"id": 9, "plant": plant, "machine": machine, "signature_version": self.version,
                 "standard_min": standard_min, "remaining_min": remaining_min, "status": "active"}
 
-    def update_occurrence_override(self, plant, line, override_id, standard_min, remaining_min,
+    def update_occurrence_override(self, plant, machine, override_id, standard_min, remaining_min,
                                    signature_version, reason, actor):
-        if line != "LINE-1":
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        if machine != "LINE-1":
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         if override_id != 9:
-            raise ValueError("Setup override does not belong to this plant and line")
+            raise ValueError("Setup override does not belong to this plant and machine")
         self._check_version(signature_version)
         if remaining_min < 0:
             raise ValueError("Override minutes must be nonnegative")
-        return {"id": override_id, "plant": plant, "line": line, "remaining_min": remaining_min,
+        return {"id": override_id, "plant": plant, "machine": machine, "remaining_min": remaining_min,
                 "signature_version": self.version, "status": "active"}
 
-    def clear_occurrence_override(self, plant, line, override_id, signature_version, actor, reason):
-        self.update_occurrence_override(plant, line, override_id, 0, 0, signature_version, reason, actor)
-        return {"id": override_id, "plant": plant, "line": line, "cleared": True,
+    def clear_occurrence_override(self, plant, machine, override_id, signature_version, actor, reason):
+        self.update_occurrence_override(plant, machine, override_id, 0, 0, signature_version, reason, actor)
+        return {"id": override_id, "plant": plant, "machine": machine, "cleared": True,
                 "signature_version": self.version}
 
     def _check_rows(self, rows, signature_version):
@@ -108,7 +108,7 @@ class _SetupServiceWithMatrixRows(_SetupService):
         assert plant == "PLANT-A"
         return 4
 
-    def page_matrix_rows(self, plant, line, signature_version, from_key=None, offset=0, limit=100):
+    def page_matrix_rows(self, plant, machine, signature_version, from_key=None, offset=0, limit=100):
         assert plant == "PLANT-A"
         rows = [
             {"from_key": [{"fieldKey": "colorWheel", "value": "BLUE"}],
@@ -120,7 +120,7 @@ class _SetupServiceWithMatrixRows(_SetupService):
         ]
         if from_key is not None:
             rows = [r for r in rows if r["from_key"] == from_key]
-        return {"plant": plant, "line": line, "signature_version": signature_version,
+        return {"plant": plant, "machine": machine, "signature_version": signature_version,
                 "rows": rows[offset:offset + limit],
                 "meta": {"total": len(rows), "offset": offset, "limit": limit}}
 
@@ -154,11 +154,11 @@ def _install_matrix_rows_double(monkeypatch):
 def test_setup_compatibility_requires_reason_and_returns_persisted_value(tc, monkeypatch):
     """A setup-only opt-out cannot be silently stored without an operator reason."""
     calls = []
-    def save(plant, line, compatible, reason, actor):
-        calls.append((plant, line, compatible, reason, actor))
+    def save(plant, machine, compatible, reason, actor):
+        calls.append((plant, machine, compatible, reason, actor))
         if not compatible and not reason:
             raise ValueError("Setup compatibility reason is required when incompatible")
-        return {"plant": plant, "line": line, "setup_compatible": compatible,
+        return {"plant": plant, "machine": machine, "setup_compatible": compatible,
                 "setup_compatibility_reason": reason}
     monkeypatch.setattr(brain.md, "set_setup_line_compatibility", save, raising=False)
     rejected = tc.put("/setup/5512/lines/LINE-1/compatibility", json={"setup_compatible": False, "reason": ""})
@@ -178,6 +178,10 @@ def tc(monkeypatch):
         "upsert_occurrence_override", "update_occurrence_override", "clear_occurrence_override",
     ):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
+    # GET /setup/{plant} merges in plants.setup_active as `plant_active`
+    # (Workstream D2) via brain.md.get_plant_setup_active — stub it so this
+    # DB-double-backed fixture never opens a real Postgres connection.
+    monkeypatch.setattr(brain.md, "get_plant_setup_active", lambda plant: False, raising=False)
     monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[brain.require_admin] = lambda: "owner@example.com"
@@ -202,7 +206,7 @@ def test_setup_snapshot_is_plant_scoped_and_versioned(tc):
     assert response.status_code == 200
     body = response.json()
     assert body["plant"] == "5512"
-    assert {row["line"] for row in body["line_rows"]} == {"LINE-1"}
+    assert {row["machine"] for row in body["machine_rows"]} == {"LINE-1"}
     assert body["freshness"] == {"signature_version": 4, "request_id": "setup-read"}
 
 
@@ -294,12 +298,53 @@ def test_active_write_requires_current_version_and_returns_freshness(tc):
     assert stale.status_code == 409
 
 
+def test_plant_setup_active_write_rejects_non_bool_and_persists_valid_bool(tc, monkeypatch):
+    """PUT /plant/{plant}/setup-active (Workstream D2's relocated gate) validates
+    like set_setup_line_compatibility: a real bool or a 400, never a truthy-string
+    coercion."""
+    calls = []
+    def save(plant, active, subnetwork="", user_email=None):
+        calls.append((plant, active, subnetwork, user_email))
+        return {"status": "ok", "plant": plant, "setup_active": active}
+    monkeypatch.setattr(brain.md, "set_plant_setup_active", save, raising=False)
+
+    rejected = tc.put("/plant/5512/setup-active", json={"active": "true"})
+    assert rejected.status_code == 400
+
+    accepted = tc.put("/plant/5512/setup-active", json={"active": True})
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "ok", "plant": "5512", "setup_active": True}
+    assert calls[-1][:2] == ("5512", True)
+
+
+def test_plant_setup_active_write_requires_admin(tc):
+    """Only an admin may flip the relocated plant-level setup-active flag."""
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    response = tc.put("/plant/5512/setup-active", json={"active": True})
+    assert response.status_code == 403
+
+
+def test_setup_snapshot_surfaces_plant_active_independently_of_definition_active(tc, monkeypatch):
+    """plant_active (the real gate) must never be conflated with the vestigial
+    setup_definition.active — the service double always returns active=False
+    for the definition, so a True plant_active here proves the two are read
+    from genuinely independent sources."""
+    monkeypatch.setattr(brain.md, "get_plant_setup_active", lambda plant: True, raising=False)
+    response = tc.get("/setup/5512", headers={"x-user-email": "scheduler@example.com"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["plant_active"] is True
+    assert body["definition"]["active"] is False
+
+
 def test_matrix_import_enforces_stale_versions_invalid_minutes_and_line_ownership(tc):
     """Matrix import must reject stale, invalid, and cross-plant line writes before success."""
     stale = tc.post("/setup/5512/matrix/import", json={"signature_version": 3, "rows": [_matrix_row()]})
     invalid = tc.post("/setup/5512/matrix/import", json={"signature_version": 4, "rows": [_matrix_row(-1)]})
     wrong_line = tc.post("/setup/5512/matrix/import", json={
-        "line": "OTHER-PLANT-LINE", "signature_version": 4, "rows": [_matrix_row()],
+        "machine": "OTHER-PLANT-LINE", "signature_version": 4, "rows": [_matrix_row()],
     })
     assert stale.status_code == 409
     assert invalid.status_code == 400
@@ -309,10 +354,10 @@ def test_matrix_import_enforces_stale_versions_invalid_minutes_and_line_ownershi
 def test_matrix_delete_rejects_stale_version_and_returns_freshness_for_the_selected_scope(tc):
     """Deleting one canonical matrix row is version-checked and never implies a broad matrix replacement."""
     stale = tc.request("DELETE", "/setup/5512/matrix", json={
-        "line": "LINE-1", "signature_version": 3, "rows": [_matrix_row()],
+        "machine": "LINE-1", "signature_version": 3, "rows": [_matrix_row()],
     })
     deleted = tc.request("DELETE", "/setup/5512/matrix", headers={"x-request-id": "matrix-delete"}, json={
-        "line": "LINE-1", "signature_version": 4, "rows": [_matrix_row()],
+        "machine": "LINE-1", "signature_version": 4, "rows": [_matrix_row()],
     })
     assert stale.status_code == 409
     assert deleted.status_code == 200
@@ -344,7 +389,7 @@ def test_line_state_and_override_reject_wrong_line_and_invalid_remaining_minutes
         "observed_at": "2026-08-13T10:00:00", "source": "manual", "reason": "floor check",
     })
     override = tc.put("/setup/5512/overrides/9", json={
-        "line": "LINE-1", "standard_min": 12, "remaining_min": -1,
+        "machine": "LINE-1", "standard_min": 12, "remaining_min": -1,
         "signature_version": 4, "reason": "actual work",
     })
     assert state.status_code == 400
@@ -354,14 +399,14 @@ def test_line_state_and_override_reject_wrong_line_and_invalid_remaining_minutes
 def test_override_update_and_delete_bind_url_identity_and_require_current_version(tc):
     """The override URL identifies the exact persisted resource; stale/mismatched targets never mutate it."""
     mismatch = tc.put("/setup/5512/overrides/8", json={
-        "line": "LINE-1", "standard_min": 12, "remaining_min": 4,
+        "machine": "LINE-1", "standard_min": 12, "remaining_min": 4,
         "signature_version": 4, "reason": "confirmed remaining work",
     })
     stale_delete = tc.request("DELETE", "/setup/5512/overrides/9", json={
-        "line": "LINE-1", "signature_version": 3, "reason": "completed on floor",
+        "machine": "LINE-1", "signature_version": 3, "reason": "completed on floor",
     })
     updated = tc.put("/setup/5512/overrides/9", headers={"x-request-id": "override-write"}, json={
-        "line": "LINE-1", "standard_min": 12, "remaining_min": 4,
+        "machine": "LINE-1", "standard_min": 12, "remaining_min": 4,
         "signature_version": 4, "reason": "confirmed remaining work",
     })
     assert mismatch.status_code == 400
@@ -374,7 +419,7 @@ def test_override_update_and_delete_bind_url_identity_and_require_current_versio
 def test_override_creation_uses_a_server_assigned_resource_identity(tc):
     """Creation is distinct from URL-identified PUT so a client cannot silently replace another override."""
     created = tc.post("/setup/5512/overrides", json={
-        "line": "LINE-1", "predecessor_order_id": "before", "successor_order_id": "after",
+        "machine": "LINE-1", "predecessor_order_id": "before", "successor_order_id": "after",
         "predecessor_values": {"colorWheel": "RED"}, "successor_values": {"colorWheel": "BLUE"},
         "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "confirmed work",
     })
@@ -385,12 +430,12 @@ def test_override_creation_uses_a_server_assigned_resource_identity(tc):
 def test_override_creation_requires_an_explicit_predecessor_key_for_initial_state(tc):
     """An initial override must send predecessor_order_id: null, not omit the binding."""
     missing = tc.post("/setup/5512/overrides", json={
-        "line": "LINE-1", "successor_order_id": "after",
+        "machine": "LINE-1", "successor_order_id": "after",
         "predecessor_values": {"colorWheel": "GREEN"}, "successor_values": {"colorWheel": "BLUE"},
         "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "initial state",
     })
     explicit_null = tc.post("/setup/5512/overrides", json={
-        "line": "LINE-1", "predecessor_order_id": None, "successor_order_id": "after",
+        "machine": "LINE-1", "predecessor_order_id": None, "successor_order_id": "after",
         "predecessor_values": {"colorWheel": "GREEN"}, "successor_values": {"colorWheel": "BLUE"},
         "standard_min": 12, "remaining_min": 4, "signature_version": 4, "reason": "initial state",
     })
@@ -441,7 +486,7 @@ def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):
         client = TestClient(brain.api)
         response = client.get(
             "/setup/PLANT-A/matrix-rows",
-            params={"line": "LINE-1", "from_key": '[{"fieldKey":"colorWheel","value":"BLUE"}]', "limit": 1},
+            params={"machine": "LINE-1", "from_key": '[{"fieldKey":"colorWheel","value":"BLUE"}]', "limit": 1},
         )
         assert response.status_code == 200
         body = response.json()

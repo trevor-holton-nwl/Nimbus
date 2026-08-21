@@ -2436,6 +2436,63 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   display: flex; align-items: center; gap: 8px;
 }
 
+/* =============================================================================
+   ADMIN > TABLE BROWSER (Workstream E) — read-only, catalog-driven universal
+   table viewer. Master-detail layout is the same 300px-rail + 1fr-detail
+   shape as the SAP Interface Console's .sap-console (kept as its own
+   .atb- prefix rather than reusing .sap-* directly, since this feature has
+   nothing to do with SAP — only the token-driven layout numbers are shared).
+   PK/FK filter dropdowns reuse .dash-filter-* (index.html) verbatim.
+   ========================================================================== */
+.atb-console { display: grid; grid-template-columns: 300px 1fr; gap: 16px; height: 70vh; min-height: 420px; }
+.atb-rail-head { display: flex; align-items: center; gap: 8px; padding: 0 0 10px; }
+.atb-rail-head .dash-filter-paste-input { flex: 1; }
+.atb-rail {
+  height: 100%; overflow-y: auto; padding: 6px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-elev);
+}
+.atb-rail-row {
+  display: flex; flex-direction: column; gap: 2px; padding: 9px 12px;
+  border-radius: var(--r-md); border-left: 3px solid transparent; cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.atb-rail-row:hover { background: var(--bg-subtle); }
+.atb-rail-row-sel { background: var(--accent-wash); border-left-color: var(--accent); }
+.atb-rail-name { font-size: 13px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; }
+.atb-rail-meta { font-size: 11px; color: var(--fg-faint); }
+.atb-rail-empty { padding: 20px 10px; text-align: center; color: var(--fg-mute); font-size: 12px; }
+.atb-internal-badge {
+  display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: var(--r-sm);
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  background: var(--bg-subtle); color: var(--fg-mute); border: 1px solid var(--line);
+}
+.atb-detail {
+  height: 100%; display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-elev); overflow: hidden;
+}
+.atb-detail-empty[hidden], .atb-detail-content[hidden] { display: none; }
+.atb-detail-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.atb-detail-head {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line); flex-wrap: wrap; flex: 0 0 auto;
+}
+.atb-detail-name { font-family: 'Archivo', 'Public Sans', sans-serif; font-size: 15px; font-weight: 700; }
+.atb-detail-meta { font-size: 11px; color: var(--fg-mute); display: flex; align-items: center; gap: 6px; }
+.atb-detail-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.atb-console .dash-filter-bar { flex: 0 0 auto; margin-bottom: 0; padding: 10px 16px; }
+#atb-grid { flex: 1; min-height: 0; width: 100%; }
+.atb-pagination {
+  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-mute); flex: 0 0 auto;
+}
+.atb-pagination select { height: 28px; padding: 3px 8px; }
+.atb-filter-kind { font-size: 9.5px; font-weight: 700; opacity: .6; }
+@media (max-width: 900px) {
+  .atb-console { grid-template-columns: 1fr; height: auto; }
+  .atb-rail { height: 260px; }
+  .atb-detail { height: 60vh; }
+}
+
 /* Status feedback line under upload / purge actions */
 .admin-status {
   margin-top: 10px;
@@ -6177,6 +6234,12 @@ button.setup-coverage-tile { cursor: pointer; }
 .setup-list-remove { border: 0; background: none; color: var(--fg-faint); cursor: pointer; font-size: 14px; line-height: 1; }
 .setup-list-revert { border: 0; background: none; color: var(--fg-mute); cursor: pointer; font-size: 14px; line-height: 1; }
 .setup-list-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 0; font-size: 11.5px; color: var(--fg-mute); }
+.setup-list-delete { border: 0; background: none; color: var(--danger, #c0392b); cursor: pointer; font-size: 14px; line-height: 1; }
+/* Workstream D3 (2026-08-20): bulk/delete-all row actions below the List footer. */
+.setup-list-bulk-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 0; border-top: 1px solid var(--border-subtle, var(--border)); margin-top: 8px; font-size: 11.5px; }
+.setup-list-delete-all { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.setup-list-delete-all label { color: var(--fg-mute); }
+.setup-list-delete-all input[type="text"] { width: 160px; }
 
 .setup-grid-scroll { overflow: auto; max-height: 480px; margin-top: 8px; }
 table.setup-grid { width: auto; border-collapse: collapse; font-size: 12px; }

@@ -10,26 +10,30 @@ const definition = {
   active: false,
 };
 
+// Canonical (post-case-fold) form: stateForOrder now uppercases every value,
+// so fixtures representing an already-canonicalized state must be uppercase
+// too — the raw, mixed-case order literals fed into stateForOrder below are
+// what exercise the fold itself.
 const redTool = [
-  { fieldKey: 'prt01', value: 'Tool A' },
-  { fieldKey: 'colorWheel', value: 'Red' },
+  { fieldKey: 'prt01', value: 'TOOL A' },
+  { fieldKey: 'colorWheel', value: 'RED' },
 ];
 
 const blueTool = [
-  { fieldKey: 'prt01', value: 'Tool A' },
-  { fieldKey: 'colorWheel', value: 'Blue' },
+  { fieldKey: 'prt01', value: 'TOOL A' },
+  { fieldKey: 'colorWheel', value: 'BLUE' },
 ];
 
 function input(overrides = {}) {
   return {
     definition,
-    line: 'LINE-1',
+    machine: 'LINE-1',
     predecessorState: redTool,
     successorState: blueTool,
     predecessorOrderId: 'ORDER-1',
     successorOrderId: 'ORDER-2',
     plantRows: [],
-    lineRows: [],
+    machineRows: [],
     overrides: [],
     ...overrides,
   };
@@ -44,7 +48,7 @@ test('an explicit diagonal matrix row takes precedence over the implicit zero', 
   const result = resolveSetup(input({
     successorState: redTool,
     plantRows: [{
-      line: '', signature_version: 7, from_key: redTool, to_key: redTool, setup_min: 12,
+      machine: '', signature_version: 7, from_key: redTool, to_key: redTool, setup_min: 12,
     }],
   }));
 
@@ -75,8 +79,8 @@ test('a complete identical state without an explicit row resolves to an implicit
 
 test('a matching line row overrides the matching plant row', () => {
   const result = resolveSetup(input({
-    plantRows: [{ line: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 20 }],
-    lineRows: [{ line: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 8 }],
+    plantRows: [{ machine: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 20 }],
+    machineRows: [{ machine: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 8 }],
   }));
 
   assert.equal(result.source, 'line');
@@ -86,10 +90,10 @@ test('a matching line row overrides the matching plant row', () => {
 
 test('a valid occurrence override takes precedence over the matrix standard', () => {
   const result = resolveSetup(input({
-    lineRows: [{ line: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 12 }],
+    machineRows: [{ machine: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 12 }],
     overrides: [{
       id: 42,
-      line: 'LINE-1',
+      machine: 'LINE-1',
       signature_version: 7,
       predecessor_order_id: 'ORDER-1',
       successor_order_id: 'ORDER-2',
@@ -116,10 +120,10 @@ test('a valid occurrence override takes precedence over the matrix standard', ()
 
 test('an occurrence override retains remaining work while reporting the current matrix standard', () => {
   const result = resolveSetup(input({
-    lineRows: [{ line: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 10 }],
+    machineRows: [{ machine: 'LINE-1', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 10 }],
     overrides: [{
       id: 43,
-      line: 'LINE-1',
+      machine: 'LINE-1',
       signature_version: 7,
       predecessor_order_id: 'ORDER-1',
       successor_order_id: 'ORDER-2',
@@ -165,10 +169,10 @@ test('incomplete equal-looking states do not receive an implicit zero', () => {
 
 test('stale matrix rows and overrides never resolve a transition', () => {
   const result = resolveSetup(input({
-    plantRows: [{ line: '', signature_version: 6, from_key: redTool, to_key: blueTool, setup_min: 20 }],
+    plantRows: [{ machine: '', signature_version: 6, from_key: redTool, to_key: blueTool, setup_min: 20 }],
     overrides: [{
       id: 9,
-      line: 'LINE-1',
+      machine: 'LINE-1',
       signature_version: 6,
       predecessor_order_id: 'ORDER-1',
       successor_order_id: 'ORDER-2',
@@ -187,9 +191,9 @@ test('stale matrix rows and overrides never resolve a transition', () => {
 
 test('malformed fractional setup minutes do not create coverage', () => {
   const result = resolveSetup({
-    definition, line: 'LINE-1', predecessorState: redTool, successorState: blueTool,
-    predecessorOrderId: 'a', successorOrderId: 'b', overrides: [], lineRows: [],
-    plantRows: [{ line: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 2.5 }],
+    definition, machine: 'LINE-1', predecessorState: redTool, successorState: blueTool,
+    predecessorOrderId: 'a', successorOrderId: 'b', overrides: [], machineRows: [],
+    plantRows: [{ machine: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 2.5 }],
   });
   assert.equal(result.covered, false);
 });
@@ -197,13 +201,13 @@ test('malformed fractional setup minutes do not create coverage', () => {
 test('shadow diagnostics count coverage and state density without mutating schedule inputs', () => {
   const snapshot = {
     plant: '5512', definition,
-    plant_rows: [{ line: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 12 }],
-    line_rows: [], overrides: [], line_states: [],
+    plant_rows: [{ machine: '', signature_version: 7, from_key: redTool, to_key: blueTool, setup_min: 12 }],
+    machine_rows: [], overrides: [], machine_states: [],
   };
   const tasks = [
-    { id: '1', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: 'Red', PRT_01: 'Tool A', start_date: new Date('2026-08-13T08:00:00Z'), scheduleSegments: [{ sequence: 1, startDate: new Date('2026-08-13T08:00:00Z'), endDate: new Date('2026-08-13T09:00:00Z') }] },
-    { id: '2', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: 'Blue', PRT_01: 'Tool A', start_date: new Date('2026-08-13T09:00:00Z') },
-    { id: '3', PLANT: '5512', PRODUCTION_LINE: 'LINE-1', COLOR: '', PRT_01: 'Tool A', start_date: new Date('2026-08-13T10:00:00Z') },
+    { id: '1', PLANT: '5512', MACHINE: 'LINE-1', COLOR: 'Red', PRT_01: 'Tool A', start_date: new Date('2026-08-13T08:00:00Z'), scheduleSegments: [{ sequence: 1, startDate: new Date('2026-08-13T08:00:00Z'), endDate: new Date('2026-08-13T09:00:00Z') }] },
+    { id: '2', PLANT: '5512', MACHINE: 'LINE-1', COLOR: 'Blue', PRT_01: 'Tool A', start_date: new Date('2026-08-13T09:00:00Z') },
+    { id: '3', PLANT: '5512', MACHINE: 'LINE-1', COLOR: '', PRT_01: 'Tool A', start_date: new Date('2026-08-13T10:00:00Z') },
   ];
   const before = structuredClone({ snapshot, tasks });
   const result = computeShadowDiagnostics(snapshot, tasks, { percentile: 0.95 });

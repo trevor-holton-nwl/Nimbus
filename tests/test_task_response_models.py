@@ -28,7 +28,7 @@ SAMPLE_TASK_ROW = {
     "original_start_date": "2026-08-01T07:00:00",
     "original_end_date": "2026-08-01T15:00:00",
     "user_scheduled": False,
-    "PRODUCTION_LINE": "Line 1",
+    "MACHINE": "Line 1",
     "MATERIAL_DESCRIPTION": "Widget",
     "MATERIAL_NUMBER": "MAT-1",
     "ORDER_QUANTITY_(GMEIN)": 500.0,

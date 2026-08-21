@@ -39,7 +39,7 @@ declare global {
   interface NimbusTask {
     id: string;
     text?: string;
-    PRODUCTION_LINE?: string;
+    MACHINE?: string;
     RUN_TIME?: number | string;
     start_date?: Date | null;
     end_date?: Date | null;
@@ -83,7 +83,7 @@ declare global {
   }
 
   interface NimbusMasterDataLine {
-    production_line: string;
+    machine: string;
     plant: string;
   }
 
@@ -121,7 +121,7 @@ declare global {
 
   interface NimbusSetupDiagnostic {
     type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
-      | 'predecessor-state-unknown' | 'successor-state-unknown';
+      | 'predecessor-state-unknown' | 'successor-state-unknown' | 'setup-no-change';
     line: string;
     scope?: string;
     pairKey?: string;
@@ -129,6 +129,15 @@ declare global {
     successorOrderId?: string;
     time?: Date;
     message?: string;
+    // D4: populated only by 'setup-no-change' (identical-signature, covered,
+    // zero-minute transition) — mirrors SetupComputeDiagnostic in
+    // web/schedule-services.mts, kept in sync deliberately.
+    predecessorState?: unknown;
+    successorState?: unknown;
+    requiredMinutes?: number;
+    effectiveMinutes?: number;
+    standardMinutes?: number;
+    source?: string;
   }
 
   interface NimbusSetupObservation {

@@ -1,6 +1,6 @@
 """Plant-scoped, versioned persistence for observation-only setup data.
 
-This module deliberately owns setup definitions, matrix rows, physical line
+This module deliberately owns setup definitions, matrix rows, physical machine
 state, and occurrence overrides only.  It never changes an order's schedule.
 """
 from __future__ import annotations
@@ -65,11 +65,17 @@ def _values_by_field(fields: list[str], values) -> dict[str, object]:
 
 
 def _normalise_value(value) -> str:
+    """Canonicalize one setup-attribute value: trimmed and uppercased, so a
+    hand-typed "Black" and an ingested "BLACK" resolve to the same JSONB
+    state-key value. Booleans return early above (lowercase "true"/"false",
+    matching the TS side's String(true)/String(false)) and never reach the
+    final line, so they are exempt from the uppercase fold.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value).strip()
+    return str(value).strip().upper()
 
 
 def derived_order_state_values(fields, color, prt01, prt02, production_version) -> dict[str, object]:
@@ -181,7 +187,7 @@ def last_completed_order(rows: list[dict], captured_at: datetime) -> dict | None
 def should_replace_line_state(existing: dict | None, observed_at: datetime, source: str) -> bool:
     """Keep physical state monotonic in both observed time and source trust."""
     if source not in _STATE_SOURCES:
-        raise ValueError(f"Unknown line-state source: {source!r}")
+        raise ValueError(f"Unknown machine-state source: {source!r}")
     if not existing:
         return True
     prior_source = existing.get("source")
@@ -214,7 +220,13 @@ def _require_definition(cur, plant: str, signature_version: int, *, lock: bool =
 
 
 def set_definition_active(plant: str, active: bool, actor: str, *, expected_signature_version: int) -> dict:
-    """Toggle whether the setup-aware optimizer paths are live for this plant."""
+    """VESTIGIAL BUT RETAINED (Workstream D2, 2026-08-20): setup_definition.active
+    used to be the "include setup times in optimizer" gate. It no longer is —
+    that flag now lives on plants.setup_active (master_data.set_plant_setup_active
+    / PUT /plant/{plant}/setup-active), a durable plant-level setting instead of
+    one that resets to FALSE on every signature-version bump. This function and
+    its column are kept, unread by any gate, because removing them expands the
+    change's blast radius for no behavioral benefit."""
     plant = _required_text(plant, "Plant")
     actor = _required_text(actor, "Actor")
     if not isinstance(active, bool):
@@ -230,17 +242,22 @@ def set_definition_active(plant: str, active: bool, actor: str, *, expected_sign
             "strict_blanks": definition["strict_blanks"], "active": active}
 
 
-def _assert_line_owned(cur, plant: str, line: str) -> None:
+def _assert_line_owned(cur, plant: str, machine: str) -> None:
     cur.execute(
-        "SELECT 1 FROM production_lines WHERE plant = %s AND production_line = %s LIMIT 1",
-        (plant, line),
+        "SELECT 1 FROM machine WHERE plant = %s AND machine = %s LIMIT 1",
+        (plant, machine),
     )
     if cur.fetchone() is None:
-        raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+        raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
 
 
 def save_definition(plant, fields, strict_blanks, actor, *, expected_signature_version=None) -> dict:
-    """Create or edit a definition without rewriting any old-version keys."""
+    """Create or edit a definition without rewriting any old-version keys.
+
+    The force-reset-to-FALSE-on-signature-bump `active` logic below is kept
+    verbatim even though `active` is now vestigial (see set_definition_active's
+    docstring) — plants.setup_active, not this column, is the real optimizer
+    gate as of Workstream D2 (2026-08-20)."""
     plant = _required_text(plant, "Plant")
     actor = _required_text(actor, "Actor")
     field_keys = _normalise_fields(fields, allowed_fields=CONFIGURABLE_PRIORITY_FIELDS)
@@ -281,21 +298,21 @@ def save_definition(plant, fields, strict_blanks, actor, *, expected_signature_v
             "strict_blanks": strict_blanks, "active": active}
 
 
-def _insert_matrix_rows(cur, plant: str, line: str, version: int, rows: list[dict], actor: str) -> None:
+def _insert_matrix_rows(cur, plant: str, machine: str, version: int, rows: list[dict], actor: str) -> None:
     for row in rows:
         source = row["source"]
         if source not in _STATE_SOURCES:
             raise ValueError(f"Unknown matrix source: {source!r}")
         cur.execute(
             """INSERT INTO setup_matrix
-               (plant, line, signature_version, from_key, to_key, setup_min, source,
+               (plant, machine, signature_version, from_key, to_key, setup_min, source,
                 source_metadata, source_reference, created_by, updated_by)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (plant, line, signature_version, from_key, to_key) DO UPDATE
+               ON CONFLICT (plant, machine, signature_version, from_key, to_key) DO UPDATE
                SET setup_min = EXCLUDED.setup_min, source = EXCLUDED.source,
                    source_metadata = EXCLUDED.source_metadata, source_reference = EXCLUDED.source_reference,
                    updated_by = EXCLUDED.updated_by, updated_at = NOW()""",
-            (plant, line, version, Jsonb(row["from_key"]), Jsonb(row["to_key"]), row["setup_min"],
+            (plant, machine, version, Jsonb(row["from_key"]), Jsonb(row["to_key"]), row["setup_min"],
              source, Jsonb(row["source_metadata"]), row["source_reference"], actor, actor),
         )
 
@@ -306,48 +323,48 @@ def replace_plant_matrix(plant, rows, signature_version, actor) -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         definition = _require_definition(cur, plant, signature_version, lock=True)
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
-        cur.execute("DELETE FROM setup_matrix WHERE plant = %s AND line = '' AND signature_version = %s",
+        cur.execute("DELETE FROM setup_matrix WHERE plant = %s AND machine = '' AND signature_version = %s",
                     (plant, signature_version))
         _insert_matrix_rows(cur, plant, "", signature_version, normalized, actor)
         conn.commit()
-    return {"plant": plant, "line": "", "signature_version": signature_version, "rows": len(normalized)}
+    return {"plant": plant, "machine": "", "signature_version": signature_version, "rows": len(normalized)}
 
 
-def upsert_line_matrix_rows(plant, line, rows, signature_version, actor) -> dict:
+def upsert_line_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
-        _insert_matrix_rows(cur, plant, line, signature_version, normalized, actor)
+        _insert_matrix_rows(cur, plant, machine, signature_version, normalized, actor)
         conn.commit()
-    return {"plant": plant, "line": line, "signature_version": signature_version, "rows": len(normalized)}
+    return {"plant": plant, "machine": machine, "signature_version": signature_version, "rows": len(normalized)}
 
 
-def delete_line_matrix_rows(plant, line, rows, signature_version, actor) -> dict:
+def delete_line_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
         deleted = 0
         for row in normalized:
             cur.execute(
-                """DELETE FROM setup_matrix WHERE plant = %s AND line = %s AND signature_version = %s
+                """DELETE FROM setup_matrix WHERE plant = %s AND machine = %s AND signature_version = %s
                    AND from_key = %s AND to_key = %s""",
-                (plant, line, signature_version, Jsonb(row["from_key"]), Jsonb(row["to_key"])),
+                (plant, machine, signature_version, Jsonb(row["from_key"]), Jsonb(row["to_key"])),
             )
             deleted += cur.rowcount
         conn.commit()
-    return {"plant": plant, "line": line, "signature_version": signature_version, "deleted": deleted}
+    return {"plant": plant, "machine": machine, "signature_version": signature_version, "deleted": deleted}
 
 
 def delete_plant_matrix_rows(plant, rows, signature_version, actor) -> dict:
-    """Delete specified plant-wide rows only; sparse line inheritance is untouched."""
+    """Delete specified plant-wide rows only; sparse machine inheritance is untouched."""
     plant = _required_text(plant, "Plant")
     _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -356,59 +373,59 @@ def delete_plant_matrix_rows(plant, rows, signature_version, actor) -> dict:
         deleted = 0
         for row in normalized:
             cur.execute(
-                """DELETE FROM setup_matrix WHERE plant = %s AND line = '' AND signature_version = %s
+                """DELETE FROM setup_matrix WHERE plant = %s AND machine = '' AND signature_version = %s
                    AND from_key = %s AND to_key = %s""",
                 (plant, signature_version, Jsonb(row["from_key"]), Jsonb(row["to_key"])),
             )
             deleted += cur.rowcount
         conn.commit()
-    return {"plant": plant, "line": "", "signature_version": signature_version, "deleted": deleted}
+    return {"plant": plant, "machine": "", "signature_version": signature_version, "deleted": deleted}
 
 
-def _set_line_state_cur(cur, plant: str, line: str, state_key: list[dict[str, str]], signature_version: int,
+def _set_line_state_cur(cur, plant: str, machine: str, state_key: list[dict[str, str]], signature_version: int,
                         observed_at: datetime, source: str, reason: str | None, actor: str,
                         physical_mold_id: str | None = None) -> bool:
-    cur.execute("SELECT observed_at, source FROM line_setup_state WHERE plant = %s AND line = %s FOR UPDATE",
-                (plant, line))
+    cur.execute("SELECT observed_at, source FROM machine_setup_state WHERE plant = %s AND machine = %s FOR UPDATE",
+                (plant, machine))
     existing = cur.fetchone()
     if existing and not should_replace_line_state({"observed_at": existing[0], "source": existing[1]}, observed_at, source):
         return False
     cur.execute(
-        """INSERT INTO line_setup_state
-           (plant, line, state_key, signature_version, physical_mold_id, observed_at, source, reason,
+        """INSERT INTO machine_setup_state
+           (plant, machine, state_key, signature_version, physical_mold_id, observed_at, source, reason,
             created_by, updated_by)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (plant, line) DO UPDATE
+           ON CONFLICT (plant, machine) DO UPDATE
            SET state_key = EXCLUDED.state_key, signature_version = EXCLUDED.signature_version,
                physical_mold_id = EXCLUDED.physical_mold_id, observed_at = EXCLUDED.observed_at,
                source = EXCLUDED.source, reason = EXCLUDED.reason, updated_by = EXCLUDED.updated_by,
                updated_at = NOW()""",
-        (plant, line, Jsonb(state_key), signature_version, physical_mold_id, observed_at, source, reason, actor, actor),
+        (plant, machine, Jsonb(state_key), signature_version, physical_mold_id, observed_at, source, reason, actor, actor),
     )
     return True
 
 
-def set_line_state(plant, line, values, signature_version, observed_at, source, reason, actor,
+def set_line_state(plant, machine, values, signature_version, observed_at, source, reason, actor,
                    physical_mold_id=None) -> dict:
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     if source not in _STATE_SOURCES:
-        raise ValueError(f"Unknown line-state source: {source!r}")
+        raise ValueError(f"Unknown machine-state source: {source!r}")
     if source == "manual":
-        reason = _required_text(reason, "Manual line-state reason")
+        reason = _required_text(reason, "Manual machine-state reason")
     if not isinstance(observed_at, datetime):
         raise ValueError("observed_at must be a datetime")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         state_key = canonical_state_key(definition["fields"], values)
         if definition["strict_blanks"] and any(not item["value"] for item in state_key):
             raise ValueError("Blank setup-state values are not allowed by this definition")
-        accepted = _set_line_state_cur(cur, plant, line, state_key, signature_version, observed_at,
+        accepted = _set_line_state_cur(cur, plant, machine, state_key, signature_version, observed_at,
                                        source, reason, actor, physical_mold_id)
         conn.commit()
-    return {"plant": plant, "line": line, "accepted": accepted, "state_key": state_key,
+    return {"plant": plant, "machine": machine, "accepted": accepted, "state_key": state_key,
             "signature_version": signature_version}
 
 
@@ -430,18 +447,18 @@ def _plant_local_capture(cur, plant: str, captured_at: datetime | None) -> datet
         return captured_at.replace(tzinfo=None)
 
 
-def derive_line_state_before_replacement(plant, line, *, captured_at: datetime | None = None,
+def derive_line_state_before_replacement(plant, machine, *, captured_at: datetime | None = None,
                                          actor: str = "system", reason: str = "schedule replacement") -> dict:
     """Capture the last already-completed planned order before its source can disappear."""
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _definition(cur, plant, lock=True)
         if definition is None:
             conn.commit()
-            return {"plant": plant, "line": line, "accepted": False, "reason": "no_definition"}
+            return {"plant": plant, "machine": machine, "accepted": False, "reason": "no_definition"}
         captured_local = _plant_local_capture(cur, plant, captured_at)
         cur.execute(
             """SELECT o.id, o.color, o.prt_01, o.prt_02, o.production_version,
@@ -454,47 +471,47 @@ def derive_line_state_before_replacement(plant, line, *, captured_at: datetime |
                     SELECT MAX(scheduled_end) AS last_end FROM order_schedule_segments
                     WHERE order_id = o.id
                  ) seg ON TRUE
-                WHERE o.plant = %s AND o.production_line = %s
+                WHERE o.plant = %s AND o.machine = %s
                   AND COALESCE(seg.last_end,
                         COALESCE(o.scheduled_start, o.basic_start_date)
                           + (o.run_time * INTERVAL '1 hour'),
                         o.scheduled_end, o.basic_finish_date) <= %s
                 ORDER BY completed_at DESC, o.id DESC LIMIT 1""",
-            (plant, line, captured_local),
+            (plant, machine, captured_local),
         )
         row = cur.fetchone()
         if row is None:
             conn.commit()
-            return {"plant": plant, "line": line, "accepted": False, "reason": "no_completed_order"}
+            return {"plant": plant, "machine": machine, "accepted": False, "reason": "no_completed_order"}
         values = derived_order_state_values(definition["fields"], row[1], row[2], row[3], row[4])
         state_key = canonical_state_key(definition["fields"], values)
         if definition["strict_blanks"] and any(not item["value"] for item in state_key):
             conn.commit()
-            return {"plant": plant, "line": line, "accepted": False, "reason": "incomplete_state"}
+            return {"plant": plant, "machine": machine, "accepted": False, "reason": "incomplete_state"}
         accepted = _set_line_state_cur(
-            cur, plant, line, state_key, definition["signature_version"], row[5], "derived",
+            cur, plant, machine, state_key, definition["signature_version"], row[5], "derived",
             f"Derived immediately before {reason} from planned order {row[0]}", actor,
         )
         conn.commit()
-    return {"plant": plant, "line": line, "accepted": accepted, "order_id": row[0],
+    return {"plant": plant, "machine": machine, "accepted": accepted, "order_id": row[0],
             "captured_at": captured_local, "completed_at": row[5], "state_key": state_key,
             "signature_version": definition["signature_version"]}
 
 
 def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reason: str) -> list[dict]:
-    """Capture each existing setup-defined line immediately before a schedule mutation."""
+    """Capture each existing setup-defined machine immediately before a schedule mutation."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT DISTINCT o.plant, p.timezone, o.production_line FROM orders o
+            """SELECT DISTINCT o.plant, p.timezone, o.machine FROM orders o
                  JOIN setup_definition d ON d.plant = o.plant
-                 JOIN production_lines pl ON pl.plant = o.plant AND pl.production_line = o.production_line
+                 JOIN machine m ON m.plant = o.plant AND m.machine = o.machine
                  LEFT JOIN plants p ON p.plant = o.plant
-                WHERE o.plant IS NOT NULL AND o.production_line IS NOT NULL"""
+                WHERE o.plant IS NOT NULL AND o.machine IS NOT NULL"""
         )
         pairs = cur.fetchall()
     captures: dict[str, datetime] = {}
     results = []
-    for plant, timezone_name, line in pairs:
+    for plant, timezone_name, machine in pairs:
         if plant not in captures:
             try:
                 captures[plant] = (datetime.now(ZoneInfo(timezone_name)).replace(tzinfo=None)
@@ -502,15 +519,15 @@ def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reas
             except ZoneInfoNotFoundError:
                 captures[plant] = datetime.now()
         results.append(derive_line_state_before_replacement(
-            plant, line, captured_at=captures[plant], actor=actor, reason=reason
+            plant, machine, captured_at=captures[plant], actor=actor, reason=reason
         ))
     return results
 
 
-def upsert_occurrence_override(plant, line, predecessor_order_id, successor_order_id, predecessor_values,
+def upsert_occurrence_override(plant, machine, predecessor_order_id, successor_order_id, predecessor_values,
                                successor_values, standard_min, remaining_min, signature_version, reason, actor) -> dict:
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     reason = _required_text(reason, "Occurrence override reason")
     # ``None`` is the meaningful initial-state predecessor.  The API layer
@@ -519,7 +536,7 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
     predecessor_order_id = _optional_text(predecessor_order_id, "Predecessor order id")
     successor_order_id = _required_text(successor_order_id, "Successor order id")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         predecessor_key = canonical_state_key(definition["fields"], predecessor_values)
         successor_key = canonical_state_key(definition["fields"], successor_values)
@@ -529,48 +546,48 @@ def upsert_occurrence_override(plant, line, predecessor_order_id, successor_orde
         remaining = validate_override_minutes(remaining_min)
         cur.execute(
             """UPDATE setup_occurrence_override SET status = 'replaced', updated_by = %s, updated_at = NOW()
-                 WHERE plant = %s AND line = %s AND signature_version = %s
+                 WHERE plant = %s AND machine = %s AND signature_version = %s
                    AND predecessor_order_id IS NOT DISTINCT FROM %s AND successor_order_id = %s
                    AND predecessor_state_key = %s AND successor_state_key = %s AND status = 'active'""",
-            (actor, plant, line, signature_version, predecessor_order_id, successor_order_id,
+            (actor, plant, machine, signature_version, predecessor_order_id, successor_order_id,
              Jsonb(predecessor_key), Jsonb(successor_key)),
         )
         cur.execute(
             """INSERT INTO setup_occurrence_override
-               (plant, line, signature_version, predecessor_order_id, successor_order_id,
+               (plant, machine, signature_version, predecessor_order_id, successor_order_id,
                 predecessor_state_key, successor_state_key, standard_min, remaining_min, status,
                 reason, created_by, updated_by)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
                RETURNING id""",
-            (plant, line, signature_version, predecessor_order_id, successor_order_id,
+            (plant, machine, signature_version, predecessor_order_id, successor_order_id,
              Jsonb(predecessor_key), Jsonb(successor_key), standard, remaining, reason, actor, actor),
         )
         override_id = int(cur.fetchone()[0])
         conn.commit()
-    return {"id": override_id, "plant": plant, "line": line, "signature_version": signature_version,
+    return {"id": override_id, "plant": plant, "machine": machine, "signature_version": signature_version,
             "standard_min": standard, "remaining_min": remaining, "status": "active"}
 
 
-def update_occurrence_override(plant, line, override_id, standard_min, remaining_min,
+def update_occurrence_override(plant, machine, override_id, standard_min, remaining_min,
                                signature_version, reason, actor) -> dict:
     """Update the identified active override without changing its bound adjacency."""
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     reason = _required_text(reason, "Occurrence override reason")
     if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         cur.execute(
             """SELECT signature_version, status FROM setup_occurrence_override
-                 WHERE id = %s AND plant = %s AND line = %s FOR UPDATE""",
-            (override_id, plant, line),
+                 WHERE id = %s AND plant = %s AND machine = %s FOR UPDATE""",
+            (override_id, plant, machine),
         )
         existing = cur.fetchone()
         if existing is None:
-            raise ValueError("Setup override does not belong to this plant and line")
+            raise ValueError("Setup override does not belong to this plant and machine")
         if int(existing[0]) != definition["signature_version"]:
             raise ValueError("Setup override signature version is stale")
         if existing[1] != "active":
@@ -580,43 +597,43 @@ def update_occurrence_override(plant, line, override_id, standard_min, remaining
         cur.execute(
             """UPDATE setup_occurrence_override
                  SET standard_min = %s, remaining_min = %s, reason = %s, updated_by = %s, updated_at = NOW()
-                 WHERE id = %s AND plant = %s AND line = %s AND status = 'active'""",
-            (standard, remaining, reason, actor, override_id, plant, line),
+                 WHERE id = %s AND plant = %s AND machine = %s AND status = 'active'""",
+            (standard, remaining, reason, actor, override_id, plant, machine),
         )
         conn.commit()
-    return {"id": override_id, "plant": plant, "line": line, "signature_version": signature_version,
+    return {"id": override_id, "plant": plant, "machine": machine, "signature_version": signature_version,
             "standard_min": standard, "remaining_min": remaining, "status": existing[1]}
 
 
-def clear_occurrence_override(plant, line, override_id, signature_version, actor, reason) -> dict:
+def clear_occurrence_override(plant, machine, override_id, signature_version, actor, reason) -> dict:
     plant = _required_text(plant, "Plant")
-    line = _required_text(line, "Line")
+    machine = _required_text(machine, "Machine")
     actor = _required_text(actor, "Actor")
     reason = _required_text(reason, "Occurrence override clear reason")
     if isinstance(override_id, bool) or not isinstance(override_id, int) or override_id <= 0:
         raise ValueError("A positive override id is required")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _assert_line_owned(cur, plant, line)
+        _assert_line_owned(cur, plant, machine)
         definition = _require_definition(cur, plant, signature_version, lock=True)
         cur.execute(
             """SELECT signature_version FROM setup_occurrence_override
-                 WHERE id = %s AND plant = %s AND line = %s FOR UPDATE""",
-            (override_id, plant, line),
+                 WHERE id = %s AND plant = %s AND machine = %s FOR UPDATE""",
+            (override_id, plant, machine),
         )
         existing = cur.fetchone()
         if existing is None:
-            raise ValueError("Setup override does not belong to this plant and line")
+            raise ValueError("Setup override does not belong to this plant and machine")
         if int(existing[0]) != definition["signature_version"]:
             raise ValueError("Setup override signature version is stale")
         cur.execute(
             """UPDATE setup_occurrence_override
                  SET status = 'cleared', reason = %s, updated_by = %s, updated_at = NOW()
-                 WHERE id = %s AND plant = %s AND line = %s AND status = 'active'""",
-            (reason, actor, override_id, plant, line),
+                 WHERE id = %s AND plant = %s AND machine = %s AND status = 'active'""",
+            (reason, actor, override_id, plant, machine),
         )
         cleared = cur.rowcount == 1
         conn.commit()
-    return {"id": override_id, "plant": plant, "line": line, "cleared": cleared,
+    return {"id": override_id, "plant": plant, "machine": machine, "cleared": cleared,
             "signature_version": signature_version}
 
 
@@ -645,34 +662,34 @@ def get_setup_snapshot(plant: str) -> dict:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         definition = _definition(cur, plant)
         if definition is None:
-            return {"plant": plant, "definition": None, "plant_rows": [], "line_rows": [],
-                    "line_states": [], "overrides": []}
+            return {"plant": plant, "definition": None, "plant_rows": [], "machine_rows": [],
+                    "machine_states": [], "overrides": []}
         version = definition["signature_version"]
         cur.execute(
-            """SELECT line, signature_version, from_key, to_key, setup_min, source, source_metadata,
+            """SELECT machine, signature_version, from_key, to_key, setup_min, source, source_metadata,
                       source_reference, created_by, created_at, updated_by, updated_at
-                 FROM setup_matrix WHERE plant = %s AND signature_version = %s ORDER BY line, from_key, to_key""",
+                 FROM setup_matrix WHERE plant = %s AND signature_version = %s ORDER BY machine, from_key, to_key""",
             (plant, version),
         )
         matrix = [
-            {"line": r[0], "signature_version": int(r[1]), "from_key": r[2], "to_key": r[3],
+            {"machine": r[0], "signature_version": int(r[1]), "from_key": r[2], "to_key": r[3],
              "setup_min": int(r[4]), "source": r[5], "source_metadata": r[6], "source_reference": r[7],
              "created_by": r[8], "created_at": _iso(r[9]), "updated_by": r[10], "updated_at": _iso(r[11])}
             for r in cur.fetchall()
         ]
         cur.execute(
-            """SELECT line, state_key, signature_version, physical_mold_id, observed_at, source, reason,
+            """SELECT machine, state_key, signature_version, physical_mold_id, observed_at, source, reason,
                       created_by, created_at, updated_by, updated_at
-                 FROM line_setup_state WHERE plant = %s AND signature_version = %s ORDER BY line""", (plant, version)
+                 FROM machine_setup_state WHERE plant = %s AND signature_version = %s ORDER BY machine""", (plant, version)
         )
         states = [
-            {"line": r[0], "state_key": r[1], "signature_version": int(r[2]), "physical_mold_id": r[3],
+            {"machine": r[0], "state_key": r[1], "signature_version": int(r[2]), "physical_mold_id": r[3],
              "observed_at": _iso(r[4]), "source": r[5], "reason": r[6], "created_by": r[7],
              "created_at": _iso(r[8]), "updated_by": r[9], "updated_at": _iso(r[10])}
             for r in cur.fetchall()
         ]
         cur.execute(
-            """SELECT id, line, signature_version, predecessor_order_id, successor_order_id,
+            """SELECT id, machine, signature_version, predecessor_order_id, successor_order_id,
                       predecessor_state_key, successor_state_key, standard_min, remaining_min, status, reason,
                       created_by, created_at, updated_by, updated_at
                  FROM setup_occurrence_override
@@ -680,7 +697,7 @@ def get_setup_snapshot(plant: str) -> dict:
             (plant, version),
         )
         overrides = [
-            {"id": int(r[0]), "line": r[1], "signature_version": int(r[2]),
+            {"id": int(r[0]), "machine": r[1], "signature_version": int(r[2]),
              "predecessor_order_id": r[3], "successor_order_id": r[4],
              "predecessor_state_key": r[5], "successor_state_key": r[6], "standard_min": int(r[7]),
              "remaining_min": int(r[8]), "status": r[9], "reason": r[10], "created_by": r[11],
@@ -689,9 +706,9 @@ def get_setup_snapshot(plant: str) -> dict:
         ]
     definition = {**definition, "plant": plant}
     return {"plant": plant, "definition": definition,
-            "plant_rows": [row for row in matrix if row["line"] == ""],
-            "line_rows": [row for row in matrix if row["line"] != ""],
-            "line_states": states, "overrides": overrides}
+            "plant_rows": [row for row in matrix if row["machine"] == ""],
+            "machine_rows": [row for row in matrix if row["machine"] != ""],
+            "machine_states": states, "overrides": overrides}
 
 
 # ---------------------------------------------------------------------------
@@ -714,27 +731,27 @@ def _state_token(state: list[dict[str, str]]) -> str:
     return json.dumps(state, sort_keys=True, separators=(",", ":"))
 
 
-def _coverage_row(rows: list[dict], line: str, version: int, from_key: list[dict[str, str]],
+def _coverage_row(rows: list[dict], machine: str, version: int, from_key: list[dict[str, str]],
                   to_key: list[dict[str, str]]) -> dict | None:
-    """Resolve line scope before plant scope, mirroring the domain contract."""
-    for scope in (line, ""):
+    """Resolve machine scope before plant scope, mirroring the domain contract."""
+    for scope in (machine, ""):
         for row in rows:
-            if (row.get("line", "") == scope and row.get("signature_version") == version
+            if (row.get("machine", "") == scope and row.get("signature_version") == version
                     and row.get("from_key") == from_key and row.get("to_key") == to_key):
                 return row
     return None
 
 
-def _coverage_pair(definition: dict, rows: list[dict], line: str, from_key, to_key) -> dict | None:
+def _coverage_pair(definition: dict, rows: list[dict], machine: str, from_key, to_key) -> dict | None:
     from_state = _coverage_state(definition, from_key)
     to_state = _coverage_state(definition, to_key)
     if from_state is None or to_state is None:
         return None
-    row = _coverage_row(rows, line, definition["signature_version"], from_state, to_state)
-    scope = "line" if row and row.get("line") else "plant"
+    row = _coverage_row(rows, machine, definition["signature_version"], from_state, to_state)
+    scope = "machine" if row and row.get("machine") else "plant"
     covered = row is not None or from_state == to_state
     return {
-        "line": line,
+        "machine": machine,
         "scope": scope,
         "from_key": from_state,
         "to_key": to_state,
@@ -749,30 +766,30 @@ def _coverage_summary(pairs: list[dict]) -> dict:
             "missing_pairs": len(missing), "missing": missing}
 
 
-def build_setup_coverage(definition: dict, plant_rows: list[dict], line_rows: list[dict],
+def build_setup_coverage(definition: dict, plant_rows: list[dict], machine_rows: list[dict],
                          observed_transitions: list[dict], reachable_states: dict[str, list]) -> dict:
     """Build deduplicated observed/reachable coverage without mutating inputs.
 
     `observed_transitions` supplies actual schedule adjacencies. `reachable_states`
-    supplies the valid state universe per line; its Cartesian product is the
-    prospective search surface. Explicit matrix rows win at line scope, then
+    supplies the valid state universe per machine; its Cartesian product is the
+    prospective search surface. Explicit matrix rows win at machine scope, then
     plant scope, then a complete diagonal is implicitly covered at zero.
     """
     if not isinstance(definition, dict) or not isinstance(definition.get("signature_version"), int):
         raise ValueError("A versioned setup definition is required")
-    rows = [*plant_rows, *line_rows]
+    rows = [*plant_rows, *machine_rows]
 
     def unique(items):
         seen: set[tuple[str, str, str]] = set()
         result: list[dict] = []
         for item in items:
-            line = item.get("line")
-            if not isinstance(line, str) or not line:
+            machine = item.get("machine")
+            if not isinstance(machine, str) or not machine:
                 continue
-            pair = _coverage_pair(definition, rows, line, item.get("from_key"), item.get("to_key"))
+            pair = _coverage_pair(definition, rows, machine, item.get("from_key"), item.get("to_key"))
             if pair is None:
                 continue
-            key = (line, _state_token(pair["from_key"]), _state_token(pair["to_key"]))
+            key = (machine, _state_token(pair["from_key"]), _state_token(pair["to_key"]))
             if key not in seen:
                 seen.add(key)
                 result.append(pair)
@@ -780,83 +797,90 @@ def build_setup_coverage(definition: dict, plant_rows: list[dict], line_rows: li
 
     observed = unique(observed_transitions)
     reachable_candidates: list[dict] = []
-    for line in sorted(reachable_states):
+    for machine in sorted(reachable_states):
         valid: dict[str, list[dict[str, str]]] = {}
-        for state in reachable_states[line]:
+        for state in reachable_states[machine]:
             canonical = _coverage_state(definition, state)
             if canonical is not None:
                 valid.setdefault(_state_token(canonical), canonical)
         for from_state in valid.values():
             for to_state in valid.values():
-                reachable_candidates.append({"line": line, "from_key": from_state, "to_key": to_state})
+                reachable_candidates.append({"machine": machine, "from_key": from_state, "to_key": to_state})
     reachable = unique(reachable_candidates)
     return {"observed": _coverage_summary(observed), "reachable": _coverage_summary(reachable)}
 
 
-def page_missing_pairs(rows: list[dict], *, line: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+def page_missing_pairs(rows: list[dict], *, machine: str | None = None, offset: int = 0, limit: int = 100) -> dict:
     """Return a bounded, stable page of missing pairs for UI and CSV callers."""
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ValueError("offset must be a nonnegative integer")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
-    filtered = [row for row in rows if line is None or row.get("line") == line]
+    filtered = [row for row in rows if machine is None or row.get("machine") == machine]
     return {"rows": filtered[offset:offset + limit],
             "meta": {"total": len(filtered), "offset": offset, "limit": limit}}
 
 
-def page_matrix_rows(plant: str, line: str, signature_version: int, *, from_key: list | None = None,
+def page_matrix_rows(plant: str, machine: str, signature_version: int, *, from_key: list | None = None,
                      offset: int = 0, limit: int = 100) -> dict:
     """Return one bounded, from-state-scoped page of effective matrix rows.
 
-    Scoped by line (plant-default rows plus this one line's overrides) so a
-    List view never has to load every line's recorded rows for the whole
+    Scoped by machine (plant-default rows plus this one machine's overrides) so a
+    List view never has to load every machine's recorded rows for the whole
     plant, unlike get_setup_snapshot. When from_key is supplied the SQL WHERE
     filters on it directly (JSONB equality on the canonical, deterministically
     ordered key), so the common "rows starting from one state" case is a
     narrow, indexed lookup rather than a fetch-then-filter.
     """
     plant = _required_text(plant, "Plant")
-    line = line or ""
+    machine = machine or ""
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ValueError("offset must be a nonnegative integer")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
     with _pool.connection() as conn, conn.cursor() as cur:
-        _require_definition(cur, plant, signature_version, lock=False)
-        where = ["plant = %s", "signature_version = %s", "line IN ('', %s)"]
-        params: list = [plant, signature_version, line]
+        definition = _require_definition(cur, plant, signature_version, lock=False)
+        where = ["plant = %s", "signature_version = %s", "machine IN ('', %s)"]
+        params: list = [plant, signature_version, machine]
         if from_key is not None:
+            # from_key arrives already decomposed into the canonical [{fieldKey,
+            # value}] shape (brain.py just json.loads'd a query string), but its
+            # values are raw caller input — a hand-typed "Black" must still match
+            # a stored, already-folded "BLACK" key, so route it through the same
+            # canonicalization every write path uses before the JSONB equality
+            # comparison, instead of comparing byte-wise against stored keys.
+            canonical_from_key = canonical_state_key(definition["fields"], from_key)
             where.append("from_key = %s")
-            params.append(Jsonb(from_key))
+            params.append(Jsonb(canonical_from_key))
         clause = " AND ".join(where)
         cur.execute(
-            f"SELECT line, from_key, to_key, setup_min, source FROM setup_matrix "
-            f"WHERE {clause} ORDER BY from_key, to_key, line DESC",
+            f"SELECT machine, from_key, to_key, setup_min, source FROM setup_matrix "
+            f"WHERE {clause} ORDER BY from_key, to_key, machine DESC",
             params,
         )
         raw = cur.fetchall()
-    # Merge line-over-plant inheritance in Python — the raw set is already
-    # bounded to one line's scope (plus plant-default) by the SQL above, so
+    # Merge machine-over-plant inheritance in Python — the raw set is already
+    # bounded to one machine's scope (plus plant-default) by the SQL above, so
     # this mirrors the client's effectiveRows() at a scale the query already
     # narrowed, not a second unbounded fetch.
     plant_by_key: dict[str, dict] = {}
-    line_by_key: dict[str, dict] = {}
+    machine_by_key: dict[str, dict] = {}
     for r in raw:
         key = f"{json.dumps(r[1], sort_keys=True)} {json.dumps(r[2], sort_keys=True)}"
         entry = {"from_key": r[1], "to_key": r[2], "setup_min": int(r[3]), "source": r[4]}
         if r[0] == "":
             plant_by_key[key] = entry
         else:
-            line_by_key[key] = entry
+            machine_by_key[key] = entry
     merged: dict[str, dict] = {}
     for key, entry in plant_by_key.items():
-        merged[key] = {**entry, "inherited": not line, "plant_value": entry["setup_min"]}
-    for key, entry in line_by_key.items():
+        merged[key] = {**entry, "inherited": not machine, "plant_value": entry["setup_min"]}
+    for key, entry in machine_by_key.items():
         plant_value = plant_by_key.get(key, {}).get("setup_min")
         merged[key] = {**entry, "inherited": False, "plant_value": plant_value}
     rows = list(merged.values())
     total = len(rows)
-    return {"plant": plant, "line": line, "signature_version": signature_version,
+    return {"plant": plant, "machine": machine, "signature_version": signature_version,
             "rows": rows[offset:offset + limit],
             "meta": {"total": total, "offset": offset, "limit": limit}}
 
@@ -874,25 +898,25 @@ def get_setup_coverage(plant: str) -> dict:
     select_attributes = ", ".join(columns)
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            f"""SELECT production_line, COALESCE(scheduled_start, basic_start_date),
+            f"""SELECT machine, COALESCE(scheduled_start, basic_start_date),
                        {select_attributes}
                   FROM orders
-                 WHERE plant = %s AND production_line IS NOT NULL
-                 ORDER BY production_line, COALESCE(scheduled_start, basic_start_date), id""",
+                 WHERE plant = %s AND machine IS NOT NULL
+                 ORDER BY machine, COALESCE(scheduled_start, basic_start_date), id""",
             (plant,),
         )
-        by_line: dict[str, list[list[dict[str, str]]]] = {}
+        by_machine: dict[str, list[list[dict[str, str]]]] = {}
         for row in cur.fetchall():
-            line = row[0]
-            if not line:
+            machine = row[0]
+            if not machine:
                 continue
             values = {field: row[index + 2] for index, field in enumerate(definition["fields"])}
             state = _coverage_state(definition, values)
             if state is not None:
-                by_line.setdefault(line, []).append(state)
+                by_machine.setdefault(machine, []).append(state)
     transitions: list[dict] = []
-    for line, states in by_line.items():
-        transitions.extend({"line": line, "from_key": states[index - 1], "to_key": states[index]}
+    for machine, states in by_machine.items():
+        transitions.extend({"machine": machine, "from_key": states[index - 1], "to_key": states[index]}
                            for index in range(1, len(states)))
-    result = build_setup_coverage(definition, snapshot["plant_rows"], snapshot["line_rows"], transitions, by_line)
+    result = build_setup_coverage(definition, snapshot["plant_rows"], snapshot["machine_rows"], transitions, by_machine)
     return {"plant": plant, "definition": definition, **result}

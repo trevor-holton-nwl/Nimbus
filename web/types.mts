@@ -34,7 +34,7 @@
 export interface NimbusTask {
   id: string;
   text?: string;
-  PRODUCTION_LINE: string;
+  MACHINE: string;
   PLANT?: string;
   /** Distinct lowercase field used by Selection.selectedRefs; likely a legacy alias of PLANT. */
   plant: string | null;
@@ -90,7 +90,12 @@ export type SplitOrderPolicy = 'never' | 'overlong_only' | 'partial_allowed';
 
 export interface NimbusBlock {
   id: string;
-  /** null = all lines in the plant. */
+  /** null = all lines in the plant. Internal Store field name kept as `line`
+   *  even though the GET/POST /plant-calendar wire field is now `machine` —
+   *  this type is used far beyond that one wire boundary (Timeline rendering,
+   *  Interaction, ProdLines, generic Store.addBlock callers), so renaming it
+   *  would ripple outside this task's scope. CalendarSync translates at the
+   *  wire boundary instead (schedule-data.mts _applyConfig / _blockPayload). */
   line: string | null;
   /** null = legacy global block. */
   plant: string | null;
@@ -124,9 +129,9 @@ export interface NimbusLineSetting {
 }
 
 export interface NimbusMasterLine {
-  production_line: string;
+  machine: string;
   plant: string;
-  pl_group?: string;
+  wc_group?: string;
   /** A line that cannot safely use the plant's active setup signature must
    * opt out of detached setup-aware evaluation. Omitted preserves the legacy
    * compatible behavior for cached/current snapshots. */
@@ -147,10 +152,10 @@ export interface ConstraintConfig {
   children?: ConstraintConfig[];
 }
 
-/** {line_or_empty: {field_key: {NORMALIZED_VALUE: RANK}}} — matches
+/** {machine_or_empty: {field_key: {NORMALIZED_VALUE: RANK}}} — matches
  *  brain.PLANT_LISTS' native shape verbatim (GET /priority-rank-maps does no
- *  reshaping, since it's on the optimizer's hot path). Line-first because
- *  Engine._sortTerms' per-task term resolves "this order's line, else
+ *  reshaping, since it's on the optimizer's hot path). Machine-first because
+ *  Engine._sortTerms' per-task term resolves "this order's machine, else
  *  plant-wide" before it knows which field it's looking up. */
 export type PriorityRankMaps = Record<string, Record<string, Record<string, number>>>;
 
@@ -163,10 +168,10 @@ export interface PriorityFieldMeta {
   default_label: string;
 }
 
-/** One (plant, line, field_key) row's metadata, from list_priority_lists_meta. */
+/** One (plant, machine, field_key) row's metadata, from list_priority_lists_meta. */
 export interface PriorityListRow {
   plant: string;
-  line: string;
+  machine: string;
   field_key: string;
   uploaded_at: string | null;
   uploaded_by: string | null;
@@ -178,7 +183,7 @@ export interface PriorityListRow {
 export interface PriorityListFieldSummary {
   default_label: string;
   plant_wide: PriorityListRow | null;
-  line_overrides: PriorityListRow[];
+  machine_overrides: PriorityListRow[];
   coverage: Record<string, { distinct_values: number; ranked_values: number }>;
 }
 export interface PriorityListsForPlant {
@@ -191,7 +196,7 @@ export interface PriorityListEntry { value: string; rank: number; }
 export interface PriorityListResponse {
   plant: string;
   field_key: string;
-  line: string;
+  machine: string;
   entries: PriorityListEntry[];
   meta: { uploaded_at: string | null; uploaded_by: string | null; filename: string | null; row_count: number };
 }
@@ -219,6 +224,14 @@ export interface NimbusMasterPlant {
   split_order_policy?: SplitOrderPolicy | null;
   /** Nullable whole calendar days an order may be scheduled before its due-date day. */
   max_pull_forward_days?: number | null;
+  /** Workstream D2 (2026-08-20): the durable, plant-level "include setup times
+   *  in optimizer" flag (plants.setup_active) — attached by master_data.py's
+   *  list_rows sidecar the same way split_order_policy is, for the Scheduling
+   *  Rules panel's checkbox. The optimizer/UI GATE itself reads
+   *  SetupSnapshot.plant_active (same underlying column, fetched via
+   *  GET /setup/{plant}), not this field — this one is display/edit-source
+   *  for the relocated checkbox only. */
+  setup_active?: boolean;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */
@@ -257,9 +270,9 @@ export interface SetupDefinition {
   active: boolean;
 }
 
-/** A long-form setup-matrix row. `line === ''` represents the plant default. */
+/** A long-form setup-matrix row. `machine === ''` represents the plant default. */
 export interface SetupMatrixRow {
-  line: string;
+  machine: string;
   signature_version: number;
   from_key: SetupStateKey;
   to_key: SetupStateKey;
@@ -270,7 +283,7 @@ export interface SetupMatrixRow {
 }
 
 export interface LineSetupState {
-  line: string;
+  machine: string;
   state_key: SetupStateKey;
   signature_version: number;
   physical_mold_id?: string | null;
@@ -282,7 +295,7 @@ export interface LineSetupState {
 /** An exact, remaining-work override for one predecessor/successor occurrence. */
 export interface SetupOccurrenceOverride {
   id: string | number;
-  line: string;
+  machine: string;
   signature_version: number;
   predecessor_order_id: string | null;
   successor_order_id: string;
@@ -301,9 +314,18 @@ export interface SetupSnapshot {
   plant: string;
   definition: SetupDefinition | null;
   plant_rows: SetupMatrixRow[];
-  line_rows: SetupMatrixRow[];
-  line_states: LineSetupState[];
+  machine_rows: SetupMatrixRow[];
+  machine_states: LineSetupState[];
   overrides: SetupOccurrenceOverride[];
+  /** Workstream D2 (2026-08-20): the real "include setup times in optimizer"
+   *  gate, sourced from plants.setup_active — durable and plant-level, unlike
+   *  `definition.active` (per-signature-version, force-reset to FALSE on
+   *  every signature bump, now vestigial-but-retained; see setup_data.py).
+   *  Deliberately a SEPARATE top-level field rather than an overload of
+   *  `definition.active`, so this gate, machine.setup_compatible (per-machine),
+   *  and the `plant === plant` snapshot-identity check all stay independently
+   *  inspectable — never conflated into one meaning. */
+  plant_active: boolean;
   freshness?: { signature_version: number | null; request_id: string };
 }
 
@@ -327,13 +349,13 @@ export type TimelineItemKind = 'order' | 'order-segment' | 'setup' | 'blackout' 
 /** Pure setup-resolution input; callers supply only the selected plant's snapshot. */
 export interface ResolveSetupInput {
   definition: SetupDefinition;
-  line: string;
+  machine: string;
   predecessorState: SetupStateKey | null;
   successorState: SetupStateKey | null;
   predecessorOrderId?: string | null;
   successorOrderId: string;
   plantRows: ReadonlyArray<SetupMatrixRow>;
-  lineRows: ReadonlyArray<SetupMatrixRow>;
+  machineRows: ReadonlyArray<SetupMatrixRow>;
   overrides: ReadonlyArray<SetupOccurrenceOverride>;
 }
 

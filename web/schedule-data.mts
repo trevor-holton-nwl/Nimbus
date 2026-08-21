@@ -52,7 +52,7 @@ type BaselineCorrectResult = components['schemas']['BaselineCorrectResult'];
 // -- Local type declarations (Phase 4 conversion; scoped to this file, for the
 //    endpoints Task 1 did not add a backend response_model= for) ------------
 
-/** GET /master-data/plants and /master-data/production_lines share this
+/** GET /master-data/plants and /master-data/machine share this
  *  envelope (master_data.py); `rows`' element shape differs per endpoint, so
  *  this is generic over it. */
 interface MasterDataRowsResponse<T> {
@@ -60,9 +60,9 @@ interface MasterDataRowsResponse<T> {
 }
 
 interface MasterLineRow {
-  production_line: string;
+  machine: string;
   plant: string;
-  pl_group?: string;
+  wc_group?: string;
 }
 
 interface MasterPlantRow {
@@ -88,7 +88,7 @@ interface HealthResponse {
 interface PlantCalendarConfig {
   plant_work_hours?: WorkHours;
   line_work_hours?: Record<string, WorkHours>;
-  line_blackouts?: Array<{ id: string; line: string | null; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
+  machine_blackouts?: Array<{ id: string; machine: string | null; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
   plant_blackouts?: Array<{ id: string; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
 }
 
@@ -305,7 +305,7 @@ export const Persistence = {
       Persistence.loadPriorityRankMaps(null);
       return Promise.all([
         fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-        fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+        fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           Store.setMasterData({
@@ -352,7 +352,7 @@ export const Persistence = {
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
             fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-            fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+            fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           ]).then(([pData, lData]) => {
             if (pData || lData) {
               Store.setMasterData({
@@ -419,7 +419,7 @@ export const Persistence = {
         // Sync plant from backend task data BEFORE setTasks so Timeline.rebuild()
         // called synchronously by the tasks:bulk subscriber sees correct plant assignments
         for (const t of tasks) {
-          const line = t.PRODUCTION_LINE;
+          const line = t.MACHINE;
           if (!line || !t.PLANT) continue;
           Store.ensureLineSettings(line);
           Store.lineSettings[line].plant = t.PLANT;
@@ -455,7 +455,7 @@ export const Persistence = {
         (payload.links || []).forEach(link => {
           (Store.dependencies[link.target] ||= []).push(link.source);
         });
-        for (const t of Store.tasksArr) Store.ensureCalendar(t.PRODUCTION_LINE || 'Unknown');
+        for (const t of Store.tasksArr) Store.ensureCalendar(t.MACHINE || 'Unknown');
         Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
 
         // Integrity reconciliation — compare received vs rendered, not total-emitted vs rendered,
@@ -482,7 +482,7 @@ export const Persistence = {
         // master_data.get_system_settings()/GET /system-settings in brain.py.
         Promise.all([
           fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-          fetch(`${Config.API_BASE}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+          fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           fetch(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
         ]).then(([pData, lData, ssData]) => {
           if (pData || lData) {
@@ -671,7 +671,7 @@ export const Persistence = {
       }
 
       for (const t of tasks) {
-        const line = t.PRODUCTION_LINE;
+        const line = t.MACHINE;
         if (!line) continue;
         if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
         const durationMs = t.end_date.getTime() - t.start_date.getTime();
@@ -744,7 +744,7 @@ export const Persistence = {
       // re-upload re-arms detection by overwriting basic_finish_date back
       // into a raw shape.
       for (const t of tasks) {
-        const line = t.PRODUCTION_LINE;
+        const line = t.MACHINE;
         if (!line) continue;
         // Guard against a missing/invalid baseline (e.g. an incomplete future
         // SAP-sync field map) rather than assume original_start_date is always
@@ -974,7 +974,7 @@ export const Persistence = {
       Persistence._restoreNonTaskState(data);
       // Sync plant from task data for any lines not yet in lineSettings
       for (const t of tasks) {
-        const line = t.PRODUCTION_LINE;
+        const line = t.MACHINE;
         if (!line || !t.PLANT) continue;
         Store.ensureLineSettings(line);
         if (!Store.lineSettings[line].plant) {
@@ -986,8 +986,8 @@ export const Persistence = {
         const t = Store.tasks[id]; if (t) t.fixed = true;
       }
       for (const t of tasks) {
-        Store.ensureCalendar(t.PRODUCTION_LINE || 'Unknown');
-        Store.ensureLineSettings(t.PRODUCTION_LINE || 'Unknown');
+        Store.ensureCalendar(t.MACHINE || 'Unknown');
+        Store.ensureLineSettings(t.MACHINE || 'Unknown');
       }
       Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
       Toast.show(Util.t('toast.loaded_cache', { count: tasks.length }), 'info');
@@ -1072,7 +1072,7 @@ export const Persistence = {
             id: String(id),
             text: `ORD-${String(id).padStart(4, '0')}`,
             ORDER: `ORD-${id}`,
-            PRODUCTION_LINE: line,
+            MACHINE: line,
             COLOR: colors[(id + day) % colors.length],
             FORM_SIZE: forms[(id + day) % forms.length],
             MATERIAL_DESCRIPTION: `Product ${String.fromCharCode(65 + (id % 8))}-${100 + id}`,
@@ -1282,7 +1282,7 @@ export const Persistence = {
     return Persistence.load({ plant });
   },
 
-  /** Fetch this plant's priority rank maps ({line_or_empty: {field_key: {VALUE:
+  /** Fetch this plant's priority rank maps ({machine_or_empty: {field_key: {VALUE:
    *  RANK}}}) — the optimizer's Stage 3 hot-path tie-break source (GET
    *  /priority-rank-maps, brain.py's in-memory PLANT_LISTS, no reshaping). Unlike
    *  loadForPlant, this deliberately does NOT skip on "already loaded for this
@@ -1569,7 +1569,7 @@ export const CalendarSync = {
     const has = {
       plantHours:     !!cfg.plant_work_hours,
       lineHours:      Object.keys(cfg.line_work_hours || {}).length > 0,
-      lineBlackouts:  (cfg.line_blackouts || []).length > 0,
+      lineBlackouts:  (cfg.machine_blackouts || []).length > 0,
       plantBlackouts: (cfg.plant_blackouts || []).length > 0,
     };
     // A missing blackout slice is the migration path for older local caches.
@@ -1601,8 +1601,8 @@ export const CalendarSync = {
         const keptBlocks = Store.blocks.filter(b => b.plant !== plant);
         Store.blocks.length = 0;
         Store.blocks.push(...keptBlocks);
-        for (const b of cfg.line_blackouts!) {
-          Store.blocks.push({ id: b.id, line: b.line || null, plant,
+        for (const b of cfg.machine_blackouts!) {
+          Store.blocks.push({ id: b.id, line: b.machine || null, plant,
             start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusBlock);
         }
       }
@@ -1685,7 +1685,7 @@ export const CalendarSync = {
       const lines = Object.keys(Store.calendars)
         .filter(l => Store.getPlantForLine(l) === plant
                   && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
-        .map(l => ({ production_line: l, work_hours: Store.calendars[l].workHours }));
+        .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
       if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
     }
     if (!has.lineBlackouts) {
@@ -1777,7 +1777,7 @@ export const CalendarSync = {
     const pending = this._pendingLineHours[plant];
     if (!pending || !Object.keys(pending).length) return;
     delete this._pendingLineHours[plant];
-    const lines = Object.entries(pending).map(([production_line, work_hours]) => ({ production_line, work_hours }));
+    const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
     return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
   },
 
@@ -1810,7 +1810,7 @@ export const CalendarSync = {
     this.savePlantHours(plant, Store.plants[plant]?.workHours);
     const lines = Object.keys(Store.calendars)
       .filter(l => Store.getPlantForLine(l) === plant)
-      .map(l => ({ production_line: l, work_hours: Store.calendars[l].workHours }));
+      .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
     if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
     const lineBk = Store.blocks.filter(b => b.plant === plant);
     const lineDeletes = removed.line || [];
@@ -1827,11 +1827,14 @@ export const CalendarSync = {
   },
 
   /* ----- internals ------------------------------------------------------- */
-  _blockPayload(b: NimbusBlock | NimbusPlantBlock, withLine: boolean): { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; line?: string | null } {
+  _blockPayload(b: NimbusBlock | NimbusPlantBlock, withLine: boolean): { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; machine?: string | null } {
     const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-    const o: { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; line?: string | null } =
+    const o: { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; machine?: string | null } =
       { id: b.id, start: s ? s.toISOString() : null, end: e ? e.toISOString() : null, reason: b.reason || null };
-    if (withLine) o.line = (b as NimbusBlock).line || null;
+    // Outgoing wire key is "machine" (backend's _prepare_blackouts reads
+    // b.get("machine")); NimbusBlock's own internal field stays "line" — see
+    // types.mts NimbusBlock comment for why the internal name wasn't renamed.
+    if (withLine) o.machine = (b as NimbusBlock).line || null;
     return o;
   },
 

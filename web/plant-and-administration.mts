@@ -45,6 +45,12 @@ import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from './types.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+// Workstream E's universal table browser (admin-tables.mjs) is a standalone
+// module, same placement rationale as MaterialGrids (master-data-grids.mjs) —
+// a plain real-ESM import, not a window.__NIMBUS_* bridge, since both files
+// are real ES modules in the same build graph (see admin-tables.mts's own
+// header comment for why no bridge is needed here).
+import { AdminTables } from './admin-tables.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in
@@ -116,7 +122,7 @@ type SetupGridState = { key: SetupStateKey; sig: string; parts: string[] };
  *  this cell" (delete the row if one exists). `line` is the scope the edit
  *  was staged under (captured at edit time, not read from current state at
  *  save time — a mid-edit scope switch must not silently retag it). */
-type SetupGridEdit = { row: SetupGridState; col: SetupGridState; setup_min: number | null; line: string };
+type SetupGridEdit = { row: SetupGridState; col: SetupGridState; setup_min: number | null; machine: string };
 type SetupGridModel = { fields: string[]; rowStates: SetupGridState[]; colStates: SetupGridState[]; cellLookup: Map<string, Map<string, EffectiveSetupRow>> };
 
 /**
@@ -171,6 +177,15 @@ export const SetupAdmin = (() => {
   // key instead of leaking it — see refreshNewRowStatus.
   let _listNewRows: Array<{ id: number; from: string; to: string; minutes: string; stagedKey: string | null }> = [];
   let _listNextRowId = 1;
+  // Workstream D3 (2026-08-20): List-view multi-select for bulk delete, keyed
+  // by the same `${fromSig} ${toSig}` string every other List-view map uses.
+  // Cleared on every successful delete and whenever the scope (plant/line)
+  // changes, so a stale key from a different scope never inflates the
+  // "Delete selected (N)" count.
+  let _listSelected: Set<string> = new Set();
+  // The scope-level "delete all rows" typed-confirmation input's live value
+  // (OD-D3a) — reset on scope change and after a successful delete-all.
+  let _deleteAllConfirmText = '';
   // Single floating editor that repositions over whichever cell is focused,
   // replacing one live <input> per cell (§7/§9-C.3) — the read-only <td>s
   // this replaces are far cheaper to paint at MAX_AXIS² scale than an <input>
@@ -222,36 +237,56 @@ export const SetupAdmin = (() => {
     return Number.isInteger(candidate) && candidate === current;
   }
 
-  function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }): { active: boolean; reason: string } {
+  /** The status chip's four-reason logic. The first three reasons
+   *  (no-definition / version-mismatch / coverage-pending / coverage-fail)
+   *  are about definition READINESS and are untouched by Workstream D2. The
+   *  final branch used to read `definition.active`; it now takes
+   *  `plantActive` (sourced from SetupSnapshot.plant_active, i.e.
+   *  plants.setup_active) as an explicit parameter — the relocated
+   *  checkbox's flag, independent of the definition object entirely. The
+   *  default keeps every existing caller/test that only exercises the first
+   *  three reasons passing unchanged. */
+  function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }, plantActive: boolean = false): { active: boolean; reason: string } {
     if (!definition) return { active: false, reason: setupText('ui.setup_status_no_definition', 'Create an ordered setup signature before setup-aware optimization can be reviewed.') };
     if (checks.matrixVersion !== definition.signature_version) {
       return { active: false, reason: setupText('ui.setup_status_version_mismatch', 'Activation is disabled: a version-matched matrix is required after a definition change.') };
     }
     if (checks.coveragePass === undefined) return { active: false, reason: setupText('ui.setup_status_coverage_pending', 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).') };
     if (!checks.coveragePass) return { active: false, reason: setupText('ui.setup_status_coverage_fail', 'Activation is disabled: the reachable coverage pass is required.') };
-    return definition.active
+    return plantActive
       ? { active: true, reason: setupText('ui.setup_status_active_reason', 'Active for approved setup-aware optimization.') }
       : { active: false, reason: setupText('ui.setup_status_ready_review', 'Ready for activation review; Stage 0 remains observation-only.') };
   }
 
-  function effectiveRows({ plantRows, lineRows, line, version }: { plantRows: SetupMatrixRow[]; lineRows: SetupMatrixRow[]; line: string; version: number }): EffectiveSetupRow[] {
+  function effectiveRows({ plantRows, machineRows, machine, version }: { plantRows: SetupMatrixRow[]; machineRows: SetupMatrixRow[]; machine: string; version: number }): EffectiveSetupRow[] {
     const plant = plantRows.filter(row => row.signature_version === version);
-    if (!line) return plant.map(row => ({ ...row, inherited: false, inheritedFromPlant: false }));
-    const overrides = lineRows.filter(row => row.line === line && row.signature_version === version);
+    if (!machine) return plant.map(row => ({ ...row, inherited: false, inheritedFromPlant: false }));
+    const overrides = machineRows.filter(row => row.machine === machine && row.signature_version === version);
     const byPair = new Map(overrides.map(row => [keyId(row), row]));
     const result = plant.map(row => {
       const override = byPair.get(keyId(row));
       return override
         ? { ...override, inherited: false, inheritedFromPlant: false }
-        : { ...row, line, inherited: true, inheritedFromPlant: true };
+        : { ...row, machine, inherited: true, inheritedFromPlant: true };
     });
     overrides.filter(row => !plant.some(base => keyId(base) === keyId(row))).forEach(row =>
       result.push({ ...row, inherited: false, inheritedFromPlant: false }));
     return result;
   }
 
-  function deleteRequest(row: SetupMatrixRow): { line: string; signature_version: number; rows: SetupMatrixRow[] } {
-    return { line: row.line, signature_version: row.signature_version, rows: [row] };
+  function deleteRequest(row: SetupMatrixRow): { machine: string; signature_version: number; rows: SetupMatrixRow[] } {
+    return { machine: row.machine, signature_version: row.signature_version, rows: [row] };
+  }
+
+  /** Workstream D3 (2026-08-20) — pure gate for the scope-level "delete all
+   *  rows" action (OD-D3a): the user must type the exact plant code before
+   *  the button enables. Deliberately whitespace-trimmed (no other slack —
+   *  a partial or case-varied match would defeat the point of a typed
+   *  confirmation) and false for a blank plant so a not-yet-loaded snapshot
+   *  can never accidentally satisfy the gate with an empty typed value. */
+  function deleteAllConfirmationMatches(typed: string, plant: string): boolean {
+    const expected = String(plant || '').trim();
+    return expected.length > 0 && String(typed || '').trim() === expected;
   }
 
   /** Removes one field from an unsaved signature draft without allowing the
@@ -407,26 +442,26 @@ export const SetupAdmin = (() => {
    *  upsert — sending only the edited cells there would silently wipe every
    *  other plant-default row. See docs/setup_matrix_ui_redesign.md §7. */
   function buildSaveRequests(edits: ReadonlyArray<SetupGridEdit>, signatureVersion: number, existingPlantRows: ReadonlyArray<SetupMatrixRow>): {
-    upsert: Array<{ line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }>;
-    deletes: Array<{ line: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }>;
+    upsert: Array<{ machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }>;
+    deletes: Array<{ machine: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }>;
   } {
     const byLine = new Map<string, SetupGridEdit[]>();
-    edits.forEach(e => { if (!byLine.has(e.line)) byLine.set(e.line, []); byLine.get(e.line)!.push(e); });
-    const upsert: Array<{ line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }> = [];
-    const deletes: Array<{ line: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }> = [];
-    byLine.forEach((lineEdits, line) => {
+    edits.forEach(e => { if (!byLine.has(e.machine)) byLine.set(e.machine, []); byLine.get(e.machine)!.push(e); });
+    const upsert: Array<{ machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }> = [];
+    const deletes: Array<{ machine: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }> = [];
+    byLine.forEach((lineEdits, machine) => {
       const sets = lineEdits.filter((e): e is SetupGridEdit & { setup_min: number } => e.setup_min !== null);
       const clears = lineEdits.filter(e => e.setup_min === null);
-      if (line) {
-        if (sets.length) upsert.push({ line, signature_version: signatureVersion, rows: sets.map(e => ({ from: e.row.key, to: e.col.key, setup_min: e.setup_min })) });
-        if (clears.length) deletes.push({ line, signature_version: signatureVersion, rows: clears.map(e => ({ from_key: e.row.key, to_key: e.col.key })) });
+      if (machine) {
+        if (sets.length) upsert.push({ machine, signature_version: signatureVersion, rows: sets.map(e => ({ from: e.row.key, to: e.col.key, setup_min: e.setup_min })) });
+        if (clears.length) deletes.push({ machine, signature_version: signatureVersion, rows: clears.map(e => ({ from_key: e.row.key, to_key: e.col.key })) });
         return;
       }
       const merged = new Map<string, SetupMatrixRow>();
       existingPlantRows.forEach(row => merged.set(`${stateSig(row.from_key)} ${stateSig(row.to_key)}`, row));
-      sets.forEach(e => merged.set(gridEditKey(e.row, e.col), { line: '', signature_version: signatureVersion, from_key: e.row.key, to_key: e.col.key, setup_min: e.setup_min, source: 'manual' }));
+      sets.forEach(e => merged.set(gridEditKey(e.row, e.col), { machine: '', signature_version: signatureVersion, from_key: e.row.key, to_key: e.col.key, setup_min: e.setup_min, source: 'manual' }));
       clears.forEach(e => merged.delete(gridEditKey(e.row, e.col)));
-      if (sets.length || clears.length) upsert.push({ line: '', signature_version: signatureVersion, rows: [...merged.values()].map(r => ({ from: r.from_key, to: r.to_key, setup_min: r.setup_min })) });
+      if (sets.length || clears.length) upsert.push({ machine: '', signature_version: signatureVersion, rows: [...merged.values()].map(r => ({ from: r.from_key, to: r.to_key, setup_min: r.setup_min })) });
     });
     return { upsert, deletes };
   }
@@ -500,7 +535,7 @@ export const SetupAdmin = (() => {
 
   function csvFor(plant: string, rows: EffectiveSetupRow[]): string {
     const quote = (value: unknown): string => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    return [csvColumns(), ...rows.map(row => [plant, row.line || '', row.signature_version, JSON.stringify(row.from_key), JSON.stringify(row.to_key), row.setup_min])]
+    return [csvColumns(), ...rows.map(row => [plant, row.machine || '', row.signature_version, JSON.stringify(row.from_key), JSON.stringify(row.to_key), row.setup_min])]
       .map(row => row.map(quote).join(',')).join('\r\n');
   }
 
@@ -523,7 +558,7 @@ export const SetupAdmin = (() => {
     return rows;
   }
 
-  function parseLongFormCsv(text: string): { plant: string; line: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> } {
+  function parseLongFormCsv(text: string): { plant: string; machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> } {
     const csv = parseCsv(text); const expected = csvColumns();
     if (!csv.length || expected.some((name, index) => csv[0][index] !== name)) throw new Error('CSV must use the canonical setup-matrix columns');
     if (csv.length < 2) throw new Error('CSV has no matrix rows');
@@ -535,7 +570,7 @@ export const SetupAdmin = (() => {
       if (!Array.isArray(from) || !Array.isArray(to) || !Number.isInteger(setup_min) || setup_min < 0) throw new Error('CSV has invalid setup-state JSON or minutes');
       return { from, to, setup_min };
     });
-    return { plant, line, signature_version, rows };
+    return { plant, machine: line, signature_version, rows };
   }
 
   async function loadRegisteredFields(): Promise<void> {
@@ -543,14 +578,14 @@ export const SetupAdmin = (() => {
     catch (error) { ErrorLog.warn('setup-admin', `Priority-field registry unavailable: ${(error as Error).message}`); }
   }
 
-  async function collectPagedLines(loadPage: (offset: number, limit: number) => Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>, pageSize = 100): Promise<string[]> {
+  async function collectPagedLines(loadPage: (offset: number, limit: number) => Promise<{ rows?: Array<{ machine: string }>; meta?: { total?: number } }>, pageSize = 100): Promise<string[]> {
     const lines: string[] = []; let offset = 0; let total = Number.POSITIVE_INFINITY;
     // Each request stays bounded. The server's filtered total controls
     // continuation; an empty page is a defensive escape from a stale total.
     while (offset < total) {
       const page = await loadPage(offset, pageSize);
       const rows = page.rows || [];
-      lines.push(...rows.map(row => row.production_line).filter(Boolean));
+      lines.push(...rows.map(row => row.machine).filter(Boolean));
       total = Number.isFinite(page.meta?.total) ? Math.max(0, Number(page.meta?.total)) : offset + rows.length;
       offset += rows.length;
       if (!rows.length) break;
@@ -560,7 +595,7 @@ export const SetupAdmin = (() => {
 
   async function loadScopeLines(plant: string): Promise<void> {
     if (_linesByPlant[plant]) return;
-    try { _linesByPlant[plant] = await collectPagedLines(async (offset, limit) => { const response = await Util.fetchTraced(`${API}/master-data/production_lines?plant=${encodeURIComponent(plant)}&limit=${limit}&offset=${offset}`); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<{ rows?: Array<{ production_line: string }>; meta?: { total?: number } }>; }); }
+    try { _linesByPlant[plant] = await collectPagedLines(async (offset, limit) => { const response = await Util.fetchTraced(`${API}/master-data/machine?plant=${encodeURIComponent(plant)}&limit=${limit}&offset=${offset}`); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json() as Promise<{ rows?: Array<{ machine: string }>; meta?: { total?: number } }>; }); }
     catch (error) { ErrorLog.warn('setup-admin', `Plant line scope unavailable: ${(error as Error).message}`); _linesByPlant[plant] = []; }
   }
 
@@ -598,6 +633,75 @@ export const SetupAdmin = (() => {
       ErrorLog.warn('setup-admin', `Setup matrix rows unavailable: ${(error as Error).message}`);
       _listRows = []; _listMeta = { ..._listMeta, total: 0 };
     }
+  }
+
+  /** Workstream D3 (2026-08-20). DELETE /setup/{plant}/matrix validates each
+   *  row's `setup_min` exactly like an import row would (a finite integer is
+   *  required even though only from_key/to_key drive the actual delete) —
+   *  `?? 0` supplies a harmless filler for an inherited/gap row that has no
+   *  real recorded value of its own. */
+  function deleteRowPayload(row: Pick<typeof _listRows[number], 'from_key' | 'to_key' | 'setup_min'>): { from_key: SetupStateKey; to_key: SetupStateKey; setup_min: number } {
+    return { from_key: row.from_key, to_key: row.to_key, setup_min: row.setup_min ?? 0 };
+  }
+
+  /** Issues one or more DELETE /setup/{plant}/matrix calls (chunked so a
+   *  large "delete all" never sends an oversized body or holds one
+   *  long-running transaction), then refreshes exactly like every other
+   *  write in this module (writeAndRefresh's pattern, inlined here because
+   *  the request itself is 1..N calls rather than writeAndRefresh's one).
+   *  `auditScope` is threaded into the request body as a same-shape
+   *  passenger field so the backend's admin-audit log can distinguish a
+   *  single-row delete from a bulk/delete-all wipe without brittle
+   *  row-count heuristics — see brain.py's delete_setup_matrix_rows. */
+  async function deleteMatrixRows(
+    target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition, permissions: SetupPermissions,
+    rows: ReadonlyArray<Pick<typeof _listRows[number], 'from_key' | 'to_key' | 'setup_min'>>,
+    auditScope: 'row' | 'bulk' | 'all',
+  ): Promise<void> {
+    if (!permissions.matrixWrite || !rows.length) return;
+    const machine = _lineScope;
+    const CHUNK = 500;
+    try {
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK).map(deleteRowPayload);
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, {
+          method: 'DELETE', headers: headers(),
+          body: JSON.stringify({ machine, signature_version: definition.signature_version, rows: chunk, scope: auditScope }),
+        });
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      }
+      Persistence.noteSetupWrite(snapshot.plant, 'matrix');
+      _listSelected.clear();
+      _deleteAllConfirmText = '';
+      await Persistence.loadSetupSnapshot(snapshot.plant);
+      Toast.show(Util.t('toast.setup_matrix_rows_deleted', { count: rows.length }), 'success');
+      render(target, snapshot.plant);
+    } catch (error) {
+      Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error');
+    }
+  }
+
+  /** Pages through the from-state-scoped matrix-rows endpoint (never a full
+   *  plant snapshot — see CLAUDE.md's O(states²) constraint) to gather every
+   *  REAL row in the current scope for the "delete all" action. An
+   *  inherited plant-default shown for context in a line scope has no real
+   *  per-machine record, so it is filtered out here rather than sent as a
+   *  (harmless but pointless) no-op delete. */
+  async function collectAllScopeRows(plant: string, machine: string): Promise<Array<Pick<typeof _listRows[number], 'from_key' | 'to_key' | 'setup_min'>>> {
+    const collected: Array<Pick<typeof _listRows[number], 'from_key' | 'to_key' | 'setup_min'>> = [];
+    const limit = 500;
+    let offset = 0; let total = Number.POSITIVE_INFINITY;
+    while (offset < total) {
+      const params = new URLSearchParams({ line: machine, offset: String(offset), limit: String(limit) });
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/matrix-rows?${params.toString()}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json() as { rows: typeof _listRows; meta: { total: number } };
+      collected.push(...body.rows.filter(row => !(machine && row.inherited)).map(row => ({ from_key: row.from_key, to_key: row.to_key, setup_min: row.setup_min })));
+      total = Number.isFinite(body.meta?.total) ? Math.max(0, Number(body.meta.total)) : offset + body.rows.length;
+      offset += body.rows.length;
+      if (!body.rows.length) break;
+    }
+    return collected;
   }
 
   /** Resolves the List view's free-text "From" filter to a canonical
@@ -723,7 +827,7 @@ export const SetupAdmin = (() => {
         const key = `${stateSig(entry.from)} ${stateSig(entry.to)}`;
         _gridDirty.set(key, { row: { key: entry.from, sig: stateSig(entry.from), parts: entry.from.map(p => p.value) },
                               col: { key: entry.to, sig: stateSig(entry.to), parts: entry.to.map(p => p.value) },
-                              setup_min: entry.minutes, line: _lineScope });
+                              setup_min: entry.minutes, machine: _lineScope });
       });
       Toast.show(Util.t('ui.setup_grid_pasted', { count: lastOutcome.ready.length }), 'success');
       close();
@@ -788,15 +892,15 @@ export const SetupAdmin = (() => {
       }
     }
     if (_lineScope && !lines.includes(_lineScope)) _lineScope = '';
-    const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, line: _lineScope, version });
+    const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, machine: _lineScope, version });
     const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
     const matrixVersion = rows.length ? version : null;
     const coverage = _coverageByPlant[snapshot.plant];
     const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
-    const status = activationStatus(definition, { matrixVersion, coveragePass });
+    const status = activationStatus(definition, { matrixVersion, coveragePass }, snapshot.plant_active);
     const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
-    const state = _lineScope ? snapshot.line_states.find(row => row.line === _lineScope) : null;
-    const overrides = _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
+    const state = _lineScope ? snapshot.machine_states.find(row => row.machine === _lineScope) : null;
+    const overrides = _lineScope ? snapshot.overrides.filter(row => row.machine === _lineScope) : snapshot.overrides;
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
     // §9 "what moves off the page": the tab's own missing-pairs mini-table
     // collapses to a filter chip on the grid — not the OptimizerPreview
@@ -831,7 +935,11 @@ export const SetupAdmin = (() => {
             <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
           </div>
           <div class="setup-context-controls">
-            ${permissions.definitionWrite ? `<label class="setup-check" data-setup-active-toggle-wrap><input type="checkbox" data-setup-active-toggle ${definition?.active ? 'checked' : ''} ${definition ? '' : 'disabled'}>${esc(Util.t('ui.setup_include_setup_times'))}</label>` : ''}
+            <!-- Workstream D2 (2026-08-20): the "Include Setup Times in Optimizer"
+                 checkbox relocated to the Scheduling Rules panel (plant-level
+                 setting, plants.setup_active) — see Plant._renderSettingsPane's
+                 setup-active panel. This chip stays; it now reads
+                 snapshot.plant_active via activationStatus's third argument. -->
             <span class="setup-status-chip ${status.active ? 'ok' : 'warn'}" title="${esc(status.reason)}"><span class="dot"></span>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</span>
           </div>
         </header>
@@ -909,6 +1017,10 @@ export const SetupAdmin = (() => {
       </section>`;
     _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => {
       _lineScope = value;
+      // A stale selection/typed-confirm from the PREVIOUS scope must never
+      // carry over — the row keys underneath belong to a different machine.
+      _listSelected.clear();
+      _deleteAllConfirmText = '';
       if (value) loadCompatibility(snapshot.plant, value).then(() => renderSnapshot(target, snapshot));
       else renderSnapshot(target, snapshot);
     } });
@@ -930,7 +1042,7 @@ export const SetupAdmin = (() => {
   }
 
   function overridesFor(snapshot: SetupSnapshot): SetupSnapshot['overrides'] {
-    return _lineScope ? snapshot.overrides.filter(row => row.line === _lineScope) : snapshot.overrides;
+    return _lineScope ? snapshot.overrides.filter(row => row.machine === _lineScope) : snapshot.overrides;
   }
 
   /** §9 "what moves off the page": the override-audit panel becomes a modal
@@ -945,7 +1057,7 @@ export const SetupAdmin = (() => {
     backdrop.className = 'modal-backdrop';
     backdrop.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-history-title">
       <header class="modal-head"><h3 id="setup-history-title">${esc(Util.t('ui.setup_override_audit'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-history-close aria-label="${esc(Util.t('btn.close'))}">&times;</button></header>
-      <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.line)} &middot; ${esc(keyText(override.predecessor_state_key))} &rarr; ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
+      <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.machine)} &middot; ${esc(keyText(override.predecessor_state_key))} &rarr; ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
       <footer class="modal-foot"><button type="button" class="btn btn-ghost sm" data-setup-history-close>${esc(Util.t('btn.close'))}</button></footer>
     </div>`;
     const close = (): void => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
@@ -1065,9 +1177,10 @@ export const SetupAdmin = (() => {
     wireGridInteractions(target, snapshot, definition, rows, permissions);
     target.querySelector<HTMLInputElement>('[data-setup-import]')?.addEventListener('change', event => importMatrix(target, snapshot, event.target as HTMLInputElement));
     target.querySelector<HTMLButtonElement>('[data-setup-edit-state]')?.addEventListener('click', () => editState(target, snapshot));
-    target.querySelector<HTMLInputElement>('[data-setup-active-toggle]')?.addEventListener('change', event => {
-      setSetupActive(target, snapshot.plant, definition, (event.target as HTMLInputElement).checked);
-    });
+    // The "Include Setup Times in Optimizer" checkbox (formerly wired here as
+    // data-setup-active-toggle) relocated to the Scheduling Rules panel —
+    // see Plant._renderSettingsPane's setup-active panel, which now owns
+    // the PUT /plant/{plant}/setup-active call directly.
     if (_lineScope && permissions.definitionWrite) wireCompatibility(target, snapshot);
     wireGridEditor(target, snapshot, definition, rows, permissions);
     target.querySelector<HTMLButtonElement>('[data-setup-mass-upload-open]')?.addEventListener('click', () => openMassUploadModal(target, snapshot, definition, rows, permissions));
@@ -1141,6 +1254,11 @@ export const SetupAdmin = (() => {
     // staged edit. Testing plant_value here hid every line-scoped override on
     // a pair the plant has no default for.
     if (_hideEmptyStates) rows = rows.filter(r => r.setup_min !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
+    // Workstream D3: keys for the rows actually on screen, so a stale
+    // selection from a filtered-out or previous-page row never inflates the
+    // header "select all" checkbox's checked state.
+    const onScreenKeys = rows.map(row => `${stateSig(row.from_key)} ${stateSig(row.to_key)}`);
+    const allSelected = onScreenKeys.length > 0 && onScreenKeys.every(key => _listSelected.has(key));
     const bodyRows = rows.map(row => {
       const v = listRowView(row, _lineScope);
       // Two separate data attributes, not one space-joined `${sig1} ${sig2}`
@@ -1148,18 +1266,24 @@ export const SetupAdmin = (() => {
       // containing a literal space (e.g. "Light Blue") would make a combined
       // attribute unsplittable, silently dropping the edit.
       const fromSig = stateSig(row.from_key), toSig = stateSig(row.to_key);
+      const key = `${fromSig} ${toSig}`;
       return `<tr data-setup-list-row-from="${esc(fromSig)}" data-setup-list-row-to="${esc(toSig)}">
+        <td class="setup-num">${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select value="${esc(key)}" ${_listSelected.has(key) ? 'checked' : ''} aria-label="${esc(Util.t('ui.setup_list_select_row'))}">` : ''}</td>
         <td class="mono">${esc(v.fromText)}</td>
         <td class="mono">${esc(v.toText)}</td>
         <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${esc(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
         <td class="setup-num">${esc(v.plantValue)}</td>
         <td><span class="${v.sourceClass}">${esc(v.sourceLabel)}</span></td>
-        <td class="setup-num">${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${esc(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}</td>
+        <td class="setup-num">
+          ${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${esc(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}
+          ${permissions.matrixWrite ? `<button type="button" class="setup-list-delete" data-setup-list-delete title="${esc(Util.t('btn.setup_list_delete_row'))}" aria-label="${esc(Util.t('btn.setup_list_delete_row'))}">&times;</button>` : ''}
+        </td>
       </tr>`;
     }).join('');
     const newRowsHtml = _listNewRows.map(row => {
       const status = listNewRowStatus(row, definition);
       return `<tr data-setup-list-new-row="${row.id}" class="setup-list-new-row">
+        <td></td>
         <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_from'))}" value="${esc(row.from)}" data-setup-list-new-from></td>
         <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_to'))}" value="${esc(row.to)}" data-setup-list-new-to></td>
         <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_minutes'))}" value="${esc(row.minutes)}" data-setup-list-new-minutes></td>
@@ -1171,6 +1295,7 @@ export const SetupAdmin = (() => {
     mount.innerHTML = `
       <table class="setup-table setup-list-table">
         <thead><tr>
+          <th>${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select-all ${allSelected ? 'checked' : ''} aria-label="${esc(Util.t('ui.setup_list_select_all'))}">` : ''}</th>
           <th>${esc(Util.t('ui.setup_list_col_from'))}</th>
           <th>${esc(Util.t('ui.setup_list_col_to'))}</th>
           <th class="setup-num">${esc(Util.t('ui.setup_list_col_minutes'))}</th>
@@ -1183,7 +1308,16 @@ export const SetupAdmin = (() => {
       <div class="setup-list-footer">
         ${permissions.matrixWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-list-add-pair>${esc(Util.t('ui.setup_list_add_pair'))}</button>` : '<span></span>'}
         <span class="setup-list-count">${esc(Util.t('ui.setup_list_showing', { shown: rows.length, total: _listMeta.total, from: _gridFilterFrom || Util.t('ui.setup_plant_default') }))}</span>
-      </div>`;
+      </div>
+      ${permissions.matrixWrite ? `
+      <div class="setup-list-bulk-actions">
+        <button type="button" class="btn btn-ghost sm" data-setup-list-delete-selected ${_listSelected.size ? '' : 'disabled'}>${esc(Util.t('btn.setup_list_delete_selected', { count: _listSelected.size }))}</button>
+        <div class="setup-list-delete-all">
+          <label for="setup-list-delete-all-confirm">${esc(Util.t('ui.setup_delete_all_hint', { plant: snapshot.plant }))}</label>
+          <input type="text" id="setup-list-delete-all-confirm" class="input" data-setup-list-delete-all-confirm placeholder="${esc(Util.t('ph.setup_delete_all_confirm', { plant: snapshot.plant }))}" value="${esc(_deleteAllConfirmText)}">
+          <button type="button" class="btn btn-danger sm" data-setup-list-delete-all ${deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant) ? '' : 'disabled'}>${esc(Util.t('btn.setup_list_delete_all'))}</button>
+        </div>
+      </div>` : ''}`;
     wireListView(target, snapshot, definition, permissions);
   }
 
@@ -1221,7 +1355,7 @@ export const SetupAdmin = (() => {
         const revertsToPlantDefault = !!_lineScope && row.plant_value !== null && parsed === row.plant_value;
         const matchesPersistedValue = !_lineScope && row.setup_min !== null && parsed === row.setup_min;
         if (revertsToPlantDefault || matchesPersistedValue) _gridDirty.delete(key);
-        else _gridDirty.set(key, { row: { key: row.from_key, sig: rowSig, parts: [] }, col: { key: row.to_key, sig: colSig, parts: [] }, setup_min: parsed, line: _lineScope });
+        else _gridDirty.set(key, { row: { key: row.from_key, sig: rowSig, parts: [] }, col: { key: row.to_key, sig: colSig, parts: [] }, setup_min: parsed, machine: _lineScope });
         refreshDirtyBar(target);
         paintListView(target, snapshot, definition, permissions);
       });
@@ -1254,6 +1388,65 @@ export const SetupAdmin = (() => {
         paintListView(target, snapshot, definition, permissions);
       });
     });
+
+    // --- Workstream D3: per-row delete, multi-select bulk delete, and the
+    // scope-level "delete all" typed confirmation ---------------------------
+    mount.querySelector<HTMLInputElement>('[data-setup-list-select-all]')?.addEventListener('change', event => {
+      const checked = (event.target as HTMLInputElement).checked;
+      mount.querySelectorAll<HTMLInputElement>('[data-setup-list-select]').forEach(box => {
+        if (checked) _listSelected.add(box.value); else _listSelected.delete(box.value);
+      });
+      paintListView(target, snapshot, definition, permissions);
+    });
+    mount.querySelectorAll<HTMLInputElement>('[data-setup-list-select]').forEach(box => {
+      box.addEventListener('change', () => {
+        if (box.checked) _listSelected.add(box.value); else _listSelected.delete(box.value);
+        // Only the bulk-delete button and the select-all header need to
+        // react — a full repaint here would drop keyboard/mouse focus mid
+        // multi-select, same reasoning as refreshDirtyBar elsewhere.
+        const bulkBtn = mount.querySelector<HTMLButtonElement>('[data-setup-list-delete-selected]');
+        if (bulkBtn) { bulkBtn.disabled = _listSelected.size === 0; bulkBtn.textContent = Util.t('btn.setup_list_delete_selected', { count: _listSelected.size }); }
+        const selectAll = mount.querySelector<HTMLInputElement>('[data-setup-list-select-all]');
+        if (selectAll) {
+          const onScreen = Array.from(mount.querySelectorAll<HTMLInputElement>('[data-setup-list-select]'));
+          selectAll.checked = onScreen.length > 0 && onScreen.every(b => _listSelected.has(b.value));
+        }
+      });
+    });
+    mount.querySelectorAll<HTMLButtonElement>('[data-setup-list-delete]').forEach(button => {
+      button.addEventListener('click', async () => {
+        const tr = button.closest<HTMLElement>('[data-setup-list-row-from]')!;
+        const rowSig = tr.dataset.setupListRowFrom!, colSig = tr.dataset.setupListRowTo!;
+        const row = _listRows.find(r => stateSig(r.from_key) === rowSig && stateSig(r.to_key) === colSig);
+        if (!row) return;
+        const ok = await Modal.confirm({ title: Util.t('modal.setup_delete_row_confirm'), confirmLabel: Util.t('btn.yes_delete'), tone: 'warn' });
+        if (!ok) return;
+        await deleteMatrixRows(target, snapshot, definition, permissions, [row], 'row');
+      });
+    });
+    mount.querySelector<HTMLButtonElement>('[data-setup-list-delete-selected]')?.addEventListener('click', async () => {
+      const selectedRows = _listRows.filter(r => _listSelected.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
+      if (!selectedRows.length) return;
+      const ok = await Modal.confirm({ title: Util.t('modal.setup_delete_bulk_confirm', { count: selectedRows.length }), confirmLabel: Util.t('btn.yes_delete'), tone: 'warn' });
+      if (!ok) return;
+      await deleteMatrixRows(target, snapshot, definition, permissions, selectedRows, 'bulk');
+    });
+    mount.querySelector<HTMLInputElement>('[data-setup-list-delete-all-confirm]')?.addEventListener('input', event => {
+      _deleteAllConfirmText = (event.target as HTMLInputElement).value;
+      const btn = mount.querySelector<HTMLButtonElement>('[data-setup-list-delete-all]');
+      if (btn) btn.disabled = !deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant);
+    });
+    mount.querySelector<HTMLButtonElement>('[data-setup-list-delete-all]')?.addEventListener('click', async () => {
+      // Belt-and-suspenders: the button is already disabled unless the typed
+      // text matches, but never trust client-disabled state alone for a
+      // destructive, scope-wide action.
+      if (!deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant)) return;
+      let allRows: Array<Pick<typeof _listRows[number], 'from_key' | 'to_key' | 'setup_min'>>;
+      try { allRows = await collectAllScopeRows(snapshot.plant, _lineScope); }
+      catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); return; }
+      if (!allRows.length) { Toast.show(Util.t('toast.setup_no_rows_to_delete'), 'warn'); return; }
+      await deleteMatrixRows(target, snapshot, definition, permissions, allRows, 'all');
+    });
   }
 
   /** Refreshes one new-pair row's status cell live as its inputs change, and
@@ -1279,7 +1472,7 @@ export const SetupAdmin = (() => {
       if (row.stagedKey && row.stagedKey !== key) _gridDirty.delete(row.stagedKey);
       _gridDirty.set(key, { row: { key: fromKey, sig: stateSig(fromKey), parts: fromKey.map(p => p.value) },
                             col: { key: toKey, sig: stateSig(toKey), parts: toKey.map(p => p.value) },
-                            setup_min: parsed, line: _lineScope });
+                            setup_min: parsed, machine: _lineScope });
       row.stagedKey = key;
       refreshDirtyBar(target);
     } else if (row.stagedKey) {
@@ -1364,7 +1557,7 @@ export const SetupAdmin = (() => {
     // "You are here" (§9-C.5): mark the row matching the scoped line's known
     // current state, making the old standalone Line Status panel unnecessary.
     const currentState = _lineScope && definition
-      ? snapshot.line_states.find(s => s.line === _lineScope && s.signature_version === definition.signature_version)
+      ? snapshot.machine_states.find(s => s.machine === _lineScope && s.signature_version === definition.signature_version)
       : undefined;
     const currentStateSig = currentState ? stateSig(currentState.state_key) : null;
     const tierCount = fields.length;
@@ -1459,7 +1652,7 @@ export const SetupAdmin = (() => {
       const { baseline } = cellAt(rowState, colState);
       const editKey = gridEditKey(rowState, colState);
       if (value === baseline) _gridDirty.delete(editKey);
-      else _gridDirty.set(editKey, { row: rowState, col: colState, setup_min: value, line: _lineScope });
+      else _gridDirty.set(editKey, { row: rowState, col: colState, setup_min: value, machine: _lineScope });
     }
 
     target.addEventListener('mousedown', event => {
@@ -1614,7 +1807,7 @@ export const SetupAdmin = (() => {
     const baseline = existing ? existing.setup_min : (row.sig === col.sig ? 0 : null);
     const editKey = gridEditKey(row, col);
     if (parsed === baseline) _gridDirty.delete(editKey);
-    else _gridDirty.set(editKey, { row, col, setup_min: parsed, line: _lineScope });
+    else _gridDirty.set(editKey, { row, col, setup_min: parsed, machine: _lineScope });
     paintGrid(target, snapshot, definition, rows, permissions);
     if (advanceRow) {
       const mount = target.querySelector<HTMLElement>('#setup-grid-table-mount');
@@ -1669,11 +1862,16 @@ export const SetupAdmin = (() => {
     }
   }
 
-  async function setSetupActive(target: HTMLElement, plant: string, definition: SetupDefinition | null, active: boolean): Promise<void> {
-    if (!definition) return;
-    await writeAndRefresh(target, plant, `${API}/setup/${encodeURIComponent(plant)}/active`, 'PUT', {
-      active, expected_signature_version: definition.signature_version,
-    });
+  /** Workstream D2 (2026-08-20): re-pointed from PUT /setup/{plant}/active
+   *  (the vestigial per-signature-version write) to the new plant-level
+   *  PUT /plant/{plant}/setup-active — no `definition`/`expected_signature_version`
+   *  needed any more since this is a durable plant setting, not a
+   *  signature-scoped one. `target` stays the Setup Matrix pane's own root
+   *  element so writeAndRefresh's post-write `render()` keeps that pane's
+   *  status chip current even when called from elsewhere (the relocated
+   *  checkbox in Plant._renderSettingsPane's Scheduling Rules panel). */
+  async function setSetupActive(target: HTMLElement, plant: string, active: boolean): Promise<boolean> {
+    return writeAndRefresh(target, plant, `${API}/plant/${encodeURIComponent(plant)}/setup-active`, 'PUT', { active });
   }
 
   async function saveDefinition(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
@@ -1689,12 +1887,12 @@ export const SetupAdmin = (() => {
     try {
       const parsed = parseLongFormCsv(await file.text());
       if (parsed.plant !== snapshot.plant || !canWriteVersion(parsed.signature_version, snapshot.definition?.signature_version)) throw new Error(Util.t('ui.setup_version_mismatch'));
-      if (parsed.line !== _lineScope) throw new Error('CSV line scope must match the selected setup scope');
+      if (parsed.machine !== _lineScope) throw new Error('CSV line scope must match the selected setup scope');
       // Plant-default scope is a destructive delete-then-insert replace
       // (setup_data.replace_plant_matrix) — unlike a line-scoped import, which
       // is a safe sparse upsert — so confirm before an admin silently wipes
       // every other plant-default row for this signature version.
-      if (!parsed.line) {
+      if (!parsed.machine) {
         const existingCount = snapshot.plant_rows.filter(row => row.signature_version === parsed.signature_version).length;
         const confirmed = await Modal.confirm({
           title: Util.t('ui.setup_replace_confirm_title'),
@@ -1705,7 +1903,7 @@ export const SetupAdmin = (() => {
         if (!confirmed) return;
       }
       await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, 'POST', {
-        line: parsed.line, signature_version: parsed.signature_version, rows: parsed.rows,
+        machine: parsed.machine, signature_version: parsed.signature_version, rows: parsed.rows,
       });
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
     finally { input.value = ''; }
@@ -1713,7 +1911,7 @@ export const SetupAdmin = (() => {
 
   function mountStateEditor(host: HTMLElement, snapshot: SetupSnapshot, line: string, onSaved?: () => void): void {
     const definition = snapshot.definition; if (!line || !definition || host.querySelector('[data-setup-state-editor]')) return;
-    const current = snapshot.line_states.find(state => state.line === line);
+    const current = snapshot.machine_states.find(state => state.machine === line);
     const initial = new Map((current?.state_key || []).map(pair => [pair.fieldKey, pair.value]));
     const editor = document.createElement('div'); editor.className = 'setup-state-editor'; editor.dataset.setupStateEditor = 'true';
     editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><label>Shop-floor reason<input class="input" data-setup-state-reason></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
@@ -1771,16 +1969,22 @@ export const SetupAdmin = (() => {
     save.addEventListener('click', persist);
   }
 
-  async function writeAndRefresh(target: HTMLElement, plant: string, url: string, method: string, body: unknown): Promise<void> {
+  /** Returns whether the write actually succeeded (Workstream D2 added this —
+   *  every prior caller just `await`s without reading it, so this stays
+   *  backward compatible; the new relocated setup-active checkbox is the
+   *  first caller that needs to know, to decide whether to commit or revert
+   *  its own optimistic local state). */
+  async function writeAndRefresh(target: HTMLElement, plant: string, url: string, method: string, body: unknown): Promise<boolean> {
     try {
       const response = await Util.fetchTraced(url, { method, headers: headers(), body: JSON.stringify(body) });
       if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
       Persistence.noteSetupWrite(plant, setupWriteKind(url));
       await Persistence.loadSetupSnapshot(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
-    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+      return true;
+    } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); return false; }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render,
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
     stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText };
@@ -1980,7 +2184,7 @@ export const CalendarUI = {
     // No plant selected yet (e.g. blackout modal opened before plant pick) —
     // fall back to the unscoped view rather than showing nothing.
     const set = new Set<string>();
-    Store.tasksArr.forEach(t => set.add(t.PRODUCTION_LINE || 'Unknown'));
+    Store.tasksArr.forEach(t => set.add(t.MACHINE || 'Unknown'));
     Object.keys(Store.calendars).forEach(l => set.add(l));
     return [...set].sort();
   },
@@ -2391,7 +2595,7 @@ export const Plant = {
     if (countEl) countEl.textContent = Util.t('ui.lines_count', {count: lines.length, plural: lines.length !== 1 ? 's' : ''});
 
     if (!lines.length) {
-      roster.innerHTML = `<div class="empty-state">${Util.t('empty.no_production_lines')}</div>`;
+      roster.innerHTML = `<div class="empty-state">${Util.t('empty.no_machine')}</div>`;
       return;
     }
 
@@ -2595,7 +2799,7 @@ export const Plant = {
     const lists  = Plant._priorityLists  || {};
 
     const fieldCardHtml = (f: { field_key: string; default_label: string }): string => {
-      const summary = lists[f.field_key] || { plant_wide: null, line_overrides: [], coverage: {} };
+      const summary = lists[f.field_key] || { plant_wide: null, machine_overrides: [], coverage: {} };
       // Util.t(key, vars?) — no fallback-string param (confirmed at
       // web/application-foundation.mts:556-562): it already falls back
       // en -> raw key on a missing translation, which is why Task 14 must
@@ -2654,22 +2858,22 @@ export const Plant = {
           </div>`;
       }
 
-      const overridesHtml = summary.line_overrides.map(o => {
+      const overridesHtml = summary.machine_overrides.map(o => {
         // priority_list_coverage (db.py:2056) computes coverage PER LINE, not
         // just plant-wide — an override row that only ever showed row_count/
         // upload time would silently drop the one number `covHtml` above proves
         // is available and useful (the whole point of N3's per-line breakdown).
-        const lineCov = summary.coverage[o.line] || null;
+        const lineCov = summary.coverage[o.machine] || null;
         const lineCovHtml = lineCov
           ? `<span class="pl-coverage pl-override-coverage">${lineCov.ranked_values}/${lineCov.distinct_values} ${Util.t('ui.values_ranked')}</span>`
           : '';
         return `
         <div class="pl-override-row">
-          <span class="pl-override-line">${esc(o.line)}</span>
+          <span class="pl-override-line">${esc(o.machine)}</span>
           <span class="pl-override-meta">${o.row_count} ${Util.t('ui.values')} &middot; ${relTime(o.uploaded_at)}</span>
           ${lineCovHtml}
-          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="${esc(o.line)}">👁</button>
-          <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${esc(o.line)}">⌫</button>
+          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="${esc(o.machine)}">👁</button>
+          <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${esc(o.machine)}">⌫</button>
         </div>`;
       }).join('');
 
@@ -2760,12 +2964,12 @@ export const Plant = {
         // Store.masterLinesForPlant(), NOT Store.linesForSelectedPlant(): this
         // dropdown feeds a VALIDATED upload. The backend checks the chosen line
         // against master_data.known_line_codes_for_plant(plant), which queries
-        // `production_lines` only — while linesForSelectedPlant() also includes
+        // `machine` only — while linesForSelectedPlant() also includes
         // line codes discovered on ORDER rows and in calendars/lineSettings, so
         // it could offer a line that 400s the moment the user picks it. Same
         // master-data-only source the Master Data grids use (see :2461, :2741).
         const lineNames = Store.masterLinesForPlant(plantName)
-          .map(l => l.production_line)
+          .map(l => l.machine)
           .filter((l): l is string => !!l)
           .sort();
         host.innerHTML = `<div class="pl-override-combo"></div><input type="file" id="pl-override-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">`;
@@ -2822,7 +3026,7 @@ export const Plant = {
     const post = (extra: Record<string, string> = {}) => {
       const fd = new FormData();
       fd.append('file', file);
-      if (line) fd.append('line', line);
+      if (line) fd.append('machine', line);
       Object.entries(extra).forEach(([k, v]) => fd.append(k, v));
       return fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName!)}/${encodeURIComponent(fieldKey)}`, {
         method: 'POST', body: fd, headers: { 'X-User': Session.actor() },
@@ -2885,7 +3089,7 @@ export const Plant = {
     const label = Util.t(`constraint.${fieldKey}`); // same-resolution rule as _handleUploadResult above
     const ok = await Modal.confirm({ title: Util.t('modal.remove_priority_list', { plant: plantName, field: label }), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
-    const qs = line ? `?line=${encodeURIComponent(line)}` : '';
+    const qs = line ? `?machine=${encodeURIComponent(line)}` : '';
     fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName)}/${encodeURIComponent(fieldKey)}${qs}`, {
       method: 'DELETE', headers: { 'X-User': Session.actor() },
     })
@@ -3009,6 +3213,22 @@ export const Plant = {
                 <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-max-pull-forward-help" placeholder="${Util.t('ui.max_pull_forward_none')}">
               </label>
               <p id="sys-max-pull-forward-help" class="split-policy-help">${Util.t('ui.max_pull_forward_help')}</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.setup_active_panel_title')}</h3></header>
+            <div class="panel-body split-policy-body">
+              <p class="panel-help-text">${Util.t('ui.setup_active_panel_help')}</p>
+              <!-- Workstream D2 (2026-08-20): relocated from the Setup Matrix
+                   header (plants.setup_active is a durable plant-level setting,
+                   not a per-signature-version one — see setup_data.py's
+                   save_definition comment). The Setup Matrix header's status
+                   chip stays and now reads this same flag via
+                   SetupSnapshot.plant_active. Gated on Session.isAdmin() —
+                   the same underlying permission SetupAdmin.permissionsFor
+                   computes as definitionWrite. -->
+              ${Session.isAdmin() ? `<label class="setup-check" for="sys-setup-active"><input type="checkbox" id="sys-setup-active">${Util.t('ui.setup_include_setup_times')}</label>` : ''}
             </div>
           </div>
 
@@ -3175,6 +3395,27 @@ export const Plant = {
         Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
       } finally { maxPullForwardInp.disabled = false; }
     });
+
+    // Workstream D2 (2026-08-20): the relocated "Include Setup Times in
+    // Optimizer" checkbox. Reuses SetupAdmin.setSetupActive (re-pointed to
+    // PUT /plant/{plant}/setup-active) rather than a third copy of the same
+    // fetch/toast/refresh sequence — its return value tells us whether to
+    // commit the optimistic `plantRow.setup_active` or revert the checkbox,
+    // same shape as the split-order-policy/max-pull-forward handlers above.
+    const setupActiveInp = pane.querySelector<HTMLInputElement>('#sys-setup-active');
+    if (setupActiveInp) {
+      setupActiveInp.checked = !!plantRow?.setup_active;
+      setupActiveInp.addEventListener('change', async () => {
+        if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); setupActiveInp.checked = false; return; }
+        const next = setupActiveInp.checked;
+        setupActiveInp.disabled = true;
+        const setupPaneTarget = pane.querySelector<HTMLElement>('#setup-admin-pane');
+        const ok = setupPaneTarget ? await SetupAdmin.setSetupActive(setupPaneTarget, plantRow.plant, next) : false;
+        if (ok) plantRow.setup_active = next;
+        else setupActiveInp.checked = !next;
+        setupActiveInp.disabled = false;
+      });
+    }
 
     // --- Scheduling constraints (per-plant PRIORITY TREE) -------------------
     // Stage 3 of docs/scheduling_priority.md rebuilt this from a flat on/off
@@ -4090,14 +4331,14 @@ type LaborLineData = Record<string, Record<string, Record<string, LaborLineDayCe
 
 /** `POST /labor-plan` cell payload (aggregate group/week hours). */
 interface LaborAggrCellPayload {
-  pl_group: string;
+  wc_group: string;
   period: string;
   avail_hours: number | null;
 }
 
 /** `POST /labor-plan/line` cell payload (line/day hours + provenance). */
 interface LaborLineCellPayload {
-  production_line: string;
+  machine: string;
   day: string;
   avail_hours: number | null;
   source: LaborCellSource;
@@ -4107,7 +4348,7 @@ interface LaborLineCellPayload {
  *  but `avail_hours` is always concrete (an even split always produces a
  *  number, unlike a user-initiated clear-to-null edit). */
 interface LaborDisaggregatedCell {
-  production_line: string;
+  machine: string;
   day: string;
   avail_hours: number;
   source: 'auto_split';
@@ -4147,7 +4388,7 @@ export const LaborPlanning = (() => {
   let _lineSearch = ''; // current search text for the cross-screen line-filter dropdown
   let _aggrData: LaborAggrData = {};        // { [plant]: { [grp]: { [period]: avail_hours } } }
   let _lineData: LaborLineData = {};        // { [plant]: { [line]: { [day]: { avail_hours, source } } } }
-  let _groups: string[]       = [];        // sorted unique pl_group values for current plant
+  let _groups: string[]       = [];        // sorted unique wc_group values for current plant
   let _displayGroups: string[] = [];        // currently rendered subset (respects _selectedGroups filter)
   let _weeks: LaborWeek[]        = [];   // [{ key:'YYYY-Www', label:'MM/DD/YY', monday:Date }]
   let _selRange: LaborSelRange | null       = null; // { r0,c0,r1,c1 } lasso rectangle, or null
@@ -4237,9 +4478,9 @@ export const LaborPlanning = (() => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       const map: Record<string, Record<string, number>> = {};
-      (json.rows || []).forEach((r: { pl_group: string; period: string; avail_hours: number }) => {
-        if (!map[r.pl_group]) map[r.pl_group] = {};
-        map[r.pl_group][r.period] = r.avail_hours;
+      (json.rows || []).forEach((r: { wc_group: string; period: string; avail_hours: number }) => {
+        if (!map[r.wc_group]) map[r.wc_group] = {};
+        map[r.wc_group][r.period] = r.avail_hours;
       });
       _aggrData[plant] = map;
       return map;
@@ -4261,9 +4502,9 @@ export const LaborPlanning = (() => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       if (!_lineData[plant]) _lineData[plant] = {};
-      (json.rows || []).forEach((r: { production_line: string; day: string; avail_hours: number; source: LaborCellSource }) => {
-        if (!_lineData[plant][r.production_line]) _lineData[plant][r.production_line] = {};
-        _lineData[plant][r.production_line][r.day] = { avail_hours: r.avail_hours, source: r.source };
+      (json.rows || []).forEach((r: { machine: string; day: string; avail_hours: number; source: LaborCellSource }) => {
+        if (!_lineData[plant][r.machine]) _lineData[plant][r.machine] = {};
+        _lineData[plant][r.machine][r.day] = { avail_hours: r.avail_hours, source: r.source };
       });
     } catch (e) {
       ErrorLog.warn('labor', `Fetch lines failed: ${(e as Error).message}`);
@@ -4273,8 +4514,8 @@ export const LaborPlanning = (() => {
   // ── Disaggregation ───────────────────────────────────────────────────────
   function _disaggregate(plant: string, group: string, periodKey: string, groupHours: number): LaborDisaggregatedCell[] {
     const lines = (Store._state.masterData?.lines || [])
-      .filter((l) => l.plant === plant && l.pl_group === group)
-      .map((l) => l.production_line);
+      .filter((l) => l.plant === plant && l.wc_group === group)
+      .map((l) => l.machine);
     if (!lines.length) return [];
 
     const monday = _isoWeekToMonday(periodKey);
@@ -4290,7 +4531,7 @@ export const LaborPlanning = (() => {
 
     const perSlot = Math.max(0, (groupHours || 0)) / openSlots.length;
     const rounded = Math.round(perSlot * 10) / 10;
-    return openSlots.map(s => ({ production_line: s.line, day: s.dayKey, avail_hours: rounded, source: 'auto_split' as const }));
+    return openSlots.map(s => ({ machine: s.line, day: s.dayKey, avail_hours: rounded, source: 'auto_split' as const }));
   }
 
   // ── KPI strip ────────────────────────────────────────────────────────────
@@ -4307,7 +4548,7 @@ export const LaborPlanning = (() => {
     const horizonStart = _weeks[0]?.monday || new Date();
     const horizonDays  = Math.min(_horizonSpan * 7, 90);
     const matrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, horizonDays);
-    const plantLines = (Store._state.masterData?.lines || []).filter((r) => r.plant === plant).map((r) => r.production_line);
+    const plantLines = (Store._state.masterData?.lines || []).filter((r) => r.plant === plant).map((r) => r.machine);
     let totalRequired = 0;
     plantLines.forEach((line) => {
       const lm = matrix[line]; if (!lm) return;
@@ -4400,10 +4641,10 @@ export const LaborPlanning = (() => {
     const g = document.getElementById('labor-grid');
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
       const grp = _displayGroups[r]; const period = _weeks[c]?.key; if (!grp || !period) continue;
-      prev.push({ pl_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
+      prev.push({ wc_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
       if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
       delete _aggrData[plant][grp][period];
-      cleared.push({ pl_group: grp, period, avail_hours: null });
+      cleared.push({ wc_group: grp, period, avail_hours: null });
       const inp = g?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
       if (inp) inp.value = '';
     }
@@ -4413,13 +4654,13 @@ export const LaborPlanning = (() => {
     const sn = _subnetwork(plant);
     UndoStack.push(`Delete ${cleared.length} labor cell${cleared.length !== 1 ? 's' : ''}`, () => {
       if (!_aggrData[plant]) _aggrData[plant] = {};
-      prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+      prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
         if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
         if (old == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = old;
       });
       const g2 = document.getElementById('labor-grid');
       if (g2) {
-        prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+        prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
           const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
           if (el) el.value = old != null ? String(old) : '';
         });
@@ -4536,8 +4777,8 @@ export const LaborPlanning = (() => {
           if (splits.length) {
             if (!_lineData[plant]) _lineData[plant] = {};
             splits.forEach((c) => {
-              if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
-              _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
+              if (!_lineData[plant][c.machine]) _lineData[plant][c.machine] = {};
+              _lineData[plant][c.machine][c.day] = { avail_hours: c.avail_hours, source: c.source };
             });
             _saveLines(sn, plant, splits);
           }
@@ -4549,9 +4790,9 @@ export const LaborPlanning = (() => {
           if (el) el.value = oldAh != null ? String(oldAh) : '';
           const gridEl = document.getElementById('labor-grid');
           if (gridEl) _updateAggrTotals(gridEl);
-          _saveAggregate(sn, plant, [{ pl_group: grp, period, avail_hours: oldAh }]);
+          _saveAggregate(sn, plant, [{ wc_group: grp, period, avail_hours: oldAh }]);
         });
-        await _saveAggregate(sn, plant, [{ pl_group: grp, period, avail_hours: ah }]);
+        await _saveAggregate(sn, plant, [{ wc_group: grp, period, avail_hours: ah }]);
       };
     });
 
@@ -4579,11 +4820,11 @@ export const LaborPlanning = (() => {
           const ah  = raw === '' ? null : parseFloat(raw);
           if (ah !== null && (isNaN(ah) || ah < 0)) return;
           const grp = inp.dataset.group!, period = inp.dataset.period!;
-          prev.push({ pl_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
+          prev.push({ wc_group: grp, period, avail_hours: _aggrData[plant]?.[grp]?.[period] ?? null });
           inp.value = ah !== null ? String(ah) : '';
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (ah === null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = ah;
-          changed.push({ pl_group: grp, period, avail_hours: ah });
+          changed.push({ wc_group: grp, period, avail_hours: ah });
           if (ah !== null) allSplits.push(..._disaggregate(plant, grp, period, ah));
         });
       });
@@ -4592,20 +4833,20 @@ export const LaborPlanning = (() => {
       if (allSplits.length) {
         if (!_lineData[plant]) _lineData[plant] = {};
         allSplits.forEach((c) => {
-          if (!_lineData[plant][c.production_line]) _lineData[plant][c.production_line] = {};
-          _lineData[plant][c.production_line][c.day] = { avail_hours: c.avail_hours, source: c.source };
+          if (!_lineData[plant][c.machine]) _lineData[plant][c.machine] = {};
+          _lineData[plant][c.machine][c.day] = { avail_hours: c.avail_hours, source: c.source };
         });
         _saveLines(sn, plant, allSplits);
       }
       UndoStack.push(`Undo paste (${changed.length} labor value${changed.length !== 1 ? 's' : ''})`, () => {
         if (!_aggrData[plant]) _aggrData[plant] = {};
-        prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+        prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (old == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = old;
         });
         const g = document.getElementById('labor-grid');
         if (g) {
-          prev.forEach(({ pl_group: grp, period, avail_hours: old }) => {
+          prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
             const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
             if (el) el.value = old != null ? String(old) : '';
           });
@@ -4631,10 +4872,10 @@ export const LaborPlanning = (() => {
     // empty-state below already covers that, same as a group-only miss.
     const lineSel = Store.selectedLines;
     const allLinesMeta = Store.masterLinesForPlant(plant)
-      .filter((l) => visibleGroups.includes(l.pl_group ?? '') && (lineSel.size === 0 || lineSel.has(l.production_line)))
-      .sort((a, b) => visibleGroups.indexOf(a.pl_group ?? '') - visibleGroups.indexOf(b.pl_group ?? '') || a.production_line.localeCompare(b.production_line));
+      .filter((l) => visibleGroups.includes(l.wc_group ?? '') && (lineSel.size === 0 || lineSel.has(l.machine)))
+      .sort((a, b) => visibleGroups.indexOf(a.wc_group ?? '') - visibleGroups.indexOf(b.wc_group ?? '') || a.machine.localeCompare(b.machine));
     if (!allLinesMeta.length) {
-      grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return;
+      grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_machine_plant')}</div>`; return;
     }
     await _fetchLines(plant, fetchGroup);
 
@@ -4688,11 +4929,11 @@ export const LaborPlanning = (() => {
       return v;
     };
     const lineRows = allLinesMeta.map((lm) => {
-      const line = lm.production_line;
+      const line = lm.machine;
       let groupRow = '';
-      if (showGroupHeaders && lm.pl_group !== lastGroup) {
-        lastGroup = lm.pl_group;
-        groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${lm.pl_group}</td></tr>`;
+      if (showGroupHeaders && lm.wc_group !== lastGroup) {
+        lastGroup = lm.wc_group;
+        groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${lm.wc_group}</td></tr>`;
       }
       const cells = days.map((d) => {
         const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
@@ -4744,9 +4985,9 @@ export const LaborPlanning = (() => {
         if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
         const el = grid.querySelector(`.lp-line-cell[data-line="${line.replace(/"/g,'&quot;')}"][data-day="${day}"]`) as HTMLInputElement | null;
         if (el) el.value = oldAh != null ? String(oldAh) : '';
-        _saveLines(sn, plant, [{ production_line: line, day, avail_hours: oldAh, source: oldSrc }]);
+        _saveLines(sn, plant, [{ machine: line, day, avail_hours: oldAh, source: oldSrc }]);
       });
-      await _saveLines(sn, plant, [{ production_line: line, day, avail_hours: ah, source: newSrc }]);
+      await _saveLines(sn, plant, [{ machine: line, day, avail_hours: ah, source: newSrc }]);
     };
 
     grid.oncontextmenu = function(e: MouseEvent) {
@@ -4754,7 +4995,7 @@ export const LaborPlanning = (() => {
       e.preventDefault();
       const line = inp.dataset.line!, day = inp.dataset.day!;
       if (_lineData[plant]?.[line]?.[day]?.source !== 'override') return;
-      const grp = (Store._state.masterData?.lines || []).find((l) => l.production_line === line && l.plant === plant)?.pl_group;
+      const grp = (Store._state.masterData?.lines || []).find((l) => l.machine === line && l.plant === plant)?.wc_group;
       if (!grp) return;
       const periodKey = _weeks.find((w) => {
         for (let d = 0; d < 7; d++) { const dd = new Date(w.monday); dd.setDate(w.monday.getDate() + d); if (Util.dayKey(dd) === day) return true; }
@@ -4762,11 +5003,11 @@ export const LaborPlanning = (() => {
       if (!periodKey) return;
       const groupHours = _aggrData[plant]?.[grp]?.[periodKey]; if (groupHours == null) return;
       const splits = _disaggregate(plant, grp, periodKey, groupHours);
-      const resetCell = splits.find((c) => c.production_line === line && c.day === day); if (!resetCell) return;
+      const resetCell = splits.find((c) => c.machine === line && c.day === day); if (!resetCell) return;
       _lineData[plant][line][day] = { avail_hours: resetCell.avail_hours, source: 'auto_split' };
       inp.value = resetCell.avail_hours ? String(resetCell.avail_hours) : '';
       inp.closest('td')?.classList.remove('lp-ovr');
-      _saveLines(sn, plant, [{ production_line: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
+      _saveLines(sn, plant, [{ machine: line, day, avail_hours: resetCell.avail_hours, source: 'auto_split' }]);
       Toast.show(`Reset ${line} · ${day} to even-split`, 'success');
     };
   }
@@ -4778,9 +5019,9 @@ export const LaborPlanning = (() => {
     await _fetchLines(plant, scopeGroup);
     const lineSel = Store.selectedLines;
     const lines = Store.masterLinesForPlant(plant)
-      .filter((l) => (!scopeGroup || l.pl_group === scopeGroup) && (lineSel.size === 0 || lineSel.has(l.production_line)))
-      .map((l) => l.production_line).sort();
-    if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_production_lines_plant')}</div>`; return; }
+      .filter((l) => (!scopeGroup || l.wc_group === scopeGroup) && (lineSel.size === 0 || lineSel.has(l.machine)))
+      .map((l) => l.machine).sort();
+    if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_machine_plant')}</div>`; return; }
 
     const horizonStart = _weeks[0].monday;
     const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
@@ -4842,8 +5083,8 @@ export const LaborPlanning = (() => {
     await _fetchLines(plant, null);
     const lineSel = Store.selectedLines;
     const lines = (Store._state.masterData?.lines || [])
-      .filter((l) => l.plant === plant && (lineSel.size === 0 || lineSel.has(l.production_line)))
-      .map((l) => l.production_line);
+      .filter((l) => l.plant === plant && (lineSel.size === 0 || lineSel.has(l.machine)))
+      .map((l) => l.machine);
     const horizonStart = _weeks[0].monday;
     const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, Math.min(_horizonSpan * 7, 84));
     const exceptions: LaborException[] = [];
@@ -4942,7 +5183,7 @@ export const LaborPlanning = (() => {
       document.getElementById('lp-line-label'), document.getElementById('lp-line-btn'), Store.selectedLines);
     if (plant) {
       const lineCandidates = Store.masterLinesForPlant(plant)
-        .map((l) => l.production_line)
+        .map((l) => l.machine)
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
       Util.renderLineChecklist(
         document.getElementById('lp-line-checklist'), lineCandidates, Store.selectedLines, _lineSearch,
@@ -4990,7 +5231,7 @@ export const LaborPlanning = (() => {
       return;
     }
     const mdLines = (Store._state.masterData?.lines || []).filter((r) => r.plant === plant);
-    _groups = [...new Set(mdLines.map((r) => r.pl_group).filter((g): g is string => Boolean(g)))].sort();
+    _groups = [...new Set(mdLines.map((r) => r.wc_group).filter((g): g is string => Boolean(g)))].sort();
     if (!_groups.length) {
       const grid = document.getElementById('labor-grid');
       if (grid) grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_line_groups_plant')}</div>`;
@@ -5057,7 +5298,7 @@ export const LaborPlanning = (() => {
         _lineSearch = lineSearchIn.value || '';
         Util.renderLineChecklist(
           document.getElementById('lp-line-checklist'),
-          Store.selectedPlant ? Store.masterLinesForPlant(Store.selectedPlant).map((l) => l.production_line).sort() : [],
+          Store.selectedPlant ? Store.masterLinesForPlant(Store.selectedPlant).map((l) => l.machine).sort() : [],
           Store.selectedLines, _lineSearch,
           (line, checked) => {
             const next = new Set(Store.selectedLines);
@@ -5127,7 +5368,7 @@ export const LaborPlanning = (() => {
  *  own `/master-data/roles`(+`/role_plants`) fetches, not this generic grid
  *  engine) — `Security` stays container-`any`-typed until its own task. */
 type MasterDataTable =
-  | 'subnetworks' | 'plants' | 'production_lines'
+  | 'subnetworks' | 'plants' | 'machine'
   | 'materials' | 'material_plants' | 'bom_items';
 
 /** `column_metadata` row shape returned alongside every `GET
@@ -5178,7 +5419,7 @@ interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
   added: T[];
 }
 
-/** `production_lines` row — the one table `MasterData.syncLineSettings`
+/** `machine` row — the one table `MasterData.syncLineSettings`
  *  reads/writes specific named fields on (the rest of the grid engine never
  *  needs more than the base `MasterDataRow` bag). Column names/types per
  *  schema.sql; `bottleneck`/`excl_optimizer` are DB `TEXT` flag columns
@@ -5186,9 +5427,9 @@ interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
 interface ProductionLineRow extends MasterDataRow {
   subnetwork: string;
   plant: string;
-  production_line: string;
+  machine: string;
   line_key?: string;
-  pl_group?: string | null;
+  wc_group?: string | null;
   bottleneck?: string | null;
   excl_optimizer?: string | null;
   buffer_type?: string | null;
@@ -5221,6 +5462,8 @@ interface PlantRow extends MasterDataRow {
   max_pull_forward_days?: number | null;
   /** Attached by master_data.py's get_table_data for the 'plants' table only. */
   constraints?: ConstraintConfig[] | null;
+  /** plants.setup_active — see NimbusMasterPlant's field of the same name. */
+  setup_active?: boolean;
 }
 
 interface MaterialRow extends MasterDataRow {
@@ -5266,7 +5509,7 @@ interface BomItemRow extends MasterDataRow {
  *  `material_plants`, rows that block the delete). */
 interface MasterDataCascadePreview {
   plants?: number;
-  production_lines?: number;
+  machine?: number;
   bom_items?: number;
 }
 
@@ -5400,7 +5643,7 @@ export const MasterData = (() => {
   const TABLE_LABELS: Record<MasterDataTable, string> = {
     subnetworks:      'Subnetworks',
     plants:           'Plants',
-    production_lines: 'Production Lines',
+    machine: 'Production Lines',
     materials:        'Material',
     material_plants:  'Material Plant',
     bom_items:        'Bill of Materials',
@@ -5410,7 +5653,7 @@ export const MasterData = (() => {
   const KEY_COLS: Record<MasterDataTable, string[]> = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
-    production_lines: ['subnetwork', 'plant', 'production_line'],
+    machine: ['subnetwork', 'plant', 'machine'],
     materials:        ['material_id'],
     material_plants:  ['material_id', 'plant'],
     bom_items:        ['material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'],
@@ -5419,7 +5662,7 @@ export const MasterData = (() => {
   // Tables that need a parent-dropdown for FK columns.
   const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
-    production_lines: { subnetwork: 'subnetworks', plant: 'plants' },
+    machine: { subnetwork: 'subnetworks', plant: 'plants' },
     material_plants:  { material_id: 'materials' },
     // bom_items.component_id is deliberately NOT registered here: it needs a
     // plant-scoped option list (material_plants filtered to the row's plant),
@@ -5840,7 +6083,7 @@ export const MasterData = (() => {
     const sourceState = _cache[sourceTable];
     const sourceRows = sourceState?.rows ?? [];
     const srcKeys = KEY_COLS[sourceTable];
-    // For subnetworks: use 'code'. For plants when in production_lines: use 'plant'.
+    // For subnetworks: use 'code'. For plants when in machine: use 'plant'.
     const valCol = srcKeys[srcKeys.length - 1];
     const labelCol = sourceTable === 'subnetworks' ? 'name' : valCol;
 
@@ -6127,7 +6370,7 @@ export const MasterData = (() => {
         }).then((r) => r.json()) as MasterDataCascadePreview;
 
         const parts: string[] = [];
-        const nPlants = preview.plants ?? 0, nLines = preview.production_lines ?? 0, nBom = preview.bom_items ?? 0;
+        const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
         if (nPlants > 0)  parts.push(`<strong>${nPlants}</strong> plant${nPlants !== 1 ? 's' : ''}`);
         if (nLines > 0)   parts.push(`<strong>${nLines}</strong> production line${nLines !== 1 ? 's' : ''}`);
         if (nBom > 0)     parts.push(`<strong>${nBom}</strong> BOM item${nBom !== 1 ? 's' : ''}`);
@@ -6202,7 +6445,7 @@ export const MasterData = (() => {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
         }).then((r) => r.json()) as MasterDataCascadePreview;
-        const nPlants = preview.plants ?? 0, nLines = preview.production_lines ?? 0, nBom = preview.bom_items ?? 0;
+        const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
         const total = nPlants + nLines + nBom;
         if (total > 0) {
           const parts: string[] = [];
@@ -6248,7 +6491,7 @@ export const MasterData = (() => {
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
         fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
-        fetch(`${API}/master-data/production_lines`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
+        fetch(`${API}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
@@ -6458,21 +6701,21 @@ export const MasterData = (() => {
   }
 
   async function syncLineSettings(line: string, patch: Partial<NimbusLineSetting>): Promise<void> {
-    if (!_cache['production_lines']) {
+    if (!_cache['machine']) {
       try {
-        const data = await fetch(`${API}/master-data/production_lines`).then((r) => {
+        const data = await fetch(`${API}/master-data/machine`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
         });
-        _cache['production_lines'] = {
+        _cache['machine'] = {
           columns: data.columns, rows: data.rows,
           dirty: new Map(), deleted: new Set(), added: [],
         };
       } catch { return; }
     }
 
-    const state = _cache['production_lines']! as MasterDataTableState<ProductionLineRow>;
-    const rowIdx = state.rows.findIndex((r) => r.production_line === line);
+    const state = _cache['machine']! as MasterDataTableState<ProductionLineRow>;
+    const rowIdx = state.rows.findIndex((r) => r.machine === line);
     if (rowIdx < 0) return;
 
     const updatedRow = { ...state.rows[rowIdx] };
@@ -6481,14 +6724,14 @@ export const MasterData = (() => {
     if ('bufferUnit'     in patch) updatedRow.buffer_type     = patch.bufferUnit === 'pct' ? '%' : 'hrs';
     if ('bufferPct'      in patch) updatedRow.buffer_percent  = patch.bufferPct;
     if ('bufferHours'    in patch) updatedRow.buffer_hours    = patch.bufferHours;
-    if ('plGroup'        in patch) updatedRow.pl_group        = patch.plGroup || null;
+    if ('plGroup'        in patch) updatedRow.wc_group        = patch.plGroup || null;
 
     // Update cache row and clear any stale dirty flag so MasterData table stays consistent.
     state.rows[rowIdx] = updatedRow;
-    state.dirty.delete(_rowKey('production_lines', updatedRow));
+    state.dirty.delete(_rowKey('machine', updatedRow));
 
     try {
-      await fetch(`${API}/master-data/production_lines/bulk`, {
+      await fetch(`${API}/master-data/machine/bulk`, {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
@@ -6496,7 +6739,7 @@ export const MasterData = (() => {
         if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
       });
-      if (_activeTable === 'production_lines') _renderTable('production_lines');
+      if (_activeTable === 'machine') _renderTable('machine');
     } catch (e) {
       ErrorLog.error('prod-lines', `Failed to save line setting: ${(e as Error).message}`);
     }
@@ -6938,15 +7181,18 @@ export const AdminCockpit = {
     const ifc = document.getElementById('admin-interface-pane');
     const sec = document.getElementById('admin-security-pane');
     const sc  = document.getElementById('admin-system-config-pane');
+    const tbl = document.getElementById('admin-table-browser-pane');
     if (ov) ov.hidden = (sub !== 'overview');
     if (mg) mg.hidden = (sub !== 'manage');
     if (ifc) ifc.hidden = (sub !== 'interface');
     if (sec) sec.hidden = (sub !== 'security');
     if (sc) sc.hidden = (sub !== 'system-config');
+    if (tbl) tbl.hidden = (sub !== 'table-browser');
     if (sub === 'manage') MasterData.render();
     else if (sub === 'interface') Interface.render();
     else if (sub === 'security') Security.render();
     else if (sub === 'system-config') SystemConfig.render();
+    else if (sub === 'table-browser') AdminTables.render();
     else AdminCockpit._renderOverview();
   },
 
@@ -9345,7 +9591,7 @@ export const Interface = (() => {
   const MASTER_KEYS: Record<string, string[]> = {
     subnetworks:      ['code'],
     plants:           ['subnetwork', 'plant'],
-    production_lines: ['subnetwork', 'plant', 'production_line'],
+    machine: ['subnetwork', 'plant', 'machine'],
     materials:        ['material_id'],
     material_plants:  ['material_id', 'plant'],
   };

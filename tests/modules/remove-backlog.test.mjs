@@ -23,7 +23,7 @@ function task(id, start, hours, extra = {}) {
     id,
     plant,
     PLANT: plant,
-    PRODUCTION_LINE: line,
+    MACHINE: line,
     RUN_TIME: String(hours),
     start_date: at(start),
     end_date: new Date(+at(start) + hours * HOUR),
@@ -42,7 +42,7 @@ function seed({ tasks = [], hours = allDays(8, 16), lineName = line, splitOrderP
   Store.replaceFixedIds(new Set(), 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: splitOrderPolicy }],
-    lines: [{ production_line: lineName, plant }],
+    lines: [{ machine: lineName, plant }],
   }, 'test');
   Store.setLineSetting(lineName, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(lineName, hours, 'test');
@@ -165,7 +165,7 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
     tasks: [
       task('invalid', '2026-08-12T06:00', 1, { RUN_TIME: '0' }),
       task('closed', '2026-08-12T07:00', 1),
-      { ...task('other', '2026-08-12T06:00', 1), id: 'other', PRODUCTION_LINE: otherLine },
+      { ...task('other', '2026-08-12T06:00', 1), id: 'other', MACHINE: otherLine },
     ],
     hours: Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, null])),
   });
@@ -180,6 +180,6 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
 
 test('Engine rejects a missing plant timezone and never mutates schedule', () => {
   seed({ tasks: [task('past', '2026-08-12T06:00', 1)] });
-  Store.setMasterData({ plants: [{ subnetwork: 'SN', plant }], lines: [{ production_line: line, plant }] }, 'test');
+  Store.setMasterData({ plants: [{ subnetwork: 'SN', plant }], lines: [{ machine: line, plant }] }, 'test');
   assert.throws(() => Engine.removeBacklog(opts()), /timezone/i);
 });

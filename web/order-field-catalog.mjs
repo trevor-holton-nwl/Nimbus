@@ -10,7 +10,7 @@
  *
  * CORE fields are never in this catalog and are never hideable — they stay
  * hardcoded in Table/Inspector exactly as before this feature existed:
- * production_order, production_line, start_date, end_date, notes.
+ * production_order, machine, start_date, end_date, notes.
  *
  * Every other order attribute NIMBUS renders anywhere today is listed here so
  * an admin can toggle its default visibility globally (system_settings

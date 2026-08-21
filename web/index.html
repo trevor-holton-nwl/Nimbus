@@ -1659,7 +1659,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
        ========================================================= -->
   <section class="tab-panel" id="masterdata-tab" role="tabpanel">
     <nav class="admin-subtabs md-master-subtabs" role="tablist">
-      <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
+      <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.machine">Production Lines</button>
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
       <button class="admin-subtab" data-md-master="material" role="tab" data-i18n="tab.materials">Material</button>
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
@@ -1718,7 +1718,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
           <div class="panel">
             <header class="panel-head">
-              <h3 data-i18n="ui.production_lines_panel">Production Lines</h3>
+              <h3 data-i18n="ui.machine_panel">Production Lines</h3>
               <span class="panel-hint" id="plant-lines-count"></span>
               <button id="plant-roster-toggle" class="btn btn-ghost sm"
                       style="padding:2px 8px;font-size:12px;">▼</button>
@@ -1799,6 +1799,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <button class="admin-subtab" data-sub="interface" role="tab" data-i18n="tab.interface">Interface</button>
           <button class="admin-subtab" data-sub="security" role="tab" data-i18n="tab.security">Security</button>
           <button class="admin-subtab" data-sub="system-config" role="tab" data-i18n="tab.system_config">System Configuration</button>
+          <button class="admin-subtab" data-sub="table-browser" role="tab" data-i18n="tab.table_browser">Table Browser</button>
         </nav>
 
         <!-- OVERVIEW PANE -->
@@ -2080,7 +2081,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <nav class="md-tabs" role="tablist">
             <button class="md-tab active" data-md-tab="subnetworks" role="tab" data-i18n="tab.subnetworks">Subnetworks</button>
             <button class="md-tab" data-md-tab="plants" role="tab" data-i18n="tab.plants">Plants</button>
-            <button class="md-tab" data-md-tab="production_lines" role="tab" data-i18n="tab.production_lines">Production Lines</button>
+            <button class="md-tab" data-md-tab="machine" role="tab" data-i18n="tab.machine">Production Lines</button>
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
             <button class="md-tab" data-md-tab="bom_items" role="tab" data-i18n="tab.bom_items">Bill of Materials</button>
@@ -2093,6 +2094,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <div id="security-host"></div>
         </div>
         <div id="admin-system-config-pane" hidden><div id="system-config-host"></div></div>
+        <!-- Workstream E — read-only universal table browser, catalog-driven
+             (GET /admin/tables et al.), deliberately separate from the
+             editable Manage Data Tables grid above. See web/admin-tables.mts. -->
+        <div id="admin-table-browser-pane" hidden><div id="admin-table-browser-host"></div></div>
 
       </div>
     </div>

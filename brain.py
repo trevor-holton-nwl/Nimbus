@@ -42,7 +42,7 @@ from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Q
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager, suppress
@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
+import admin_tables
 import auth
 import db
 import master_data as md
@@ -192,14 +193,15 @@ async def lifespan(app: FastAPI):
         _backfill_color_wheels_from_disk()
     load_priority_lists()
     md.ensure_labor_plan_table()
-    md.ensure_labor_plan_line_table()
+    md.ensure_labor_plan_machine_table()
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_max_pull_forward_days_column()
+    md.ensure_plant_setup_active_column()
     md.ensure_work_hours_columns()
-    md.ensure_line_calendar_table()
-    md.ensure_line_blackout_table()
-    md.ensure_line_key_columns()
+    md.ensure_machine_calendar_table()
+    md.ensure_machine_blackout_table()
+    md.ensure_machine_key_columns()
     md.ensure_plant_blackout_table()
     md.ensure_unique_plant()
     md.ensure_material_plant_attributes()
@@ -582,18 +584,19 @@ _ADMIN_WRITE_OPERATIONS = {
     "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
     "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
     "/setup/{plant}/definition": "setup.definition_write",
-    "/setup/{plant}/active": "setup.active_write",
+    "/setup/{plant}/active": "setup.active_write",  # D2: vestigial-but-retained; see plant.setup_active_update below
+    "/plant/{plant}/setup-active": "plant.setup_active_update",
     "/setup/{plant}/matrix/import": "setup.matrix_import",
     "/setup/{plant}/matrix": "setup.matrix_delete",
-    "/setup/{plant}/lines/{line}/state": "setup.line_state_write",
-    "/setup/{plant}/lines/{line}/compatibility": "setup.line_compatibility_write",
+    "/setup/{plant}/lines/{machine}/state": "setup.line_state_write",
+    "/setup/{plant}/lines/{machine}/compatibility": "setup.line_compatibility_write",
     "/setup/{plant}/overrides": "setup.override_create",
     "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "line", "override_id", "table", "column", "object", "username"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:
@@ -722,7 +725,7 @@ ROW_ORDER_SENTINEL = "__row_order__"
 
 def _resolve_priority_list_columns(
         df: pd.DataFrame, plant: str, spec: dict, *,
-        explicit_line: str = "", explicit_value_col: str | None = None,
+        explicit_machine: str = "", explicit_value_col: str | None = None,
         explicit_rank_col: str | None = None, reject_conflicts: bool = True,
 ) -> dict:
     """Shared column-resolution/validation for POST /priority-list/{plant}/{field_key}
@@ -750,8 +753,8 @@ def _resolve_priority_list_columns(
 
     Returns {"status": "needs_mapping", "headers": [...], "sample": [...]} or
     {"status": "resolved", "value_col": str, "rank_col": str | None,
-     "line": str, "entries": {VALUE: RANK|None}}.
-    Raises HTTPException(400) for plant-mismatch, unknown-line, multi-value
+     "machine": str, "entries": {VALUE: RANK|None}}.
+    Raises HTTPException(400) for plant-mismatch, unknown-machine, multi-value
     LINE column, an explicitly-named column that doesn't exist in the file, or
     (when reject_conflicts) conflicting ranks for the same value.
     """
@@ -768,19 +771,22 @@ def _resolve_priority_list_columns(
             raise HTTPException(status_code=400,
                 detail=f"File's PLANT column ({sorted(file_plants)}) doesn't match target plant {plant!r}")
 
-    resolved_line = explicit_line.strip()
-    if "LINE" in headers and not resolved_line:
+    # "LINE" here is the uploaded spreadsheet's own column header — the
+    # SAP/user-facing Excel format for this per-file scoping column — and is
+    # unrelated to the JSON wire-facing "machine" key; it stays LINE.
+    resolved_machine = explicit_machine.strip()
+    if "LINE" in headers and not resolved_machine:
         file_lines = {v for v in df["LINE"].fillna("").astype(str).str.strip() if v and v.lower() != "nan"}
         if len(file_lines) > 1:
             raise HTTPException(status_code=400,
                 detail=f"File contains multiple LINE values {sorted(file_lines)} — upload once per line, or pass a single line explicitly")
         if len(file_lines) == 1:
-            resolved_line = next(iter(file_lines))
-    if resolved_line:
+            resolved_machine = next(iter(file_lines))
+    if resolved_machine:
         known_lines = md.known_line_codes_for_plant(plant)
-        if resolved_line not in known_lines:
+        if resolved_machine not in known_lines:
             raise HTTPException(status_code=400,
-                detail=f"{resolved_line!r} is not a known production line for plant {plant!r}")
+                detail=f"{resolved_machine!r} is not a known machine for plant {plant!r}")
 
     resolved_value_col = explicit_value_col
     if resolved_value_col and resolved_value_col not in headers:
@@ -843,11 +849,11 @@ def _resolve_priority_list_columns(
             detail=f"Conflicting ranks for the same value in this file: {sorted(set(conflicts))}")
 
     return {"status": "resolved", "value_col": resolved_value_col, "rank_col": resolved_rank_col,
-            "line": resolved_line, "entries": entries}
+            "machine": resolved_machine, "entries": entries}
 
 
 def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict, *,
-                           line: str, value_col: str, rank_col: str | None,
+                           machine: str, value_col: str, rank_col: str | None,
                            filename: str, file_row_count: int, user: str,
                            legacy_action_names: bool = False) -> bool:
     """Shared upsert+audit+cache-reload step (Decision 9b) — this part was
@@ -860,7 +866,7 @@ def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict
     `priority_list.row_count` stores len(entries) — the number of value/rank
     pairs actually STORED — not the uploaded file's raw row count. Every
     consumer of that column renders it as "N values" (the Stage 2 field card,
-    a line-override row, PriorityListViewer's meta line, the legacy
+    a machine-override row, PriorityListViewer's meta line, the legacy
     GET /color-wheels list), and _resolve_priority_list_columns drops blank
     values and collapses duplicates, so a 500-row file with 40 distinct values
     displayed "500 values" while only 40 could ever affect sequencing. This is
@@ -870,7 +876,7 @@ def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict
     """
     stored_count = len(entries)
     res = db.upsert_priority_list(
-        plant, field_key, entries, line=line,
+        plant, field_key, entries, line=machine,
         source_column=spec["orders_column"], value_column=value_col,
         rank_column=rank_col, filename=filename, row_count=stored_count, uploaded_by=user,
     )
@@ -881,7 +887,7 @@ def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict
         action = "priority_list_replace" if is_replace else "priority_list_upload"
     _cw_append_audit({
         "ts": datetime.utcnow().isoformat() + "Z", "user": user, "action": action, "plant": plant,
-        "details": {"field_key": field_key, "line": line, "filename": filename,
+        "details": {"field_key": field_key, "machine": machine, "filename": filename,
                     "row_count": stored_count, "file_row_count": file_row_count,
                     "replaced": is_replace},
     })
@@ -962,7 +968,7 @@ def _reload_one_plant_lists(plant: str) -> None:
     priority_list table — used after an upload/delete/resync so we don't
     reload every plant's lists. Keyed by the RAW plant name (no
     _cw_safe_name() — see the PLANT_LISTS module comment). Currently reloads
-    the whole plant (all lines/fields) since Stage 1 has no per-(line, field)
+    the whole plant (all machines/fields) since Stage 1 has no per-(machine, field)
     upload endpoint yet; Stage 2 can narrow this once it does.
     """
     global CW_LOADED_AT
@@ -995,8 +1001,8 @@ def apply_priority_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd
     yet consulted here (Stage 3 is the optimizer change, and ranks resolve
     client-side there — N2b, no generic RANKS field is ever emitted).
 
-    A line-specific 'colorWheel' list wins over the plant-wide one for that
-    line (docs/scheduling_priority.md "List scope" decision); orders whose
+    A machine-specific 'colorWheel' list wins over the plant-wide one for that
+    machine (docs/scheduling_priority.md "List scope" decision); orders whose
     color isn't in the applicable list are NOT dropped — they are assigned
     last priority (999999) so they sequence after listed colors. Returns
     (df, stats). Reads from the PLANT_LISTS module cache — callers should
@@ -1022,29 +1028,41 @@ def apply_priority_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd
     try:
         df = df.copy()
         df["COLOR"] = df["COLOR"].astype(str).str.upper().str.strip()
+        # PRT_01/PRT_02/PRODUCTION_VERSION are equally rankable (master_data.
+        # RANKABLE_FIELDS) and equally subject to the case-mismatch pathology
+        # this fold exists to close for COLOR: _resolve_priority_list_columns
+        # already uppercases uploaded priority-list values, so an order's own
+        # attribute value must be folded the same way before any rank lookup
+        # compares the two, whether that lookup happens here or client-side.
+        # Guarded by column presence — the real /tasks df (db.query_orders'
+        # _ORDERS_SELECT) always carries these, but this function is also
+        # exercised in tests against minimal synthetic frames.
+        for _attr_col in ("PRT_01", "PRT_02", "PRODUCTION_VERSION"):
+            if _attr_col in df.columns:
+                df[_attr_col] = df[_attr_col].astype(str).str.upper().str.strip()
         df = df.drop(columns=["ORDER_Y"], errors="ignore")
         df["ORDER_Y"] = None
 
-        def _merge_one_plant(by_line: dict, plant_mask) -> None:
-            plantwide = (by_line.get("") or {}).get("colorWheel")
+        def _merge_one_plant(by_machine: dict, plant_mask) -> None:
+            plantwide = (by_machine.get("") or {}).get("colorWheel")
             _apply_priority_scope(df, plant_mask, plantwide)
-            for line_key, fields in by_line.items():
-                if line_key == "":
+            for priority_scope_key, fields in by_machine.items():
+                if priority_scope_key == "":
                     continue
-                line_map = fields.get("colorWheel")
-                if line_map:
-                    _apply_priority_scope(df, plant_mask & (df["PRODUCTION_LINE"] == line_key), line_map)
+                machine_map = fields.get("colorWheel")
+                if machine_map:
+                    _apply_priority_scope(df, plant_mask & (df["MACHINE"] == priority_scope_key), machine_map)
 
         if plant:
             # Scoped path: only this plant's lists matter for a plant-scoped df.
-            by_line = PLANT_LISTS.get(plant)
-            if by_line:
-                _merge_one_plant(by_line, pd.Series(True, index=df.index))
+            by_machine = PLANT_LISTS.get(plant)
+            if by_machine:
+                _merge_one_plant(by_machine, pd.Series(True, index=df.index))
         else:
-            for plant_key, by_line in PLANT_LISTS.items():
+            for plant_key, by_machine in PLANT_LISTS.items():
                 plant_mask = df["PLANT"] == plant_key
                 if plant_mask.any():
-                    _merge_one_plant(by_line, plant_mask)
+                    _merge_one_plant(by_machine, plant_mask)
 
         # Orders whose COLOR isn't found in any applicable list are NOT dropped —
         # they flow through and sequence LAST via ORDER_Y = 999999 below.
@@ -1072,7 +1090,7 @@ def apply_priority_merge(df: pd.DataFrame, plant: str | None = None) -> tuple[pd
     # which rows get linked into a chain in get_tasks. Do not "fix" this by
     # reading plants.constraints here — the optimizer overwrites it anyway.
     df = df.sort_values(
-        by=["BASIC_START_DATE", "PRODUCTION_LINE", "ORDER_Y"]
+        by=["BASIC_START_DATE", "MACHINE", "ORDER_Y"]
     ).reset_index(drop=True)
 
     stats["emitted_task_count"] = len(df)
@@ -1160,7 +1178,7 @@ class TaskDTO(BaseModel):
     original_start_date: str | None = None
     original_end_date: str | None = None
     user_scheduled: bool
-    PRODUCTION_LINE: str
+    MACHINE: str
     MATERIAL_DESCRIPTION: str
     MATERIAL_NUMBER: str | None = None
     order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
@@ -1320,8 +1338,8 @@ def get_diagnostics_deep():
         }
         wheel_colors = {
             color
-            for by_line in PLANT_LISTS.values()
-            for color in (by_line.get("") or {}).get("colorWheel", {})
+            for by_machine in PLANT_LISTS.values()
+            for color in (by_machine.get("") or {}).get("colorWheel", {})
         }
         if order_colors:
             missed = order_colors - wheel_colors
@@ -1394,7 +1412,7 @@ def _clean_id(v):
 
 
 @api.get("/tasks", response_model=TasksResponse)
-def get_tasks(plant: str | None = None, line: str | None = None,
+def get_tasks(plant: str | None = None, machine: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
                   description="Max rows to return. Omit for the full plant-scoped list."),
               offset: int | None = Query(default=None, ge=0,
@@ -1405,43 +1423,43 @@ def get_tasks(plant: str | None = None, line: str | None = None,
 
     Stateless: queries Postgres per request (db.query_orders) rather than
     copying an in-memory frame. ?plant= is the scaling unit (bounds the result
-    to one plant); ?line= narrows further; ?limit/?offset= are a coarse guard
-    rail for unscoped tooling (links are only coherent within a plant/line scope).
+    to one plant); ?machine= narrows further; ?limit/?offset= are a coarse guard
+    rail for unscoped tooling (links are only coherent within a plant/machine scope).
     Color merge still runs per-request from the in-process color-wheel cache.
     Response: { data: Task[], links: Link[], meta: DiagnosticsDict }
     When ?limit/?offset= are supplied, meta.total carries the full filtered
     row count (ignoring limit/offset) so callers can paginate.
 
     Per-user plant scope (role_plants, via auth.get_allowed_plants) is
-    enforced here: an explicit ?plant= (or the plant a ?line= resolves to)
+    enforced here: an explicit ?plant= (or the plant a ?machine= resolves to)
     outside the caller's allowed set 403s; an unscoped (?limit=-only) pull
     is silently bounded to the allowed set rather than rejected.
     """
     paging = limit is not None or offset is not None
-    # A request with no plant, no line, and no explicit limit would materialize the
+    # A request with no plant, no machine, and no explicit limit would materialize the
     # entire order book. Refuse it — plant is the scaling unit, so callers must scope
-    # by ?plant=/?line=, or bound an unscoped tooling pull with ?limit=.
-    if plant is None and line is None and limit is None:
+    # by ?plant=/?machine=, or bound an unscoped tooling pull with ?limit=.
+    if plant is None and machine is None and limit is None:
         raise HTTPException(
             status_code=400,
-            detail=("Specify ?plant= (or ?line=) to scope the request, or ?limit= "
+            detail=("Specify ?plant= (or ?machine=) to scope the request, or ?limit= "
                     "for a bounded unscoped tooling pull — refusing to load the full order book."),
         )
     if allowed_plants is not None:
         if plant is not None and plant not in allowed_plants:
             raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
-        if plant is None and line is not None:
-            line_plants = md.plants_for_line(line)
+        if plant is None and machine is not None:
+            line_plants = md.plants_for_line(machine)
             if line_plants and not (set(line_plants) & set(allowed_plants)):
-                raise HTTPException(status_code=403, detail=f"Line {line!r} is not on any of your assigned plants")
-    df = db.query_orders(plant=plant, line=line, limit=limit, offset=offset, allowed_plants=allowed_plants)
+                raise HTTPException(status_code=403, detail=f"Machine {machine!r} is not on any of your assigned plants")
+    df = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
-                      "line_filter_active": line, "pre_color_merge_count": 0,
+                      "machine_filter_active": machine, "pre_color_merge_count": 0,
                       "raw_row_count": 0, "unique_id_count": 0,
                       "color_merge_misses": 0, "missed_colors": [],
                       "emitted_task_count": 0, "color_merge_ms": 0,
-                      "total": (db.count_orders(plant=plant, line=line, allowed_plants=allowed_plants) if paging else 0),
+                      "total": (db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else 0),
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
                       "source_file": "postgres://nimbus/orders"}
         return {"data": [], "links": [], "meta": empty_meta}
@@ -1457,7 +1475,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     link_id_counter = 1
     links = []
 
-    for prod_line, group_raw in df.groupby("PRODUCTION_LINE"):
+    for prod_line, group_raw in df.groupby("MACHINE"):
         group = group_raw.sort_values("BASIC_START_DATE")
         prev_task_id = None
 
@@ -1477,7 +1495,7 @@ def get_tasks(plant: str | None = None, line: str | None = None,
                 "original_start_date": orig_start.strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(orig_start) else None,
                 "original_end_date":   orig_end.strftime("%Y-%m-%dT%H:%M:%S")   if pd.notna(orig_end)   else None,
                 "user_scheduled": bool(row.get("USER_SCHEDULED")),
-                "PRODUCTION_LINE": prod_line,
+                "MACHINE": prod_line,
                 "MATERIAL_DESCRIPTION": task_text,
                 "MATERIAL_NUMBER": _clean_id(row.get("MATERIAL_NUMBER")),
                 "ORDER_QUANTITY_(GMEIN)": row.get("ORDER_QUANTITY_(GMEIN)"),
@@ -1515,11 +1533,11 @@ def get_tasks(plant: str | None = None, line: str | None = None,
     meta["rendered"] = len(data)
     meta["link_count"] = len(links)
     meta["plant_filter_active"] = plant
-    meta["line_filter_active"] = line
+    meta["machine_filter_active"] = machine
     meta["pre_color_merge_count"] = pre_merge_count
     meta["raw_row_count"] = pre_merge_count
     meta["unique_id_count"] = len(data)
-    meta["total"] = db.count_orders(plant=plant, line=line, allowed_plants=allowed_plants) if paging else len(data)
+    meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -2053,7 +2071,7 @@ def get_priority_rank_maps(
     current by every priority-list upload/delete (Stage 2) and POST /reload);
     the plant-authorization gate below does its own one-row user_security
     lookup when an identity header is present, same as every sibling in this
-    block. Shape: {line_or_empty: {field_key: {VALUE: RANK}}} — the exact
+    block. Shape: {machine_or_empty: {field_key: {VALUE: RANK}}} — the exact
     native shape of PLANT_LISTS, no reshaping, since this runs on every
     optimize call and every alert auto-fix.
 
@@ -2078,17 +2096,17 @@ def get_priority_lists_for_plant(
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Per-field metadata + coverage for one plant's Optimization tab (Stage 2).
     Groups the flat list_priority_lists_meta rows by field_key, splitting
-    line='' (plant-wide) from everything else (line overrides), and merges in
-    priority_list_coverage's per-line ranked/distinct counts.
+    machine='' (plant-wide) from everything else (machine overrides), and
+    merges in priority_list_coverage's per-machine ranked/distinct counts.
 
     `fields[<key>].coverage` is passed through verbatim, so it carries BOTH the
-    per-line buckets (keyed by the line code, or '' for orders with no line)
-    and one true plant-wide roll-up keyed by db.PLANT_TOTAL_COVERAGE_KEY
+    per-machine buckets (keyed by the machine code, or '' for orders with no
+    machine) and one true plant-wide roll-up keyed by db.PLANT_TOTAL_COVERAGE_KEY
     ('__plant_total__'). The plant-wide card must read that reserved key — '' is
-    the no-production-line bucket, NOT a plant total, and reading '' left the
-    ratio blank on every plant whose orders all carry a line. Summing the
-    per-line buckets client-side is also wrong: they are per-line
-    COUNT(DISTINCT ...), so a value used on two lines would be counted twice."""
+    the no-machine bucket, NOT a plant total, and reading '' left the
+    ratio blank on every plant whose orders all carry a machine. Summing the
+    per-machine buckets client-side is also wrong: they are per-machine
+    COUNT(DISTINCT ...), so a value used on two machines would be counted twice."""
     try:
         md._assert_plant_allowed(plant, allowed_plants)
     except md.PlantNotAllowed as e:
@@ -2097,18 +2115,26 @@ def get_priority_lists_for_plant(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     rows, _total = db.list_priority_lists_meta(plant=plant)
+
+    def _rekey(row: dict) -> dict:
+        # db.py's rows use its own Python-facing "line" key (unchanged by
+        # design) — rename it to "machine" at this JSON boundary only.
+        out = {k: v for k, v in row.items() if k != "line"}
+        out["machine"] = row["line"]
+        return out
+
     coverage = db.priority_list_coverage(
         plant, {k: v["orders_column"] for k, v in md.CONFIGURABLE_PRIORITY_FIELDS.items()}
     )
     fields: dict = {}
     for key, spec in md.CONFIGURABLE_PRIORITY_FIELDS.items():
         field_rows = [r for r in rows if r["field_key"] == key]
-        plant_wide = next((r for r in field_rows if r["line"] == ""), None)
-        line_overrides = [r for r in field_rows if r["line"] != ""]
+        plant_wide_row = next((r for r in field_rows if r["line"] == ""), None)
+        machine_overrides = [_rekey(r) for r in field_rows if r["line"] != ""]
         fields[key] = {
             "default_label": spec["default_label"],
-            "plant_wide": plant_wide,
-            "line_overrides": line_overrides,
+            "plant_wide": _rekey(plant_wide_row) if plant_wide_row else None,
+            "machine_overrides": machine_overrides,
             "coverage": coverage.get(key, {}),
         }
     return {"plant": plant, "fields": fields}
@@ -2117,11 +2143,11 @@ def get_priority_lists_for_plant(
 @api.post("/priority-list/{plant}/{field_key}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_priority_list(
         plant: str, field_key: str, request: Request, file: UploadFile = File(...),
-        line: str = Form(default=""), value_column: str | None = Form(default=None),
+        machine: str = Form(default=""), value_column: str | None = Form(default=None),
         rank_column: str | None = Form(default=None),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Generic priority-list upload (Stage 2) — one file per plant [+ optional
-    line override]. See docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+    machine override]. See docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
     Decisions 5-6 for the Line-column and implicit-rank rules, and Decision 9b
     for why this shares _resolve_priority_list_columns/_persist_priority_list
     with the legacy POST /color-wheel/{plant}."""
@@ -2145,7 +2171,7 @@ async def upload_priority_list(
         raise HTTPException(status_code=400, detail="Uploaded file has no rows")
 
     resolved = _resolve_priority_list_columns(
-        df, plant, spec, explicit_line=line, explicit_value_col=value_column, explicit_rank_col=rank_column,
+        df, plant, spec, explicit_machine=machine, explicit_value_col=value_column, explicit_rank_col=rank_column,
     )
     if resolved["status"] == "needs_mapping":
         return resolved
@@ -2161,19 +2187,19 @@ async def upload_priority_list(
 
     is_replace = await run_in_threadpool(
         _persist_priority_list, plant, field_key, spec, resolved["entries"],
-        line=resolved["line"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
+        machine=resolved["machine"], value_col=resolved["value_col"], rank_col=resolved["rank_col"],
         filename=fname, file_row_count=file_row_count, user=user, legacy_action_names=False,
     )
     return {"status": "ok", "row_count": row_count, "file_row_count": file_row_count,
-            "line": resolved["line"],
+            "machine": resolved["machine"],
             "action": "replace" if is_replace else "upload", "replaced": is_replace}
 
 
 @api.get("/priority-list/{plant}/{field_key}")
 def get_priority_list_generic(
-        plant: str, field_key: str, line: str = Query(default=""),
+        plant: str, field_key: str, machine: str = Query(default=""),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Generic value/rank listing for one (plant, field_key[, line]) — the
+    """Generic value/rank listing for one (plant, field_key[, machine]) — the
     Stage 2 field card's Preview data source for non-color fields (color
     keeps using GET /color-wheel/{plant} via ColorWheelViewer, unchanged)."""
     try:
@@ -2184,17 +2210,17 @@ def get_priority_list_generic(
         raise HTTPException(status_code=400, detail=str(e)) from e
     if field_key not in md.RANKABLE_FIELDS:
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
-    row = db.get_priority_list(plant, field_key, line=line)
+    row = db.get_priority_list(plant, field_key, line=machine)
     if row is None:
         raise HTTPException(status_code=404,
-            detail=f"No {field_key!r} priority list uploaded for plant {plant!r}" + (f" line {line!r}" if line else ""))
+            detail=f"No {field_key!r} priority list uploaded for plant {plant!r}" + (f" machine {machine!r}" if machine else ""))
     entries = [
         {"value": v, "rank": (999999 if r is None else r)}
         for v, r in row["entries"].items()
     ]
     entries.sort(key=lambda e: e["rank"])
     return {
-        "plant": plant, "field_key": field_key, "line": line, "entries": entries,
+        "plant": plant, "field_key": field_key, "machine": machine, "entries": entries,
         "meta": {
             "uploaded_at": row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
             "uploaded_by": row["uploaded_by"], "filename": row["filename"], "row_count": row["row_count"],
@@ -2204,7 +2230,7 @@ def get_priority_list_generic(
 
 @api.delete("/priority-list/{plant}/{field_key}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def delete_priority_list_generic(
-        plant: str, field_key: str, request: Request, line: str = Query(default=""),
+        plant: str, field_key: str, request: Request, machine: str = Query(default=""),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     try:
         md._assert_plant_allowed(plant, allowed_plants)
@@ -2214,14 +2240,14 @@ def delete_priority_list_generic(
         raise HTTPException(status_code=400, detail=str(e)) from e
     if field_key not in md.RANKABLE_FIELDS:
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
-    res = db.delete_priority_list(plant, field_key, line=line)
+    res = db.delete_priority_list(plant, field_key, line=machine)
     if res is None:
         return {"status": "not_found"}
     ts = datetime.utcnow().isoformat() + "Z"
     user = request.headers.get("X-User", "system")
     _cw_append_audit({
         "ts": ts, "user": user, "action": "priority_list_delete", "plant": plant,
-        "details": {"field_key": field_key, "line": line, "filename": res.get("filename") or "unknown"},
+        "details": {"field_key": field_key, "machine": machine, "filename": res.get("filename") or "unknown"},
     })
     _reload_one_plant_lists(plant)
     return {"status": "ok"}
@@ -2255,10 +2281,10 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     NOT applied here (only the new generic endpoint gets it), so a 0-row file
     still succeeds with row_count 0, exactly as it always did.
 
-    Two more preserved-behavior fixes: this route never supported line
+    Two more preserved-behavior fixes: this route never supported machine
     scoping before this rewrite (external callers/`GET /color-wheel/{plant}`/
-    `ColorWheelViewer` only ever read the plant-wide line="" row), so it
-    always persists with line="" regardless of what
+    `ColorWheelViewer` only ever read the plant-wide machine="" row), so it
+    always persists with machine="" regardless of what
     _resolve_priority_list_columns resolved from an incidental LINE column in
     the file. And it passes reject_conflicts=False so a duplicate COLOR value
     with two different ranks resolves last-value-wins, matching the old
@@ -2296,7 +2322,7 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
 
     is_replace = await run_in_threadpool(
         _persist_priority_list, plant, "colorWheel", spec, resolved["entries"],
-        line="", value_col=resolved["value_col"], rank_col=resolved["rank_col"],
+        machine="", value_col=resolved["value_col"], rank_col=resolved["rank_col"],
         filename=fname, file_row_count=file_row_count, user=user, legacy_action_names=True,
     )
     action = "color_wheel_replace" if is_replace else "color_wheel_upload"
@@ -2378,8 +2404,13 @@ def list_color_wheels(
 def set_setup_active(plant: str, request: Request, body: dict = Body(default={}),
                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                      actor: str = Depends(auth.require_authenticated)):
-    """Toggle whether setup-aware optimization is live for this plant (the
-    single "Include Setup Times in Optimizer" checkbox)."""
+    """VESTIGIAL BUT RETAINED (Workstream D2, 2026-08-20): this used to be the
+    "Include Setup Times in Optimizer" checkbox's write path. That checkbox
+    now writes plants.setup_active via PUT /plant/{plant}/setup-active
+    instead — no UI or optimizer gate reads setup_definition.active any
+    more. Kept, unchanged, because removing it means also removing every
+    caller/test of it, which was judged higher blast radius than leaving one
+    unread write path in place."""
     _setup_plant_guard(plant, allowed_plants)
     _set_admin_log_details(request, plant=plant, active=bool(body.get("active")))
     try:
@@ -2398,56 +2429,92 @@ def get_setup(plant: str, request: Request,
     """Return one authorized plant's complete setup snapshot, never a cross-plant aggregate."""
     _setup_plant_guard(plant, allowed_plants)
     try:
-        return _setup_freshness(setup_data.get_setup_snapshot(plant))
+        snapshot = setup_data.get_setup_snapshot(plant)
+        # Workstream D2: the real "include setup times in optimizer" gate is
+        # plants.setup_active, not setup_definition.active (which is
+        # vestigial-but-retained — see schema.sql). Surfaced as its own
+        # top-level field rather than overloading `definition.active`, so it
+        # stays independently inspectable alongside machine.setup_compatible
+        # and the snapshot's own plant-identity check.
+        snapshot["plant_active"] = md.get_plant_setup_active(plant)
+        return _setup_freshness(snapshot)
     except ValueError as exc:
         raise _setup_error(exc) from exc
 
 
-def _setup_coverage_payload(result: dict, *, line: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+@api.put("/plant/{plant}/setup-active", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist the plant-level "include setup times in optimizer" flag.
+
+    Payload: { subnetwork?, active: bool }. Relocated off the per-signature-
+    version setup_definition.active (see PUT /setup/{plant}/active above,
+    now vestigial-but-retained) onto a durable plant-level setting, following
+    the machine.setup_compatible precedent: unregistered column, dedicated
+    validated endpoint. This is intentionally separate from that route and
+    from machine.setup_compatible — three independent gates, never conflated."""
+    active = body.get("active")
+    if not isinstance(active, bool):
+        raise HTTPException(status_code=400, detail="active must be boolean")
+    _set_admin_log_details(request, plant=plant, active=active)
+    try:
+        return md.set_plant_setup_active(
+            plant, active,
+            subnetwork=body.get("subnetwork", ""),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+def _setup_coverage_payload(result: dict, *, machine: str | None = None, offset: int = 0, limit: int = 100) -> dict:
     """Keep coverage totals useful without embedding an unbounded missing-edge list."""
     payload = {"plant": result["plant"], "signature_version": result.get("definition", {}).get("signature_version")
                if result.get("definition") else None}
     for kind in ("observed", "reachable"):
         summary = result[kind]
-        page = setup_data.page_missing_pairs(summary["missing"], line=line, offset=offset, limit=limit)
+        page = setup_data.page_missing_pairs(summary["missing"], machine=machine, offset=offset, limit=limit)
         payload[kind] = {key: value for key, value in summary.items() if key != "missing"}
         payload[kind]["missing_page"] = page
     return _setup_freshness(payload)
 
 
 @api.get("/setup/{plant}/coverage", dependencies=[Depends(auth.require_authenticated)])
-def get_setup_coverage(plant: str, line: str | None = Query(default=None), offset: int = Query(default=0, ge=0),
+def get_setup_coverage(plant: str, machine: str | None = Query(default=None), offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=100, ge=1, le=500),
                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Bounded Stage 0 transition coverage; this observes, never changes, schedules."""
     _setup_plant_guard(plant, allowed_plants)
     try:
-        return _setup_coverage_payload(setup_data.get_setup_coverage(plant), line=line, offset=offset, limit=limit)
+        return _setup_coverage_payload(setup_data.get_setup_coverage(plant), machine=machine, offset=offset, limit=limit)
     except ValueError as exc:
         raise _setup_error(exc) from exc
 
 
 @api.get("/setup/{plant}/matrix-rows", dependencies=[Depends(auth.require_authenticated)])
-def get_setup_matrix_rows(plant: str, line: str = Query(default=""), from_key: str | None = Query(default=None),
+def get_setup_matrix_rows(plant: str, machine: str = Query(default=""), from_key: str | None = Query(default=None),
                           offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Bounded, from-state-scoped page of effective matrix rows for the List view."""
     _setup_plant_guard(plant, allowed_plants)
     try:
+        # This is raw caller JSON, not yet case-folded — page_matrix_rows()
+        # canonicalizes it (via setup_data.canonical_state_key, using this
+        # plant's definition fields) before comparing against stored JSONB, so
+        # a hand-typed "black" here still matches a stored "BLACK" key.
         parsed_from_key = json.loads(from_key) if from_key else None
         signature_version = setup_data.current_signature_version(plant)
         if signature_version is None:
-            return _setup_freshness({"plant": plant, "line": line, "signature_version": None, "rows": [],
+            return _setup_freshness({"plant": plant, "machine": machine, "signature_version": None, "rows": [],
                                      "meta": {"total": 0, "offset": offset, "limit": limit}})
         return _setup_freshness(setup_data.page_matrix_rows(
-            plant, line, signature_version, from_key=parsed_from_key, offset=offset, limit=limit,
+            plant, machine, signature_version, from_key=parsed_from_key, offset=offset, limit=limit,
         ))
     except (ValueError, json.JSONDecodeError) as exc:
         raise _setup_error(exc) from exc
 
 
 @api.get("/setup/{plant}/missing-pairs.csv", dependencies=[Depends(auth.require_authenticated)])
-def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed"), line: str | None = Query(default=None),
+def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed"), machine: str | None = Query(default=None),
                                offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
                                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Export one bounded, selectable page of missing canonical long-form pairs."""
@@ -2456,15 +2523,15 @@ def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed")
         raise HTTPException(status_code=400, detail="kind must be observed or reachable")
     try:
         coverage = setup_data.get_setup_coverage(plant)
-        page = setup_data.page_missing_pairs(coverage[kind]["missing"], line=line, offset=offset, limit=limit)
+        page = setup_data.page_missing_pairs(coverage[kind]["missing"], machine=machine, offset=offset, limit=limit)
     except ValueError as exc:
         raise _setup_error(exc) from exc
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Plant", "Line", "Scope", "Signature version", "From setup state", "To setup state"])
+    writer.writerow(["Plant", "Machine", "Scope", "Signature version", "From setup state", "To setup state"])
     version = coverage.get("definition", {}).get("signature_version") if coverage.get("definition") else ""
     for row in page["rows"]:
-        writer.writerow([plant, row["line"], row["scope"], version,
+        writer.writerow([plant, row["machine"], row["scope"], version,
                          json.dumps(row["from_key"], separators=(",", ":")),
                          json.dumps(row["to_key"], separators=(",", ":"))])
     headers = {"Content-Disposition": f'attachment; filename="setup-missing-{kind}-{plant}.csv"',
@@ -2497,14 +2564,14 @@ def save_setup_definition(plant: str, request: Request, body: dict = Body(defaul
 def import_setup_matrix(plant: str, request: Request, body: dict = Body(default={}),
                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                         actor: str = Depends(auth.require_authenticated)):
-    """Write canonical long-form plant rows or sparse rows for one owned line."""
+    """Write canonical long-form plant rows or sparse rows for one owned machine."""
     _setup_plant_guard(plant, allowed_plants)
-    line = body.get("line", "")
+    machine = body.get("machine", "")
     rows = body.get("rows")
-    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    _set_admin_log_details(request, plant=plant, machine=machine, row_count=len(rows) if isinstance(rows, list) else 0)
     try:
-        if line:
-            result = setup_data.upsert_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        if machine:
+            result = setup_data.upsert_line_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
         else:
             result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor)
     except ValueError as exc:
@@ -2518,14 +2585,21 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
 def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(default={}),
                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                              actor: str = Depends(auth.require_authenticated)):
-    """Delete only selected cells; a sparse line deletion exposes inherited plant truth."""
+    """Delete only selected cells; a sparse machine deletion exposes inherited plant truth."""
     _setup_plant_guard(plant, allowed_plants)
-    line = body.get("line", "")
+    machine = body.get("machine", "")
     rows = body.get("rows")
-    _set_admin_log_details(request, plant=plant, line=line, row_count=len(rows) if isinstance(rows, list) else 0)
+    # `scope` is an optional audit-only passenger field (Workstream D3): the
+    # Setup Matrix admin UI's per-row/bulk/delete-all actions send 'row' /
+    # 'bulk' / 'all' respectively so an auditor can tell a single-cell delete
+    # from a scope-wide wipe without a brittle row-count heuristic. The
+    # pre-existing minute-clear-via-Save path sends no `scope` at all, so it
+    # is logged distinctly as 'edit' rather than defaulting to 'row'.
+    _set_admin_log_details(request, plant=plant, machine=machine, scope=body.get("scope") or "edit",
+                           row_count=len(rows) if isinstance(rows, list) else 0)
     try:
-        if line:
-            result = setup_data.delete_line_matrix_rows(plant, line, rows, body.get("signature_version"), actor)
+        if machine:
+            result = setup_data.delete_line_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
         else:
             result = setup_data.delete_plant_matrix_rows(plant, rows, body.get("signature_version"), actor)
     except ValueError as exc:
@@ -2534,16 +2608,16 @@ def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(def
     return _setup_freshness(result)
 
 
-@api.put("/setup/{plant}/lines/{line}/state", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
-def save_setup_line_state(plant: str, line: str, request: Request, body: dict = Body(default={}),
+@api.put("/setup/{plant}/lines/{machine}/state", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+def save_setup_line_state(plant: str, machine: str, request: Request, body: dict = Body(default={}),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                           actor: str = Depends(auth.require_setup_scheduler)):
-    """Authorized plant schedulers assert current physical state for an owned line."""
+    """Authorized plant schedulers assert current physical state for an owned machine."""
     _setup_plant_guard(plant, allowed_plants)
-    _set_admin_log_details(request, plant=plant, line=line)
+    _set_admin_log_details(request, plant=plant, machine=machine)
     try:
         result = setup_data.set_line_state(
-            plant, line, body.get("values"), body.get("signature_version"),
+            plant, machine, body.get("values"), body.get("signature_version"),
             _setup_observed_at(body.get("observed_at")), body.get("source"), body.get("reason"), actor,
             body.get("physical_mold_id"),
         )
@@ -2553,30 +2627,31 @@ def save_setup_line_state(plant: str, line: str, request: Request, body: dict = 
     return _setup_freshness(result)
 
 
-@api.put("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@api.put("/setup/{plant}/lines/{machine}/compatibility", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                                       Depends(require_admin)])
-def save_setup_line_compatibility(plant: str, line: str, request: Request, body: dict = Body(default={}),
+def save_setup_line_compatibility(plant: str, machine: str, request: Request, body: dict = Body(default={}),
                                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                                   actor: str = Depends(auth.require_authenticated)):
     """Admin-only setup-signature opt-out, distinct from global optimizer exclusion."""
     _setup_plant_guard(plant, allowed_plants)
-    _set_admin_log_details(request, plant=plant, line=line)
+    _set_admin_log_details(request, plant=plant, machine=machine)
     try:
-        result = md.set_setup_line_compatibility(plant, line, body.get("setup_compatible"), body.get("reason"), actor)
+        result = md.set_setup_line_compatibility(plant, machine, body.get("setup_compatible"), body.get("reason"), actor)
     except ValueError as exc:
         raise _setup_error(exc) from exc
     _set_admin_log_details(request, setup_compatible=result["setup_compatible"])
     return result
 
 
-@api.get("/setup/{plant}/lines/{line}/compatibility", dependencies=[Depends(auth.require_authenticated)])
-def get_setup_line_compatibility(plant: str, line: str,
+@api.get("/setup/{plant}/lines/{machine}/compatibility", dependencies=[Depends(auth.require_authenticated)])
+def get_setup_line_compatibility(plant: str, machine: str,
                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     _setup_plant_guard(plant, allowed_plants)
     try:
-        return md.get_setup_line_compatibility(plant, line)
+        result = md.get_setup_line_compatibility(plant, machine)
     except ValueError as exc:
         raise _setup_error(exc) from exc
+    return result
 
 
 @api.post("/setup/{plant}/overrides", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
@@ -2587,17 +2662,17 @@ def create_setup_override(plant: str, request: Request, body: dict = Body(defaul
     _setup_plant_guard(plant, allowed_plants)
     if "predecessor_order_id" not in body:
         raise _setup_error(ValueError("Predecessor order id is required; use null for initial state"))
-    line = body.get("line")
-    _set_admin_log_details(request, plant=plant, line=line)
+    machine = body.get("machine")
+    _set_admin_log_details(request, plant=plant, machine=machine)
     try:
         result = setup_data.upsert_occurrence_override(
-            plant, line, body.get("predecessor_order_id"), body.get("successor_order_id"),
+            plant, machine, body.get("predecessor_order_id"), body.get("successor_order_id"),
             body.get("predecessor_values"), body.get("successor_values"), body.get("standard_min"),
             body.get("remaining_min"), body.get("signature_version"), body.get("reason"), actor,
         )
     except ValueError as exc:
         raise _setup_error(exc) from exc
-    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+    _set_admin_log_details(request, machine=result["machine"], signature_version=result["signature_version"],
                            persisted_override_id=result["id"])
     return _setup_freshness(result)
 
@@ -2608,16 +2683,16 @@ def save_setup_override(plant: str, override_id: int, request: Request, body: di
                         actor: str = Depends(auth.require_setup_scheduler)):
     """Update the exact occurrence override identified by the URL; never rebind its adjacency."""
     _setup_plant_guard(plant, allowed_plants)
-    line = body.get("line")
-    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    machine = body.get("machine")
+    _set_admin_log_details(request, plant=plant, machine=machine, override_id=override_id)
     try:
         result = setup_data.update_occurrence_override(
-            plant, line, override_id, body.get("standard_min"), body.get("remaining_min"),
+            plant, machine, override_id, body.get("standard_min"), body.get("remaining_min"),
             body.get("signature_version"), body.get("reason"), actor,
         )
     except ValueError as exc:
         raise _setup_error(exc) from exc
-    _set_admin_log_details(request, line=result["line"], signature_version=result["signature_version"],
+    _set_admin_log_details(request, machine=result["machine"], signature_version=result["signature_version"],
                            persisted_override_id=result["id"])
     return _setup_freshness(result)
 
@@ -2628,15 +2703,15 @@ def clear_setup_override(plant: str, override_id: int, request: Request, body: d
                          actor: str = Depends(auth.require_setup_scheduler)):
     """Clear an active occurrence override while retaining its audit reason and history."""
     _setup_plant_guard(plant, allowed_plants)
-    line = body.get("line")
-    _set_admin_log_details(request, plant=plant, line=line, override_id=override_id)
+    machine = body.get("machine")
+    _set_admin_log_details(request, plant=plant, machine=machine, override_id=override_id)
     try:
         result = setup_data.clear_occurrence_override(
-            plant, line, override_id, body.get("signature_version"), actor, body.get("reason")
+            plant, machine, override_id, body.get("signature_version"), actor, body.get("reason")
         )
     except ValueError as exc:
         raise _setup_error(exc) from exc
-    _set_admin_log_details(request, line=result["line"], cleared=result["cleared"],
+    _set_admin_log_details(request, machine=result["machine"], cleared=result["cleared"],
                            signature_version=result.get("signature_version"))
     return _setup_freshness(result)
 
@@ -2716,6 +2791,104 @@ def md_schema_export():
     return {"sql": md.export_schema_sql()}
 
 
+# ---------------------------------------------------------------------------
+# Admin universal table browser (Workstream E). Deliberately separate from
+# /master-data/* — read-only, catalog-driven (admin_tables.py), and NOT
+# gated by master_data.ALLOWED_TABLES. Every table in `public` is
+# discoverable here, including ones ALLOWED_TABLES will never register.
+#
+# OD-E2 (documented data-exposure decision): unlike every other admin/master-
+# data route, these three do NOT call _assert_plant_allowed / scope by
+# role_plants. A catalog-wide browser is cross-plant by nature — there is no
+# single-plant version of "list every table" — so scoping is deliberately
+# skipped and access is gated on admin role alone (require_admin), same
+# posture as GET /diagnostics and GET /master-data/_schema-export. All three
+# are pure reads: admin_tables.py never builds an INSERT/UPDATE/DELETE or DDL
+# statement (OD-E3).
+# ---------------------------------------------------------------------------
+def _admin_tables_query_filters(request: Request) -> dict[str, list[str]]:
+    """Filter transport: a repeated query parameter per column, e.g.
+    ?material_id=A&material_id=B&plant=5512 — multi-value via repetition,
+    paste-splitting is the frontend's job before it builds the query
+    string. Every query param other than limit/offset is treated as a
+    candidate filter column; admin_tables validates each one against the
+    table's real columns (fresh per request) before it ever reaches SQL, so
+    an unrecognized param name 400s rather than silently no-op'ing."""
+    reserved = {"limit", "offset"}
+    filters: dict[str, list[str]] = {}
+    for key in request.query_params:
+        if key in reserved:
+            continue
+        values = request.query_params.getlist(key)
+        if values:
+            filters[key] = values
+    return filters
+
+
+@api.get("/admin/tables", dependencies=[Depends(require_admin)])
+def admin_list_tables():
+    """Catalog listing of every table in the `public` schema, discovered
+    fresh on this request (see admin_tables.list_tables — no process-level
+    cache, unlike db._get_maint_table_allowlist). Response:
+        { "tables": [ { table, approx_row_count, internal,
+                         pk_columns: [str], fk_columns: [{column, ref_table, ref_column}] }, ... ] }
+    `internal` is a flag, not a filter — schema_migrations/admin_audit/
+    column_metadata/sap_sync_*/sap_field_map still appear, just marked."""
+    return {"tables": admin_tables.list_tables()}
+
+
+@api.get("/admin/tables/{table}", dependencies=[Depends(require_admin)])
+def admin_table_rows(table: str, request: Request,
+                      limit: int = Query(default=100, ge=1, le=1000),
+                      offset: int = Query(default=0, ge=0)):
+    """Paginated rows for one table, PK/FK-aware, filterable by any real
+    column of that table (see _admin_tables_query_filters for transport).
+    Response:
+        { "columns": [ { name, sql_type, is_nullable, ordinal_position,
+                          is_pk, is_fk, ref_table, ref_column } ],
+          "rows": [ {col: value, ...}, ... ],
+          "meta": { "total": int, "limit": int, "offset": int } }
+    `meta.total` is the full filtered count ignoring limit/offset, mirroring
+    GET /tasks' paging contract. A filter value with no matching row is not
+    an error — it simply contributes nothing to `rows`."""
+    filters = _admin_tables_query_filters(request)
+    try:
+        return admin_tables.fetch_rows(table, limit=limit, offset=offset, filters=filters)
+    except admin_tables.UnknownTable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except admin_tables.UnknownColumn as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.get("/admin/tables/{table}/export.csv", dependencies=[Depends(require_admin)])
+def admin_table_export_csv(table: str, request: Request, offset: int = Query(default=0, ge=0)):
+    """Streaming CSV export of `table` (same filter transport as
+    GET /admin/tables/{table}), soft-capped at admin_tables.EXPORT_ROW_CAP
+    (~250k) rows. Table/filter validation happens up front, BEFORE the
+    StreamingResponse is constructed, so a bad table/column name comes back
+    as a normal 404/400 rather than a truncated-looking CSV body.
+
+    If the cap is hit, the CSV stream itself carries the truncation signal
+    (a response header can't work here — this is a real stream, so whether
+    the cap will be hit isn't known until the body is already underway):
+    the last line is `# NIMBUS_TRUNCATED,resume_offset=<N>,rows_written=<N>`.
+    A client must treat any line starting with that prefix as a marker, not
+    a data row, and may resume via ?offset=<resume_offset>. No trailing
+    marker at all means the export was not truncated."""
+    filters = _admin_tables_query_filters(request)
+    try:
+        admin_tables.validate_table_and_filters(table, filters)
+    except admin_tables.UnknownTable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except admin_tables.UnknownColumn as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return StreamingResponse(
+        admin_tables.stream_csv_rows(table, filters=filters, offset=offset),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{table}.csv"'},
+    )
+
+
 @api.get("/master-data/_material-grid")
 def md_material_grid(
         plant: str = Query(..., min_length=1,
@@ -2750,7 +2923,7 @@ def md_material_plant_grid(
         offset: int | None = Query(default=None, ge=0),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Plant-scoped Material Plant grid (Master Data tab). Read-only except
-    prt_01/prt_02/color/default_workcenter, which come back with
+    prt_01/prt_02/color/default_machine, which come back with
     columns[].editable=True and are written through
     POST /master-data/material-plants/attributes."""
     try:
@@ -2772,7 +2945,7 @@ def md_list(table: str,
             material_id: str | None = Query(default=None,
                 description="Filter to one material (only honored for tables with a material_id column)."),
             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """List rows for a master-data table (subnetworks | plants | production_lines | ...).
+    """List rows for a master-data table (subnetworks | plants | machine | ...).
 
     Optional ?limit=/?offset=/?plant=/?material_id= scope the result server-side;
     all default to the full-catalog behavior. When supplied, meta.total carries
@@ -2818,7 +2991,7 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
         # Adding/editing production lines may let orders uploaded before the line
         # existed resolve their materialized plant. Re-derive NULL-plant orders so they
         # stop being invisible to the plant-scoped read path (best-effort, non-fatal).
-        if table == "production_lines":
+        if table == "machine":
             try:
                 n = db.reattribute_null_plant_orders()
                 if n:
@@ -2826,11 +2999,11 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
             except Exception as e:
                 _log_event("warn", "db", "Plant re-attribution after line change failed", error=str(e))
             try:
-                n = db.backfill_line_keys()
+                n = db.backfill_machine_keys()
                 if n:
-                    _log_event("info", "db", "Backfilled order line_key after line change", count=n)
+                    _log_event("info", "db", "Backfilled order machine_key after line change", count=n)
             except Exception as e:
-                _log_event("warn", "db", "line_key backfill after line change failed", error=str(e))
+                _log_event("warn", "db", "machine_key backfill after line change failed", error=str(e))
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -2977,7 +3150,7 @@ def post_system_settings(request: Request, body: dict = Body(default={})):
 def md_set_material_plant_attributes(request: Request, body: dict = Body(default={}),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Update the planner-editable material_plants attributes (prt_01, prt_02,
-    color, default_workcenter) for one plant. Deliberately NOT admin-gated —
+    color, default_machine) for one plant. Deliberately NOT admin-gated —
     this is the Master Data tab's Material Plant grid save, and planners (not
     just admins) are its users. The write surface is a hard server-side
     allowlist (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
@@ -2985,7 +3158,7 @@ def md_set_material_plant_attributes(request: Request, body: dict = Body(default
     regardless of what the client sends. Rows must already exist — this never
     inserts.
 
-    Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_workcenter? }] }
+    Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_machine? }] }
     """
     plant = (body.get("plant") or "").strip()
     rows = body.get("updates") or []
@@ -3397,7 +3570,7 @@ def labor_plan_get(plant: str):
 
 @api.post("/labor-plan")
 def labor_plan_post(request: Request, body: dict = Body(default={})):
-    """Upsert or delete aggregate labor-plan cells. Payload: { subnetwork, plant, cells:[{pl_group, period, avail_hours}] }"""
+    """Upsert or delete aggregate labor-plan cells. Payload: { subnetwork, plant, cells:[{wc_group, period, avail_hours}] }"""
     try:
         return md.upsert_labor_plan(
             subnetwork=body.get("subnetwork", ""),
@@ -3414,14 +3587,14 @@ def labor_plan_line_get(plant: str, group: str | None = None, from_date: str | N
     """Return line-level available-hours cells for the given plant, optionally filtered by group and date range."""
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
-    return md.load_labor_plan_line(plant, group=group, from_date=from_date, to_date=to_date)
+    return md.load_labor_plan_machine(plant, group=group, from_date=from_date, to_date=to_date)
 
 
 @api.post("/labor-plan/line")
 def labor_plan_line_post(request: Request, body: dict = Body(default={})):
-    """Upsert or delete line-level labor cells. Payload: { subnetwork, plant, cells:[{production_line, day, avail_hours, source}] }"""
+    """Upsert or delete line-level labor cells. Payload: { subnetwork, plant, cells:[{machine, day, avail_hours, source}] }"""
     try:
-        return md.upsert_labor_plan_line(
+        return md.upsert_labor_plan_machine(
             subnetwork=body.get("subnetwork", ""),
             plant=body.get("plant", ""),
             cells=body.get("cells", []),
@@ -3445,11 +3618,15 @@ def labor_plan_line_post(request: Request, body: dict = Body(default={})):
 def plant_calendar_get(plant: str):
     """Return a plant's full calendar/blackout config for Store hydration:
     { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
-      line_blackouts:[...], plant_blackouts:[...] }."""
+      machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...] }."""
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
     try:
-        return md.load_plant_calendar(plant)
+        result = md.load_plant_calendar(plant)
+        for block in result.get("machine_blackouts") or []:
+            if "line" in block:
+                block["machine"] = block.pop("line")
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -3472,7 +3649,7 @@ def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default=
 @api.post("/plant-calendar/line-hours", dependencies=[Depends(require_admin)])
 def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={})):
     """Upsert per-line working hours (batched). Payload:
-    { plant, lines:[{production_line, work_hours:{0..6:[h1,h2]|null}}] }."""
+    { plant, lines:[{machine, work_hours:{0..6:[h1,h2]|null}}] }."""
     try:
         result = md.set_line_work_hours(
             plant=body.get("plant", ""),
@@ -3491,7 +3668,7 @@ def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(defau
     { plant, upserts:[{id, line?, start, end, reason?}], deletes?:[id] }.
     line omitted/null = all lines in this plant."""
     try:
-        result = md.save_line_blackouts(
+        result = md.save_machine_blackouts(
             plant=body.get("plant", ""),
             upserts=body.get("upserts", []),
             deletes=body.get("deletes", []),

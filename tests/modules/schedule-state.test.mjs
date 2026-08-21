@@ -73,7 +73,7 @@ test('Store.replaceSetupSnapshot replaces the active plant snapshot and publishe
   const events = [];
   const off = Store.subscribe(evt => events.push(evt));
   const snapshot = {
-    plant: '5512', definition: null, plant_rows: [], line_rows: [], line_states: [], overrides: [],
+    plant: '5512', definition: null, plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
     freshness: { signature_version: null, request_id: 'state-test' },
   };
   Store.replaceSetupSnapshot(snapshot, 'unit-test');
@@ -87,7 +87,7 @@ test('Store.replaceSetupSnapshot replaces the active plant snapshot and publishe
 });
 
 test('Store.setAllowedPlantsResolver scopes knownPlants()', () => {
-  Store.setTasks([{ id: 't1', PRODUCTION_LINE: 'L1', RUN_TIME: '1' }], 'unit-test');
+  Store.setTasks([{ id: 't1', MACHINE: 'L1', RUN_TIME: '1' }], 'unit-test');
   Store.setAllowedPlantsResolver(() => ['5512']);
   const known = Store.knownPlants();
   assert.ok(known.includes('5512') || known.length === 0); // scoped set never includes a disallowed plant
@@ -110,7 +110,7 @@ test('Store.removeTask removes the id from Selection directly (Selection is a si
 });
 
 test('Selection tracks ids and selectedRefs() resolves plant per id', () => {
-  Store.setTasks([{ id: 'sel1', plant: '5512', PRODUCTION_LINE: 'L1', RUN_TIME: '1' }], 'unit-test');
+  Store.setTasks([{ id: 'sel1', plant: '5512', MACHINE: 'L1', RUN_TIME: '1' }], 'unit-test');
   Selection.clear();
   Selection.add(['sel1']);
   assert.deepEqual(Selection.ids(), ['sel1']);

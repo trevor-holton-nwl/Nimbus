@@ -40,7 +40,7 @@ test('Persistence.setCalendarService is settable and Persistence works with a st
   // A snap-affecting path should not throw even with no calendar service wired yet —
   // it should just skip snapping, not crash the load.
   const tasks = [{
-    id: 'nosvc1', PRODUCTION_LINE: 'L9', RUN_TIME: '1',
+    id: 'nosvc1', MACHINE: 'L9', RUN_TIME: '1',
     start_date: new Date('2026-08-03T00:00:00'),
     end_date:   new Date('2026-08-03T01:00:00'),
   }];
@@ -49,7 +49,7 @@ test('Persistence.setCalendarService is settable and Persistence works with a st
 
 test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', () => {
   Store.setTasks([{
-    id: 'pd1', PRODUCTION_LINE: 'L1', RUN_TIME: '1',
+    id: 'pd1', MACHINE: 'L1', RUN_TIME: '1',
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
     row_version: '5', PRT_01: 'MOLD-A', PRT_02: 'MOLD-B', PRODUCTION_VERSION: '0001',
   }], 'unit-test');
@@ -86,7 +86,7 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
 
 test('Persistence.saveAll sends the full split aggregate in naive-local form', () => {
   Store.setTasks([{
-    id: 'split-save', PRODUCTION_LINE: 'L1', RUN_TIME: '10',
+    id: 'split-save', MACHINE: 'L1', RUN_TIME: '10',
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-04T10:00:00'),
     row_version: '5',
     scheduleSegments: [
@@ -124,9 +124,9 @@ test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they
   // so these ids never cleared → they re-posted on every save and spammed a
   // "Partial DB save" warning with no way to resolve.
   Store.setTasks([
-    { id: 'ok1',       PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
-    { id: 'bad-range', PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
-    { id: 'gone',      PRODUCTION_LINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+    { id: 'ok1',       MACHINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+    { id: 'bad-range', MACHINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
+    { id: 'gone',      MACHINE: 'L1', RUN_TIME: '1', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5' },
   ], 'unit-test');
   Persistence._dirtyIds.add('ok1');
   Persistence._dirtyIds.add('bad-range');
@@ -162,7 +162,7 @@ test('a load that needs to snap a task to working hours calls the injected calen
     workWindow: (line, date) => { calls.push(['workWindow', line]); return null; },
   });
   const tasks = [{
-    id: 'snap1', PRODUCTION_LINE: 'L9', RUN_TIME: '1',
+    id: 'snap1', MACHINE: 'L9', RUN_TIME: '1',
     start_date: new Date('2026-08-03T00:00:00'), // midnight -> triggers the snap path
     end_date:   new Date('2026-08-03T01:00:00'),
   }];
@@ -309,17 +309,34 @@ test('Persistence.loadPriorityRankMaps goes through Util.fetchTraced, so the pla
   }
 });
 
-function setupSnapshot(plant) {
+function setupSnapshot(plant, plantActive = false) {
   return {
     plant,
     definition: null,
     plant_rows: [],
-    line_rows: [],
-    line_states: [],
+    machine_rows: [],
+    machine_states: [],
     overrides: [],
+    // Workstream D2 (2026-08-20): plants.setup_active, surfaced as the
+    // top-level plant_active field — independent of definition.active.
+    plant_active: plantActive,
     freshness: { signature_version: null, request_id: `setup-${plant}` },
   };
 }
+
+test('Persistence.loadSetupSnapshot round-trips plant_active from GET /setup/{plant} into Store.setupSnapshot', async () => {
+  const priorSnapshot = Store.setupSnapshot;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(setupSnapshot('PLANT_ACTIVE', true)) });
+  try {
+    const snapshot = await Persistence.loadSetupSnapshot('PLANT_ACTIVE');
+    assert.equal(snapshot.plant_active, true, 'loadSetupSnapshot must return the fetched plant_active verbatim');
+    assert.equal(Store.setupSnapshot?.plant_active, true, 'Store.setupSnapshot must carry plant_active through unchanged');
+  } finally {
+    globalThis.fetch = origFetch;
+    Store.replaceSetupSnapshot(priorSnapshot, 'unit-test');
+  }
+});
 
 test('Persistence.loadSetupSnapshot clears the outgoing plant before the replacement request resolves', async () => {
   Store.replaceSetupSnapshot(setupSnapshot('PLANT_A'), 'unit-test');

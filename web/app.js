@@ -597,7 +597,7 @@ const NIMBUS = (function () {
           const mdLines = Store.masterData?.lines;
           if (mdLines?.length) {
             mdLines.forEach(row => {
-              const line = row.production_line;
+              const line = row.machine;
               if (!line) return;
               Store.ensureLineSettings(line);
               const ls = Store.lineSettings[line];
@@ -610,7 +610,7 @@ const NIMBUS = (function () {
                 ls.bufferPct = parseFloat(row.buffer_percent) || 0;
               if (row.buffer_hours != null && row.buffer_hours !== '')
                 ls.bufferHours = parseFloat(row.buffer_hours) || 0;
-              ls.plGroup = row.pl_group || '';
+              ls.plGroup = row.wc_group || '';
               ls.plant   = row.plant    || null;
               if (JSON.stringify(ls) !== before) touched++;
             });

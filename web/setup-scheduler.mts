@@ -8,7 +8,7 @@
 
 import type { RemoveBacklogResult } from './schedule-services.mjs';
 import { Engine, candidateDefaultWorkHours } from './schedule-services.mjs';
-import { resolveSetup, stateForOrder } from './setup-domain.mjs';
+import { normalizedValue, resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
   NimbusBlock,
   ConstraintConfig,
@@ -615,8 +615,15 @@ const PRIORITY_TASK_FIELDS: Readonly<Record<string, string>> = {
   productionVersion: 'PRODUCTION_VERSION',
 };
 
+// Rank-lookup values here are always order attribute values for
+// PRIORITY_TASK_FIELDS (color / prt01 / prt02 / productionVersion) — never
+// boolean-shaped — so this delegates to setup-domain's `normalizedValue`
+// fold for a single source of truth rather than keeping an independent
+// `toUpperCase()`. The boolean exemption in `normalizedValue` is inert here
+// (no priority field value is ever literally "true"/"false"), so behavior
+// is unchanged from the prior standalone implementation.
 function normalizedPriorityValue(value: unknown): string {
-  return String(value ?? '').trim().toUpperCase();
+  return normalizedValue(value);
 }
 
 /** Mirrors the active, tree-aware priority order without reaching into Store.
@@ -720,7 +727,7 @@ function inactiveOverrideForTransition(
   const definition = bounds.setup.definition!;
   const bound = bounds.setup.overrides.filter(override => (
     override.status === 'active'
-    && override.line === line
+    && override.machine === line
     && override.signature_version === definition.signature_version
     && override.successor_order_id === successorOrderId
   ));
@@ -766,7 +773,7 @@ function missingSuccessorOverrideEdges(
   const presentIds = new Set(tasks.map(taskId));
   return bounds.setup.overrides.flatMap(override => {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version) {
       return [];
     }
@@ -800,7 +807,7 @@ function missingPredecessorOverrideEdges(
   const presentIds = new Set(tasks.map(taskId));
   return bounds.setup.overrides.flatMap(override => {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version
       || override.predecessor_order_id === null) {
       return [];
@@ -839,7 +846,7 @@ function preservedAnchorOverrideEdges(
   const anchorId = taskId(anchor.task);
   return bounds.setup.overrides.flatMap(override => {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version
       || String(override.successor_order_id) !== anchorId
       || override.predecessor_order_id === null) {
@@ -866,7 +873,7 @@ function initialFreeOverrideLock(
 
   for (const override of bounds.setup.overrides) {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version
       || override.predecessor_order_id !== initialPredecessorOrderId) {
       continue;
@@ -912,7 +919,7 @@ function fragmentAdjacency(
 
   for (const override of bounds.setup.overrides) {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version) {
       continue;
     }
@@ -1021,7 +1028,7 @@ function freeOverrideComponents(
     const predecessorId = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
     const successorId = String(override.successor_order_id);
     if (override.status === 'active'
-      && override.line === line
+      && override.machine === line
       && override.signature_version === definition.signature_version
       && predecessorId
       && freeIds.has(predecessorId)
@@ -1202,7 +1209,7 @@ function taskIsFixed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): bo
 }
 
 // B7: resolve an order's plant the same way the legacy engine does
-// (`t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE)`, schedule-state.mts)
+// (`t.PLANT || Store.getPlantForLine(t.MACHINE)`, schedule-state.mts)
 // instead of an exact `task.PLANT` match. Without this, a null-PLANT order on
 // a line that maps to this plant is optimized by the legacy engine and
 // counted in the preview's KPIs, but is completely invisible to the
@@ -1212,11 +1219,11 @@ function taskIsFixed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): bo
 function resolveTaskPlant(task: Readonly<NimbusTask>, snapshot: Readonly<ScheduleSnapshot>): string | null {
   const direct = task.PLANT || task.plant;
   if (direct) return String(direct);
-  const line = String(task.PRODUCTION_LINE ?? '');
+  const line = String(task.MACHINE ?? '');
   if (!line) return null;
   const fromSettings = snapshot.lineSettings?.[line]?.plant;
   if (fromSettings) return fromSettings;
-  const mdLine = (snapshot.masterData?.lines ?? []).find(row => row.production_line === line);
+  const mdLine = (snapshot.masterData?.lines ?? []).find(row => row.machine === line);
   return mdLine?.plant ?? null;
 }
 
@@ -1456,13 +1463,13 @@ function candidateForSequence(
     } else {
       const resolved = resolveSetup({
         definition,
-        line,
+        machine: line,
         predecessorState,
         successorState,
         predecessorOrderId,
         successorOrderId: taskId(task),
         plantRows: bounds.setup.plant_rows,
-        lineRows: bounds.setup.line_rows,
+        machineRows: bounds.setup.machine_rows,
         overrides: bounds.setup.overrides,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
@@ -1624,13 +1631,13 @@ function candidateForSequence(
     } else {
       const resolved = resolveSetup({
         definition,
-        line,
+        machine: line,
         predecessorState,
         successorState: fixed.state,
         predecessorOrderId,
         successorOrderId: taskId(fixed.task),
         plantRows: bounds.setup.plant_rows,
-        lineRows: bounds.setup.line_rows,
+        machineRows: bounds.setup.machine_rows,
         overrides: bounds.setup.overrides,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
@@ -2183,7 +2190,7 @@ function unchangedLineResult(
 function initialStateForLine(
   bounds: Readonly<DueDateFirstBounds>, line: string, signatureVersion: number,
 ): { state: SetupStateKey | null; reason: 'initial-state-unknown' | 'signature-incompatible' } {
-  const lineStates = bounds.setup.line_states.filter(state => state.line === line);
+  const lineStates = bounds.setup.machine_states.filter(state => state.machine === line);
   const matching = lineStates.find(state => state.signature_version === signatureVersion);
   if (matching) return { state: matching.state_key, reason: 'initial-state-unknown' };
   return {
@@ -2250,7 +2257,7 @@ function setupCompatibilityForLine(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string,
 ): { reason: string | null } | null {
   const masterLine = snapshot.masterData?.lines.find(candidate => (
-    candidate.plant === plant && candidate.production_line === line
+    candidate.plant === plant && candidate.machine === line
   ));
   if (masterLine?.setup_compatible !== false) return null;
   return { reason: masterLine.setup_compatibility_reason ?? null };
@@ -2283,7 +2290,7 @@ function boundaryOverrideLocks(
   };
 
   for (const override of bounds.setup.overrides) {
-    if (override.status !== 'active' || override.line !== line || override.signature_version !== definition.signature_version) {
+    if (override.status !== 'active' || override.machine !== line || override.signature_version !== definition.signature_version) {
       continue;
     }
     const successorFixed = fixedById.get(override.successor_order_id);
@@ -2400,7 +2407,7 @@ function auditOutOfHorizonFixedOverrides(
   const inactiveEdges: MissingSetupEdge[] = [];
   for (const override of bounds.setup.overrides) {
     if (override.status !== 'active'
-      || override.line !== line
+      || override.machine !== line
       || override.signature_version !== definition.signature_version) {
       continue;
     }
@@ -2896,13 +2903,13 @@ function tailCapacityEnd(
   const definition = bounds.setup.definition!;
   const resolved = resolveSetup({
     definition,
-    line,
+    machine: line,
     predecessorState: finalState,
     successorState: nextFixed.state,
     predecessorOrderId: finalPredecessorOrderId,
     successorOrderId: taskId(nextFixed.task),
     plantRows: bounds.setup.plant_rows,
-    lineRows: bounds.setup.line_rows,
+    machineRows: bounds.setup.machine_rows,
     overrides: bounds.setup.overrides,
   });
   const reserveMinutes = resolved.covered && resolved.effectiveMin !== null ? resolved.effectiveMin : 0;
@@ -3694,7 +3701,7 @@ export function evaluateSptWithSetup(
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
     const taskPlant = resolveTaskPlant(task, snapshot);
-    const line = String(task.PRODUCTION_LINE ?? '');
+    const line = String(task.MACHINE ?? '');
     if (!line || taskPlant !== plant) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -3846,7 +3853,7 @@ export function evaluateDueDateFirst(
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
     const taskPlant = resolveTaskPlant(task, snapshot);
-    const line = String(task.PRODUCTION_LINE ?? '');
+    const line = String(task.MACHINE ?? '');
     if (!line || taskPlant !== plant) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);

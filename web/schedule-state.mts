@@ -49,7 +49,7 @@ interface StoreState {
   masterData: NimbusMasterData | null;
   /** Stage 3: per-plant rank-map cache for the optimizer's hot path, fetched by
    *  Persistence.loadPriorityRankMaps (schedule-data.mts) on plant load/switch and
-   *  after a priority-list upload/delete. Shape: {line_or_empty: {field_key:
+   *  after a priority-list upload/delete. Shape: {machine_or_empty: {field_key:
    *  {VALUE: RANK}}} — matches GET /priority-rank-maps verbatim, no reshaping. */
   priorityRankMaps: PriorityRankMaps;
   /** Read-only setup truth for exactly one plant, or null while unavailable/stale.
@@ -268,7 +268,7 @@ export const Store = {
       const key = String(t.id);
       if (Object.prototype.hasOwnProperty.call(this._state.tasks, key)) {
         collisions++;
-        if (collisionSamples.length < 5) collisionSamples.push({ id: key, text: t.text, line: t.PRODUCTION_LINE });
+        if (collisionSamples.length < 5) collisionSamples.push({ id: key, text: t.text, line: t.MACHINE });
       }
       this._state.tasks[key] = t;
     }
@@ -501,7 +501,7 @@ export const Store = {
     // worker snapshots, util matrix builds). A miss falls through to the authoritative scan.
     const cached = this._lineToPlant[line];
     if (cached !== undefined) return cached;
-    const mdLine = (this._state.masterData?.lines ?? []).find(r => r.production_line === line);
+    const mdLine = (this._state.masterData?.lines ?? []).find(r => r.machine === line);
     return mdLine?.plant ?? null;
   },
   setSelectedPlant(plant: string | null, source?: string): void {
@@ -538,14 +538,14 @@ export const Store = {
     const l2p: Record<string, string | null> = {};
     const masterByPlant: Record<string, NimbusMasterData['lines']> = {};
     for (const r of (Store._state.masterData?.lines ?? [])) {
-      if (r.production_line && l2p[r.production_line] === undefined) l2p[r.production_line] = r.plant ?? null;
+      if (r.machine && l2p[r.machine] === undefined) l2p[r.machine] = r.plant ?? null;
       if (r.plant) (masterByPlant[r.plant] ||= []).push(r);
     }
     Store._lineToPlant = l2p;
     Store._masterLinesByPlant = masterByPlant;
     const idx: Record<string, NimbusTask[]> = {};
     for (const t of Store.tasksArr) {
-      const p = t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE);
+      const p = t.PLANT || Store.getPlantForLine(t.MACHINE);
       if (!p) continue;
       (idx[p] ||= []).push(t);
     }
@@ -555,10 +555,10 @@ export const Store = {
     // allLines() unions, bucketed by plant instead of collapsed into one flat set.
     const namesByPlant: Record<string, Set<string>> = {};
     const addName = (plant: string | null, line: string): void => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
-    for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE), t.PRODUCTION_LINE);
+    for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.MACHINE), t.MACHINE);
     for (const line of Object.keys(this._state.calendars))    addName(Store.getPlantForLine(line), line);
     for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
-    for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.production_line);
+    for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.machine);
     const linesByPlant: Record<string, string[]> = {};
     for (const [plant, set] of Object.entries(namesByPlant)) {
       linesByPlant[plant] = [...set].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
@@ -586,7 +586,7 @@ export const Store = {
   _reindexTask(prev: NimbusTask, next: NimbusTask): void {
     const idx = Store._tasksByPlant;
     if (!idx) return; // index not built yet (pre-setTasks) — nothing to keep coherent
-    const plantOf = (t: NimbusTask): string | null => t.PLANT || Store.getPlantForLine(t.PRODUCTION_LINE) || null;
+    const plantOf = (t: NimbusTask): string | null => t.PLANT || Store.getPlantForLine(t.MACHINE) || null;
     const oldP = plantOf(prev);
     const newP = plantOf(next);
     if (oldP === newP) {
@@ -607,13 +607,13 @@ export const Store = {
   allLines(): string[] {
     const set = new Set<string>();
     for (const t of Store.tasksArr) {
-      if (t.PRODUCTION_LINE) set.add(t.PRODUCTION_LINE);
+      if (t.MACHINE) set.add(t.MACHINE);
     }
     Object.keys(this._state.calendars).forEach(l => set.add(l));
     Object.keys(this._state.lineSettings).forEach(l => set.add(l));
     // Master table is authoritative — include lines regardless of order attachment.
     (this._state.masterData?.lines ?? []).forEach(r => {
-      if (r.production_line) set.add(r.production_line);
+      if (r.machine) set.add(r.machine);
     });
     return [...set];
   },
@@ -841,13 +841,13 @@ export const Selection = {
 
     const ta = Store.tasks[anchor];
     const tt = Store.tasks[target];
-    if (!ta || !tt || ta.PRODUCTION_LINE !== tt.PRODUCTION_LINE) {
+    if (!ta || !tt || ta.MACHINE !== tt.MACHINE) {
       this.set([target]);
       return;
     }
-    const line = ta.PRODUCTION_LINE;
+    const line = ta.MACHINE;
     const peers = Store.tasksArr
-      .filter(t => t.PRODUCTION_LINE === line && t.start_date)
+      .filter(t => t.MACHINE === line && t.start_date)
       .sort((a, b) => Number(a.start_date) - Number(b.start_date));
     const ia = peers.findIndex(t => String(t.id) === anchor);
     const it = peers.findIndex(t => String(t.id) === target);
@@ -869,7 +869,7 @@ export const Selection = {
       const t = Store.tasks[id];
       if (!t) continue;
       totalHours += Util.runHours(t);
-      if (t.PRODUCTION_LINE) lines.add(t.PRODUCTION_LINE);
+      if (t.MACHINE) lines.add(t.MACHINE);
       if (Store.isFixed(id)) fixedCount++;
     }
     return { count: ids.length, totalHours, lines: [...lines], fixedCount };

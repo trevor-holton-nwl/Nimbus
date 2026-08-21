@@ -207,16 +207,27 @@ test('SetupAdmin resolves sparse line rows over inherited plant rows and deletes
   // would erase the shared standard instead of revealing it again.
   const from = [{ fieldKey: 'COLOR', value: 'RED' }];
   const to = [{ fieldKey: 'COLOR', value: 'BLUE' }];
-  const plant = { line: '', signature_version: 4, from_key: from, to_key: to, setup_min: 20, source: 'manual' };
-  const line = { line: 'L-10', signature_version: 4, from_key: from, to_key: to, setup_min: 7, source: 'manual' };
-  assert.deepEqual(SetupAdmin.effectiveRows({ plantRows: [plant], lineRows: [line], line: 'L-10', version: 4 }), [{
+  const plant = { machine: '', signature_version: 4, from_key: from, to_key: to, setup_min: 20, source: 'manual' };
+  const line = { machine: 'L-10', signature_version: 4, from_key: from, to_key: to, setup_min: 7, source: 'manual' };
+  assert.deepEqual(SetupAdmin.effectiveRows({ plantRows: [plant], machineRows: [line], machine: 'L-10', version: 4 }), [{
     ...line, inherited: false, inheritedFromPlant: false,
   }]);
   assert.deepEqual(SetupAdmin.deleteRequest(line), {
-    line: 'L-10', signature_version: 4, rows: [line],
+    machine: 'L-10', signature_version: 4, rows: [line],
   });
-  assert.equal(SetupAdmin.effectiveRows({ plantRows: [plant], lineRows: [], line: 'L-10', version: 4 })[0].setup_min, 20);
-  assert.equal(SetupAdmin.effectiveRows({ plantRows: [plant], lineRows: [], line: 'L-10', version: 4 })[0].inherited, true);
+  assert.equal(SetupAdmin.effectiveRows({ plantRows: [plant], machineRows: [], machine: 'L-10', version: 4 })[0].setup_min, 20);
+  assert.equal(SetupAdmin.effectiveRows({ plantRows: [plant], machineRows: [], machine: 'L-10', version: 4 })[0].inherited, true);
+});
+
+test('SetupAdmin.deleteAllConfirmationMatches requires the exact (trimmed) plant code before enabling the destructive action', () => {
+  // Regression target for the D3 "delete all rows" typed confirmation
+  // (OD-D3a) — a partial, case-varied, or blank match must never enable it.
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('5512', '5512'), true);
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('  5512  ', '5512'), true, 'surrounding whitespace in the typed value is trimmed');
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('', '5512'), false, 'an empty typed value never matches');
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('551', '5512'), false, 'a partial match never matches');
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('5512X', '5512'), false, 'an over-typed match never matches');
+  assert.equal(SetupAdmin.deleteAllConfirmationMatches('5512', ''), false, 'a blank plant can never be satisfied, even by an empty typed value');
 });
 
 test('SetupAdmin blocks stale writes and reports why activation is unavailable after a definition change', () => {
@@ -227,6 +238,23 @@ test('SetupAdmin blocks stale writes and reports why activation is unavailable a
     /version-matched matrix/i);
   assert.match(SetupAdmin.activationStatus({ active: false, signature_version: 4, fields: ['COLOR'] }, { matrixVersion: 4, coveragePass: false }).reason,
     /coverage pass/i);
+});
+
+test('SetupAdmin.activationStatus reads plant_active (the D2-relocated gate), not the vestigial definition.active', () => {
+  // Regression target: the status chip must key off plants.setup_active
+  // (passed in as the third argument) once definition readiness clears —
+  // definition.active is deliberately ignored here even when true, and the
+  // omitted third argument (every pre-D2 caller/test) must keep defaulting
+  // to false rather than throwing or silently reporting active.
+  const readyDefinition = { active: true, signature_version: 4, fields: ['COLOR'] };
+  const readyChecks = { matrixVersion: 4, coveragePass: true };
+  assert.equal(SetupAdmin.activationStatus(readyDefinition, readyChecks, true).active, true);
+  assert.equal(SetupAdmin.activationStatus(readyDefinition, readyChecks, false).active, false);
+  assert.equal(SetupAdmin.activationStatus(readyDefinition, readyChecks).active, false,
+    'omitting plantActive must default to inactive, not throw or read definition.active');
+  // definition.active === false must not force inactive when plant_active is true —
+  // proof the two gates are read from genuinely independent sources.
+  assert.equal(SetupAdmin.activationStatus({ ...readyDefinition, active: false }, readyChecks, true).active, true);
 });
 
 test('SetupAdmin exports canonical long-form columns with plant, line, and version metadata', () => {
@@ -246,7 +274,7 @@ test('SetupAdmin uses registered setup keys and reversibly parses canonical long
     '5512,LINE-1,4,"[{""fieldKey"":""colorWheel"",""value"":""A|B""}]","[{""fieldKey"":""colorWheel"",""value"":""C,D""}]",12',
   ].join('\r\n');
   assert.deepEqual(SetupAdmin.parseLongFormCsv(csv), {
-    plant: '5512', line: 'LINE-1', signature_version: 4,
+    plant: '5512', machine: 'LINE-1', signature_version: 4,
     rows: [{ from: [{ fieldKey: 'colorWheel', value: 'A|B' }], to: [{ fieldKey: 'colorWheel', value: 'C,D' }], setup_min: 12 }],
   });
 });
@@ -265,8 +293,8 @@ test('SetupAdmin loads every plant-line page without requesting an unbounded lis
   const lines = await SetupAdmin.collectPagedLines(async (offset, limit) => {
     calls.push({ offset, limit });
     return offset === 0
-      ? { rows: [{ production_line: 'L-100' }, { production_line: 'L-001' }], meta: { total: 3 } }
-      : { rows: [{ production_line: 'L-250' }], meta: { total: 3 } };
+      ? { rows: [{ machine: 'L-100' }, { machine: 'L-001' }], meta: { total: 3 } }
+      : { rows: [{ machine: 'L-250' }], meta: { total: 3 } };
   }, 2);
   assert.deepEqual(lines, ['L-001', 'L-100', 'L-250']);
   assert.deepEqual(calls, [{ offset: 0, limit: 2 }, { offset: 2, limit: 2 }]);
@@ -284,7 +312,7 @@ test('cartesianStates builds one state per combination, in field order', () => {
 
 test('stateSig matches regardless of key part order — a real row must resolve against a synthesized candidate state', () => {
   const candidate = SetupAdmin.cartesianStates(['colorWheel', 'prt01'], { colorWheel: ['RED'], prt01: ['A12'] })[0];
-  const storedRow = { line: '', signature_version: 1, from_key: [{ fieldKey: 'prt01', value: 'A12' }, { fieldKey: 'colorWheel', value: 'RED' }], to_key: [], setup_min: 5 };
+  const storedRow = { machine: '', signature_version: 1, from_key: [{ fieldKey: 'prt01', value: 'A12' }, { fieldKey: 'colorWheel', value: 'RED' }], to_key: [], setup_min: 5 };
   assert.equal(SetupAdmin.stateSig(candidate.key), SetupAdmin.stateSig(storedRow.from_key));
 });
 
@@ -310,7 +338,7 @@ test('fieldValueSet unions plant-default and line-override ranked values', () =>
 });
 
 test('buildGridModel resolves an existing row regardless of from/to array order', () => {
-  const rows = [{ line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 12, inherited: false, inheritedFromPlant: false }];
+  const rows = [{ machine: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 12, inherited: false, inheritedFromPlant: false }];
   const model = SetupAdmin.buildGridModel(['colorWheel'], { colorWheel: ['RED', 'BLUE'] }, rows);
   const red = model.rowStates.find(s => s.parts[0] === 'RED');
   const blue = model.colStates.find(s => s.parts[0] === 'BLUE');
@@ -394,8 +422,8 @@ test('parseGridMinutes accepts 0-10080 whole minutes, clears on blank, rejects o
 test('buildSaveRequests: line-scoped edits are a sparse upsert of only the edited rows', () => {
   const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
   const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
-  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, line: 'L1' }], 4, []);
-  assert.deepEqual(upsert, [{ line: 'L1', signature_version: 4, rows: [{ from: red.key, to: blue.key, setup_min: 20 }] }]);
+  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, machine: 'L1' }], 4, []);
+  assert.deepEqual(upsert, [{ machine: 'L1', signature_version: 4, rows: [{ from: red.key, to: blue.key, setup_min: 20 }] }]);
   assert.deepEqual(deletes, []);
 });
 
@@ -403,10 +431,10 @@ test('buildSaveRequests: plant-default edits merge into the FULL existing row se
   const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
   const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
   const green = { key: [{ fieldKey: 'colorWheel', value: 'GREEN' }], sig: 'colorWheel=GREEN', parts: ['GREEN'] };
-  const existingUntouchedRow = { line: '', signature_version: 4, from_key: green.key, to_key: blue.key, setup_min: 99 };
-  const { upsert } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, line: '' }], 4, [existingUntouchedRow]);
+  const existingUntouchedRow = { machine: '', signature_version: 4, from_key: green.key, to_key: blue.key, setup_min: 99 };
+  const { upsert } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, machine: '' }], 4, [existingUntouchedRow]);
   assert.equal(upsert.length, 1);
-  assert.equal(upsert[0].line, '');
+  assert.equal(upsert[0].machine, '');
   // The edited pair AND the untouched existing row must both be present —
   // sending only the edited cell here would silently wipe the untouched row.
   assert.equal(upsert[0].rows.length, 2);
@@ -417,8 +445,8 @@ test('buildSaveRequests: plant-default edits merge into the FULL existing row se
 test('buildSaveRequests: a plant-default clear removes that pair from the resent set', () => {
   const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
   const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
-  const existingRow = { line: '', signature_version: 4, from_key: red.key, to_key: blue.key, setup_min: 20 };
-  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: null, line: '' }], 4, [existingRow]);
+  const existingRow = { machine: '', signature_version: 4, from_key: red.key, to_key: blue.key, setup_min: 20 };
+  const { upsert, deletes } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: null, machine: '' }], 4, [existingRow]);
   assert.equal(upsert[0].rows.length, 0);
   assert.deepEqual(deletes, []); // plant-default clears are folded into the resend, not a separate DELETE call
 });

@@ -209,7 +209,7 @@ export interface SetupComputeInterval {
 
 export interface SetupComputeDiagnostic {
   type: 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
-    | 'predecessor-state-unknown' | 'successor-state-unknown';
+    | 'predecessor-state-unknown' | 'successor-state-unknown' | 'setup-no-change';
   line: string;
   scope: string;
   pairKey?: string;
@@ -217,6 +217,18 @@ export interface SetupComputeDiagnostic {
   successorOrderId?: string;
   time?: Date;
   message?: string;
+  // Populated only by the 'setup-no-change' diagnostic below (D4): an
+  // identical-signature, zero-minute, covered transition that never had a
+  // matrix row or override consulted. Carried here so a caller (Inspector,
+  // tests) that reads observation.diagnostics directly — rather than
+  // re-resolving through resolveSetup() — still sees the full fact set.
+  // Never populated for any other diagnostic type.
+  predecessorState?: SetupStateKey | null;
+  successorState?: SetupStateKey | null;
+  requiredMinutes?: number;
+  effectiveMinutes?: number;
+  standardMinutes?: number;
+  source?: string;
 }
 
 export interface SetupObservation {
@@ -329,9 +341,9 @@ export function deriveSetupObservation(
   // is deliberately disabled for observation-only rollout.
   if (!setup || !definition) return observation;
 
-  const stateForLine = new Map(setup.line_states
+  const stateForLine = new Map(setup.machine_states
     .filter(state => state.signature_version === definition.signature_version)
-    .map(state => [state.line, state]));
+    .map(state => [state.machine, state]));
   const taskById = new Map(tasks.map(task => [String(task.id), task]));
   const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
   for (const task of tasks) {
@@ -339,10 +351,10 @@ export function deriveSetupObservation(
     // plant's chain, and `|| 'Unknown'` would chain every line-less order
     // together across plants/lines. A line code can be reused across plants
     // (db.reattribute_null_plant_orders deliberately leaves PLANT null when a
-    // line code maps to >1 plant), so both PLANT and PRODUCTION_LINE must be
+    // line code maps to >1 plant), so both PLANT and MACHINE must be
     // exact, non-empty matches — mirroring the optimizer's rule.
     const taskPlant = String(task.PLANT ?? task.plant ?? '');
-    const line = String(task.PRODUCTION_LINE ?? '');
+    const line = String(task.MACHINE ?? '');
     if (!line || taskPlant !== setup.plant) continue;
     if (scopedLines && !scopedLines.has(line)) continue;
     const intervals = setupOrderIntervals(task);
@@ -360,7 +372,7 @@ export function deriveSetupObservation(
     // path, EVERY active override's line gets pulled in — including lines
     // with zero loaded orders — producing override-inactive diagnostics with
     // time: undefined for lines outside the caller's scope.
-    if (override.status === 'active' && (scopedLines?.has(override.line) || byLine.has(override.line))) lines.add(override.line);
+    if (override.status === 'active' && (scopedLines?.has(override.machine) || byLine.has(override.machine))) lines.add(override.machine);
   }
   for (const line of lines) {
     const orders = byLine.get(line) || [];
@@ -411,8 +423,8 @@ export function deriveSetupObservation(
         });
       } else {
         const resolved = resolveSetup({
-          definition, line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
-          plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+          definition, machine: line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
+          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
         });
         if (!resolved.covered || resolved.effectiveMin == null) {
           observation.diagnostics.push({
@@ -433,6 +445,26 @@ export function deriveSetupObservation(
           });
         } else {
           resolvedEdges.add(`${predecessorOrderId ?? 'initial'}|${String(order.task.id)}`);
+          // D4: an identical-signature, zero-minute transition (setup-domain's
+          // resolveSetup 'implicit-zero' branch — no matrix row or override was
+          // consulted) previously produced neither an interval nor a
+          // diagnostic, so the Inspector's hasObservedEntry gate found nothing
+          // and blanked every detail row to '—'. Push a non-alerting
+          // diagnostic here (never an interval — no bar is drawn, nothing
+          // consumes capacity) so the detail card populates honestly. A
+          // matrix-row- or override-sourced zero-minute transition (source
+          // 'line'/'plant'/'occurrence') is a genuinely different, already-
+          // correctly-silent case and must NOT take this branch — only the
+          // no-matrix-consulted identical-state case does.
+          if (resolved.source === 'implicit-zero') {
+            observation.diagnostics.push({
+              type: 'setup-no-change', line, scope,
+              predecessorOrderId, successorOrderId: String(order.task.id), time: order.start,
+              predecessorState, successorState,
+              requiredMinutes: 0, effectiveMinutes: 0, standardMinutes: 0,
+              source: resolved.source,
+            });
+          }
         }
       }
       predecessorState = successorState;
@@ -440,7 +472,7 @@ export function deriveSetupObservation(
       predecessorEnd = order.end;
     }
 
-    for (const override of setup.overrides.filter(override => override.status === 'active' && override.line === line)) {
+    for (const override of setup.overrides.filter(override => override.status === 'active' && override.machine === line)) {
       const key = `${override.predecessor_order_id ?? 'initial'}|${override.successor_order_id}`;
       if (!resolvedEdges.has(key)) observation.diagnostics.push({
         type: 'override-inactive', line, scope, predecessorOrderId: override.predecessor_order_id,
@@ -497,14 +529,14 @@ function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selec
 function sourceGetPlantForLine(line: string): string | null {
   if (!_candidateSnapshot) return Store.getPlantForLine(line);
   return _candidateSnapshot.lineSettings[line]?.plant
-    ?? _candidateSnapshot.masterData?.lines.find(row => row.production_line === line)?.plant
+    ?? _candidateSnapshot.masterData?.lines.find(row => row.machine === line)?.plant
     ?? null;
 }
 
 function sourceTasksByPlant(plant: string | null): NimbusTask[] {
   if (!_candidateSnapshot) return Store.tasksByPlant(plant);
   if (!plant) return [];
-  return _candidateSnapshot.tasks.filter(task => (task.PLANT || sourceGetPlantForLine(task.PRODUCTION_LINE)) === plant);
+  return _candidateSnapshot.tasks.filter(task => (task.PLANT || sourceGetPlantForLine(task.MACHINE)) === plant);
 }
 
 function sourceTask(id: string): NimbusTask | undefined {
@@ -1444,7 +1476,7 @@ export const Alerts = {
     if (a.type === 'overlap' || a.type === 'blackout') {
       const task = Store.tasks[a.taskId!];
       if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
-      const line = task.PRODUCTION_LINE || 'Unknown';
+      const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
@@ -1498,7 +1530,7 @@ export const Alerts = {
       // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
       // dayKey(start) missed cross-midnight orders and lost them on undo.
       const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
-        (t.PRODUCTION_LINE || 'Unknown') === line &&
+        (t.MACHINE || 'Unknown') === line &&
         (!t.end_date   || t.end_date   >= dayStart) &&
         (!t.start_date || t.start_date <= dayEnd)
       ).map(t => t.id));
@@ -1606,12 +1638,12 @@ export const Utilization = {
     // Reproduce the exact line set the inline builder used: task lines, plus (when this
     // is NOT a filtered subset) either the selected plant's lines or every visited
     // calendar line. Passed explicitly so the core pins the same set.
-    const lineSet = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    const lineSet = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
     if (srcTasks === null) {
       if (utilizationSnapshot && selectedPlant) {
         for (const [line, settings] of Object.entries(lineSettings)) {
           const mappedPlant = settings.plant
-            ?? masterData?.lines.find(row => row.production_line === line)?.plant;
+            ?? masterData?.lines.find(row => row.machine === line)?.plant;
           if (mappedPlant === selectedPlant) lineSet.add(line);
         }
       } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
@@ -1677,7 +1709,7 @@ export const Utilization = {
     const d = Util.startOfDay(date) || Util.startOfDay(new Date())!;
     const dEndMs = (() => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.getTime(); })();
     const out: Record<string, DayByLineRow> = {};
-    const lines = new Set(taskList.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    const lines = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
     const dayKeyTarget = Util.dayKey(d);
     // Pre-parse blackout blocks once; reused for both capacity and the per-task clip below.
     const blockIdx = Calendar._indexCapacityBlocks();
@@ -1696,7 +1728,7 @@ export const Utilization = {
         const _pb = blockIdx.plantBlocks.get(plant!); if (_pb) for (const x of _pb) blackouts.push(x);
         for (const x of blockIdx.globalPlant) blackouts.push(x);
         for (const t of taskList) {
-          if ((t.PRODUCTION_LINE || 'Unknown') !== line) continue;
+          if ((t.MACHINE || 'Unknown') !== line) continue;
           if (!t.start_date) continue;
           const intervals = Util.scheduleIntervals(t);
           if (intervals.length >= 2) {
@@ -1839,7 +1871,9 @@ export const Engine = {
     snapshot: ScheduleSnapshot = snapshotSchedule(),
     thresholds?: Readonly<SetupPolicyThresholds>,
   ): CandidateResult {
-    if (!bounds.setup.definition?.active) {
+    // Workstream D2: the real gate is plants.setup_active (bounds.setup.plant_active),
+    // not the vestigial per-signature-version setup_definition.active.
+    if (!bounds.setup.plant_active) {
       throw new Error('Setup-aware evaluation is disabled for this plant');
     }
     if (mode === 'due-date-first') return evaluateDueDateFirstPure(snapshot, bounds);
@@ -1908,14 +1942,14 @@ export const Engine = {
       return {
         start_date: start,
         end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN),
-        PRODUCTION_LINE: line,
+        MACHINE: line,
         scheduleSegments: [],
       };
     }
     Calendar._beginRun(plant);
     try {
       const patch = Engine.schedulePatchFor(task, line, requestedStart, policy);
-      return patch ? { ...patch, PRODUCTION_LINE: line } : null;
+      return patch ? { ...patch, MACHINE: line } : null;
     } finally {
       Calendar._endRun();
     }
@@ -1934,7 +1968,7 @@ export const Engine = {
     try {
       for (const task of Store.tasksByPlant(plant)) {
         if (!task.runtime_schedule_mismatch || !task.start_date) continue;
-        const line = task.PRODUCTION_LINE || 'Unknown';
+        const line = task.MACHINE || 'Unknown';
         const changes = Engine.schedulePatchFor(task, line, task.start_date, policy);
         if (!changes?.start_date || !changes.end_date) {
           ErrorLog.warn('engine',
@@ -2018,7 +2052,7 @@ export const Engine = {
       ? new Set((opts.lines as unknown[]).map(String))
       : null;
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
-    const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.PRODUCTION_LINE || 'Unknown'));
+    const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.MACHINE || 'Unknown'));
     for (const task of scopedTasks) {
       if (!task.start_date) {
         diagnostics.missingStartIds.push(task.id);
@@ -2026,7 +2060,7 @@ export const Engine = {
       }
       const snapshotStart = new Date(task.start_date);
       if (snapshotStart < from || snapshotStart > to) continue;
-      const line = task.PRODUCTION_LINE || 'Unknown';
+      const line = task.MACHINE || 'Unknown';
       const list = grouped.get(line) || [];
       list.push({ task, snapshotStart });
       grouped.set(line, list);
@@ -2114,10 +2148,10 @@ export const Engine = {
       const movedEnd = patch.changes.end_date!;
       const movedTask = sourceTask(patch.id);
       for (const protectedTask of scopedTasks) {
-        if (protectedTask.PRODUCTION_LINE !== movedTask?.PRODUCTION_LINE || !protectedTask.start_date || !protectedTask.end_date) continue;
+        if (protectedTask.MACHINE !== movedTask?.MACHINE || !protectedTask.start_date || !protectedTask.end_date) continue;
         if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
         if (movedStart < protectedTask.end_date && movedEnd > protectedTask.start_date) {
-          diagnostics.boundaryConflicts.push({ line: movedTask.PRODUCTION_LINE, movedTaskId: patch.id, protectedTaskId: protectedTask.id, type: 'overlap' });
+          diagnostics.boundaryConflicts.push({ line: movedTask.MACHINE, movedTaskId: patch.id, protectedTaskId: protectedTask.id, type: 'overlap' });
         }
       }
     }
@@ -2450,7 +2484,7 @@ export const Engine = {
    *
    *  opts.plant selects which plant's constraint tree applies. The line scope
    *  is resolved PER TASK inside each term's get(), off the task's *current*
-   *  PRODUCTION_LINE (line override winning over plant-wide, ''), which is
+   *  MACHINE (line override winning over plant-wide, ''), which is
    *  what makes a cross-line drag or an Orders-grid line edit picked up with
    *  no refetch (the N2 fix — see docs/scheduling_priority.md's Seam 1). */
   _sortTerms(mode: string, opts: { plant?: string | null } = {}): SortTerm[] {
@@ -2478,7 +2512,7 @@ export const Engine = {
           get: (t: NimbusTask): string => {
             const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
             const byLine = sourcePriorityRankMaps() || {};
-            const line = t.PRODUCTION_LINE || '';
+            const line = t.MACHINE || '';
             // An EMPTY line-scoped map must fall through to the plant-wide list,
             // not shadow it: `??` only bridges null/undefined, and a stored
             // override with zero entries ({} — reachable from an all-blank-value
@@ -2965,14 +2999,16 @@ export const Engine = {
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
 
-    // "Include Setup Times in Optimizer" (SetupDefinition.active) routes
+    // "Include Setup Times in Optimizer" (plants.setup_active, surfaced as
+    // SetupSnapshot.plant_active — Workstream D2 relocated this off the
+    // vestigial per-signature-version setup_definition.active) routes
     // spt/changeover through the setup-aware evaluators
     // (setup-scheduler.mjs) instead of the legacy per-line walk below. Mirrors
     // the same live gate Engine.autoReflow already reads for incremental
     // reflow. Search-safety limits are hardcoded (see SETUP_AWARE_* above) —
     // the perf-measurement gate this was meant to come from was never run.
     const setupSnapshot = Store.setupSnapshot;
-    if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.definition?.active) {
+    if (setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active) {
       const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
       const snapshot = _candidateSnapshot ?? snapshotSchedule();
       const bounds: DueDateFirstBounds = {
@@ -3000,7 +3036,7 @@ export const Engine = {
         result = {
           ...result,
           patches: result.patches.filter(patch => {
-            const line = byId.get(String(patch.id))?.PRODUCTION_LINE || 'Unknown';
+            const line = byId.get(String(patch.id))?.MACHINE || 'Unknown';
             if (allowedLines && !allowedLines.has(line)) return false;
             if (sourceLineSettings()[line]?.excludeFromOpt) return false;
             return true;
@@ -3052,7 +3088,7 @@ export const Engine = {
       // always yields a patch — even when its dates are unchanged — so
       // "in scope, not fixed, not patched" is exactly "not scheduled".
       // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
-      // sourceGetPlantForLine(t.PRODUCTION_LINE)`) so this reporting and the
+      // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
       // setup-aware evaluators' own scoping agree on which orders exist for
       // this plant.
       const unplacedLines = new Set<string>();
@@ -3061,9 +3097,9 @@ export const Engine = {
         const id = String(task.id);
         if (patchedIds.has(id)) continue;
         if (sourceIsFixed(task.id)) continue;
-        const taskPlant = task.PLANT || sourceGetPlantForLine(task.PRODUCTION_LINE);
+        const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
         if (taskPlant !== plant) continue;
-        const line = task.PRODUCTION_LINE || 'Unknown';
+        const line = task.MACHINE || 'Unknown';
         if (allowedLines && !allowedLines.has(line)) continue;
         if (sourceLineSettings()[line]?.excludeFromOpt) continue;
         unplacedCount += 1;
@@ -3093,7 +3129,7 @@ export const Engine = {
     // pay for grouping work that will just be discarded.
     const groups: Record<string, { line: string; tasks: NimbusTask[] }> = {};
     for (const t of sourceTasksByPlant(plant)) {
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       if (allowed && !allowed.has(line)) continue;
       (groups[line] ||= { line, tasks: [] }).tasks.push(t);
     }
@@ -3270,26 +3306,28 @@ export const Engine = {
     if (!changed || !changed.start_date || !changed.end_date) return;
     const _horizonStart = Util.startOfDay(new Date())!;
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
-    const line = changed.PRODUCTION_LINE || 'Unknown';
+    const line = changed.MACHINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
     const setup = Store.setupSnapshot;
     const definition = setup?.definition;
-    const setupActive = !!(setup && definition?.active && setup.plant === (changed.PLANT || Store.selectedPlant));
+    // Workstream D2: the real gate is plants.setup_active (setup.plant_active),
+    // not the vestigial per-signature-version setup_definition.active.
+    const setupActive = !!(setup && setup.plant_active && setup.plant === (changed.PLANT || Store.selectedPlant));
     const setupMinutes = (predecessor: NimbusTask, successor: NimbusTask): number => {
       if (!setupActive || !setup || !definition) return 0;
       const predecessorState = stateForOrder(predecessor, definition);
       const successorState = stateForOrder(successor, definition);
       if (!predecessorState || !successorState) return 0;
       const resolved = resolveSetup({
-        definition, line, predecessorState, successorState,
+        definition, machine: line, predecessorState, successorState,
         predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
-        plantRows: setup.plant_rows, lineRows: setup.line_rows, overrides: setup.overrides,
+        plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
       });
       return resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0;
     };
 
     const peers = Store.tasksByPlant(Store.selectedPlant)
-      .filter(t => (t.PRODUCTION_LINE || 'Unknown') === line
+      .filter(t => (t.MACHINE || 'Unknown') === line
                 && t.start_date && t.end_date
                 && t.id !== changedId)
       .sort((a, b) => Number(a.start_date) - Number(b.start_date) || String(a.id).localeCompare(String(b.id)));
@@ -3401,7 +3439,7 @@ Store.subscribe(evt => {
     const plants = new Set<string>();
     for (const id of evt.ids) {
       const task = Store.tasks[String(id)];
-      const plant = task ? Store.getPlantForLine(task.PRODUCTION_LINE) : null;
+      const plant = task ? Store.getPlantForLine(task.MACHINE) : null;
       if (plant) plants.add(plant);
     }
     for (const plant of plants) Engine.reconcileRuntimeSchedules(plant);

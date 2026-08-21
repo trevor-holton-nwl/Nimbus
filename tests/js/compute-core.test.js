@@ -56,9 +56,9 @@ test('dailyCapacityHours is 0 on a closed day-of-week', () => {
 
 test('computeAlerts flags exactly one overlap for two overlapping orders on a line', () => {
   const base = Date.now() + 24 * 3600000; // tomorrow → "active"
-  const t1 = { id: 'a', text: 'A', PRODUCTION_LINE: 'L', RUN_TIME: 2,
+  const t1 = { id: 'a', text: 'A', MACHINE: 'L', RUN_TIME: 2,
     start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) };
-  const t2 = { id: 'b', text: 'B', PRODUCTION_LINE: 'L', RUN_TIME: 2,
+  const t2 = { id: 'b', text: 'B', MACHINE: 'L', RUN_TIME: 2,
     start_date: new Date(base + 2 * 3600000), end_date: new Date(base + 4 * 3600000) };
   const res = Core.computeAlerts({
     tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
@@ -71,9 +71,9 @@ test('computeAlerts flags exactly one overlap for two overlapping orders on a li
 
 test('computeAlerts honours the dismissed set', () => {
   const base = Date.now() + 24 * 3600000;
-  const t1 = { id: 'a', PRODUCTION_LINE: 'L', RUN_TIME: 2,
+  const t1 = { id: 'a', MACHINE: 'L', RUN_TIME: 2,
     start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) };
-  const t2 = { id: 'b', PRODUCTION_LINE: 'L', RUN_TIME: 2,
+  const t2 = { id: 'b', MACHINE: 'L', RUN_TIME: 2,
     start_date: new Date(base + 2 * 3600000), end_date: new Date(base + 4 * 3600000) };
   const res = Core.computeAlerts({
     tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
@@ -84,7 +84,7 @@ test('computeAlerts honours the dismissed set', () => {
 
 test('computeUtilization buckets scheduled hours onto the task line/day', () => {
   const start = new Date(2026, 6, 7); // local midnight
-  const t = { id: 'x', PRODUCTION_LINE: 'L', RUN_TIME: 4,
+  const t = { id: 'x', MACHINE: 'L', RUN_TIME: 4,
     start_date: new Date(2026, 6, 7, 9), end_date: new Date(2026, 6, 7, 13) };
   const { matrix } = Core.computeUtilization({
     tasks: [t], lineSettings: { L: { plant: null } },
@@ -104,7 +104,7 @@ test('computeUtilization counts supplied positive setup intervals without chargi
   const day = new Date(2026, 6, 7);
   const workHours = allDays([0, 24]);
   const task = {
-    id: 'setup-successor', PRODUCTION_LINE: 'L-SETUP', RUN_TIME: 2,
+    id: 'setup-successor', MACHINE: 'L-SETUP', RUN_TIME: 2,
     start_date: new Date(2026, 6, 7, 10), end_date: new Date(2026, 6, 7, 12),
   };
   const { matrix } = Core.computeUtilization({
@@ -133,7 +133,7 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
   const workHours = allDays([0, 24]);
   const { alerts } = Core.computeAlerts({
     tasks: [], blocks: [], plantBlocks: [], calendars: { L: { workHours } }, plants: {},
-    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ production_line: 'L', plant: 'P' }] },
+    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ machine: 'L', plant: 'P' }] },
     dismissed: [], opts: {},
     setup: {
       intervals: [{
@@ -169,7 +169,7 @@ test('computeAlerts recognizes predecessor-state-unknown/successor-state-unknown
   const workHours = allDays([0, 24]);
   const { alerts } = Core.computeAlerts({
     tasks: [], blocks: [], plantBlocks: [], calendars: { L: { workHours } }, plants: {},
-    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ production_line: 'L', plant: 'P' }] },
+    lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ machine: 'L', plant: 'P' }] },
     dismissed: [], opts: {},
     setup: {
       intervals: [],
@@ -216,7 +216,7 @@ test('dailyCapacityHours plant-scopes LINE blocks (reused line code across plant
   // the old worker lacked (it matched line blocks by code alone).
   const calendars = { L: { workHours: allDays([8, 16]) } };     // 8h line window
   const plants = { A: { workHours: allDays([0, 24]) } };         // plant open 24h (no day-of-week noise)
-  const mdA = { lines: [{ production_line: 'L', plant: 'A' }] };
+  const mdA = { lines: [{ machine: 'L', plant: 'A' }] };
   const date = new Date(2026, 6, 7, 12);
   const otherPlant = [{ line: 'L', plant: 'B', start: '2026-07-07T10:00:00', end: '2026-07-07T12:00:00' }];
   const samePlant  = [{ line: 'L', plant: 'A', start: '2026-07-07T10:00:00', end: '2026-07-07T12:00:00' }];
@@ -240,7 +240,7 @@ test('computeUtilization honours an explicit lines set (app.js plant-scoped line
 });
 
 test('getPlantForLine: lineSettings override wins over master data', () => {
-  const md = { lines: [{ production_line: 'L', plant: 'A' }] };
+  const md = { lines: [{ machine: 'L', plant: 'A' }] };
   assert.equal(Core.getPlantForLine('L', { L: { plant: 'OVERRIDE' } }, md), 'OVERRIDE');
   assert.equal(Core.getPlantForLine('L', {}, md), 'A');
   assert.equal(Core.getPlantForLine('L', {}, noPlant), null);

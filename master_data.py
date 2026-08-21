@@ -1,5 +1,5 @@
 """
-NIMBUS 2.0 — Master Data layer (Subnetwork / Plant / Production Line).
+NIMBUS 2.0 — Master Data layer (Subnetwork / Plant / Machine).
 
 Safe DDL surface: every dynamic identifier is routed through
 psycopg.sql.Identifier; every type literal is validated against a whitelist
@@ -27,9 +27,9 @@ log = logging.getLogger("nimbus.md")
 # Safety constants
 # ---------------------------------------------------------------------------
 ALLOWED_TABLES = frozenset({
-    'subnetworks', 'plants', 'production_lines',
+    'subnetworks', 'plants', 'machine',
     'materials', 'material_plants', 'bom_items',
-    'roles', 'role_plants',
+    'roles', 'role_plants', 'workcenter_mapping',
 })
 
 # Tables whose `plant` column is business/scheduling data, subject to
@@ -40,7 +40,7 @@ ALLOWED_TABLES = frozenset({
 # admin action. Deliberately excludes `role_plants` itself — its `plant`
 # column means "which plant this role can see", a different concept from
 # "which plant this record belongs to".
-PLANT_SCOPED_TABLES = frozenset({'plants', 'production_lines', 'material_plants', 'bom_items'})
+PLANT_SCOPED_TABLES = frozenset({'plants', 'machine', 'material_plants', 'bom_items', 'workcenter_mapping'})
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
@@ -56,20 +56,21 @@ SYSTEM_COLUMNS = frozenset({'created_at', 'updated_at'})
 # Generated/computed columns per table — must never be written by bulk_apply's
 # upsert (Postgres rejects an explicit value for a GENERATED ALWAYS AS column).
 # Only relevant if such a column is ever also registered in column_metadata;
-# line_key deliberately never is, but this is cheap insurance against that
+# machine_key deliberately never is, but this is cheap insurance against that
 # happening by mistake later.
-GENERATED_COLUMNS = {'production_lines': frozenset({'line_key'})}
+GENERATED_COLUMNS = {'machine': frozenset({'machine_key'})}
 
 # Key columns per table — is_locked in column_metadata, but also enforced here.
 _KEY_COLUMNS = {
-    'subnetworks':      frozenset({'code'}),
-    'plants':           frozenset({'subnetwork', 'plant'}),
-    'production_lines': frozenset({'subnetwork', 'plant', 'production_line'}),
-    'materials':        frozenset({'material_id'}),
-    'material_plants':  frozenset({'material_id', 'plant'}),
-    'bom_items':        frozenset({'material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'}),
-    'roles':            frozenset({'role'}),
-    'role_plants':      frozenset({'role', 'plant'}),
+    'subnetworks':        frozenset({'code'}),
+    'plants':             frozenset({'subnetwork', 'plant'}),
+    'machine':            frozenset({'subnetwork', 'plant', 'machine'}),
+    'materials':          frozenset({'material_id'}),
+    'material_plants':    frozenset({'material_id', 'plant'}),
+    'bom_items':          frozenset({'material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'}),
+    'roles':              frozenset({'role'}),
+    'role_plants':        frozenset({'role', 'plant'}),
+    'workcenter_mapping': frozenset({'plant', 'machine'}),
 }
 
 # The ONLY material_plants columns POST /master-data/material-plants/attributes
@@ -79,7 +80,7 @@ _KEY_COLUMNS = {
 # default_production_version) and the lot sizes the optimizer consumes.
 # Widening it is a deliberate act — see tests/test_material_plant_attributes.py,
 # which pins its exact contents.
-EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default_workcenter'})
+EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default_machine'})
 
 # ---------------------------------------------------------------------------
 # Scheduling priority — rankable fields (docs/scheduling_priority.md, Stage 1:
@@ -303,30 +304,32 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         else:
             total = len(rows)
 
-        # Plants carry sidecar optimization settings (`constraints` and the
-        # split-order allocation policy). They are intentionally NOT registered in
-        # column_metadata, so it never appears as an editable grid column — but
-        # we attach it to each row dict so the frontend (Settings pane +
-        # optimizer) can read it alongside the visible columns. Scope the fetch
-        # to the plants on this page so a paged/filtered request never re-scans
-        # the whole table.
+        # Plants carry sidecar optimization settings (`constraints`, the
+        # split-order allocation policy, and — as of Workstream D2 — the
+        # relocated setup-active flag). They are intentionally NOT registered
+        # in column_metadata, so none of them appears as an editable grid
+        # column — but we attach them to each row dict so the frontend
+        # (Settings pane + optimizer) can read them alongside the visible
+        # columns. Scope the fetch to the plants on this page so a
+        # paged/filtered request never re-scans the whole table.
         if table == 'plants':
             try:
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days "
+                        "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, setup_active "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5]) for r in cur.fetchall()}
                     for row in rows:
-                        constraints, policy, max_pull_forward_days = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None)
+                        constraints, policy, max_pull_forward_days, setup_active = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
                         row['max_pull_forward_days'] = max_pull_forward_days
+                        row['setup_active'] = bool(setup_active)
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -518,7 +521,7 @@ def set_material_plant_attributes(plant: str, updates: list[dict],
                                   allowed_plants: list[str] | None = None,
                                   user_email: str | None = None) -> dict:
     """Update the four planner-editable material_plants attributes for ONE
-    plant (prt_01, prt_02, color, default_workcenter).
+    plant (prt_01, prt_02, color, default_machine).
 
     UPDATE only — never INSERT, never ON CONFLICT. These rows are SAP-owned
     master data; a missing (material_id, plant) pair means the client is
@@ -642,7 +645,7 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
     """
     _assert_table(table)
     # Seed all child-table keys so a missing branch reads as 0, not "absent".
-    result = {"plants": 0, "production_lines": 0, "material_plants": 0, "bom_items": 0}
+    result = {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0}
     if not deletes:
         return result
 
@@ -655,9 +658,9 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
                 )
                 result["plants"] = int(cur.fetchone()[0])
                 cur.execute(
-                    "SELECT COUNT(*) FROM production_lines WHERE subnetwork = ANY(%s)", (codes,)
+                    "SELECT COUNT(*) FROM machine WHERE subnetwork = ANY(%s)", (codes,)
                 )
-                result["production_lines"] = int(cur.fetchone()[0])
+                result["machine"] = int(cur.fetchone()[0])
 
         elif table == "plants":
             # Each delete dict should have {subnetwork, plant}
@@ -665,11 +668,11 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
             for d in deletes:
                 if d.get("subnetwork") and d.get("plant"):
                     cur.execute(
-                        "SELECT COUNT(*) FROM production_lines WHERE subnetwork = %s AND plant = %s",
+                        "SELECT COUNT(*) FROM machine WHERE subnetwork = %s AND plant = %s",
                         (d["subnetwork"], d["plant"]),
                     )
                     plines += int(cur.fetchone()[0])
-            result["production_lines"] = plines
+            result["machine"] = plines
 
         elif table == "materials":
             # material_plants FK: material_id REFERENCES materials(material_id) ON DELETE CASCADE.
@@ -1005,8 +1008,18 @@ def ensure_plant_max_pull_forward_days_column() -> None:
         conn.commit()
 
 
+def ensure_plant_setup_active_column() -> None:
+    """Idempotent plant-level "include setup times in optimizer" flag
+    (Workstream D2, 2026-08-20) — relocated off the per-signature-version
+    setup_definition.active. Kept out of the grid, same as its siblings
+    above; changed only through PUT /plant/{plant}/setup-active."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_active BOOLEAN NOT NULL DEFAULT FALSE")
+        conn.commit()
+
+
 def ensure_material_plant_attributes() -> None:
-    """Idempotent: add material_plants.prt_01/prt_02/color/default_workcenter +
+    """Idempotent: add material_plants.prt_01/prt_02/color/default_machine +
     their column_metadata rows. Mirrors migrations/2026-08-07-material-plant-attributes.sql
     and migrations/2026-08-10-material-plant-default-workcenter.sql (keep column
     names/types in sync with those files and with schema.sql's drift block) so
@@ -1017,7 +1030,7 @@ def ensure_material_plant_attributes() -> None:
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_01 TEXT")
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS prt_02 TEXT")
         cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS color TEXT")
-        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_workcenter TEXT")
+        cur.execute("ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_machine TEXT")
         cur.execute(
             """
             INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)
@@ -1025,7 +1038,7 @@ def ensure_material_plant_attributes() -> None:
                 ('material_plants', 'prt_01', 'Prod. Resource Tool (01)', FALSE, 8),
                 ('material_plants', 'prt_02', 'Prod. Resource Tool (02)', FALSE, 9),
                 ('material_plants', 'color',  'Color',                    FALSE, 10),
-                ('material_plants', 'default_workcenter', 'Default Workcenter', FALSE, 11)
+                ('material_plants', 'default_machine', 'Default Machine', FALSE, 11)
             ON CONFLICT (table_name, column_name) DO NOTHING
             """
         )
@@ -1098,11 +1111,11 @@ def set_plant_constraints(subnetwork: str, plant: str, constraints: list,
     return {"status": "ok", "plant": plant, "constraints": clean}
 
 
-def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason: str | None,
+def set_setup_line_compatibility(plant: str, machine: str, compatible: bool, reason: str | None,
                                  user_email: str | None = None) -> dict:
-    """Persist the setup-only line opt-out without touching excl_optimizer.
+    """Persist the setup-only machine opt-out without touching excl_optimizer.
 
-    This deliberately has its own narrow write path: generic production-line
+    This deliberately has its own narrow write path: generic machine
     bulk writes cannot enforce the required incompatibility reason and would
     make it too easy to conflate this setup signature exception with the
     existing global optimizer exclusion flag.
@@ -1110,40 +1123,40 @@ def set_setup_line_compatibility(plant: str, line: str, compatible: bool, reason
     if not isinstance(compatible, bool):
         raise ValueError("setup_compatible must be boolean")
     plant = str(plant or "").strip()
-    line = str(line or "").strip()
+    machine = str(machine or "").strip()
     reason = str(reason or "").strip() or None
-    if not plant or not line:
-        raise ValueError("plant and line are required")
+    if not plant or not machine:
+        raise ValueError("plant and machine are required")
     if not compatible and not reason:
         raise ValueError("Setup compatibility reason is required when incompatible")
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """UPDATE production_lines
+            """UPDATE machine
                    SET setup_compatible = %s, setup_compatibility_reason = %s
-                 WHERE plant = %s AND production_line = %s""",
-            (compatible, None if compatible else reason, plant, line),
+                 WHERE plant = %s AND machine = %s""",
+            (compatible, None if compatible else reason, plant, machine),
         )
         if cur.rowcount != 1:
-            raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
+            raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES (%s, %s, %s, %s)",
-            ("production_lines", "set_setup_compatibility",
-             Jsonb({"plant": plant, "line": line, "setup_compatible": compatible,
+            ("machine", "set_setup_compatibility",
+             Jsonb({"plant": plant, "machine": machine, "setup_compatible": compatible,
                     "setup_compatibility_reason": None if compatible else reason}), user_email),
         )
         conn.commit()
-    return {"plant": plant, "line": line, "setup_compatible": compatible,
+    return {"plant": plant, "machine": machine, "setup_compatible": compatible,
             "setup_compatibility_reason": None if compatible else reason}
 
 
-def get_setup_line_compatibility(plant: str, line: str) -> dict:
-    """Return one line's setup-only compatibility, never a plant-wide line list."""
+def get_setup_line_compatibility(plant: str, machine: str) -> dict:
+    """Return one machine's setup-only compatibility, never a plant-wide machine list."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT setup_compatible, setup_compatibility_reason FROM production_lines WHERE plant = %s AND production_line = %s", (plant, line))
+        cur.execute("SELECT setup_compatible, setup_compatibility_reason FROM machine WHERE plant = %s AND machine = %s", (plant, machine))
         row = cur.fetchone()
     if row is None:
-        raise ValueError(f"Line {line!r} does not belong to plant {plant!r}")
-    return {"plant": plant, "line": line, "setup_compatible": bool(row[0]), "setup_compatibility_reason": row[1]}
+        raise ValueError(f"Machine {machine!r} does not belong to plant {plant!r}")
+    return {"plant": plant, "machine": machine, "setup_compatible": bool(row[0]), "setup_compatibility_reason": row[1]}
 
 
 def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,
@@ -1205,6 +1218,60 @@ def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | No
         )
         conn.commit()
     return {"status": "ok", "plant": plant, "max_pull_forward_days": value}
+
+
+def set_plant_setup_active(plant: str, active: bool, subnetwork: str | None = None,
+                           user_email: str | None = None) -> dict:
+    """Persist the plant-level "include setup times in optimizer" flag on
+    plants.setup_active (Workstream D2, 2026-08-20).
+
+    This is now the SOLE gate the optimizer/frontend read for setup-aware
+    scheduling. It replaces (but does not remove) setup_definition.active,
+    which is per-signature-version and force-reset to FALSE on every
+    signature bump — a poor fit for a durable plant-level switch. Validated
+    the same way set_setup_line_compatibility validates setup_compatible:
+    a real bool or a rejection, no truthy-string coercion. Deliberately
+    independent of machine.setup_compatible (a separate, per-machine
+    concept) and of the setupSnapshot.plant identity check the frontend also
+    consults — all three gates must stay separately inspectable."""
+    if not isinstance(active, bool):
+        raise ValueError("active must be boolean")
+    plant = str(plant or "").strip()
+    if not plant:
+        raise ValueError("plant is required")
+    subnetwork = str(subnetwork or "").strip()
+
+    params: list = [active, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET setup_active = %s, updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_setup_active', %s, %s)",
+            (Jsonb({"plant": plant, "setup_active": active}), user_email),
+        )
+        conn.commit()
+
+    return {"status": "ok", "plant": plant, "setup_active": active}
+
+
+def get_plant_setup_active(plant: str) -> bool:
+    """Read-only fetch of one plant's setup_active flag for GET /setup/{plant}
+    to attach as `plant_active` — never raises for a plant that (unexpectedly)
+    has no plants row, since this is a snapshot-embed read, not a write."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT setup_active FROM plants WHERE plant = %s LIMIT 1", (plant,))
+        row = cur.fetchone()
+    return bool(row[0]) if row else False
 
 
 # Top-level pages a role's access can be toggled for. Must mirror the frontend
@@ -1438,12 +1505,12 @@ def ensure_labor_plan_table() -> None:
             CREATE TABLE IF NOT EXISTS labor_plan (
                 subnetwork  TEXT    NOT NULL,
                 plant       TEXT    NOT NULL,
-                pl_group    TEXT    NOT NULL,
+                wc_group    TEXT    NOT NULL,
                 period      TEXT    NOT NULL,
                 avail_hours NUMERIC,
                 created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (subnetwork, plant, pl_group, period),
+                PRIMARY KEY (subnetwork, plant, wc_group, period),
                 FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
                     ON DELETE CASCADE ON UPDATE CASCADE
             )
@@ -1461,24 +1528,24 @@ def ensure_labor_plan_table() -> None:
         conn.commit()
 
 
-def ensure_labor_plan_line_table() -> None:
-    """Idempotent: create labor_plan_line table."""
+def ensure_labor_plan_machine_table() -> None:
+    """Idempotent: create labor_plan_machine table."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS labor_plan_line (
+            CREATE TABLE IF NOT EXISTS labor_plan_machine (
                 subnetwork      TEXT    NOT NULL,
                 plant           TEXT    NOT NULL,
-                production_line TEXT    NOT NULL,
+                machine         TEXT    NOT NULL,
                 day             TEXT    NOT NULL,
                 avail_hours     NUMERIC,
                 source          TEXT    NOT NULL DEFAULT 'auto_split',
                 created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (subnetwork, plant, production_line, day)
+                PRIMARY KEY (subnetwork, plant, machine, day)
             )
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant ON labor_plan_line(plant)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant_line ON labor_plan_line(plant, production_line)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant ON labor_plan_machine(plant)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_lpl_plant_line ON labor_plan_machine(plant, machine)")
         conn.commit()
 
 
@@ -1486,10 +1553,10 @@ def load_labor_plan(plant: str) -> dict:
     """Return all aggregate labor-plan cells (avail_hours) for the given plant."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT pl_group, period, avail_hours FROM labor_plan WHERE plant = %s ORDER BY pl_group, period",
+            "SELECT wc_group, period, avail_hours FROM labor_plan WHERE plant = %s ORDER BY wc_group, period",
             (plant,),
         )
-        rows = [{"pl_group": r[0], "period": r[1], "avail_hours": float(r[2]) if r[2] is not None else None}
+        rows = [{"wc_group": r[0], "period": r[1], "avail_hours": float(r[2]) if r[2] is not None else None}
                 for r in cur.fetchall()]
     return {"rows": rows}
 
@@ -1498,7 +1565,7 @@ def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str 
     """Upsert or delete aggregate labor-plan cells. A null/empty avail_hours deletes the cell."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
-    valid = [c for c in cells if c.get("pl_group") and c.get("period")]
+    valid = [c for c in cells if c.get("wc_group") and c.get("period")]
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -1506,20 +1573,20 @@ def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str 
         if to_delete:
             cur.execute(
                 "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s"
-                " AND (pl_group, period) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+                " AND (wc_group, period) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
                 (subnetwork, plant,
-                 [c["pl_group"] for c in to_delete],
+                 [c["wc_group"] for c in to_delete],
                  [c["period"] for c in to_delete]),
             )
             deleted = cur.rowcount
         upserted = 0
         if to_upsert:
             cur.executemany(
-                "INSERT INTO labor_plan (subnetwork, plant, pl_group, period, avail_hours)"
+                "INSERT INTO labor_plan (subnetwork, plant, wc_group, period, avail_hours)"
                 " VALUES (%s, %s, %s, %s, %s)"
-                " ON CONFLICT (subnetwork, plant, pl_group, period)"
+                " ON CONFLICT (subnetwork, plant, wc_group, period)"
                 " DO UPDATE SET avail_hours = EXCLUDED.avail_hours, updated_at = NOW()",
-                [(subnetwork, plant, c["pl_group"], c["period"], c["avail_hours"])
+                [(subnetwork, plant, c["wc_group"], c["period"], c["avail_hours"])
                  for c in to_upsert],
             )
             upserted = len(to_upsert)
@@ -1532,14 +1599,14 @@ def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str 
     return {"upserted": upserted, "deleted": deleted}
 
 
-def load_labor_plan_line(plant: str, group: str | None = None,
+def load_labor_plan_machine(plant: str, group: str | None = None,
                          from_date: str | None = None, to_date: str | None = None) -> dict:
-    """Return line-level labor plan cells, optionally filtered by pl_group and date range."""
+    """Return line-level labor plan cells, optionally filtered by wc_group and date range."""
     with _pool.connection() as conn, conn.cursor() as cur:
         conditions = ["lpl.plant = %s"]
         params: list = [plant]
         if group:
-            conditions.append("pl.pl_group = %s")
+            conditions.append("pl.wc_group = %s")
             params.append(group)
         if from_date:
             conditions.append("lpl.day >= %s")
@@ -1550,58 +1617,58 @@ def load_labor_plan_line(plant: str, group: str | None = None,
         where = " AND ".join(conditions)
         cur.execute(
             f"""
-            SELECT lpl.production_line, lpl.day, lpl.avail_hours, lpl.source
-            FROM labor_plan_line lpl
-            LEFT JOIN production_lines pl
-              ON pl.production_line = lpl.production_line AND pl.plant = lpl.plant
+            SELECT lpl.machine, lpl.day, lpl.avail_hours, lpl.source
+            FROM labor_plan_machine lpl
+            LEFT JOIN machine pl
+              ON pl.machine = lpl.machine AND pl.plant = lpl.plant
             WHERE {where}
-            ORDER BY lpl.production_line, lpl.day
+            ORDER BY lpl.machine, lpl.day
             """,
             params,
         )
         rows = [
-            {"production_line": r[0], "day": r[1],
+            {"machine": r[0], "day": r[1],
              "avail_hours": float(r[2]) if r[2] is not None else None, "source": r[3]}
             for r in cur.fetchall()
         ]
     return {"rows": rows}
 
 
-def upsert_labor_plan_line(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
+def upsert_labor_plan_machine(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
     """Upsert or delete line-level labor cells."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
-    valid = [c for c in cells if c.get("production_line") and c.get("day")]
+    valid = [c for c in cells if c.get("machine") and c.get("day")]
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:
         deleted = 0
         if to_delete:
             cur.execute(
-                "DELETE FROM labor_plan_line WHERE subnetwork=%s AND plant=%s"
-                " AND (production_line, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+                "DELETE FROM labor_plan_machine WHERE subnetwork=%s AND plant=%s"
+                " AND (machine, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
                 (subnetwork, plant,
-                 [c["production_line"] for c in to_delete],
+                 [c["machine"] for c in to_delete],
                  [c["day"] for c in to_delete]),
             )
             deleted = cur.rowcount
         upserted = 0
         if to_upsert:
             cur.executemany(
-                "INSERT INTO labor_plan_line"
-                " (subnetwork, plant, production_line, day, avail_hours, source)"
+                "INSERT INTO labor_plan_machine"
+                " (subnetwork, plant, machine, day, avail_hours, source)"
                 " VALUES (%s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (subnetwork, plant, production_line, day)"
+                " ON CONFLICT (subnetwork, plant, machine, day)"
                 " DO UPDATE SET avail_hours = EXCLUDED.avail_hours,"
                 " source = EXCLUDED.source, updated_at = NOW()",
-                [(subnetwork, plant, c["production_line"], c["day"],
+                [(subnetwork, plant, c["machine"], c["day"],
                   c["avail_hours"], c.get("source", "auto_split"))
                  for c in to_upsert],
             )
             upserted = len(to_upsert)
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('labor_plan_line', 'upsert', %s, %s)",
+            " VALUES ('labor_plan_machine', 'upsert', %s, %s)",
             (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
         )
         conn.commit()
@@ -1610,10 +1677,10 @@ def upsert_labor_plan_line(subnetwork: str, plant: str, cells: list, user_email:
 
 # ---------------------------------------------------------------------------
 # Plant / line calendars (working hours) + blackout blocks
-#   Working hours: plants.work_hours JSONB (plant-level) + line_calendar table
-#   (line-level). Blackouts: line_blackout / plant_blackout tables.
+#   Working hours: plants.work_hours JSONB (plant-level) + machine_calendar table
+#   (line-level). Blackouts: machine_blackout / plant_blackout tables.
 #   Writes are DELTA-based (explicit upserts + explicit deletes), never
-#   prune-by-omission. line_blackout.production_line NULL = "all lines in this
+#   prune-by-omission. machine_blackout.machine NULL = "all lines in this
 #   plant". Working-hours shape mirrors the frontend Store: {"0".."6": [h1,h2]|null}
 #   (0=Sun..6=Sat; null=closed; fractional hours ok).
 # ---------------------------------------------------------------------------
@@ -1621,46 +1688,46 @@ def upsert_labor_plan_line(subnetwork: str, plant: str, cells: list, user_email:
 def ensure_work_hours_columns() -> None:
     """Idempotent: add plants.work_hours JSONB (plant-level weekly hours). Kept
     out of column_metadata (like plants.constraints) so it never renders as an
-    editable Master Data grid column. Line-level hours live in the line_calendar
-    table (below), NOT on production_lines, so order-derived lines that lag master
+    editable Master Data grid column. Line-level hours live in the machine_calendar
+    table (below), NOT on machine, so order-derived lines that lag master
     data still persist."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS work_hours JSONB")
         conn.commit()
 
 
-def ensure_line_calendar_table() -> None:
+def ensure_machine_calendar_table() -> None:
     """Idempotent: per-line working hours (work_hours JSONB). No FK to
-    production_lines (mirrors labor_plan_line) so a calendar may be authored
+    machine (mirrors labor_plan_machine) so a calendar may be authored
     before its line master row exists; only the plants FK is enforced."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS line_calendar (
+            CREATE TABLE IF NOT EXISTS machine_calendar (
                 subnetwork      TEXT NOT NULL,
                 plant           TEXT NOT NULL,
-                production_line TEXT NOT NULL,
+                machine         TEXT NOT NULL,
                 work_hours      JSONB,
                 created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (subnetwork, plant, production_line),
+                PRIMARY KEY (subnetwork, plant, machine),
                 FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
                     ON DELETE CASCADE ON UPDATE CASCADE
             )
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_line_calendar_plant ON line_calendar(plant)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_machine_calendar_plant ON machine_calendar(plant)")
         conn.commit()
 
 
-def ensure_line_blackout_table() -> None:
-    """Idempotent: per-plant line blackout blocks. production_line NULL = all
+def ensure_machine_blackout_table() -> None:
+    """Idempotent: per-plant line blackout blocks. machine NULL = all
     lines in the plant. block_id is client-supplied (Util.uid 'blk'). No FK to
-    production_lines (a block may precede its line row); plants FK cascades."""
+    machine (a block may precede its line row); plants FK cascades."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS line_blackout (
+            CREATE TABLE IF NOT EXISTS machine_blackout (
                 subnetwork      TEXT      NOT NULL,
                 plant           TEXT      NOT NULL,
-                production_line TEXT,                 -- NULL = all lines in this plant
+                machine         TEXT,          -- NULL = all lines in this plant
                 block_id        TEXT      NOT NULL,   -- client-supplied (Util.uid 'blk')
                 start_ts        TIMESTAMP NOT NULL,
                 end_ts          TIMESTAMP NOT NULL,
@@ -1670,28 +1737,41 @@ def ensure_line_blackout_table() -> None:
                 PRIMARY KEY (subnetwork, plant, block_id),
                 FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
                     ON DELETE CASCADE ON UPDATE CASCADE,
-                CONSTRAINT chk_line_blackout_range CHECK (end_ts > start_ts)
+                CONSTRAINT chk_machine_blackout_range CHECK (end_ts > start_ts)
             )
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_line_blackout_plant ON line_blackout(plant)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_machine_blackout_plant ON machine_blackout(plant)")
         conn.commit()
 
 
-def ensure_line_key_columns() -> None:
-    """Idempotent: add the generated line_key identity column ({subnetwork}_
-    {plant}_{production_line}) to the three line-scoped tables that are
-    startup-hook-authoritative for prod (labor_plan_line/line_calendar/
-    line_blackout are NOT re-provisioned by schema.sql on redeploy — see
-    DEPLOYMENT.md). production_lines/orders are NOT handled here: they have
+def ensure_machine_key_columns() -> None:
+    """Idempotent: add the generated machine_key identity column ({subnetwork}_
+    {plant}_{machine}) to the three machine-scoped tables that are
+    startup-hook-authoritative for prod (labor_plan_machine/machine_calendar/
+    machine_blackout are NOT re-provisioned by schema.sql on redeploy — see
+    DEPLOYMENT.md). machine/orders are NOT handled here: they have
     no ensure_* hook and rely on schema.sql / a dated migrations/*.sql apply
-    instead."""
+    instead.
+
+    Per-table (not a uniform loop): index name AND uniqueness both vary,
+    mirroring schema.sql exactly — machine_calendar's is UNIQUE (one calendar
+    row per machine); labor_plan_machine's and machine_blackout's are plain
+    indexes (many day rows share a machine; many blackout blocks — or NULL,
+    "all machines" — share a machine_key)."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        for table in ("labor_plan_line", "line_calendar", "line_blackout"):
+        # (table, index name, unique)
+        specs = (
+            ("labor_plan_machine", "idx_lpl_machine_key", False),
+            ("machine_calendar", "uq_machine_calendar_machine_key", True),
+            ("machine_blackout", "idx_machine_blackout_machine_key", False),
+        )
+        for table, index_name, unique in specs:
             cur.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS line_key TEXT "
-                f"GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED"
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS machine_key TEXT "
+                f"GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || machine) STORED"
             )
-            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_line_key ON {table}(line_key)")
+            index_kw = "UNIQUE INDEX" if unique else "INDEX"
+            cur.execute(f"CREATE {index_kw} IF NOT EXISTS {index_name} ON {table}(machine_key)")
         conn.commit()
 
 
@@ -1852,15 +1932,15 @@ def set_plant_work_hours(plant: str, work_hours, user_email: str | None = None) 
 
 
 def set_line_work_hours(plant: str, lines: list, user_email: str | None = None) -> dict:
-    """Upsert per-line working hours into line_calendar. `lines` is
-    [{production_line, work_hours}]. Null/empty work_hours clears that line's
-    hours (SET NULL). No production_lines dependency — order-derived lines
+    """Upsert per-line working hours into machine_calendar. `lines` is
+    [{machine, work_hours}]. Null/empty work_hours clears that line's
+    hours (SET NULL). No machine dependency — order-derived lines
     persist. Idempotent per line via ON CONFLICT."""
     if not isinstance(lines, list):
         raise ValueError("lines must be a list")
     prepared = []
     for item in lines:
-        code = (item or {}).get("production_line")
+        code = (item or {}).get("machine")
         if not code:
             continue
         wh = item.get("work_hours")
@@ -1870,16 +1950,16 @@ def set_line_work_hours(plant: str, lines: list, user_email: str | None = None) 
         subnet = _resolve_subnetwork(cur, plant)
         if prepared:
             cur.executemany(
-                "INSERT INTO line_calendar (subnetwork, plant, production_line, work_hours)"
+                "INSERT INTO machine_calendar (subnetwork, plant, machine, work_hours)"
                 " VALUES (%s, %s, %s, %s)"
-                " ON CONFLICT (subnetwork, plant, production_line)"
+                " ON CONFLICT (subnetwork, plant, machine)"
                 " DO UPDATE SET work_hours = EXCLUDED.work_hours, updated_at = NOW()",
                 [(subnet, plant, code, Jsonb(clean) if clean is not None else None)
                  for code, clean in prepared],
             )
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('line_calendar', 'upsert', %s, %s)",
+            " VALUES ('machine_calendar', 'upsert', %s, %s)",
             (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared)}), user_email),
         )
         conn.commit()
@@ -1901,16 +1981,16 @@ def _prepare_blackouts(upserts: list, *, with_line: bool) -> list:
         if e <= s:
             raise ValueError(f"blackout {bid!r} has an inverted range (end <= start)")
         if with_line:
-            out.append((b.get("line") or None, bid, s, e, b.get("reason")))
+            out.append((b.get("machine") or None, bid, s, e, b.get("reason")))
         else:
             out.append((bid, s, e, b.get("reason")))
     return out
 
 
-def save_line_blackouts(plant: str, upserts: list, deletes: list | None = None,
+def save_machine_blackouts(plant: str, upserts: list, deletes: list | None = None,
                         user_email: str | None = None) -> dict:
-    """Delta write of line blackouts: upsert the given blocks and delete the given
-    ids. NEVER prunes by omission. production_line NULL = all lines in the plant."""
+    """Delta write of machine blackouts: upsert the given blocks and delete the given
+    ids. NEVER prunes by omission. machine NULL = all machines in the plant."""
     prepared = _prepare_blackouts(upserts, with_line=True)
     del_ids = [d for d in (deletes or []) if d]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -1918,25 +1998,25 @@ def save_line_blackouts(plant: str, upserts: list, deletes: list | None = None,
         deleted = 0
         if del_ids:
             cur.execute(
-                "DELETE FROM line_blackout WHERE subnetwork = %s AND plant = %s"
+                "DELETE FROM machine_blackout WHERE subnetwork = %s AND plant = %s"
                 " AND block_id = ANY(%s)",
                 (subnet, plant, del_ids),
             )
             deleted = cur.rowcount
         if prepared:
             cur.executemany(
-                "INSERT INTO line_blackout"
-                " (subnetwork, plant, production_line, block_id, start_ts, end_ts, reason)"
+                "INSERT INTO machine_blackout"
+                " (subnetwork, plant, machine, block_id, start_ts, end_ts, reason)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (subnetwork, plant, block_id) DO UPDATE SET"
-                " production_line = EXCLUDED.production_line, start_ts = EXCLUDED.start_ts,"
+                " machine = EXCLUDED.machine, start_ts = EXCLUDED.start_ts,"
                 " end_ts = EXCLUDED.end_ts, reason = EXCLUDED.reason, updated_at = NOW()",
                 [(subnet, plant, line, bid, s, e, reason)
                  for (line, bid, s, e, reason) in prepared],
             )
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('line_blackout', 'save', %s, %s)",
+            " VALUES ('machine_blackout', 'save', %s, %s)",
             (Jsonb({"plant": plant, "subnetwork": subnet,
                     "upserted": len(prepared), "deleted": deleted}), user_email),
         )
@@ -1982,21 +2062,21 @@ def save_plant_blackouts(plant: str, upserts: list, deletes: list | None = None,
 
 # ----- loaders (hydration) -------------------------------------------------
 
-def load_line_blackouts(plant: str) -> list:
-    """Return a plant's line blackouts. production_line NULL surfaces as line=None
-    ('all lines in this plant'). Own connection (transaction isolation). Returns []
+def load_machine_blackouts(plant: str) -> list:
+    """Return a plant's machine blackouts. machine NULL surfaces as machine=None
+    ('all machines in this plant'). Own connection (transaction isolation). Returns []
     if the table doesn't exist yet (pre-migration/restored DB) so the consolidated
     GET honors its 'never 500s' contract for the blackout slices too. (F6)"""
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT block_id, production_line, start_ts, end_ts, reason"
-                " FROM line_blackout WHERE plant = %s"
-                " ORDER BY production_line NULLS FIRST, start_ts",
+                "SELECT block_id, machine, start_ts, end_ts, reason"
+                " FROM machine_blackout WHERE plant = %s"
+                " ORDER BY machine NULLS FIRST, start_ts",
                 (plant,),
             )
             return [
-                {"id": r[0], "line": r[1], "start": _iso_utc(r[2]),
+                {"id": r[0], "machine": r[1], "start": _iso_utc(r[2]),
                  "end": _iso_utc(r[3]), "reason": r[4]}
                 for r in cur.fetchall()
             ]
@@ -2006,7 +2086,7 @@ def load_line_blackouts(plant: str) -> list:
 
 def load_plant_blackouts(plant: str) -> list:
     """Return a plant's plant-level blackouts. Own connection. Returns [] if the table
-    is absent (pre-migration/restored DB) — see load_line_blackouts. (F6)"""
+    is absent (pre-migration/restored DB) — see load_machine_blackouts. (F6)"""
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
@@ -2041,7 +2121,7 @@ def load_plant_calendar(plant: str) -> dict:
         cur.execute(
             "SELECT table_name FROM information_schema.columns"
             " WHERE table_schema='public' AND column_name='work_hours'"
-            " AND table_name IN ('plants','line_calendar')"
+            " AND table_name IN ('plants','machine_calendar')"
         )
         wh_tables = {r[0] for r in cur.fetchall()}
         if 'plants' in wh_tables:
@@ -2051,9 +2131,9 @@ def load_plant_calendar(plant: str) -> dict:
                 cur.execute("SELECT work_hours FROM plants WHERE plant=%s LIMIT 1", (plant,))
             row = cur.fetchone()
             plant_wh = row[0] if row else None
-        if 'line_calendar' in wh_tables:
+        if 'machine_calendar' in wh_tables:
             cur.execute(
-                "SELECT production_line, work_hours FROM line_calendar"
+                "SELECT machine, work_hours FROM machine_calendar"
                 " WHERE plant=%s AND work_hours IS NOT NULL",
                 (plant,),
             )
@@ -2063,7 +2143,7 @@ def load_plant_calendar(plant: str) -> dict:
         "subnetwork": subnet,
         "plant_work_hours": plant_wh,
         "line_work_hours": line_wh,
-        "line_blackouts": load_line_blackouts(plant),
+        "machine_blackouts": load_machine_blackouts(plant),
         "plant_blackouts": load_plant_blackouts(plant),
     }
 
@@ -2073,7 +2153,7 @@ def known_plant_line_codes() -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT plant FROM plants")
         plants = {r[0] for r in cur.fetchall()}
-        cur.execute("SELECT production_line FROM production_lines")
+        cur.execute("SELECT machine FROM machine")
         lines = {r[0] for r in cur.fetchall()}
     return {"plants": plants, "lines": lines}
 
@@ -2083,7 +2163,7 @@ def known_line_codes_for_plant(plant: str) -> set[str]:
     priority-list file's optional Line column against that specific plant
     (N4), unlike known_plant_line_codes()'s whole-catalog sets used by /upload."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT production_line FROM production_lines WHERE plant = %s", (plant,))
+        cur.execute("SELECT machine FROM machine WHERE plant = %s", (plant,))
         return {r[0] for r in cur.fetchall()}
 
 
@@ -2207,13 +2287,13 @@ def ingest_bom_from_excel(file_bytes: bytes, filename: str, user_email: str | No
 
 
 def plants_for_line(line: str) -> list[str]:
-    """Distinct plants a production_line code currently appears under. May
+    """Distinct plants a machine code currently appears under. May
     return more than one — a line code is not guaranteed unique across
-    plants (composite PK on production_lines). Used by /tasks' per-user
+    plants (composite PK on machine). Used by /tasks' per-user
     plant-scope check for ?line=-only requests: a shared line code should
     count as allowed if ANY of its plants is in the caller's allowed set."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT plant FROM production_lines WHERE production_line = %s", (line,))
+        cur.execute("SELECT DISTINCT plant FROM machine WHERE machine = %s", (line,))
         return [r[0] for r in cur.fetchall()]
 
 

@@ -16,7 +16,7 @@ GREEN = [{"fieldKey": "colorWheel", "value": "GREEN"}]
 
 
 def _row(line, from_key, to_key, minutes=12):
-    return {"line": line, "signature_version": 4, "from_key": from_key, "to_key": to_key,
+    return {"machine": line, "signature_version": 4, "from_key": from_key, "to_key": to_key,
             "setup_min": minutes}
 
 
@@ -25,8 +25,8 @@ def test_coverage_distinguishes_observed_adjacencies_from_reachable_state_pairs(
     result = setup_data.build_setup_coverage(
         DEFINITION, [_row("", RED, BLUE)], [],
         [
-            {"line": "L1", "from_key": RED, "to_key": BLUE},
-            {"line": "L1", "from_key": BLUE, "to_key": GREEN},
+            {"machine": "L1", "from_key": RED, "to_key": BLUE},
+            {"machine": "L1", "from_key": BLUE, "to_key": GREEN},
         ],
         {"L1": [RED, BLUE, GREEN]},
     )
@@ -45,15 +45,15 @@ def test_coverage_deduplicates_by_line_and_pair_and_keeps_line_scope_distinct():
     result = setup_data.build_setup_coverage(
         DEFINITION, [], [_row("L1", RED, BLUE)],
         [
-            {"line": "L1", "from_key": RED, "to_key": BLUE},
-            {"line": "L1", "from_key": RED, "to_key": BLUE},
-            {"line": "L2", "from_key": RED, "to_key": BLUE},
+            {"machine": "L1", "from_key": RED, "to_key": BLUE},
+            {"machine": "L1", "from_key": RED, "to_key": BLUE},
+            {"machine": "L2", "from_key": RED, "to_key": BLUE},
         ],
         {"L1": [RED, BLUE], "L2": [RED, BLUE]},
     )
     assert result["observed"]["total_pairs"] == 2
     assert result["observed"]["missing_pairs"] == 1
-    assert result["observed"]["missing"][0]["line"] == "L2"
+    assert result["observed"]["missing"][0]["machine"] == "L2"
     assert result["observed"]["missing"][0]["scope"] == "plant"
 
 
@@ -64,9 +64,9 @@ def test_coverage_excludes_implicit_diagonal_but_rejects_invalid_or_incomplete_s
     result = setup_data.build_setup_coverage(
         DEFINITION, [], [],
         [
-            {"line": "L1", "from_key": RED, "to_key": RED},
-            {"line": "L1", "from_key": RED, "to_key": incomplete},
-            {"line": "L1", "from_key": invalid, "to_key": BLUE},
+            {"machine": "L1", "from_key": RED, "to_key": RED},
+            {"machine": "L1", "from_key": RED, "to_key": incomplete},
+            {"machine": "L1", "from_key": invalid, "to_key": BLUE},
         ],
         {"L1": [RED, RED, incomplete, invalid]},
     )
@@ -79,11 +79,11 @@ def test_coverage_excludes_implicit_diagonal_but_rejects_invalid_or_incomplete_s
 def test_missing_pair_page_is_stable_filtered_and_bounded():
     """Review/export requests never default to an unbounded plant-wide missing-pair payload."""
     rows = [
-        {"line": "L2", "scope": "plant", "from_key": RED, "to_key": GREEN},
-        {"line": "L1", "scope": "line", "from_key": RED, "to_key": BLUE},
-        {"line": "L1", "scope": "plant", "from_key": BLUE, "to_key": GREEN},
+        {"machine": "L2", "scope": "plant", "from_key": RED, "to_key": GREEN},
+        {"machine": "L1", "scope": "machine", "from_key": RED, "to_key": BLUE},
+        {"machine": "L1", "scope": "plant", "from_key": BLUE, "to_key": GREEN},
     ]
-    page = setup_data.page_missing_pairs(rows, line="L1", offset=1, limit=1)
+    page = setup_data.page_missing_pairs(rows, machine="L1", offset=1, limit=1)
     assert page == {"rows": [rows[2]], "meta": {"total": 2, "offset": 1, "limit": 1}}
     with pytest.raises(ValueError, match="limit"):
         setup_data.page_missing_pairs(rows, offset=0, limit=501)
@@ -92,7 +92,7 @@ def test_missing_pair_page_is_stable_filtered_and_bounded():
 def test_coverage_inputs_remain_unchanged():
     """Coverage is a pure observation: it cannot rewrite schedule rows, keys, or matrix records."""
     plant_rows = [_row("", RED, BLUE)]
-    transitions = [{"line": "L1", "from_key": RED, "to_key": BLUE}]
+    transitions = [{"machine": "L1", "from_key": RED, "to_key": BLUE}]
     states = {"L1": [RED, BLUE]}
     before = copy.deepcopy((plant_rows, transitions, states))
     setup_data.build_setup_coverage(DEFINITION, plant_rows, [], transitions, states)

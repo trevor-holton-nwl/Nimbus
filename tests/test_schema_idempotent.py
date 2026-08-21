@@ -30,13 +30,19 @@ def _schema_text() -> str:
 
 
 def _setup_schema_texts() -> list[tuple[str, str]]:
-    """Both deployment paths must provide identical setup persistence guards."""
-    paths = (SCHEMA_PATH, SETUP_MIGRATION_PATH)
-    texts = []
-    for path in paths:
-        with open(path, encoding="utf-8") as schema_file:
-            texts.append((path, schema_file.read()))
-    return texts
+    """Both deployment paths must provide identical setup persistence guards.
+
+    SETUP_MIGRATION_PATH (2026-08-13-changeover-matrix-stage-0.sql) is EXCLUDED
+    from this comparison as of the 2026-08-20 Production Line -> Machine rename.
+    That migration is a frozen historical record of what was actually applied to
+    Azure on 2026-08-13 (pre-rename naming: `line`, `production_lines`) and is not
+    rewritten retroactively — schema.sql now uses `machine` naming, so the two
+    would permanently disagree on those tokens. The live Azure DB is reconciled
+    to the new naming by a separate, one-time hand-applied cutover migration
+    (migrations/2026-08-20-line-to-machine.sql), not by keeping this dated file
+    in lockstep with schema.sql. Only SCHEMA_PATH is checked here now; the
+    constant is kept (unused below) so this rationale stays attached to it."""
+    return [(SCHEMA_PATH, _schema_text())]
 
 
 def _table_block(text: str, table: str) -> str:
@@ -91,7 +97,7 @@ def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
         matrix = _table_block(text, "setup_matrix")
         for required in (
             "plant             TEXT NOT NULL",
-            "line              TEXT NOT NULL DEFAULT ''",
+            "machine           TEXT NOT NULL DEFAULT ''",
             "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
             "from_key          JSONB NOT NULL CHECK (jsonb_typeof(from_key) = 'array')",
             "to_key            JSONB NOT NULL CHECK (jsonb_typeof(to_key) = 'array')",
@@ -102,14 +108,14 @@ def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
             "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
             "updated_by        TEXT",
             "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
-            "PRIMARY KEY (plant, line, signature_version, from_key, to_key)",
+            "PRIMARY KEY (plant, machine, signature_version, from_key, to_key)",
         ):
             assert required in matrix, f"{path}: setup_matrix missing {required}"
 
-        line_state = _table_block(text, "line_setup_state")
+        line_state = _table_block(text, "machine_setup_state")
         for required in (
             "plant             TEXT NOT NULL",
-            "line              TEXT NOT NULL",
+            "machine           TEXT NOT NULL",
             "state_key         JSONB NOT NULL CHECK (jsonb_typeof(state_key) = 'array')",
             "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
             "physical_mold_id  TEXT",
@@ -120,15 +126,15 @@ def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
             "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
             "updated_by        TEXT",
             "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
-            "PRIMARY KEY (plant, line)",
+            "PRIMARY KEY (plant, machine)",
         ):
-            assert required in line_state, f"{path}: line_setup_state missing {required}"
+            assert required in line_state, f"{path}: machine_setup_state missing {required}"
 
         occurrence = _table_block(text, "setup_occurrence_override")
         for required in (
             "id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
             "plant                TEXT NOT NULL",
-            "line                 TEXT NOT NULL",
+            "machine              TEXT NOT NULL",
             "signature_version    INTEGER NOT NULL CHECK (signature_version > 0)",
             "predecessor_order_id TEXT",
             "successor_order_id   TEXT NOT NULL",
@@ -151,7 +157,7 @@ def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
     """Dropping the partial unique index would allow conflicting active overrides."""
     expected = (
         r"CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency\s+"
-        r"ON setup_occurrence_override \(\s*plant, line, signature_version,\s+"
+        r"ON setup_occurrence_override \(\s*plant, machine, signature_version,\s+"
         r"predecessor_order_id,\s+successor_order_id,\s+predecessor_state_key,\s+successor_state_key\s*\)\s+"
         r"NULLS NOT DISTINCT\s+WHERE status = 'active'"
     )
@@ -172,9 +178,9 @@ def test_setup_schema_enforces_matrix_bound_and_unbounded_override_minutes():
 def test_setup_schema_keeps_compatibility_separate_from_global_optimizer_exclusion():
     """An incompatible line must opt out with a reason without mutating excl_optimizer."""
     expected = (
-        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatible "
+        r"ALTER TABLE machine ADD COLUMN IF NOT EXISTS setup_compatible "
         r"BOOLEAN NOT NULL DEFAULT TRUE;\s*"
-        r"ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;"
+        r"ALTER TABLE machine ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;"
     )
     for path, text in _setup_schema_texts():
         assert re.search(expected, text), path

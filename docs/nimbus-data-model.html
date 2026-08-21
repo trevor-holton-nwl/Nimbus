@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NIMBUS Data Model</title>
+<meta name="description" content="Entity-relationship reference for every Postgres table behind NIMBUS, including the deliberate soft-referenced satellite tables that hard foreign keys can't show." />
+<style>
+  :root {
+    --bg: #e9edf2;
+    --bg-elev: #ffffff;
+    --bg-subtle: #f4f7fa;
+    --bg-strong: #eef1f5;
+    --line: #d5dce4;
+    --line-strong: #c6d0db;
+    --fg: #1c2b3a;
+    --fg-mute: #5d7186;
+    --fg-faint: #8fa1b3;
+    --primary: #12263f;
+    --primary-hot: #1a4fa0;
+    --accent: #1f5fbf;
+    --chrome-bg: #12263f;
+    --chrome-bg-deep: #0c1c30;
+    --chrome-fg: #ffffff;
+    --chrome-fg-mute: #a7b8ca;
+    --ok: #1e7a4a;
+    --ok-soft: #dff0e6;
+    --warn: #93610a;
+    --warn-soft: #f8ecd0;
+    --warn-vivid: #f39c12;
+    --err: #b02a20;
+    --err-soft: #f7ddd9;
+    --info: #1f5fbf;
+    --info-soft: #dde9f8;
+    --font-display: "Archivo", "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+    --font-body: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a1420;
+      --bg-elev: #1c2a3c;
+      --bg-subtle: #16212f;
+      --bg-strong: #101b28;
+      --line: #263850;
+      --line-strong: #344965;
+      --fg: #e8edf3;
+      --fg-mute: #90a2b8;
+      --fg-faint: #56677c;
+      --primary: #2b4f78;
+      --primary-hot: #35618f;
+      --accent: #4d9fff;
+      --ok: #3d9962;
+      --ok-soft: #123024;
+      --warn: #d09010;
+      --warn-soft: #2e2410;
+      --warn-vivid: #e0a018;
+      --err: #d94a3a;
+      --err-soft: #331714;
+      --info: #4a88c8;
+      --info-soft: #142438;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a1420;
+    --bg-elev: #1c2a3c;
+    --bg-subtle: #16212f;
+    --bg-strong: #101b28;
+    --line: #263850;
+    --line-strong: #344965;
+    --fg: #e8edf3;
+    --fg-mute: #90a2b8;
+    --fg-faint: #56677c;
+    --primary: #2b4f78;
+    --primary-hot: #35618f;
+    --accent: #4d9fff;
+    --ok: #3d9962;
+    --ok-soft: #123024;
+    --warn: #d09010;
+    --warn-soft: #2e2410;
+    --warn-vivid: #e0a018;
+    --err: #d94a3a;
+    --err-soft: #331714;
+    --info: #4a88c8;
+    --info-soft: #142438;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .cmd-band {
+    background: var(--chrome-bg);
+    color: var(--chrome-fg);
+    padding: 28px clamp(20px, 6vw, 64px) 26px;
+    border-bottom: 1px solid var(--chrome-bg-deep);
+  }
+  .cmd-band .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--chrome-fg-mute);
+    margin: 0 0 10px;
+  }
+  .cmd-band h1 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    font-size: clamp(28px, 4vw, 40px);
+    margin: 0 0 12px;
+  }
+  .cmd-band p.dek {
+    max-width: 62ch;
+    color: var(--chrome-fg-mute);
+    font-size: 15.5px;
+    margin: 0 0 18px;
+  }
+  .cmd-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 32px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--chrome-fg-mute);
+  }
+  .cmd-meta strong { color: var(--chrome-fg); font-weight: 500; }
+
+  main {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 40px clamp(20px, 6vw, 64px) 100px;
+  }
+
+  nav.toc {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin: 0 0 40px;
+  }
+  nav.toc h2 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    margin: 0 0 12px;
+  }
+  nav.toc ol {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 6px 20px;
+    margin: 0;
+    padding: 0 0 0 1.4em;
+    font-size: 13.5px;
+  }
+  nav.toc a { color: var(--fg); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); text-decoration: underline; }
+
+  section { margin: 0 0 56px; }
+  section > .kicker {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 6px;
+  }
+  section > h2 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    font-size: 24px;
+    margin: 0 0 10px;
+    border-top: 1px solid var(--line);
+    padding-top: 24px;
+  }
+  section > h2 .tbl-count {
+    font-family: var(--font-mono);
+    font-weight: 400;
+    font-size: 13px;
+    color: var(--fg-faint);
+    margin-left: 10px;
+    vertical-align: middle;
+  }
+  section > p.lede {
+    max-width: 72ch;
+    color: var(--fg-mute);
+    font-size: 14.5px;
+    margin: 0 0 20px;
+  }
+
+  .diagram {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 0 0 18px;
+  }
+  .diagram-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    background: var(--bg-strong);
+    border-bottom: 1px solid var(--line);
+  }
+  .diagram-toolbar button {
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    border: 1px solid var(--line-strong);
+    background: var(--bg-elev);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .diagram-toolbar button:hover { background: var(--bg-subtle); }
+  .diagram-hint {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--fg-faint);
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .diagram-viewport {
+    position: relative;
+    overflow: hidden;
+    height: 420px;
+    cursor: grab;
+    touch-action: none;
+    background:
+      linear-gradient(var(--bg-elev), var(--bg-elev)),
+      repeating-linear-gradient(0deg, var(--bg-subtle) 0 1px, transparent 1px 28px),
+      repeating-linear-gradient(90deg, var(--bg-subtle) 0 1px, transparent 1px 28px);
+  }
+  .diagram-viewport.tall { height: 640px; }
+  .diagram-viewport.grabbing { cursor: grabbing; }
+  .diagram-viewport .mermaid {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+    user-select: none;
+  }
+  .diagram-viewport svg { display: block; }
+
+  .callout {
+    border: 1px solid var(--line);
+    background: var(--bg-subtle);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 0 0 18px;
+    font-size: 13.5px;
+  }
+  .callout.warn { border-color: var(--warn-vivid); }
+  .callout.err { border-color: var(--err); }
+  .callout p { margin: 0 0 8px; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .callout.warn .label { color: var(--warn); }
+  .callout.err .label { color: var(--err); }
+  code, .mono {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    background: var(--bg-subtle);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.05em 0.4em;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 26px;
+    font-size: 13px;
+    color: var(--fg-mute);
+    margin: 0 0 8px;
+  }
+  .legend .swatch { display: inline-flex; align-items: center; gap: 8px; }
+  .legend .line { width: 26px; height: 0; border-top: 2px solid var(--fg); display: inline-block; }
+  .legend .line.soft { border-top-style: dashed; border-top-color: var(--fg-mute); }
+
+  table.coltab {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 0 0 18px;
+  }
+  table.coltab th, table.coltab td {
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  table.coltab th {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    background: var(--bg-strong);
+  }
+  table.coltab td.mono { font-family: var(--font-mono); font-size: 12.5px; background: none; border: none; padding: 7px 10px; }
+
+  footer {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 clamp(20px, 6vw, 64px) 60px;
+    color: var(--fg-faint);
+    font-size: 12.5px;
+  }
+  footer .rule { border-top: 1px solid var(--line); padding-top: 18px; }
+
+  .part-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    margin: 0 0 8px;
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+
+<div class="cmd-band">
+  <p class="eyebrow">Reference · Postgres schema</p>
+  <h1>NIMBUS Data Model</h1>
+  <p class="dek">Every table behind the scheduler, grouped by the domain it serves — plus the thing a plain foreign-key diagram would hide: which relationships are enforced by the database and which are held together only by matching text, on purpose.</p>
+  <div class="cmd-meta">
+    <span><strong>32</strong> tables</span>
+    <span><strong>35</strong> relationships</span>
+    <span>Source: <strong>schema.sql</strong></span>
+    <span>Generated <strong>2026&#8209;08&#8209;20</strong></span>
+  </div>
+</div>
+
+<main>
+
+<nav class="toc" aria-label="Table of contents">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#howto">How to read these diagrams</a></li>
+    <li><a href="#overview">System map</a></li>
+    <li><a href="#master">Full master ERD</a></li>
+    <li><a href="#masterdata">Master data hierarchy</a></li>
+    <li><a href="#orders">Orders &amp; scheduling</a></li>
+    <li><a href="#calendars">Calendars &amp; blackouts</a></li>
+    <li><a href="#labor">Labor planning</a></li>
+    <li><a href="#priority">Priority lists &amp; changeover setup</a></li>
+    <li><a href="#security">Security, roles &amp; settings</a></li>
+    <li><a href="#sap">SAP sync</a></li>
+    <li><a href="#admin">Admin plumbing</a></li>
+  </ol>
+</nav>
+
+<section id="howto">
+  <p class="kicker">Legend</p>
+  <h2>How to read these diagrams</h2>
+  <p class="lede">NIMBUS's schema has two very different kinds of relationship, and conflating them is the fastest way to misjudge what a migration or a delete is safe to do. Every diagram below is a canvas — scroll/pinch to zoom, drag to pan, double-click to reset, or use the toolbar buttons.</p>
+  <div class="legend">
+    <span class="swatch"><span class="line"></span> hard foreign key — Postgres enforces it, a bad write is rejected</span>
+    <span class="swatch"><span class="line soft"></span> soft reference — same plant/machine/order text, no constraint, no cascade</span>
+  </div>
+  <div class="callout warn">
+    <span class="label">Why so many soft references</span>
+    <p>Order data, calendars, blackout blocks, priority lists and setup state are all allowed to reference a plant or machine that master data hasn't caught up to yet — an order can arrive on a machine code before that machine is registered in <code>machine</code>. Hard-FK'ing those tables to master data would mean a scheduler-blocking rejection every time SAP is ahead of the admin tab. The tradeoff: nothing stops a typo'd plant code from silently creating an orphaned calendar or priority list that never joins to anything.</p>
+  </div>
+</section>
+
+<section id="overview">
+  <p class="kicker">The whole shape</p>
+  <h2>System map</h2>
+  <p class="lede">Eight domains, one real backbone. <code>plants</code> and <code>machine</code> are the only tables almost everything else keys off of — by hard FK where the schema can afford to reject bad writes, by soft text match everywhere else.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+flowchart LR
+  classDef domain fill:transparent,stroke:#8fa1b3,stroke-dasharray:2 2,color:#5d7186,font-size:11px
+  classDef tbl fill:#ffffff,stroke:#1c2b3a,color:#1c2b3a,font-size:12px
+
+  subgraph MD["Master Data"]
+    direction TB
+    SUB[subnetworks]:::tbl --> PLT[plants]:::tbl --> MACH[machine]:::tbl
+    MAT[materials]:::tbl --> MP[material_plants]:::tbl --> BOM[bom_items]:::tbl
+    MACH --> WM[workcenter_mapping]:::tbl
+  end
+
+  subgraph OS["Orders &amp; Scheduling"]
+    direction TB
+    ORD[orders]:::tbl --> SEG[order_schedule_segments]:::tbl
+    UA[upload_audit]:::tbl
+  end
+
+  subgraph CB["Calendars &amp; Blackouts"]
+    direction TB
+    MC[machine_calendar]:::tbl
+    MB[machine_blackout]:::tbl
+    PB[plant_blackout]:::tbl
+  end
+
+  subgraph LP["Labor Planning"]
+    direction TB
+    LPP[labor_plan]:::tbl --> LPM[labor_plan_machine]:::tbl
+  end
+
+  subgraph PS["Priority &amp; Setup"]
+    direction TB
+    PRI[priority_list]:::tbl
+    SD[setup_definition]:::tbl --> SM[setup_matrix]:::tbl
+    MSS[machine_setup_state]:::tbl
+    SOO[setup_occurrence_override]:::tbl
+  end
+
+  subgraph SEC["Security &amp; Settings"]
+    direction TB
+    ROL[roles]:::tbl --> USEC[user_security]:::tbl --> USET[user_settings]:::tbl
+    ROL --> RP[role_plants]:::tbl
+  end
+
+  subgraph SAP["SAP Sync"]
+    direction TB
+    SSC[sap_sync_config]:::tbl --> SSR[sap_sync_run]:::tbl
+    SSC --> SFM[sap_field_map]:::tbl
+  end
+
+  PLT ==> MC
+  PLT ==> MB
+  PLT ==> PB
+  PLT ==> LPP
+  MACH -. soft: machine text .-> ORD
+  PLT -. soft: plant text .-> ORD
+  MP -. soft: stamps color/PRT/version .-> ORD
+  ORD -. soft: order_id text .-> SOO
+  PLT -. soft .-> PRI
+  PLT -. soft .-> SD
+  RP -. soft: plant text .-> PLT
+  MACH -. soft .-> LPM
+  PLT -. soft: plant text .-> WM
+
+  class MD,OS,CB,LP,PS,SEC,SAP domain
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Read this as</span>
+    <p>A double arrow (<code>==></code>) is a real FK from <code>plants</code>, cascading on delete. A dashed arrow is a column that holds a plant or machine <em>string</em> with nothing in the database stopping it from pointing at nothing. <code>column_metadata</code>, <code>admin_audit</code>, and <code>schema_migrations</code> aren't drawn here — they describe the system rather than participate in it; see <a href="#admin">Admin plumbing</a>.</p>
+  </div>
+</section>
+
+<section id="master">
+  <p class="kicker">Every table, every field, every link</p>
+  <h2>Full master ERD <span class="tbl-count">32 tables · 35 relationships</span></h2>
+  <p class="lede">The single, complete diagram — every column in the schema, and every relationship named by the exact key(s) it joins on, not just "these two tables are related." A solid line is a real foreign key; a dashed line is a text match the database does not enforce. It's a big canvas — drag to pan, scroll or use the buttons to zoom. The domain sections below are this same graph, cut into readable pieces.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport tall">
+      <div class="mermaid">
+erDiagram
+  ORDERS {
+    text id PK "MD5(production_order|material_number)"
+    text production_order
+    text material_number
+    text material_description
+    text machine
+    timestamp basic_start_date
+    timestamp basic_finish_date
+    timestamp scheduled_start
+    timestamp scheduled_end
+    numeric run_time
+    bool runtime_schedule_mismatch
+    text color
+    numeric order_quantity
+    text form_size
+    text notes
+    text firming_indicator
+    uuid upload_batch_id
+    timestamp uploaded_at
+    timestamp updated_at
+    text plant
+    text machine_key
+    text prt_01
+    text prt_02
+    text production_version
+  }
+  ORDER_SCHEDULE_SEGMENTS {
+    text order_id PK
+    int segment_no PK
+    timestamp scheduled_start
+    timestamp scheduled_end
+  }
+  UPLOAD_AUDIT {
+    uuid batch_id PK
+    text filename
+    int row_count
+    int inserted_count
+    int updated_count
+    timestamp uploaded_at
+    jsonb warnings
+  }
+  SUBNETWORKS {
+    text code PK
+    text name
+    timestamp created_at
+    timestamp updated_at
+  }
+  PLANTS {
+    text subnetwork PK
+    text plant PK
+    text timezone
+    int alt_flag_horizon
+    int conf_score_horizon
+    timestamp created_at
+    timestamp updated_at
+    text description
+    text product_focus
+    text split_order_policy
+    int max_pull_forward_days
+    jsonb setup_policy_config
+    jsonb setup_release_evidence
+    jsonb work_hours
+  }
+  MACHINE {
+    text subnetwork PK
+    text plant PK
+    text machine PK
+    timestamp created_at
+    timestamp updated_at
+    text machine_key "generated, unique"
+    text wc_group
+    text bottleneck
+    text excl_optimizer
+    text buffer_type
+    numeric buffer_percent
+    numeric buffer_hours
+    bool setup_compatible
+    text setup_compatibility_reason
+  }
+  WORKCENTER_MAPPING {
+    text plant PK "no FK"
+    text machine PK "no FK"
+    text sap_workcenter
+    timestamp created_at
+    timestamp updated_at
+  }
+  MATERIALS {
+    text material_id PK
+    text material_description
+    text material_type
+    text base_uom
+    timestamp created_at
+    timestamp updated_at
+  }
+  MATERIAL_PLANTS {
+    text material_id PK
+    text plant PK
+    text subnetwork
+    text status_pl
+    text default_production_version
+    int min_lot_size
+    int incremental_lot_size
+    timestamp created_at
+    timestamp updated_at
+    text prt_01
+    text prt_02
+    text color
+    text default_machine
+  }
+  BOM_ITEMS {
+    text material_id PK
+    text plant PK
+    text alternative_bom PK
+    int level PK
+    text item_number PK
+    text component_id PK
+    numeric base_quantity
+    text item_category
+    text assembly
+    numeric component_quantity
+    text base_unit_of_measure
+    date valid_from
+    date valid_to
+    date changed_on
+    text change_number
+    timestamp created_at
+    timestamp updated_at
+  }
+  LABOR_PLAN {
+    text subnetwork PK
+    text plant PK
+    text wc_group PK
+    text period PK "ISO week"
+    numeric avail_hours
+    timestamp created_at
+    timestamp updated_at
+  }
+  LABOR_PLAN_MACHINE {
+    text subnetwork PK
+    text plant PK
+    text machine PK
+    text day PK "ISO date"
+    numeric avail_hours
+    text source
+    timestamp created_at
+    timestamp updated_at
+    text machine_key "generated"
+  }
+  MACHINE_CALENDAR {
+    text subnetwork PK
+    text plant PK
+    text machine PK
+    jsonb work_hours
+    timestamp created_at
+    timestamp updated_at
+    text machine_key "generated"
+  }
+  MACHINE_BLACKOUT {
+    text subnetwork PK
+    text plant PK
+    text block_id PK
+    text machine "nullable = all machines"
+    timestamp start_ts
+    timestamp end_ts
+    text reason
+    timestamp created_at
+    timestamp updated_at
+    text machine_key "generated"
+  }
+  PLANT_BLACKOUT {
+    text subnetwork PK
+    text plant PK
+    text block_id PK
+    timestamp start_ts
+    timestamp end_ts
+    text reason
+    timestamp created_at
+    timestamp updated_at
+  }
+  SCHEMA_MIGRATIONS {
+    text id PK
+    timestamp applied_at
+  }
+  COLUMN_METADATA {
+    text table_name PK
+    text column_name PK
+    text display_label
+    bool is_locked
+    int column_order
+  }
+  ADMIN_AUDIT {
+    bigint id PK
+    text table_name
+    text action
+    text column_name
+    jsonb details
+    text user_email
+    timestamp occurred_at
+  }
+  ROLES {
+    text role PK
+    text description
+    timestamp created_at
+    timestamp updated_at
+    jsonb settings
+  }
+  ROLE_PLANTS {
+    text role PK
+    text plant PK
+    timestamp created_at
+    timestamp updated_at
+  }
+  USER_SECURITY {
+    text username PK
+    text password_hash
+    text role
+    timestamp created_at
+    timestamp updated_at
+    text first_name
+    text last_name
+    timestamp last_login
+  }
+  USER_SETTINGS {
+    text username PK
+    jsonb settings
+    timestamp updated_at
+  }
+  SYSTEM_SETTINGS {
+    int id PK "singleton, always 1"
+    jsonb settings
+    timestamp updated_at
+  }
+  PRIORITY_LIST {
+    text plant PK
+    text machine PK "'' = plant-wide"
+    text field_key PK
+    jsonb entries
+    text source_column
+    text value_column
+    text rank_column
+    text filename
+    int row_count
+    text uploaded_by
+    timestamp uploaded_at
+    timestamp updated_at
+  }
+  SETUP_DEFINITION {
+    text plant PK
+    jsonb fields
+    int signature_version
+    bool strict_blanks
+    bool active
+    text created_by
+    timestamp created_at
+    text updated_by
+    timestamp updated_at
+  }
+  SETUP_MATRIX {
+    text plant PK
+    text machine PK "'' = plant-wide"
+    int signature_version PK
+    jsonb from_key PK
+    jsonb to_key PK
+    int setup_min
+    text source
+    jsonb source_metadata
+    text source_reference
+    text created_by
+    timestamp created_at
+    text updated_by
+    timestamp updated_at
+  }
+  MACHINE_SETUP_STATE {
+    text plant PK
+    text machine PK
+    jsonb state_key
+    int signature_version
+    text physical_mold_id
+    timestamp observed_at
+    text source
+    text reason
+    text created_by
+    timestamp created_at
+    text updated_by
+    timestamp updated_at
+  }
+  SETUP_OCCURRENCE_OVERRIDE {
+    bigint id PK
+    text plant
+    text machine
+    int signature_version
+    text predecessor_order_id "nullable"
+    text successor_order_id
+    jsonb predecessor_state_key
+    jsonb successor_state_key
+    int standard_min
+    int remaining_min
+    text status
+    text reason
+    text created_by
+    timestamp created_at
+    text updated_by
+    timestamp updated_at
+  }
+  COLOR_WHEEL {
+    text plant_key PK
+    text plant_label
+    jsonb entries
+    text filename
+    int row_count
+    text uploaded_by
+    timestamp uploaded_at
+    timestamp updated_at
+  }
+  SAP_SYNC_CONFIG {
+    text object_key PK
+    bool enabled
+    text transport
+    text schedule_cron
+    jsonb source_params
+    text last_watermark
+    timestamp updated_at
+  }
+  SAP_SYNC_RUN {
+    bigint id PK
+    text object_key
+    timestamp started_at
+    timestamp ended_at
+    text status
+    int rows_read
+    int rows_inserted
+    int rows_updated
+    int rows_failed
+    text error
+    text watermark_before
+    text watermark_after
+    text triggered_by
+  }
+  SAP_FIELD_MAP {
+    text object_key PK
+    text sap_field PK
+    text nimbus_column
+    text transform
+    bool active
+    int field_order
+  }
+
+  SUBNETWORKS ||--o{ PLANTS : "FK plants.subnetwork = subnetworks.code"
+  PLANTS ||--o{ MACHINE : "FK (subnetwork,plant)"
+  MATERIALS ||--o{ MATERIAL_PLANTS : "FK material_id"
+  MATERIAL_PLANTS ||--o{ BOM_ITEMS : "FK (material_id,plant) as parent"
+  MATERIAL_PLANTS ||--o{ BOM_ITEMS : "FK (component_id,plant) as component"
+  ORDERS ||--o{ ORDER_SCHEDULE_SEGMENTS : "FK order_id, cascade"
+  PLANTS ||--o{ LABOR_PLAN : "FK (subnetwork,plant), cascade"
+  PLANTS ||--o{ MACHINE_CALENDAR : "FK (subnetwork,plant), cascade"
+  PLANTS ||--o{ MACHINE_BLACKOUT : "FK (subnetwork,plant), cascade"
+  PLANTS ||--o{ PLANT_BLACKOUT : "FK (subnetwork,plant), cascade"
+  ROLES ||--o{ ROLE_PLANTS : "FK role, cascade"
+  ROLES ||--o{ USER_SECURITY : "FK role, restrict"
+  USER_SECURITY ||--o{ USER_SETTINGS : "FK username, cascade"
+
+  PLANTS o|..o{ ORDERS : "soft: orders.plant = plants.plant"
+  MACHINE o|..o{ ORDERS : "soft: machine / machine_key"
+  UPLOAD_AUDIT o|..o{ ORDERS : "soft: upload_batch_id = batch_id"
+  MATERIAL_PLANTS o|..o{ ORDERS : "soft: (plant, material_id=material_number) stamp"
+  PLANTS o|..o{ MATERIAL_PLANTS : "soft: plant"
+  MACHINE o|..o{ LABOR_PLAN_MACHINE : "soft: (plant, machine)"
+  PLANTS o|..o{ ROLE_PLANTS : "soft: plant"
+  PLANTS o|..o{ PRIORITY_LIST : "soft: plant"
+  MACHINE o|..o{ PRIORITY_LIST : "soft: machine"
+  PLANTS o|..o{ SETUP_DEFINITION : "soft: plant"
+  SETUP_DEFINITION o|..o{ SETUP_MATRIX : "soft: (plant, signature_version)"
+  MACHINE o|..o{ SETUP_MATRIX : "soft: machine"
+  SETUP_DEFINITION o|..o{ MACHINE_SETUP_STATE : "soft: plant"
+  MACHINE o|..o{ MACHINE_SETUP_STATE : "soft: machine"
+  ORDERS o|..o{ SETUP_OCCURRENCE_OVERRIDE : "soft: id = predecessor_order_id"
+  ORDERS o|..o{ SETUP_OCCURRENCE_OVERRIDE : "soft: id = successor_order_id"
+  MACHINE o|..o{ SETUP_OCCURRENCE_OVERRIDE : "soft: machine"
+  PLANTS o|..o{ COLOR_WHEEL : "soft: plant = plant_label (legacy)"
+  SAP_SYNC_CONFIG o|..o{ SAP_SYNC_RUN : "soft: object_key"
+  SAP_SYNC_CONFIG o|..o{ SAP_FIELD_MAP : "soft: object_key"
+  PLANTS o|..o{ WORKCENTER_MAPPING : "soft: plant"
+  MACHINE o|..o{ WORKCENTER_MAPPING : "soft: (plant, machine)"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Deliberately not wired in</span>
+    <p><code>schema_migrations</code> carries no relationships at all — it's a migration ledger, not business data. <code>column_metadata</code> and <code>admin_audit</code> reference table/column names as free text for <em>any</em> table the admin CRUD registry recognizes, not a fixed set, so a drawn edge would misrepresent them as scoped to one table. All three are fully specified in <a href="#admin">Admin plumbing</a>.</p>
+  </div>
+</section>
+
+<section id="masterdata">
+  <p class="kicker">Domain 1</p>
+  <h2>Master data hierarchy <span class="tbl-count">7 tables</span></h2>
+  <p class="lede">The one place NIMBUS commits to real referential integrity: subnetwork → plant → machine, and materials → material/plant → bill of materials. Everything downstream either FKs into this spine or soft-references it.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  SUBNETWORKS {
+    text code PK
+    text name
+  }
+  PLANTS {
+    text subnetwork PK, FK
+    text plant PK
+    text timezone
+    text description
+    text product_focus
+    int alt_flag_horizon "minutes"
+    int conf_score_horizon "minutes"
+    jsonb work_hours
+    jsonb setup_policy_config
+    text split_order_policy
+    int max_pull_forward_days
+  }
+  MACHINE {
+    text subnetwork PK, FK
+    text plant PK, FK
+    text machine PK
+    text machine_key "generated, unique"
+    text wc_group
+    text bottleneck
+    text excl_optimizer
+    text buffer_type
+    numeric buffer_percent
+    numeric buffer_hours
+    bool setup_compatible
+    text setup_compatibility_reason
+  }
+  WORKCENTER_MAPPING {
+    text plant PK "no FK"
+    text machine PK "no FK"
+    text sap_workcenter
+  }
+  MATERIALS {
+    text material_id PK
+    text material_description
+    text material_type
+    text base_uom
+  }
+  MATERIAL_PLANTS {
+    text material_id PK, FK
+    text plant PK
+    text subnetwork
+    text status_pl
+    text default_production_version
+    text prt_01
+    text prt_02
+    text color
+    text default_machine
+    int min_lot_size
+    int incremental_lot_size
+  }
+  BOM_ITEMS {
+    text material_id PK, FK
+    text plant PK
+    text alternative_bom PK
+    int level PK
+    text item_number PK
+    text component_id PK, FK
+    numeric base_quantity
+    numeric component_quantity
+    date valid_from
+    date valid_to
+  }
+
+  SUBNETWORKS ||--o{ PLANTS : "owns"
+  PLANTS ||--o{ MACHINE : "owns"
+  MATERIALS ||--o{ MATERIAL_PLANTS : "priced/planned per plant"
+  MATERIAL_PLANTS ||--o{ BOM_ITEMS : "as parent material"
+  MATERIAL_PLANTS ||--o{ BOM_ITEMS : "as component (same plant)"
+  PLANTS o|..o{ MATERIAL_PLANTS : "soft: plant text, no FK"
+  PLANTS o|..o{ WORKCENTER_MAPPING : "soft: plant text, no FK"
+  MACHINE o|..o{ WORKCENTER_MAPPING : "soft: (plant, machine) text, no FK"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>machine.machine_key</code> is a generated column (<code>subnetwork || '_' || plant || '_' || machine</code>) — it exists so downstream tables can carry one stable identity string instead of three, but it's never written to directly and never registered for the Add-Column admin UI, because Postgres rejects writes into a generated column.</p>
+    <p><code>material_plants.plant</code> has no FK to <code>plants</code> at all, unlike its FK to <code>materials</code> — a plant can appear here before it's onboarded in the master-data tab.</p>
+    <p><code>workcenter_mapping</code> maps a NIMBUS <code>machine</code> to its SAP workcenter code, per plant — like <code>material_plants.default_machine</code>, it has no FK to <code>machine</code> or <code>plants</code>, so a mapping can exist for an order-derived machine that lags master data.</p>
+  </div>
+</section>
+
+<section id="orders">
+  <p class="kicker">Domain 2</p>
+  <h2>Orders &amp; scheduling <span class="tbl-count">3 tables</span></h2>
+  <p class="lede">The only tables the frontend reads on every page load. <code>brain.py</code> holds no cache — every request is a fresh query against these.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  ORDERS {
+    text id PK "MD5(production_order|material_number)"
+    text production_order
+    text material_number
+    text machine "soft ref, ambiguous if machine code reused"
+    text plant "soft ref, derived at ingest"
+    text machine_key "soft ref, copied from machine"
+    timestamp basic_start_date "SAP-owned, overwritten on upload"
+    timestamp basic_finish_date "SAP-owned"
+    timestamp scheduled_start "user-owned, NULL until first edit"
+    timestamp scheduled_end "user-owned"
+    numeric run_time
+    bool runtime_schedule_mismatch
+    text firming_indicator "SAP FIXKZ"
+    text color "stamped from material_plants"
+    text prt_01 "stamped from material_plants"
+    text prt_02 "stamped from material_plants"
+    text production_version "stamped from material_plants"
+    uuid upload_batch_id "soft ref, no FK"
+  }
+  ORDER_SCHEDULE_SEGMENTS {
+    text order_id PK, FK
+    int segment_no PK
+    timestamp scheduled_start
+    timestamp scheduled_end
+  }
+  UPLOAD_AUDIT {
+    uuid batch_id PK
+    text filename
+    int row_count
+    int inserted_count
+    int updated_count
+    jsonb warnings
+  }
+
+  ORDERS ||--o{ ORDER_SCHEDULE_SEGMENTS : "cascade delete"
+  ORDERS }o..|| UPLOAD_AUDIT : "soft: upload_batch_id, no FK"
+      </div>
+    </div>
+  </div>
+  <div class="callout err">
+    <span class="label">Load-bearing hazard</span>
+    <p>There is no in-memory order cache anywhere in the backend, so <code>orders.xmin</code> doubles as the optimistic-concurrency <code>base_version</code> the frontend saves against. <strong>Any</strong> <code>UPDATE orders</code> — even on a column the UI never touches — bumps xmin for every row it touches and makes those rows come back <code>stale</code> on the planner's next save, discarding the in-flight edit (last-writer-loses). This is why the priority-list attribute stamp only ever runs batch-scoped at ingest or on an explicit admin resync call, never as a background sweep.</p>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p>Task IDs are stable across reschedules because <code>make_id()</code> hashes only <code>production_order|material_number</code> — no timestamp — which is what lets drag/edit operations key off an id that never changes underneath them.</p>
+  </div>
+</section>
+
+<section id="calendars">
+  <p class="kicker">Domain 3</p>
+  <h2>Calendars &amp; blackouts <span class="tbl-count">3 tables + plants.work_hours</span></h2>
+  <p class="lede">Working hours and blackout windows are the one satellite family that gets a real FK back to <code>plants</code> — but never down to <code>machine</code>, so a machine's calendar can exist before the machine is registered.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  PLANTS {
+    text subnetwork PK
+    text plant PK
+    jsonb work_hours "plant-wide weekly hours"
+  }
+  MACHINE_CALENDAR {
+    text subnetwork PK, FK
+    text plant PK, FK
+    text machine PK "no FK to machine"
+    jsonb work_hours
+    text machine_key "generated"
+  }
+  MACHINE_BLACKOUT {
+    text subnetwork PK, FK
+    text plant PK, FK
+    text block_id PK "client-supplied"
+    text machine "nullable = all machines in plant"
+    timestamp start_ts
+    timestamp end_ts
+    text reason
+  }
+  PLANT_BLACKOUT {
+    text subnetwork PK, FK
+    text plant PK, FK
+    text block_id PK "client-supplied"
+    timestamp start_ts
+    timestamp end_ts
+    text reason
+  }
+
+  PLANTS ||--o{ MACHINE_CALENDAR : "cascade delete"
+  PLANTS ||--o{ MACHINE_BLACKOUT : "cascade delete"
+  PLANTS ||--o{ PLANT_BLACKOUT : "cascade delete"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>machine_blackout.machine</code> being nullable is the whole mechanism for "blackout the entire plant vs. one machine" — a NULL there isn't a missing value, it's the plant-wide case, and the generated <code>machine_key</code> column correctly comes out NULL too since <code>||</code> propagates NULL without special-casing.</p>
+  </div>
+</section>
+
+<section id="labor">
+  <p class="kicker">Domain 4</p>
+  <h2>Labor planning <span class="tbl-count">2 tables</span></h2>
+  <p class="lede">Available labor hours at two grains — weekly by workcenter group for planning, daily by machine for the actual capacity math.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  LABOR_PLAN {
+    text subnetwork PK, FK
+    text plant PK, FK
+    text wc_group PK
+    text period PK "ISO week: YYYY-Www"
+    numeric avail_hours
+  }
+  LABOR_PLAN_MACHINE {
+    text subnetwork PK "no FK to plants"
+    text plant PK
+    text machine PK
+    text day PK "ISO date: YYYY-MM-DD"
+    numeric avail_hours
+    text source "auto_split | calendar | override"
+    text machine_key "generated"
+  }
+  PLANTS ||--o{ LABOR_PLAN : "cascade delete"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>labor_plan_machine</code> carries no FK at all, unlike its weekly sibling <code>labor_plan</code> — the daily grain is populated by an <code>auto_split</code> derivation that can run ahead of the plant even existing in <code>plants</code> yet.</p>
+  </div>
+</section>
+
+<section id="priority">
+  <p class="kicker">Domain 5</p>
+  <h2>Priority lists &amp; changeover setup <span class="tbl-count">6 tables</span></h2>
+  <p class="lede">Two independently-evolving features that share a shape: a plant/machine-scoped ranking or matrix, uploaded once and read by the optimizer, with zero hard FKs anywhere in the group.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  PRIORITY_LIST {
+    text plant PK "no FK"
+    text machine PK "'' = plant-wide"
+    text field_key PK "colorWheel | prt01 | prt02 | productionVersion"
+    jsonb entries "VALUE to RANK map"
+    text source_column
+    int row_count
+  }
+  COLOR_WHEEL_LEGACY["color_wheel (legacy, retired path)"] {
+    text plant_key PK
+    text plant_label
+    jsonb entries
+  }
+  SETUP_DEFINITION {
+    text plant PK "no FK"
+    jsonb fields "ordered signature fields"
+    int signature_version
+    bool active
+  }
+  SETUP_MATRIX {
+    text plant PK "no FK"
+    text machine PK "'' = plant-wide"
+    int signature_version PK
+    jsonb from_key PK
+    jsonb to_key PK
+    int setup_min "0-10080"
+    text source "manual | derived | actual"
+  }
+  MACHINE_SETUP_STATE {
+    text plant PK "no FK"
+    text machine PK
+    jsonb state_key
+    int signature_version
+    text physical_mold_id
+  }
+  SETUP_OCCURRENCE_OVERRIDE {
+    bigint id PK
+    text plant "no FK"
+    text machine
+    text predecessor_order_id "soft ref to orders.id, nullable"
+    text successor_order_id "soft ref to orders.id"
+    int standard_min
+    int remaining_min
+    text status "active | inactive | cleared | replaced"
+  }
+
+  SETUP_DEFINITION o|..o{ SETUP_MATRIX : "soft: plant + signature_version"
+  SETUP_DEFINITION o|..o{ MACHINE_SETUP_STATE : "soft"
+  ORDERS_REF o|..o{ SETUP_OCCURRENCE_OVERRIDE : "soft: order_id text, no FK"
+      </div>
+    </div>
+  </div>
+  <div class="callout warn">
+    <span class="label">Sharp edge</span>
+    <p><code>setup_occurrence_override</code> references two <code>orders.id</code> values with no foreign key at all. Deleting or re-uploading an order that has an active override silently orphans it rather than cascading or rejecting — the override just stops matching anything at optimizer time.</p>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>color_wheel</code> is superseded by <code>priority_list</code> (Stage 1, 2026-08-11) via a one-time, ledger-guarded backfill — it's kept in place only so the legacy <code>/color-wheel/*</code> endpoints have something to read/write behind their old response shape. There is deliberately no global fallback tier: a plant with nothing uploaded to <code>priority_list</code> just has no entry, full stop.</p>
+  </div>
+</section>
+
+<section id="security">
+  <p class="kicker">Domain 6</p>
+  <h2>Security, roles &amp; settings <span class="tbl-count">5 tables</span></h2>
+  <p class="lede">RBAC scaffolding plus three tiers of settings resolution: system default, then role default, then per-user override.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  ROLES {
+    text role PK
+    text description
+    jsonb settings "role-default settings blob"
+  }
+  ROLE_PLANTS {
+    text role PK, FK
+    text plant PK "no FK to plants"
+  }
+  USER_SECURITY {
+    text username PK
+    text password_hash "never selected back to frontend"
+    text role FK "RESTRICT on delete"
+    text first_name
+    text last_name
+    timestamp last_login
+  }
+  USER_SETTINGS {
+    text username PK, FK
+    jsonb settings "theme, language, defaultPlant, grid layout..."
+  }
+  SYSTEM_SETTINGS {
+    int id PK "singleton, always 1"
+    jsonb settings "orderFields visibility"
+  }
+
+  ROLES ||--o{ ROLE_PLANTS : "cascade delete"
+  ROLES ||--o{ USER_SECURITY : "restrict delete while users exist"
+  USER_SECURITY ||--o{ USER_SETTINGS : "cascade delete"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>user_security</code> is deliberately never registered in the generic master-data CRUD path — it's the one table the admin "Manage Data Tables" grid can never expose, reached only through dedicated <code>auth.py</code> functions and <code>/security/*</code> routes.</p>
+  </div>
+</section>
+
+<section id="sap">
+  <p class="kicker">Domain 7</p>
+  <h2>SAP sync <span class="tbl-count">3 tables</span></h2>
+  <p class="lede">The transport-agnostic sync engine's config, run history, and field mapping — connectors are stub skeletons today, but the persistence is real.</p>
+  <div class="diagram">
+    <div class="diagram-toolbar">
+      <button data-zoom="out" title="Zoom out">&minus;</button>
+      <button data-zoom="in" title="Zoom in">+</button>
+      <button data-zoom="reset" title="Reset view">&#8634;</button>
+      <span class="diagram-hint">drag · scroll to zoom · dblclick to reset</span>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid">
+erDiagram
+  SAP_SYNC_CONFIG {
+    text object_key PK "subnetworks | plants | machine | materials | material_plants | orders"
+    bool enabled
+    text transport "file_drop"
+    text schedule_cron
+    text last_watermark
+  }
+  SAP_SYNC_RUN {
+    bigint id PK
+    text object_key "soft ref, no FK"
+    timestamp started_at
+    text status
+    int rows_read
+    int rows_inserted
+    int rows_updated
+    int rows_failed
+  }
+  SAP_FIELD_MAP {
+    text object_key PK "soft ref, no FK"
+    text sap_field PK
+    text nimbus_column
+    text transform "none | strip_zeros | alpha | dats | decimal"
+    bool active
+  }
+
+  SAP_SYNC_CONFIG o|..o{ SAP_SYNC_RUN : "soft: object_key text"
+  SAP_SYNC_CONFIG o|..o{ SAP_FIELD_MAP : "soft: object_key text"
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="label">Notable</span>
+    <p><code>object_key</code> is a plain string that happens to name a table (or <code>orders</code>, which isn't in <code>ALLOWED_TABLES</code> and can't be reached through the generic master-data CRUD path at all) — there's no DB-level guarantee it stays in sync with what the table registry actually recognizes.</p>
+  </div>
+</section>
+
+<section id="admin">
+  <p class="kicker">Domain 8</p>
+  <h2>Admin plumbing <span class="tbl-count">3 tables</span></h2>
+  <p class="lede">Tables that describe the system rather than participate in its business data — none of them FK to anything, by design.</p>
+  <table class="coltab">
+    <thead><tr><th>Table</th><th>Key columns</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">column_metadata</td><td class="mono">(table_name, column_name) PK</td><td>Display label + locked flag for any column the Manage Data Tables UI shows — for any table in <code>ALLOWED_TABLES</code>, not just these 32.</td></tr>
+      <tr><td class="mono">admin_audit</td><td class="mono">id PK (bigserial)</td><td>One row per DDL change or bulk data operation — <code>table_name</code>/<code>column_name</code>/<code>user_email</code> are plain text, nothing FK'd.</td></tr>
+      <tr><td class="mono">schema_migrations</td><td class="mono">id PK (text)</td><td>Ledger of one-time, data-mutating migrations — guards against exactly the kind of unguarded <code>UPDATE</code> that once re-multiplied plant horizon values by 1440 on every schema apply.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout err">
+    <span class="label">Read before touching orders</span>
+    <p><code>schema_migrations</code> exists because a data-mutating statement in <code>schema.sql</code> is otherwise re-run on every apply. The current live example of the pattern it now guards against is the opposite failure mode: the one-time <code>orders_mp_attrs_backfill</code> stamps <code>orders</code> from <code>material_plants</code> and records itself applied even when it matches zero rows — if it runs before a plant's <code>material_plants</code> rows exist, it will <strong>never run again</strong> for that plant. <code>POST /master-data/resync-order-attributes</code> is the real, repeatable mechanism; this migration is convenience only.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="rule">
+    <p>Reflects <code>schema.sql</code> as of 2026-08-20. Column lists omit <code>created_at</code>/<code>updated_at</code> throughout for readability — every table carries both unless noted. For DDL provenance, active constraints, and migration history, read <code>schema.sql</code> and <code>docs/MIGRATION.md</code> directly; this page is a map, not a replacement for either.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var lightVars = {
+    background: '#ffffff',
+    primaryColor: '#eef1f5',
+    primaryTextColor: '#1c2b3a',
+    primaryBorderColor: '#1c2b3a',
+    lineColor: '#5d7186',
+    secondaryColor: '#dde9f8',
+    tertiaryColor: '#f4f7fa',
+    fontFamily: 'JetBrains Mono, ui-monospace, Consolas, monospace',
+    fontSize: '12px'
+  };
+  var darkVars = {
+    background: '#1c2a3c',
+    primaryColor: '#16212f',
+    primaryTextColor: '#e8edf3',
+    primaryBorderColor: '#344965',
+    lineColor: '#90a2b8',
+    secondaryColor: '#142438',
+    tertiaryColor: '#101b28',
+    fontFamily: 'JetBrains Mono, ui-monospace, Consolas, monospace',
+    fontSize: '12px'
+  };
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: prefersDark ? darkVars : lightVars,
+    er: { fontSize: 12 },
+    flowchart: { htmlLabels: true }
+  });
+
+  function initPanZoom(viewportEl) {
+    var contentEl = viewportEl.querySelector('.mermaid');
+    if (!contentEl) return null;
+    var svg = contentEl.querySelector('svg');
+    var baseW = 0, baseH = 0;
+    if (svg) {
+      // Mermaid ships the svg with width="100%" (an attribute) which shrinks
+      // it to the container's width — measuring the rendered box at that
+      // point captures the SHRUNK size, not the diagram's true native pixel
+      // size, which is what made "4x zoom" still look tiny/illegible on a
+      // big diagram. Read the real size from the viewBox instead, then
+      // strip the attributes that were forcing the shrink.
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
+      svg.style.maxWidth = 'none';
+      var vb = svg.viewBox && svg.viewBox.baseVal;
+      if (vb && vb.width && vb.height) {
+        baseW = vb.width; baseH = vb.height;
+      } else {
+        try {
+          var bbox = svg.getBBox();
+          baseW = bbox.width; baseH = bbox.height;
+        } catch (e) {}
+      }
+      if (!baseW || !baseH) {
+        var rect = svg.getBoundingClientRect();
+        baseW = rect.width || 300;
+        baseH = rect.height || 200;
+      }
+    }
+
+    var MIN_SCALE = 0.03, MAX_SCALE = 8;
+    var scale = 1, x = 24, y = 24;
+    var isPanning = false, startX = 0, startY = 0, startPanX = 0, startPanY = 0;
+
+    function apply() {
+      // Translate only — scaling the SVG's own width/height (below) forces a
+      // crisp vector re-render at each zoom level instead of stretching a
+      // rasterized GPU layer, which is what caused the blur.
+      contentEl.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+      if (svg && baseW && baseH) {
+        svg.style.width = (baseW * scale) + 'px';
+        svg.style.height = (baseH * scale) + 'px';
+      }
+    }
+    function reset() {
+      // Fit the whole diagram in the viewport as the starting point — from
+      // there, zooming in goes all the way up to MAX_SCALE x the diagram's
+      // true native (crisp, fully-legible) pixel size.
+      var vpRect = viewportEl.getBoundingClientRect();
+      var fitScale = 1;
+      if (baseW && baseH && vpRect.width && vpRect.height) {
+        fitScale = Math.min(vpRect.width / baseW, vpRect.height / baseH);
+      }
+      if (!isFinite(fitScale) || fitScale <= 0) fitScale = 1;
+      scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fitScale));
+      x = Math.max(0, (vpRect.width - baseW * scale) / 2);
+      y = Math.max(0, (vpRect.height - baseH * scale) / 2);
+      apply();
+    }
+    function zoomBy(factor, cx, cy) {
+      var rect = viewportEl.getBoundingClientRect();
+      var mx = cx !== undefined ? cx : rect.width / 2;
+      var my = cy !== undefined ? cy : rect.height / 2;
+      var newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * factor));
+      x = mx - (mx - x) * (newScale / scale);
+      y = my - (my - y) * (newScale / scale);
+      scale = newScale;
+      apply();
+    }
+    reset();
+
+    viewportEl.addEventListener('pointerdown', function (e) {
+      isPanning = true;
+      viewportEl.classList.add('grabbing');
+      startX = e.clientX; startY = e.clientY;
+      startPanX = x; startPanY = y;
+      try { viewportEl.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    viewportEl.addEventListener('pointermove', function (e) {
+      if (!isPanning) return;
+      x = startPanX + (e.clientX - startX);
+      y = startPanY + (e.clientY - startY);
+      apply();
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evt) {
+      viewportEl.addEventListener(evt, function () {
+        isPanning = false;
+        viewportEl.classList.remove('grabbing');
+      });
+    });
+    viewportEl.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var rect = viewportEl.getBoundingClientRect();
+      var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      zoomBy(e.deltaY < 0 ? 1.12 : 0.89, mx, my);
+    }, { passive: false });
+    viewportEl.addEventListener('dblclick', reset);
+
+    return { zoomBy: zoomBy, reset: reset };
+  }
+
+  async function renderAllDiagrams() {
+    var mermaidEls = document.querySelectorAll('.mermaid');
+    for (var i = 0; i < mermaidEls.length; i++) {
+      try {
+        await mermaid.run({ nodes: [mermaidEls[i]] });
+      } catch (err) {
+        console.error('Mermaid diagram ' + i + ' failed to render:', err);
+      }
+    }
+  }
+
+  function wirePanZoom() {
+    document.querySelectorAll('.diagram').forEach(function (diagram) {
+      var viewport = diagram.querySelector('.diagram-viewport');
+      if (!viewport) return;
+      var controls = initPanZoom(viewport);
+      if (!controls) return;
+      diagram.querySelectorAll('.diagram-toolbar button').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var action = btn.getAttribute('data-zoom');
+          if (action === 'in') controls.zoomBy(1.25);
+          else if (action === 'out') controls.zoomBy(0.8);
+          else controls.reset();
+        });
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    renderAllDiagrams().then(wirePanZoom).catch(function (err) {
+      console.error('Diagram rendering pass failed:', err);
+      wirePanZoom();
+    });
+  });
+</script>
+
+</body>
+</html>

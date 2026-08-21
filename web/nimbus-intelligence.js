@@ -573,7 +573,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           run(s) {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
-            const sample = Store.tasksArr.find(t => t.PRODUCTION_LINE === s.overloadedLine);
+            const sample = Store.tasksArr.find(t => t.MACHINE === s.overloadedLine);
             if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
           }
         },
@@ -900,7 +900,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       for (const t of Store.tasksArr.slice(0, 2000)) {
         const order = t.ORDER || t.PRODUCTION_ORDER;
         const label = [t.text, order, t.MATERIAL_NUMBER].filter(Boolean).join(' · ');
-        const sub   = `${t.PRODUCTION_LINE || '?'} · ${t.COLOR || ''}`.trim().replace(/·\s*$/, '');
+        const sub   = `${t.MACHINE || '?'} · ${t.COLOR || ''}`.trim().replace(/·\s*$/, '');
         idx.push({
           type: 'order', label, sub, icon: '📦', id: t.id,
           run() {
@@ -913,14 +913,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           }
         });
       }
-      const lines = [...new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE).filter(Boolean))];
+      const lines = [...new Set(Store.tasksArr.map(t => t.MACHINE).filter(Boolean))];
       for (const line of lines) {
         idx.push({
           type: 'line', label: `Go to: ${line}`, sub: 'Scroll Gantt to this line', icon: '🏭',
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
-            const sample = NIMBUS.Store.tasksArr.find(t => t.PRODUCTION_LINE === line);
+            const sample = NIMBUS.Store.tasksArr.find(t => t.MACHINE === line);
             if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
           }
         });
@@ -1148,14 +1148,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             .map(id => {
               const order = Store.tasks[id];
               const requestedStart = new Date(order.start_date.getTime() + 3600000);
-              const plant = Store.getPlantForLine(order.PRODUCTION_LINE || 'Unknown')
+              const plant = Store.getPlantForLine(order.MACHINE || 'Unknown')
                 || order.PLANT || Store.selectedPlant;
               const policy = NIMBUS.Engine?.splitOrderPolicyFor?.(plant);
               const needsAggregate = (order.scheduleSegments?.length ?? 0) >= 2
                 || (policy && policy !== 'never');
               if (needsAggregate) {
                 const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
-                  order, order.PRODUCTION_LINE || 'Unknown', requestedStart);
+                  order, order.MACHINE || 'Unknown', requestedStart);
                 return changes ? { id, changes } : null;
               }
               return { id, changes: {
@@ -1275,7 +1275,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           id:               t.id,
           start_date:       t.start_date ? t.start_date.getTime() : null,
           end_date:         t.end_date   ? t.end_date.getTime()   : null,
-          PRODUCTION_LINE:  t.PRODUCTION_LINE  || '',
+          MACHINE:  t.MACHINE  || '',
           PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
           text:             t.text || t.MATERIAL_DESCRIPTION || '',
           COLOR:            t.COLOR     || '',
@@ -1957,10 +1957,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _show(taskId) {
       RipplePreview._clearGhosts();
       const task = Store.tasks[taskId];
-      if (!task?.PRODUCTION_LINE || !task.start_date) return;
-      const line = task.PRODUCTION_LINE;
+      if (!task?.MACHINE || !task.start_date) return;
+      const line = task.MACHINE;
       const peers = Store.tasksArr
-        .filter(t => t.PRODUCTION_LINE === line && t.start_date && t.id !== taskId)
+        .filter(t => t.MACHINE === line && t.start_date && t.id !== taskId)
         .sort((a,b) => a.start_date - b.start_date);
       const downstream = peers.filter(t => t.start_date >= task.start_date).slice(0, 5);
       if (!downstream.length) return;
@@ -2019,7 +2019,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         id:               t.id,
         start_date:       t.start_date,
         end_date:         t.end_date,
-        PRODUCTION_LINE:  t.PRODUCTION_LINE  || '',
+        MACHINE:  t.MACHINE  || '',
         PRODUCTION_ORDER: t.PRODUCTION_ORDER || live?.PRODUCTION_ORDER || t.id.slice(0, 8),
         text:             t.text             || live?.text              || live?.MATERIAL_DESCRIPTION || '—',
         COLOR:            t.COLOR            || live?.COLOR             || '',
@@ -2039,13 +2039,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Object.keys(mapB).forEach(id => {
         if (!mapA[id]) return;
         const delta       = (mapB[id].start_date || 0) - (mapA[id].start_date || 0);
-        const lineChanged = mapA[id].PRODUCTION_LINE !== mapB[id].PRODUCTION_LINE;
+        const lineChanged = mapA[id].MACHINE !== mapB[id].MACHINE;
         if (Math.abs(delta) > 0 || lineChanged) {
           moved.push({
             ...mapB[id],
             delta,
-            lineFrom:    mapA[id].PRODUCTION_LINE,
-            lineTo:      mapB[id].PRODUCTION_LINE,
+            lineFrom:    mapA[id].MACHINE,
+            lineTo:      mapB[id].MACHINE,
             lineChanged,
             newStart:    mapB[id].start_date,
             oldStart:    mapA[id].start_date,
@@ -2062,8 +2062,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         lineImpact[line][key]++;
       };
       moved.forEach(m => { bump(m.lineTo, 'moved'); if (m.lineChanged) bump(m.lineFrom, 'moved'); });
-      added.forEach(a => bump(a.PRODUCTION_LINE, 'added'));
-      removed.forEach(r => bump(r.PRODUCTION_LINE, 'removed'));
+      added.forEach(a => bump(a.MACHINE, 'added'));
+      removed.forEach(r => bump(r.MACHINE, 'removed'));
 
       return {
         moved, added, removed, lineImpact,
@@ -2119,7 +2119,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             <span class="ni-diff-shift added">+ Added</span>
           </div>
           <div class="ni-diff-row-bottom">
-            <span class="ni-diff-line-chip">${esc(a.PRODUCTION_LINE)}</span>
+            <span class="ni-diff-line-chip">${esc(a.MACHINE)}</span>
             ${a.start_date ? `<span class="ni-diff-dates">${esc(Diff._fmtShort(a.start_date))}</span>` : ''}
           </div>
         </div>`).join('');
@@ -2132,7 +2132,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             <span class="ni-diff-shift removed">− Removed</span>
           </div>
           <div class="ni-diff-row-bottom">
-            <span class="ni-diff-line-chip">${esc(r.PRODUCTION_LINE)}</span>
+            <span class="ni-diff-line-chip">${esc(r.MACHINE)}</span>
             ${r.start_date ? `<span class="ni-diff-dates">${esc(Diff._fmtShort(r.start_date))}</span>` : ''}
           </div>
         </div>`).join('');
@@ -2209,7 +2209,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           id:               t.id,
           start_date:       t.start_date?.getTime?.() || null,
           end_date:         t.end_date?.getTime?.()   || null,
-          PRODUCTION_LINE:  t.PRODUCTION_LINE  || '',
+          MACHINE:  t.MACHINE  || '',
           PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
           text:             t.text || t.MATERIAL_DESCRIPTION || '',
           COLOR:            t.COLOR    || '',
@@ -2253,9 +2253,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _observe(movedId) {
       const task = Store.tasks[movedId];
-      if (!task?.PRODUCTION_LINE || !task.start_date) return;
+      if (!task?.MACHINE || !task.start_date) return;
       const sorted = Store.tasksArr
-        .filter(x => x.PRODUCTION_LINE === task.PRODUCTION_LINE && x.start_date)
+        .filter(x => x.MACHINE === task.MACHINE && x.start_date)
         .sort((a,b) => a.start_date - b.start_date);
       const idx = sorted.findIndex(x => x.id === movedId);
       if (idx > 0) {

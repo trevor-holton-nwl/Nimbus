@@ -36,7 +36,7 @@ test('split pieces aggregate their actual durations in overload alerts', () => {
   const second = new Date(first); second.setDate(second.getDate() + 1); second.setHours(7, 30, 0, 0);
   const secondEnd = new Date(second); secondEnd.setHours(16, 0, 0, 0);
   const split = {
-    id: 'split-overload-hours', PRODUCTION_LINE: 'SFN11', RUN_TIME: 9.5,
+    id: 'split-overload-hours', MACHINE: 'SFN11', RUN_TIME: 9.5,
     start_date: first, end_date: secondEnd,
     scheduleSegments: [
       { sequence: 1, startDate: first, endDate: firstEnd },
@@ -62,14 +62,14 @@ test('split pieces consume capacity without making the parent gap overlap anothe
   const inGap = new Date(first); inGap.setHours(21, 0, 0, 0);
   const gapEnd = new Date(inGap.getTime() + 60 * 60 * 1000);
   const split = {
-    id: 'split-capacity', PRODUCTION_LINE: 'L', RUN_TIME: 14,
+    id: 'split-capacity', MACHINE: 'L', RUN_TIME: 14,
     start_date: first, end_date: secondEnd,
     scheduleSegments: [
       { sequence: 1, startDate: first, endDate: firstEnd },
       { sequence: 2, startDate: second, endDate: secondEnd },
     ],
   };
-  const gapOrder = { id: 'gap-order', PRODUCTION_LINE: 'L', RUN_TIME: 1, start_date: inGap, end_date: gapEnd };
+  const gapOrder = { id: 'gap-order', MACHINE: 'L', RUN_TIME: 1, start_date: inGap, end_date: gapEnd };
   const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
   const base = {
     lineSettings: { L: { plant: null } }, calendars: { L: { workHours } }, plants: {},
@@ -105,9 +105,9 @@ test('a setup interval before a split successor occupies capacity and reports a 
       }], diagnostics: [],
     },
   };
-  const predecessor = { id: 'fixed-predecessor', fixed: true, PRODUCTION_LINE: 'L', RUN_TIME: 1, start_date: first, end_date: predecessorEnd };
+  const predecessor = { id: 'fixed-predecessor', fixed: true, MACHINE: 'L', RUN_TIME: 1, start_date: first, end_date: predecessorEnd };
   const successor = {
-    id: 'split-successor', PRODUCTION_LINE: 'L', RUN_TIME: 4, start_date: successorStart, end_date: successorEnd,
+    id: 'split-successor', MACHINE: 'L', RUN_TIME: 4, start_date: successorStart, end_date: successorEnd,
     scheduleSegments: [
       { sequence: 1, startDate: successorStart, endDate: successorFirstEnd },
       { sequence: 2, startDate: second, endDate: successorEnd },
@@ -131,7 +131,7 @@ test('partial_allowed allocates a 14-hour order into today plus tomorrow', () =>
   Store.replacePlants({}, 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
-    lines: [{ production_line: line, plant }],
+    lines: [{ machine: line, plant }],
   }, 'test');
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
@@ -163,7 +163,7 @@ test('overlong_only keeps ordinary orders whole and adjusts a short split tail t
   Store.replacePlants({}, 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'overlong_only' }],
-    lines: [{ production_line: line, plant }],
+    lines: [{ machine: line, plant }],
   }, 'test');
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
@@ -202,7 +202,7 @@ test('Calendar.placeWithSetup uses effective calendar fragments and keeps setup 
   Store.replacePlants({}, 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
-    lines: [{ production_line: line, plant }],
+    lines: [{ machine: line, plant }],
   }, 'test');
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
@@ -244,14 +244,14 @@ test('standard scheduling regenerates a logical parent as one split aggregate', 
   Store.replaceFixedIds(new Set(), 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
-    lines: [{ production_line: line, plant }],
+    lines: [{ machine: line, plant }],
   }, 'test');
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
   for (const day of Object.keys(workHours).map(Number)) Store.setPlantWorkHours(plant, day, workHours[day], 'test');
   Store.setSelectedPlant(plant, 'test');
   Store.setTasks([{
-    id: 'strategy-split', plant, PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 14,
+    id: 'strategy-split', plant, PLANT: plant, MACHINE: line, RUN_TIME: 14,
     start_date: new Date(horizonStart.getTime() - 2 * 60 * 60 * 1000),
     end_date: horizonStart,
   }], 'test');
@@ -278,13 +278,13 @@ test('a runtime mismatch remains diagnostic until calendar-based reconciliation 
   Store.replacePlants({}, 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
-    lines: [{ production_line: line, plant }],
+    lines: [{ machine: line, plant }],
   }, 'test');
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
   for (const day of Object.keys(workHours).map(Number)) Store.setPlantWorkHours(plant, day, workHours[day], 'test');
   Store.setTasks([{
-    id: 'runtime-repair', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 14,
+    id: 'runtime-repair', PLANT: plant, MACHINE: line, RUN_TIME: 14,
     start_date: start, end_date: new Date('2026-08-12T20:00:00'), runtime_schedule_mismatch: true,
   }], 'test');
 
@@ -304,7 +304,7 @@ test('a runtime mismatch stays visible even when its prior schedule is already i
   const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
   const alerts = Core.computeAlerts({
     tasks: [{
-      id: 'historic-runtime-mismatch', PRODUCTION_LINE: 'L-HISTORIC', RUN_TIME: 14,
+      id: 'historic-runtime-mismatch', MACHINE: 'L-HISTORIC', RUN_TIME: 14,
       start_date: new Date('2020-01-02T08:00:00'), end_date: new Date('2020-01-02T20:00:00'),
       runtime_schedule_mismatch: true,
     }],

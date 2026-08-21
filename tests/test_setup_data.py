@@ -15,8 +15,45 @@ def test_canonical_state_key_preserves_registered_definition_order_and_values():
         ["prt01", "colorWheel"], {"colorWheel": " Blue ", "prt01": 12}
     ) == [
         {"fieldKey": "prt01", "value": "12"},
-        {"fieldKey": "colorWheel", "value": "Blue"},
+        {"fieldKey": "colorWheel", "value": "BLUE"},
     ]
+
+
+@pytest.mark.parametrize("raw, folded", [
+    ("Black", "BLACK"), (" black ", "BLACK"), ("BLACK", "BLACK"),
+    ("Mold-A", "MOLD-A"), (12, "12"),
+])
+def test_canonical_state_key_uppercases_non_boolean_values(raw, folded):
+    """A hand-typed 'Black' and an ingested 'BLACK' must resolve to the same
+    canonical JSONB state-key value — the false 'no setup defined' alert this
+    fold exists to close."""
+    assert setup_data.canonical_state_key(["colorWheel"], {"colorWheel": raw}) == [
+        {"fieldKey": "colorWheel", "value": folded},
+    ]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_canonical_state_key_exempts_booleans_from_the_uppercase_fold(value):
+    """Booleans must stay lowercase 'true'/'false' — never reach the uppercase
+    branch — matching the TS side's String(true)/String(false)."""
+    assert setup_data.canonical_state_key(["colorWheel"], {"colorWheel": value}) == [
+        {"fieldKey": "colorWheel", "value": "true" if value else "false"},
+    ]
+
+
+def test_page_matrix_rows_from_key_case_fold_round_trip(monkeypatch):
+    """A List-view lookup with a differently-cased from_key (as brain.py's
+    json.loads of the raw query string would produce) must resolve to the
+    exact same rows as the canonical-uppercase form — the end-to-end
+    regression this fold was chasing, not just the fold function in
+    isolation."""
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MatrixRowsCursor()))
+    canonical = setup_data.page_matrix_rows("5512", "LINE-1", 4, from_key=_state("GREEN"))
+    mixed_case = setup_data.page_matrix_rows(
+        "5512", "LINE-1", 4, from_key=[{"fieldKey": "colorWheel", "value": "green"}],
+    )
+    assert mixed_case["rows"] == canonical["rows"]
+    assert mixed_case["meta"]["total"] == 1
 
 
 def test_derived_order_state_values_are_scoped_to_the_setup_definition():
@@ -136,7 +173,7 @@ def test_clear_override_persists_its_reason(monkeypatch):
     result = setup_data.clear_occurrence_override(
         "5512", "LINE-1", 7, 1, "owner@example.com", "completed on floor"
     )
-    assert result == {"id": 7, "plant": "5512", "line": "LINE-1", "cleared": True,
+    assert result == {"id": 7, "plant": "5512", "machine": "LINE-1", "cleared": True,
                       "signature_version": 1}
     update_sql, update_params = cursor.executed[-1]
     assert "reason = %s" in update_sql
@@ -286,7 +323,7 @@ def test_snapshot_reads_only_one_current_signature_version_in_a_repeatable_trans
     snapshot = setup_data.get_setup_snapshot("5512")
     assert snapshot["definition"]["signature_version"] == 4
     assert snapshot["plant_rows"][0]["signature_version"] == 4
-    assert snapshot["line_states"][0]["signature_version"] == 4
+    assert snapshot["machine_states"][0]["signature_version"] == 4
     assert snapshot["overrides"][0]["signature_version"] == 4
     statements = "\n".join(sql for sql, _params in cursor.executed)
     assert "REPEATABLE READ READ ONLY" in statements
@@ -319,7 +356,7 @@ def test_capture_coordinator_forwards_one_plant_local_timestamp_to_every_line(mo
     assert first_capture.tzinfo is None
     assert all(kwargs["actor"] == "system" and kwargs["reason"] == "purge" for _, _, kwargs in calls)
     query, _params = cursor.executed[0]
-    assert "JOIN production_lines" in query
+    assert "JOIN machine" in query
 
 
 def test_page_matrix_rows_lets_a_line_override_replace_the_plant_default(monkeypatch):
@@ -404,7 +441,7 @@ class _DefinitionCursor:
 class _InitialOverrideCursor(_DefinitionCursor):
     def fetchone(self):
         query = self.executed[-1][0]
-        if "SELECT 1 FROM production_lines" in query:
+        if "SELECT 1 FROM machine" in query:
             return (1,)
         if "SELECT fields" in query:
             return (["colorWheel"], 1, True, True)
@@ -428,7 +465,7 @@ class _SnapshotCursor(_DefinitionCursor):
         query = self.executed[-1][0]
         if "FROM setup_matrix" in query:
             return [("", 4, [], [], 12, "manual", {}, None, "owner", None, "owner", None)]
-        if "FROM line_setup_state" in query:
+        if "FROM machine_setup_state" in query:
             return [("LINE-1", [], 4, None, None, "manual", "floor", "owner", None, "owner", None)]
         if "FROM setup_occurrence_override" in query:
             return [(9, "LINE-1", 4, "before", "after", [], [], 12, 4, "active", "floor", "owner", None,
@@ -439,7 +476,7 @@ class _SnapshotCursor(_DefinitionCursor):
 class _InactiveOverrideCursor(_DefinitionCursor):
     def fetchone(self):
         query = self.executed[-1][0]
-        if "SELECT 1 FROM production_lines" in query:
+        if "SELECT 1 FROM machine" in query:
             return (1,)
         if "SELECT fields" in query:
             return (["colorWheel"], 1, True, False)
@@ -502,10 +539,10 @@ def _state(value):
 
 class _MatrixRowsCursor(_DefinitionCursor):
     """Serves `page_matrix_rows`' one setup_matrix SELECT from a fixed row set,
-    applying the same `line IN ('', %s)` / `from_key = %s` narrowing the SQL
+    applying the same `machine IN ('', %s)` / `from_key = %s` narrowing the SQL
     does so the merge under test sees a realistic raw result."""
 
-    #      line       from      to        min  source
+    #      machine    from      to        min  source
     ROWS = [
         ("",       _state("BLUE"),  _state("RED"),   30, "manual"),
         ("",       _state("BLUE"),  _state("WHITE"), 40, "manual"),
@@ -525,5 +562,5 @@ class _MatrixRowsCursor(_DefinitionCursor):
         if "from_key = %s" in sql:
             wanted = params[3].obj if hasattr(params[3], "obj") else params[3]
             rows = [r for r in rows if r[1] == wanted]
-        # Mirror the query's ORDER BY from_key, to_key, line DESC.
+        # Mirror the query's ORDER BY from_key, to_key, machine DESC.
         return sorted(rows, key=lambda r: (json.dumps(r[1]), json.dumps(r[2]), r[0]), reverse=False)

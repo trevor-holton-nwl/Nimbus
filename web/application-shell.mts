@@ -403,7 +403,7 @@ const SessionUIAdapter = {
   _landingSubDefs(tab: string): Array<[string, string]> | null {
     if (tab === 'gantt')      return [['timeline', Util.t('us.landing_timeline')], ['orders', Util.t('tab.table')]];
     if (tab === 'masterdata') return [
-      ['lines',          Util.t('tab.production_lines')],
+      ['lines',          Util.t('tab.machine')],
       ['plant',          Util.t('tab.plant')],
       ['material',       Util.t('tab.materials')],
       ['material-plant', Util.t('tab.material_plant')],

@@ -24,7 +24,7 @@ def test_editable_material_plant_attrs_is_exactly_the_four_planner_fields():
     """This is a security boundary, not a convenience list — widening it is a
     deliberate act. If this test needs to change, the change itself is the
     thing that should get scrutiny."""
-    assert frozenset({"prt_01", "prt_02", "color", "default_workcenter"}) == md.EDITABLE_MATERIAL_PLANT_ATTRS
+    assert frozenset({"prt_01", "prt_02", "color", "default_machine"}) == md.EDITABLE_MATERIAL_PLANT_ATTRS
 
 
 def test_editable_material_plant_attrs_excludes_key_and_sap_owned_columns():
@@ -39,7 +39,7 @@ def test_materials_was_not_added_to_plant_scoped_tables():
     worse than no check at all, because it looks enforced. The plant-scoped
     Material grid closes this gap itself via _assert_plant_allowed instead."""
     assert "materials" not in md.PLANT_SCOPED_TABLES
-    assert frozenset({"plants", "production_lines", "material_plants", "bom_items"}) == md.PLANT_SCOPED_TABLES
+    assert frozenset({"plants", "machine", "material_plants", "bom_items", "workcenter_mapping"}) == md.PLANT_SCOPED_TABLES
 
 
 def test_plant_not_allowed_is_a_permission_error_not_a_value_error():

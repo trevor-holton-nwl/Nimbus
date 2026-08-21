@@ -567,7 +567,7 @@ export const Util = {
     const byLine: Record<string, NimbusTask[]> = {};
     for (const t of tasks) {
       if (!t.start_date) continue;
-      const l = t.PRODUCTION_LINE || 'Unknown';
+      const l = t.MACHINE || 'Unknown';
       (byLine[l] ||= []).push(t);
     }
     const fields = Util.changeoverFields();

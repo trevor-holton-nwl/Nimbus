@@ -148,13 +148,13 @@ test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancel
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot({
     plant,
-    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
-    plant_rows: [{ line: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
-    line_rows: [], line_states: [], overrides: [],
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+    machine_rows: [], machine_states: [], overrides: [],
   }, 'unit-test');
   Store.setTasks([
-    { id: 'cancel-red', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
-    { id: 'cancel-blue', PLANT: plant, PRODUCTION_LINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') },
+    { id: 'cancel-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'cancel-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') },
   ], 'unit-test');
   Timeline._dragSetupLines.add(line);
   try {
@@ -173,7 +173,7 @@ test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancel
 
 test('Timeline renders split schedules as multiple parent-mapped timeline items', () => {
   const task = {
-    id: 'timeline-split', PRODUCTION_LINE: 'L-SPLIT', RUN_TIME: 14,
+    id: 'timeline-split', MACHINE: 'L-SPLIT', RUN_TIME: 14,
     start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
     scheduleSegments: [
       { sequence: 1, startDate: new Date('2026-08-12T08:00:00'), endDate: new Date('2026-08-12T20:00:00') },
@@ -191,7 +191,7 @@ test('Timeline renders split schedules as multiple parent-mapped timeline items'
 
 test('Timeline derives exact setup bars before successor processing, including the first split segment', () => {
   const successor = {
-    id: 'setup-successor', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 3,
+    id: 'setup-successor', MACHINE: 'SETUP-L1', RUN_TIME: 3,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T11:00:00'),
     scheduleSegments: [
       { sequence: 1, startDate: new Date('2026-08-14T08:00:00'), endDate: new Date('2026-08-14T09:00:00') },
@@ -212,7 +212,7 @@ test('Timeline derives exact setup bars before successor processing, including t
 });
 
 test('Timeline omits zero setup but renders a leading-edge marker for missing setup detail', () => {
-  const successor = { id: 'missing-successor', PRODUCTION_LINE: 'SETUP-L2', RUN_TIME: 1,
+  const successor = { id: 'missing-successor', MACHINE: 'SETUP-L2', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
   const zero = Timeline._setupItemsForObservation([successor], {
     intervals: [{ line: 'SETUP-L2', successorOrderId: 'missing-successor', start: new Date('2026-08-14T08:00:00'), end: new Date('2026-08-14T08:00:00'), requiredMinutes: 0, availableMinutes: 0 }], diagnostics: [],
@@ -236,12 +236,12 @@ test('Timeline gives each setup diagnostic type a distinct marker label and clas
   // types (initial/predecessor/successor) must carry the shared
   // 'setup-unrecorded' class the other three types do not.
   const successors = [
-    { id: 'diag-initial', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') },
-    { id: 'diag-predecessor', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T09:00:00'), end_date: new Date('2026-08-14T10:00:00') },
-    { id: 'diag-successor', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T10:00:00'), end_date: new Date('2026-08-14T11:00:00') },
-    { id: 'diag-uncovered', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T11:00:00'), end_date: new Date('2026-08-14T12:00:00') },
-    { id: 'diag-diverged', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T12:00:00'), end_date: new Date('2026-08-14T13:00:00') },
-    { id: 'diag-override', PRODUCTION_LINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T13:00:00'), end_date: new Date('2026-08-14T14:00:00') },
+    { id: 'diag-initial', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') },
+    { id: 'diag-predecessor', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T09:00:00'), end_date: new Date('2026-08-14T10:00:00') },
+    { id: 'diag-successor', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T10:00:00'), end_date: new Date('2026-08-14T11:00:00') },
+    { id: 'diag-uncovered', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T11:00:00'), end_date: new Date('2026-08-14T12:00:00') },
+    { id: 'diag-diverged', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T12:00:00'), end_date: new Date('2026-08-14T13:00:00') },
+    { id: 'diag-override', MACHINE: 'SETUP-DIAG', RUN_TIME: 1, start_date: new Date('2026-08-14T13:00:00'), end_date: new Date('2026-08-14T14:00:00') },
   ];
   const items = Timeline._setupItemsForObservation(successors, {
     intervals: [],
@@ -294,7 +294,7 @@ test('missing setup marker is pinned to the center of a narrow setup bar', () =>
 });
 
 test('Timeline preserves the full required setup duration when capacity conflicts', () => {
-  const successor = { id: 'conflict-successor', PRODUCTION_LINE: 'SETUP-L3', RUN_TIME: 1,
+  const successor = { id: 'conflict-successor', MACHINE: 'SETUP-L3', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
   const [item] = Timeline._setupItemsForObservation([successor], {
     intervals: [{ line: 'SETUP-L3', successorOrderId: 'conflict-successor', start: new Date('2026-08-14T07:20:00'), end: successor.start_date,
@@ -317,7 +317,7 @@ test('setup timeline items never resolve to a business order across interaction 
 test('setup items are ignored by click, double-click, drag, ghost, selection, focus, dependency, hover, marquee, and context dispatch', () => {
   const setupId = 'setup:SETUP-L1:successor';
   const setupItem = { id: setupId, kind: 'setup', group: 'SETUP-L1', start: new Date('2026-08-14T07:30:00'), end: new Date('2026-08-14T08:00:00'), editable: false };
-  const order = { id: 'guard-order', PRODUCTION_LINE: 'SETUP-L1', RUN_TIME: 1,
+  const order = { id: 'guard-order', MACHINE: 'SETUP-L1', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
   const priorItems = Timeline._items;
   const priorTl = Timeline._tl;
@@ -342,7 +342,7 @@ test('setup items are ignored by click, double-click, drag, ghost, selection, fo
 });
 
 test('Inspector exposes keyboard-equivalent setup detail on the successor, including override and missing states', () => {
-  const task = { id: 'detail-successor', PRODUCTION_LINE: 'SETUP-L4', RUN_TIME: 1,
+  const task = { id: 'detail-successor', MACHINE: 'SETUP-L4', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
   const detail = Inspector._setupDetailForTask(task, {
     intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
@@ -372,7 +372,7 @@ test('Inspector renders derived setup details for orders without setup observati
   };
   const task = {
     id: 'detail-without-observation', ORDER: '100003', PLANT: 'P-SETUP',
-    PRODUCTION_LINE: 'L-SETUP', RUN_TIME: 1,
+    MACHINE: 'L-SETUP', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00'),
   };
   try {
@@ -400,18 +400,18 @@ test('Inspector does not infer setup values for an order absent from the observa
   const priorSetup = Store.setupSnapshot;
   const task = {
     id: 'detail-configured-without-observation', ORDER: '100004', PLANT: 'P-SETUP',
-    PRODUCTION_LINE: 'L-SETUP', COLOR: 'BLUE', RUN_TIME: 1,
+    MACHINE: 'L-SETUP', COLOR: 'BLUE', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00'),
   };
   try {
     Store.replaceSetupSnapshot({
       plant: 'P-SETUP',
-      definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
-      plant_rows: [{ line: '', signature_version: 1,
+      definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1,
         from_key: [{ fieldKey: 'colorWheel', value: 'RED' }],
         to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
-      line_rows: [],
-      line_states: [{ line: 'L-SETUP', signature_version: 1,
+      machine_rows: [],
+      machine_states: [{ machine: 'L-SETUP', signature_version: 1,
         state_key: [{ fieldKey: 'colorWheel', value: 'RED' }], source: 'manual', reason: 'unit-test' }],
       overrides: [],
     }, 'unit-test');
@@ -444,15 +444,15 @@ test('Inspector._isSetupActionTask still identifies the active/earliest-upcoming
   // are no longer restricted to the active/earliest-upcoming order. This test
   // intentionally does NOT assert anything about canWriteSetup/button gating.
   const now = new Date('2026-08-17T10:00:00');
-  const earlier = { id: 'setup-earlier', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+  const earlier = { id: 'setup-earlier', MACHINE: 'SETUP-CURRENT', RUN_TIME: 1,
     start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') };
-  const active = { id: 'setup-active', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+  const active = { id: 'setup-active', MACHINE: 'SETUP-CURRENT', RUN_TIME: 1,
     start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') };
-  const later = { id: 'setup-later', PRODUCTION_LINE: 'SETUP-CURRENT', RUN_TIME: 1,
+  const later = { id: 'setup-later', MACHINE: 'SETUP-CURRENT', RUN_TIME: 1,
     start_date: new Date('2026-08-17T11:00:00'), end_date: new Date('2026-08-17T12:00:00') };
-  const futureFirst = { id: 'setup-future-first', PRODUCTION_LINE: 'SETUP-FUTURE', RUN_TIME: 1,
+  const futureFirst = { id: 'setup-future-first', MACHINE: 'SETUP-FUTURE', RUN_TIME: 1,
     start_date: new Date('2026-08-17T10:15:00'), end_date: new Date('2026-08-17T11:00:00') };
-  const futureLater = { id: 'setup-future-later', PRODUCTION_LINE: 'SETUP-FUTURE', RUN_TIME: 1,
+  const futureLater = { id: 'setup-future-later', MACHINE: 'SETUP-FUTURE', RUN_TIME: 1,
     start_date: new Date('2026-08-17T10:30:00'), end_date: new Date('2026-08-17T11:30:00') };
   try {
     Store.setTasks([earlier, active, later, futureLater, futureFirst], 'unit-test');
@@ -487,7 +487,7 @@ test('Inspector shows a plain dash for unavailable setup values and names the mi
       overrideStatus: null, availableMinutes: null, shortMinutes: null, missingDetail: 'No matching matrix row.',
     });
     Util.t = key => key === 'ui.setup_missing' ? 'Missing setup matrix data' : key;
-    Inspector._render({ id: 'missing-setup-inspector', ORDER: '100002', PRODUCTION_LINE: 'L1', RUN_TIME: 1 });
+    Inspector._render({ id: 'missing-setup-inspector', ORDER: '100002', MACHINE: 'L1', RUN_TIME: 1 });
     const setupPanel = body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title'));
     const dashCount = [...setupPanel.matchAll(/—/g)].length;
     assert.equal(dashCount, 6, 'the six unavailable setup values (predecessor, state, required, effective, standard, override) render a plain dash');
@@ -575,7 +575,7 @@ test('Inspector puts editable priority fields in the Order section', () => {
       PRT_01: { inspector: true }, PRT_02: { inspector: true }, PRODUCTION_VERSION: { inspector: true },
     }, 'unit-test');
     Inspector._render({
-      id: 'inspector-priority-fields', ORDER: '100001', PRODUCTION_LINE: 'L1', RUN_TIME: 1,
+      id: 'inspector-priority-fields', ORDER: '100001', MACHINE: 'L1', RUN_TIME: 1,
       PRT_01: '1J13', PRT_02: '2K24', PRODUCTION_VERSION: '0001',
     });
     const orderSection = body.innerHTML.slice(0, body.innerHTML.indexOf('ui.insp_notes_section'));
@@ -607,7 +607,7 @@ test('GanttFilter.selectedLines/isolateLine/restoreAllLines/activeFilter are the
 
 test('GanttFilter applies dimming to every visual piece of a split order', () => {
   const task = {
-    id: 'filter-split', PLANT: 'P-SPLIT', PRODUCTION_LINE: 'L-SPLIT', text: 'matched nowhere', RUN_TIME: 14,
+    id: 'filter-split', PLANT: 'P-SPLIT', MACHINE: 'L-SPLIT', text: 'matched nowhere', RUN_TIME: 14,
     start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
     scheduleSegments: [
       { sequence: 1, startDate: new Date('2026-08-12T08:00:00'), endDate: new Date('2026-08-12T20:00:00') },
@@ -676,7 +676,7 @@ test('Dashboard alert summary treats quote-bearing setup alert IDs as data and d
     };
     Store.setMasterData({
       plants: [{ plant: '5512' }],
-      lines: [{ plant: '5512', production_line: '1000TA' }],
+      lines: [{ plant: '5512', machine: '1000TA' }],
     }, 'unit-test');
     Store.setSelectedPlant('5512', 'unit-test');
     Store.setAlerts([{
@@ -814,7 +814,7 @@ test('Interaction._onDataSetUpdate: the fixed-task noActualChange guard checks o
   // check, which DOES see the changed end and commits it, failing this test.
   const differentEnd = new Date('2026-07-01T14:00:00');
   Store.setTasks([{
-    id, PRODUCTION_ORDER: 'PFX1', MATERIAL_NUMBER: 'MFX1', PRODUCTION_LINE: 'L1',
+    id, PRODUCTION_ORDER: 'PFX1', MATERIAL_NUMBER: 'MFX1', MACHINE: 'L1',
     plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
   Store.setFixed([id], true, 'test');
@@ -837,7 +837,7 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
   const draggedStart = new Date('2026-07-01T09:00:00');
   const draggedEnd   = new Date('2026-07-01T13:00:00');
   Store.setTasks([{
-    id, PRODUCTION_ORDER: 'PFX2', MATERIAL_NUMBER: 'MFX2', PRODUCTION_LINE: 'L1',
+    id, PRODUCTION_ORDER: 'PFX2', MATERIAL_NUMBER: 'MFX2', MACHINE: 'L1',
     plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
   Store.setFixed([id], true, 'test');
@@ -906,12 +906,12 @@ test('OptimizerPreview derives and exports real setup states for bounded missing
     unchangedLines: [], missingEdges: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', reason: 'matrix-missing' }],
   };
   const setup = {
-    plant: '5512', definition: { plant: '5512', fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false },
-    plant_rows: [], line_rows: [], line_states: [], overrides: [],
+    plant: '5512', definition: { plant: '5512', fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false }, plant_active: false,
+    plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
   };
   const pairs = OptimizerPreview.describeMissingPairs(candidate, [
-    { id: 'red-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'RED' },
-    { id: 'blue-order', PLANT: '5512', PRODUCTION_LINE: 'L-1', COLOR: 'BLUE' },
+    { id: 'red-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'RED' },
+    { id: 'blue-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'BLUE' },
   ], setup);
   assert.deepEqual(pairs, [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing' }]);
   const csv = OptimizerPreview.missingPairsCsv(pairs);
@@ -970,8 +970,8 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
     return Promise.resolve({ ok: true });
   };
   Store.setTasks([
-    { id: 'preview-long', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 5, start_date: null, end_date: null },
-    { id: 'preview-short', PLANT: 'PREVIEW', PRODUCTION_LINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null },
+    { id: 'preview-long', PLANT: 'PREVIEW', MACHINE: 'L1', RUN_TIME: 5, start_date: null, end_date: null },
+    { id: 'preview-short', PLANT: 'PREVIEW', MACHINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('PREVIEW', 'unit-test');
   const beforeRevision = Store.rev();
@@ -1056,7 +1056,7 @@ test('OptimizerPreview computes KPI utilization against detached calendar and pl
   Store.replacePlants({}, 'unit-test');
   Store.setLineSetting('KPI-DETACHED-LINE', { plant: 'KPI-DETACHED' }, 'unit-test');
   Store.setTasks([{
-    id: 'kpi-detached-order', PLANT: 'KPI-DETACHED', PRODUCTION_LINE: 'KPI-DETACHED-LINE', RUN_TIME: 1,
+    id: 'kpi-detached-order', PLANT: 'KPI-DETACHED', MACHINE: 'KPI-DETACHED-LINE', RUN_TIME: 1,
     start_date: scheduledStart, end_date: scheduledEnd,
   }], 'unit-test');
   Store.setSelectedPlant('KPI-DETACHED', 'unit-test');
@@ -1107,8 +1107,8 @@ test('OptimizerPreview keeps evaluation failures out of ErrorLog persistence', (
   Alerts.scheduleRecompute = () => {};
   ErrorLog._scheduleSave = () => { saveCalls++; };
   ErrorLog._scheduleShip = () => { shipCalls++; };
-  Store.setMasterData({ plants: [{ plant: 'PREVIEW-FAIL' }], lines: [{ plant: 'PREVIEW-FAIL', production_line: 'FAIL-LINE' }] }, 'unit-test');
-  Store.setTasks([{ id: 'preview-fail', PLANT: 'PREVIEW-FAIL', PRODUCTION_LINE: 'FAIL-LINE', RUN_TIME: 1, start_date: new Date(), end_date: new Date() }], 'unit-test');
+  Store.setMasterData({ plants: [{ plant: 'PREVIEW-FAIL' }], lines: [{ plant: 'PREVIEW-FAIL', machine: 'FAIL-LINE' }] }, 'unit-test');
+  Store.setTasks([{ id: 'preview-fail', PLANT: 'PREVIEW-FAIL', MACHINE: 'FAIL-LINE', RUN_TIME: 1, start_date: new Date(), end_date: new Date() }], 'unit-test');
   Store.setSelectedPlant('PREVIEW-FAIL', 'unit-test');
 
   try {

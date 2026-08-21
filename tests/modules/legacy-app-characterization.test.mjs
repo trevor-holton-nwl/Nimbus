@@ -21,14 +21,14 @@ const { Store, Persistence } = nimbus;
 test('Store.tasksForSelectedPlant returns only the selected plant\'s tasks', async () => {
   const task5512 = {
     id: 'aa01', PRODUCTION_ORDER: 'PO1', MATERIAL_NUMBER: 'M1',
-    PRODUCTION_LINE: 'L1', plant: '5512',
+    MACHINE: 'L1', plant: '5512',
     start_date: new Date('2026-07-01T06:00:00'),
     end_date:   new Date('2026-07-01T14:00:00'),
     RUN_TIME: 8, COLOR: 'RED', FORM_SIZE: 'S',
   };
   const task1006 = {
     id: 'bb02', PRODUCTION_ORDER: 'PO2', MATERIAL_NUMBER: 'M2',
-    PRODUCTION_LINE: 'L2', plant: '1006',
+    MACHINE: 'L2', plant: '1006',
     start_date: new Date('2026-07-01T06:00:00'),
     end_date:   new Date('2026-07-01T14:00:00'),
     RUN_TIME: 8, COLOR: 'BLUE', FORM_SIZE: 'M',
@@ -38,8 +38,8 @@ test('Store.tasksForSelectedPlant returns only the selected plant\'s tasks', asy
   Store._state.masterData = {
     plants: [{ plant: '5512', subnetwork: 'NA' }, { plant: '1006', subnetwork: 'NA' }],
     lines:  [
-      { production_line: 'L1', plant: '5512' },
-      { production_line: 'L2', plant: '1006' },
+      { machine: 'L1', plant: '5512' },
+      { machine: 'L2', plant: '1006' },
     ],
   };
 
@@ -87,7 +87,7 @@ test('Alerts.recompute is callable and Utilization.computeMatrix returns structu
 test('Persistence.saveAll posts to /tasks/update with expected payload shape', async () => {
   const task = {
     id: 'cc03', PRODUCTION_ORDER: 'PO3', MATERIAL_NUMBER: 'M3',
-    PRODUCTION_LINE: 'L1', plant: '5512',
+    MACHINE: 'L1', plant: '5512',
     start_date: new Date('2026-07-02T06:00:00'),
     end_date:   new Date('2026-07-02T14:00:00'),
     RUN_TIME: 8, COLOR: 'GREEN', FORM_SIZE: 'S',

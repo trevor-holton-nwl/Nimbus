@@ -174,7 +174,7 @@
     if (fromSettings) {
       result = fromSettings;
     } else {
-      const mdLine = (masterData?.lines ?? []).find(r => r.production_line === line);
+      const mdLine = (masterData?.lines ?? []).find(r => r.machine === line);
       result = mdLine?.plant ?? null;
     }
     if (_plantMemo) _plantMemo.set(line, result);
@@ -353,12 +353,12 @@
     const todayStart = startOfDay(new Date());
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
     let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStart);
-    if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.PRODUCTION_LINE || 'Unknown'));
+    if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'));
 
     /* 1. OVERLAPS */
     const byLine = {};
     for (const t of activeTasks) {
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       for (const interval of scheduleIntervals(t)) {
         (byLine[line] ||= []).push({ task: t, start: interval.start, end: interval.end });
       }
@@ -381,7 +381,7 @@
     /* 2. OVERLOAD / CLOSED */
     const byLineDay = {};
     for (const t of activeTasks) {
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       const intervals = scheduleIntervals(t);
       if (intervals.length >= 2) {
         for (const interval of intervals) {
@@ -482,7 +482,7 @@
 
     /* 3. BLACKOUT VIOLATION */
     for (const t of activeTasks) {
-      const line  = t.PRODUCTION_LINE || 'Unknown';
+      const line  = t.MACHINE || 'Unknown';
       const plant = plantOf(line);
       let conflict = false;
       let conflictTime = t.start_date;
@@ -515,7 +515,7 @@
     /* 4. FIXED-BUT-ON-CLOSED-DAY */
     for (const t of activeTasks) {
       if (!t.fixed) continue;
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       const badInterval = scheduleIntervals(t).find(interval =>
         !workWindow(line, interval.start, calendars, plants, lineSettings, masterData));
       if (badInterval) {
@@ -530,7 +530,7 @@
     /* 5. FIXED-OUT-OF-HOURS */
     for (const t of activeTasks) {
       if (!t.fixed) continue;
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       const parts = [];
       let alertTime = t.start_date;
       for (const interval of scheduleIntervals(t)) {
@@ -559,11 +559,11 @@
     // after its prior envelope moves into the past, until an aggregate repair
     // succeeds (while respecting an incremental line scope when supplied).
     const mismatchTasks = onlyLines
-      ? tasks.filter(t => onlyLines.has(t.PRODUCTION_LINE || 'Unknown'))
+      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
       : tasks;
     for (const t of mismatchTasks) {
       if (!t.runtime_schedule_mismatch) continue;
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
         msg: `Order "${orderNumber(t)}" has a runtime that no longer matches its saved schedule.`,
@@ -675,7 +675,7 @@
     if (Array.isArray(explicitLines)) {
       lines = new Set(explicitLines);
     } else {
-      lines = new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'));
+      lines = new Set(tasks.map(t => t.MACHINE || 'Unknown'));
       Object.keys(calendars).forEach(l => lines.add(l));
     }
 
@@ -699,7 +699,7 @@
 
     for (const t of tasks) {
       if (!t.start_date) continue;
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       if (!matrix[line]) continue;
 
       const intervals = scheduleIntervals(t);

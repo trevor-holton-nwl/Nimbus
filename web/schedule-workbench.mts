@@ -219,6 +219,15 @@ function setupDiagnosticLabel(type: string | undefined | null): string {
   return Util.t(entry ? entry.i18nKey : 'ui.setup_missing');
 }
 
+/** D4: the resolveSetup() 'source' field is raw plumbing (`'line'|'plant'|
+ * 'occurrence'|'implicit-zero'|'uncovered'`), displayed verbatim in the
+ * Inspector's Source row for every value except 'implicit-zero' — that one
+ * value gets a translated label so an identical-signature no-change
+ * transition never reads as though a matrix row had been consulted. */
+function setupSourceLabel(source: string | null | undefined): string {
+  return source === 'implicit-zero' ? Util.t('ui.setup_source_no_change') : (source || '');
+}
+
 /** A vis-timeline group — one row per production line. */
 interface TimelineGroupData {
   id: string;
@@ -459,7 +468,7 @@ export const Timeline = {
           const sid = String(id);
           if (filtered) {
             const t = Store.tasks[sid];
-            if (!t || !sel!.has(t.PRODUCTION_LINE || 'Unknown')) continue;
+            if (!t || !sel!.has(t.MACHINE || 'Unknown')) continue;
           }
           const patch = Timeline._itemPatchFor(sid);
           if (patch) patches.push(patch);
@@ -603,7 +612,7 @@ export const Timeline = {
 
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
-    const line = t.PRODUCTION_LINE || 'Unknown';
+    const line = t.MACHINE || 'Unknown';
     const ci = Timeline._colorIndex(line);
     const fixed = Store.isFixed(t.id);
     const conflict = Timeline._conflictIds().has(String(t.id));
@@ -696,6 +705,12 @@ export const Timeline = {
     }
     const marked = new Set<string>();
     for (const diagnostic of observation.diagnostics || []) {
+      // D4: 'setup-no-change' is an honest-detail-only fact (identical-
+      // signature, zero-minute, covered transition) — it must never render as
+      // a "!" marker bar. That marker is reserved for the genuinely different
+      // case (uncovered signature, no matrix row), which is a distinct
+      // diagnostic type and unaffected by this exclusion.
+      if (diagnostic.type === 'setup-no-change') continue;
       const successorId = diagnostic.successorOrderId ? String(diagnostic.successorOrderId) : '';
       const successor = byId.get(successorId);
       const markKey = `${diagnostic.line}|${successorId}`;
@@ -726,7 +741,7 @@ export const Timeline = {
     if (!Timeline._items || typeof Timeline._items.getIds !== 'function' || !lines.size) return;
     const _deriveT0 = performance.now();
     const tasks = Store.tasksForSelectedPlant().filter(task => (
-      lines.has(task.PRODUCTION_LINE || 'Unknown') && task.start_date && task.end_date
+      lines.has(task.MACHINE || 'Unknown') && task.start_date && task.end_date
     ));
     const desired = new Map(Timeline._setupItemsForObservation(tasks, Timeline._setupObservation(tasks))
       .map(item => [String(item.id), item] as const));
@@ -813,7 +828,7 @@ export const Timeline = {
         `Rebuild: ${dropped} task(s) hidden (missing start/end)`,
         all.filter(t => !(t.start_date && t.end_date))
            .slice(0, 10)
-           .map(t => ({ id: t.id, line: t.PRODUCTION_LINE, text: t.text })));
+           .map(t => ({ id: t.id, line: t.MACHINE, text: t.text })));
     }
 
     const plant = Store.selectedPlant;
@@ -830,7 +845,7 @@ export const Timeline = {
     const visibleLines = Timeline._visibleLines();
     const visibleSet = new Set(visibleLines);
     const scopedTasks = lineFilterActive
-      ? tasks.filter(t => visibleSet.has(t.PRODUCTION_LINE || 'Unknown'))
+      ? tasks.filter(t => visibleSet.has(t.MACHINE || 'Unknown'))
       : tasks;
     // Compute alert-per-task set ONCE (fixes snapshot inconsistency during rebuild).
     const conflictIds = new Set<string>();
@@ -1221,7 +1236,7 @@ export const Timeline = {
     const plant = Store.selectedPlant;
     const tasks = Store.tasksForSelectedPlant().filter(t => t.start_date && t.end_date);
     const plantLines = new Set(Store.linesForSelectedPlant());
-    const lineSet = new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    const lineSet = new Set(tasks.map(t => t.MACHINE || 'Unknown'));
     if (plant) {
       for (const l of plantLines) lineSet.add(l);
     }
@@ -1464,20 +1479,20 @@ export const TimelineNav = {
     // Order blocks (tiny)
     const lineColors: Record<string, string> = {};
     tasks.forEach(t => {
-      const line = t.PRODUCTION_LINE || 'Unknown';
+      const line = t.MACHINE || 'Unknown';
       if (!lineColors[line]) {
         const ci = Timeline._colorIndex(line);
         lineColors[line] = Config.COLORS[ci % Config.COLORS.length];
       }
     });
-    const lineArr = [...new Set(tasks.map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
+    const lineArr = [...new Set(tasks.map(t => t.MACHINE || 'Unknown'))].sort();
     const lineH = Math.max(2, Math.floor(cssH / (lineArr.length || 1)));
     tasks.forEach(t => {
-      const li = lineArr.indexOf(t.PRODUCTION_LINE || 'Unknown');
+      const li = lineArr.indexOf(t.MACHINE || 'Unknown');
       const x1 = toX(t.start_date!.getTime());
       const x2 = toX(t.end_date!.getTime());
       const y  = li * lineH;
-      ctx.fillStyle = lineColors[t.PRODUCTION_LINE || 'Unknown'] + 'cc';
+      ctx.fillStyle = lineColors[t.MACHINE || 'Unknown'] + 'cc';
       ctx.fillRect(x1, y, Math.max(1, x2 - x1), lineH);
     });
 
@@ -1624,7 +1639,7 @@ export const DependencyOverlay = {
     // Scope to the selected plant (mirrors the TimelineNav R17 fix) so this ordering
     // matches the visible plant-scoped group rows built by Timeline.rebuild.
     const lines = [...new Set((Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr)
-      .map(t => t.PRODUCTION_LINE || 'Unknown'))].sort();
+      .map(t => t.MACHINE || 'Unknown'))].sort();
     if (groupEls.length) {
       lines.forEach((line, i) => {
         const groupEl = groupEls[i];
@@ -1657,8 +1672,8 @@ export const DependencyOverlay = {
         try {
           sx = timeToX(sTask.end_date.getTime());
           tx = timeToX(tTask.start_date.getTime());
-          sy = lineToY[sTask.PRODUCTION_LINE || 'Unknown'] ?? (foreOffY + foreRect.height / 2);
-          ty = lineToY[tTask.PRODUCTION_LINE || 'Unknown'] ?? (foreOffY + foreRect.height / 2);
+          sy = lineToY[sTask.MACHINE || 'Unknown'] ?? (foreOffY + foreRect.height / 2);
+          ty = lineToY[tTask.MACHINE || 'Unknown'] ?? (foreOffY + foreRect.height / 2);
 
           // Don't draw fully off-screen arrows
           if (tx < -50 || sx > foreOffX + foreRect.width + 50) continue;
@@ -1824,7 +1839,7 @@ interface TableGridReadyEvent {
   columnApi?: unknown;
 }
 
-/** Table._SearchableLineEditor's AG Grid CellEditorParams — the PRODUCTION_LINE
+/** Table._SearchableLineEditor's AG Grid CellEditorParams — the MACHINE
  *  column's cellEditorParams() factory returns { values: () => string[] } (see
  *  columnDefs above), and AG Grid merges in `value`/`api` itself at cell-edit-
  *  start time. */
@@ -2077,7 +2092,7 @@ export const Table = {
         { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
           editable: false, cellClass: 'cell-num', hide: Table._fieldHidden('ORDER_QUANTITY_(GMEIN)'),
           valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
-        { headerName: Util.t('col.line'), field: 'PRODUCTION_LINE', minWidth: 130, editable: true,
+        { headerName: Util.t('col.line'), field: 'MACHINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
           cellEditorPopup: true,
           cellEditorParams: () => ({ values: Table._getLineOptions() }),
@@ -2291,7 +2306,7 @@ export const Table = {
   _taskPassesChipFilters(data: NimbusTask | null): boolean {
     if (!data) return false;
     const f = Table._chipFilters;
-    if (f.lines.size > 0 && !f.lines.has(data.PRODUCTION_LINE)) return false;
+    if (f.lines.size > 0 && !f.lines.has(data.MACHINE)) return false;
     if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
     if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
     if (f.dateKey) {
@@ -2357,7 +2372,7 @@ export const Table = {
     if (!drop) return;
     const lineSet = new Set<string>();
     for (const t of (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])) {
-      if (t.PRODUCTION_LINE) lineSet.add(t.PRODUCTION_LINE);
+      if (t.MACHINE) lineSet.add(t.MACHINE);
     }
     const sorted = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
@@ -2629,13 +2644,13 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
       const t = Store.tasks[String(evt.id)];
       if (t && Store.selectedPlant
-          && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant) {
+          && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant) {
         Table._api.applyTransaction({ update: [t] });
       }
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
@@ -2643,7 +2658,7 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.PRODUCTION_LINE) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
@@ -2758,9 +2773,9 @@ export const Table = {
       changes.RUN_TIME = h;
       scheduleTask = { ...p.data, RUN_TIME: h };
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
-    } else if (field === 'PRODUCTION_LINE') {
-      changes.PRODUCTION_LINE = String(p.newValue || 'Unknown');
-      requestedLine = changes.PRODUCTION_LINE;
+    } else if (field === 'MACHINE') {
+      changes.MACHINE = String(p.newValue || 'Unknown');
+      requestedLine = changes.MACHINE;
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       changes[field] = parseFloat(String(p.newValue)) || 0;
@@ -2776,7 +2791,7 @@ export const Table = {
     }
 
     if (requestedStart) {
-      const targetLine = requestedLine || p.data.PRODUCTION_LINE || 'Unknown';
+      const targetLine = requestedLine || p.data.MACHINE || 'Unknown';
       const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
       if (!schedule?.start_date || !schedule.end_date) {
         Toast.show('Could not regenerate the order in the available calendar window.', 'error');
@@ -2822,7 +2837,7 @@ export const Table = {
   _getLineOptions(): string[] {
     if (Store.selectedPlant) return Store.linesForSelectedPlant();
     // No plant selected — fall back to the unscoped view rather than showing nothing.
-    const set = new Set(Store.tasksArr.map(t => t.PRODUCTION_LINE || 'Unknown'));
+    const set = new Set(Store.tasksArr.map(t => t.MACHINE || 'Unknown'));
     Object.keys(Store.calendars).forEach(l => set.add(l));
     return [...set].sort();
   },
@@ -2860,13 +2875,13 @@ export const Table = {
     if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     Table._selectedId = id;
-    orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.PRODUCTION_LINE || '—'}`;
+    orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.MACHINE || '—'}`;
     if (!Table._fpOvrStart) {
       Table._fpOvrStart = Util.fpDatetime('#ovr-start');
     }
     Table._fpOvrStart.setDate(t.start_date!, false);
     const lines = Table._getLineOptions();
-    lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.PRODUCTION_LINE ? 'selected' : ''}>${l}</option>`).join('');
+    lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.MACHINE ? 'selected' : ''}>${l}</option>`).join('');
     fixEl.checked = !!t.fixed;
     Modal.open('modal-override');
   },
@@ -3240,7 +3255,7 @@ export const Table = {
 //    Inspector) ---------------------------------------------------------------
 
 /** Inspector._onFieldChange's `[data-field]` inputs — Inspector._render() only
- *  ever wires PRODUCTION_LINE (<select>), notes (<textarea>), start_date
+ *  ever wires MACHINE (<select>), notes (<textarea>), start_date
  *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>), the
  *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION), plus the open
  *  SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name arrives as
@@ -3275,7 +3290,7 @@ export const Inspector = {
       if (evt.type === 'plant:selected') {
         const t = Inspector._currentId ? Store.tasks[Inspector._currentId] : null;
         if (!t || !Store.selectedPlant
-            || Store.getPlantForLine(t.PRODUCTION_LINE) !== Store.selectedPlant) {
+            || Store.getPlantForLine(t.MACHINE) !== Store.selectedPlant) {
           Inspector.clear();
         }
         return;
@@ -3297,7 +3312,7 @@ export const Inspector = {
     // Only block when the task's plant is positively known and wrong — if
     // getPlantForLine returns null (line unmapped), allow inspection rather
     // than silently failing.
-    const taskPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || null;
+    const taskPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || null;
     if (Store.selectedPlant && taskPlant && taskPlant !== Store.selectedPlant) {
       Toast.show(Util.t('toast.order_belongs_other_plant'), 'warn');
       return;
@@ -3319,7 +3334,7 @@ export const Inspector = {
   },
 
   _isSetupActionTask(task: NimbusTask, now: Date = new Date()): boolean {
-    const lineTasks = Store.tasksArr.filter(candidate => candidate.PRODUCTION_LINE === task.PRODUCTION_LINE)
+    const lineTasks = Store.tasksArr.filter(candidate => candidate.MACHINE === task.MACHINE)
       .map(candidate => ({ task: candidate, start: Util.parseDate(candidate.start_date), end: Util.parseDate(candidate.end_date) }))
       .filter((candidate): candidate is { task: NimbusTask; start: Date; end: Date } => !!candidate.start && !!candidate.end)
       .sort((left, right) => left.start.getTime() - right.start.getTime() || String(left.task.id).localeCompare(String(right.task.id)));
@@ -3357,12 +3372,12 @@ export const Inspector = {
     const predecessorOrderId = interval?.predecessorOrderId ?? diagnostic?.predecessorOrderId ?? null;
     const predecessor = predecessorOrderId ? Store.tasks[String(predecessorOrderId)] : null;
     const predecessorState = predecessor ? stateForOrder(predecessor, definition)
-      : snapshot.line_states.find(state => state.line === task.PRODUCTION_LINE && state.signature_version === definition.signature_version)?.state_key || null;
+      : snapshot.machine_states.find(state => state.machine === task.MACHINE && state.signature_version === definition.signature_version)?.state_key || null;
     const successorState = stateForOrder(task, definition);
     if (!predecessorState || !successorState) return null;
-    const resolved = resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
-      predecessorOrderId, successorOrderId: String(task.id), plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides });
-    const existing = snapshot.overrides.find(override => override.status === 'active' && override.line === task.PRODUCTION_LINE
+    const resolved = resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
+      predecessorOrderId, successorOrderId: String(task.id), plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides });
+    const existing = snapshot.overrides.find(override => override.status === 'active' && override.machine === task.MACHINE
       && override.signature_version === definition.signature_version && override.predecessor_order_id === predecessorOrderId
       && override.successor_order_id === String(task.id));
     return { predecessorOrderId, predecessorState, successorState,
@@ -3385,13 +3400,13 @@ export const Inspector = {
     const predecessor = hasObservedEntry && entry.predecessorOrderId ? Store.tasks[String(entry.predecessorOrderId)] : null;
     const predecessorState = hasObservedEntry && definition
       ? (predecessor ? stateForOrder(predecessor, definition)
-        : snapshot?.line_states.find(state => state.line === task.PRODUCTION_LINE && state.signature_version === definition.signature_version)?.state_key)
+        : snapshot?.machine_states.find(state => state.machine === task.MACHINE && state.signature_version === definition.signature_version)?.state_key)
       : null;
     const successorState = hasObservedEntry && definition ? stateForOrder(task, definition) : null;
     const resolved = hasObservedEntry && definition && predecessorState && successorState && snapshot
-      ? resolveSetup({ definition, line: task.PRODUCTION_LINE, predecessorState, successorState,
+      ? resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
-        plantRows: snapshot.plant_rows, lineRows: snapshot.line_rows, overrides: snapshot.overrides }) : null;
+        plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides }) : null;
     const predecessorStateText = hasObservedEntry
       ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)
       : null;
@@ -3402,7 +3417,11 @@ export const Inspector = {
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
       effectiveMinutes: resolved?.effectiveMin ?? (Number.isFinite(entry.effectiveMinutes) ? entry.effectiveMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
       standardMinutes: resolved?.standardMin ?? (Number.isFinite(entry.standardMinutes) ? entry.standardMinutes : (Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null)),
-      source: resolved?.source ?? (entry.source || (hasObservedEntry ? 'resolved' : null)), overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : null),
+      source: resolved?.source ?? (entry.source || (hasObservedEntry ? 'resolved' : null)),
+      // D4: 'none' is an explicit fact ("this no-change transition has no
+      // override to speak of") — distinguishable in the UI from the '—'
+      // placeholder used when the transition itself is unknown/unobserved.
+      overrideStatus: entry.overrideStatus || (resolved?.source === 'occurrence' ? 'active' : (resolved?.source === 'implicit-zero' ? 'none' : null)),
       availableMinutes: Number.isFinite(entry.availableMinutes) ? entry.availableMinutes : null,
       shortMinutes: Number.isFinite(entry.availableMinutes) && Number.isFinite(entry.requiredMinutes) && entry.availableMinutes < entry.requiredMinutes
         ? entry.requiredMinutes - entry.availableMinutes : null,
@@ -3438,7 +3457,7 @@ export const Inspector = {
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
     const missingSetupPlaceholder = '—';
-    const setupPlant = Store.getPlantForLine(task.PRODUCTION_LINE) || task.PLANT || Store.selectedPlant || '';
+    const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
 
     body.innerHTML = `
@@ -3478,8 +3497,8 @@ export const Inspector = {
             <div class="insp-val"><input type="text" data-field="${key}" value="${esc(value)}"></div></div>`;
         }).join('')}
         <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
-          <div class="insp-val"><select data-field="PRODUCTION_LINE">
-            ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.PRODUCTION_LINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+          <div class="insp-val"><select data-field="MACHINE">
+            ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.MACHINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
           </select></div></div>
       </div>
 
@@ -3540,8 +3559,8 @@ export const Inspector = {
         <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
         <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupDetail.source || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
         ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
         ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
         ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
@@ -3576,7 +3595,7 @@ export const Inspector = {
     body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
       const snapshot = Store.setupSnapshot;
       const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
-      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.PRODUCTION_LINE, () => Inspector._refreshSetupTruth(setupPlant));
+      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(setupPlant));
     });
     body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
     // Notes char counter (oninput fires on every keystroke)
@@ -3616,7 +3635,7 @@ export const Inspector = {
       Toast.show(Util.t('toast.setup_record_line_state_first'), 'warn');
       const snapshot = Store.setupSnapshot;
       if (host && snapshot && plant && Inspector._canWriteSetup(plant)) {
-        SetupAdmin.mountStateEditor(host, snapshot, task.PRODUCTION_LINE, () => Inspector._refreshSetupTruth(plant));
+        SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(plant));
       }
       return;
     }
@@ -3631,7 +3650,7 @@ export const Inspector = {
       const values = Inspector._setupOverrideValues(baseline, host.querySelector<HTMLInputElement>('[data-setup-override-adjustment]')?.value || '', host.querySelector<HTMLInputElement>('[data-setup-override-total]')?.value || '');
       if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
       if (!values) { Toast.show(baseline != null ? 'The remaining setup time cannot be below zero.' : 'Enter a whole-number total setup duration.', 'error'); return; }
-      const payload = { line: task.PRODUCTION_LINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
+      const payload = { machine: task.MACHINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
       const url = existing ? `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}` : `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides`;
       const body = existing ? payload : { ...payload, predecessor_order_id: context.predecessorOrderId, successor_order_id: String(task.id), predecessor_values: Object.fromEntries(context.predecessorState.map(part => [part.fieldKey, part.value])), successor_values: Object.fromEntries(context.successorState.map(part => [part.fieldKey, part.value])) };
       try {
@@ -3644,7 +3663,7 @@ export const Inspector = {
       if (!existing) return;
       if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
       try {
-        const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ line: task.PRODUCTION_LINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
+        const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ machine: task.MACHINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
         if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
         Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup override reset to matrix.', 'success');
       } catch (error) { Toast.show(`Could not reset setup time: ${(error as Error).message}`, 'error'); }
@@ -3697,13 +3716,13 @@ export const Inspector = {
       return;
     } else {
       changes[field] = value;
-      if (field === 'PRODUCTION_LINE') {
+      if (field === 'MACHINE') {
         requestedLine = value || 'Unknown';
         requestedStart = t.start_date ? new Date(t.start_date) : null;
       }
     }
     if (requestedStart) {
-      const targetLine = requestedLine || t.PRODUCTION_LINE || 'Unknown';
+      const targetLine = requestedLine || t.MACHINE || 'Unknown';
       const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
       if (!schedule?.start_date || !schedule.end_date) {
         Toast.show('Could not regenerate the order in the available calendar window.', 'error');
@@ -3713,7 +3732,7 @@ export const Inspector = {
       Object.assign(changes, schedule);
     }
     Store.updateTask(id, changes, 'inspector');
-    if (field === 'start_date' || field === 'RUN_TIME' || field === 'PRODUCTION_LINE') {
+    if (field === 'start_date' || field === 'RUN_TIME' || field === 'MACHINE') {
       Engine.autoReflow(id);
     }
     Alerts.scheduleRecompute();
@@ -3913,7 +3932,7 @@ export const Hierarchy = {
 
     const lines: Record<string, NimbusTask[]> = {};
     for (const tk of Store.tasksForSelectedPlant()) {
-      const k = tk.PRODUCTION_LINE || 'Unknown';
+      const k = tk.MACHINE || 'Unknown';
       (lines[k] ||= []).push(tk);
     }
     for (const l of Store.linesForSelectedPlant()) {
@@ -4216,7 +4235,7 @@ export const GanttFilter = {
     if (!drop) return;
     const lineSet = new Set(Store.linesForSelectedPlant());
     for (const t of Store.tasksForSelectedPlant()) {
-      if (t.PRODUCTION_LINE) lineSet.add(t.PRODUCTION_LINE);
+      if (t.MACHINE) lineSet.add(t.MACHINE);
     }
     const sorted = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
@@ -4618,7 +4637,7 @@ export const Dashboard = {
   _filteredTasks(): NimbusTask[] {
     let tasks = Store.tasksForSelectedPlant();
     if (Dashboard._filterLines.size > 0) {
-      tasks = tasks.filter(t => Dashboard._filterLines.has(t.PRODUCTION_LINE));
+      tasks = tasks.filter(t => Dashboard._filterLines.has(t.MACHINE));
     }
     return tasks;
   },
@@ -5164,7 +5183,7 @@ export const Dashboard = {
 
     const byLine: Record<string, NimbusTask[]> = {};
     for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
-    for (const tk of tasks) { const l = tk.PRODUCTION_LINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
+    for (const tk of tasks) { const l = tk.MACHINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
     const lines = Object.keys(byLine).sort();
 
     if (!lines.length) {
@@ -5282,7 +5301,7 @@ export const Dashboard = {
     list.innerHTML = fixed.slice(0, 12).map(t => `
       <div class="fixed-row">
         <span class="pin">🔒</span>
-        <span class="id">${t.PRODUCTION_LINE || ''}</span>
+        <span class="id">${t.MACHINE || ''}</span>
         <span class="name">${t.text || t.ORDER || t.id}</span>
         <span class="when">${Util.fmtDT(t.start_date).slice(5, 16)}</span>
         <button class="btn btn-ghost sm" onclick="NIMBUS.Dashboard._unfix('${t.id}')">Unfix</button>
@@ -5314,7 +5333,7 @@ export const Dashboard = {
     const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
     // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
-    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.PRODUCTION_LINE || 'Unknown')])].sort();
+    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.MACHINE || 'Unknown')])].sort();
     const days: string[]  = [];
     {
       const d = Util.startOfDay(new Date())!;
@@ -5333,7 +5352,7 @@ export const Dashboard = {
       if (!end) continue;
       const dk = Util.dayKey(end);
       if (dk < startKey || dk > endKey) continue;
-      const ln = t.PRODUCTION_LINE || 'Unknown';
+      const ln = t.MACHINE || 'Unknown';
       if (!cells[ln] || !cells[ln][dk]) continue;
       const lh = Util.latenessHours(t);
       if (lh > 0) {
@@ -6022,7 +6041,7 @@ export const Interaction = {
       const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
       const qty = t['ORDER_QUANTITY_(GMEIN)'] ?? '—';
       const run = Util.runHours(t);
-      const line = t.PRODUCTION_LINE || '—';
+      const line = t.MACHINE || '—';
       const color = t.COLOR || '—';
       const form  = t.FORM_SIZE || '—';
       const startStr = t.start_date ? Util.fmtDTReadable(t.start_date) : '—';
@@ -6456,10 +6475,10 @@ export const Interaction = {
        * ---------------------------------------------------------------- */
       if (Store.isFixed(id)) {
         const currentStart = Util.snap(new Date(v.start));
-        const currentGroup = v.group || t.PRODUCTION_LINE;
+        const currentGroup = v.group || t.MACHINE;
         const noActualChange = t.start_date &&
           currentStart.getTime() === expectedItem.start.getTime() &&
-          currentGroup === t.PRODUCTION_LINE;
+          currentGroup === t.MACHINE;
 
         if (noActualChange) {
           this._log('update:ignored', { id, reason: 'fixed task, no change' });
@@ -6470,11 +6489,11 @@ export const Interaction = {
 
       const newStart = Util.snap(new Date(v.start));
       const newEnd   = Util.snap(new Date(v.end));
-      const newLine  = v.group || t.PRODUCTION_LINE;
+      const newLine  = v.group || t.MACHINE;
 
       const moved = newStart.getTime() !== expectedItem.start.getTime()
                  || newEnd.getTime()   !== expectedItem.end.getTime()
-                 || newLine !== t.PRODUCTION_LINE;
+                 || newLine !== t.MACHINE;
 
       if (!moved) {
         // vis emitted an update for non-temporal reasons (e.g. zoom relayout).
@@ -6495,7 +6514,7 @@ export const Interaction = {
           || Selection.ids().some(selectedId => {
             const selected = Store.tasks[selectedId];
             return !!selected && Interaction._dragRequiresRegeneration(
-              selected, newLine !== t.PRODUCTION_LINE ? newLine : (selected.PRODUCTION_LINE || 'Unknown')
+              selected, newLine !== t.MACHINE ? newLine : (selected.MACHINE || 'Unknown')
             );
           })) {
         const deltaMs = newStart.getTime() - expectedItem.start.getTime();
@@ -6508,7 +6527,7 @@ export const Interaction = {
           if (!parent?.start_date) continue;
           const targetLine = taskId === id
             ? newLine
-            : (newLine !== t.PRODUCTION_LINE ? newLine : (parent.PRODUCTION_LINE || 'Unknown'));
+            : (newLine !== t.MACHINE ? newLine : (parent.MACHINE || 'Unknown'));
           // A segment drag explicitly establishes the new FIRST start for its
           // parent. Companion parents retain the user's relative drag delta.
           const requestedStart = taskId === id
@@ -6523,7 +6542,7 @@ export const Interaction = {
           regenerationPatches.push({ id: taskId, changes });
         }
         if (regenerationPatches.length) Store.updateMany(regenerationPatches, 'timeline');
-        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
+        Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
         Timeline._scheduleRebuild();
         UndoStack.push(`Move ${allIds.length} order${allIds.length === 1 ? '' : 's'}`,
           () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
@@ -6534,7 +6553,7 @@ export const Interaction = {
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-fixed selected items by the same time + line delta.
       const deltaMs  = newStart.getTime() - t.start_date.getTime();
-      const lineMoved = newLine !== t.PRODUCTION_LINE;
+      const lineMoved = newLine !== t.MACHINE;
       const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFixed(sid));
 
       if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
@@ -6543,7 +6562,7 @@ export const Interaction = {
         const snap = UndoStack.snapshotTasks(allIds);
 
         // Apply the dragged item
-        Store.updateTask(id, { start_date: newStart, end_date: newEnd, PRODUCTION_LINE: newLine }, 'timeline');
+        Store.updateTask(id, { start_date: newStart, end_date: newEnd, MACHINE: newLine }, 'timeline');
 
         // Apply the same delta to each companion
         // (skippedFixed stays empty today — selIds above already excludes fixed
@@ -6555,8 +6574,8 @@ export const Interaction = {
           if (!st || !st.start_date) continue;
           const sNewStart = new Date(st.start_date.getTime() + deltaMs);
           const sNewEnd   = new Date(st.end_date  ? st.end_date.getTime() + deltaMs : sNewStart.getTime() + Util.runHours(st) * Config.MS_HOUR);
-          const sNewLine  = lineMoved ? newLine : (st.PRODUCTION_LINE || 'Unknown');
-          companionPatches.push({ id: sid, changes: { start_date: sNewStart, end_date: sNewEnd, PRODUCTION_LINE: sNewLine } });
+          const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
+          companionPatches.push({ id: sid, changes: { start_date: sNewStart, end_date: sNewEnd, MACHINE: sNewLine } });
 
           // Update the vis item too
           Timeline._suppressEvents = true;
@@ -6565,7 +6584,7 @@ export const Interaction = {
           } finally { Timeline._suppressEvents = false; }
         }
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
-        Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
+        Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
         if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
 
@@ -6581,10 +6600,10 @@ export const Interaction = {
       Store.updateTask(id, {
         start_date:      newStart,
         end_date:        newEnd,
-        PRODUCTION_LINE: newLine
+        MACHINE: newLine
       }, 'timeline');
       Engine.autoReflow(id);
-      Timeline.finishSetupDrag(new Set([t.PRODUCTION_LINE || 'Unknown', newLine]));
+      Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
                      () => UndoStack.restoreTasks(snap));
@@ -6643,8 +6662,8 @@ export const Interaction = {
 
     const dragTask = Store.tasks[dragId];
     if (dragTask) Timeline.dimSetupForDrag(new Set([
-      dragTask.PRODUCTION_LINE || 'Unknown',
-      props.group == null ? (dragTask.PRODUCTION_LINE || 'Unknown') : String(props.group),
+      dragTask.MACHINE || 'Unknown',
+      props.group == null ? (dragTask.MACHINE || 'Unknown') : String(props.group),
     ]));
     const selIds = Selection.ids().filter(sid => sid !== dragId);
     if (!selIds.length) return;
@@ -6670,7 +6689,7 @@ export const Interaction = {
     for (const peer of Store.tasksArr) {
       if (selSet.has(String(peer.id))) continue;
       if (!peer.start_date || !peer.end_date) continue;
-      const pl = peer.PRODUCTION_LINE || 'Unknown';
+      const pl = peer.MACHINE || 'Unknown';
       let arr = peersByLine.get(pl);
       if (!arr) peersByLine.set(pl, arr = []);
       arr.push(peer);
@@ -6685,7 +6704,7 @@ export const Interaction = {
       if (!item) continue;
 
       // Check for ghost collisions with non-selected tasks on same line.
-      const line = st.PRODUCTION_LINE || 'Unknown';
+      const line = st.MACHINE || 'Unknown';
       const peers = peersByLine.get(line) || [];
       const hasConflict = peers.some((peer) =>
         ghostStart < peer.end_date! && ghostEnd > peer.start_date!
@@ -6830,24 +6849,24 @@ export const Interaction = {
     if (!cur || !cur.start_date) return;
 
     const allLines = [...new Set(Store.tasksArr
-      .filter(t => t.PRODUCTION_LINE)
-      .map(t => t.PRODUCTION_LINE))].sort();
+      .filter(t => t.MACHINE)
+      .map(t => t.MACHINE))].sort();
 
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
       const peers = Store.tasksArr
-        .filter(t => t.PRODUCTION_LINE === cur.PRODUCTION_LINE && t.start_date)
+        .filter(t => t.MACHINE === cur.MACHINE && t.start_date)
         .sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime());
       const i = peers.findIndex(t => String(t.id) === currentId);
       const j = key === 'ArrowLeft' ? i - 1 : i + 1;
       if (j >= 0 && j < peers.length) Selection.set([String(peers[j].id)]);
     } else {
-      const li = allLines.indexOf(cur.PRODUCTION_LINE);
+      const li = allLines.indexOf(cur.MACHINE);
       const lj = key === 'ArrowUp' ? li - 1 : li + 1;
       if (lj < 0 || lj >= allLines.length) return;
       const targetLine = allLines[lj];
       // Pick the task on the new line that's temporally closest to current.
       const candidates = Store.tasksArr
-        .filter(t => t.PRODUCTION_LINE === targetLine && t.start_date);
+        .filter(t => t.MACHINE === targetLine && t.start_date);
       if (!candidates.length) return;
       candidates.sort((a, b) => Math.abs(a.start_date!.getTime() - cur.start_date!.getTime())
                               - Math.abs(b.start_date!.getTime() - cur.start_date!.getTime()));
@@ -7023,7 +7042,7 @@ export const OptimizeDialog = (() => {
   }
 
   function _buildPlantSelect() {
-    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.PRODUCTION_LINE)).filter(Boolean) as string[];
+    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.MACHINE)).filter(Boolean) as string[];
     _allPlants = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
     const list = document.getElementById('opt-plant-list');
     if (!list) return;
@@ -7135,7 +7154,7 @@ export const OptimizeDialog = (() => {
     if (!_plant) return [];
     const set = new Set(Store.linesForSelectedPlant());
     for (const t of Store.tasksByPlant(_plant)) {
-      const l = t.PRODUCTION_LINE || 'Unknown';
+      const l = t.MACHINE || 'Unknown';
       set.add(l);
     }
     return [...set].sort((a, b) => a.localeCompare(b));
@@ -7156,7 +7175,7 @@ export const OptimizeDialog = (() => {
     // Count orders per line (scoped to selected plant)
     const orderCounts: Record<string, number> = {};
     for (const t of Store.tasksByPlant(_plant)) {
-      const l = t.PRODUCTION_LINE || 'Unknown';
+      const l = t.MACHINE || 'Unknown';
       orderCounts[l] = (orderCounts[l] || 0) + 1;
     }
 
@@ -7238,7 +7257,7 @@ export const OptimizeDialog = (() => {
     if (!_plant) return;
     const now = _backlogNow();
     const scopedLines = _scope === 'lines' && _selectedLines.size ? _selectedLines : null;
-    const tasks = Store.tasksByPlant(_plant).filter(t => !scopedLines || scopedLines.has(t.PRODUCTION_LINE));
+    const tasks = Store.tasksByPlant(_plant).filter(t => !scopedLines || scopedLines.has(t.MACHINE));
     const pastStarts = tasks.map(t => t.start_date).filter((d): d is Date => !!d && d < now);
     const latestEnds = tasks.map(t => t.end_date).filter((d): d is Date => !!d);
     const computedStart = pastStarts.length ? new Date(Math.min(...pastStarts.map(d => d.getTime()))) : now;
@@ -7952,7 +7971,7 @@ export const OptimizerPreview = {
       const predecessor = edge.predecessorOrderId ? byId.get(String(edge.predecessorOrderId)) : undefined;
       const successor = edge.successorOrderId ? byId.get(String(edge.successorOrderId)) : undefined;
       const lineState = definition
-        ? setup?.line_states.find(state => state.line === edge.line && state.signature_version === definition.signature_version)?.state_key
+        ? setup?.machine_states.find(state => state.machine === edge.line && state.signature_version === definition.signature_version)?.state_key
         : null;
       return {
         line: edge.line,
@@ -8043,8 +8062,8 @@ export const OptimizerPreview = {
         // / lines), so the undo snapshot must stay unfiltered.
         const candidateSnapshot = snapshotSchedule();
         const scopedTasks = candidateSnapshot.tasks.filter(task => {
-          const mappedPlant = candidateSnapshot.lineSettings[task.PRODUCTION_LINE]?.plant
-            ?? candidateSnapshot.masterData?.lines.find(row => row.production_line === task.PRODUCTION_LINE)?.plant;
+          const mappedPlant = candidateSnapshot.lineSettings[task.MACHINE]?.plant
+            ?? candidateSnapshot.masterData?.lines.find(row => row.machine === task.MACHINE)?.plant;
           return (task.PLANT || mappedPlant) === plant;
         });
         const _snapT0 = performance.now();
@@ -8061,7 +8080,7 @@ export const OptimizerPreview = {
         const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
         const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
         const inScope = (t: NimbusTask): boolean => {
-          if (lineSet && !lineSet.has(t.PRODUCTION_LINE)) return false;
+          if (lineSet && !lineSet.has(t.MACHINE)) return false;
           const s = t.start_date ? t.start_date.getTime() : null;
           if (s == null) return false;
           const e = Util.scheduledEnd(t);
@@ -8107,9 +8126,9 @@ export const OptimizerPreview = {
         // `inScope`, since an order outside the KPI window can still be
         // legitimately "not scheduled" by this run.
         const unplacedCandidates = scopedTasks
-          .filter(t => !lineSet || lineSet.has(t.PRODUCTION_LINE))
-          .filter(t => !candidateSnapshot.lineSettings[t.PRODUCTION_LINE || '']?.excludeFromOpt)
-          .map(t => ({ id: String(t.id), line: t.PRODUCTION_LINE || 'Unknown' }));
+          .filter(t => !lineSet || lineSet.has(t.MACHINE))
+          .filter(t => !candidateSnapshot.lineSettings[t.MACHINE || '']?.excludeFromOpt)
+          .map(t => ({ id: String(t.id), line: t.MACHINE || 'Unknown' }));
         const explanation = OptimizerPreview.summarizeCandidate(candidate, {
           productionBefore: snapshot.filter(inScope).length,
           productionAfter: postTasks.length,
@@ -8993,7 +9012,7 @@ export const ColorWheelViewer = (() => {
     // Task counts per color for this plant
     const taskCounts: Record<string, number> = {};
     for (const t of Store.tasksArr) {
-      if (_plant && Store.getPlantForLine(t.PRODUCTION_LINE) !== _plant) continue;
+      if (_plant && Store.getPlantForLine(t.MACHINE) !== _plant) continue;
       const c = Util.norm(t.COLOR);
       if (c && c !== 'NAN') taskCounts[c] = (taskCounts[c] || 0) + 1;
     }
@@ -9128,7 +9147,7 @@ export const PriorityListViewer = (() => {
     // header a plant-restricted user could preview ANY plant's priority
     // list, not just plants they're allowed to see (same class of bug as
     // plant-and-administration.mts's fetch trio, just in a different file).
-    const qs = _line ? `?line=${encodeURIComponent(_line)}` : '';
+    const qs = _line ? `?machine=${encodeURIComponent(_line)}` : '';
     Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}${qs}`,
           { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PriorityListResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -9295,7 +9314,7 @@ export const AlertsUIAdapter = {
     dayEnd.setDate(dayEnd.getDate() + 1);
     const cellEntries: Array<{ task: NimbusTask; scheduledHours: number; sortAt: Date }> = [];
     for (const task of Store.tasksArr) {
-      if ((task.PRODUCTION_LINE || 'Unknown') !== line) continue;
+      if ((task.MACHINE || 'Unknown') !== line) continue;
       const isSplit = (task.scheduleSegments?.length ?? 0) >= 2;
       if (!isSplit) {
         // Preserve legacy continuous-order accounting in Never mode.
@@ -9784,7 +9803,7 @@ export const Printer = {
     const rows = Store.tasksArr
       .filter(t => t.start_date && t.start_date >= rangeStart && t.start_date <= rangeEnd)
       .sort((a, b) => {
-        const la = (a.PRODUCTION_LINE || 'Unknown'), lb = (b.PRODUCTION_LINE || 'Unknown');
+        const la = (a.MACHINE || 'Unknown'), lb = (b.MACHINE || 'Unknown');
         if (la !== lb) return la.localeCompare(lb);
         return (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0);
       });
@@ -9833,7 +9852,7 @@ export const Printer = {
       const tr = document.createElement('tr');
       tr.style.background = i % 2 === 0 ? '' : 'var(--surface-2, #f8f7f2)';
       const cells = [
-        t.PRODUCTION_LINE || '—',
+        t.MACHINE || '—',
         t.ORDER || t.PRODUCTION_ORDER || '—',
         t.MATERIAL_NUMBER  || '—',
         t.MATERIAL_DESCRIPTION || t.text || '—',
@@ -9868,7 +9887,7 @@ export const Printer = {
     const lines = [
       headers.join(','),
       ...Printer._rows.map(t => [
-        t.PRODUCTION_LINE || '',
+        t.MACHINE || '',
         t.ORDER || t.PRODUCTION_ORDER || '',
         t.MATERIAL_NUMBER  || '',
         (t.MATERIAL_DESCRIPTION || t.text || '').replace(/,/g, ';'),

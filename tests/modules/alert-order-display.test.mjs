@@ -24,7 +24,7 @@ function task(overrides = {}) {
     id: ORDER_ID,
     ORDER: ORDER_NUMBER,
     PLANT: 'P1',
-    PRODUCTION_LINE: 'L1',
+    MACHINE: 'L1',
     RUN_TIME: 1,
     start_date: new Date('2026-08-19T08:00:00'),
     end_date: new Date('2026-08-19T09:00:00'),
@@ -36,8 +36,8 @@ const setup = {
   plant: 'P1',
   definition: { fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false },
   plant_rows: [],
-  line_rows: [],
-  line_states: [],
+  machine_rows: [],
+  machine_states: [],
   overrides: [],
 };
 
@@ -55,7 +55,7 @@ test('computeAlerts resolves setup diagnostic IDs to Order Numbers', () => {
     calendars: { L1: { workHours: allDays([0, 24]) } },
     plants: {},
     lineSettings: { L1: { plant: 'P1' } },
-    masterData: { lines: [{ production_line: 'L1', plant: 'P1' }] },
+    masterData: { lines: [{ machine: 'L1', plant: 'P1' }] },
     dismissed: [],
     opts: {},
     setup: {

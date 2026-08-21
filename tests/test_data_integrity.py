@@ -31,13 +31,13 @@ class TestCrossPlantAttribution_202:
         with db._pool.connection() as conn, conn.cursor() as cur:
             # One line CODE existing under TWO different plants (the scale reality).
             cur.execute(
-                "INSERT INTO production_lines (subnetwork, plant, production_line) "
+                "INSERT INTO machine (subnetwork, plant, machine) "
                 "VALUES (%s,%s,%s),(%s,%s,%s) ON CONFLICT DO NOTHING",
                 (self.SUB_A, self.PLANT_A, self.LINE, self.SUB_B, self.PLANT_B, self.LINE),
             )
             cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
             cur.execute(
-                "INSERT INTO orders (id, production_order, material_number, production_line, plant) "
+                "INSERT INTO orders (id, production_order, material_number, machine, plant) "
                 "VALUES (%s,%s,%s,%s,NULL)",
                 (oid, self.ORD, self.MAT, self.LINE),
             )
@@ -45,7 +45,7 @@ class TestCrossPlantAttribution_202:
         yield
         with db._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
-            cur.execute("DELETE FROM production_lines WHERE production_line = %s", (self.LINE,))
+            cur.execute("DELETE FROM machine WHERE machine = %s", (self.LINE,))
             conn.commit()
 
     def _plant_of(self, db, oid):
@@ -66,7 +66,7 @@ class TestCrossPlantAttribution_202:
         oid = db.make_id(self.ORD, self.MAT)
         with db._pool.connection() as conn, conn.cursor() as cur:
             # Collapse to a single plant for this line, then re-derive.
-            cur.execute("DELETE FROM production_lines WHERE production_line = %s AND plant = %s",
+            cur.execute("DELETE FROM machine WHERE machine = %s AND plant = %s",
                         (self.LINE, self.PLANT_B))
             conn.commit()
         db.reattribute_null_plant_orders()
@@ -94,7 +94,7 @@ class TestBulkUpdateContract_203:
         with db._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
             cur.execute(
-                "INSERT INTO orders (id, production_order, material_number, production_line, "
+                "INSERT INTO orders (id, production_order, material_number, machine, "
                 "basic_start_date, basic_finish_date) VALUES (%s,%s,%s,'ZZTEST_LINE',%s,%s)",
                 (oid, self.ORD, self.MAT, dt.datetime(2026, 1, 1, 8), dt.datetime(2026, 1, 1, 16)),
             )

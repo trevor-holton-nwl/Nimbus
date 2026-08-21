@@ -51,7 +51,7 @@ def test_rankable_fields_exposes_only_three_configurable_entries():
 def test_production_version_mp_column_is_not_editable_via_attributes_endpoint():
     """default_production_version is SAP-owned and deliberately excluded from
     EDITABLE_MATERIAL_PLANT_ATTRS (see that frozenset's comment) — confirms the
-    fourth rankable field is NOT default_workcenter (an earlier draft's mistake,
+    fourth rankable field is NOT default_machine (an earlier draft's mistake,
     corrected 2026-08-11) and that RANKABLE_FIELDS/EDITABLE_MATERIAL_PLANT_ATTRS
     are allowed to diverge."""
     mp_col = md.RANKABLE_FIELDS["productionVersion"]["mp_column"]
@@ -217,15 +217,15 @@ def test_known_line_codes_for_plant_is_scoped(pg):
         cur.execute("INSERT INTO subnetworks (code, name) VALUES ('ZZTEST_SUB','ZZTEST_SUB') ON CONFLICT DO NOTHING")
         cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP') ON CONFLICT DO NOTHING")
         cur.execute("INSERT INTO plants (subnetwork, plant) VALUES ('ZZTEST_SUB','ZZTEST_LP2') ON CONFLICT DO NOTHING")
-        cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES ('ZZTEST_SUB','ZZTEST_LP','L01') ON CONFLICT DO NOTHING")
-        cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES ('ZZTEST_SUB','ZZTEST_LP2','L99') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES ('ZZTEST_SUB','ZZTEST_LP','L01') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES ('ZZTEST_SUB','ZZTEST_LP2','L99') ON CONFLICT DO NOTHING")
         conn.commit()
     try:
         assert md.known_line_codes_for_plant('ZZTEST_LP') == {'L01'}
         assert 'L99' not in md.known_line_codes_for_plant('ZZTEST_LP')
     finally:
         with pg._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM production_lines WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
+            cur.execute("DELETE FROM machine WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
             cur.execute("DELETE FROM plants WHERE plant IN ('ZZTEST_LP','ZZTEST_LP2')")
             cur.execute("DELETE FROM subnetworks WHERE code = 'ZZTEST_SUB'")
             conn.commit()
@@ -242,10 +242,10 @@ def _schema_text() -> str:
 def test_schema_declares_priority_list_table_and_orders_columns():
     text = _schema_text()
     assert "CREATE TABLE IF NOT EXISTS priority_list" in text
-    assert "PRIMARY KEY (plant, line, field_key)" in text
+    assert "PRIMARY KEY (plant, machine, field_key)" in text
     assert 'ADD COLUMN IF NOT EXISTS production_version TEXT' in text
-    # The corrected column — must NOT be default_workcenter (2026-08-11 fix).
-    assert "orders ADD COLUMN IF NOT EXISTS default_workcenter" not in text
+    # The corrected column — must NOT be default_machine (2026-08-11 fix).
+    assert "orders ADD COLUMN IF NOT EXISTS default_machine" not in text
 
 
 def test_schema_ledger_guards_the_two_data_mutating_steps():
@@ -372,7 +372,7 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
                 (self.SUB, self.PLANT),
             )
             cur.execute(
-                "INSERT INTO production_lines (subnetwork, plant, production_line) "
+                "INSERT INTO machine (subnetwork, plant, machine) "
                 "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
                 (self.SUB, self.PLANT, self.LINE),
             )
@@ -391,7 +391,7 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
             cur.execute("DELETE FROM orders WHERE production_order = %s", (self.ORDER_NO,))
             cur.execute("DELETE FROM material_plants WHERE material_id = %s AND plant = %s",
                        (self.MATERIAL, self.PLANT))
-            cur.execute("DELETE FROM production_lines WHERE subnetwork = %s AND plant = %s",
+            cur.execute("DELETE FROM machine WHERE subnetwork = %s AND plant = %s",
                        (self.SUB, self.PLANT))
             cur.execute("DELETE FROM plants WHERE subnetwork = %s AND plant = %s", (self.SUB, self.PLANT))
             cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
@@ -402,7 +402,7 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
         return db.upsert_orders([{
             "production_order": self.ORDER_NO,
             "material_number": self.MATERIAL,
-            "production_line": self.LINE,
+            "machine": self.LINE,
             "plant": self.PLANT,
             "basic_start_date": "2026-08-11T00:00:00",
             "basic_finish_date": "2026-08-11T08:00:00",
@@ -480,7 +480,7 @@ class TestApplyPriorityMerge:
         df = pd.DataFrame({
             "COLOR": ["red", "blue", "green"],
             "PLANT": [self.PLANT, self.PLANT, self.PLANT],
-            "PRODUCTION_LINE": ["L1", "L1", "L1"],
+            "MACHINE": ["L1", "L1", "L1"],
             "BASIC_START_DATE": pd.to_datetime(["2026-08-11", "2026-08-11", "2026-08-11"]),
         })
         out, stats = brain.apply_priority_merge(df, plant=self.PLANT)
@@ -492,17 +492,37 @@ class TestApplyPriorityMerge:
         assert stats["color_merge_misses"] == 1
         assert stats["missed_colors"] == ["GREEN"]
 
+    def test_prt_and_production_version_are_uppercased_alongside_color(self):
+        """PRT_01/PRT_02/PRODUCTION_VERSION are equally rankable fields and
+        equally subject to the case-mismatch pathology this fold exists to
+        close for COLOR (docs/multi_change_spec_08.20.26.md D1) — a
+        hand-typed 'mold-a' must present the same as an ingested 'MOLD-A'."""
+        import pandas as pd
+        df = pd.DataFrame({
+            "COLOR": ["red"],
+            "PRT_01": ["mold-a"],
+            "PRT_02": [" Mold-B "],
+            "PRODUCTION_VERSION": ["v01"],
+            "PLANT": [self.PLANT],
+            "MACHINE": ["L1"],
+            "BASIC_START_DATE": pd.to_datetime(["2026-08-11"]),
+        })
+        out, _ = brain.apply_priority_merge(df, plant=self.PLANT)
+        assert out.loc[0, "PRT_01"] == "MOLD-A"
+        assert out.loc[0, "PRT_02"] == "MOLD-B"
+        assert out.loc[0, "PRODUCTION_VERSION"] == "V01"
+
     def test_line_override_wins_over_plant_wide(self):
         import pandas as pd
         brain.PLANT_LISTS[self.PLANT]["L2"] = {"colorWheel": {"RED": 50.0}}
         df = pd.DataFrame({
             "COLOR": ["red", "red"],
             "PLANT": [self.PLANT, self.PLANT],
-            "PRODUCTION_LINE": ["L1", "L2"],
+            "MACHINE": ["L1", "L2"],
             "BASIC_START_DATE": pd.to_datetime(["2026-08-11", "2026-08-11"]),
         })
         out, _ = brain.apply_priority_merge(df, plant=self.PLANT)
-        rows = out.set_index("PRODUCTION_LINE")["ORDER_Y"]
+        rows = out.set_index("MACHINE")["ORDER_Y"]
         assert rows["L1"] == 1.0    # plant-wide list applies
         assert rows["L2"] == 50.0   # line override wins for L2 only
 
@@ -592,7 +612,7 @@ def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
         for oid, line, color in orders:
             cur.execute(
                 "INSERT INTO orders (id, production_order, material_number, plant,"
-                " production_line, color, basic_start_date)"
+                " machine, color, basic_start_date)"
                 " VALUES (%s,%s,%s,%s,%s,%s, NOW()) ON CONFLICT (id) DO NOTHING",
                 (oid, oid.upper(), "MAT-" + oid, plant, line, color),
             )
@@ -604,8 +624,8 @@ def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
         assert body["plant"] == plant
         cw = body["fields"]["colorWheel"]
         assert cw["plant_wide"]["filename"] == "w.xlsx"
-        assert len(cw["line_overrides"]) == 1
-        assert cw["line_overrides"][0]["line"] == "L01"
+        assert len(cw["machine_overrides"]) == 1
+        assert cw["machine_overrides"][0]["machine"] == "L01"
 
         cov = cw["coverage"]
         # Per-line buckets, keyed by line code.
@@ -625,7 +645,7 @@ def test_priority_lists_endpoint_groups_by_field_with_coverage(client, pg):
 
         # A field with no list uploaded still reports its own coverage denominator.
         assert body["fields"]["prt01"]["plant_wide"] is None
-        assert body["fields"]["prt01"]["line_overrides"] == []
+        assert body["fields"]["prt01"]["machine_overrides"] == []
     finally:
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM priority_list WHERE plant = %s", (plant,))
@@ -708,13 +728,13 @@ class TestGenericPriorityListUpload:
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (self.SUB, self.SUB))
             cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING", (self.SUB, self.PLANT))
-            cur.execute("INSERT INTO production_lines (subnetwork, plant, production_line) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
                         (self.SUB, self.PLANT, self.LINE))
             conn.commit()
         yield
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM priority_list WHERE plant = %s", (self.PLANT,))
-            cur.execute("DELETE FROM production_lines WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM machine WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM plants WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
             conn.commit()
@@ -732,7 +752,7 @@ class TestGenericPriorityListUpload:
                              files={"file": ("w.xlsx", body)})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
-        assert r.json()["line"] == ""
+        assert r.json()["machine"] == ""
 
     def test_no_rank_column_uses_row_order(self):
         body = self._xlsx([{"PRT_01": "DOG"}, {"PRT_01": "CAT"}])
@@ -790,16 +810,16 @@ class TestGenericPriorityListUpload:
         body = self._xlsx([{"TOOL": "DOG", "RANK": 1}])
         r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
                              files={"file": ("t.xlsx", body)},
-                             data={"value_column": "TOOL", "rank_column": "RANK", "line": self.LINE})
+                             data={"value_column": "TOOL", "rank_column": "RANK", "machine": self.LINE})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
-        assert r.json()["line"] == self.LINE
+        assert r.json()["machine"] == self.LINE
 
     def test_unknown_line_is_rejected(self):
         body = self._xlsx([{"TOOL": "DOG", "RANK": 1}])
         r = self.client.post(f"/priority-list/{self.PLANT}/prt01",
                              files={"file": ("t.xlsx", body)},
-                             data={"value_column": "TOOL", "rank_column": "RANK", "line": "NOT-A-REAL-LINE"})
+                             data={"value_column": "TOOL", "rank_column": "RANK", "machine": "NOT-A-REAL-LINE"})
         assert r.status_code == 400
 
     def test_multiple_line_values_in_file_rejected_without_explicit_line(self):
@@ -842,7 +862,7 @@ class TestGenericPriorityListUpload:
                              data={"value_column": "TOOL", "rank_column": "RANK"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
-        assert r.json()["line"] == self.LINE
+        assert r.json()["machine"] == self.LINE
 
     def test_all_blank_line_column_falls_back_to_plant_wide(self):
         """C1 companion case: if every LINE cell is blank, resolution must
@@ -856,7 +876,7 @@ class TestGenericPriorityListUpload:
                              data={"value_column": "TOOL", "rank_column": "RANK"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
-        assert r.json()["line"] == ""
+        assert r.json()["machine"] == ""
 
     def test_ambiguous_columns_with_blank_and_numeric_cells_does_not_500(self):
         """C4 regression: the needs_mapping response's `sample` (df.head(5))

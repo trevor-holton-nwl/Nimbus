@@ -50,7 +50,7 @@ VERSION = "2026-06-30-b"
 SAP_OBJECTS: dict[str, dict] = {
     "subnetworks":      {"kind": "master", "table": "subnetworks",      "label": "Subnetworks"},
     "plants":           {"kind": "master", "table": "plants",           "label": "Plants"},
-    "production_lines": {"kind": "master", "table": "production_lines", "label": "Production Lines"},
+    "machine":          {"kind": "master", "table": "machine",          "label": "Machines"},
     "materials":        {"kind": "master", "table": "materials",        "label": "Materials"},
     "material_plants":  {"kind": "master", "table": "material_plants",  "label": "Material Plants"},
     "orders":           {"kind": "orders", "table": "orders",           "label": "Production Orders"},
@@ -61,7 +61,7 @@ SAP_OBJECTS: dict[str, dict] = {
 _MASTER_KEY_COLUMNS = {
     "subnetworks":      ("code",),
     "plants":           ("subnetwork", "plant"),
-    "production_lines": ("subnetwork", "plant", "production_line"),
+    "machine":          ("subnetwork", "plant", "machine"),
     "materials":        ("material_id",),
     "material_plants":  ("material_id", "plant"),
 }

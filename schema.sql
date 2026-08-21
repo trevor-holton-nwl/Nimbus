@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS orders (
     production_order      TEXT NOT NULL,
     material_number       TEXT NOT NULL,
     material_description  TEXT,
-    production_line       TEXT,
+    machine               TEXT,
     -- SAP-source dates
     basic_start_date      TIMESTAMP,
     basic_finish_date     TIMESTAMP,
@@ -60,15 +60,15 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE INDEX IF NOT EXISTS idx_orders_basic_start  ON orders(basic_start_date);
 CREATE INDEX IF NOT EXISTS idx_orders_upload_batch ON orders(upload_batch_id);
-CREATE INDEX IF NOT EXISTS idx_orders_line         ON orders(production_line);
--- Serves the stateless /tasks read path: per-line scan ordered by start date
--- (db.query_orders ORDER BY production_line, effective start). Supersedes
+CREATE INDEX IF NOT EXISTS idx_orders_machine       ON orders(machine);
+-- Serves the stateless /tasks read path: per-machine scan ordered by start date
+-- (db.query_orders ORDER BY machine, effective start). Supersedes
 -- relying on the two single-column indexes above for that access pattern.
-CREATE INDEX IF NOT EXISTS idx_orders_line_start   ON orders(production_line, basic_start_date);
--- Matches db.query_orders() ORDER BY exactly: per-line scan ordered by effective start.
--- Supersedes idx_orders_line_start for the /tasks read path when scheduled_start is set.
-CREATE INDEX IF NOT EXISTS idx_orders_line_eff_start
-  ON orders(production_line, COALESCE(scheduled_start, basic_start_date));
+CREATE INDEX IF NOT EXISTS idx_orders_machine_start ON orders(machine, basic_start_date);
+-- Matches db.query_orders() ORDER BY exactly: per-machine scan ordered by effective start.
+-- Supersedes idx_orders_machine_start for the /tasks read path when scheduled_start is set.
+CREATE INDEX IF NOT EXISTS idx_orders_machine_eff_start
+  ON orders(machine, COALESCE(scheduled_start, basic_start_date));
 
 -- Defense-in-depth: reject inverted user-scheduled ranges at the DB layer too
 -- (the app already validates in update_task_dates_bulk). NOT VALID so the
@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS upload_audit (
 CREATE INDEX IF NOT EXISTS idx_audit_uploaded_at ON upload_audit(uploaded_at DESC);
 
 -- ============================================================================
--- MASTER DATA — Subnetwork → Plant → Production Line hierarchy
+-- MASTER DATA — Subnetwork → Plant → Machine hierarchy
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS subnetworks (
@@ -150,6 +150,14 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- legacy behavior until an admin deliberately opts in.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
+-- Workstream D2 (2026-08-20): the "include setup times in optimizer" flag,
+-- relocated off the per-signature-version setup_definition.active (which
+-- reset to FALSE on every signature bump — see that table's comment below).
+-- Deliberately unregistered (no column_metadata row), same as
+-- split_order_policy above — never appears in the generic Master Data grid.
+-- Written only through the validated PUT /plant/{plant}/setup-active route,
+-- following the machine.setup_compatible precedent.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_active BOOLEAN NOT NULL DEFAULT FALSE;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_max_pull_forward_days_nonnegative') THEN
@@ -185,99 +193,123 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_release_evidence JSONB NOT NUL
 -- then INSERT the ledger row below so it is never repeated. See MIGRATION.md.
 INSERT INTO schema_migrations (id) VALUES ('plants_horizon_minutes') ON CONFLICT DO NOTHING;
 
-CREATE TABLE IF NOT EXISTS production_lines (
+CREATE TABLE IF NOT EXISTS machine (
     subnetwork       TEXT NOT NULL,
     plant            TEXT NOT NULL,
-    production_line  TEXT NOT NULL,
+    machine          TEXT NOT NULL,
     created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (subnetwork, plant, production_line),
+    PRIMARY KEY (subnetwork, plant, machine),
     FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_lines_plant ON production_lines(subnetwork, plant);
+CREATE INDEX IF NOT EXISTS idx_lines_plant ON machine(subnetwork, plant);
 -- Plant-only index: the stateless /tasks join filters by plant alone, which the
 -- composite above (subnetwork-leading) can't serve efficiently.
-CREATE INDEX IF NOT EXISTS idx_lines_plant_only ON production_lines(plant);
--- Line-code index: the order->plant derivation (ingest, backfill, re-attribution)
--- looks up production_lines by production_line alone, which the subnetwork-leading
+CREATE INDEX IF NOT EXISTS idx_lines_plant_only ON machine(plant);
+-- Machine-code index: the order->plant derivation (ingest, backfill, re-attribution)
+-- looks up machine by machine alone, which the subnetwork-leading
 -- composite PK cannot serve efficiently.
-CREATE INDEX IF NOT EXISTS idx_lines_production_line ON production_lines(production_line);
+CREATE INDEX IF NOT EXISTS idx_lines_machine ON machine(machine);
 
 -- ----------------------------------------------------------------------------
--- line_key: stable, human-readable composite identity string for a production
--- line, e.g. "HMF_5512_LINE01". GENERATED so it can never drift from the
--- natural PK (subnetwork, plant, production_line) — never write to it
+-- machine_key: stable, human-readable composite identity string for a
+-- machine, e.g. "HMF_5512_LINE01". GENERATED so it can never drift from the
+-- natural PK (subnetwork, plant, machine) — never write to it
 -- directly, and never register it in column_metadata (it would make the
 -- Add-Column wizard / export_schema_sql / bulk_apply try to write a value
 -- into a generated column, which Postgres rejects outright).
 -- Soft reference only: indexed for identity/joins, NOT a hard FK from
--- orders/labor_plan_line/line_calendar/line_blackout — those tables can
--- reference a plant+line combo before it's registered here, same as today.
--- Must precede the orders.plant/line_key blocks below in file order: the
--- orders.line_key backfill selects this column, so it has to exist first.
+-- orders/labor_plan_machine/machine_calendar/machine_blackout — those tables can
+-- reference a plant+machine combo before it's registered here, same as today.
+-- Must precede the orders.plant/machine_key blocks below in file order: the
+-- orders.machine_key backfill selects this column, so it has to exist first.
 -- ----------------------------------------------------------------------------
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS line_key TEXT
-    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_lines_line_key ON production_lines(line_key);
+ALTER TABLE machine DROP COLUMN IF EXISTS line_key;
+DROP INDEX IF EXISTS uq_lines_line_key;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS machine_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || machine) STORED;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_machine_machine_key ON machine(machine_key);
 
 -- ----------------------------------------------------------------------------
--- orders.plant — per-order plant attribution. Placed AFTER production_lines so the
--- backfill below can resolve the line→plant mapping. The /tasks read path now selects
--- o.plant directly instead of LEFT JOINing production_lines on the line code alone,
--- which fanned out / mis-attributed orders when a line code is reused across plants.
+-- workcenter_mapping: per-plant mapping of a NIMBUS machine to its SAP
+-- workcenter code. No FK to machine/plants — soft reference by convention,
+-- same as material_plants.default_machine and the other plant-scoped tables
+-- above; a mapping may exist for an order-derived machine that lags master
+-- data.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workcenter_mapping (
+    plant           TEXT NOT NULL,
+    machine         TEXT NOT NULL,
+    sap_workcenter  TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (plant, machine)
+);
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('workcenter_mapping', 'plant',          'Plant',            TRUE,  1),
+    ('workcenter_mapping', 'machine',        'Machine',          TRUE,  2),
+    ('workcenter_mapping', 'sap_workcenter', 'SAP Workcenter',   FALSE, 3)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- orders.plant — per-order plant attribution. Placed AFTER machine so the
+-- backfill below can resolve the machine→plant mapping. The /tasks read path now selects
+-- o.plant directly instead of LEFT JOINing machine on the machine code alone,
+-- which fanned out / mis-attributed orders when a machine code is reused across plants.
 -- Ingest sets plant from a WERKS/PLANT upload column when present, else derives it from
--- the line→plant mapping (db.ingest_orders_from_excel). Idempotent: ADD COLUMN IF NOT
+-- the machine→plant mapping (db.ingest_orders_from_excel). Idempotent: ADD COLUMN IF NOT
 -- EXISTS + a NULL-only backfill, safe to re-run.
 --   ⚠ Re-run schema.sql after deploying this change, or GET /tasks errors on the
 --     missing orders.plant column (the read path references o.plant). See MIGRATION.md.
 -- ----------------------------------------------------------------------------
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant TEXT;
 CREATE INDEX IF NOT EXISTS idx_orders_plant ON orders(plant);
--- Partial index: the post-line-change re-attribution and ingest derivation scan
+-- Partial index: the post-machine-change re-attribution and ingest derivation scan
 -- orders WHERE plant IS NULL; a plain btree won't serve IS NULL efficiently, so
--- index just the NULL-plant rows by line (kept tiny — most rows are attributed).
-CREATE INDEX IF NOT EXISTS idx_orders_plant_null ON orders(production_line) WHERE plant IS NULL;
--- Only derive plant when the line code maps to EXACTLY ONE plant. A line code shared
+-- index just the NULL-plant rows by machine (kept tiny — most rows are attributed).
+CREATE INDEX IF NOT EXISTS idx_orders_plant_null ON orders(machine) WHERE plant IS NULL;
+-- Only derive plant when the machine code maps to EXACTLY ONE plant. A machine code shared
 -- across plants cannot be attributed from the code alone, so those rows are left NULL
 -- (the app surfaces this) instead of being silently assigned to the lowest plant code.
 UPDATE orders o
    SET plant = (
-       SELECT MIN(pl.plant) FROM production_lines pl
-        WHERE pl.production_line = o.production_line
+       SELECT MIN(pl.plant) FROM machine pl
+        WHERE pl.machine = o.machine
    )
  WHERE o.plant IS NULL
    AND (
-       SELECT COUNT(DISTINCT pl.plant) FROM production_lines pl
-        WHERE pl.production_line = o.production_line
+       SELECT COUNT(DISTINCT pl.plant) FROM machine pl
+        WHERE pl.machine = o.machine
    ) = 1;
 
 -- ----------------------------------------------------------------------------
--- orders.line_key — soft-reference identity string mirroring production_lines
--- line_key. Plain TEXT (not generated — orders has no subnetwork column, and
+-- orders.machine_key — soft-reference identity string mirroring machine.
+-- machine_key. Plain TEXT (not generated — orders has no subnetwork column, and
 -- adding one would be redundant; plant is already enforced ~globally unique
--- via ensure_unique_plant(), so a (plant, production_line) lookup against
--- production_lines is sufficient). Populated by copying production_lines.
--- line_key for the matching (plant, production_line) pair. Kept in sync by
+-- via ensure_unique_plant(), so a (plant, machine) lookup against
+-- machine is sufficient). Populated by copying machine.
+-- machine_key for the matching (plant, machine) pair. Kept in sync by
 -- db.py (ingest upsert CASE + reattribution), not by the DB.
--- Strictly downstream of orders.plant: a line code ambiguous across >1 plant
--- (left plant NULL above) stays line_key NULL too — this does not resolve
+-- Strictly downstream of orders.plant: a machine code ambiguous across >1 plant
+-- (left plant NULL above) stays machine_key NULL too — this does not resolve
 -- that pre-existing ambiguity, it inherits it (see MIGRATION.md).
 -- ----------------------------------------------------------------------------
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS line_key TEXT;
-CREATE INDEX IF NOT EXISTS idx_orders_line_key ON orders(line_key);
-CREATE INDEX IF NOT EXISTS idx_orders_line_key_null ON orders(production_line, plant) WHERE line_key IS NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS machine_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_orders_machine_key ON orders(machine_key);
+CREATE INDEX IF NOT EXISTS idx_orders_machine_key_null ON orders(machine, plant) WHERE machine_key IS NULL;
 
 UPDATE orders o
-   SET line_key = (
-       SELECT pl.line_key FROM production_lines pl
-        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+   SET machine_key = (
+       SELECT pl.machine_key FROM machine pl
+        WHERE pl.plant = o.plant AND pl.machine = o.machine
    )
- WHERE o.line_key IS NULL
+ WHERE o.machine_key IS NULL
    AND o.plant IS NOT NULL
    AND (
-       SELECT COUNT(*) FROM production_lines pl
-        WHERE pl.plant = o.plant AND pl.production_line = o.production_line
+       SELECT COUNT(*) FROM machine pl
+        WHERE pl.plant = o.plant AND pl.machine = o.machine
    ) = 1;
 
 -- ============================================================================
@@ -378,36 +410,36 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_occurred_at ON admin_audit(occurred_at DESC);
 
 -- ----------------------------------------------------------------------------
--- Production Line Group column (added via Admin DDL; schema.sql ensures it
+-- Workcenter Group column (added via Admin DDL; schema.sql ensures it
 -- survives a fresh-DB migration without requiring a manual ALTER TABLE).
 -- ----------------------------------------------------------------------------
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS pl_group TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS wc_group TEXT;
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)
-VALUES ('production_lines', 'pl_group', 'Production Line Group', FALSE, 4)
+VALUES ('machine', 'wc_group', 'Workcenter Group', FALSE, 4)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
 -- Optimizer-flag columns (added via Admin DDL at some point; the physical
 -- columns and/or their column_metadata rows never made it into schema.sql,
 -- so `list_rows`'s INNER JOIN against column_metadata silently hid them from
--- GET /master-data/production_lines — the ProdLines "Bottleneck"/"Excl.
+-- GET /master-data/machine — the ProdLines "Bottleneck"/"Excl.
 -- Optimizer" checkboxes therefore reset to unchecked on every master-data
 -- reload even after being toggled. ADD COLUMN IF NOT EXISTS covers the case
 -- where the physical column is already there; the INSERT closes the metadata
 -- gap either way.
 -- ----------------------------------------------------------------------------
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS bottleneck      TEXT;
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS excl_optimizer  TEXT;
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_type     TEXT;
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_percent  NUMERIC;
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS buffer_hours    NUMERIC;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS bottleneck      TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS excl_optimizer  TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS buffer_type     TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS buffer_percent  NUMERIC;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS buffer_hours    NUMERIC;
 
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
-    ('production_lines', 'bottleneck',     'Bottleneck',             FALSE, 5),
-    ('production_lines', 'excl_optimizer', 'Exclude from Optimizer', FALSE, 6),
-    ('production_lines', 'buffer_type',    'Buffer Type',            FALSE, 7),
-    ('production_lines', 'buffer_percent', 'Buffer %',               FALSE, 8),
-    ('production_lines', 'buffer_hours',   'Buffer Hours',           FALSE, 9)
+    ('machine', 'bottleneck',     'Bottleneck',             FALSE, 5),
+    ('machine', 'excl_optimizer', 'Exclude from Optimizer', FALSE, 6),
+    ('machine', 'buffer_type',    'Buffer Type',            FALSE, 7),
+    ('machine', 'buffer_percent', 'Buffer %',               FALSE, 8),
+    ('machine', 'buffer_hours',   'Buffer Hours',           FALSE, 9)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
@@ -435,7 +467,7 @@ ON CONFLICT (table_name, column_name) DO NOTHING;
 -- Plant grids: both filter material_plants by `plant` ALONE, which the
 -- (material_id, plant) PK cannot serve efficiently (material_id leads it), so
 -- a ?plant= filter would seq-scan the whole table. Same reasoning as
--- idx_lines_plant_only on production_lines above. Composite (plant,
+-- idx_lines_plant_only on machine above. Composite (plant,
 -- material_id) rather than plant-only: it also satisfies the grid's
 -- ORDER BY material_id within a plant, and lets the Material grid's
 -- EXISTS(...) semi-join run as an index-only probe.
@@ -445,17 +477,19 @@ CREATE INDEX IF NOT EXISTS idx_material_plants_plant_material
     ON material_plants(plant, material_id);
 
 -- ----------------------------------------------------------------------------
--- material_plants.default_workcenter — same drift-repair pattern as prt_01/
+-- material_plants.default_machine — same drift-repair pattern as prt_01/
 -- prt_02/color above: added directly to schema.sql + a standalone migration
 -- (migrations/2026-08-10-material-plant-default-workcenter.sql) rather than
 -- via the Add Column wizard, to avoid the same backfill gap. Editable
 -- through POST /master-data/material-plants/attributes alongside
 -- prt_01/prt_02/color (master_data.EDITABLE_MATERIAL_PLANT_ATTRS).
+-- No FK to machine — soft reference by convention, matching the other
+-- material_plants attribute columns.
 -- ----------------------------------------------------------------------------
-ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_workcenter TEXT;
+ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS default_machine TEXT;
 
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
-    ('material_plants', 'default_workcenter', 'Default Workcenter', FALSE, 11)
+    ('material_plants', 'default_machine', 'Default Machine', FALSE, 11)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
@@ -480,9 +514,9 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants',            'alt_flag_horizon',              'Alert Flag Horizon (days)',    FALSE, 3),
     ('plants',            'conf_score_horizon',            'Conf Score Horizon (days)',    FALSE, 4),
     ('plants',            'timezone',                       'Plant Timezone (IANA)',         FALSE, 5),
-    ('production_lines',  'subnetwork',                    'Subnetwork',                   TRUE,  1),
-    ('production_lines',  'plant',                         'Plant',                        TRUE,  2),
-    ('production_lines',  'production_line',               'Production Line',              TRUE,  3),
+    ('machine',            'subnetwork',                    'Subnetwork',                   TRUE,  1),
+    ('machine',            'plant',                         'Plant',                        TRUE,  2),
+    ('machine',            'machine',                       'Machine',                      TRUE,  3),
     ('roles',             'role',                          'Role',                         TRUE,  1),
     ('roles',             'description',                   'Description',                  FALSE, 2),
     ('role_plants',       'role',                          'Role',                         TRUE,  1),
@@ -506,17 +540,17 @@ ON CONFLICT (table_name, column_name) DO NOTHING;
 -- ----------------------------------------------------------------------------
 
 -- ----------------------------------------------------------------------------
--- Labor Planning — aggregate available labor hours by line group × ISO week
+-- Labor Planning — aggregate available labor hours by workcenter group × ISO week
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS labor_plan (
     subnetwork  TEXT    NOT NULL,
     plant       TEXT    NOT NULL,
-    pl_group    TEXT    NOT NULL,
+    wc_group    TEXT    NOT NULL,
     period      TEXT    NOT NULL,   -- ISO week key: 'YYYY-Www'
     avail_hours NUMERIC,
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (subnetwork, plant, pl_group, period),
+    PRIMARY KEY (subnetwork, plant, wc_group, period),
     FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -538,33 +572,35 @@ BEGIN
   END IF;
 END $$;
 
--- Labor Plan Line — available labor hours per production line per calendar day
+-- Labor Plan Machine — available labor hours per machine per calendar day
 -- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS labor_plan_line (
+CREATE TABLE IF NOT EXISTS labor_plan_machine (
     subnetwork      TEXT    NOT NULL,
     plant           TEXT    NOT NULL,
-    production_line TEXT    NOT NULL,
+    machine         TEXT    NOT NULL,
     day             TEXT    NOT NULL,   -- ISO date 'YYYY-MM-DD'
     avail_hours     NUMERIC,
     source          TEXT    NOT NULL DEFAULT 'auto_split',  -- 'auto_split'|'calendar'|'override'
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (subnetwork, plant, production_line, day)
+    PRIMARY KEY (subnetwork, plant, machine, day)
 );
-CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant ON labor_plan_line(plant);
-CREATE INDEX IF NOT EXISTS idx_labor_plan_line_plant_line ON labor_plan_line(plant, production_line);
--- line_key: same generated identity string as production_lines.line_key (see
--- above). This table already carries its own subnetwork/plant/production_line,
+CREATE INDEX IF NOT EXISTS idx_labor_plan_machine_plant ON labor_plan_machine(plant);
+CREATE INDEX IF NOT EXISTS idx_labor_plan_machine_plant_machine ON labor_plan_machine(plant, machine);
+-- machine_key: same generated identity string as machine.machine_key (see
+-- above). This table already carries its own subnetwork/plant/machine,
 -- so it self-populates on ALTER — no lookup/backfill needed. NOT a startup-hook
 -- table for this column: schema.sql only reaches a pre-existing prod DB once at
 -- provisioning (see master_data.py's ensure_line_key_columns() for the
 -- redeploy-safe path that also covers this table).
-ALTER TABLE labor_plan_line ADD COLUMN IF NOT EXISTS line_key TEXT
-    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
-CREATE INDEX IF NOT EXISTS idx_lpl_line_key ON labor_plan_line(line_key);
+ALTER TABLE labor_plan_machine DROP COLUMN IF EXISTS line_key;
+DROP INDEX IF EXISTS idx_lpl_line_key;
+ALTER TABLE labor_plan_machine ADD COLUMN IF NOT EXISTS machine_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || machine) STORED;
+CREATE INDEX IF NOT EXISTS idx_lpl_machine_key ON labor_plan_machine(machine_key);
 
 -- ----------------------------------------------------------------------------
--- Plant / line calendars (working hours) + blackout blocks
+-- Plant / machine calendars (working hours) + blackout blocks
 --   Fresh-DB parity for the idempotent ensure_* startup migrations in
 --   master_data.py (which are authoritative for prod). Additive only — no
 --   data re-mutation on re-run (like the now-ledger-guarded plants horizon
@@ -585,33 +621,35 @@ BEGIN
   END IF;
 END $$;
 
--- Line-level working hours. No FK to production_lines (like labor_plan_line) so
--- order-derived lines that lag master data still persist; only the plants FK.
-CREATE TABLE IF NOT EXISTS line_calendar (
+-- Machine-level working hours. No FK to machine (like labor_plan_machine) so
+-- order-derived machines that lag master data still persist; only the plants FK.
+CREATE TABLE IF NOT EXISTS machine_calendar (
     subnetwork      TEXT NOT NULL,
     plant           TEXT NOT NULL,
-    production_line TEXT NOT NULL,
+    machine         TEXT NOT NULL,
     work_hours      JSONB,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (subnetwork, plant, production_line),
+    PRIMARY KEY (subnetwork, plant, machine),
     FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_line_calendar_plant ON line_calendar(plant);
--- line_key: same generated identity string as production_lines.line_key.
+CREATE INDEX IF NOT EXISTS idx_machine_calendar_plant ON machine_calendar(plant);
+-- machine_key: same generated identity string as machine.machine_key.
 -- See master_data.py's ensure_line_key_columns() for the redeploy-safe path
 -- (this table is startup-hook-authoritative for prod, not schema.sql).
-ALTER TABLE line_calendar ADD COLUMN IF NOT EXISTS line_key TEXT
-    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
-CREATE INDEX IF NOT EXISTS idx_line_calendar_line_key ON line_calendar(line_key);
+ALTER TABLE machine_calendar DROP COLUMN IF EXISTS line_key;
+DROP INDEX IF EXISTS idx_line_calendar_line_key;
+ALTER TABLE machine_calendar ADD COLUMN IF NOT EXISTS machine_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || machine) STORED;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_machine_calendar_machine_key ON machine_calendar(machine_key);
 
--- Line blackout blocks. production_line NULL = all lines in this plant.
+-- Machine blackout blocks. machine NULL = all machines in this plant.
 -- block_id is client-supplied (Util.uid 'blk'). Delta writes only.
-CREATE TABLE IF NOT EXISTS line_blackout (
+CREATE TABLE IF NOT EXISTS machine_blackout (
     subnetwork      TEXT      NOT NULL,
     plant           TEXT      NOT NULL,
-    production_line TEXT,
+    machine         TEXT,
     block_id        TEXT      NOT NULL,
     start_ts        TIMESTAMP NOT NULL,
     end_ts          TIMESTAMP NOT NULL,
@@ -621,17 +659,24 @@ CREATE TABLE IF NOT EXISTS line_blackout (
     PRIMARY KEY (subnetwork, plant, block_id),
     FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
         ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT chk_line_blackout_range CHECK (end_ts > start_ts)
+    CONSTRAINT chk_machine_blackout_range CHECK (end_ts > start_ts)
 );
-CREATE INDEX IF NOT EXISTS idx_line_blackout_plant ON line_blackout(plant);
--- line_key: same generated identity string as production_lines.line_key.
--- production_line is nullable here (NULL = all lines in plant) — '||'
--- propagates NULL automatically, so line_key correctly comes out NULL for
+CREATE INDEX IF NOT EXISTS idx_machine_blackout_plant ON machine_blackout(plant);
+-- machine_key: same generated identity string as machine.machine_key.
+-- machine is nullable here (NULL = all machines in plant) — '||'
+-- propagates NULL automatically, so machine_key correctly comes out NULL for
 -- plant-wide blocks with no special-casing. See master_data.py's
 -- ensure_line_key_columns() for the redeploy-safe path (startup-hook table).
-ALTER TABLE line_blackout ADD COLUMN IF NOT EXISTS line_key TEXT
-    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || production_line) STORED;
-CREATE INDEX IF NOT EXISTS idx_line_blackout_line_key ON line_blackout(line_key);
+-- NOTE: unlike machine/machine_calendar, this index is deliberately NOT unique
+-- (kept as the original non-unique index, just renamed) — machine_blackout's
+-- real PK is (subnetwork, plant, block_id), and multiple blackout blocks
+-- legitimately share one machine (or share machine IS NULL for plant-wide
+-- blocks), so a UNIQUE index on machine_key would reject that valid case.
+ALTER TABLE machine_blackout DROP COLUMN IF EXISTS line_key;
+DROP INDEX IF EXISTS idx_line_blackout_line_key;
+ALTER TABLE machine_blackout ADD COLUMN IF NOT EXISTS machine_key TEXT
+    GENERATED ALWAYS AS (subnetwork || '_' || plant || '_' || machine) STORED;
+CREATE INDEX IF NOT EXISTS idx_machine_blackout_machine_key ON machine_blackout(machine_key);
 
 -- Plant-level blackout blocks. block_id is client-supplied (Util.uid 'pblk').
 CREATE TABLE IF NOT EXISTS plant_blackout (
@@ -676,9 +721,9 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants',           'alt_flag_horizon',  'Alert Flag Horizon (days)',  FALSE, 3),
     ('plants',           'conf_score_horizon','Conf Score Horizon (days)', FALSE, 4),
     ('plants',           'timezone',          'Plant Timezone (IANA)',      FALSE, 5),
-    ('production_lines', 'subnetwork',      'Subnetwork',      TRUE,  1),
-    ('production_lines', 'plant',           'Plant',           TRUE,  2),
-    ('production_lines', 'production_line', 'Production Line', TRUE,  3),
+    ('machine',           'subnetwork',      'Subnetwork',      TRUE,  1),
+    ('machine',           'plant',           'Plant',           TRUE,  2),
+    ('machine',           'machine',         'Machine',         TRUE,  3),
     ('materials',        'material_id',                'Material ID',                  TRUE,  1),
     ('materials',        'material_description',       'Material Description',         FALSE, 2),
     ('materials',        'material_type',              'Material Type',                FALSE, 3),
@@ -752,7 +797,7 @@ CREATE INDEX IF NOT EXISTS idx_sap_field_map_object ON sap_field_map(object_key,
 INSERT INTO sap_sync_config (object_key, transport) VALUES
     ('subnetworks',      'file_drop'),
     ('plants',           'file_drop'),
-    ('production_lines', 'file_drop'),
+    ('machine',          'file_drop'),
     ('materials',        'file_drop'),
     ('material_plants',  'file_drop'),
     ('orders',           'file_drop')
@@ -779,7 +824,7 @@ ON CONFLICT (object_key, sap_field) DO NOTHING;
 -- plant_key = _cw_safe_name(plant) (uppercase, non-word chars -> '_'): the same
 -- key used for the on-disk filename stem and the PLANT_CWS cache, so the
 -- collision profile is byte-for-byte unchanged. No FK to plants — like
--- line_calendar, a wheel may exist for an order-derived plant that lags master
+-- machine_calendar, a wheel may exist for an order-derived plant that lags master
 -- data, and wheels are plant-keyed, not subnetwork-scoped. plant_label keeps the
 -- raw plant code as typed (for the /color-wheels listing).
 -- ----------------------------------------------------------------------------
@@ -798,7 +843,7 @@ CREATE TABLE IF NOT EXISTS color_wheel (
 -- SECURITY / RBAC scaffolding — roles, role_plants, user_security
 --
 -- roles + role_plants are generic-CRUD backed via master_data.py (registered
--- in ALLOWED_TABLES), same as subnetworks/plants/production_lines above.
+-- in ALLOWED_TABLES), same as subnetworks/plants/machine above.
 -- user_security is credentials storage — deliberately NEVER registered in
 -- master_data's ALLOWED_TABLES; it is only ever read/written through the
 -- dedicated auth.py functions and the /security/* endpoints in brain.py, not
@@ -912,15 +957,15 @@ INSERT INTO system_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- priority_list: one row per (plant, line-scope, rankable field). Generalizes
--- color_wheel to any field in master_data.RANKABLE_FIELDS. line = '' means
--- plant-wide; a specific production_line value overrides the plant-wide list
--- for that line only (mirrors line_calendar / line_blackout's line: null
+-- priority_list: one row per (plant, machine-scope, rankable field). Generalizes
+-- color_wheel to any field in master_data.RANKABLE_FIELDS. machine = '' means
+-- plant-wide; a specific machine value overrides the plant-wide list
+-- for that machine only (mirrors machine_calendar / machine_blackout's machine: null
 -- convention). entries is {NORMALIZED_VALUE: RANK}, same shape color_wheel
 -- already uses for {COLOR: ORDER_Y}.
 --
--- No FK to plants/production_lines — like color_wheel, a list may exist for
--- an order-derived plant/line that lags master data. value_column/rank_column
+-- No FK to plants/machine — like color_wheel, a list may exist for
+-- an order-derived plant/machine that lags master data. value_column/rank_column
 -- are upload provenance only (which uploaded headers were mapped); they are
 -- never re-parsed from — master_data.RANKABLE_FIELDS is the sole source of
 -- truth for a field's DB source column (N19 in docs/scheduling_priority.md).
@@ -928,7 +973,7 @@ INSERT INTO system_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS priority_list (
     plant         TEXT NOT NULL,
-    line          TEXT NOT NULL DEFAULT '',
+    machine       TEXT NOT NULL DEFAULT '',
     field_key     TEXT NOT NULL,
     entries       JSONB NOT NULL,
     source_column TEXT NOT NULL,
@@ -939,7 +984,7 @@ CREATE TABLE IF NOT EXISTS priority_list (
     uploaded_by   TEXT,
     uploaded_at   TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (plant, line, field_key)
+    PRIMARY KEY (plant, machine, field_key)
 );
 
 -- ----------------------------------------------------------------------------
@@ -950,7 +995,7 @@ CREATE TABLE IF NOT EXISTS priority_list (
 -- this feature); Stage 1 changes what populates it, not its column
 -- definition. production_version sources from material_plants.
 -- default_production_version (the material_plants base table above) — NOT
--- material_plants.default_workcenter, which stays a plain admin-editable
+-- material_plants.default_machine, which stays a plain admin-editable
 -- material_plants column and is deliberately not part of this feature.
 -- production_version is also the eventual PRT_02 join anchor once PRT_02
 -- moves from a single TEXT value to a production-version-keyed table (see
@@ -965,7 +1010,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS production_version TEXT;
 
 -- ----------------------------------------------------------------------------
 -- One-time: copy every existing color_wheel row into priority_list as a
--- plant-wide (line = '') 'colorWheel' entry. Keyed on plant_label (the raw
+-- plant-wide (machine = '') 'colorWheel' entry. Keyed on plant_label (the raw
 -- plant name as typed), NOT plant_key (a _cw_safe_name() slug) — priority_list
 -- is keyed by raw plant name throughout. color_wheel itself is left in place,
 -- unread from here on except by the legacy-compat /color-wheel/* endpoints,
@@ -975,12 +1020,12 @@ DO $mig$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'priority_list_from_color_wheel') THEN
         INSERT INTO priority_list
-            (plant, line, field_key, entries, source_column, value_column, rank_column,
+            (plant, machine, field_key, entries, source_column, value_column, rank_column,
              filename, row_count, uploaded_by, uploaded_at, updated_at)
         SELECT plant_label, '', 'colorWheel', entries, 'color', NULL, NULL,
                filename, row_count, uploaded_by, uploaded_at, updated_at
           FROM color_wheel
-        ON CONFLICT (plant, line, field_key) DO NOTHING;
+        ON CONFLICT (plant, machine, field_key) DO NOTHING;
 
         INSERT INTO schema_migrations (id) VALUES ('priority_list_from_color_wheel');
     END IF;
@@ -997,10 +1042,10 @@ $mig$;
 -- JSON arrays; application validation supplies their field-level semantics.
 
 -- setup_compatible is deliberately distinct from excl_optimizer. A FALSE value
--- prevents only setup-aware optimization for a signature-incompatible line;
+-- prevents only setup-aware optimization for a signature-incompatible machine;
 -- setup data and diagnostics remain visible. The reason preserves that choice.
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatible BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE production_lines ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS setup_compatible BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS setup_compatibility_reason TEXT;
 
 -- One current definition per plant. Increment signature_version whenever the
 -- ordered field signature changes; later writes must use that exact version.
@@ -1009,6 +1054,14 @@ CREATE TABLE IF NOT EXISTS setup_definition (
     fields            JSONB NOT NULL CHECK (jsonb_typeof(fields) = 'array'),
     signature_version INTEGER NOT NULL CHECK (signature_version > 0),
     strict_blanks     BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Workstream D2 (2026-08-20): VESTIGIAL BUT RETAINED. The real "include
+    -- setup times in optimizer" gate is now plants.setup_active (see
+    -- schema.sql's plants block above) — no optimizer/UI gate reads this
+    -- column any more. Kept, with its force-reset-to-FALSE-on-signature-bump
+    -- write path (setup_data.save_definition) untouched, because ripping out
+    -- PUT /setup/{plant}/active and every reader was judged higher blast
+    -- radius than leaving one harmless unread column. Do not repurpose this
+    -- for anything new — plants.setup_active is the single source of truth.
     active            BOOLEAN NOT NULL DEFAULT FALSE,
     created_by        TEXT,
     created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -1016,12 +1069,12 @@ CREATE TABLE IF NOT EXISTS setup_definition (
     updated_at        TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- A blank line scope is the plant-wide value; a nonblank line is a sparse
+-- A blank machine scope is the plant-wide value; a nonblank machine is a sparse
 -- override. JSONB participates in the primary key so canonical array order is
 -- significant and duplicate transitions are rejected within each version.
 CREATE TABLE IF NOT EXISTS setup_matrix (
     plant             TEXT NOT NULL,
-    line              TEXT NOT NULL DEFAULT '',
+    machine           TEXT NOT NULL DEFAULT '',
     signature_version INTEGER NOT NULL CHECK (signature_version > 0),
     from_key          JSONB NOT NULL CHECK (jsonb_typeof(from_key) = 'array'),
     to_key            JSONB NOT NULL CHECK (jsonb_typeof(to_key) = 'array'),
@@ -1033,15 +1086,15 @@ CREATE TABLE IF NOT EXISTS setup_matrix (
     created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_by        TEXT,
     updated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (plant, line, signature_version, from_key, to_key)
+    PRIMARY KEY (plant, machine, signature_version, from_key, to_key)
 );
-CREATE INDEX IF NOT EXISTS idx_setup_matrix_plant_line_version
-    ON setup_matrix (plant, line, signature_version);
+CREATE INDEX IF NOT EXISTS idx_setup_matrix_plant_machine_version
+    ON setup_matrix (plant, machine, signature_version);
 
--- The most recently accepted physical setup state for each plant/line.
-CREATE TABLE IF NOT EXISTS line_setup_state (
+-- The most recently accepted physical setup state for each plant/machine.
+CREATE TABLE IF NOT EXISTS machine_setup_state (
     plant             TEXT NOT NULL,
-    line              TEXT NOT NULL,
+    machine           TEXT NOT NULL,
     state_key         JSONB NOT NULL CHECK (jsonb_typeof(state_key) = 'array'),
     signature_version INTEGER NOT NULL CHECK (signature_version > 0),
     physical_mold_id  TEXT,
@@ -1052,7 +1105,7 @@ CREATE TABLE IF NOT EXISTS line_setup_state (
     created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_by        TEXT,
     updated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (plant, line)
+    PRIMARY KEY (plant, machine)
 );
 
 -- An override represents remaining physical setup work for one exact observed
@@ -1060,7 +1113,7 @@ CREATE TABLE IF NOT EXISTS line_setup_state (
 CREATE TABLE IF NOT EXISTS setup_occurrence_override (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     plant                TEXT NOT NULL,
-    line                 TEXT NOT NULL,
+    machine              TEXT NOT NULL,
     signature_version    INTEGER NOT NULL CHECK (signature_version > 0),
     -- NULL is the explicit initial-state predecessor; an omitted API key is
     -- rejected before this column is reached.
@@ -1083,13 +1136,13 @@ ALTER TABLE setup_occurrence_override
 DROP INDEX IF EXISTS uq_setup_occurrence_override_active_adjacency;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_setup_occurrence_override_active_adjacency
     ON setup_occurrence_override (
-        plant, line, signature_version, predecessor_order_id, successor_order_id,
+        plant, machine, signature_version, predecessor_order_id, successor_order_id,
         predecessor_state_key, successor_state_key
     )
     NULLS NOT DISTINCT
     WHERE status = 'active';
-CREATE INDEX IF NOT EXISTS idx_setup_occurrence_override_plant_line
-    ON setup_occurrence_override (plant, line, signature_version);
+CREATE INDEX IF NOT EXISTS idx_setup_occurrence_override_plant_machine
+    ON setup_occurrence_override (plant, machine, signature_version);
 
 -- Occurrence overrides represent remaining physical work, which need not fit
 -- the setup-matrix seven-day standard cap. Existing Stage 0 databases may

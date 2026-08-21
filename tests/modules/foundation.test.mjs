@@ -120,9 +120,9 @@ test('Util.countChangeovers counts on the resolved field set, not a hardcoded CO
   // Same COLOR and FORM_SIZE throughout, differing only in PRT_01: the old
   // implementation reported 0 for this line no matter what the plant sequences on.
   const tasks = [
-    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'DOG' },
-    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
-    { id: 'c', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+    { id: 'a', MACHINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', MACHINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+    { id: 'c', MACHINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: 'CAT' },
   ];
   Util.setChangeoverFieldsResolver(null);
   assert.equal(Util.countChangeovers(tasks), 0, 'baseline: invisible to a COLOR/FORM_SIZE-only count');
@@ -135,21 +135,21 @@ test('Util.countChangeovers: ANY differing active field is ONE changeover, and b
   Util.setChangeoverFieldsResolver(() => ['COLOR', 'PRT_01', 'FORM_SIZE']);
   // Both COLOR and PRT_01 change between a and b — one physical changeover, not two.
   assert.equal(Util.countChangeovers([
-    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
-    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+    { id: 'a', MACHINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', MACHINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
   ]), 1);
   // Absent vs null vs '' must all read as the same blank (the `|| ''` coercion the
   // hardcoded comparison used), or every order missing a value would look like a
   // changeover on a plant that has not populated that field yet.
   assert.equal(Util.countChangeovers([
-    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD' },
-    { id: 'b', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: null },
-    { id: 'c', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: '' },
+    { id: 'a', MACHINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED', FORM_SIZE: 'MD' },
+    { id: 'b', MACHINE: 'L1', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: null },
+    { id: 'c', MACHINE: 'L1', start_date: new Date('2026-08-11T10:00:00'), COLOR: 'RED', FORM_SIZE: 'MD', PRT_01: '' },
   ]), 0);
   // Lines are counted independently (regression guard on the existing grouping).
   assert.equal(Util.countChangeovers([
-    { id: 'a', PRODUCTION_LINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
-    { id: 'b', PRODUCTION_LINE: 'L2', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
+    { id: 'a', MACHINE: 'L1', start_date: new Date('2026-08-11T06:00:00'), COLOR: 'RED',  FORM_SIZE: 'MD', PRT_01: 'DOG' },
+    { id: 'b', MACHINE: 'L2', start_date: new Date('2026-08-11T08:00:00'), COLOR: 'BLUE', FORM_SIZE: 'MD', PRT_01: 'CAT' },
   ]), 0, 'adjacency is per line, so two orders on different lines are never a changeover');
   Util.setChangeoverFieldsResolver(null); // reset
 });
