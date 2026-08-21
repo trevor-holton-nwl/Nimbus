@@ -65,6 +65,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" to {{date}}',
   'toast.cannot_fix_task':             'Cannot fix: task not found',
+  'toast.commit_failed':               'Could not commit the order to the requested start.',
   'toast.save_rejected':               'Save rejected: {{msg}}',
   'toast.saved_locally':               'Saved locally (backend unreachable)',
   'toast.saved_to_backend':            'Saved to backend',

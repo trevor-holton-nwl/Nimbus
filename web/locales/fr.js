@@ -65,6 +65,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',
+  'toast.commit_failed':               'Impossible de valider la commande au démarrage demandé.',
   'toast.save_rejected':               'Sauvegarde refusée : {{msg}}',
   'toast.saved_locally':               'Enregistré localement (serveur inaccessible)',
   'toast.saved_to_backend':            'Enregistré sur le serveur',

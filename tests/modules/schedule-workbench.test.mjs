@@ -950,6 +950,102 @@ test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=
   }
 });
 
+test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s existing >=2 scheduleSegments by the GROUP delta too (whole-branch review fix)', () => {
+  // Before this fix, the multi-select branch's companion loop built a plain
+  // {start_date, end_date, MACHINE} object directly -- never consulting
+  // manualSchedulePatchFor -- so a companion that was itself already split
+  // into >=2 scheduleSegments had its PARENT boundaries moved while its
+  // CHILD segments stayed stale at their old absolute positions. The
+  // companion loop now routes every companion through the same
+  // manualSchedulePatchFor the dragged item uses, so this is a real
+  // regression check on the same shift contract Step 6 already pins for
+  // the dragged item, applied to a companion instead.
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+
+  const line = 'MULTI-DRAG-LINE';
+  const anchorId = 'multi-anchor';
+  const companionId = 'multi-companion';
+
+  const anchorStart = new Date('2026-08-20T08:00:00');
+  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
+
+  const seg1Start = new Date('2026-09-01T08:00:00');
+  const seg1End   = new Date('2026-09-01T16:00:00');
+  const seg2Start = new Date('2026-09-02T08:00:00');
+  const seg2End   = new Date('2026-09-02T16:00:00');
+  const seg3Start = new Date('2026-09-03T08:00:00');
+  const seg3End   = new Date('2026-09-03T16:00:00');
+  const companionOriginalSegments = [
+    { sequence: 1, startDate: seg1Start, endDate: seg1End },
+    { sequence: 2, startDate: seg2Start, endDate: seg2End },
+    { sequence: 3, startDate: seg3Start, endDate: seg3End },
+  ];
+
+  Store.setTasks([
+    {
+      id: anchorId, PRODUCTION_ORDER: 'PANCHOR', MATERIAL_NUMBER: 'MANCHOR', MACHINE: line,
+      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+    },
+    {
+      id: companionId, PRODUCTION_ORDER: 'PCOMP', MATERIAL_NUMBER: 'MCOMP', MACHINE: line,
+      plant: '5512', RUN_TIME: 24, start_date: seg1Start, end_date: seg3End,
+      scheduleSegments: companionOriginalSegments,
+    },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+
+  // The anchor (dragged item) is dropped two days later; the companion is
+  // NOT dragged directly -- it must move by the same group delta.
+  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
+
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: droppedAnchorStart, end: droppedAnchorEnd, group: line } : undefined),
+    update: () => {},
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+
+    const updatedAnchor = Store.tasks[anchorId];
+    assert.equal(updatedAnchor.start_date.getTime(), Util.snap(droppedAnchorStart).getTime(),
+      'the dragged anchor commits at the dropped position');
+
+    const updatedCompanion = Store.tasks[companionId];
+    assert.equal(updatedCompanion.scheduleSegments.length, 3,
+      'the companion is NOT collapsed to a single continuous block just because it was dragged as part of a group');
+
+    const deltaMs = Util.snap(droppedAnchorStart).getTime() - anchorStart.getTime();
+    assert.notEqual(deltaMs, 0, 'sanity: the group drag must have actually moved');
+
+    for (let i = 0; i < 3; i++) {
+      const original = companionOriginalSegments[i];
+      const shifted = updatedCompanion.scheduleSegments[i];
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
+        `companion segment ${i + 1} start shifted by exactly the GROUP drag delta, not left stale`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
+        `companion segment ${i + 1} end shifted by exactly the GROUP drag delta, not left stale`);
+      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
+        original.endDate.getTime() - original.startDate.getTime(),
+        `companion segment ${i + 1} duration is unchanged`);
+    }
+    assert.equal(updatedCompanion.start_date.getTime(), updatedCompanion.scheduleSegments[0].startDate.getTime(),
+      'companion parent start_date mirrors its own shifted first segment');
+    assert.equal(updatedCompanion.end_date.getTime(), updatedCompanion.scheduleSegments[2].endDate.getTime(),
+      'companion parent end_date mirrors its own shifted last segment');
+    assert.equal(updatedCompanion.MACHINE, line);
+  } finally {
+    Timeline._items = undefined;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
 test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');

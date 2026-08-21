@@ -6598,30 +6598,47 @@ export const Interaction = {
         // collapsed or re-derived (OD-B1a).
         const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
         if (!draggedPatch?.start_date || !draggedPatch.end_date) {
-          Toast.show('Could not commit the order to the requested start.', 'error');
+          Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
           continue;
         }
         Store.updateTask(id, draggedPatch, 'timeline');
 
-        // Apply the same delta to each companion
+        // Apply the same delta to each companion — routed through
+        // manualSchedulePatchFor (not a hand-rolled {start_date, end_date,
+        // MACHINE} object) so a companion that is itself already split
+        // (>=2 scheduleSegments) has its segments shifted too, instead of
+        // its parent boundaries moving while its child segments go stale at
+        // their old absolute positions. Mirrors the deleted regeneration
+        // branch's own contract: "Companion parents retain the user's
+        // relative drag delta."
         // (skippedFixed stays empty today — selIds above already excludes fixed
         // tasks — but is preserved as-is; not this task's scope to remove.)
         const skippedFixed: string[] = [];
         const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+        let companionFailed = false;
         for (const sid of selIds) {
           const st = Store.tasks[sid];
           if (!st || !st.start_date) continue;
-          const sNewStart = new Date(st.start_date.getTime() + deltaMs);
-          const sNewEnd   = new Date(st.end_date  ? st.end_date.getTime() + deltaMs : sNewStart.getTime() + Util.runHours(st) * Config.MS_HOUR);
           const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
-          companionPatches.push({ id: sid, changes: { start_date: sNewStart, end_date: sNewEnd, MACHINE: sNewLine } });
+          const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
+          const changes = Engine.manualSchedulePatchFor(st, sNewLine, sRequestedStart);
+          if (!changes?.start_date || !changes.end_date) {
+            companionFailed = true;
+            break;
+          }
+          companionPatches.push({ id: sid, changes });
 
           // Update the vis item too
           Timeline._suppressEvents = true;
           try {
-            Timeline._items!.update({ id: sid, start: sNewStart, end: sNewEnd, group: sNewLine });
+            Timeline._items!.update({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
           } finally { Timeline._suppressEvents = false; }
+        }
+        if (companionFailed) {
+          Toast.show(Util.t('toast.commit_failed'), 'error');
+          Timeline._scheduleRebuild();
+          continue;
         }
         if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
         Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
@@ -6642,7 +6659,7 @@ export const Interaction = {
 
       const patch = Engine.manualSchedulePatchFor(t, newLine, newStart);
       if (!patch?.start_date || !patch.end_date) {
-        Toast.show('Could not commit the order to the requested start.', 'error');
+        Toast.show(Util.t('toast.commit_failed'), 'error');
         Timeline._scheduleRebuild();
         continue;
       }

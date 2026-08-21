@@ -65,6 +65,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para {{date}}',
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',
+  'toast.commit_failed':               'Não foi possível confirmar o pedido no início solicitado.',
   'toast.save_rejected':               'Salvamento rejeitado: {{msg}}',
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',
   'toast.saved_to_backend':            'Salvo no servidor',

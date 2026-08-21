@@ -65,6 +65,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben nach {{date}}',
   'toast.cannot_fix_task':             'Fixieren nicht möglich: Aufgabe nicht gefunden',
+  'toast.commit_failed':               'Auftrag konnte nicht zum angeforderten Start übernommen werden.',
   'toast.save_rejected':               'Speichern abgelehnt: {{msg}}',
   'toast.saved_locally':               'Lokal gespeichert (Server nicht erreichbar)',
   'toast.saved_to_backend':            'Auf dem Server gespeichert',

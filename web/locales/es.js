@@ -65,6 +65,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.unscheduled_bulk':            '{{count}} pedidos desplanificados',
   'toast.order_moved':                 'Movido "{{name}}" a {{date}}',
   'toast.cannot_fix_task':             'No se puede fijar: tarea no encontrada',
+  'toast.commit_failed':               'No se pudo confirmar el pedido en el inicio solicitado.',
   'toast.save_rejected':               'Guardado rechazado: {{msg}}',
   'toast.saved_locally':               'Guardado localmente (backend no disponible)',
   'toast.saved_to_backend':            'Guardado en el servidor',
