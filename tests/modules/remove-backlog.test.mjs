@@ -40,6 +40,10 @@ function seed({ tasks = [], hours = allDays(8, 16), lineName = line, splitOrderP
   Store.replaceCalendars({}, 'test');
   Store.replacePlants({}, 'test');
   Store.replaceFixedIds(new Set(), 'test');
+  // C2 (2026-08-20): reset between tests, same as every other piece of Store
+  // state seed() already resets, so a frozen-horizon test never bleeds into
+  // one that doesn't expect it.
+  Store.setFrozenHorizonEnd(null, 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: splitOrderPolicy }],
     lines: [{ machine: lineName, plant }],
@@ -176,6 +180,68 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
   assert.deepEqual(result.diagnostics.invalidRuntimeIds, ['invalid']);
   assert.ok(result.diagnostics.calendarSearchFailures.some((failure) => failure.line === line));
   assert.equal(+patch(result, 'other').changes.start_date, +at('2026-08-12T08:00'));
+});
+
+// ---------------------------------------------------------------------------
+// Workstream C2 (2026-08-20) — plant frozen horizon.
+//
+// removeBacklog's own doc comment says it deliberately has no fixed-
+// protection/day-integrity branches -- C2 is the ONE unconditional exception
+// (no 'backlog'-mode carve-out per the C2 spec's placement-floor
+// requirement). It must NOT restore any of the other intentionally-absent
+// protections: 'Engine uses RUN_TIME and moves a fixed order without
+// clearing its fixed state' above still passes unmodified, proving a
+// genuinely Store.isFixed-pinned order is still moved "when reached".
+// ---------------------------------------------------------------------------
+
+test('Engine.removeBacklog leaves an order starting inside the frozen window exactly in place, unpatched', () => {
+  seed({
+    tasks: [task('frozen-past', '2026-08-12T06:00', 2)],
+  });
+  // "now" (plant-local, America/New_York, per opts()' runAt) is 2026-08-12T08:00.
+  // The frozen window runs through 2026-08-15 -- well past this backlog
+  // item's own (already-past) start, so it must be left untouched instead of
+  // compressed forward the way 'Engine compresses backlogged gaps...' above
+  // proves it otherwise would be.
+  Store.setFrozenHorizonEnd(at('2026-08-15T00:00'), 'test');
+  const result = Engine.removeBacklog(opts());
+  assert.equal(patch(result, 'frozen-past'), undefined,
+    'an order already starting inside the frozen window gets NO patch at all -- not even a floored one');
+});
+
+test('Engine.removeBacklog never places any order to start before the frozen-horizon boundary', () => {
+  const frozenEnd = at('2026-08-14T00:00');
+  seed({
+    tasks: [
+      // Genuinely backlogged AND starts inside the frozen window -- pinned,
+      // but its artificially long runtime (4 days) pushes removeBacklog's
+      // internal obstacle cursor well PAST frozenEnd, so the next task below
+      // still needs genuine de-overlap repositioning against it.
+      task('frozen-obstacle', '2026-08-12T06:00', 96),
+      // Starts AFTER frozenEnd (not itself frozen) but overlaps the
+      // long-running frozen obstacle above -- this one DOES get moved,
+      // proving C2 doesn't disable removeBacklog outright for orders whose
+      // own start is beyond the window.
+      task('beyond-window-overlap', '2026-08-15T09:00', 2),
+    ],
+  });
+  Store.setFrozenHorizonEnd(frozenEnd, 'test');
+  // opts()' default endDate (2026-08-12T23:59) only scopes same-day orders;
+  // both tasks above run well past that, so widen it or scopedTasks would
+  // filter 'beyond-window-overlap' out before removeBacklog ever sees it.
+  const result = Engine.removeBacklog(opts({ endDate: at('2026-08-20T00:00') }));
+
+  assert.equal(patch(result, 'frozen-obstacle'), undefined,
+    'the frozen-window order itself is never patched');
+  const moved = patch(result, 'beyond-window-overlap');
+  assert.ok(moved, 'an order whose OWN start is beyond the frozen window can still be repositioned');
+  assert.ok(moved.changes.start_date.getTime() >= frozenEnd.getTime(),
+    'and wherever it lands, it never starts before the frozen-horizon boundary');
+
+  for (const entry of result.patches) {
+    assert.ok(entry.changes.start_date.getTime() >= frozenEnd.getTime(),
+      `patch for ${entry.id} must never start before the frozen-horizon boundary`);
+  }
 });
 
 test('Engine rejects a missing plant timezone and never mutates schedule', () => {
