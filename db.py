@@ -14,7 +14,9 @@ import io
 import logging
 import os
 import uuid
+from datetime import datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -318,6 +320,80 @@ def _validate_schedule_segments(segments: list[dict], runtime_value) -> tuple[li
         return [], None, None
     return normalized, normalized[0]["start"], normalized[-1]["end"]
 
+
+# ---------------------------------------------------------------------------
+# Workstream C1 (2026-08-20) — plant visibility horizon.
+#
+# How far into the future a planner can see on the Gantt/Orders tab, enforced
+# server-side (docs/multi_change_spec_08.20.26.md, section C1) so the horizon
+# bounds the /tasks payload itself, not just what the frontend chooses to
+# render. compute_visibility_horizon_end is the single, pure, testable piece
+# of clock math; the frontend deliberately carries no copy of it (Step 2) —
+# GET /tasks sends the already-computed instant down in `meta`.
+# ---------------------------------------------------------------------------
+def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
+                                    horizon_roll_hour_utc: int,
+                                    visibility_horizon_days: int | None) -> datetime | None:
+    """Return the plant-local-midnight instant beyond which orders are hidden,
+    or None when the horizon is unlimited (visibility_horizon_days is None).
+
+    anchor_day is "today" in the plant's timezone, advanced one calendar day
+    once `now_utc`'s UTC hour reaches `horizon_roll_hour_utc` — a deliberate
+    once-daily roll, not a minute-by-minute creep (OD-C1c: the plant-local
+    clock and the UTC roll clock are allowed to disagree). The result is a
+    naive datetime: scheduled_start/basic_start_date are already treated as
+    plant-local wall-clock values with no further tz conversion elsewhere in
+    this codebase (same convention as setup_data._plant_local_capture), so
+    this value is directly comparable to those columns with no conversion.
+
+    An unresolvable/missing timezone falls back to treating `now_utc` itself
+    as the local clock (UTC), same fallback setup_data.py already uses for
+    plant-local captures — never raises on bad master data.
+    """
+    if visibility_horizon_days is None:
+        return None
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    try:
+        local_now = now_utc.astimezone(ZoneInfo(timezone_name)) if timezone_name else now_utc
+    except ZoneInfoNotFoundError:
+        local_now = now_utc
+    anchor_day = local_now.date()
+    if now_utc.astimezone(timezone.utc).hour >= int(horizon_roll_hour_utc):
+        anchor_day += timedelta(days=1)
+    horizon_date = anchor_day + timedelta(days=int(visibility_horizon_days))
+    return datetime.combine(horizon_date, dt_time.min)
+
+
+def _visibility_horizon_end_for_plant(cur, plant: str) -> datetime | None:
+    """Look up one plant's C1 config on the caller's own cursor (so
+    query_orders/count_orders spend no extra pool checkout) and resolve it to
+    a concrete bound via compute_visibility_horizon_end. Returns None for an
+    unknown plant or an unlimited (NULL days) horizon — both mean "no bound"."""
+    cur.execute(
+        "SELECT visibility_horizon_days, horizon_roll_hour_utc, timezone "
+        "FROM plants WHERE plant = %s LIMIT 1",
+        (plant,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    visibility_horizon_days, horizon_roll_hour_utc, timezone_name = row
+    return compute_visibility_horizon_end(
+        datetime.now(timezone.utc), timezone_name, horizon_roll_hour_utc, visibility_horizon_days,
+    )
+
+
+def get_visibility_horizon_end(plant: str) -> datetime | None:
+    """Public, own-connection counterpart to _visibility_horizon_end_for_plant —
+    for callers (brain.py's GET /tasks meta) that need the same bound
+    query_orders/count_orders just applied, without duplicating the lookup logic."""
+    if not plant:
+        return None
+    with _pool.connection() as conn, conn.cursor() as cur:
+        return _visibility_horizon_end_for_plant(cur, plant)
+
+
 # Shared projection for the orders read path. Column aliases are the contract the
 # frontend/brain.py rely on; user scheduling overrides take precedence over the
 # SAP-source dates via COALESCE so callers only ever see one start/end per order.
@@ -385,6 +461,16 @@ def query_orders(plant: str | None = None, line: str | None = None,
     All filter values are bound as parameters (no string interpolation).
     Rows are ordered by (machine, effective start) so brain.py's
     per-line link builder sees each line contiguously.
+
+    C1 (2026-08-20): when `plant` is a single plant, the plant's visibility
+    horizon (plants.visibility_horizon_days/horizon_roll_hour_utc) is resolved
+    and applied to the SAME three-way coalesce the endpoint reports as
+    BASIC_START_DATE — gating on start only (OD-C1d) — so a plant with a
+    configured horizon never has to rely on the frontend to hide rows that
+    were never sent. Unscoped (`plant=None`) calls are not horizon-bounded:
+    the horizon is a per-plant setting and every real caller of this path
+    already scopes by plant (the frontend always does; unscoped pulls are the
+    documented coarse tooling guard rail, a different use case).
     """
     sql = _ORDERS_SELECT
     where, params = [], []
@@ -397,16 +483,20 @@ def query_orders(plant: str | None = None, line: str | None = None,
     if allowed_plants is not None:
         where.append('o.plant = ANY(%s)')
         params.append(allowed_plants)
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
-    if limit is not None:
-        sql += " LIMIT %s"
-        params.append(int(limit))
-    if offset:
-        sql += " OFFSET %s"
-        params.append(int(offset))
     with _pool.connection() as conn, conn.cursor() as cur:
+        horizon_end = _visibility_horizon_end_for_plant(cur, plant) if plant else None
+        if horizon_end is not None:
+            where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
+            params.append(horizon_end)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        if offset:
+            sql += " OFFSET %s"
+            params.append(int(offset))
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
@@ -415,8 +505,20 @@ def query_orders(plant: str | None = None, line: str | None = None,
 
 def count_orders(plant: str | None = None, line: str | None = None,
                  allowed_plants: list[str] | None = None) -> int:
-    """Row count for a plant/line scope — for pagination totals / tooling."""
-    sql = "SELECT COUNT(*) FROM orders o"
+    """Row count for a plant/line scope — for pagination totals / tooling.
+
+    Mirrors query_orders' WHERE construction exactly, including the C1
+    visibility-horizon bound (see that function's docstring) — this is the
+    "separate, duplicated WHERE builder" the C1 spec calls out
+    (docs/multi_change_spec_08.20.26.md OD-C1b): historically it counted
+    `orders` alone with no order_schedule_segments LATERAL, so a horizon bound
+    referencing seg.first_start would have silently disagreed with
+    query_orders' filtered set. It now joins the same LATERAL (harmless for a
+    plain COUNT(*) — the subquery's aggregate always returns exactly one row
+    per order, so the join stays one-to-one) so meta.total never lies about
+    what a horizon-bounded, paged /tasks call actually returns.
+    """
+    sql = f"SELECT COUNT(*) FROM orders o {_SCHEDULE_SEGMENTS_LATERAL_SQL}"
     where, params = [], []
     if plant:
         where.append('o.plant = %s')
@@ -427,9 +529,13 @@ def count_orders(plant: str | None = None, line: str | None = None,
     if allowed_plants is not None:
         where.append('o.plant = ANY(%s)')
         params.append(allowed_plants)
-    if where:
-        sql += " WHERE " + " AND ".join(where)
     with _pool.connection() as conn, conn.cursor() as cur:
+        horizon_end = _visibility_horizon_end_for_plant(cur, plant) if plant else None
+        if horizon_end is not None:
+            where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
+            params.append(horizon_end)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         cur.execute(sql, params)
         row = cur.fetchone()
     return int(row[0]) if row else 0

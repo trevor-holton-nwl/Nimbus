@@ -958,6 +958,18 @@ export const Timeline = {
       }
     }
 
+    // C1 (2026-08-20): plant visibility horizon — clamp the vis-timeline `max`
+    // option to the far edge the backend already computed and sent down in
+    // GET /tasks' meta (Store.visibilityHorizonEnd; see schedule-data.mts and
+    // db.compute_visibility_horizon_end). This is an ADDITIONAL bound on top
+    // of the zoomMin/zoomMax options set at init() — those cap how far the
+    // user can zoom OUT, this caps the latest instant they can pan/zoom TO.
+    // Deliberately never touches `min` — only the future edge is bounded
+    // (OD-C1d/e); the past stays exactly as unbounded as it already was.
+    if (Timeline._tl) {
+      Timeline._tl.setOptions({ max: Store.visibilityHorizonEnd });
+    }
+
     // Alert-cell background items — inserted last so they sit on top of the horizon
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
@@ -2162,7 +2174,7 @@ export const Table = {
       ] as TableColDef[],
       onCellValueChanged: Table._onCellChanged,
       onSelectionChanged: Table._onSelectionChanged,
-      isExternalFilterPresent: () => Table._hasChipFilters(),
+      isExternalFilterPresent: () => Table._isExternalFilterActive(),
       doesExternalFilterPass: (node: { data: NimbusTask }) => Table._taskPassesChipFilters(node.data),
       noRowsOverlayComponent: Table._NoRowsOverlay,
       onCellMouseDown: (p: TableCellMouseEvent) => {
@@ -2303,6 +2315,18 @@ export const Table = {
     return f.lines.size > 0 || f.colors.size > 0 || f.status !== null || f.dateKey !== null || f.poMat.size > 0;
   },
 
+  // C1 (2026-08-20): whether AG Grid's external-filter machinery needs to run
+  // at all — user-chosen chip filters OR a configured visibility horizon.
+  // Deliberately separate from _hasChipFilters(), which also drives the
+  // "Clear filters" button/hint (a plant horizon isn't a user-clearable chip,
+  // so it must not make that button appear with nothing to clear) — but
+  // without this OR, isExternalFilterPresent returning false when no CHIP is
+  // active would mean doesExternalFilterPass (the thing that actually hides
+  // beyond-horizon rows) never runs at all.
+  _isExternalFilterActive(): boolean {
+    return Table._hasChipFilters() || Store.visibilityHorizonEnd !== null;
+  },
+
   _taskPassesChipFilters(data: NimbusTask | null): boolean {
     if (!data) return false;
     const f = Table._chipFilters;
@@ -2313,6 +2337,13 @@ export const Table = {
       const dk = data.start_date ? Util.dayKey(data.start_date) : '';
       if (dk !== f.dateKey) return false;
     }
+    // C1 (2026-08-20), OD-C1d/e: gate on start only, hide (not merely block
+    // scrolling to) rows beyond the plant's visibility horizon. Belt-and-
+    // suspenders — db.query_orders already excludes these rows from the
+    // /tasks payload server-side, so this only matters if a cached/stale
+    // payload briefly disagrees; it must never be the ONLY thing hiding them.
+    const horizonEnd = Store.visibilityHorizonEnd;
+    if (horizonEnd && data.start_date && data.start_date.getTime() > horizonEnd.getTime()) return false;
     if (f.status) {
       if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
       if (f.status === 'fixed' && !Store.isFixed(data.id)) return false;

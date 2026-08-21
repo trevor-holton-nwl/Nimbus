@@ -401,6 +401,16 @@ window.__NIMBUS_LOCALES.de = {
   'ui.split_order_opt_overlong':       'Nur von Natur aus zu lange Aufträge teilen',
   'ui.split_order_opt_partial':        'Teilaufträge über Betriebsintervalle hinweg zulassen',
   'ui.split_order_policy_help':        'Erzeugte Segmente sind für Planer sichtbar, bleiben ein logischer Auftrag und sind nie kürzer als 30 Minuten.',
+  'ui.visibility_horizon_title':       'Sichtbarkeitshorizont',
+  'ui.visibility_horizon_help':        'Begrenzt, wie weit Aufträge im Gantt- und Auftragstab in die Zukunft angezeigt werden. Feld für Tage leer lassen für keine Begrenzung. Das Fenster rückt jeweils um einen ganzen Tag vor, nicht minutenweise.',
+  'ui.visibility_horizon_days_label':  'Aufträge anzeigen bis (Tage)',
+  'ui.visibility_horizon_days_none':   'Keine Begrenzung',
+  'ui.visibility_horizon_days_invalid':'Geben Sie eine ganze Anzahl Tage ein, null oder größer.',
+  'ui.horizon_roll_hour_label':        'Vorrückstunde (UTC)',
+  'ui.horizon_roll_hour_help':         'Die UTC-Stunde, zu der das Sichtbarkeitsfenster auf den nächsten Tag vorrückt.',
+  'ui.horizon_roll_hour_invalid':      'Geben Sie eine ganze Stundenzahl von 0 bis 23 ein.',
+  'ui.visibility_horizon_saved':       'Sichtbarkeitshorizont für dieses Werk gespeichert.',
+  'ui.visibility_horizon_failed':      'Sichtbarkeitshorizont konnte nicht gespeichert werden',
 
   // Phase 2 von docs/scheduling_priority.md — Feldbezeichnungen für Prioritätslisten
   // (gemeinsamer Namensraum mit dem Scheduling-Constraints-Baum aus Phase 3, Entscheidung 4).

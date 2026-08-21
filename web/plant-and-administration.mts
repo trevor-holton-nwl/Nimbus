@@ -3217,6 +3217,22 @@ export const Plant = {
           </div>
 
           <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.visibility_horizon_title')}</h3></header>
+            <div class="panel-body split-policy-body">
+              <p class="panel-help-text">${Util.t('ui.visibility_horizon_help')}</p>
+              <label class="split-policy-control" for="sys-visibility-horizon-days">
+                <span>${Util.t('ui.visibility_horizon_days_label')}</span>
+                <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
+              </label>
+              <label class="split-policy-control" for="sys-horizon-roll-hour">
+                <span>${Util.t('ui.horizon_roll_hour_label')}</span>
+                <input type="number" id="sys-horizon-roll-hour" class="form-input" min="0" max="23" step="1" inputmode="numeric" aria-describedby="sys-horizon-roll-hour-help">
+              </label>
+              <p id="sys-horizon-roll-hour-help" class="split-policy-help">${Util.t('ui.horizon_roll_hour_help')}</p>
+            </div>
+          </div>
+
+          <div class="panel">
             <header class="panel-head"><h3>${Util.t('ui.setup_active_panel_title')}</h3></header>
             <div class="panel-body split-policy-body">
               <p class="panel-help-text">${Util.t('ui.setup_active_panel_help')}</p>
@@ -3271,6 +3287,8 @@ export const Plant = {
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
     const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
     const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
+    const visibilityHorizonDaysInp = pane.querySelector('#sys-visibility-horizon-days') as HTMLInputElement;
+    const horizonRollHourInp = pane.querySelector('#sys-horizon-roll-hour') as HTMLInputElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
@@ -3279,6 +3297,10 @@ export const Plant = {
       ? savedSplitPolicy : 'never';
     maxPullForwardInp.value = Number.isInteger(plantRow?.max_pull_forward_days) && (plantRow!.max_pull_forward_days as number) >= 0
       ? String(plantRow!.max_pull_forward_days) : '';
+    visibilityHorizonDaysInp.value = Number.isInteger(plantRow?.visibility_horizon_days) && (plantRow!.visibility_horizon_days as number) >= 0
+      ? String(plantRow!.visibility_horizon_days) : '';
+    horizonRollHourInp.value = Number.isInteger(plantRow?.horizon_roll_hour_utc)
+      ? String(plantRow!.horizon_roll_hour_utc) : '19';
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -3395,6 +3417,60 @@ export const Plant = {
         Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
       } finally { maxPullForwardInp.disabled = false; }
     });
+
+    // C1 (2026-08-20): visibility_horizon_days + horizon_roll_hour_utc are one
+    // setting (see master_data.set_plant_visibility_horizon) saved together —
+    // either input's change handler re-reads and re-validates BOTH fields and
+    // POSTs both, same fetch/toast/revert shape as split-order-policy/
+    // max-pull-forward-days above.
+    async function _saveVisibilityHorizon(): Promise<void> {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const prevDays = Number.isInteger(plantRow.visibility_horizon_days) && (plantRow.visibility_horizon_days as number) >= 0
+        ? plantRow.visibility_horizon_days : null;
+      const prevRollHour = Number.isInteger(plantRow.horizon_roll_hour_utc) ? plantRow.horizon_roll_hour_utc : 19;
+
+      const rawDays = visibilityHorizonDaysInp.value.trim();
+      const nextDays = rawDays === '' ? null : Number(rawDays);
+      if (nextDays !== null && (!Number.isInteger(nextDays) || nextDays < 0)) {
+        visibilityHorizonDaysInp.value = prevDays === null ? '' : String(prevDays);
+        Toast.show(Util.t('ui.visibility_horizon_days_invalid'), 'error');
+        return;
+      }
+      const rawRollHour = horizonRollHourInp.value.trim();
+      const nextRollHour = rawRollHour === '' ? NaN : Number(rawRollHour);
+      if (!Number.isInteger(nextRollHour) || nextRollHour < 0 || nextRollHour > 23) {
+        horizonRollHourInp.value = String(prevRollHour);
+        Toast.show(Util.t('ui.horizon_roll_hour_invalid'), 'error');
+        return;
+      }
+
+      visibilityHorizonDaysInp.disabled = true;
+      horizonRollHourInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/visibility-horizon`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({
+              subnetwork: plantRow.subnetwork,
+              visibility_horizon_days: nextDays,
+              horizon_roll_hour_utc: nextRollHour,
+            }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        plantRow.visibility_horizon_days = nextDays;
+        plantRow.horizon_roll_hour_utc = nextRollHour;
+        Toast.show(Util.t('ui.visibility_horizon_saved'), 'success');
+      } catch (error) {
+        visibilityHorizonDaysInp.value = prevDays === null ? '' : String(prevDays);
+        horizonRollHourInp.value = String(prevRollHour);
+        Toast.show(`${Util.t('ui.visibility_horizon_failed')}: ${(error as Error).message}`, 'error');
+      } finally {
+        visibilityHorizonDaysInp.disabled = false;
+        horizonRollHourInp.disabled = false;
+      }
+    }
+    visibilityHorizonDaysInp.addEventListener('change', _saveVisibilityHorizon);
+    horizonRollHourInp.addEventListener('change', _saveVisibilityHorizon);
 
     // Workstream D2 (2026-08-20): the relocated "Include Setup Times in
     // Optimizer" checkbox. Reuses SetupAdmin.setSetupActive (re-pointed to

@@ -69,6 +69,17 @@ CREATE INDEX IF NOT EXISTS idx_orders_machine_start ON orders(machine, basic_sta
 -- Supersedes idx_orders_machine_start for the /tasks read path when scheduled_start is set.
 CREATE INDEX IF NOT EXISTS idx_orders_machine_eff_start
   ON orders(machine, COALESCE(scheduled_start, basic_start_date));
+-- Workstream C1 (2026-08-20): plant-scoped visibility-horizon bound. Neither
+-- index above leads with `plant`, and this file's expression indexes can only
+-- reference physical `orders` columns — not `seg.first_start`, a
+-- LATERAL-join alias resolved per-query in db.py's _SCHEDULE_SEGMENTS_LATERAL_SQL,
+-- not a column any btree expression index could name. This covers the
+-- two-way-coalesce shape that dominates (orders with no schedule segments);
+-- the segment-bearing minority stays index-assisted via
+-- idx_order_schedule_segments_order_start (order_id-keyed) once the planner
+-- reaches that LATERAL subquery.
+CREATE INDEX IF NOT EXISTS idx_orders_plant_eff_start
+  ON orders(plant, COALESCE(scheduled_start, basic_start_date));
 
 -- Defense-in-depth: reject inverted user-scheduled ranges at the DB layer too
 -- (the app already validates in update_task_dates_bulk). NOT VALID so the
@@ -163,6 +174,35 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_max_pull_forward_days_nonnegative') THEN
     ALTER TABLE plants ADD CONSTRAINT plants_max_pull_forward_days_nonnegative
       CHECK (max_pull_forward_days IS NULL OR max_pull_forward_days >= 0);
+  END IF;
+END $$;
+-- Workstream C1 (2026-08-20): plant-level visibility horizon — how far into the
+-- future a planner can see on the Gantt and Orders tab. NULL days = unlimited
+-- (existing behavior unchanged until an admin opts in), mirroring
+-- max_pull_forward_days' nullable-optional shape above. horizon_roll_hour_utc
+-- is NOT NULL DEFAULT 19 (mirrors setup_active's NOT NULL DEFAULT shape) so
+-- every plant has a well-defined roll instant even before an admin ever visits
+-- the Scheduling Rules panel. Deliberately unregistered (no column_metadata
+-- row), same as split_order_policy/max_pull_forward_days — never appears in
+-- the generic Master Data grid; changed only through the validated
+-- POST /master-data/plants/{plant}/visibility-horizon route. See
+-- docs/multi_change_spec_08.20.26.md's C1 section for the plant-local-midnight-
+-- with-a-UTC-roll-hour design and its three implementation corrections
+-- (three-way coalesce, count_orders' separate WHERE builder, indexing).
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS visibility_horizon_days INTEGER;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS horizon_roll_hour_utc INTEGER NOT NULL DEFAULT 19;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_visibility_horizon_days_nonnegative') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_visibility_horizon_days_nonnegative
+      CHECK (visibility_horizon_days IS NULL OR visibility_horizon_days >= 0);
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_horizon_roll_hour_utc_range') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_horizon_roll_hour_utc_range
+      CHECK (horizon_roll_hour_utc >= 0 AND horizon_roll_hour_utc <= 23);
   END IF;
 END $$;
 -- Changeover Matrix Stage 2 policy sidecar. Kept separate from the priority

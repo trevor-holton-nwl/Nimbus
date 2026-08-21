@@ -317,19 +317,23 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
                 if page_plants:
                     cur.execute(
-                        "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, setup_active "
+                        "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, "
+                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7]) for r in cur.fetchall()}
                     for row in rows:
-                        constraints, policy, max_pull_forward_days, setup_active = cmap.get(
-                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False)
+                        (constraints, policy, max_pull_forward_days, setup_active,
+                         visibility_horizon_days, horizon_roll_hour_utc) = cmap.get(
+                            (row.get('subnetwork'), row.get('plant')), (None, 'never', None, False, None, 19)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
                         row['max_pull_forward_days'] = max_pull_forward_days
                         row['setup_active'] = bool(setup_active)
+                        row['visibility_horizon_days'] = visibility_horizon_days
+                        row['horizon_roll_hour_utc'] = horizon_roll_hour_utc if horizon_roll_hour_utc is not None else 19
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -1008,6 +1012,23 @@ def ensure_plant_max_pull_forward_days_column() -> None:
         conn.commit()
 
 
+def ensure_plant_visibility_horizon_columns() -> None:
+    """Idempotent Workstream C1 (2026-08-20) columns: how far into the future a
+    planner can see on the Gantt/Orders tab. Redeploy-safe counterpart to
+    schema.sql's ALTER TABLE block, following split_order_policy/
+    max_pull_forward_days' dual-provisioning precedent (this repo's
+    schema.sql-vs-boot-hook hazard — see workstream A's completion notes) so a
+    normal boot against a pre-existing DB provisions these columns too, not
+    just a fresh schema.sql apply. Kept out of the grid, same as its siblings."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS visibility_horizon_days INTEGER")
+        cur.execute(
+            "ALTER TABLE plants ADD COLUMN IF NOT EXISTS horizon_roll_hour_utc "
+            "INTEGER NOT NULL DEFAULT 19"
+        )
+        conn.commit()
+
+
 def ensure_plant_setup_active_column() -> None:
     """Idempotent plant-level "include setup times in optimizer" flag
     (Workstream D2, 2026-08-20) — relocated off the per-signature-version
@@ -1218,6 +1239,47 @@ def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | No
         )
         conn.commit()
     return {"status": "ok", "plant": plant, "max_pull_forward_days": value}
+
+
+def set_plant_visibility_horizon(subnetwork: str, plant: str, visibility_horizon_days: int | None,
+                                 horizon_roll_hour_utc: int, user_email: str | None = None) -> dict:
+    """Persist the plant's C1 visibility-horizon setting: a nullable
+    whole-calendar-day window (NULL = unlimited) plus the UTC hour at which
+    that window rolls forward a day. Both fields are saved together — they
+    describe one setting, not two independent ones."""
+    if not plant:
+        raise ValueError("plant is required")
+    if visibility_horizon_days is not None and (
+        isinstance(visibility_horizon_days, bool) or not isinstance(visibility_horizon_days, int)
+        or visibility_horizon_days < 0
+    ):
+        raise ValueError("visibility_horizon_days must be a non-negative integer or null")
+    if (isinstance(horizon_roll_hour_utc, bool) or not isinstance(horizon_roll_hour_utc, int)
+            or horizon_roll_hour_utc < 0 or horizon_roll_hour_utc > 23):
+        raise ValueError("horizon_roll_hour_utc must be an integer between 0 and 23")
+
+    params: list = [visibility_horizon_days, horizon_roll_hour_utc, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET visibility_horizon_days = %s, horizon_roll_hour_utc = %s, "
+            f"updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_visibility_horizon', %s, %s)",
+            (Jsonb({"plant": plant, "visibility_horizon_days": visibility_horizon_days,
+                    "horizon_roll_hour_utc": horizon_roll_hour_utc}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "visibility_horizon_days": visibility_horizon_days,
+            "horizon_roll_hour_utc": horizon_roll_hour_utc}
 
 
 def set_plant_setup_active(plant: str, active: bool, subnetwork: str | None = None,

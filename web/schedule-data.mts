@@ -301,6 +301,7 @@ export const Persistence = {
       ErrorLog.info('persistence', 'No plant selected — skipping /tasks; loading master data for the picker');
       stats.source = 'backend';
       Store.setTasks([], 'persistence');
+      Store.setVisibilityHorizonEnd(null, 'persistence');
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
       return Promise.all([
@@ -333,6 +334,13 @@ export const Persistence = {
         stats.color_merge_misses = (payload?.meta?.color_merge_misses as number | undefined) ?? 0;
         stats.missed_colors = (payload?.meta?.missed_colors as string[] | undefined) ?? [];
         stats.pre_color_merge_count = (payload?.meta?.pre_color_merge_count as number | undefined) ?? 0;
+        // C1 (2026-08-20): the backend already computed the plant's visibility-
+        // horizon end instant (or null if unlimited) — store it as-is rather than
+        // recomputing the plant-local-midnight/roll-hour clock math client-side.
+        // Timeline.rebuild (Gantt `max` clamp) and Table's chip filter both read
+        // Store.visibilityHorizonEnd.
+        const horizonEndIso = (payload?.meta?.visibility_horizon_end as string | null | undefined) ?? null;
+        Store.setVisibilityHorizonEnd(horizonEndIso ? new Date(horizonEndIso) : null, 'persistence');
         ErrorLog.info('persistence',
           `Backend returned ${stats.raw_received} rows`,
           { meta: stats.backend_meta });

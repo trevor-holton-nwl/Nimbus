@@ -197,6 +197,7 @@ async def lifespan(app: FastAPI):
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_max_pull_forward_days_column()
+    md.ensure_plant_visibility_horizon_columns()
     md.ensure_plant_setup_active_column()
     md.ensure_work_hours_columns()
     md.ensure_machine_calendar_table()
@@ -567,6 +568,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/plants/{plant}/max-pull-forward-days": "plant.max_pull_forward_days_update",
+    "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/system-settings": "system_settings.update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
@@ -1453,6 +1455,12 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
             if line_plants and not (set(line_plants) & set(allowed_plants)):
                 raise HTTPException(status_code=403, detail=f"Machine {machine!r} is not on any of your assigned plants")
     df = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    # C1 (2026-08-20): the same bound query_orders/count_orders just applied
+    # internally (plant-scoped only — see their docstrings), resolved once
+    # more here purely to report it. Sent down rather than have the frontend
+    # keep its own copy of the plant-local-midnight/roll-hour clock math
+    # (Step 2) — Timeline.rebuild reads this to clamp the Gantt's far edge.
+    visibility_horizon_end = db.get_visibility_horizon_end(plant) if plant else None
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,
@@ -1461,7 +1469,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                       "emitted_task_count": 0, "color_merge_ms": 0,
                       "total": (db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else 0),
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
-                      "source_file": "postgres://nimbus/orders"}
+                      "source_file": "postgres://nimbus/orders",
+                      "visibility_horizon_end": visibility_horizon_end.isoformat() if visibility_horizon_end else None}
         return {"data": [], "links": [], "meta": empty_meta}
 
     # Drop rows with no usable start date (query can't enforce this without
@@ -1538,6 +1547,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["raw_row_count"] = pre_merge_count
     meta["unique_id_count"] = len(data)
     meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
+    meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -3099,6 +3109,26 @@ def md_set_plant_max_pull_forward_days(plant: str, request: Request, body: dict 
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             value=body.get("max_pull_forward_days"),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@api.post("/master-data/plants/{plant}/visibility-horizon", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_visibility_horizon(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist the C1 plant visibility-horizon setting (how far into the future
+    a planner can see on the Gantt/Orders tab).
+
+    Payload: { subnetwork?, visibility_horizon_days: int|null, horizon_roll_hour_utc: int }.
+    Both fields are saved together — see master_data.set_plant_visibility_horizon.
+    """
+    try:
+        return md.set_plant_visibility_horizon(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            visibility_horizon_days=body.get("visibility_horizon_days"),
+            horizon_roll_hour_utc=body.get("horizon_roll_hour_utc"),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

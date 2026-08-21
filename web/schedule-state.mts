@@ -63,6 +63,14 @@ interface StoreState {
    *  web/order-field-catalog.mjs. Keyed by catalog `key`; absent keys fall
    *  back to the catalog's gridDefault/inspectorDefault. */
   orderFieldVisibility: Record<string, { grid?: boolean; inspector?: boolean }>;
+  /** C1 (2026-08-20): the currently-selected plant's visibility-horizon end
+   *  instant, as computed server-side and echoed in GET /tasks' `meta.
+   *  visibility_horizon_end` — null when unlimited or before any load. Set on
+   *  every successful /tasks load (schedule-data.mts) so Timeline.rebuild's
+   *  Gantt `max` clamp and Table's Orders-grid filter both read the SAME
+   *  already-computed instant instead of each carrying their own copy of the
+   *  plant-local-midnight/roll-hour clock math the backend already did. */
+  visibilityHorizonEnd: Date | null;
 }
 
 interface SelectionEmitPayload {
@@ -122,7 +130,8 @@ export const Store = {
     setupSnapshot: null,
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {},
-    orderFieldVisibility: {}
+    orderFieldVisibility: {},
+    visibilityHorizonEnd: null
   } as StoreState,
   _listeners: new Set<((event: StoreEvent) => void) & { _pmLabel?: string }>(),
   // Lazily populated by alertsByTask() below — declared here (not left to first
@@ -164,6 +173,7 @@ export const Store = {
   get setupSnapshot(): SetupSnapshot | null { return this._state.setupSnapshot; },
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
   get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
+  get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
 
   isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
 
@@ -219,6 +229,18 @@ export const Store = {
    *  the other setters, exactly as in `setLastOptimize`. */
   setPriorityRankMaps(maps: PriorityRankMaps, _source?: string): void {
     this._state.priorityRankMaps = maps || {};
+  },
+
+  /** Replace the C1 visibility-horizon end instant for whichever plant just
+   *  loaded (schedule-data.mts's Persistence.load, from GET /tasks' `meta.
+   *  visibility_horizon_end`). No `emit()` — same reasoning as
+   *  setPriorityRankMaps above: this always changes alongside a tasks load,
+   *  which already triggers its own 'schedule:hydrated' event and the
+   *  Timeline.rebuild()/Table refresh that reads this value, so a second
+   *  event here would be redundant, not additive. `_source` is accepted only
+   *  for signature symmetry with the other setters. */
+  setVisibilityHorizonEnd(end: Date | null, _source?: string): void {
+    this._state.visibilityHorizonEnd = end;
   },
 
   /** Replace the one active plant's read-only setup snapshot. Unlike priority

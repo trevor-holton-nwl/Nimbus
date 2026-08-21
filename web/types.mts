@@ -246,6 +246,17 @@ export interface NimbusMasterPlant {
   /** IANA zone, e.g. "America/Chicago". May be absent or invalid — all readers
    *  must go through Util.plantNowParts's try/catch, never Intl directly. */
   timezone?: string | null;
+  /** C1 (2026-08-20): nullable whole calendar days a planner can see into the
+   *  future on the Gantt/Orders tab; null = unlimited. Server-enforced (GET
+   *  /tasks bounds the payload itself) — this field only backs the
+   *  Scheduling Rules panel's editable input, never a client-side filter by
+   *  itself (see Store.visibilityHorizonEnd, computed server-side and sent
+   *  down per-request instead of duplicating this plus a "now" into a client
+   *  copy of the same clock math). */
+  visibility_horizon_days?: number | null;
+  /** UTC hour (0-23) at which the visibility window rolls forward a day;
+   *  schema.sql: NOT NULL DEFAULT 19. */
+  horizon_roll_hour_utc?: number;
 }
 
 export interface NimbusMasterData {

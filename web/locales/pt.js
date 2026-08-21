@@ -401,6 +401,16 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.split_order_opt_overlong':       'Dividir apenas pedidos inerentemente longos demais',
   'ui.split_order_opt_partial':        'Permitir pedidos parciais entre intervalos operacionais',
   'ui.split_order_policy_help':        'Os segmentos gerados são visíveis ao planejador, permanecem um único pedido lógico e nunca são mais curtos que 30 minutos.',
+  'ui.visibility_horizon_title':       'Horizonte de visibilidade',
+  'ui.visibility_horizon_help':        'Limita até quando no futuro os pedidos aparecem nas abas Gantt e Pedidos. Deixe o campo de dias em branco para nenhum limite. A janela avança um dia inteiro por vez, não minuto a minuto.',
+  'ui.visibility_horizon_days_label':  'Mostrar pedidos até (dias)',
+  'ui.visibility_horizon_days_none':   'Sem limite',
+  'ui.visibility_horizon_days_invalid':'Informe um número inteiro de dias, zero ou maior.',
+  'ui.horizon_roll_hour_label':        'Hora de avanço (UTC)',
+  'ui.horizon_roll_hour_help':         'A hora UTC em que a janela de visibilidade avança para o dia seguinte.',
+  'ui.horizon_roll_hour_invalid':      'Informe um número inteiro de horas, de 0 a 23.',
+  'ui.visibility_horizon_saved':       'Horizonte de visibilidade salvo para esta planta.',
+  'ui.visibility_horizon_failed':      'Não foi possível salvar o horizonte de visibilidade',
 
   // Fase 2 de docs/scheduling_priority.md — rótulos de campo para listas de prioridades
   // (namespace compartilhado com a árvore de Restrições de Programação da Fase 3, Decisão 4).

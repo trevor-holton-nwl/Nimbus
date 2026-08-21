@@ -553,6 +553,16 @@ window.__NIMBUS_LOCALES.en = {
   'ui.max_pull_forward_invalid':       'Enter a whole number of days, zero or greater.',
   'ui.max_pull_forward_saved':         'Maximum pull-forward saved for this plant.',
   'ui.max_pull_forward_failed':        'Could not save maximum pull-forward',
+  'ui.visibility_horizon_title':       'Visibility Horizon',
+  'ui.visibility_horizon_help':        'Limits how far into the future orders appear on the Gantt and Orders tab. Leave the days field blank for no limit. The window advances a whole day at a time, not minute by minute.',
+  'ui.visibility_horizon_days_label':  'Show orders up to (days)',
+  'ui.visibility_horizon_days_none':   'No limit',
+  'ui.visibility_horizon_days_invalid':'Enter a whole number of days, zero or greater.',
+  'ui.horizon_roll_hour_label':        'Roll-forward hour (UTC)',
+  'ui.horizon_roll_hour_help':         'The UTC hour at which the visibility window advances to the next day.',
+  'ui.horizon_roll_hour_invalid':      'Enter a whole number of hours, 0 through 23.',
+  'ui.visibility_horizon_saved':       'Visibility horizon saved for this plant.',
+  'ui.visibility_horizon_failed':      'Could not save visibility horizon',
 
   // Stage 2 of docs/scheduling_priority.md — priority-list field labels
   // (shared namespace with Stage 3's Scheduling Constraints tree, Decision 4).

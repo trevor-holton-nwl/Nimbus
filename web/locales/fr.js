@@ -401,6 +401,16 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.split_order_opt_overlong':       'Diviser uniquement les ordres intrinsèquement trop longs',
   'ui.split_order_opt_partial':        'Autoriser les ordres partiels entre intervalles d\'exploitation',
   'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que 30 minutes.',
+  'ui.visibility_horizon_title':       'Horizon de visibilité',
+  'ui.visibility_horizon_help':        'Limite jusqu\'où dans le futur les ordres apparaissent dans les onglets Gantt et Ordres. Laissez le champ des jours vide pour aucune limite. La fenêtre avance d\'une journée entière à la fois, pas minute par minute.',
+  'ui.visibility_horizon_days_label':  'Afficher les ordres jusqu\'à (jours)',
+  'ui.visibility_horizon_days_none':   'Aucune limite',
+  'ui.visibility_horizon_days_invalid':'Saisissez un nombre entier de jours, zéro ou plus.',
+  'ui.horizon_roll_hour_label':        'Heure d\'avancement (UTC)',
+  'ui.horizon_roll_hour_help':         'L\'heure UTC à laquelle la fenêtre de visibilité avance au jour suivant.',
+  'ui.horizon_roll_hour_invalid':      'Saisissez un nombre entier d\'heures, de 0 à 23.',
+  'ui.visibility_horizon_saved':       'Horizon de visibilité enregistré pour cette usine.',
+  'ui.visibility_horizon_failed':      'Impossible d\'enregistrer l\'horizon de visibilité',
 
   // Phase 2 de docs/scheduling_priority.md — libellés de champs pour les listes de priorités
   // (espace de noms partagé avec l'arborescence des Contraintes de Planification de la Phase 3, Décision 4).
