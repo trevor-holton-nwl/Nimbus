@@ -374,10 +374,20 @@ test('changeover advances to a future order pull-forward floor instead of stalli
     Store.setSelectedPlant('PULL', 'child-test');
     Store.replaceCalendars({ L1: { workHours: hours } }, 'child-test');
     Store.replacePlants({ PULL: { workHours: hours } }, 'child-test');
+    // B3a (2026-08-21): 'changeover' now always routes through the
+    // setup-aware evaluator (real snapshot or a synthetic zero-cost one).
+    // That evaluator preserves an order that is ALREADY scheduled (real
+    // start_date/end_date) as its line's "current first order" anchor when
+    // no persisted machine setup state exists (setup-domain.mts's
+    // initialScheduledAnchor) -- deliberately never rewriting a physical
+    // predecessor. Leaving start_date/end_date null (as a freshly-created
+    // order would be) keeps this order a genuinely free candidate, so the
+    // pull-forward floor this test targets is still the thing that decides
+    // its placement, not the anchor-preservation rule.
     Store.setTasks([{
       id: 'future-order', PLANT: 'PULL', MACHINE: 'L1', RUN_TIME: 2,
       original_end_date: new Date('2035-08-17T18:00:00'),
-      start_date: new Date('2035-08-17T16:00:00'), end_date: new Date('2035-08-17T18:00:00'),
+      start_date: null, end_date: null,
     }], 'child-test');
     const result = Engine.evaluateSchedule('changeover', {
       plant: 'PULL', startDate: now, endDate: new Date('2035-08-31T18:00:00'), now,
@@ -398,7 +408,21 @@ test('changeover advances to a future order pull-forward floor instead of stalli
   assert.deepEqual(JSON.parse(run.stdout.trim()), { year: 2035, month: 7, date: 10, hour: 8 });
 });
 
-test('changeover never uses the force-placement escape hatch before a long pull-forward floor', () => {
+test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, never silent) instead of using the retired legacy force-placement escape hatch', () => {
+  // B3a (2026-08-21): this test used to pin the LEGACY day-integrity
+  // dispatcher's FORCE_PLACE_AFTER_DAYS escape hatch (Engine.
+  // _dispatchDayIntegrity, deleted by this task) -- a mechanism that, after
+  // 90 consecutive empty calendar days, force-placed an order by bypassing
+  // fitsAt() entirely, i.e. placing it into a calendar slot that violates
+  // the calendar. 'changeover' now always routes through the setup-aware
+  // evaluator (setup-scheduler.mjs), which has no equivalent: a line whose
+  // calendar is closed EVERY day, forever, is never a valid placement
+  // target, so the order is correctly left unplaced (no patch) rather than
+  // forced into an impossible slot -- and that fact is surfaced via
+  // explanation/missingEdges (and, at the live runAndApply layer, the
+  // "orders left in place" toast for a real/active plant), never silently
+  // dropped. This is arguably safer than the old escape hatch, not merely
+  // "different" -- it never violates the calendar it was told to respect.
   const child = String.raw`
     import { createRequire } from 'node:module';
     const require = createRequire(import.meta.url);
@@ -419,18 +443,21 @@ test('changeover never uses the force-placement escape hatch before a long pull-
     Store.setTasks([{
       id: 'long-wait-order', PLANT: 'PULL', MACHINE: 'L1', RUN_TIME: 2,
       original_end_date: new Date('2036-02-22T18:00:00'),
-      start_date: new Date('2036-02-22T16:00:00'), end_date: new Date('2036-02-22T18:00:00'),
+      start_date: null, end_date: null,
     }, {
       id: 'undated-order', PLANT: 'PULL', MACHINE: 'L1', RUN_TIME: 2,
       original_end_date: null,
-      start_date: new Date('2036-02-22T12:00:00'), end_date: new Date('2036-02-22T14:00:00'),
+      start_date: null, end_date: null,
     }], 'child-test');
     const result = Engine.evaluateSchedule('changeover', {
       plant: 'PULL', startDate: now, endDate: new Date('2036-04-01T18:00:00'), now,
       respectFixed: true, respectCalendar: true,
     }, snapshotSchedule());
     const patch = result.patches.find(candidate => candidate.id === 'long-wait-order');
-    console.log(JSON.stringify({ start: patch?.changes.start_date?.getTime() }));
+    console.log(JSON.stringify({
+      hasPatch: !!patch,
+      surfaced: result.missingEdges.length > 0 || result.explanation.some(e => e.taskId === 'long-wait-order'),
+    }));
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
@@ -439,9 +466,10 @@ test('changeover never uses the force-placement escape hatch before a long pull-
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
   const output = JSON.parse(run.stdout.trim());
-  assert.ok(Number.isFinite(output.start), 'the escape hatch must eventually produce a placement');
-  assert.ok(output.start >= new Date('2035-11-14T00:00:00').getTime(),
-    'a 100-day limit must not be bypassed by the 90-day force-placement guard');
+  assert.equal(output.hasPatch, false,
+    'a permanently closed calendar must never be violated by a forced placement');
+  assert.equal(output.surfaced, true,
+    'leaving the order unplaced must be surfaced in the result, never a silent drop');
 });
 
 test('Calendar exposes capacity-math methods only (no render/openBlockModal/DOM)', () => {
@@ -2043,8 +2071,17 @@ test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegment
 test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup-aware run', () => {
   // F8: lastSetupAwareResult must mirror lastBacklogResult's clear-then-set
   // lifecycle — a later run that does NOT go through the setup-aware branch
-  // (no active setup definition for the run's plant) must not leave a stale
-  // result from an earlier setup-aware run lying around.
+  // must not leave a stale result from an earlier setup-aware run lying
+  // around.
+  //
+  // B3a (2026-08-21): 'changeover' no longer has a non-setup-aware path at
+  // all — it ALWAYS routes through evaluateSetupAware now (via the real
+  // active-and-matching snapshot, or Engine._syntheticZeroCostSetupSnapshot
+  // otherwise), so it can no longer exercise "a later run that does NOT go
+  // through the setup-aware branch." 'spt' is the one mode B3a left
+  // untouched: it still only takes the setup-aware branch when the plant's
+  // real Store.setupSnapshot is genuinely active-and-matching, so it remains
+  // the correct probe for this invariant.
   const plant = 'SETUP-STALE-PLANT';
   const line = 'SETUP-STALE-LINE';
   const priorPlant = Store.selectedPlant;
@@ -2053,14 +2090,14 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
 
   Store.setSelectedPlant(plant, 'unit-test');
   // No Store.replaceSetupSnapshot call: this plant has no active setup
-  // definition, so runAndApply takes the legacy (non-setup-aware) path.
+  // definition, so runAndApply('spt', ...) takes the legacy (non-setup-aware) path.
   Store.setTasks([
     { id: 'stale-check-a', PLANT: plant, MACHINE: line, RUN_TIME: '1' },
   ], 'unit-test');
   Engine.lastSetupAwareResult = { patches: [], score: [], explanation: [], diagnostics: {}, unchangedLines: [], missingEdges: [] };
 
   try {
-    Engine.runAndApply('changeover', { plant, respectFixed: true, respectCalendar: false });
+    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: false });
     assert.equal(Engine.lastSetupAwareResult, null, 'a later non-setup-aware run clears the stale result, not just leaves it');
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
