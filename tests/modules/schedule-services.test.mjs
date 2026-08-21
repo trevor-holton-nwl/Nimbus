@@ -2044,3 +2044,42 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
     Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
+
+test('Alerts.applyFix still calls Engine.autoReflow for overlap and blackout alerts (Task 3: B2)', () => {
+  // Task 3: B2 deleted manual-edit autoReflow calls but kept Alerts.applyFix's.
+  // This verifies Engine.autoReflow is still called from applyFix for overlap/blackout types.
+  const line = 'REFLOW-TEST-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAutoReflow = Engine.autoReflow;
+
+  let autoReflowCallCount = 0;
+  Engine.autoReflow = (id) => {
+    autoReflowCallCount++;
+    return priorAutoReflow.call(Engine, id);
+  };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'overlap-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+
+  try {
+    // Simulate an overlap alert and apply the fix
+    Alerts._recomputeSync();
+    const overlapAlert = Store.alerts.find(a => a.type === 'overlap');
+    assert.ok(overlapAlert, 'an overlap alert must be present');
+    const callCountBefore = autoReflowCallCount;
+    Alerts.applyFix(overlapAlert.id);
+    assert.ok(autoReflowCallCount > callCountBefore,
+      'Engine.autoReflow must be called inside applyFix for overlap alerts (Task 3: B2 kept this call)');
+  } finally {
+    Engine.autoReflow = priorAutoReflow;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});

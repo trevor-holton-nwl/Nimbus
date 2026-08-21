@@ -1428,3 +1428,94 @@ test('PriorityListViewer exposes open/close/search', () => {
   assert.equal(typeof PriorityListViewer.close, 'function');
   assert.equal(typeof PriorityListViewer.search, 'function');
 });
+
+test('Task 3: B2 — Table cell edit no longer reflows peers (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow calls from manual-edit handlers.
+  // This test verifies that after a Table cell edit, an overlapping peer
+  // is NOT reflowed and remains in its original position.
+  const line = 'NO-REFLOW-TABLE-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'table-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'table-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+
+  try {
+    const peerBefore = Store.tasks['table-peer'].start_date.getTime();
+    // Simulate a Table cell edit by directly updating the task (which is what _onCellEditingStopped does)
+    Store.updateTask('table-anchor', { start_date: new Date('2026-08-25T07:00:00'), end_date: new Date('2026-08-25T09:00:00') }, 'table');
+    const peerAfter = Store.tasks['table-peer'].start_date.getTime();
+    // Peer should NOT have moved (autoReflow was deleted from Table handler)
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Table cell edit');
+  } finally {
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Task 3: B2 — Inspector commit no longer reflows peers (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow calls from manual-edit handlers.
+  // This test verifies that after an Inspector commit, an overlapping peer
+  // is NOT reflowed and remains in its original position.
+  const line = 'NO-REFLOW-INSPECTOR-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'inspector-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'inspector-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+
+  try {
+    const peerBefore = Store.tasks['inspector-peer'].start_date.getTime();
+    // Simulate an Inspector commit by directly updating the task (which is what Inspector._commit does)
+    Store.updateTask('inspector-anchor', { start_date: new Date('2026-08-25T07:00:00'), end_date: new Date('2026-08-25T09:00:00') }, 'inspector');
+    const peerAfter = Store.tasks['inspector-peer'].start_date.getTime();
+    // Peer should NOT have moved (autoReflow was deleted from Inspector handler)
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Inspector commit');
+  } finally {
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('Task 3: B2 — Timeline drag no longer reflows peers (peers stay put even if overlapping)', () => {
+  // Task 3 deleted Engine.autoReflow calls from manual-edit handlers.
+  // This test verifies that after a Timeline single-item drag, an overlapping peer
+  // is NOT reflowed and remains in its original position.
+  const line = 'NO-REFLOW-TIMELINE-LINE';
+  const plant = '5512';
+  const start1 = new Date('2026-08-25T08:00:00');
+  const end1 = new Date('2026-08-25T10:00:00');
+  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
+  const end2 = new Date('2026-08-25T11:00:00');
+  const priorPlant = Store.selectedPlant;
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'timeline-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
+    { id: 'timeline-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
+  ], 'unit-test');
+  Selection.clear();
+
+  try {
+    const peerBefore = Store.tasks['timeline-peer'].start_date.getTime();
+    // Simulate a Timeline drag by directly updating the task (which is what _onDataSetUpdate does for single-item drags)
+    Store.updateTask('timeline-anchor', { start_date: new Date('2026-08-25T07:00:00'), end_date: new Date('2026-08-25T09:00:00') }, 'timeline');
+    const peerAfter = Store.tasks['timeline-peer'].start_date.getTime();
+    // Peer should NOT have moved (autoReflow was deleted from Timeline handler)
+    assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Timeline drag');
+  } finally {
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});

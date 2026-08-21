@@ -2876,7 +2876,6 @@ export const Table = {
 
     Store.updateTask(id, changes, 'table');
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
-    Engine.autoReflow(id);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
   },
@@ -3813,9 +3812,6 @@ export const Inspector = {
       Object.assign(changes, schedule);
     }
     Store.updateTask(id, changes, 'inspector');
-    if (field === 'start_date' || field === 'RUN_TIME' || field === 'MACHINE') {
-      Engine.autoReflow(id);
-    }
     Alerts.scheduleRecompute();
   },
 
@@ -6664,7 +6660,6 @@ export const Interaction = {
         continue;
       }
       Store.updateTask(id, patch, 'timeline');
-      Engine.autoReflow(id);
       Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
