@@ -2970,10 +2970,16 @@ export const Engine = {
       // empty by construction, so its uncovered-but-admitted edges are an
       // artifact of routing an inactive/never-configured plant through this
       // evaluator at all — never a real data gap the plant needs to fix.
-      // Suppress this and the two toasts below so such a plant sees ZERO new
-      // diagnostics from this run, exactly as it did under the retired
-      // legacy walk. A genuinely active-and-matching snapshot (synthetic
-      // undefined/false) is completely unaffected.
+      // Suppress ONLY this missing-setup-summary toast for a synthetic run.
+      // The two toasts below (orders left in place / lines guarded) are NOT
+      // setup-specific — they report genuine unplaced orders or untouched
+      // lines for reasons that have nothing to do with setup data (e.g. a
+      // permanently-uncalendarable order), so they must fire regardless of
+      // `synthetic`. Blanket-suppressing them for every setup-inactive plant
+      // would silently violate the never-freeze invariant's own "drops can't
+      // happen silently" guarantee for the majority of NIMBUS plants — those
+      // that haven't activated setup tracking. A genuinely active-and-
+      // matching snapshot (synthetic undefined/false) is unaffected either way.
       if (unknownSetupOrderIds.size && !effectiveSetupSnapshot!.synthetic) {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: unknownSetupOrderIds.size,
@@ -3006,13 +3012,13 @@ export const Engine = {
         unplacedCount += 1;
         unplacedLines.add(line);
       }
-      if (unplacedCount && !effectiveSetupSnapshot!.synthetic) {
+      if (unplacedCount) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedCount,
           lines: unplacedLines.size,
         }), 'warn');
       }
-      if (result.unchangedLines.length && !effectiveSetupSnapshot!.synthetic) {
+      if (result.unchangedLines.length) {
         Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');
       }
       PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);

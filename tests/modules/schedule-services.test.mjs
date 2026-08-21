@@ -2083,6 +2083,72 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
   }
 });
 
+test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalendarable order still raises "orders left in place", but not "missing setup summary"', () => {
+  // The two suppressions must now be independent: toast.
+  // optimize_missing_setup_summary is synthetic-run-only noise (an empty
+  // fabricated matrix always reports every transition as "uncovered", which
+  // is meaningless for a plant that never configured setup), but
+  // toast.optimize_orders_left_in_place / toast.optimize_lines_guarded report
+  // a genuinely unplaced order or untouched line for reasons that have
+  // nothing to do with setup data -- here, a line whose calendar is closed
+  // EVERY day, forever (same fixture shape as the "changeover leaves a
+  // permanently-uncalendarable order unplaced" test above, adapted to run
+  // in-process through Engine.runAndApply so the toast layer is reachable).
+  const plant = 'FINAL-FIX2-PLANT';
+  const line = 'FINAL-FIX2-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorPlantEntry = Store.plants[plant];
+  const priorLastSetupAware = Engine.lastSetupAwareResult;
+
+  const ALL_CLOSED = { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  // No Store.replaceSetupSnapshot call -- this plant has never configured or
+  // activated setup tracking, so 'changeover' routes through
+  // Engine._syntheticZeroCostSetupSnapshot (synthetic: true).
+  Store.setCalendar(line, ALL_CLOSED, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, null, 'unit-test');
+  Store.setTasks([{
+    id: 'final-fix2-order', PLANT: plant, MACHINE: line, RUN_TIME: '2',
+    start_date: null, end_date: null, original_end_date: new Date('2026-09-15T12:00:00'),
+  }], 'unit-test');
+
+  const toastCalls = [];
+  const originalShow = Toast.show;
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  try {
+    Engine.runAndApply('changeover', {
+      plant, respectFixed: true, respectCalendar: true,
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-10-15T00:00:00'),
+    });
+
+    assert.equal(Store.tasks['final-fix2-order'].start_date, null,
+      'sanity: the permanently-closed calendar must leave this order genuinely unplaced');
+
+    const leftInPlaceText = Util.t('toast.optimize_orders_left_in_place', { orders: 1, lines: 1 });
+    assert.ok(toastCalls.some(c => c.msg === leftInPlaceText && c.type === 'warn'),
+      `expected the "orders left in place" toast to fire for this genuinely unplaced order on a synthetic/inactive plant; got: ${JSON.stringify(toastCalls)}`);
+
+    const missingSetupSummaryText = Util.t('toast.optimize_missing_setup_summary', { orders: 1, lines: 1 });
+    assert.ok(!toastCalls.some(c => c.msg === missingSetupSummaryText),
+      `the missing-setup-summary toast must stay suppressed for a synthetic run; got: ${JSON.stringify(toastCalls)}`);
+  } finally {
+    Toast.show = originalShow;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    if (priorPlantEntry) Store.plants[plant] = priorPlantEntry;
+    else delete Store.plants[plant];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Engine.lastSetupAwareResult = priorLastSetupAware;
+  }
+});
+
 test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so an inactive plant\'s Timeline shows no setup bars after a changeover run', () => {
   // Timeline draws setup bars/diagnostics from deriveSetupObservation(
   // Store.setupSnapshot, ...) (schedule-workbench.mts's Timeline.
