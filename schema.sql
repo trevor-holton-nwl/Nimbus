@@ -161,6 +161,25 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- legacy behavior until an admin deliberately opts in.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
+-- B3 (2026-08-21): the productive-segment floor (minutes) both the
+-- non-setup-aware split allocator (Calendar.allocateRuntime) and the
+-- setup-aware placeWithSetup primitive enforce — "no split piece shorter
+-- than this, except one complete unsplit order below the boundary". Was a
+-- fixed system-wide 30 in code (web/schedule-services.mjs's
+-- MIN_PRODUCTIVE_SEGMENT_MINUTES); NOT NULL DEFAULT 30 here preserves that
+-- exact behavior for every existing plant until an admin opts into a
+-- different floor via the validated
+-- POST /master-data/plants/{plant}/min-productive-segment-minutes route.
+-- Deliberately unregistered (no column_metadata row), same as
+-- split_order_policy/max_pull_forward_days above.
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS min_productive_segment_minutes INTEGER NOT NULL DEFAULT 30;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_min_productive_segment_minutes_positive') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_min_productive_segment_minutes_positive
+      CHECK (min_productive_segment_minutes > 0);
+  END IF;
+END $$;
 -- Workstream D2 (2026-08-20): the "include setup times in optimizer" flag,
 -- relocated off the per-signature-version setup_definition.active (which
 -- reset to FALSE on every signature bump — see that table's comment below).

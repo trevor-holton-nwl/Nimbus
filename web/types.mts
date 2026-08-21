@@ -224,6 +224,13 @@ export interface NimbusMasterPlant {
   split_order_policy?: SplitOrderPolicy | null;
   /** Nullable whole calendar days an order may be scheduled before its due-date day. */
   max_pull_forward_days?: number | null;
+  /** B3 (2026-08-21): plant-configurable override of the productive-segment
+   *  floor (schema.sql: NOT NULL DEFAULT 30) that both the non-setup-aware
+   *  split allocator (Calendar.allocateRuntime) and the setup-aware
+   *  placeWithSetup primitive enforce. Null/unset falls back to
+   *  schedule-services.mjs's exported MIN_PRODUCTIVE_SEGMENT_MINUTES default
+   *  — see Engine.minProductiveSegmentMinutesFor. */
+  min_productive_segment_minutes?: number | null;
   /** Workstream D2 (2026-08-20): the durable, plant-level "include setup times
    *  in optimizer" flag (plants.setup_active) — attached by master_data.py's
    *  list_rows sidecar the same way split_order_policy is, for the Scheduling
