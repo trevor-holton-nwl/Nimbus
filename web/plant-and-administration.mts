@@ -619,9 +619,12 @@ export const SetupAdmin = (() => {
   /** Fetches one page of the List view's flattened matrix rows from the
    *  Task 1 endpoint, replacing `_listRows`/`_listMeta` in place. On failure
    *  it clears both rather than leaving a stale page on screen — the caller
-   *  paints the current (possibly now-empty) state either way. */
-  async function fetchListRows(plant: string, definition: SetupDefinition, fromKey: SetupStateKey | null): Promise<void> {
-    const params = new URLSearchParams({ line: _lineScope, offset: String(_listMeta.offset), limit: String(_listMeta.limit) });
+   *  paints the current (possibly now-empty) state either way. `machine`
+   *  is passed explicitly (not read off module-private `_lineScope`
+   *  directly) so this network-calling function stays unit-testable the
+   *  same way `collectAllScopeRows` is. */
+  async function fetchListRows(plant: string, definition: SetupDefinition, fromKey: SetupStateKey | null, machine: string): Promise<void> {
+    const params = new URLSearchParams({ machine, offset: String(_listMeta.offset), limit: String(_listMeta.limit) });
     if (fromKey) params.set('from_key', JSON.stringify(fromKey));
     try {
       const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/matrix-rows?${params.toString()}`);
@@ -1231,7 +1234,7 @@ export const SetupAdmin = (() => {
     if (!mount) return;
     if (!definition) { mount.innerHTML = emptyState(Util.t('ui.setup_no_definition')); return; }
     const fromKey = resolveFromKey(definition.fields, _gridFilterFrom);
-    fetchListRows(snapshot.plant, definition, fromKey).then(() => paintListView(target, snapshot, definition, permissions));
+    fetchListRows(snapshot.plant, definition, fromKey, _lineScope).then(() => paintListView(target, snapshot, definition, permissions));
     // Paint immediately with whatever's cached (e.g. after an edit) so the
     // table never flashes empty while the fetch is in flight.
     paintListView(target, snapshot, definition, permissions);
@@ -1989,11 +1992,12 @@ export const SetupAdmin = (() => {
     // existing pattern of testing pure logic without a DOM harness.
     stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,
     // Exported for direct unit testing of the "delete all rows in scope"
-    // request shape (mock Util.fetchTraced's underlying fetch and assert on
-    // the URL) — same rationale as the grid helpers above, extended to this
-    // one network-calling function because its query-param name is exactly
-    // the kind of regression a DOM-level test wouldn't catch here.
-    collectAllScopeRows };
+    // and List-view-page request shapes (mock Util.fetchTraced's underlying
+    // fetch and assert on the URL) — same rationale as the grid helpers
+    // above, extended to these two network-calling functions because their
+    // query-param name is exactly the kind of regression a DOM-level test
+    // wouldn't catch here.
+    collectAllScopeRows, fetchListRows };
 })();
 
 /* =============================================================================

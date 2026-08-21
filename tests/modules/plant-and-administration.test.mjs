@@ -324,6 +324,29 @@ test('SetupAdmin.collectAllScopeRows scopes the "delete all" fetch by machine, n
   }
 });
 
+test('SetupAdmin.fetchListRows scopes the List view page fetch by machine, not the stale "line" param', async () => {
+  // Same regression family as collectAllScopeRows above: this call site
+  // still built its params as { line: _lineScope, ... } until fixed, so a
+  // machine selected in the List view combobox never actually reached the
+  // backend and the view always rendered plant-default rows.
+  const seen = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    seen.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [], meta: { total: 0, offset: 0, limit: 50 } }) });
+  };
+  try {
+    const definition = { active: true, signature_version: 4, fields: ['colorWheel'] };
+    await SetupAdmin.fetchListRows('5512', definition, null, 'L-10');
+    assert.equal(seen.length, 1);
+    const query = new URL(seen[0], 'http://localhost').searchParams;
+    assert.equal(query.get('machine'), 'L-10', 'must send machine=, not line=');
+    assert.equal(query.get('line'), null, 'must not send a line= param at all');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // Setup Matrix grid redesign (docs/setup_matrix_ui_redesign.md) — the
 // from-state x to-state grid replacing the old flat edge-list table.
 
