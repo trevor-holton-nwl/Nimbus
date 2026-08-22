@@ -3110,6 +3110,105 @@ test('placeUnknownTail\'s tail-pass valve stops attempting placement once wall-c
 });
 
 // ---------------------------------------------------------------------------
+// Task 4 code-review fixes (Critical 1 + Critical 2): a 'converged' run must
+// never be discarded as an enumeration cut short, and a later 'converged'
+// must never silently overwrite an earlier line's genuine 'deadline'.
+// ---------------------------------------------------------------------------
+
+test('isSearchConclusive treats \'converged\' exactly like \'completed\', never like a cutoff', () => {
+  // Critical 1: `evaluateLineWithFixedBoundaries`'s boundary-fallback
+  // enumeration (terminal- and non-terminal-boundary branches) gates on this
+  // exact predicate to decide whether a fallback/continuation run's result
+  // is trustworthy enough to use, or must be treated as an ambiguous/cut-off
+  // enumeration and discarded in favor of inferior unknown-tail placement.
+  //
+  // A true end-to-end regression test driving this through the public
+  // evaluateDueDateFirst/evaluateSptWithSetup API was attempted and is not
+  // constructible: `supportsBoundaryFallback` (the gate that admits a run
+  // into the boundary-fallback branches at all) requires `run.winner ===
+  // null` AND every one of `run.missingEdges`' reasons to be either
+  // `UNCOVERED_SETUP_TRANSITION_REASON` or 'incoming-fixed-setup-infeasible'.
+  // Reading every `feasible: false` return in `candidateForSequence` shows
+  // neither reason is ever attached to an infeasible candidate — both are
+  // only ever pushed on an already-FEASIBLE candidate (Part 1f's lenient
+  // tolerance), which by construction always sets `run.winner`. So
+  // `supportsBoundaryFallback(run)` is unconditionally false whenever
+  // `run.winner === null` under current semantics, making the boundary-
+  // fallback branches unreachable dead code today (pre-existing, not
+  // introduced by Task 4) — confirmed by exhaustive source reading, not
+  // merely a failed empirical construction attempt. `isSearchConclusive` is
+  // exported (see its doc comment in setup-scheduler.mts) specifically so
+  // its exact truth table — the one thing the Critical 1 fix actually
+  // changed — can still be pinned directly.
+  assert.equal(SetupScheduler.isSearchConclusive('completed'), true);
+  assert.equal(SetupScheduler.isSearchConclusive('converged'), true,
+    'a converged run reached a real, trustworthy winner and must count as conclusive, never as a truncated cutoff');
+  assert.equal(SetupScheduler.isSearchConclusive('deadline'), false);
+  assert.equal(SetupScheduler.isSearchConclusive('iteration-cap'), false);
+});
+
+test('evaluateDueDateFirst aggregates by severity: an earlier line\'s genuine \'deadline\' is never overwritten by a later line converging', () => {
+  // Critical 2: the aggregate termination used to be "last non-'completed'
+  // value wins" — a later line converging would silently overwrite an
+  // earlier line's real 'deadline', falsifying `limitReached` (the preview's
+  // "may not be optimal" signal) and risking `evaluateMinChangeover`'s
+  // `candidateStarved` guard being fooled into accepting a starved candidate
+  // pass. L1 is a single 60-order same-state chain (Part 2b: exactSearch has
+  // no permutation freedom within one state group, so this is one
+  // deterministic sequence) whose full covered-core search needs more ticks
+  // than its fair half-share of the deadline, so it terminates 'deadline'
+  // (its already-found winner is still applied — 'deadline' does not discard
+  // work, it just stops searching further). L2 is a small 3-RED + 3-BLUE
+  // combinatorial search on its own line, which — given the per-line
+  // deadline-fairness rollover (Requirement 3) — receives ample remaining
+  // budget to find its winner immediately and then converge (Requirement 1)
+  // well before it would naturally complete. Per-line termination was
+  // confirmed via direct instrumentation while constructing this fixture:
+  // L1 -> 'deadline' (candidateCount 1), L2 -> 'converged' (candidateCount
+  // 4). The aggregate must report 'deadline' (the more severe value), not
+  // 'converged' (which would falsely claim "search finished by choice" and
+  // clear `limitReached`) and not silently keep whichever line happened to
+  // run last.
+  const chain = Array.from({ length: 60 }, (_, index) => (
+    scheduledTask(`crit2-chain-${index}`, 0.02, 'RED', `2026-08-03T${8 + Math.floor(index / 60)}:${String(index % 60).padStart(2, '0')}:00`)
+  ));
+  const l2Reds = Array.from({ length: 3 }, (_, index) => (
+    { ...scheduledTask(`crit2-conv-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`), MACHINE: 'L2' }
+  ));
+  const l2Blues = Array.from({ length: 3 }, (_, index) => (
+    { ...scheduledTask(`crit2-conv-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`), MACHINE: 'L2' }
+  ));
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 5),
+    setupRow('RED', 'BLUE', 5), setupRow('BLUE', 'RED', 5),
+  ] });
+  setup.machine_states.push({ machine: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'second aggregation line' });
+  const snapshot = setupSnapshot([...chain, ...l2Reds, ...l2Blues]);
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
+  snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+
+  let ticks = 0;
+  const clock = () => { ticks += 1; return ticks; };
+  const result = SetupScheduler.evaluateDueDateFirst(
+    snapshot,
+    dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 1000000, clock, deadline: 240, convergenceWindow: 3 }),
+  );
+
+  assert.equal(result.diagnostics.termination, 'deadline',
+    'the aggregate keeps the more severe \'deadline\' from L1, not the \'converged\' from L2 processed after it');
+  assert.equal(result.diagnostics.limitReached, true,
+    '\'deadline\' still sets limitReached — the never-freeze fallback applying a found winner does not make the search reliably exhaustive');
+  // Neither line's work is silently dropped by the aggregation fix.
+  assert.equal(result.patches.filter(patch => patch.id.startsWith('crit2-chain-')).length, 60,
+    'L1\'s already-found winner is still applied despite \'deadline\'');
+  assert.equal(result.patches.filter(patch => patch.id.startsWith('crit2-conv-')).length, 6,
+    'L2\'s converged winner is still applied');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'due-date-first-placement' && reason.taskId?.startsWith('crit2-conv-')
+  )), 'L2 was placed via real covered-core search (converged), not zero-effort tail placement');
+});
+
+// ---------------------------------------------------------------------------
 // Workstream B — Task 7 (B4): parity pin between Engine.flattenConstraints
 // (web/schedule-services.mts:2484, Store-coupled, drives _sortTerms/'spt') and
 // this module's own activePriorityKeys (:641, snapshot-pure, drives

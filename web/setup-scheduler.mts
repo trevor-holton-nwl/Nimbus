@@ -628,6 +628,49 @@ interface SearchRun {
   unknownTail: NimbusTask[];
 }
 
+/** True when a `SearchRun` reached a real, trustworthy conclusion — either it
+ * fully completed or it converged with a confirmed winner (Phase 1e) — as
+ * opposed to being cut off mid-enumeration by 'deadline'/'iteration-cap' with
+ * no guarantee the result is final. Boundary-fallback enumeration (below)
+ * must treat both the same: a fallback/continuation run that converged with
+ * a real winner is a legitimate, usable result, not a truncated one — using
+ * the strict `=== 'completed'` check on its own would silently discard a
+ * converged winner and fall through to inferior unknown-tail placement.
+ * Exported (rather than kept module-private like most helpers here) solely
+ * so this exact truth table can be pinned by a direct unit test — see
+ * tests/modules/setup-scheduler.test.mjs for why: `supportsBoundaryFallback`
+ * (below) is provably unreachable with `run.winner === null` under current
+ * `candidateForSequence` semantics, so the boundary-fallback branches that
+ * consume this predicate cannot be driven through the public
+ * `evaluateDueDateFirst`/`evaluateSptWithSetup` API to prove the fix
+ * end-to-end. */
+export function isSearchConclusive(termination: SearchRun['termination']): boolean {
+  return termination === 'completed' || termination === 'converged';
+}
+
+/** Severity ranking used to aggregate multiple line/fragment `SearchRun`
+ * terminations into one overall value: the WORST (most severe) one wins,
+ * never simply "the last one seen". Without this, a later line/fragment that
+ * converges (Phase 1e) could silently overwrite an earlier line's genuine
+ * 'deadline'/'iteration-cap', falsifying `limitReached` (the preview's "may
+ * not be optimal" signal) and defeating `evaluateMinChangeover`'s
+ * `candidateStarved` guard. Order: deadline > iteration-cap > converged >
+ * completed — 'converged' outranks 'completed' (it IS worth surfacing
+ * distinctly on the aggregate) but must never be conflated with, or ranked
+ * above, a genuine budget cutoff. */
+const TERMINATION_SEVERITY: Record<SearchRun['termination'], number> = {
+  deadline: 3,
+  'iteration-cap': 2,
+  converged: 1,
+  completed: 0,
+};
+
+function worseTermination(
+  current: SearchRun['termination'], next: SearchRun['termination'],
+): SearchRun['termination'] {
+  return TERMINATION_SEVERITY[next] > TERMINATION_SEVERITY[current] ? next : current;
+}
+
 /** A per-line counter. Constructed fresh inside the per-line loop of both
  * `evaluateDueDateFirst` and `evaluateSptWithSetup` (Part 2b) so one large
  * line's search can never exhaust the budget for every other line on the
@@ -3710,7 +3753,7 @@ function evaluateLineWithFixedBoundaries(
   const recordRun = (run: Readonly<SearchRun>): void => {
     candidateCount += run.candidateCount;
     if (run.method === 'due-date-first-greedy') method = run.method;
-    if (run.termination !== 'completed') termination = run.termination;
+    termination = worseTermination(termination, run.termination);
   };
   const applyCandidate = (candidate: Readonly<DueDateCandidate>): DueDateCandidate => {
     patches.push(...candidate.patches);
@@ -3932,7 +3975,10 @@ function evaluateLineWithFixedBoundaries(
           const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
           fallbackRuns.push(fallbackRun);
           recordRun(fallbackRun);
-          if (fallbackRun.termination !== 'completed') {
+          // A converged run (Phase 1e) reached a real, trustworthy winner —
+          // it must not be mistaken for an enumeration cut short by
+          // 'deadline'/'iteration-cap' and discarded (Critical fix).
+          if (!isSearchConclusive(fallbackRun.termination)) {
             completeEnumeration = false;
             break;
           }
@@ -3952,7 +3998,7 @@ function evaluateLineWithFixedBoundaries(
           }, budget, mode);
           continuationRuns.push(continuation);
           recordRun(continuation);
-          if (continuation.termination !== 'completed') {
+          if (!isSearchConclusive(continuation.termination)) {
             completeEnumeration = false;
             break;
           }
@@ -4080,7 +4126,12 @@ function evaluateLineWithFixedBoundaries(
             feasibleFallbacks.push({ option, run: fallbackRun, candidate: fallbackRun.winner });
             if (feasibleFallbacks.length > 1) break;
           }
-          if (fallbackRun.termination !== 'completed') {
+          // A converged run (Phase 1e) reached a real, trustworthy winner —
+          // it must not be mistaken for an enumeration cut short by
+          // 'deadline'/'iteration-cap' and discarded (Critical fix), which
+          // would otherwise wrongly drop even a single-feasible-fallback
+          // result below.
+          if (!isSearchConclusive(fallbackRun.termination)) {
             completeEnumeration = false;
             break;
           }
@@ -4300,7 +4351,12 @@ export function evaluateSptWithSetup(
   }
 
   let candidateCount = 0;
-  let termination: SearchDiagnostics['termination'] = 'completed';
+  // Narrower than SearchDiagnostics['termination'] (excludes 'no-plant' /
+  // 'infeasible', which this per-line aggregation never produces — every
+  // value here comes from a LineSearchResult, whose termination type is
+  // exactly SearchRun['termination']) so `worseTermination` below can accept
+  // it directly.
+  let termination: SearchRun['termination'] = 'completed';
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const unchangedLines: string[] = [];
@@ -4407,7 +4463,7 @@ export function evaluateSptWithSetup(
       'spt',
     );
     candidateCount += result.candidateCount;
-    if (result.termination !== 'completed') termination = result.termination;
+    termination = worseTermination(termination, result.termination);
     if (result.unchanged) {
       unchangedLines.push(line);
       missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
@@ -4469,7 +4525,12 @@ export function evaluateDueDateFirst(
 
   let candidateCount = 0;
   let method: SearchDiagnostics['method'] = 'due-date-first-exact';
-  let termination: SearchDiagnostics['termination'] = 'completed';
+  // Narrower than SearchDiagnostics['termination'] (excludes 'no-plant' /
+  // 'infeasible', which this per-line aggregation never produces — every
+  // value here comes from a LineSearchResult, whose termination type is
+  // exactly SearchRun['termination']) so `worseTermination` below can accept
+  // it directly.
+  let termination: SearchRun['termination'] = 'completed';
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const unchangedLines: string[] = [];
@@ -4579,7 +4640,7 @@ export function evaluateDueDateFirst(
     );
     candidateCount += result.candidateCount;
     if (result.method === 'due-date-first-greedy') method = result.method;
-    if (result.termination !== 'completed') termination = result.termination;
+    termination = worseTermination(termination, result.termination);
     if (result.unchanged) {
       unchangedLines.push(line);
       missingEdges.push(...initialDiagnosticEdges, ...result.missingEdges);
