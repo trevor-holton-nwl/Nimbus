@@ -8,7 +8,8 @@
 
 import type { RemoveBacklogResult } from './schedule-services.mjs';
 import { Engine, candidateDefaultWorkHours, MIN_PRODUCTIVE_SEGMENT_MINUTES } from './schedule-services.mjs';
-import { normalizedValue, resolveSetup, stateForOrder } from './setup-domain.mjs';
+import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from './setup-domain.mjs';
+import type { SetupResolutionIndex } from './setup-domain.mjs';
 import type {
   NimbusBlock,
   ConstraintConfig,
@@ -18,6 +19,8 @@ import type {
   NimbusTask,
   OptimizerMode,
   PriorityRankMaps,
+  SetupDefinition,
+  SetupOccurrenceOverride,
   SetupSnapshot as SetupTruthSnapshot,
   SetupStateKey,
   SplitOrderPolicy,
@@ -363,6 +366,111 @@ export interface DueDateFirstBounds {
   horizonEnd: Date;
   /** Optional plant rule supplied by the live engine; absent retains detached legacy behavior. */
   notBefore?: (task: NimbusTask) => Date | null;
+  /** Phase 1a: an optional caller-owned per-run context of indexes/memos
+   *  (see `SetupRunContext`/`buildRunContext` below). Every hot-loop consumer
+   *  reads this only when `runContext.snapshot` is the SAME object reference
+   *  as the snapshot being evaluated; a stale or absent context degrades to
+   *  the original unmemoized computation rather than a wrong answer. Never
+   *  built or owned by this module beyond the one call that constructs it —
+   *  it lives entirely on this bounds object for one evaluator invocation. */
+  runContext?: SetupRunContext;
+}
+
+/**
+ * Per-run context of indexes and memos for the setup-aware evaluators
+ * (Phase 1a). `evaluateDueDateFirst`/`evaluateSptWithSetup` build one of
+ * these once per (snapshot, bounds.setup) pair via `buildRunContext` and
+ * thread it to every hot loop below via `bounds.runContext`, so a single
+ * optimize run's many candidate evaluations stop re-deriving the same
+ * run-constant values (setup-resolution lookups, per-task state/rank
+ * decoding, plant-constant reads, calendar windows). This is never
+ * module-global state: it is a plain object that lives only as long as the
+ * `bounds` it is attached to, built fresh by the caller for each run.
+ */
+export interface SetupRunContext {
+  /** Identity guard: valid only for this exact snapshot object reference. */
+  snapshot: Readonly<ScheduleSnapshot>;
+  /** Phase 1b resolution index built from `bounds.setup`. Null when no setup
+   *  definition is available for the plant — `resolveSetup` already treats a
+   *  missing `index` as "use the unindexed scan", so callers simply pass this
+   *  through unconditionally. */
+  resolutionIndex: SetupResolutionIndex | null;
+  plant: string;
+  /** Hoisted once: identical for every candidate this run evaluates. */
+  activePriorityKeys: ReadonlyArray<string>;
+  splitOrderPolicy: SplitOrderPolicy;
+  minProductiveSegmentMinutes: number;
+  /** Lazy per-task-id memos. */
+  _stateForOrder: Map<string, SetupStateKey | null>;
+  _stateSignatureKey: Map<string, string | null>;
+  _notBefore: Map<string, Date | null>;
+  /** Lazy per-(line, taskId) memos, keyed by NUL-joined `line + taskId`
+   *  (mirrors `setup-domain.mts`'s `joinIndexKey` convention). */
+  _rankVector: Map<string, number[]>;
+  _policyKeyForTask: Map<string, string>;
+  /** Per-line pre-filtered/merged/sorted blackout blocks (ms timestamps),
+   *  filled in once per line on first use — the `Calendar._runBlocks`
+   *  equivalent for this detached evaluator. */
+  _lineBlocks: Map<string, ReadonlyArray<{ start: number; end: number }>>;
+  /** Lazy per-(line, dayStartMs) joint (line ∩ plant) work-window memo. */
+  _dayWindow: Map<string, PlacementInterval | null>;
+  /** Lazy per-line pre-filtered active/version-matched overrides consumed by
+   *  `inactiveOverrideForTransition` — the per-call residual checks
+   *  (successor id, states) still run against this small filtered array. */
+  _overridesByLine: Map<string, ReadonlyArray<SetupOccurrenceOverride>>;
+  /** Built once, in full, on first use — covers every line at once. */
+  _plantByLine: Map<string, string | null> | null;
+}
+
+/**
+ * Builds a fresh `SetupRunContext` for one (snapshot, bounds.setup) pair.
+ * Pure: reads only `snapshot` and `bounds.setup`, returns a new object, and
+ * never mutates its inputs or any module-level state. Cheap plant-constant
+ * fields are computed eagerly; everything keyed by task/line/day is an empty
+ * lazy `Map` filled in by the memo helpers below on first use.
+ */
+export function buildRunContext(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
+): SetupRunContext {
+  const plant = bounds.setup.plant;
+  const definition = bounds.setup.definition;
+  const resolutionIndex = definition
+    ? buildSetupResolutionIndex({
+      definition,
+      machineRows: bounds.setup.machine_rows,
+      plantRows: bounds.setup.plant_rows,
+      overrides: bounds.setup.overrides,
+    })
+    : null;
+  return {
+    snapshot,
+    resolutionIndex,
+    plant,
+    activePriorityKeys: activePriorityKeys(snapshot, plant),
+    splitOrderPolicy: splitOrderPolicyForSnapshot(snapshot, plant),
+    minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
+    _stateForOrder: new Map(),
+    _stateSignatureKey: new Map(),
+    _notBefore: new Map(),
+    _rankVector: new Map(),
+    _policyKeyForTask: new Map(),
+    _lineBlocks: new Map(),
+    _dayWindow: new Map(),
+    _overridesByLine: new Map(),
+    _plantByLine: null,
+  };
+}
+
+/** Builds the run's `SetupRunContext` fresh only when `bounds.runContext` is
+ * absent or was built for a different snapshot object, and otherwise reuses
+ * it unchanged. Returns the (possibly augmented) bounds to thread below, so
+ * every nested helper can read `bounds.runContext` without a second identity
+ * check — safe because that returned bounds object is never mutated again. */
+function withRunContext(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
+): Readonly<DueDateFirstBounds> {
+  if (bounds.runContext && bounds.runContext.snapshot === snapshot) return bounds;
+  return { ...bounds, runContext: buildRunContext(snapshot, bounds) };
 }
 
 export interface SetupPolicyThresholds {
@@ -616,6 +724,69 @@ function stateKey(state: SetupStateKey): string {
   return JSON.stringify(state);
 }
 
+/** Ordinal (code-point) string comparison. `localeCompare` walks ICU
+ * collation tables on every call, which dominates sort/compare cost once it
+ * runs per candidate permutation. Used only where the compared alphabet is
+ * known ASCII (zero-padded digit policy keys, MD5-hex task ids), where
+ * ordinal order is identical to `localeCompare`'s order. */
+function ordinalCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Phase 1a memo: `stateForOrder` is a pure function of (task, definition),
+ * both constant for the whole run once an evaluator starts — a candidate
+ * search calls it on the very same task repeatedly across permutations,
+ * fragments, and fallback attempts. Falls back to the unmemoized call
+ * whenever no run context is threaded (`bounds.runContext` absent). */
+function orderState(
+  bounds: Readonly<DueDateFirstBounds>, task: Readonly<NimbusTask>, definition: SetupDefinition,
+): SetupStateKey | null {
+  const ctx = bounds.runContext;
+  if (!ctx) return stateForOrder(task, definition);
+  const id = taskId(task);
+  const cached = ctx._stateForOrder.get(id);
+  if (cached !== undefined) return cached;
+  const state = stateForOrder(task, definition);
+  ctx._stateForOrder.set(id, state);
+  return state;
+}
+
+/** Phase 1a memo: the canonical `stateKey` string for a task's resolved
+ * state, replacing repeated `stateKey(stateForOrder(...))`/JSON.stringify
+ * calls for the same task within one run. Reuses `orderState`'s cache rather
+ * than re-deriving the state. */
+function orderStateKey(
+  bounds: Readonly<DueDateFirstBounds>, task: Readonly<NimbusTask>, definition: SetupDefinition,
+): string | null {
+  const ctx = bounds.runContext;
+  if (!ctx) {
+    const state = stateForOrder(task, definition);
+    return state ? stateKey(state) : null;
+  }
+  const id = taskId(task);
+  const cached = ctx._stateSignatureKey.get(id);
+  if (cached !== undefined) return cached;
+  const state = orderState(bounds, task, definition);
+  const key = state ? stateKey(state) : null;
+  ctx._stateSignatureKey.set(id, key);
+  return key;
+}
+
+/** Phase 1a memo: `bounds.notBefore` is an engine-supplied pull-forward rule
+ * that a hot loop calls on the same task repeatedly across permutations.
+ * Falls back to the direct call whenever no run context is threaded. */
+function notBeforeFor(bounds: Readonly<DueDateFirstBounds>, task: Readonly<NimbusTask>): Date | null {
+  if (!bounds.notBefore) return null;
+  const ctx = bounds.runContext;
+  if (!ctx) return bounds.notBefore(task) ?? null;
+  const id = taskId(task);
+  const cached = ctx._notBefore.get(id);
+  if (cached !== undefined) return cached;
+  const value = bounds.notBefore(task) ?? null;
+  ctx._notBefore.set(id, value);
+  return value;
+}
+
 const PRIORITY_TASK_FIELDS: Readonly<Record<string, string>> = {
   colorWheel: 'COLOR',
   prt01: 'PRT_01',
@@ -678,44 +849,113 @@ function rankForTask(
   return Number.isFinite(raw) ? Math.max(0, Math.min(9999999, Math.round(raw))) : 999999;
 }
 
+/** Compound-key join for the per-(line, taskId) memo caches below. NUL
+ * (`String.fromCharCode(0)`, not a literal backslash-escape — see
+ * `setup-domain.mts`'s `joinIndexKey`), not a printable separator, because a
+ * line/machine code is a real, uncontrolled string that can legitimately
+ * contain spaces (e.g. "LINE 1"), which would otherwise let two different
+ * (line, taskId) pairs collide on the same cache key. */
+const CTX_KEY_SEP = String.fromCharCode(0);
+
+/** Phase 1a memo: the per-task rank vector (one rank per active priority
+ * key, in the same order as `ctx.activePriorityKeys`) that both
+ * `policyKeyForTask` and `policyScore` derive their result from. Memoized
+ * per-(line, task) since a rank depends on the line-scoped priority-rank
+ * map. Falls back to a fresh, unmemoized vector when `ctx` is absent. */
+function rankVectorForTask(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, task: NimbusTask, ctx?: SetupRunContext,
+): number[] {
+  const keys = ctx ? ctx.activePriorityKeys : activePriorityKeys(snapshot, plant);
+  if (!ctx) return keys.map(fieldKey => rankForTask(snapshot, fieldKey, line, task));
+  const cacheKey = line + CTX_KEY_SEP + taskId(task);
+  const cached = ctx._rankVector.get(cacheKey);
+  if (cached) return cached;
+  const vector = keys.map(fieldKey => rankForTask(snapshot, fieldKey, line, task));
+  ctx._rankVector.set(cacheKey, vector);
+  return vector;
+}
+
 function policyKeyForTask(
-  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, task: NimbusTask,
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, task: NimbusTask, ctx?: SetupRunContext,
 ): string {
-  return activePriorityKeys(snapshot, plant)
-    .map(fieldKey => String(rankForTask(snapshot, fieldKey, line, task)).padStart(7, '0'))
-    .join('|');
+  if (!ctx) {
+    return activePriorityKeys(snapshot, plant)
+      .map(fieldKey => String(rankForTask(snapshot, fieldKey, line, task)).padStart(7, '0'))
+      .join('|');
+  }
+  const cacheKey = line + CTX_KEY_SEP + taskId(task);
+  const cached = ctx._policyKeyForTask.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const vector = rankVectorForTask(snapshot, plant, line, task, ctx);
+  const key = vector.map(rank => String(rank).padStart(7, '0')).join('|');
+  ctx._policyKeyForTask.set(cacheKey, key);
+  return key;
 }
 
 function policyKeyForSequence(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, sequence: ReadonlyArray<NimbusTask>,
+  ctx?: SetupRunContext,
 ): string {
-  return sequence.map(task => policyKeyForTask(snapshot, plant, line, task)).join('\u0000');
+  return sequence.map(task => policyKeyForTask(snapshot, plant, line, task, ctx)).join('\u0000');
 }
 
 function policyScore(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, sequence: ReadonlyArray<NimbusTask>,
+  ctx?: SetupRunContext,
 ): number {
   // Kept as a numeric score slot for preview consumers. Candidate comparison
   // uses the full policyKey above, because a scalar sum cannot preserve a
   // nested policy tree's lexicographic precedence.
-  const keys = activePriorityKeys(snapshot, plant);
+  const keys = ctx ? ctx.activePriorityKeys : activePriorityKeys(snapshot, plant);
   if (!keys.length) return 0;
   return sequence.reduce((total, task, position) => {
+    const vector = ctx ? rankVectorForTask(snapshot, plant, line, task, ctx) : null;
     const taskScore = keys.reduce((rankTotal, fieldKey, depth) => (
-      rankTotal + rankForTask(snapshot, fieldKey, line, task) * (keys.length - depth)
+      rankTotal + (vector ? vector[depth] : rankForTask(snapshot, fieldKey, line, task)) * (keys.length - depth)
     ), 0);
     return total + taskScore * (sequence.length - position);
   }, 0);
 }
 
+/** Decorate-sort-undecorate: each task's policy key is computed once (via
+ * the ctx memo when present) rather than up to twice per comparator call,
+ * and compared ordinally — the policy-key alphabet is zero-padded ASCII
+ * digits joined by `|`, so ordinal order is identical to `localeCompare`'s
+ * order there, without walking ICU collation tables on every comparison. */
 function orderedByPolicyThenDue(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
+  ctx?: SetupRunContext,
 ): NimbusTask[] {
-  return [...tasks].sort((left, right) => (
-    policyKeyForTask(snapshot, plant, line, left).localeCompare(policyKeyForTask(snapshot, plant, line, right))
-    || dueTimestamp(left) - dueTimestamp(right)
-    || taskId(left).localeCompare(taskId(right))
+  const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
+  decorated.sort((left, right) => (
+    ordinalCompare(left.key, right.key)
+    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || taskId(left.task).localeCompare(taskId(right.task))
   ));
+  return decorated.map(entry => entry.task);
+}
+
+/** Phase 1a memo: the status/machine/signature-version predicate every
+ * override-lookup helper in this module repeats over `bounds.setup.overrides`
+ * for one line. `inactiveOverrideForTransition` is the only caller that reads
+ * this cached slice (it is the only one invoked per-transition, i.e. per
+ * candidate); the once-per-line-eval callers keep filtering directly since
+ * they gain nothing from a run-scoped cache. */
+function overridesForLine(
+  bounds: Readonly<DueDateFirstBounds>, line: string, definition: SetupDefinition,
+): ReadonlyArray<SetupOccurrenceOverride> {
+  const matches = (override: SetupOccurrenceOverride): boolean => (
+    override.status === 'active'
+    && override.machine === line
+    && override.signature_version === definition.signature_version
+  );
+  const ctx = bounds.runContext;
+  if (!ctx) return bounds.setup.overrides.filter(matches);
+  const cached = ctx._overridesByLine.get(line);
+  if (cached) return cached;
+  const filtered = bounds.setup.overrides.filter(matches);
+  ctx._overridesByLine.set(line, filtered);
+  return filtered;
 }
 
 /** An active occurrence override belongs to one physical adjacency. When a
@@ -733,11 +973,8 @@ function inactiveOverrideForTransition(
   allowsDeletedPredecessorBinding = false,
 ): MissingSetupEdge | null {
   const definition = bounds.setup.definition!;
-  const bound = bounds.setup.overrides.filter(override => (
-    override.status === 'active'
-    && override.machine === line
-    && override.signature_version === definition.signature_version
-    && override.successor_order_id === successorOrderId
+  const bound = overridesForLine(bounds, line, definition).filter(override => (
+    override.successor_order_id === successorOrderId
   ));
   for (const override of bound) {
     // A binding to a deleted predecessor is already surfaced as an inactive
@@ -891,11 +1128,11 @@ function initialFreeOverrideLock(
     // Fixed successors are validated by boundaryOverrideLocks. A missing
     // successor has already been diagnosed without freezing this line.
     if (!successor) continue;
-    const successorState = stateForOrder(successor, definition);
+    const successorState = orderState(bounds, successor, definition);
     if (!successorState
       || initialState === null
       || stateKey(initialState) !== stateKey(override.predecessor_state_key)
-      || stateKey(successorState) !== stateKey(override.successor_state_key)
+      || orderStateKey(bounds, successor, definition) !== stateKey(override.successor_state_key)
       || (requiredFirstOrderId && requiredFirstOrderId !== successorOrderId)) {
       issue ??= inactiveOverrideEdge(line, initialPredecessorOrderId, successorOrderId);
       continue;
@@ -934,8 +1171,8 @@ function fragmentAdjacency(
     const successorId = String(override.successor_order_id);
     const successor = byId.get(successorId);
     if (!successor) continue;
-    const successorState = stateForOrder(successor, definition);
-    if (!successorState || stateKey(successorState) !== stateKey(override.successor_state_key)) {
+    const successorState = orderState(bounds, successor, definition);
+    if (!successorState || orderStateKey(bounds, successor, definition) !== stateKey(override.successor_state_key)) {
       markIssue(override.predecessor_order_id, successorId);
       continue;
     }
@@ -967,8 +1204,8 @@ function fragmentAdjacency(
       }
       continue;
     }
-    const predecessorState = stateForOrder(predecessor, definition);
-    if (!predecessorState || stateKey(predecessorState) !== stateKey(override.predecessor_state_key)) {
+    const predecessorState = orderState(bounds, predecessor, definition);
+    if (!predecessorState || orderStateKey(bounds, predecessor, definition) !== stateKey(override.predecessor_state_key)) {
       markIssue(predecessorId, successorId);
       continue;
     }
@@ -1224,13 +1461,29 @@ function taskIsFixed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): bo
 // setup-aware evaluators — no patch, no explanation, no toast. Mirrors
 // `Store.getPlantForLine`'s own precedence: line settings first, then the
 // master-data line→plant mapping.
-function resolveTaskPlant(task: Readonly<NimbusTask>, snapshot: Readonly<ScheduleSnapshot>): string | null {
+/** Phase 1a memo: built once, in full, on first use — a single linear scan
+ * over `masterData.lines` replaces a `.find()` repeated for every task on
+ * every line in the grouping loops below. */
+function plantByLineMap(ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>): ReadonlyMap<string, string | null> {
+  if (ctx._plantByLine) return ctx._plantByLine;
+  const map = new Map<string, string | null>();
+  for (const row of snapshot.masterData?.lines ?? []) {
+    if (!map.has(row.machine)) map.set(row.machine, row.plant ?? null);
+  }
+  ctx._plantByLine = map;
+  return map;
+}
+
+function resolveTaskPlant(
+  task: Readonly<NimbusTask>, snapshot: Readonly<ScheduleSnapshot>, ctx?: SetupRunContext,
+): string | null {
   const direct = task.PLANT || task.plant;
   if (direct) return String(direct);
   const line = String(task.MACHINE ?? '');
   if (!line) return null;
   const fromSettings = snapshot.lineSettings?.[line]?.plant;
   if (fromSettings) return fromSettings;
+  if (ctx) return plantByLineMap(ctx, snapshot).get(line) ?? null;
   const mdLine = (snapshot.masterData?.lines ?? []).find(row => row.machine === line);
   return mdLine?.plant ?? null;
 }
@@ -1250,9 +1503,74 @@ function localWindow(hours: WorkHours, date: Date): PlacementInterval | null {
   return end > start ? { start, end } : null;
 }
 
+/** Phase 1d: the plant+line-eligible blackout block set is constant for the
+ * whole run (blocks/plantBlocks never change mid-evaluation), so this merges
+ * it once per line — globally, unbound by any particular query window — and
+ * caches it on `ctx`. `indexedOverlapBlocks` then binary-searches this
+ * per-line array per query instead of re-filtering/re-sorting/re-merging
+ * every call. Clipping an already-merged, already-disjoint interval set to a
+ * query window can only shrink each interval, never introduce a new merge,
+ * so this produces byte-identical output to the unindexed path below. */
+function lineBlocksFor(
+  ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
+): ReadonlyArray<{ start: number; end: number }> {
+  const cached = ctx._lineBlocks.get(line);
+  if (cached) return cached;
+  const candidates = [
+    ...snapshot.blocks.filter(block => (
+      (!block.plant || block.plant === plant) && (!block.line || block.line === line)
+    )),
+    ...snapshot.plantBlocks.filter(block => !block.plant || block.plant === plant),
+  ];
+  const intervals = candidates.flatMap(block => {
+    const blockStart = timestamp(block.start);
+    const blockEnd = timestamp(block.end);
+    if (!blockStart || !blockEnd) return [];
+    return [{ start: blockStart.getTime(), end: blockEnd.getTime() }];
+  }).sort((left, right) => left.start - right.start);
+
+  const merged: { start: number; end: number }[] = [];
+  for (const interval of intervals) {
+    const prior = merged.at(-1);
+    if (prior && interval.start <= prior.end) {
+      if (interval.end > prior.end) prior.end = interval.end;
+    } else {
+      merged.push({ start: interval.start, end: interval.end });
+    }
+  }
+  ctx._lineBlocks.set(line, merged);
+  return merged;
+}
+
+/** Binary-searches a sorted, disjoint, per-line merged block array for the
+ * first block overlapping `[startMs, endMs)`, then walks forward — replacing
+ * `overlapBlocks`'s per-call filter+flatMap+sort+merge with an O(log n + k)
+ * lookup into a run-constant structure. */
+function indexedOverlapBlocks(
+  merged: ReadonlyArray<{ start: number; end: number }>, startMs: number, endMs: number,
+): PlacementInterval[] {
+  if (!merged.length || endMs <= startMs) return [];
+  let lo = 0;
+  let hi = merged.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (merged[mid].end > startMs) hi = mid; else lo = mid + 1;
+  }
+  const result: PlacementInterval[] = [];
+  for (let index = lo; index < merged.length && merged[index].start < endMs; index += 1) {
+    result.push({
+      start: new Date(Math.max(startMs, merged[index].start)),
+      end: new Date(Math.min(endMs, merged[index].end)),
+    });
+  }
+  return result;
+}
+
 function overlapBlocks(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, start: Date, end: Date,
+  ctx?: SetupRunContext,
 ): PlacementInterval[] {
+  if (ctx) return indexedOverlapBlocks(lineBlocksFor(ctx, snapshot, line, plant), start.getTime(), end.getTime());
   const candidates = [
     ...snapshot.blocks.filter(block => (
       (!block.plant || block.plant === plant) && (!block.line || block.line === line)
@@ -1281,11 +1599,44 @@ function overlapBlocks(
   return merged;
 }
 
+/** Intersects two already-resolved line/plant work windows, mirroring the
+ * inline `Math.max`/`Math.min` combination `freeIntervalsFor`/
+ * `hasNominalWindow` each used to repeat. Null in, null out. */
+function intersectWindows(
+  lineWindow: PlacementInterval | null, plantWindow: PlacementInterval | null,
+): PlacementInterval | null {
+  if (!lineWindow || !plantWindow) return null;
+  return {
+    start: new Date(Math.max(lineWindow.start.getTime(), plantWindow.start.getTime())),
+    end: new Date(Math.min(lineWindow.end.getTime(), plantWindow.end.getTime())),
+  };
+}
+
+/** Phase 1d: the raw (line ∩ plant) work window for one calendar day is a
+ * run-constant fact — independent of any particular call's `[from, through]`
+ * clip — so it is memoized per-(line, dayStartMs) rather than recomputed via
+ * `localWindow` twice per day on every `freeIntervalsFor`/`hasNominalWindow`
+ * call. Null means a closed day (either side has no window that day). */
+function jointWindowForDay(
+  ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, day: Date,
+): PlacementInterval | null {
+  const dayStart = new Date(day);
+  dayStart.setHours(0, 0, 0, 0);
+  const key = `${line}|${dayStart.getTime()}`;
+  if (ctx._dayWindow.has(key)) return ctx._dayWindow.get(key)!;
+  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  const result = intersectWindows(localWindow(lineHours, dayStart), localWindow(plantHours, dayStart));
+  ctx._dayWindow.set(key, result);
+  return result;
+}
+
 /** Derive only the availability present in the supplied immutable snapshot.
  * A missing calendar is unavailable rather than a prompt to synthesize a
  * default calendar into a detached candidate. */
 function freeIntervalsFor(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
+  ctx?: SetupRunContext,
 ): PlacementInterval[] {
   // B6: fall back to the same default work hours the alerts path and the
   // detached-candidate path already use (schedule-services.mts's
@@ -1301,14 +1652,15 @@ function freeIntervalsFor(
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
   while (day <= through) {
-    const lineWindow = localWindow(lineHours, day);
-    const plantWindow = localWindow(plantHours, day);
-    if (lineWindow && plantWindow) {
-      const start = new Date(Math.max(lineWindow.start.getTime(), plantWindow.start.getTime(), from.getTime()));
-      const end = new Date(Math.min(lineWindow.end.getTime(), plantWindow.end.getTime(), through.getTime()));
+    const joint = ctx
+      ? jointWindowForDay(ctx, snapshot, line, plant, day)
+      : intersectWindows(localWindow(lineHours, day), localWindow(plantHours, day));
+    if (joint) {
+      const start = new Date(Math.max(joint.start.getTime(), from.getTime()));
+      const end = new Date(Math.min(joint.end.getTime(), through.getTime()));
       if (end > start) {
         let cursor = start;
-        for (const block of overlapBlocks(snapshot, line, plant, start, end)) {
+        for (const block of overlapBlocks(snapshot, line, plant, start, end, ctx)) {
           if (block.start > cursor) result.push({ start: new Date(cursor), end: new Date(block.start) });
           if (block.end > cursor) cursor = new Date(block.end);
         }
@@ -1344,6 +1696,7 @@ function minProductiveSegmentMinutesForSnapshot(snapshot: Readonly<ScheduleSnaps
  * the detached snapshot evaluator so policy routing remains Store-free. */
 function hasNominalWindow(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, runtimeMinutes: number,
+  ctx?: SetupRunContext,
 ): boolean {
   const lineHours = snapshot.calendars[line]?.workHours;
   const plantHours = snapshot.plants[plant]?.workHours;
@@ -1354,12 +1707,14 @@ function hasNominalWindow(
   for (let offset = 0; offset < 90; offset += 1) {
     const date = new Date(day);
     date.setDate(day.getDate() + offset);
-    const lineWindow = localWindow(lineHours, date);
-    const plantWindow = localWindow(plantHours, date);
-    if (!lineWindow || !plantWindow) continue;
-    const start = Math.max(lineWindow.start.getTime(), plantWindow.start.getTime());
-    const end = Math.min(lineWindow.end.getTime(), plantWindow.end.getTime());
-    if (end - start >= requiredMs) return true;
+    // `lineHours`/`plantHours` are already confirmed present above, so the
+    // memo's own defaulting (for a missing calendar) never triggers here —
+    // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
+    const joint = ctx
+      ? jointWindowForDay(ctx, snapshot, line, plant, date)
+      : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
+    if (!joint) continue;
+    if (joint.end.getTime() - joint.start.getTime() >= requiredMs) return true;
   }
   return false;
 }
@@ -1368,7 +1723,10 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
                           mode: FragmentMode = 'due-date-first'): number {
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
-  const policyDelta = left.policyKey.localeCompare(right.policyKey);
+  // Ordinal, not localeCompare: policyKey is zero-padded ASCII digits joined
+  // by `|`/` ` (see `ordinalCompare`), and this comparison runs on every
+  // candidate pair a search evaluates.
+  const policyDelta = ordinalCompare(left.policyKey, right.policyKey);
   if (policyDelta) return policyDelta;
   // Coverage tier (A2): compared outside the mode-permuted `terms` list below
   // so it is immune to future reordering there, and so a mode like
@@ -1392,7 +1750,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
   }
-  return left.sequenceKey.localeCompare(right.sequenceKey);
+  return ordinalCompare(left.sequenceKey, right.sequenceKey);
 }
 
 function candidateForSequence(
@@ -1436,9 +1794,9 @@ function candidateForSequence(
 
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
-    const pullForwardFloor = bounds.notBefore?.(task);
+    const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
-    const successorState = stateForOrder(task, definition);
+    const successorState = orderState(bounds, task, definition);
     if (!successorState) {
       missingEdges.push({ line, predecessorOrderId, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
       return {
@@ -1490,6 +1848,7 @@ function candidateForSequence(
         plantRows: bounds.setup.plant_rows,
         machineRows: bounds.setup.machine_rows,
         overrides: bounds.setup.overrides,
+        index: bounds.runContext?.resolutionIndex ?? undefined,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
         uncoveredAdmission = true;
@@ -1525,7 +1884,7 @@ function candidateForSequence(
     }
 
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
-    const splitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
@@ -1538,10 +1897,12 @@ function candidateForSequence(
           bounds.setup.plant,
           cursor,
           runtimeMinutes,
+          bounds.runContext,
         ),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, fragment.end),
-      minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, fragment.end, bounds.runContext),
+      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
+        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       if (placement.kind === 'infeasible' && placement.reason === 'no-feasible-capacity') {
@@ -1659,6 +2020,7 @@ function candidateForSequence(
         plantRows: bounds.setup.plant_rows,
         machineRows: bounds.setup.machine_rows,
         overrides: bounds.setup.overrides,
+        index: bounds.runContext?.resolutionIndex ?? undefined,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
         // A1: counted into uncoveredEdgeCount (only this !resolved.covered
@@ -1680,7 +2042,7 @@ function candidateForSequence(
         const fitsIncomingSetup = resolved.effectiveMin === 0
           ? cursor <= fixed.start
           : setupStart >= cursor && freeIntervalsFor(
-            snapshot, line, bounds.setup.plant, cursor, fixed.start,
+            snapshot, line, bounds.setup.plant, cursor, fixed.start, bounds.runContext,
           ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
         if (!fitsIncomingSetup) {
           missingEdges.push({
@@ -1710,10 +2072,10 @@ function candidateForSequence(
     // score[SCORE_UNCOVERED] (A2) is compared in compareCandidate immediately
     // after policyKey, ahead of every term below.
     score: [
-      0, policyScore(snapshot, bounds.setup.plant, line, sequence), lateCount, latenessMinutes, -patches.length,
+      0, policyScore(snapshot, bounds.setup.plant, line, sequence, bounds.runContext), lateCount, latenessMinutes, -patches.length,
       setupMinutes, uncoveredEdgeCount,
     ],
-    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence),
+    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence, bounds.runContext),
     sequenceKey: sequence.map(taskId).join('|'),
     unadmitted,
     explanation,
@@ -1926,11 +2288,19 @@ function greedySearch(
       candidateCount: 0, method: 'due-date-first-greedy', termination: 'iteration-cap', winner: null, missingEdges: [], unknownTail: [],
     };
   }
-  const orderedTasks = groups.flatMap(group => group.tasks).sort((left, right) => (
-    policyKeyForTask(snapshot, bounds.setup.plant, line, left).localeCompare(
-      policyKeyForTask(snapshot, bounds.setup.plant, line, right),
-    ) || dueTimestamp(left) - dueTimestamp(right) || taskId(left).localeCompare(taskId(right))
+  // Decorate-sort-undecorate: compute each task's (ctx-memoized) policy key
+  // once rather than up to twice per comparator call, and compare it
+  // ordinally (see `ordinalCompare` — identical order to `localeCompare` for
+  // this zero-padded-digit alphabet, without the ICU collation cost).
+  const decoratedTasks = groups.flatMap(group => group.tasks).map(task => (
+    { task, key: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext) }
   ));
+  decoratedTasks.sort((left, right) => (
+    ordinalCompare(left.key, right.key)
+    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || taskId(left.task).localeCompare(taskId(right.task))
+  ));
+  const orderedTasks = decoratedTasks.map(entry => entry.task);
   let candidateCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
@@ -2103,13 +2473,13 @@ function searchFragment(
   // unknown too.
   const unknownTail: NimbusTask[] = [];
   for (const task of tasks) {
-    const state = stateForOrder(task, definition);
+    const state = orderState(bounds, task, definition);
     if (!state) {
       missingEdges.push({ line, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
       unknownTail.push(task);
       continue;
     }
-    const key = stateKey(state);
+    const key = orderStateKey(bounds, task, definition)!;
     const group = groupsByState.get(key) ?? { key, state, tasks: [] };
     group.tasks.push(task);
     groupsByState.set(key, group);
@@ -2132,7 +2502,7 @@ function searchFragment(
       ...group,
       tasks: mode === 'spt'
         ? orderedByProductiveRuntime(group.tasks)
-        : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks),
+        : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext),
     }))
     .sort((left, right) => left.key.localeCompare(right.key));
   if (mode === 'spt') {
@@ -2421,7 +2791,7 @@ function auditOutOfHorizonFixedOverrides(
   const stateForEndpoint = (orderId: string | null): SetupStateKey | null => {
     if (orderId === null) return initial.predecessorOrderId === null ? initialState : null;
     const task = tasksById.get(orderId);
-    return task ? stateForOrder(task, definition) : null;
+    return task ? orderState(bounds, task, definition) : null;
   };
   const protectedEdges: MissingSetupEdge[] = [];
   const inactiveEdges: MissingSetupEdge[] = [];
@@ -2556,7 +2926,7 @@ function boundaryFallbackComponentPlan(
   if (!fragment.nextFixed || !admitted.length) return null;
   const baseOrder = mode === 'spt'
     ? orderedByProductiveRuntime(admitted)
-    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted);
+    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted, bounds.runContext);
   const adjacency = fragmentAdjacency(bounds, line, admitted, fragment);
   const sequence = orderWithAdjacency(baseOrder, fragment, adjacency);
   if (!sequence) return null;
@@ -2730,7 +3100,7 @@ function completeFinalBoundaryCandidate(
     patches,
     score: [
       0,
-      policyScore(snapshot, bounds.setup.plant, line, orderedTasks),
+      policyScore(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
       (preFixed.score[2] ?? 0) + (continuation.score[2] ?? 0),
       (preFixed.score[3] ?? 0) + (continuation.score[3] ?? 0),
       -patches.length,
@@ -2740,7 +3110,7 @@ function completeFinalBoundaryCandidate(
       // score[SCORE_UNCOVERED] directly.
       (preFixed.score[SCORE_UNCOVERED] ?? 0) + (continuation.score[SCORE_UNCOVERED] ?? 0),
     ],
-    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, orderedTasks),
+    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
     sequenceKey: joinKey(preFixed.patches.map(patch => patch.id).join('|'), continuation.patches.map(patch => patch.id).join('|')),
     unadmitted: [],
     explanation: [...preFixed.explanation, ...continuation.explanation],
@@ -2809,8 +3179,8 @@ export function placeUnknownTail(
 ): UnknownTailPlacement {
   const ordered = mode === 'spt'
     ? orderedByProductiveRuntime(tasks)
-    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks);
-  const splitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
+  const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const missingEdges: MissingSetupEdge[] = [];
@@ -2837,7 +3207,7 @@ export function placeUnknownTail(
       }
       break;
     }
-    const pullForwardFloor = bounds.notBefore?.(task);
+    const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
     const placement = placeWithSetup({
@@ -2846,10 +3216,11 @@ export function placeUnknownTail(
       setup: { kind: 'resolved', minutes: 0 },
       policy: splitPolicy,
       ...(splitPolicy === 'overlong_only' ? {
-        isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes),
+        isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, capacityEnd),
-      minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, capacityEnd, bounds.runContext),
+      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
+        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       // B2: this order alone doesn't fit at the current cursor — defer it
@@ -2932,6 +3303,7 @@ function tailCapacityEnd(
     plantRows: bounds.setup.plant_rows,
     machineRows: bounds.setup.machine_rows,
     overrides: bounds.setup.overrides,
+    index: bounds.runContext?.resolutionIndex ?? undefined,
   });
   const reserveMinutes = resolved.covered && resolved.effectiveMin !== null ? resolved.effectiveMin : 0;
   return new Date(nextFixed.start.getTime() - reserveMinutes * 60 * 1000);
@@ -3081,7 +3453,7 @@ function evaluateLineWithFixedBoundaries(
     // setup can still occupy time inside the caller horizon. Strictly later
     // unprotected runs cannot lend capacity to this detached candidate.
     if (start && start > bounds.horizonEnd) continue;
-    const state = stateForOrder(task, definition);
+    const state = orderState(bounds, task, definition);
     if (!start || !end || end <= start || !state) {
       return unchangedLineResult(
         line,
@@ -3717,11 +4089,15 @@ export function evaluateSptWithSetup(
 ): CandidateResult {
   requireDueDateBounds(bounds);
   const started = bounds.clock();
+  // Phase 1a: reuse the caller's run context when it matches this snapshot,
+  // otherwise build one fresh — then thread the (possibly augmented) bounds
+  // to everything below so every hot loop can read `bounds.runContext`.
+  bounds = withRunContext(snapshot, bounds);
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
-    const taskPlant = resolveTaskPlant(task, snapshot);
+    const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
     const line = String(task.MACHINE ?? '');
     if (!line || taskPlant !== plant) continue;
     const group = byLine.get(line) ?? [];
@@ -3869,11 +4245,15 @@ export function evaluateDueDateFirst(
 ): CandidateResult {
   requireDueDateBounds(bounds);
   const started = bounds.clock();
+  // Phase 1a: reuse the caller's run context when it matches this snapshot,
+  // otherwise build one fresh — then thread the (possibly augmented) bounds
+  // to everything below so every hot loop can read `bounds.runContext`.
+  bounds = withRunContext(snapshot, bounds);
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
-    const taskPlant = resolveTaskPlant(task, snapshot);
+    const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
     const line = String(task.MACHINE ?? '');
     if (!line || taskPlant !== plant) continue;
     const group = byLine.get(line) ?? [];
@@ -4037,6 +4417,10 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
+  // Phase 1a: build the run context ONCE and share it across both of this
+  // function's internal `evaluateDueDateFirst` sweeps (baseline + candidate),
+  // instead of each sweep independently rebuilding its own.
+  bounds = withRunContext(snapshot, bounds);
   // Part 2a: the baseline pass only gets half of whatever wall-clock remains
   // right now. The candidate pass runs against the caller's own unmodified
   // `bounds.deadline` — i.e. everything left in the original budget — rather
@@ -4131,6 +4515,10 @@ export function evaluateThroughput(
   if (!Number.isInteger(thresholds.throughputMaxSlipMin) || thresholds.throughputMaxSlipMin <= 0) {
     throw new TypeError('Throughput policy requires a positive per-order slip cap.');
   }
+  // Phase 1a: build the run context ONCE and share it across both of this
+  // function's internal `evaluateDueDateFirst` sweeps (baseline + throughput),
+  // instead of each sweep independently rebuilding its own.
+  bounds = withRunContext(snapshot, bounds);
   return selectThroughputCandidate(
     snapshot,
     evaluateDueDateFirst(snapshot, bounds),
