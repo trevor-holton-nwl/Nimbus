@@ -7696,7 +7696,11 @@ export const OptimizeDialog = (() => {
     let wheelUsed = false;
     let unrankedFields: string[] = [];
     if (_mode !== 'backlog') {
-      if (Persistence._rankMapsPlant !== plant) await Persistence.loadPriorityRankMaps(plant);
+      if (Persistence._rankMapsPlant !== plant) {
+        const _rankMapFetchT0 = performance.now();
+        await Persistence.loadPriorityRankMaps(plant);
+        PerfMonitor.record('Optimize.rankMapFetch', performance.now() - _rankMapFetchT0);
+      }
       const ranksFresh = Persistence._rankMapsPlant === plant;
       wheelUsed = ranksFresh && _hasColorRanks();
       unrankedFields = Engine.unrankedActiveFields(plant);
@@ -8211,10 +8215,14 @@ export const OptimizerPreview = {
 
         // Evaluate the established placement algorithm against a detached read
         // model. Store changes only if the planner applies this candidate.
+        const _evalPrimaryT0 = performance.now();
         const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts });
+        PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
 
         // Post-KPIs are calculated from detached patched task values.
+        const _applyPatchesT0a = performance.now();
         const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
+        PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0a);
         const _postKpiT0 = performance.now();
         const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot);
         PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
@@ -8271,12 +8279,16 @@ export const OptimizerPreview = {
           let finalists: typeof OptimizerPreview['_finalists'] = null;
           if (altMode) {
             try {
+              const _evalAltT0 = performance.now();
               const altCandidate = evaluateSchedule(candidateSnapshot, {
                 mode: altMode, plant: opts.plant, lines: opts.lines,
                 startDate: opts.startDate, endDate: opts.endDate,
                 respectFixed: opts.respectFixed, respectCalendar: opts.respectCalendar,
               });
+              PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
+              const _applyPatchesT0b = performance.now();
               const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
+              PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
               const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot);
               finalists = [
                 { label: 'A', mode, kpis: postKpis, whyNot: null },
@@ -8552,6 +8564,14 @@ export const OptimizerPreview = {
       const eventsHtml = diagEvents.length
         ? `<ul class="opt-pv-diag-events">${diagEvents.map(e => `<li class="opt-pv-diag-event opt-pv-diag-${esc(e.level)}"><strong>${esc(e.level.toUpperCase())}</strong> ${esc(e.message)}</li>`).join('')}</ul>`
         : '';
+      // Derived, not stored on `search` — candidateCount / (runtimeMs / 1000),
+      // rounded, guarded against divide-by-zero and non-finite candidateCount
+      // so a zero/degenerate runtime omits the row rather than rendering
+      // NaN/Infinity.
+      const { candidateCount, runtimeMs } = explanation.search;
+      const rateHtml = runtimeMs > 0 && Number.isFinite(candidateCount)
+        ? `<div><dt>${esc(Util.t('ui.opt_pv_diag_rate'))}</dt><dd>${esc(String(Math.round(candidateCount / (runtimeMs / 1000))))}</dd></div>`
+        : '';
       return `<details class="opt-pv-section">
         <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span><span class="opt-pv-section-summary">${esc(diagSummary)}</span>${limitBadge}</summary>
         <div class="opt-pv-section-body">
@@ -8561,6 +8581,7 @@ export const OptimizerPreview = {
             <div><dt>${esc(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${esc(explanation.search.termination)}</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
             <div><dt>${esc(Util.t('ui.opt_pv_diag_orders_in_scope'))}</dt><dd>${esc(String(explanation.impact.production.before))} → ${esc(String(explanation.impact.production.after))}</dd></div>
+            ${rateHtml}
           </dl>
           ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
           ${eventsHtml}

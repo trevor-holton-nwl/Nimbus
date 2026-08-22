@@ -1385,6 +1385,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_reasons_none':            'Aucun motif spécifique n’a été signalé pour ce candidat.',
   'ui.setup_missing_pairs_none':      'Aucune paire de réglage manquante pour ce candidat.',
   'ui.opt_pv_scheduled_without_setup': '{{orders}} commande(s) sur {{lines}} machine(s) ont été planifiées sans transition de réglage résoluble — aucune barre de changement n\'a été placée pour elles.',
+  'ui.opt_pv_diag_rate':               'Itérations/s',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Règles de planification',

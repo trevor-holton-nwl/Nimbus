@@ -1387,6 +1387,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_reasons_none':            'Für diesen Kandidaten wurden keine spezifischen Gründe gemeldet.',
   'ui.setup_missing_pairs_none':      'Keine fehlenden Setup-Paare für diesen Kandidaten.',
   'ui.opt_pv_scheduled_without_setup': '{{orders}} Auftrag(e) auf {{lines}} Maschine(n) wurden ohne lösbaren Rüstübergang eingeplant — für sie wurde kein Rüstbalken platziert.',
+  'ui.opt_pv_diag_rate':               'Iterationen/Sek.',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Planungsregeln',

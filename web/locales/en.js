@@ -1510,6 +1510,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_diag_limit_reached_note':   'The search stopped at a time or iteration limit rather than converging — a longer run may find a better candidate.',
   'ui.opt_pv_diag_summary':             '{{method}} · {{count}} candidates · {{runtime}}',
   'ui.opt_pv_diag_orders_in_scope':     'Orders in scope',
+  'ui.opt_pv_diag_rate':                'Iterations/sec',
   // Plan comparison table
   'ui.opt_pv_plan_col_current':         'Current',
   'ui.opt_pv_plan_col_current_sub':     'in place now',

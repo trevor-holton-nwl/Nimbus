@@ -179,19 +179,24 @@ interface SortTerm {
  * is cloned at the Store boundary so candidate scheduling cannot hold a live
  * reference that a later Store mutation could alter while it is evaluating. */
 export function snapshotSchedule(): ScheduleSnapshot {
-  return {
-    tasks: structuredClone(Store.tasksArr),
-    fixedIds: Array.from(Store.fixedIds),
-    alerts: structuredClone(Store.alerts),
-    selectedPlant: Store.selectedPlant,
-    blocks: structuredClone(Store.blocks),
-    plantBlocks: structuredClone(Store.plantBlocks),
-    calendars: structuredClone(Store.calendars),
-    plants: structuredClone(Store.plants),
-    lineSettings: structuredClone(Store.lineSettings),
-    masterData: structuredClone(Store.masterData),
-    priorityRankMaps: structuredClone(Store.priorityRankMaps),
-  };
+  const _pmT0s = performance.now();
+  try {
+    return {
+      tasks: structuredClone(Store.tasksArr),
+      fixedIds: Array.from(Store.fixedIds),
+      alerts: structuredClone(Store.alerts),
+      selectedPlant: Store.selectedPlant,
+      blocks: structuredClone(Store.blocks),
+      plantBlocks: structuredClone(Store.plantBlocks),
+      calendars: structuredClone(Store.calendars),
+      plants: structuredClone(Store.plants),
+      lineSettings: structuredClone(Store.lineSettings),
+      masterData: structuredClone(Store.masterData),
+      priorityRankMaps: structuredClone(Store.priorityRankMaps),
+    };
+  } finally {
+    PerfMonitor.record('Optimize.snapshotSchedule', performance.now() - _pmT0s);
+  }
 }
 
 /** The only bridge from a detached candidate into live schedule state.  Keep
@@ -1863,12 +1868,14 @@ export const Engine = {
     if (_candidateSnapshot) throw new Error('Nested detached schedule evaluation is not supported');
     _candidateSnapshot = snapshot;
     _candidateDiagnostics = [];
+    const _pmT0es = performance.now();
     try {
       return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
         ?? detachedCandidateResult([], performance.now());
     } finally {
       _candidateSnapshot = null;
       _candidateDiagnostics = null;
+      PerfMonitor.record('Engine.evaluateSchedule', performance.now() - _pmT0es);
     }
   },
 

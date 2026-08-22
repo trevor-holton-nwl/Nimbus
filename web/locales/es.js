@@ -1385,6 +1385,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_reasons_none':            'No se reportaron motivos específicos para este candidato.',
   'ui.setup_missing_pairs_none':      'No hay pares de preparación faltantes en este candidato.',
   'ui.opt_pv_scheduled_without_setup': '{{orders}} pedido(s) en {{lines}} máquina(s) se programaron sin una transición de preparación resoluble — no se colocó una barra de cambio para ellos.',
+  'ui.opt_pv_diag_rate':               'Iteraciones/seg',
 
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Reglas de programación',
