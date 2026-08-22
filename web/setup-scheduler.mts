@@ -408,11 +408,16 @@ export interface SetupRunContext {
    *  (mirrors `setup-domain.mts`'s `joinIndexKey` convention). */
   _rankVector: Map<string, number[]>;
   _policyKeyForTask: Map<string, string>;
-  /** Per-line pre-filtered/merged/sorted blackout blocks (ms timestamps),
-   *  filled in once per line on first use — the `Calendar._runBlocks`
-   *  equivalent for this detached evaluator. */
+  /** Per-(plant, line) pre-filtered/merged/sorted blackout blocks (ms
+   *  timestamps), filled in once per (plant, line) on first use — the
+   *  `Calendar._runBlocks` equivalent for this detached evaluator. Keyed by
+   *  plant too (not just line): machine codes are documented as reusable
+   *  across plants, so a line-only key could return one plant's cached
+   *  blocks for another. */
   _lineBlocks: Map<string, ReadonlyArray<{ start: number; end: number }>>;
-  /** Lazy per-(line, dayStartMs) joint (line ∩ plant) work-window memo. */
+  /** Lazy per-(plant, line, dayStartMs) joint (line ∩ plant) work-window
+   *  memo — plant is folded into the key for the same reuse-across-plants
+   *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
   /** Lazy per-line pre-filtered active/version-matched overrides consumed by
    *  `inactiveOverrideForTransition` — the per-call residual checks
@@ -465,7 +470,19 @@ export function buildRunContext(
  * absent or was built for a different snapshot object, and otherwise reuses
  * it unchanged. Returns the (possibly augmented) bounds to thread below, so
  * every nested helper can read `bounds.runContext` without a second identity
- * check — safe because that returned bounds object is never mutated again. */
+ * check — safe because that returned bounds object is never mutated again.
+ *
+ * Invariant this guard does NOT check: a reused `runContext` is only valid
+ * for the same `bounds.setup` (definition/matrix rows/overrides) it was
+ * built from — `resolutionIndex` and the hoisted plant constants are derived
+ * from `bounds.setup`, not `snapshot`, so a caller that reused a `snapshot`
+ * object but swapped in different `bounds.setup` would silently get stale
+ * setup truth. Every caller today satisfies this for free: a `runContext` is
+ * created and consumed entirely within one `runAndApply`/evaluator
+ * invocation, which never changes `bounds.setup` mid-call. A future caller
+ * must preserve that pairing (or extend this guard with a `bounds.setup`
+ * identity check) rather than reuse a `runContext` across a `bounds.setup`
+ * change. */
 function withRunContext(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): Readonly<DueDateFirstBounds> {
@@ -1514,7 +1531,13 @@ function localWindow(hours: WorkHours, date: Date): PlacementInterval | null {
 function lineBlocksFor(
   ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
 ): ReadonlyArray<{ start: number; end: number }> {
-  const cached = ctx._lineBlocks.get(line);
+  // Machine codes are documented as reusable across plants — fold `plant`
+  // into the key (not just `line`) so a ctx that ever saw two plants for the
+  // same line code can't return one plant's cached blocks for the other.
+  // Today every call site passes the single plant `ctx` was built for, so
+  // this is defense-in-depth, not a live bug fix.
+  const cacheKey = plant + CTX_KEY_SEP + line;
+  const cached = ctx._lineBlocks.get(cacheKey);
   if (cached) return cached;
   const candidates = [
     ...snapshot.blocks.filter(block => (
@@ -1538,7 +1561,7 @@ function lineBlocksFor(
       merged.push({ start: interval.start, end: interval.end });
     }
   }
-  ctx._lineBlocks.set(line, merged);
+  ctx._lineBlocks.set(cacheKey, merged);
   return merged;
 }
 
@@ -1622,7 +1645,12 @@ function jointWindowForDay(
 ): PlacementInterval | null {
   const dayStart = new Date(day);
   dayStart.setHours(0, 0, 0, 0);
-  const key = `${line}|${dayStart.getTime()}`;
+  // Machine codes are documented as reusable across plants — fold `plant`
+  // into the key (via CTX_KEY_SEP, not the printable `|` used for line/day)
+  // so a ctx that ever saw two plants for the same line code can't return
+  // one plant's cached hours for the other. Today every call site passes
+  // the single plant `ctx` was built for, so this is defense-in-depth.
+  const key = `${plant}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
   if (ctx._dayWindow.has(key)) return ctx._dayWindow.get(key)!;
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
