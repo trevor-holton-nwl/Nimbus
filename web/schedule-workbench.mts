@@ -343,12 +343,7 @@ export const Timeline = {
     // Refresh the DataView after the user finishes panning/zooming. Debounced so it
     // never fires per-frame during active drag — items already in the window stay
     // rendered; fringe items outside the buffer are evicted/loaded once pan settles.
-    const _refreshView = Util.debounce(() => {
-      const w = Timeline._tl!.getWindow();
-      Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
-      Timeline._visItems!.refresh();
-      Timeline._tl!.redraw();
-    }, 120);
+    const _refreshView = Util.debounce(() => Timeline._refreshViewNow(), 120);
     Timeline._tl.on('rangechanged', _refreshView);
 
     // One-shot screen calibration: measure real row + axis after first render
@@ -1132,6 +1127,12 @@ export const Timeline = {
     if (savedWindow && Timeline._tl) {
       Timeline._tl.setWindow(savedWindow.start, savedWindow.end, { animation: false });
     }
+    // Rebuild writes items straight into the parent DataSet while the DataView
+    // filter may hold a stale window (setOptions({max}) above can clamp the range
+    // without firing rangechanged, and the setWindow restore is a same-range no-op
+    // event-wise). Resync + full refresh + redraw here, or freshly-added bars stay
+    // culled until the user's next zoom/pan.
+    Timeline._refreshViewNow();
     // Re-apply the remembered vertical offset AFTER _fitHeight() has set the
     // new height — must be rAF-deferred because setOptions({height}) doesn't
     // take effect (and thus doesn't clamp scrollTop to the new max) until
@@ -1236,6 +1237,18 @@ export const Timeline = {
       end:   cur ? Math.max(cur.end,   endMs)   : endMs,
     };
     if (Timeline._visItems) Timeline._visItems.refresh();
+  },
+
+  // Undebounced core of the rangechanged refresh: resync the DataView culling
+  // window to the timeline's actual range, fully re-evaluate the filter (an item
+  // excluded while _viewWindow was stale stays excluded until a refresh — vis-data
+  // DataViews filter incrementally at add/update time), and force a relayout.
+  _refreshViewNow(): void {
+    if (!Timeline._tl || !Timeline._visItems) return;
+    const w = Timeline._tl.getWindow();
+    Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
+    Timeline._visItems.refresh();
+    Timeline._tl.redraw();
   },
 
   setView(mode: string): void {
