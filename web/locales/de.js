@@ -360,6 +360,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.kpi_headroom':                   'Kapazitätsreserve nächste 7T',
   'ui.kpi_fixed':                      'Fixierte Aufträge',
   'ui.days':                           'Tage',
+  'ui.unit_minutes':                   'Minuten',
+  'ui.unit_hour_utc':                  'Std. (UTC)',
   'ui.remaining':                      'verbleibend',
   'ui.welcome_title':                  'Hallo! Willkommen bei NIMBUS',
   'ui.welcome_subtitle':               'Bitte wählen Sie ein Werk aus, um zu beginnen.',
@@ -378,6 +380,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.constraint_no_list':                'Keine Prioritätsliste für dieses Feld hochgeladen — keine Wirkung, bis eine hinzugefügt wird.',
   'ui.move_up':                        'Nach oben',
   'ui.move_down':                      'Nach unten',
+  'ui.more_info':                      'Weitere Informationen',
 
   // Stufe 3 von docs/scheduling_priority.md — Steuerelemente zum Hinzufügen/
   // Entfernen im Prioritätsbaum sowie die Anzeige „Effektive Reihenfolge“
@@ -402,6 +405,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.split_order_opt_overlong':       'Nur von Natur aus zu lange Aufträge teilen',
   'ui.split_order_opt_partial':        'Teilaufträge über Betriebsintervalle hinweg zulassen',
   'ui.split_order_policy_help':        'Erzeugte Segmente sind für Planer sichtbar, bleiben ein logischer Auftrag und sind nie kürzer als 30 Minuten.',
+  'ui.split_policy_saved':             'Auftragsteilungsrichtlinie für dieses Werk gespeichert.',
+  'ui.split_policy_save_failed':       'Auftragsteilungsrichtlinie konnte nicht gespeichert werden: {{msg}}',
   'ui.min_productive_segment_title':   'Mindest-Produktivsegment',
   'ui.min_productive_segment_help':    'Legt die Mindestlänge eines geteilten Produktivstücks fest, wenn oben eine teilweise oder nur-übermäßig-lange Teilung zugelassen ist. Gilt für den setup-unabhängigen und den setup-bewussten Planer.',
   'ui.min_productive_segment_label':   'Mindest-Produktivsegment (Minuten)',

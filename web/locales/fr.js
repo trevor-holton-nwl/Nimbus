@@ -360,6 +360,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.kpi_headroom':                   'Capacité dispo. 7 proch. jours',
   'ui.kpi_fixed':                      'Ordres fixés',
   'ui.days':                           'jours',
+  'ui.unit_minutes':                   'minutes',
+  'ui.unit_hour_utc':                  'h (UTC)',
   'ui.remaining':                      'restants',
   'ui.welcome_title':                  'Bonjour ! Bienvenue dans NIMBUS',
   'ui.welcome_subtitle':               'Veuillez sélectionner une Usine pour commencer.',
@@ -378,6 +380,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.constraint_no_list':                'Aucune liste de priorité chargée pour ce champ — sans effet tant qu\'aucune n\'est ajoutée.',
   'ui.move_up':                        'Monter',
   'ui.move_down':                      'Descendre',
+  'ui.more_info':                      'Plus d\'infos',
 
   // Étape 3 de docs/scheduling_priority.md — commandes d'ajout/suppression de
   // l'arborescence des priorités et le panneau « Séquence effective »
@@ -402,6 +405,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.split_order_opt_overlong':       'Diviser uniquement les ordres intrinsèquement trop longs',
   'ui.split_order_opt_partial':        'Autoriser les ordres partiels entre intervalles d\'exploitation',
   'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que 30 minutes.',
+  'ui.split_policy_saved':             'Politique de division des ordres enregistrée pour cette usine.',
+  'ui.split_policy_save_failed':       'Impossible d\'enregistrer la politique de division des ordres : {{msg}}',
   'ui.min_productive_segment_title':   'Segment productif minimal',
   'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessus. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
   'ui.min_productive_segment_label':   'Segment productif minimal (minutes)',

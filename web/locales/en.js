@@ -521,6 +521,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.constraint_no_list':                'No priority list uploaded for this field — no effect until one is added.',
   'ui.move_up':                        'Move up',
   'ui.move_down':                      'Move down',
+  'ui.more_info':                      'More info',
 
   // Stage 3 of docs/scheduling_priority.md — priority-tree add/remove controls
   // and the "Effective sequence" readout (Plant ▸ Settings ▸ Scheduling Constraints).
@@ -539,6 +540,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.show_alerts_within':             'Show alerts within the next',
   'ui.score_covers':                   'Score covers the next',
   'ui.days':                           'days',
+  'ui.unit_minutes':                   'minutes',
+  'ui.unit_hour_utc':                  'h (UTC)',
   'ui.remaining':                      'remaining',
   'ui.split_order_title':              'Split-order allocation',
   'ui.split_order_help':               'Choose how future scheduling actions use valid operating intervals. Existing schedules are never rewritten by changing this plant setting.',
@@ -547,6 +550,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.split_order_opt_overlong':       'Split inherently overlong orders only',
   'ui.split_order_opt_partial':        'Allow partial orders across operating intervals',
   'ui.split_order_policy_help':        'Generated segments are planner-visible, remain one logical order, and are never shorter than 30 minutes.',
+  'ui.split_policy_saved':             'Split-order policy saved for this plant.',
+  'ui.split_policy_save_failed':       'Could not save split-order policy: {{msg}}',
   'ui.max_pull_forward_title':         'Due-date pull-forward limit',
   'ui.max_pull_forward_label':         'Maximum pull-forward (days)',
   'ui.max_pull_forward_none':          'No limit',

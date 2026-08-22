@@ -166,6 +166,25 @@ test('setup-aware optimizer never-freeze toast key exists in all 5 locales', () 
   }
 });
 
+test('Scheduling Rules density pass keys exist in all 5 locales', () => {
+  // 2026-08-21: Plant ▸ Settings ▸ Scheduling Rules compact-form rework moved
+  // every per-field description into a right-click "More info" popover and
+  // fixed the split-policy save handler's two hardcoded English toasts.
+  const REQUIRED_SCHED_RULES = [
+    'ui.more_info',
+    'ui.split_policy_saved',
+    'ui.split_policy_save_failed',
+    'ui.unit_minutes',
+    'ui.unit_hour_utc',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_SCHED_RULES) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

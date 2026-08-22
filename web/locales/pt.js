@@ -360,6 +360,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.kpi_headroom':                   'Capacidade disponível próx. 7D',
   'ui.kpi_fixed':                      'Ordens fixadas',
   'ui.days':                           'dias',
+  'ui.unit_minutes':                   'minutos',
+  'ui.unit_hour_utc':                  'h (UTC)',
   'ui.remaining':                      'restantes',
   'ui.welcome_title':                  'Olá! Bem-vindo ao NIMBUS',
   'ui.welcome_subtitle':               'Por favor, selecione uma Planta para começar.',
@@ -378,6 +380,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.constraint_no_list':                'Nenhuma lista de prioridade carregada para este campo — sem efeito até que uma seja adicionada.',
   'ui.move_up':                        'Mover para cima',
   'ui.move_down':                      'Mover para baixo',
+  'ui.more_info':                      'Mais informações',
 
   // Etapa 3 de docs/scheduling_priority.md — controles de adicionar/remover na
   // árvore de prioridades e o painel "Sequência efetiva"
@@ -402,6 +405,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.split_order_opt_overlong':       'Dividir apenas pedidos inerentemente longos demais',
   'ui.split_order_opt_partial':        'Permitir pedidos parciais entre intervalos operacionais',
   'ui.split_order_policy_help':        'Os segmentos gerados são visíveis ao planejador, permanecem um único pedido lógico e nunca são mais curtos que 30 minutos.',
+  'ui.split_policy_saved':             'Política de divisão de pedidos salva para esta planta.',
+  'ui.split_policy_save_failed':       'Não foi possível salvar a política de divisão de pedidos: {{msg}}',
   'ui.min_productive_segment_title':   'Piso do segmento produtivo',
   'ui.min_productive_segment_help':    'Controla a duração mínima de um segmento produtivo dividido quando a divisão parcial ou apenas para pedidos excessivamente longos está permitida acima. Aplica-se tanto ao planejador sem conhecimento de troca quanto ao que considera as trocas.',
   'ui.min_productive_segment_label':   'Segmento produtivo mínimo (minutos)',

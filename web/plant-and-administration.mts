@@ -2216,6 +2216,28 @@ interface PillFpPair {
 // straight through — the shape that carries `children` — so a save can no
 // longer flatten a stored tree on its way back to the backend.
 
+/** Scheduling Rules density pass (2026-08-21): the per-field "More info" copy
+ *  for each `[data-rule-key]` row in `Plant._renderSettingsPane`'s compact
+ *  form, keyed by that same `data-rule-key`. Values are locale KEYS, not
+ *  translated text — resolved via `Util.t` at right-click time so a live
+ *  language switch is picked up with no re-render of this table. `title`
+ *  reuses each row's own label key; `help` is the row's former inline
+ *  `panel-help-text`/`split-policy-help` paragraph(s), in the order they used
+ *  to read top-to-bottom. `horizonRollHour` has no dedicated `*_title` key —
+ *  `ui.horizon_roll_hour_label` ("Roll-forward hour (UTC)") already exists
+ *  and reads fine as a popover heading, so no new locale key was needed. */
+const RULE_HELP: Record<string, { title: string; help: string[] }> = {
+  alertHorizon:         { title: 'ui.alert_horizon_title',          help: ['ui.alert_horizon_help'] },
+  confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },
+  splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
+  maxPullForward:       { title: 'ui.max_pull_forward_title',       help: ['ui.max_pull_forward_help'] },
+  minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
+  visibilityHorizon:    { title: 'ui.visibility_horizon_title',     help: ['ui.visibility_horizon_help'] },
+  horizonRollHour:      { title: 'ui.horizon_roll_hour_label',      help: ['ui.horizon_roll_hour_help'] },
+  frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
+  setupActive:          { title: 'ui.setup_active_panel_title',     help: ['ui.setup_active_panel_help'] },
+};
+
 export const Plant = {
   _blocksCollapsed: true,
   _rosterCollapsed: true,
@@ -2540,6 +2562,84 @@ export const Plant = {
     };
     const dismissKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') { menu.remove(); document.removeEventListener('keydown', dismissKey); }
+    };
+    setTimeout(() => {
+      document.addEventListener('mousedown', dismiss);
+      document.addEventListener('keydown', dismissKey);
+    }, 0);
+  },
+
+  /** Single-item "More info" context menu, cursor-positioned and
+   *  viewport-clamped exactly like `_pillRightClick` above. Used by the
+   *  Scheduling Rules pane (`_renderSettingsPane`) for both its compact
+   *  `[data-rule-key]` rows and the Scheduling Constraints tree's
+   *  `.constraint-row`s, whose inline per-field descriptions were both moved
+   *  out of the always-visible flow and behind this menu. `titleText` and
+   *  `bodyParas` must already be translated/escaped by the caller — this
+   *  helper (and `_showFieldInfoPopover` below) render them as-is. */
+  _openFieldInfoMenu(e: MouseEvent, anchorEl: HTMLElement, titleText: string, bodyParas: string[]): void {
+    document.querySelector('.pill-ctx-menu')?.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'pill-ctx-menu';
+    menu.innerHTML = `<button data-action="more-info">${Util.t('ui.more_info')}</button>`;
+
+    menu.querySelector('button')!.onclick = () => {
+      menu.remove();
+      Plant._showFieldInfoPopover(anchorEl, titleText, bodyParas);
+    };
+
+    menu.style.left = e.clientX + 'px';
+    menu.style.top  = e.clientY + 'px';
+    document.body.appendChild(menu);
+
+    requestAnimationFrame(() => {
+      const r = menu.getBoundingClientRect();
+      if (r.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
+      if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
+    });
+
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', dismiss); }
+    };
+    const dismissKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') { menu.remove(); document.removeEventListener('keydown', dismissKey); }
+    };
+    setTimeout(() => {
+      document.addEventListener('mousedown', dismiss);
+      document.addEventListener('keydown', dismissKey);
+    }, 0);
+  },
+
+  /** Anchored info popover: a field-name heading plus its (possibly
+   *  multi-paragraph) description, opened from the "More info" menu item
+   *  above. Positioned adjacent to the row that was right-clicked, clamped to
+   *  the viewport, and dismissed the same way `_pillRightClick`'s menu is —
+   *  outside `mousedown` or `Escape` — with only one popover open at a time. */
+  _showFieldInfoPopover(anchorEl: HTMLElement, titleText: string, bodyParas: string[]): void {
+    document.querySelector('.field-info-popover')?.remove();
+
+    const pop = document.createElement('div');
+    pop.className = 'field-info-popover';
+    pop.innerHTML = `<h4>${titleText}</h4>${bodyParas.map(p => `<p>${p}</p>`).join('')}`;
+    document.body.appendChild(pop);
+
+    const anchorRect = anchorEl.getBoundingClientRect();
+    pop.style.left = anchorRect.left + 'px';
+    pop.style.top  = (anchorRect.bottom + 6) + 'px';
+
+    requestAnimationFrame(() => {
+      const r = pop.getBoundingClientRect();
+      if (r.right  > window.innerWidth)  pop.style.left = Math.max(6, window.innerWidth  - r.width  - 6) + 'px';
+      if (r.bottom > window.innerHeight) pop.style.top  = Math.max(6, anchorRect.top - r.height - 6) + 'px';
+      if (parseFloat(pop.style.top) < 0) pop.style.top = '6px';
+    });
+
+    const dismiss = (ev: MouseEvent) => {
+      if (!pop.contains(ev.target as Node)) { pop.remove(); document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', dismissKey); }
+    };
+    const dismissKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') { pop.remove(); document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', dismissKey); }
     };
     setTimeout(() => {
       document.addEventListener('mousedown', dismiss);
@@ -3174,110 +3274,87 @@ export const Plant = {
         <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px" ${subTabVisibility.rules ? '' : 'hidden'}>
 
           <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.alert_horizon_title')}</h3></header>
+            <header class="panel-head"><h3>${Util.t('ui.settings_subtab_rules')}</h3></header>
             <div class="panel-body">
-              <p class="panel-help-text">${Util.t('ui.alert_horizon_help')}</p>
-              <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-                <span style="min-width:160px">${Util.t('ui.show_alerts_within')}</span>
-                <input type="number" id="sys-alert-horizon-days" class="form-input" min="1" max="60" step="1"
-                       style="width:64px;text-align:right" placeholder="0">
-                <span>${Util.t('ui.days')}</span>
+              <!-- Compact SAP-MM03-style form (Workstream: Scheduling Rules
+                   density pass, 2026-08-21). The 8 stacked cards this used to
+                   be each carried an inline description paragraph, forcing a
+                   lot of scrolling to reach the constraint tree below. Every
+                   description now lives behind a right-click "More info"
+                   popover (see the contextmenu listener + RULE_HELP map below)
+                   instead of being permanently in the flow. Row order,
+                   element ids, input types/min/max/step, and current-value
+                   population are all unchanged from the previous 8-panel
+                   layout — this is a markup restructure only. -->
+              <div class="sched-rules-form">
+                <div class="sched-rule-row" data-rule-key="alertHorizon">
+                  <label for="sys-alert-horizon-days">${Util.t('ui.alert_horizon_title')}</label>
+                  <input type="number" id="sys-alert-horizon-days" class="form-input" min="1" max="60" step="1" placeholder="0">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="confHorizon">
+                  <label for="sys-conf-horizon-days">${Util.t('ui.conf_horizon_title')}</label>
+                  <input type="number" id="sys-conf-horizon-days" class="form-input" min="1" step="1" placeholder="0">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="splitOrderPolicy">
+                  <label for="sys-split-order-policy">${Util.t('ui.split_order_title')}</label>
+                  <select id="sys-split-order-policy" class="form-input">
+                    <option value="never">${Util.t('ui.split_order_opt_never')}</option>
+                    <option value="overlong_only">${Util.t('ui.split_order_opt_overlong')}</option>
+                    <option value="partial_allowed">${Util.t('ui.split_order_opt_partial')}</option>
+                  </select>
+                  <span class="sched-rule-unit"></span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="maxPullForward">
+                  <label for="sys-max-pull-forward-days">${Util.t('ui.max_pull_forward_title')}</label>
+                  <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_pull_forward_none')}">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="minProductiveSegment">
+                  <label for="sys-min-productive-segment-minutes">${Util.t('ui.min_productive_segment_title')}</label>
+                  <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" step="1" inputmode="numeric">
+                  <span class="sched-rule-unit">${Util.t('ui.unit_minutes')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="visibilityHorizon">
+                  <label for="sys-visibility-horizon-days">${Util.t('ui.visibility_horizon_title')}</label>
+                  <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="horizonRollHour">
+                  <label for="sys-horizon-roll-hour">${Util.t('ui.horizon_roll_hour_label')}</label>
+                  <input type="number" id="sys-horizon-roll-hour" class="form-input" min="0" max="23" step="1" inputmode="numeric">
+                  <span class="sched-rule-unit">${Util.t('ui.unit_hour_utc')}</span>
+                </div>
+
+                <div class="sched-rule-row" data-rule-key="frozenHorizon">
+                  <label for="sys-frozen-horizon-days">${Util.t('ui.frozen_horizon_title')}</label>
+                  <input type="number" id="sys-frozen-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.frozen_horizon_days_none')}">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
+                <!-- Workstream D2 (2026-08-20): relocated from the Setup Matrix
+                     header (plants.setup_active is a durable plant-level setting,
+                     not a per-signature-version one — see setup_data.py's
+                     save_definition comment). The Setup Matrix header's status
+                     chip stays and now reads this same flag via
+                     SetupSnapshot.plant_active. Gated on Session.isAdmin() —
+                     the same underlying permission SetupAdmin.permissionsFor
+                     computes as definitionWrite. Row omitted entirely (not just
+                     hidden) for non-admins, same as the prior panel. -->
+                ${Session.isAdmin() ? `
+                <div class="sched-rule-row" data-rule-key="setupActive">
+                  <label for="sys-setup-active">${Util.t('ui.setup_active_panel_title')}</label>
+                  <label class="setup-check" for="sys-setup-active"><input type="checkbox" id="sys-setup-active">${Util.t('ui.setup_include_setup_times')}</label>
+                  <span class="sched-rule-unit"></span>
+                </div>` : ''}
               </div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.conf_horizon_title')}</h3></header>
-            <div class="panel-body">
-              <p class="panel-help-text">${Util.t('ui.conf_horizon_help')}</p>
-              <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-                <span style="min-width:160px">${Util.t('ui.score_covers')}</span>
-                <input type="number" id="sys-conf-horizon-days" class="form-input" min="1" step="1"
-                       style="width:64px;text-align:right" placeholder="0">
-                <span>${Util.t('ui.days')}</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.split_order_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <p class="panel-help-text split-policy-copy">${Util.t('ui.split_order_help')}</p>
-              <label class="split-policy-control" for="sys-split-order-policy">
-                <span>${Util.t('ui.split_order_policy_label')}</span>
-                <select id="sys-split-order-policy" class="form-input" aria-describedby="sys-split-order-policy-help">
-                  <option value="never">${Util.t('ui.split_order_opt_never')}</option>
-                  <option value="overlong_only">${Util.t('ui.split_order_opt_overlong')}</option>
-                  <option value="partial_allowed">${Util.t('ui.split_order_opt_partial')}</option>
-                </select>
-              </label>
-              <p id="sys-split-order-policy-help" class="split-policy-help">${Util.t('ui.split_order_policy_help')}</p>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.max_pull_forward_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <label class="split-policy-control" for="sys-max-pull-forward-days">
-                <span>${Util.t('ui.max_pull_forward_label')}</span>
-                <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-max-pull-forward-help" placeholder="${Util.t('ui.max_pull_forward_none')}">
-              </label>
-              <p id="sys-max-pull-forward-help" class="split-policy-help">${Util.t('ui.max_pull_forward_help')}</p>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.min_productive_segment_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <p class="panel-help-text">${Util.t('ui.min_productive_segment_help')}</p>
-              <label class="split-policy-control" for="sys-min-productive-segment-minutes">
-                <span>${Util.t('ui.min_productive_segment_label')}</span>
-                <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" step="1" inputmode="numeric" aria-describedby="sys-min-productive-segment-help">
-              </label>
-              <p id="sys-min-productive-segment-help" class="split-policy-help">${Util.t('ui.min_productive_segment_help_detail')}</p>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.visibility_horizon_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <p id="sys-visibility-horizon-help" class="panel-help-text">${Util.t('ui.visibility_horizon_help')}</p>
-              <label class="split-policy-control" for="sys-visibility-horizon-days">
-                <span>${Util.t('ui.visibility_horizon_days_label')}</span>
-                <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-visibility-horizon-help" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
-              </label>
-              <label class="split-policy-control" for="sys-horizon-roll-hour">
-                <span>${Util.t('ui.horizon_roll_hour_label')}</span>
-                <input type="number" id="sys-horizon-roll-hour" class="form-input" min="0" max="23" step="1" inputmode="numeric" aria-describedby="sys-horizon-roll-hour-help">
-              </label>
-              <p id="sys-horizon-roll-hour-help" class="split-policy-help">${Util.t('ui.horizon_roll_hour_help')}</p>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.frozen_horizon_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <label class="split-policy-control" for="sys-frozen-horizon-days">
-                <span>${Util.t('ui.frozen_horizon_days_label')}</span>
-                <input type="number" id="sys-frozen-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" aria-describedby="sys-frozen-horizon-help" placeholder="${Util.t('ui.frozen_horizon_days_none')}">
-              </label>
-              <p id="sys-frozen-horizon-help" class="split-policy-help">${Util.t('ui.frozen_horizon_help')}</p>
-            </div>
-          </div>
-
-          <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.setup_active_panel_title')}</h3></header>
-            <div class="panel-body split-policy-body">
-              <p class="panel-help-text">${Util.t('ui.setup_active_panel_help')}</p>
-              <!-- Workstream D2 (2026-08-20): relocated from the Setup Matrix
-                   header (plants.setup_active is a durable plant-level setting,
-                   not a per-signature-version one — see setup_data.py's
-                   save_definition comment). The Setup Matrix header's status
-                   chip stays and now reads this same flag via
-                   SetupSnapshot.plant_active. Gated on Session.isAdmin() —
-                   the same underlying permission SetupAdmin.permissionsFor
-                   computes as definitionWrite. -->
-              ${Session.isAdmin() ? `<label class="setup-check" for="sys-setup-active"><input type="checkbox" id="sys-setup-active">${Util.t('ui.setup_include_setup_times')}</label>` : ''}
             </div>
           </div>
 
@@ -3315,6 +3392,47 @@ export const Plant = {
       Plant._currentSettingsSubTab = next;
       Plant._renderSettingsPane();
     }));
+
+    // Scheduling Rules density pass (2026-08-21) — right-click "More info".
+    // ONE delegated listener on the whole rules sub-tab, not one per row:
+    // `#sys-constraints-list` (holding the `.constraint-row`s below) is
+    // rebuilt by renderConstraints() on every toggle/add/remove/reorder, so a
+    // per-row listener would need to be re-installed on every one of those
+    // re-renders. Delegating from the stable `#settings-subtab-rules`
+    // container (rebuilt only when _renderSettingsPane itself re-runs) means
+    // this line never has to run again for the lifetime of the pane.
+    const rulesSubtabEl = pane.querySelector<HTMLElement>('#settings-subtab-rules');
+    rulesSubtabEl?.addEventListener('contextmenu', (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const ruleRow = target.closest<HTMLElement>('[data-rule-key]');
+      const consRow = target.closest<HTMLElement>('.constraint-row');
+      if (!ruleRow && !consRow) return;
+
+      if (ruleRow) {
+        const info = RULE_HELP[ruleRow.dataset.ruleKey || ''];
+        if (!info) return;
+        e.preventDefault();
+        Plant._openFieldInfoMenu(e, ruleRow, Util.t(info.title), info.help.map(k => Util.t(k)));
+        return;
+      }
+
+      // `.constraint-row` — title from the same `_label(key)` helper the row
+      // itself renders with; body from Engine._fieldDescriptions, the single
+      // source setConstraintCatalog also draws `cat.desc` from. A key with no
+      // registered description (e.g. a stored-but-unregistered field) gets no
+      // menu at all rather than an empty popover.
+      const path = consRow!.dataset.path;
+      const hit = path ? _resolvePath(path) : null;
+      if (!hit) return;
+      const desc = Engine._fieldDescriptions[hit.node.key];
+      if (!desc) return;
+      e.preventDefault();
+      // `esc()` (defined below, in scope by the time this fires): a constraint
+      // key can be arbitrary JSONB-stored text (see the comment on `esc`'s own
+      // definition), and _label() falls back to echoing the raw key when
+      // neither the locale nor the catalog recognizes it.
+      Plant._openFieldInfoMenu(e, consRow!, esc(_label(hit.node.key)), [esc(desc)]);
+    });
 
     const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
@@ -3421,10 +3539,10 @@ export const Plant = {
           throw new Error(body.detail || `HTTP ${response.status}`);
         }
         plantRow.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed';
-        Toast.show('Split-order policy saved for this plant.', 'success');
+        Toast.show(Util.t('ui.split_policy_saved'), 'success');
       } catch (error) {
         splitPolicySelect.value = previous;
-        Toast.show(`Could not save split-order policy: ${(error as Error).message}`, 'error');
+        Toast.show(Util.t('ui.split_policy_save_failed', { msg: (error as Error).message }), 'error');
       } finally {
         splitPolicySelect.disabled = false;
       }
@@ -3795,7 +3913,6 @@ export const Plant = {
       const canAddAnywhere = countConfiguredKeys(consTree) < Engine.CONSTRAINT_CATALOG.length;
 
       const renderNode = (node: ConstraintConfig, siblings: ConstraintConfig[], depth: number, path: string): string => {
-        const cat = Engine.CONSTRAINT_CATALOG.find(x => x.key === node.key);
         // "Enabled but no list uploaded", for EVERY rankable field, not just
         // colorWheel (N11, docs/scheduling_priority.md). Since Stage 3 every
         // enabled node contributes a real sort term, so any of them can be
@@ -3822,7 +3939,14 @@ export const Plant = {
             </div>
             <div class="cons-meta">
               <div class="cons-label">${esc(_label(node.key))}</div>
-              <div class="cons-desc">${cat?.desc || ''}${noList ? ` <span class="cons-warn">${esc(Util.t('ui.constraint_no_list'))}</span>` : ''}</div>
+              <!-- Scheduling Rules density pass (2026-08-21): the field
+                   description that used to render here unconditionally moved
+                   to the right-click "More info" popover (see the
+                   contextmenu listener above, reading
+                   Engine._fieldDescriptions). The "no list uploaded" warning
+                   is left in place -- it's an active, actionable alert about
+                   THIS row's current state, not reference documentation. -->
+              ${noList ? `<div class="cons-desc"><span class="cons-warn">${esc(Util.t('ui.constraint_no_list'))}</span></div>` : ''}
             </div>
             <label class="cons-toggle">
               <input type="checkbox" ${node.enabled ? 'checked' : ''}>

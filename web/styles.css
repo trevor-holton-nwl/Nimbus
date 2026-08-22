@@ -5825,6 +5825,51 @@ body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--war
   .split-policy-control { grid-template-columns: 1fr; gap: 6px; }
 }
 
+/* Scheduling Rules — compact SAP-MM03-style form (density pass, 2026-08-21).
+   Replaces 8 stacked .panel cards (each with its own inline description) with
+   one panel of label+input rows; descriptions moved to a right-click
+   "More info" popover (.field-info-popover below) instead of living in the
+   flow. Row grid mirrors .split-policy-control immediately above but adds a
+   third column for a short unit suffix ("days", "minutes", "h (UTC)"). */
+.sched-rules-form { display: flex; flex-direction: column; gap: 8px; }
+.sched-rule-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 2fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.sched-rule-row:last-child { border-bottom: none; }
+.sched-rule-row > label { font-weight: 600; color: var(--fg); }
+.sched-rule-row input.form-input,
+.sched-rule-row select.form-input { width: 100%; min-width: 0; }
+.sched-rule-unit { font-size: 11.5px; color: var(--fg-mute); white-space: nowrap; }
+@media (max-width: 620px) {
+  .sched-rule-row { grid-template-columns: 1fr; gap: 6px; }
+}
+
+/* Anchored "More info" popover — field-name heading + its former inline
+   description, opened from the single-item .pill-ctx-menu (right-click on a
+   .sched-rule-row or a .constraint-row). Modeled on #nb-note-popover. */
+.field-info-popover {
+  position: fixed;
+  z-index: 9500;
+  max-width: 360px;
+  width: max-content;
+  background: var(--bg-elev, #fff);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+  padding: 12px 14px;
+  color: var(--fg);
+}
+.field-info-popover h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 700; color: var(--fg); }
+.field-info-popover p { margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--fg-mute); }
+.field-info-popover p:last-child { margin-bottom: 0; }
+body.dark .field-info-popover { box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+
 .constraint-list { display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
 .constraint-row {
   display: flex; align-items: center; gap: 12px; padding: 10px 12px;

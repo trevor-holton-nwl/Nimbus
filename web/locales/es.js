@@ -364,6 +364,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.kpi_headroom':                   'Capacidad disponible próx. 7D',
   'ui.kpi_fixed':                      'Pedidos fijados',
   'ui.days':                           'días',
+  'ui.unit_minutes':                   'minutos',
+  'ui.unit_hour_utc':                  'h (UTC)',
   'ui.remaining':                      'restantes',
   'ui.welcome_title':                  '¡Hola! Bienvenido a NIMBUS',
   'ui.welcome_subtitle':               'Por favor, seleccione una Planta para comenzar.',
@@ -382,6 +384,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.constraint_no_list':                'No hay lista de prioridad cargada para este campo: sin efecto hasta que se agregue una.',
   'ui.move_up':                        'Subir',
   'ui.move_down':                      'Bajar',
+  'ui.more_info':                      'Más información',
 
   // Etapa 3 de docs/scheduling_priority.md — controles de agregar/quitar del
   // árbol de prioridades y el panel "Secuencia efectiva"
@@ -406,6 +409,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.split_order_opt_overlong':       'Dividir solo pedidos inherentemente demasiado largos',
   'ui.split_order_opt_partial':        'Permitir pedidos parciales entre intervalos operativos',
   'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos de 30 minutos.',
+  'ui.split_policy_saved':             'Política de división de pedidos guardada para esta planta.',
+  'ui.split_policy_save_failed':       'No se pudo guardar la política de división de pedidos: {{msg}}',
   'ui.min_productive_segment_title':   'Mínimo de segmento productivo',
   'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando arriba se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
   'ui.min_productive_segment_label':   'Segmento productivo mínimo (minutos)',
