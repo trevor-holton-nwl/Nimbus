@@ -1110,3 +1110,62 @@ Matrix view (the review/highlight affordance lives only in `paintGrid`), the "Hi
 value" filter and the clear-an-override path now test the row's **effective** `setup_min` rather
 than `plant_value`, the "From" box narrows the displayed page by substring, and `_listNewRows` is
 cleared on both Save and Discard.
+
+## Optimizer-speedup whole-branch review — deferred follow-ups (2026-08-22)
+
+Three items surfaced by the final whole-branch review of the optimizer-speedup effort
+(`docs/architecture/optimizer-dispatch.md` → "Search controls") that were deliberately **not** built
+in that fix wave — recorded here so they aren't silently forgotten.
+
+- **Worker offload of the pure setup-aware evaluator.** `web/setup-scheduler.mts`'s search
+  (`evaluateDueDateFirst`/`evaluateSptWithSetup`/`evaluateMinChangeover`/`evaluateThroughput`) still
+  runs entirely on the main thread — unlike Alerts/Utilization compute, it is not delegated to
+  `nimbus-worker.js`/`nimbus-compute-core.js`. A multi-second `SETUP_AWARE_DEADLINE_MS` search (5000 ms
+  default, and the deferred Plan B run now gets the same full window — see "The deferred Plan B run" in
+  `optimizer-dispatch.md`) is real main-thread jank risk on a large plant. **Recommended approach: a real
+  Worker offload, not cooperative chunking** (breaking the search into `setTimeout`/`requestIdleCallback`
+  slices) — cooperative chunking still contends with the main thread for every slice and is materially
+  harder to reason about for a search that already tracks its own wall-clock budget internally
+  (`bounds.deadline`, `bounds.clock`). **Blocker:** `setup-scheduler.mts` is not currently importable in
+  isolation — its `evaluateSchedule` export (line ~4820) is a thin adapter that calls straight back into
+  `Engine.evaluateSchedule` (`import { Engine, ... } from './schedule-services.mjs'`), and `Engine` is a
+  live, Store/DOM-coupled singleton that cannot run inside a Worker. That adapter — used only by the
+  `'spt'`-mode-via-setup-aware-evaluator legacy-walk delegation path — would need to be split out of
+  `setup-scheduler.mts`'s import graph (e.g. into a separate adapter module that the main thread composes,
+  while the Worker only ever sees the pure `evaluateDueDateFirst`/`evaluateSptWithSetup`/
+  `evaluateMinChangeover`/`evaluateThroughput` family plus their `ScheduleSnapshot`/`DueDateFirstBounds`
+  inputs) before the module as a whole could be `importScripts`'d or ES-imported into a Worker the way
+  `nimbus-compute-core.js` already is.
+- **Duplicate unknown-state diagnostics when a trailing search has no winner (pre-existing, reproducible
+  on `main`, not introduced by this branch).** In both `evaluateLineWithFixedBoundaries` and
+  `evaluateLineWithFixedBoundariesSpt`, when the fragment's final `trailing` search
+  (`searchFragment(..., { start: fragmentStart, end: bounds.horizonEnd, ... })`) produces no winner, the
+  `!trailing.winner` branch does two things with the *same* set of unresolved orders: it pushes
+  `trailing.missingEdges` verbatim into the run's `missingEdges` array, **and** folds those same orders
+  into `remaining`/`tailTasks`, which then goes through `applyUnknownTail` a few lines later —
+  `applyUnknownTail` pushes its *own* diagnostics (e.g. `'initial-state-unknown'`) for the same orders into
+  that same `missingEdges` array. The net effect: an order whose state genuinely can't be resolved gets
+  counted/reported twice in the run's diagnostics (and, downstream, potentially double-counted in the
+  OptimizerPreview missing-pairs tally or the live-run "orders scheduled without setup data" toast).
+  Reproduce by driving `evaluateDueDateFirst`/`evaluateSptWithSetup` with a fixed boundary whose trailing
+  fragment contains an order with an unresolvable signature and confirm `missingEdges` (or the exported
+  `SearchDiagnostics`) carries that order's edge more than once. *Fix direction:* de-duplicate by
+  `(line, predecessorOrderId, successorOrderId, reason)` before appending, the same shape
+  `appendRejectedCoverageDiagnostics` already uses elsewhere, or skip the raw `trailing.missingEdges` push
+  entirely when every one of those orders is about to be re-diagnosed via the tail placement anyway.
+- **Boundary-fallback branch is currently unreachable — needs an integration test if `supportsBoundaryFallback`'s
+  reason allowlist is ever widened.** `supportsBoundaryFallback(run)` (setup-scheduler.mts) only returns
+  true when every one of `run.missingEdges` has reason `UNCOVERED_SETUP_TRANSITION_REASON` or
+  `'incoming-fixed-setup-infeasible'` — but the branch that consumes it
+  (`if (!winner && run.termination === 'completed' && supportsBoundaryFallback(run))`) requires
+  `run.winner === null`, which the code comment above `isSearchConclusive` documents as **provably
+  unreachable under current `candidateForSequence` semantics**: a completed search with a nonempty
+  `missingEdges` restricted to those two reasons always produces a winner today, so the fallback path is
+  dead code in practice, only reachable through the unit tests that construct a `SearchRun` directly
+  (`tests/modules/setup-scheduler.test.mjs`) rather than through the public `evaluateDueDateFirst`/
+  `evaluateSptWithSetup` API end-to-end. This is fine as long as it stays true — but if
+  `supportsBoundaryFallback`'s reason allowlist is ever widened (e.g. to admit another "safe to reroute"
+  missing-edge reason), whoever does that widening must also add an end-to-end integration test that
+  drives the branch through the public API, not just a direct `SearchRun` unit test, since a reachability
+  assumption this specific is exactly the kind of thing a future change can invalidate without anyone
+  noticing.
