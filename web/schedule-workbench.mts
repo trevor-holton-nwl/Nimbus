@@ -143,7 +143,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, scheduleAlertsForPatches } from './schedule-services.mjs';
 import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
@@ -1410,6 +1410,11 @@ export const TimelineNav = {
   _dragStartX: 0,
   _dragStartRange: null as TimelineWindowMs | null,
   _unsubStore: null as (() => void) | null,
+  // Phase 3 (Pkg E): local memo for the plant-scoped minimap matrix — passing
+  // srcTasks to Utilization.computeMatrix bypasses its own shared memo (see
+  // that function's `cacheable = srcTasks === null` guard), so this render
+  // loop would otherwise recompute the matrix on every call.
+  _minimapMatrixCache: null as { key: string; matrix: ReturnType<typeof Utilization.computeMatrix> } | null,
 
   init(): void {
     const el = document.getElementById('timeline-nav');
@@ -1504,8 +1509,9 @@ export const TimelineNav = {
     ctx.clearRect(0, 0, cssW, cssH);
 
     // Scope to the selected plant (R17) so the nav strip draws only the current
-    // plant's orders, not every plant's. The utilization heat-band below
-    // (computeMatrix) stays intentionally system-wide.
+    // plant's orders, not every plant's. Phase 3 (Pkg E): the utilization
+    // heat-band below (computeMatrix) is now scoped the same way via
+    // srcTasks, instead of recomputing a global, all-plant matrix.
     const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
       .filter(t => t.start_date && t.end_date);
     if (!tasks.length || !Timeline._tl) return;
@@ -1534,7 +1540,28 @@ export const TimelineNav = {
     ctx.fillRect(0, 0, cssW, cssH);
 
     // Draw per-day utilization heat bands
-    const matrix = Utilization.computeMatrix(new Date(scheduleMin), Math.ceil(totalMs / Config.MS_DAY) + 2);
+    const days = Math.ceil(totalMs / Config.MS_DAY) + 2;
+    const plant = Store.selectedPlant;
+    let matrix: ReturnType<typeof Utilization.computeMatrix>;
+    if (plant) {
+      // Plant-scoped: pass `tasks` (already filtered to this plant's lines
+      // above) as srcTasks. That bypasses Utilization.computeMatrix's own
+      // shared memo (its `cacheable` guard requires srcTasks === null), so
+      // keep a tiny local one here — this render fires on every
+      // rangechange/pan/resize.
+      const matrixCacheKey = `${Store.rev()}|${plant}|${scheduleMin}|${days}`;
+      if (TimelineNav._minimapMatrixCache?.key === matrixCacheKey) {
+        matrix = TimelineNav._minimapMatrixCache.matrix;
+      } else {
+        matrix = Utilization.computeMatrix(new Date(scheduleMin), days, tasks);
+        TimelineNav._minimapMatrixCache = { key: matrixCacheKey, matrix };
+      }
+    } else {
+      // No plant selected: unchanged global behavior (unreached today, since
+      // `tasks` is empty and render() already returned above in that case —
+      // kept as a safe fallback should that early return ever change).
+      matrix = Utilization.computeMatrix(new Date(scheduleMin), days);
+    }
     const SEV_COLORS: Record<'ok' | 'warn' | 'err', string> = { ok: 'rgba(30,122,74,0.25)', warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
     for (const line of Object.keys(matrix)) {
       for (const [dayKey, row] of Object.entries(matrix[line])) {
@@ -8856,11 +8883,18 @@ export const OptimizerPreview = {
       () => UndoStack.restoreTasks(snap));
     Toast.show(Util.t('toast.opt_applied'), 'success');
     OptimizerPreview._clear();
-    // The trial is now the committed baseline — recompute right away instead of
-    // waiting on the debounce so the badge reflects it immediately.
-    NIMBUS!.Confidence?._recompute?.();
+    // The trial is now the committed baseline. Phase 3 (Pkg E): route through
+    // Confidence's own debounced scheduler (Util.debounce-wrapped in
+    // nimbus-intelligence.js) instead of forcing a synchronous recompute on
+    // the click path.
+    NIMBUS!.Confidence?._recomputeDebounced?.();
     Modal.close('modal-opt-preview');
-    Alerts.scheduleRecompute();
+    // Phase 3 (Pkg E): scope the recompute to the lines candidate.patches
+    // actually touched instead of a full-plant recompute. `snap` is the
+    // pre-apply snapshot (candidate patches never change MACHINE, so
+    // pre/post-apply line membership match).
+    const byId = new Map(snap.map(t => [String(t.id), t]));
+    scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE);
   },
 
   discard() {

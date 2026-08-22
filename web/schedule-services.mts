@@ -1615,6 +1615,35 @@ export const Alerts = {
   },
 };
 
+/** Phase 3 (Pkg E): shared post-apply alert-recompute scoping for optimizer
+ *  patches (used by both Engine.runAndApply's setup-aware branch and
+ *  OptimizerPreview.apply). The optimizer only ever shifts dates within a
+ *  line — never moves a task across lines/machines — which is exactly the
+ *  invariant scheduleRecomputeLines' doc comment above requires of its
+ *  callers. Defensive fallback: if any patch's `changes` actually carries a
+ *  MACHINE field (shouldn't happen today), or a patch id can't be resolved
+ *  to a line at all, fall back to the full recompute rather than trust a
+ *  possibly-incomplete scope. */
+export function scheduleAlertsForPatches(
+  patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
+  resolveLine: (id: string) => string | undefined,
+): void {
+  // No patches to scope to (e.g. an apply that changed nothing) — both call
+  // sites call Alerts.clearDismissed() just before this, which only takes
+  // effect on the next recompute (Alerts.recompute reads Alerts._dismissed
+  // internally), so an empty scope must still trigger a (full) recompute
+  // rather than silently skip one.
+  if (!patches.length) { Alerts.scheduleRecompute(); return; }
+  const lines = new Set<string>();
+  for (const p of patches) {
+    if ('MACHINE' in p.changes) { Alerts.scheduleRecompute(); return; }
+    const line = resolveLine(p.id);
+    if (!line) { Alerts.scheduleRecompute(); return; }
+    lines.add(line);
+  }
+  Alerts.scheduleRecomputeLines(lines);
+}
+
 // schedule-data.mjs's Persistence used to call `Alerts.scheduleRecompute()` directly
 // after every hydration (load()'s two branches, _loadCache(), _loadDemo()) — a reverse
 // dependency schedule-data.mjs must never take (it may not import schedule-services.mjs).
@@ -3033,7 +3062,11 @@ export const Engine = {
       Engine.lastSetupAwareResult = result;
       Store.setLastOptimize(new Date(), 'engine');
       Alerts.clearDismissed();
-      Alerts.scheduleRecompute();
+      // Phase 3 (Pkg E): scope the recompute to the lines these patches actually
+      // touched instead of a full-plant recompute. `byId` (built above from the
+      // pre-apply snapshot) resolves each patch id to its line/MACHINE; patches
+      // never change MACHINE, so pre- and post-apply line membership match.
+      scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE);
       // Surface the never-freeze fallbacks that actually landed in this apply:
       // orders scheduled without a resolvable setup transition (no changeover
       // bar) and, separately, any line still guarded off entirely (only
