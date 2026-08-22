@@ -202,12 +202,14 @@ END $$;
 -- max_pull_forward_days' nullable-optional shape above. horizon_roll_hour_utc
 -- is NOT NULL DEFAULT 19 (mirrors setup_active's NOT NULL DEFAULT shape) so
 -- every plant has a well-defined roll instant even before an admin ever visits
--- the Scheduling Rules panel. visibility_horizon_days is registered in
--- column_metadata (2026-08-21, see the INSERT below and
--- migrations/2026-08-21-plants-grid-visibility.sql) so it's also editable
--- from the generic Admin > Manage Data Tables grid; horizon_roll_hour_utc
--- stays unregistered — a companion field of the dedicated
--- POST /master-data/plants/{plant}/visibility-horizon route only. See
+-- the Scheduling Rules panel. BOTH columns are registered in column_metadata
+-- (see the INSERTs below and migrations/2026-08-21-plants-grid-visibility.sql
+-- + migrations/2026-08-21-plants-grid-roll-hour.sql), because the Manage Data
+-- Tables grid is now their ONLY editable surface: the Scheduling Rules pane's
+-- rows for both were removed on 2026-08-21, so the dedicated
+-- POST /master-data/plants/{plant}/visibility-horizon route still exists but
+-- has no frontend caller. horizon_roll_hour_utc was briefly left unregistered
+-- earlier the same day, which left it with no UI at all. See
 -- docs/multi_change_spec_08.20.26.md's C1 section for the plant-local-midnight-
 -- with-a-UTC-roll-hour design and its three implementation corrections
 -- (three-way coalesce, count_orders' separate WHERE builder, indexing).
@@ -579,13 +581,16 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants', 'timezone',      'Timezone (IANA)', FALSE, 7)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
--- 2026-08-21: expose setup_active and visibility_horizon_days as editable
--- Manage Data Tables grid columns too (verbatim copy in
--- migrations/2026-08-21-plants-grid-visibility.sql). horizon_roll_hour_utc
--- stays unregistered — see that column's comment above.
+-- 2026-08-21: expose setup_active, visibility_horizon_days and
+-- horizon_roll_hour_utc as editable Manage Data Tables grid columns. Verbatim
+-- copies in migrations/2026-08-21-plants-grid-visibility.sql (first two) and
+-- migrations/2026-08-21-plants-grid-roll-hour.sql (the third, added once the
+-- Scheduling Rules pane's rows for all three were removed and the grid became
+-- their only editable surface).
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
     ('plants', 'setup_active',            'Setup-Aware Optimization',  FALSE, 8),
-    ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9)
+    ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9),
+    ('plants', 'horizon_roll_hour_utc',   'Roll-Forward Hour (UTC)',   FALSE, 10)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------

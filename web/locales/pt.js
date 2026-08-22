@@ -392,6 +392,9 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.all_fields_used':              'Todos os campos classificáveis já estão na árvore',
   'ui.effective_sequence':           'Sequência efetiva',
 
+  // Títulos de seção do painel de Regras de Programação (2026-08-21).
+  'ui.sched_section_horizons':         'Horizontes',
+  'ui.sched_section_order_rules':      'Regras de Pedidos',
   'ui.alert_horizon_title':            'Horizonte de Alertas',
   'ui.alert_horizon_help':             'Controla quais alertas aparecem no indicador do cabeçalho e na gaveta de alertas. Pedidos além da janela selecionada ficam ocultos para reduzir ruído. A janela avança continuamente com o relógio atual.',
   'ui.conf_horizon_title':             'Horizonte da Pontuação de Confiança',

@@ -169,13 +169,20 @@ test('setup-aware optimizer never-freeze toast key exists in all 5 locales', () 
 test('Scheduling Rules density pass keys exist in all 5 locales', () => {
   // 2026-08-21: Plant ▸ Settings ▸ Scheduling Rules compact-form rework moved
   // every per-field description into a right-click "More info" popover and
-  // fixed the split-policy save handler's two hardcoded English toasts.
+  // fixed the split-policy save handler's two hardcoded English toasts. The
+  // follow-up pass the same day split the form into two titled panels
+  // ("Horizons" / "Order Rules") and dropped the Visibility Horizon,
+  // Roll-forward hour and Setup-aware optimization rows. `ui.unit_hour_utc`
+  // stays pinned even though nothing renders it now — its POST
+  // /master-data/plants/{plant}/visibility-horizon route still exists.
   const REQUIRED_SCHED_RULES = [
     'ui.more_info',
     'ui.split_policy_saved',
     'ui.split_policy_save_failed',
     'ui.unit_minutes',
     'ui.unit_hour_utc',
+    'ui.sched_section_horizons',
+    'ui.sched_section_order_rules',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED_SCHED_RULES) {

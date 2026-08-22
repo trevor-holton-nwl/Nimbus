@@ -1192,6 +1192,33 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   pointer-events: none !important;
 }
 
+/* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
+   line at the exact instant orders stop appearing (Store.visibilityHorizonEnd
+   / Timeline.rebuild), deliberately quieter than the frozen-/alert-horizon
+   bands above (a line + small tag, not a wash). vis-timeline custom time bars
+   are draggable by design with no options-level opt-out, so pointer-events is
+   the mechanism disabling that here, not a vis-timeline API call. */
+.vis-custom-time.visibility-horizon {
+  background-color: var(--accent);
+  width: 2px;
+  pointer-events: none;
+}
+.vis-custom-time.visibility-horizon .vis-custom-time-marker {
+  background: var(--accent);
+  color: var(--primary-fg, #fff);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 0 0 var(--r-sm, 3px) 0;
+  white-space: nowrap;
+  pointer-events: none;
+}
+body.dark .vis-custom-time.visibility-horizon,
+body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
+  background-color: var(--accent);
+}
+
 /* Ctrl+drag marquee rubber-band — drawn into .vis-panel.vis-center */
 .nimbus-marquee {
   position: absolute;
@@ -5827,25 +5854,57 @@ body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--war
 
 /* Scheduling Rules — compact SAP-MM03-style form (density pass, 2026-08-21).
    Replaces 8 stacked .panel cards (each with its own inline description) with
-   one panel of label+input rows; descriptions moved to a right-click
-   "More info" popover (.field-info-popover below) instead of living in the
-   flow. Row grid mirrors .split-policy-control immediately above but adds a
-   third column for a short unit suffix ("days", "minutes", "h (UTC)"). */
-.sched-rules-form { display: flex; flex-direction: column; gap: 8px; }
+   label+input rows split across two titled panels ("Horizons", "Order Rules");
+   descriptions moved to a right-click "More info" popover
+   (.field-info-popover below) instead of living in the flow.
+
+   Two changes from the first cut of this pass, both to fix field sizing that
+   read as inconsistent: the rows now sit two-per-row in a grid rather than one
+   tall column, and each field is sized to its own content instead of being
+   stretched to `minmax(220px, 2fr)` — a 2-digit day count and a 50-character
+   policy dropdown were getting the same box. */
+.sched-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 40px;
+  align-items: start;
+}
 .sched-rule-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(220px, 2fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;   /* label | field | unit */
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 6px 0;
   font-size: 13px;
   border-bottom: 1px solid var(--line);
 }
-.sched-rule-row:last-child { border-bottom: none; }
+/* Split Order Allocation only — its longest <option> needs the full width, and
+   in a 2-column grid a span also keeps it flush left on its own row. */
+.sched-rule-row--wide { grid-column: 1 / -1; }
 .sched-rule-row > label { font-weight: 600; color: var(--fg); }
-.sched-rule-row input.form-input,
-.sched-rule-row select.form-input { width: 100%; min-width: 0; }
+/* MM03 field sizing: the box fits its value, not its column. 4.5rem holds a
+   3-digit entry at 13px once the spinner is suppressed — Frozen Horizon, the
+   pull-forward limit and Productive Segment Floor are all uncapped, so 120/180
+   are legitimate values and must not clip. No `:last-child` border reset here:
+   in a 2-column grid the last child is not the bottom row, and keeping the rule
+   on every row is what keeps the two columns' baselines aligned when a row is
+   half-empty. */
+.sched-rule-row input.form-input[type="number"] {
+  width: 4.5rem;
+  min-width: 0;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.sched-rule-row input.form-input[type="number"]::-webkit-outer-spin-button,
+.sched-rule-row input.form-input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.sched-rule-row select.form-input { width: min(100%, 50ch); min-width: 0; }
 .sched-rule-unit { font-size: 11.5px; color: var(--fg-mute); white-space: nowrap; }
+@media (max-width: 900px) {
+  .sched-rules-grid { grid-template-columns: 1fr; }
+}
 @media (max-width: 620px) {
   .sched-rule-row { grid-template-columns: 1fr; gap: 6px; }
 }

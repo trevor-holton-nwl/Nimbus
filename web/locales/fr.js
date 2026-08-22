@@ -392,6 +392,9 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.all_fields_used':              'Tous les champs classables sont déjà dans l\'arborescence',
   'ui.effective_sequence':           'Séquence effective',
 
+  // Titres de section du volet Règles d'Ordonnancement (2026-08-21).
+  'ui.sched_section_horizons':         'Horizons',
+  'ui.sched_section_order_rules':      'Règles de Commande',
   'ui.alert_horizon_title':            'Horizon d\'Alertes',
   'ui.alert_horizon_help':             'Détermine quelles alertes apparaissent dans le badge d\'en-tête et le tiroir d\'alertes. Les ordres au-delà de la fenêtre sélectionnée sont masqués pour réduire le bruit. La fenêtre avance en continu avec l\'horloge actuelle.',
   'ui.conf_horizon_title':             'Horizon du Score de Confiance',

@@ -392,6 +392,9 @@ window.__NIMBUS_LOCALES.de = {
   'ui.all_fields_used':              'Alle einstufbaren Felder befinden sich bereits im Baum',
   'ui.effective_sequence':           'Effektive Reihenfolge',
 
+  // Abschnittstitel des zweispaltigen Planungsregeln-Bereichs (2026-08-21).
+  'ui.sched_section_horizons':         'Horizonte',
+  'ui.sched_section_order_rules':      'Auftragsregeln',
   'ui.alert_horizon_title':            'Warnungshorizont',
   'ui.alert_horizon_help':             'Bestimmt, welche Warnungen im Kopfzeilen-Badge und im Warnungsfenster erscheinen. Aufträge außerhalb des gewählten Fensters werden ausgeblendet, um Rauschen zu reduzieren. Das Fenster verschiebt sich kontinuierlich mit der aktuellen Uhrzeit.',
   'ui.conf_horizon_title':             'Vertrauens-Score-Horizont',

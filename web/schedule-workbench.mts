@@ -268,6 +268,7 @@ export const Timeline = {
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
   _alertHorizonIds: [] as string[],
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
+  _visibilityHorizonMarker: false,          // C1: tracks whether the 'visibility-horizon' custom time bar has been added to _tl (addCustomTime/removeCustomTime throw on a duplicate/missing id)
   _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
   _nextColorIdx: 0,
   _unsubStore:   null as (() => void) | null,
@@ -1010,6 +1011,31 @@ export const Timeline = {
     // (OD-C1d/e); the past stays exactly as unbounded as it already was.
     if (Timeline._tl) {
       Timeline._tl.setOptions({ max: Store.visibilityHorizonEnd });
+
+      // C1: labeled vertical marker at the horizon edge itself, so a planner
+      // sees WHY the timeline ends / orders vanish there instead of just
+      // hitting an unexplained wall. Added once and repositioned via
+      // setCustomTime on later rebuilds (addCustomTime throws on a duplicate
+      // id); removed when the plant has no horizon (removeCustomTime throws
+      // on a missing id, hence the _visibilityHorizonMarker existence flag).
+      // Not draggable: vis-timeline custom time bars are draggable by design
+      // with no options-level opt-out, so dragging is disabled via CSS
+      // (`.vis-custom-time.visibility-horizon { pointer-events: none }` in
+      // styles.css) rather than through the vis-timeline API.
+      const tlCustomTime = Timeline._tl as unknown as VisCustomTimeApi;
+      const horizonEnd = Store.visibilityHorizonEnd;
+      if (horizonEnd) {
+        if (Timeline._visibilityHorizonMarker) {
+          tlCustomTime.setCustomTime(horizonEnd, 'visibility-horizon');
+        } else {
+          tlCustomTime.addCustomTime(horizonEnd, 'visibility-horizon');
+          tlCustomTime.setCustomTimeMarker(Util.t('ui.visibility_horizon_title'), 'visibility-horizon', false);
+          Timeline._visibilityHorizonMarker = true;
+        }
+      } else if (Timeline._visibilityHorizonMarker) {
+        tlCustomTime.removeCustomTime('visibility-horizon');
+        Timeline._visibilityHorizonMarker = false;
+      }
     }
 
     // Alert-cell background items — inserted last so they sit on top of the horizon
@@ -1455,7 +1481,13 @@ export const TimelineNav = {
     const pixelW = rect.width || el.offsetWidth || 800;
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const scheduleMin = today.getTime();
-    const scheduleMax = scheduleMin + 42 * Config.MS_DAY;
+    // C1 (2026-08-20 convention, OD-C1d/e): cap the future edge at the plant
+    // visibility horizon when one is set — same bound Timeline.rebuild() applies
+    // to the Gantt's `max` option, so the minimap can't imply a scrollable range
+    // past the point orders actually stop appearing. scheduleMin is left alone;
+    // only the future edge is ever bounded.
+    const horizon = Store.visibilityHorizonEnd?.getTime();
+    const scheduleMax = Math.min(scheduleMin + 42 * Config.MS_DAY, horizon ?? Infinity);
     return { scheduleMin, scheduleMax, pixelW };
   },
 
@@ -5625,6 +5657,19 @@ interface VisInternalTimeline {
   itemSet?: { items?: Record<string, { dom?: { box?: HTMLElement } } | undefined> };
   _setScrollTop?(top: number): void;
   _getScrollTop?(): number;
+}
+
+/** Custom time bar methods — real, stable vis-timeline v7.7.3 public API
+ *  (https://visjs.github.io/vis-timeline/docs/timeline/#Custom_Time), just not
+ *  yet enumerated on NimbusVendor.VisTimelineInstance in types/vendor.d.ts.
+ *  Kept local since Timeline.rebuild's plant visibility-horizon marker is the
+ *  only caller today. setCustomTimeMarker's `editable` only controls whether
+ *  the title text becomes contenteditable — it does not affect bar dragging. */
+interface VisCustomTimeApi {
+  addCustomTime(time?: Date | number | string, id?: string | number): string | number;
+  removeCustomTime(id: string | number): void;
+  setCustomTime(time: Date | number | string, id?: string | number): void;
+  setCustomTimeMarker(title: string, id?: string | number, editable?: boolean): void;
 }
 
 /** One order item's on-screen rect, snapshotted once per marquee gesture (or

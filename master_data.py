@@ -60,6 +60,15 @@ SYSTEM_COLUMNS = frozenset({'created_at', 'updated_at'})
 # happening by mistake later.
 GENERATED_COLUMNS = {'machine': frozenset({'machine_key'})}
 
+# information_schema.columns.data_type values (upper-cased, matching
+# _column_meta's `sql_type`) that behave like TEXT for bulk_apply's blank-cell
+# handling below: an empty/whitespace string is a legitimate value for these
+# (e.g. materials.material_description VARCHAR NOT NULL DEFAULT ''), never a
+# stand-in for "no value entered". Every other registered type (INTEGER,
+# NUMERIC, BOOLEAN, DATE, TIMESTAMP...) has no such legitimate blank literal,
+# so a blank there means the contentEditable cell was cleared.
+_TEXT_LIKE_SQL_TYPES = frozenset({'TEXT', 'CHARACTER VARYING', 'VARCHAR', 'CHARACTER', 'CHAR', 'BPCHAR'})
+
 # Key columns per table — is_locked in column_metadata, but also enforced here.
 _KEY_COLUMNS = {
     'subnetworks':        frozenset({'code'}),
@@ -304,14 +313,19 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         else:
             total = len(rows)
 
-        # Plants carry sidecar optimization settings (`constraints`, the
-        # split-order allocation policy, and — as of Workstream D2 — the
-        # relocated setup-active flag). They are intentionally NOT registered
-        # in column_metadata, so none of them appears as an editable grid
-        # column — but we attach them to each row dict so the frontend
-        # (Settings pane + optimizer) can read them alongside the visible
-        # columns. Scope the fetch to the plants on this page so a
-        # paged/filtered request never re-scans the whole table.
+        # Plants carry sidecar optimization settings. We attach them to each row
+        # dict so the frontend (Settings pane + optimizer) can read them
+        # alongside the visible columns; whether a given one ALSO renders as an
+        # editable grid column depends purely on whether it has a
+        # column_metadata row, which list_rows' INNER JOIN requires.
+        #   registered (grid-editable): setup_active, visibility_horizon_days,
+        #     horizon_roll_hour_utc — the grid is the only editable surface for
+        #     all three as of 2026-08-21, their Scheduling Rules rows removed.
+        #   unregistered (read-only here, written by a dedicated route):
+        #     constraints, split_order_policy, max_pull_forward_days,
+        #     frozen_horizon_days, min_productive_segment_minutes.
+        # Scope the fetch to the plants on this page so a paged/filtered request
+        # never re-scans the whole table.
         if table == 'plants':
             try:
                 page_plants = list({r.get('plant') for r in rows if r.get('plant') is not None})
@@ -716,6 +730,47 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Write — bulk upsert + delete
 # ---------------------------------------------------------------------------
+def _bulk_apply_readable_error(table: str, exc: psycopg.Error) -> str:
+    """Turn a bulk_apply upsert failure into a message the Manage Data Tables
+    grid can show a planner, instead of a bare constraint/type name.
+
+    Covers the three exception types bulk_apply translates to a 400: a
+    CHECK violation (a value was entered but is out of range), a NOT NULL
+    violation (a required cell was cleared — the blank-string coercion
+    below runs regardless of nullability, so a NOT NULL column reaches
+    Postgres as an explicit None and is rejected this way rather than via a
+    raw type-cast failure on ""), and InvalidTextRepresentation (SQLSTATE
+    22P02 — genuinely non-numeric/non-boolean/non-date text landed on a
+    typed column, e.g. "abc" into an INTEGER; the blank-string coercion
+    never touches this case because the cell wasn't blank).
+    """
+    diag = exc.diag
+    column = diag.column_name
+    constraint = diag.constraint_name
+
+    if isinstance(exc, psycopg.errors.NotNullViolation):
+        which = repr(column) if column else "a required column"
+        return (
+            f"Cannot apply change to {table!r}: {which} is required and cannot be left blank."
+        )
+
+    if isinstance(exc, psycopg.errors.InvalidTextRepresentation):
+        detail = diag.message_primary or "the entered value has the wrong type for its column"
+        return f"Cannot apply change to {table!r}: {detail}."
+
+    # CheckViolation — a value was entered but falls outside the column's
+    # allowed range (e.g. plants.horizon_roll_hour_utc outside 0..23). The
+    # constraint/column name from the error diagnostics is the most
+    # specific thing we can say generically here — a per-column message
+    # table would duplicate the CHECKs themselves.
+    detail = constraint or column or 'a column constraint'
+    return (
+        f"Cannot apply change to {table!r}: a value violates {detail}. "
+        "Check the edited cells against that column's allowed range, "
+        "and note that required columns cannot be left blank."
+    )
+
+
 def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
     """
     ops = {
@@ -744,7 +799,8 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # is a raw Python list with no Jsonb() wrapper (psycopg can't adapt it —
         # unmapped sqlstate, surfaces as a generic 500), and `pages` isn't a real
         # `roles` column at all (42703 undefined column, same generic 500).
-        allowed_cols = {m["column_name"] for m in _column_meta(cur, table)} if upserts else set()
+        col_meta_by_name = {m["column_name"]: m for m in _column_meta(cur, table)} if upserts else {}
+        allowed_cols = set(col_meta_by_name)
 
         # --- Deletes first so upserts don't conflict with to-be-deleted rows ---
         for d in deletes:
@@ -803,11 +859,50 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     vals=placeholders,
                     conflict=conflict_cols,
                 )
+            # The Manage Data Tables grid edits cells as contentEditable divs
+            # and POSTs raw strings verbatim — a cleared cell arrives here as
+            # "" regardless of the column's type. For a non-text column (e.g.
+            # plants.visibility_horizon_days INTEGER, meaning "unlimited" when
+            # NULL) that blank means "clear it", never "insert the literal
+            # empty string" — so it's coerced to None here unconditionally,
+            # NOT NULL columns included. Postgres then decides the outcome:
+            # a NULLABLE column accepts it and the cell clears to NULL; a NOT
+            # NULL column (e.g. plants.horizon_roll_hour_utc) rejects None
+            # with a NotNullViolation, caught and translated to a readable
+            # 400 below — clearer than letting "" hit the column's type cast
+            # and surface as a raw InvalidTextRepresentation. Text-typed
+            # columns keep "" as-is: an empty string is a legitimate value
+            # there (e.g. materials.material_description).
+            values = []
+            for c in col_names:
+                v = row[c]
+                if isinstance(v, str) and v.strip() == "":
+                    meta = col_meta_by_name.get(c)
+                    if meta and meta["sql_type"] not in _TEXT_LIKE_SQL_TYPES:
+                        v = None
+                values.append(v)
             try:
-                cur.execute(q, [row[c] for c in col_names])
+                cur.execute(q, values)
             except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
                 raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
+            except (
+                psycopg.errors.CheckViolation,
+                psycopg.errors.NotNullViolation,
+                psycopg.errors.InvalidTextRepresentation,
+            ) as exc:
+                # Translated to a 400 rather than left to surface as an opaque
+                # 500, because for several plants columns this generic grid is
+                # now the ONLY editor — the dedicated validated routes that used
+                # to front them (and that returned a readable message) lost their
+                # UI on 2026-08-21. plants.horizon_roll_hour_utc is the sharpest
+                # case: NOT NULL with a CHECK (0..23), so both a cleared cell
+                # (NotNullViolation, via the blank->None coercion above) and a
+                # mistyped "25" (CheckViolation) or "abc" (InvalidTextRepresentation,
+                # for a non-blank value the coercion above never touches) are
+                # hard failures a planner has to be able to read.
+                conn.rollback()
+                raise ValueError(_bulk_apply_readable_error(table, exc)) from exc
             row_result = cur.fetchone()
             if row_result and row_result[0]:
                 inserted += 1
@@ -1054,10 +1149,12 @@ def ensure_plant_visibility_horizon_columns() -> None:
     max_pull_forward_days' dual-provisioning precedent (this repo's
     schema.sql-vs-boot-hook hazard — see workstream A's completion notes) so a
     normal boot against a pre-existing DB provisions these columns too, not
-    just a fresh schema.sql apply. visibility_horizon_days is registered in
-    column_metadata (2026-08-21) so it also renders in the generic Manage
-    Data Tables grid; horizon_roll_hour_utc stays unregistered — a companion
-    field of the dedicated visibility-horizon route only."""
+    just a fresh schema.sql apply. BOTH columns are registered in
+    column_metadata (2026-08-21) so both render in the generic Manage Data
+    Tables grid — which is now their ONLY editable surface, the Scheduling
+    Rules pane's rows for both having been removed the same day. The dedicated
+    POST /master-data/plants/{plant}/visibility-horizon route still exists and
+    still validates both together, but has no frontend caller."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS visibility_horizon_days INTEGER")
         cur.execute(
@@ -1066,7 +1163,8 @@ def ensure_plant_visibility_horizon_columns() -> None:
         )
         cur.execute(
             "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)"
-            " VALUES ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9)"
+            " VALUES ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9),"
+            "        ('plants', 'horizon_roll_hour_utc',   'Roll-Forward Hour (UTC)',   FALSE, 10)"
             " ON CONFLICT (table_name, column_name) DO NOTHING"
         )
         conn.commit()

@@ -396,6 +396,9 @@ window.__NIMBUS_LOCALES.es = {
   'ui.all_fields_used':              'Todos los campos clasificables ya están en el árbol',
   'ui.effective_sequence':           'Secuencia efectiva',
 
+  // Títulos de sección del panel de Reglas de Programación (2026-08-21).
+  'ui.sched_section_horizons':         'Horizontes',
+  'ui.sched_section_order_rules':      'Reglas de Pedidos',
   'ui.alert_horizon_title':            'Horizonte de Alertas',
   'ui.alert_horizon_help':             'Controla qué alertas aparecen en el indicador del encabezado y en el panel de alertas. Los pedidos fuera de la ventana seleccionada se ocultan para reducir el ruido. La ventana avanza continuamente con el reloj actual.',
   'ui.conf_horizon_title':             'Horizonte de Puntuación de Confianza',

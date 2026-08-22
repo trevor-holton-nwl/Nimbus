@@ -533,6 +533,9 @@ window.__NIMBUS_LOCALES.en = {
   'ui.effective_sequence':           'Effective sequence',
 
   'ui.system_settings_sub':            'Configure scheduling horizons for {{plant}}. Changes take effect immediately and are persisted to plant master data.',
+  // Section headings for the two-panel Scheduling Rules layout (2026-08-21).
+  'ui.sched_section_horizons':         'Horizons',
+  'ui.sched_section_order_rules':      'Order Rules',
   'ui.alert_horizon_title':            'Alert Horizon',
   'ui.alert_horizon_help':             'Controls which alerts appear in the header badge and alert drawer. Orders beyond the selected window are hidden to reduce noise. The window rolls with the current clock continuously.',
   'ui.conf_horizon_title':             'Confidence Score Horizon',

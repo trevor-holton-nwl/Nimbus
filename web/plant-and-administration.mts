@@ -2223,19 +2223,26 @@ interface PillFpPair {
  *  language switch is picked up with no re-render of this table. `title`
  *  reuses each row's own label key; `help` is the row's former inline
  *  `panel-help-text`/`split-policy-help` paragraph(s), in the order they used
- *  to read top-to-bottom. `horizonRollHour` has no dedicated `*_title` key —
- *  `ui.horizon_roll_hour_label` ("Roll-forward hour (UTC)") already exists
- *  and reads fine as a popover heading, so no new locale key was needed. */
+ *  to read top-to-bottom.
+ *
+ *  Two-section pass (2026-08-21): the `visibilityHorizon`, `horizonRollHour`
+ *  and `setupActive` entries were dropped along with their rows — Visibility
+ *  Horizon and Setup-Aware Optimization are now maintained through Admin ▸
+ *  Manage Data Tables ▸ `plants` (both registered in `column_metadata` by
+ *  migrations/2026-08-21-plants-grid-visibility.sql), and
+ *  `plants.horizon_roll_hour_utc` has no UI at all any more — it stays at its
+ *  NOT NULL DEFAULT 19 (see that migration's comment on why it is deliberately
+ *  left out of the grid too). Their locale keys are intentionally KEPT in
+ *  web/locales/* — `ui.unit_hour_utc` is pinned by
+ *  tests/modules/locale-completeness.test.mjs and the visibility-horizon
+ *  toasts still describe a live backend route. */
 const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   alertHorizon:         { title: 'ui.alert_horizon_title',          help: ['ui.alert_horizon_help'] },
   confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },
-  splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
+  frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
   maxPullForward:       { title: 'ui.max_pull_forward_title',       help: ['ui.max_pull_forward_help'] },
   minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
-  visibilityHorizon:    { title: 'ui.visibility_horizon_title',     help: ['ui.visibility_horizon_help'] },
-  horizonRollHour:      { title: 'ui.horizon_roll_hour_label',      help: ['ui.horizon_roll_hour_help'] },
-  frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
-  setupActive:          { title: 'ui.setup_active_panel_title',     help: ['ui.setup_active_panel_help'] },
+  splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
 };
 
 export const Plant = {
@@ -3273,20 +3280,33 @@ export const Plant = {
       <div class="settings-content-scroll"><div class="cal-container settings-content-container">
         <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px" ${subTabVisibility.rules ? '' : 'hidden'}>
 
+          <!-- Compact SAP-MM03-style form (Scheduling Rules density pass,
+               2026-08-21; regrouped into two named sections later the same day).
+               The 8 stacked cards this used to be each carried an inline
+               description paragraph, forcing a lot of scrolling to reach the
+               constraint tree below. Every description now lives behind a
+               right-click "More info" popover (see the contextmenu listener +
+               RULE_HELP map above) instead of being permanently in the flow.
+               Element ids, input types/min/max/step, and current-value
+               population are unchanged — only the grouping, the two-per-row
+               grid (.sched-rules-grid), and the three removals below.
+
+               Removed from this pane deliberately, NOT relocated within it:
+                 * Visibility Horizon      -> Admin ▸ Manage Data Tables ▸ plants
+                 * Setup-Aware Optimization -> Admin ▸ Manage Data Tables ▸ plants
+                   (both registered in column_metadata by
+                    migrations/2026-08-21-plants-grid-visibility.sql; the Setup
+                    Matrix header keeps its read-only status chip)
+                 * Roll-forward hour (UTC) -> no UI at all. plants.
+                   horizon_roll_hour_utc keeps its NOT NULL DEFAULT 19 and is
+                   intentionally unregistered in the grid too, so it is now
+                   SQL-only. Its POST /master-data/plants/{plant}/visibility-
+                   horizon route still accepts it — that route is simply no
+                   longer called from the frontend. -->
           <div class="panel">
-            <header class="panel-head"><h3>${Util.t('ui.settings_subtab_rules')}</h3></header>
+            <header class="panel-head"><h3>${Util.t('ui.sched_section_horizons')}</h3></header>
             <div class="panel-body">
-              <!-- Compact SAP-MM03-style form (Workstream: Scheduling Rules
-                   density pass, 2026-08-21). The 8 stacked cards this used to
-                   be each carried an inline description paragraph, forcing a
-                   lot of scrolling to reach the constraint tree below. Every
-                   description now lives behind a right-click "More info"
-                   popover (see the contextmenu listener + RULE_HELP map below)
-                   instead of being permanently in the flow. Row order,
-                   element ids, input types/min/max/step, and current-value
-                   population are all unchanged from the previous 8-panel
-                   layout — this is a markup restructure only. -->
-              <div class="sched-rules-form">
+              <div class="sched-rules-grid">
                 <div class="sched-rule-row" data-rule-key="alertHorizon">
                   <label for="sys-alert-horizon-days">${Util.t('ui.alert_horizon_title')}</label>
                   <input type="number" id="sys-alert-horizon-days" class="form-input" min="1" max="60" step="1" placeholder="0">
@@ -3299,16 +3319,19 @@ export const Plant = {
                   <span class="sched-rule-unit">${Util.t('ui.days')}</span>
                 </div>
 
-                <div class="sched-rule-row" data-rule-key="splitOrderPolicy">
-                  <label for="sys-split-order-policy">${Util.t('ui.split_order_title')}</label>
-                  <select id="sys-split-order-policy" class="form-input">
-                    <option value="never">${Util.t('ui.split_order_opt_never')}</option>
-                    <option value="overlong_only">${Util.t('ui.split_order_opt_overlong')}</option>
-                    <option value="partial_allowed">${Util.t('ui.split_order_opt_partial')}</option>
-                  </select>
-                  <span class="sched-rule-unit"></span>
+                <div class="sched-rule-row" data-rule-key="frozenHorizon">
+                  <label for="sys-frozen-horizon-days">${Util.t('ui.frozen_horizon_title')}</label>
+                  <input type="number" id="sys-frozen-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.frozen_horizon_days_none')}">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
                 </div>
+              </div>
+            </div>
+          </div>
 
+          <div class="panel">
+            <header class="panel-head"><h3>${Util.t('ui.sched_section_order_rules')}</h3></header>
+            <div class="panel-body">
+              <div class="sched-rules-grid">
                 <div class="sched-rule-row" data-rule-key="maxPullForward">
                   <label for="sys-max-pull-forward-days">${Util.t('ui.max_pull_forward_title')}</label>
                   <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_pull_forward_none')}">
@@ -3321,39 +3344,20 @@ export const Plant = {
                   <span class="sched-rule-unit">${Util.t('ui.unit_minutes')}</span>
                 </div>
 
-                <div class="sched-rule-row" data-rule-key="visibilityHorizon">
-                  <label for="sys-visibility-horizon-days">${Util.t('ui.visibility_horizon_title')}</label>
-                  <input type="number" id="sys-visibility-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.visibility_horizon_days_none')}">
-                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
-                </div>
-
-                <div class="sched-rule-row" data-rule-key="horizonRollHour">
-                  <label for="sys-horizon-roll-hour">${Util.t('ui.horizon_roll_hour_label')}</label>
-                  <input type="number" id="sys-horizon-roll-hour" class="form-input" min="0" max="23" step="1" inputmode="numeric">
-                  <span class="sched-rule-unit">${Util.t('ui.unit_hour_utc')}</span>
-                </div>
-
-                <div class="sched-rule-row" data-rule-key="frozenHorizon">
-                  <label for="sys-frozen-horizon-days">${Util.t('ui.frozen_horizon_title')}</label>
-                  <input type="number" id="sys-frozen-horizon-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.frozen_horizon_days_none')}">
-                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
-                </div>
-
-                <!-- Workstream D2 (2026-08-20): relocated from the Setup Matrix
-                     header (plants.setup_active is a durable plant-level setting,
-                     not a per-signature-version one — see setup_data.py's
-                     save_definition comment). The Setup Matrix header's status
-                     chip stays and now reads this same flag via
-                     SetupSnapshot.plant_active. Gated on Session.isAdmin() —
-                     the same underlying permission SetupAdmin.permissionsFor
-                     computes as definitionWrite. Row omitted entirely (not just
-                     hidden) for non-admins, same as the prior panel. -->
-                ${Session.isAdmin() ? `
-                <div class="sched-rule-row" data-rule-key="setupActive">
-                  <label for="sys-setup-active">${Util.t('ui.setup_active_panel_title')}</label>
-                  <label class="setup-check" for="sys-setup-active"><input type="checkbox" id="sys-setup-active">${Util.t('ui.setup_include_setup_times')}</label>
+                <!-- Spans both grid columns: unlike its numeric siblings this is
+                     a select whose longest option ("Allow partial orders across
+                     operating intervals") needs roughly 50 characters, so a
+                     half-width cell would truncate it. It still starts flush
+                     left on the row below the pull-forward limit. -->
+                <div class="sched-rule-row sched-rule-row--wide" data-rule-key="splitOrderPolicy">
+                  <label for="sys-split-order-policy">${Util.t('ui.split_order_title')}</label>
+                  <select id="sys-split-order-policy" class="form-input">
+                    <option value="never">${Util.t('ui.split_order_opt_never')}</option>
+                    <option value="overlong_only">${Util.t('ui.split_order_opt_overlong')}</option>
+                    <option value="partial_allowed">${Util.t('ui.split_order_opt_partial')}</option>
+                  </select>
                   <span class="sched-rule-unit"></span>
-                </div>` : ''}
+                </div>
               </div>
             </div>
           </div>
@@ -3439,8 +3443,6 @@ export const Plant = {
     const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
     const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
     const minProductiveSegmentInp = pane.querySelector('#sys-min-productive-segment-minutes') as HTMLInputElement;
-    const visibilityHorizonDaysInp = pane.querySelector('#sys-visibility-horizon-days') as HTMLInputElement;
-    const horizonRollHourInp = pane.querySelector('#sys-horizon-roll-hour') as HTMLInputElement;
     const frozenHorizonDaysInp = pane.querySelector('#sys-frozen-horizon-days') as HTMLInputElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
@@ -3452,10 +3454,6 @@ export const Plant = {
       ? String(plantRow!.max_pull_forward_days) : '';
     minProductiveSegmentInp.value = Number.isInteger(plantRow?.min_productive_segment_minutes) && (plantRow!.min_productive_segment_minutes as number) > 0
       ? String(plantRow!.min_productive_segment_minutes) : '30';
-    visibilityHorizonDaysInp.value = Number.isInteger(plantRow?.visibility_horizon_days) && (plantRow!.visibility_horizon_days as number) >= 0
-      ? String(plantRow!.visibility_horizon_days) : '';
-    horizonRollHourInp.value = Number.isInteger(plantRow?.horizon_roll_hour_utc)
-      ? String(plantRow!.horizon_roll_hour_utc) : '19';
     frozenHorizonDaysInp.value = Number.isInteger(plantRow?.frozen_horizon_days) && (plantRow!.frozen_horizon_days as number) >= 0
       ? String(plantRow!.frozen_horizon_days) : '';
 
@@ -3637,80 +3635,12 @@ export const Plant = {
       } finally { frozenHorizonDaysInp.disabled = false; }
     });
 
-    // C1 (2026-08-20): visibility_horizon_days + horizon_roll_hour_utc are one
-    // setting (see master_data.set_plant_visibility_horizon) saved together —
-    // either input's change handler re-reads and re-validates BOTH fields and
-    // POSTs both, same fetch/toast/revert shape as split-order-policy/
-    // max-pull-forward-days above.
-    async function _saveVisibilityHorizon(): Promise<void> {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const prevDays = Number.isInteger(plantRow.visibility_horizon_days) && (plantRow.visibility_horizon_days as number) >= 0
-        ? plantRow.visibility_horizon_days : null;
-      const prevRollHour = Number.isInteger(plantRow.horizon_roll_hour_utc) ? plantRow.horizon_roll_hour_utc : 19;
-
-      const rawDays = visibilityHorizonDaysInp.value.trim();
-      const nextDays = rawDays === '' ? null : Number(rawDays);
-      if (nextDays !== null && (!Number.isInteger(nextDays) || nextDays < 0)) {
-        visibilityHorizonDaysInp.value = prevDays === null ? '' : String(prevDays);
-        Toast.show(Util.t('ui.visibility_horizon_days_invalid'), 'error');
-        return;
-      }
-      const rawRollHour = horizonRollHourInp.value.trim();
-      const nextRollHour = rawRollHour === '' ? NaN : Number(rawRollHour);
-      if (!Number.isInteger(nextRollHour) || nextRollHour < 0 || nextRollHour > 23) {
-        horizonRollHourInp.value = String(prevRollHour);
-        Toast.show(Util.t('ui.horizon_roll_hour_invalid'), 'error');
-        return;
-      }
-
-      visibilityHorizonDaysInp.disabled = true;
-      horizonRollHourInp.disabled = true;
-      try {
-        const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/visibility-horizon`,
-          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({
-              subnetwork: plantRow.subnetwork,
-              visibility_horizon_days: nextDays,
-              horizon_roll_hour_utc: nextRollHour,
-            }) },
-        );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
-        plantRow.visibility_horizon_days = nextDays;
-        plantRow.horizon_roll_hour_utc = nextRollHour;
-        Toast.show(Util.t('ui.visibility_horizon_saved'), 'success');
-      } catch (error) {
-        visibilityHorizonDaysInp.value = prevDays === null ? '' : String(prevDays);
-        horizonRollHourInp.value = String(prevRollHour);
-        Toast.show(`${Util.t('ui.visibility_horizon_failed')}: ${(error as Error).message}`, 'error');
-      } finally {
-        visibilityHorizonDaysInp.disabled = false;
-        horizonRollHourInp.disabled = false;
-      }
-    }
-    visibilityHorizonDaysInp.addEventListener('change', _saveVisibilityHorizon);
-    horizonRollHourInp.addEventListener('change', _saveVisibilityHorizon);
-
-    // Workstream D2 (2026-08-20): the relocated "Include Setup Times in
-    // Optimizer" checkbox. Reuses SetupAdmin.setSetupActive (re-pointed to
-    // PUT /plant/{plant}/setup-active) rather than a third copy of the same
-    // fetch/toast/refresh sequence — its return value tells us whether to
-    // commit the optimistic `plantRow.setup_active` or revert the checkbox,
-    // same shape as the split-order-policy/max-pull-forward handlers above.
-    const setupActiveInp = pane.querySelector<HTMLInputElement>('#sys-setup-active');
-    if (setupActiveInp) {
-      setupActiveInp.checked = !!plantRow?.setup_active;
-      setupActiveInp.addEventListener('change', async () => {
-        if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); setupActiveInp.checked = false; return; }
-        const next = setupActiveInp.checked;
-        setupActiveInp.disabled = true;
-        const setupPaneTarget = pane.querySelector<HTMLElement>('#setup-admin-pane');
-        const ok = setupPaneTarget ? await SetupAdmin.setSetupActive(setupPaneTarget, plantRow.plant, next) : false;
-        if (ok) plantRow.setup_active = next;
-        else setupActiveInp.checked = !next;
-        setupActiveInp.disabled = false;
-      });
-    }
+    // The visibility-horizon pair (C1, 2026-08-20) and the relocated
+    // setup-active checkbox (D2, 2026-08-20) both had their change handlers
+    // here until the two-section pass (2026-08-21) removed their rows — see the
+    // markup comment above for where each setting is maintained now.
+    // `SetupAdmin.setSetupActive` is deliberately left in place on SetupAdmin's
+    // exported surface even though this was its only caller.
 
     // --- Scheduling constraints (per-plant PRIORITY TREE) -------------------
     // Stage 3 of docs/scheduling_priority.md rebuilt this from a flat on/off
