@@ -3,6 +3,15 @@
  *
  * This module deliberately has no browser, Store, network, persistence, or
  * cache dependency. Stage 0 consumes its results only as observation data.
+ *
+ * No cache lives here: this module holds zero module-level or mutable state.
+ * `resolveSetup` remains a pure deterministic function of its inputs. It
+ * optionally accepts a caller-owned prebuilt lookup index (`ResolveSetupInput.index`,
+ * built by the exported `buildSetupResolutionIndex`) so a caller who resolves the
+ * same plant snapshot thousands of times per optimize run can replace the three
+ * linear scans (`matchingMatrixRow` ×2, `matchingOverride`) with O(1) map lookups.
+ * Building and owning that index is entirely the caller's responsibility — this
+ * module never builds, caches, or mutates one itself.
  */
 
 import type {
@@ -110,6 +119,143 @@ function matchingOverride(
   ));
 }
 
+// ---------------------------------------------------------------------------
+// Phase 1b — caller-owned prebuilt resolution index
+// ---------------------------------------------------------------------------
+
+/** Compound-key component join. Distinct from `stateSignature`'s '' join —
+ * this joins independently-identified components (machine, order id, a
+ * signature string), so a plain space separator is sufficient: it only needs
+ * to keep the SAME tuple mapping to the SAME string across build and lookup,
+ * not to be collision-proof against adversarial input. */
+function joinIndexKey(...parts: ReadonlyArray<string>): string {
+  return parts.join(' ');
+}
+
+/** Sentinel for an absent/null key component (today: a null `predecessorOrderId`).
+ * Chosen to be a string no real machine, order id, or signature value can equal. */
+const ABSENT_KEY_COMPONENT = '__ABSENT_ORDER_ID__';
+
+/**
+ * Canonical string for a state's ordered VALUES, joined with `''`. Valid only
+ * for states that have already passed `hasCanonicalShape` against the SAME
+ * definition: shape validation already guarantees each state's fieldKeys equal
+ * `definition.fields` in order, so `statesEqual` on two shape-valid states
+ * reduces to value-array equality — which is exactly what comparing their
+ * `stateSignature` strings tests. Do not key an unvalidated state this way.
+ */
+export function stateSignature(state: SetupStateKey): string {
+  return state.map(entry => entry.value).join('');
+}
+
+/** Caller-owned prebuilt lookup index for `resolveSetup`. Built once per plant
+ * snapshot (see `buildSetupResolutionIndex`) and passed in via
+ * `ResolveSetupInput.index`; this module never builds or caches one itself. */
+export interface SetupResolutionIndex {
+  /** The `definition.signature_version` this index was built for. `resolveSetup`
+   * ignores the index entirely when this doesn't match the call's definition. */
+  signatureVersion: number;
+  /** Line (machine) matrix rows keyed by `machine + ' ' + fromSignature + ' ' + toSignature`.
+   * Only rows that pass the exact build-time validation `matchingMatrixRow` applies
+   * per-row are present; first-row-wins on a duplicate key. */
+  machineRows: ReadonlyMap<string, SetupMatrixRow>;
+  /** Plant-default matrix rows (`machine === ''`) keyed by `fromSignature + ' ' + toSignature`.
+   * Same build-time validation and first-row-wins semantics as `machineRows`. */
+  plantRows: ReadonlyMap<string, SetupMatrixRow>;
+  /** Active, version-matched, shape-valid overrides grouped by the portion of
+   * `matchingOverride`'s match identity that is fully known at build time —
+   * `machine + ' ' + (predecessorOrderId ?? ABSENT) + ' ' + successorOrderId` —
+   * in original relative order. The state-key equality checks depend on the
+   * call's actual predecessor/successor states, which aren't part of any
+   * override's identity key — so they are NOT baked into the key. `indexedOverride`
+   * reruns those two `statesEqual` checks (plus a defensive re-check of the
+   * machine/order-id components, guarding against a sentinel collision) over
+   * this (small) group instead. */
+  overrides: ReadonlyMap<string, ReadonlyArray<SetupOccurrenceOverride>>;
+}
+
+/**
+ * Builds a `SetupResolutionIndex` from the same plant-snapshot inputs
+ * `resolveSetup` already accepts (`definition`, `machineRows`, `plantRows`,
+ * `overrides`). Pure and side-effect-free — the caller owns the returned index
+ * and decides how long to keep it (e.g. per optimize run, invalidated whenever
+ * the snapshot's `signature_version` changes).
+ */
+export function buildSetupResolutionIndex(input: {
+  definition: SetupDefinition;
+  machineRows: ReadonlyArray<SetupMatrixRow>;
+  plantRows: ReadonlyArray<SetupMatrixRow>;
+  overrides: ReadonlyArray<SetupOccurrenceOverride>;
+}): SetupResolutionIndex {
+  const { definition, machineRows, plantRows, overrides } = input;
+  const signatureVersion = definition.signature_version;
+
+  const isValidRow = (row: SetupMatrixRow): boolean => (
+    row.signature_version === signatureVersion
+    && validMinutes(row.setup_min)
+    && hasCanonicalShape(row.from_key, definition)
+    && hasCanonicalShape(row.to_key, definition)
+  );
+
+  const machineIndex = new Map<string, SetupMatrixRow>();
+  for (const row of machineRows) {
+    if (!isValidRow(row)) continue;
+    const key = joinIndexKey(row.machine, stateSignature(row.from_key), stateSignature(row.to_key));
+    if (!machineIndex.has(key)) machineIndex.set(key, row);
+  }
+
+  const plantIndex = new Map<string, SetupMatrixRow>();
+  for (const row of plantRows) {
+    // matchingMatrixRow is always called with machine === '' for plant rows,
+    // so only plant-default rows can ever match — mirror that here.
+    if (row.machine !== '' || !isValidRow(row)) continue;
+    const key = joinIndexKey(stateSignature(row.from_key), stateSignature(row.to_key));
+    if (!plantIndex.has(key)) plantIndex.set(key, row);
+  }
+
+  const overrideIndex = new Map<string, SetupOccurrenceOverride[]>();
+  for (const override of overrides) {
+    if (override.status !== 'active') continue;
+    if (override.signature_version !== signatureVersion) continue;
+    if (!validMinutes(override.standard_min) || !validMinutes(override.remaining_min)) continue;
+    if (!hasCanonicalShape(override.predecessor_state_key, definition)) continue;
+    if (!hasCanonicalShape(override.successor_state_key, definition)) continue;
+    const key = joinIndexKey(override.machine, override.predecessor_order_id ?? ABSENT_KEY_COMPONENT, override.successor_order_id);
+    const bucket = overrideIndex.get(key);
+    if (bucket) bucket.push(override);
+    else overrideIndex.set(key, [override]);
+  }
+
+  return { signatureVersion, machineRows: machineIndex, plantRows: plantIndex, overrides: overrideIndex };
+}
+
+/** Fast-path override lookup: narrows to the (small) group sharing the
+ * build-time-known portion of `matchingOverride`'s match identity, then reruns
+ * the ORIGINAL residual predicates over that group — not just the two
+ * `statesEqual` checks that motivated grouping, but also machine/order-id
+ * equality. That second layer is deliberate belt-and-suspenders: it is what
+ * keeps this correct even in the theoretical case where a real order id
+ * equals `ABSENT_KEY_COMPONENT`, which would otherwise make the sentinel and
+ * a real "no predecessor" case collide on the same map key. First-row-wins
+ * is preserved because the group retains original relative order. */
+function indexedOverride(
+  index: SetupResolutionIndex,
+  input: ResolveSetupInput,
+  predecessorState: SetupStateKey,
+  successorState: SetupStateKey,
+): SetupOccurrenceOverride | undefined {
+  const key = joinIndexKey(input.machine, input.predecessorOrderId ?? ABSENT_KEY_COMPONENT, input.successorOrderId);
+  const bucket = index.overrides.get(key);
+  if (!bucket) return undefined;
+  return bucket.find(override => (
+    override.machine === input.machine
+    && override.predecessor_order_id === (input.predecessorOrderId ?? null)
+    && override.successor_order_id === input.successorOrderId
+    && statesEqual(override.predecessor_state_key, predecessorState)
+    && statesEqual(override.successor_state_key, successorState)
+  ));
+}
+
 function resolvedMatrix(row: SetupMatrixRow, source: 'line' | 'plant', signatureVersion: number): ResolvedSetup {
   return {
     covered: true,
@@ -164,9 +310,24 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     return uncovered(signatureVersion);
   }
 
-  const lineRow = matchingMatrixRow(input.machineRows, input.machine, predecessorState, successorState, definition);
-  const plantRow = matchingMatrixRow(input.plantRows, '', predecessorState, successorState, definition);
-  const override = matchingOverride(input.overrides, input);
+  const index = input.index && input.index.signatureVersion === signatureVersion ? input.index : null;
+
+  let lineRow: SetupMatrixRow | undefined;
+  let plantRow: SetupMatrixRow | undefined;
+  let override: SetupOccurrenceOverride | undefined;
+
+  if (index) {
+    const fromSig = stateSignature(predecessorState);
+    const toSig = stateSignature(successorState);
+    lineRow = index.machineRows.get(joinIndexKey(input.machine, fromSig, toSig));
+    plantRow = index.plantRows.get(joinIndexKey(fromSig, toSig));
+    override = indexedOverride(index, input, predecessorState, successorState);
+  } else {
+    lineRow = matchingMatrixRow(input.machineRows, input.machine, predecessorState, successorState, definition);
+    plantRow = matchingMatrixRow(input.plantRows, '', predecessorState, successorState, definition);
+    override = matchingOverride(input.overrides, input);
+  }
+
   if (override) {
     const currentStandard = lineRow?.setup_min
       ?? plantRow?.setup_min

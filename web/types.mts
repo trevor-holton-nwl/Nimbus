@@ -398,6 +398,13 @@ export interface ResolveSetupInput {
   plantRows: ReadonlyArray<SetupMatrixRow>;
   machineRows: ReadonlyArray<SetupMatrixRow>;
   overrides: ReadonlyArray<SetupOccurrenceOverride>;
+  /** Optional caller-owned prebuilt lookup index (Phase 1b, `setup-domain.mts`'s
+   *  `buildSetupResolutionIndex`) letting `resolveSetup` replace its three linear
+   *  scans with O(1) map lookups. Only consulted when its `signatureVersion`
+   *  matches `definition.signature_version`; otherwise `resolveSetup` falls back
+   *  to the unindexed scan unchanged. This is a type-only import — `setup-domain.mts`
+   *  and this module do not form a runtime circular dependency. */
+  index?: import('./setup-domain.mjs').SetupResolutionIndex;
 }
 
 // ---------------------------------------------------------------------------
