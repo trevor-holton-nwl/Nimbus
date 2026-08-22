@@ -187,17 +187,30 @@ interface SortTerm {
  * file uses) instead of every line the session has ever visited. Every other
  * member stays whole (tasks/fixedIds/alerts/blocks/plantBlocks/plants/
  * lineSettings/masterData/priorityRankMaps) — downstream reads depend on
- * them being unscoped. Confirmed safe: every ScheduleSnapshot.calendars
+ * them being unscoped.
+ *
+ * The filter below only DROPS a line when Store.getPlantForLine positively
+ * resolves it to a *different* plant. A line Store can't resolve (no
+ * lineSettings/masterData entry) is KEPT rather than dropped: getPlantForLine
+ * is lineSettings/masterData-only, but setup-scheduler's resolveTaskPlant
+ * also checks each task's own PLANT field, so a line with no master-data
+ * plant mapping can still be scheduled for this plant via its tasks' PLANT.
+ * Dropping such a line's calendar here would silently starve it of real work
+ * hours — freeIntervalsFor falls back to a default 7:00-19:00 window and
+ * hasNominalWindow returns false, producing wrongful overlong splits under
+ * 'overlong_only'. Confirmed safe otherwise: every ScheduleSnapshot.calendars
  * consumer (setup-scheduler.mts's freeIntervalsFor/jointWindowForDay/
  * hasNominalWindow, and sourceLineWorkHours below) only ever looks up a
- * `line` that already passed the SAME plant's task filter upstream, so a
- * plant-scoped snapshot never needs another plant's calendar entry. Omitting
+ * `line` that already passed the SAME plant's task filter upstream. Omitting
  * `plant` (or passing none) reproduces the prior unscoped behavior exactly. */
 export function snapshotSchedule(plant?: string): ScheduleSnapshot {
   const _pmT0s = performance.now();
   try {
     const sourceCalendars = plant
-      ? Object.fromEntries(Object.entries(Store.calendars).filter(([line]) => Store.getPlantForLine(line) === plant))
+      ? Object.fromEntries(Object.entries(Store.calendars).filter(([line]) => {
+          const p = Store.getPlantForLine(line);
+          return !p || p === plant;
+        }))
       : Store.calendars;
     return {
       tasks: structuredClone(Store.tasksArr),
@@ -1504,7 +1517,16 @@ export const Alerts = {
     Store.dismissAllAlerts('alerts');
   },
   // Clear dismissals (so new runs of recompute() can re-surface the same issue).
-  clearDismissed(): void { Alerts._dismissed.clear(); },
+  // Returns whether any dismissal actually existed — callers that follow this
+  // with a SCOPED recompute (scheduleAlertsForPatches) need this: a scoped
+  // merge retains the untouched lines' previously-computed (dismissal-filtered)
+  // alert lists as-is, so a dismissal on an untouched line would otherwise
+  // never re-surface until some later full recompute happened to run.
+  clearDismissed(): boolean {
+    const had = Alerts._dismissed.size > 0;
+    Alerts._dismissed.clear();
+    return had;
+  },
 
   applyFix(alertId: string): void {
     const a = Store.alerts.find(x => x.id === alertId);
@@ -1623,16 +1645,20 @@ export const Alerts = {
  *  callers. Defensive fallback: if any patch's `changes` actually carries a
  *  MACHINE field (shouldn't happen today), or a patch id can't be resolved
  *  to a line at all, fall back to the full recompute rather than trust a
- *  possibly-incomplete scope. */
+ *  possibly-incomplete scope.
+ *
+ *  Both call sites gate the call on `Alerts.clearDismissed()`'s return value
+ *  BEFORE reaching this function: if any dismissal actually existed, they
+ *  call `Alerts.scheduleRecompute()` directly and skip this scoped helper
+ *  entirely — a scoped merge retains untouched lines' stale (dismissal-
+ *  filtered) alert lists as-is, so a cleared dismissal on an untouched line
+ *  would otherwise never re-surface until some later full recompute. */
 export function scheduleAlertsForPatches(
   patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
   resolveLine: (id: string) => string | undefined,
 ): void {
-  // No patches to scope to (e.g. an apply that changed nothing) — both call
-  // sites call Alerts.clearDismissed() just before this, which only takes
-  // effect on the next recompute (Alerts.recompute reads Alerts._dismissed
-  // internally), so an empty scope must still trigger a (full) recompute
-  // rather than silently skip one.
+  // No patches to scope to (e.g. an apply that changed nothing) — fall back
+  // to a full recompute rather than silently skip one.
   if (!patches.length) { Alerts.scheduleRecompute(); return; }
   const lines = new Set<string>();
   for (const p of patches) {
@@ -3061,12 +3087,18 @@ export const Engine = {
       applySchedulePatches(result.patches);
       Engine.lastSetupAwareResult = result;
       Store.setLastOptimize(new Date(), 'engine');
-      Alerts.clearDismissed();
+      const hadDismissed = Alerts.clearDismissed();
       // Phase 3 (Pkg E): scope the recompute to the lines these patches actually
       // touched instead of a full-plant recompute. `byId` (built above from the
       // pre-apply snapshot) resolves each patch id to its line/MACHINE; patches
       // never change MACHINE, so pre- and post-apply line membership match.
-      scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE);
+      // If any alert was dismissed before this apply, a scoped merge would
+      // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
+      // those cleared dismissals would never re-surface until some later full
+      // recompute. A pending full recompute already wins over a scoped one by
+      // design, so force it whenever there was something to clear.
+      if (hadDismissed) Alerts.scheduleRecompute();
+      else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown');
       // Surface the never-freeze fallbacks that actually landed in this apply:
       // orders scheduled without a resolvable setup transition (no changeover
       // bar) and, separately, any line still guarded off entirely (only

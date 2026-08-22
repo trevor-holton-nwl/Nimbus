@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation,
-  MIN_PRODUCTIVE_SEGMENT_MINUTES,
+  MIN_PRODUCTIVE_SEGMENT_MINUTES, scheduleAlertsForPatches,
 } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 import { Toast, Util, Config } from '../../web/application-foundation.mjs';
@@ -2783,4 +2783,77 @@ test('Alerts.applyFix still calls Engine.autoReflow for blackout alerts (Task 3:
     Store.setAlerts(priorAlerts, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
+});
+
+// ---------------------------------------------------------------------------
+// scheduleAlertsForPatches (Phase 3, Pkg E) — shared post-apply alert-recompute
+// scoping for optimizer patches. Mocks Alerts.scheduleRecompute/
+// scheduleRecomputeLines (same pattern as the debounce test above) to verify
+// routing without waiting on the real debounce timer.
+// ---------------------------------------------------------------------------
+
+function withMockedAlertScheduling(fn) {
+  const priorFull = Alerts.scheduleRecompute;
+  const priorLines = Alerts.scheduleRecomputeLines;
+  let fullCalls = 0;
+  let linesCalls = [];
+  Alerts.scheduleRecompute = () => { fullCalls++; };
+  Alerts.scheduleRecomputeLines = (lines) => { linesCalls.push(lines); };
+  try {
+    fn({ getFullCalls: () => fullCalls, getLinesCalls: () => linesCalls });
+  } finally {
+    Alerts.scheduleRecompute = priorFull;
+    Alerts.scheduleRecomputeLines = priorLines;
+  }
+}
+
+test('scheduleAlertsForPatches falls back to a full recompute for an empty patch list', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    scheduleAlertsForPatches([], () => 'L1');
+    assert.equal(getFullCalls(), 1, 'an empty patch list must trigger exactly one full recompute');
+    assert.equal(getLinesCalls().length, 0, 'the scoped variant must never be called for an empty patch list');
+  });
+});
+
+test('scheduleAlertsForPatches falls back to a full recompute when a patch carries a MACHINE change', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    const patches = [
+      { id: 'p1', changes: { start_date: new Date('2026-08-21T08:00:00') } },
+      { id: 'p2', changes: { MACHINE: 'NEW-LINE' } },
+    ];
+    scheduleAlertsForPatches(patches, () => 'L1');
+    assert.equal(getFullCalls(), 1,
+      'a patch whose changes carry a MACHINE field must fall back to a full recompute, never a scoped one');
+    assert.equal(getLinesCalls().length, 0);
+  });
+});
+
+test('scheduleAlertsForPatches falls back to a full recompute when a patch id resolves to no line', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    const patches = [
+      { id: 'resolvable', changes: { start_date: new Date('2026-08-21T08:00:00') } },
+      { id: 'unresolvable', changes: { start_date: new Date('2026-08-21T09:00:00') } },
+    ];
+    const resolveLine = (id) => (id === 'resolvable' ? 'L1' : undefined);
+    scheduleAlertsForPatches(patches, resolveLine);
+    assert.equal(getFullCalls(), 1,
+      'an id that resolves to no line must fall back to a full recompute rather than trust an incomplete scope');
+    assert.equal(getLinesCalls().length, 0);
+  });
+});
+
+test('scheduleAlertsForPatches scopes to exactly the resolved lines for normal patches', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    const patches = [
+      { id: 'a', changes: { start_date: new Date('2026-08-21T08:00:00') } },
+      { id: 'b', changes: { start_date: new Date('2026-08-21T09:00:00') } },
+      { id: 'c', changes: { start_date: new Date('2026-08-21T10:00:00') } },
+    ];
+    const lineById = { a: 'L1', b: 'L2', c: 'L1' };
+    scheduleAlertsForPatches(patches, (id) => lineById[id]);
+    assert.equal(getFullCalls(), 0, 'normal, fully-resolvable patches must never trigger a full recompute');
+    assert.equal(getLinesCalls().length, 1, 'exactly one scoped call must be made');
+    assert.deepEqual(new Set(getLinesCalls()[0]), new Set(['L1', 'L2']),
+      'the scoped lines set must contain exactly the lines the patches resolved to, deduplicated');
+  });
 });

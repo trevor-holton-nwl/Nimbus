@@ -4020,7 +4020,7 @@ function evaluateLineWithFixedBoundaries(
         }
         if (fallbackCursor.termination !== 'completed') {
           completeEnumeration = false;
-          termination = fallbackCursor.termination;
+          termination = worseTermination(termination, fallbackCursor.termination);
         }
         if (!completeEnumeration) {
           missingEdges.push(
@@ -4144,7 +4144,7 @@ function evaluateLineWithFixedBoundaries(
         }
         if (fallbackCursor.termination !== 'completed') {
           completeEnumeration = false;
-          termination = fallbackCursor.termination;
+          termination = worseTermination(termination, fallbackCursor.termination);
         }
         if (!completeEnumeration || feasibleFallbacks.length > 1) {
           missingEdges.push(...run.missingEdges, ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges));

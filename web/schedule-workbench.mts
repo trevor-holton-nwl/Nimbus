@@ -7924,12 +7924,6 @@ interface PreviewExplanationInput {
 
 const PREVIEW_REASON_LIMIT = 8;
 const PREVIEW_MISSING_PAIR_LIMIT = 12;
-// Phase 2 (Pkg D): the deferred Plan B comparison run's search budget. Plan B
-// is a comparison column, not the applied schedule, so it gets a smaller,
-// fixed slice of the engine's normal SETUP_AWARE_DEADLINE_MS rather than a
-// full fresh window — a deliberate, documented tradeoff (faster comparison,
-// possibly less-converged Plan B numbers).
-const ALT_PLAN_BUDGET_MS = Math.min(SETUP_AWARE_DEADLINE_MS, 2500);
 
 /** Reason codes that represent a genuine exclusion (order/line left out of the
  *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
@@ -8369,8 +8363,12 @@ export const OptimizerPreview = {
             // fields); `_runSeq` catches a newer runWithPreview call already
             // in flight (whose own synchronous block already reset both
             // fields for itself) so a slow, superseded run can never
-            // resurrect stale finalists or issue an orphan render.
-            if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+            // resurrect stale finalists or issue an orphan render. Also bail
+            // if `stale` went true between paint and this callback — a Store
+            // setup write landing in that window (see markStale) would make
+            // Plan B evaluate against setup data Plan A never saw, so the
+            // comparison would no longer be apples-to-apples.
+            if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq || OptimizerPreview.stale) return;
             let finalists: typeof OptimizerPreview['_finalists'] = null;
             try {
               const _evalAltT0 = performance.now();
@@ -8378,10 +8376,12 @@ export const OptimizerPreview = {
                 mode: altMode, plant: opts.plant, lines: opts.lines,
                 startDate: opts.startDate, endDate: opts.endDate,
                 respectFixed: opts.respectFixed, respectCalendar: opts.respectCalendar,
-                // Plan B is a comparison column, not the applied schedule —
-                // a smaller, fixed budget is a deliberate tradeoff (see
-                // ALT_PLAN_BUDGET_MS).
-                deadlineAt: performance.now() + ALT_PLAN_BUDGET_MS,
+                // Controller ruling: Plan B is deferred off the click path,
+                // so background time is acceptable — give it the SAME full
+                // SETUP_AWARE_DEADLINE_MS window as the primary run rather
+                // than a reduced budget (previously ALT_PLAN_BUDGET_MS,
+                // removed — it silently handicapped the comparison).
+                deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS,
               });
               PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
               const _applyPatchesT0b = performance.now();
@@ -8877,7 +8877,7 @@ export const OptimizerPreview = {
     // This is the sole schedule-state commit for a preview candidate.
     Engine.applySchedulePatches(candidate.patches);
     Store.setLastOptimize(new Date(), 'engine');
-    Alerts.clearDismissed();
+    const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
@@ -8893,8 +8893,17 @@ export const OptimizerPreview = {
     // actually touched instead of a full-plant recompute. `snap` is the
     // pre-apply snapshot (candidate patches never change MACHINE, so
     // pre/post-apply line membership match).
-    const byId = new Map(snap.map(t => [String(t.id), t]));
-    scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE);
+    // If any alert was dismissed before this apply, a scoped merge would
+    // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
+    // those cleared dismissals would never re-surface until some later full
+    // recompute. A pending full recompute already wins over a scoped one by
+    // design, so force it whenever there was something to clear.
+    if (hadDismissed) {
+      Alerts.scheduleRecompute();
+    } else {
+      const byId = new Map(snap.map(t => [String(t.id), t]));
+      scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown');
+    }
   },
 
   discard() {
