@@ -498,6 +498,11 @@ and all manual paths ignore it.
 - **OD-C2c — Does frozen block manual drags?** *Recommend no* — it constrains the optimizer only.
   The planner is always free to move things (B1).
 
+**2026-08-22: backlog-mode carve-out.** `Engine.removeBacklog` no longer applies the frozen
+obstacle-skip or placement floor (SAP002 "Remove Backlog" parity); frozen orders shift when
+reached, counted in `diagnostics.frozenMoved`. All other placement sites listed above are
+unchanged.
+
 ---
 
 # D. Setup matrix: hygiene, controls, transparency
@@ -827,6 +832,7 @@ one table.
 | OD-C1e | Hide beyond-horizon orders, or just block scrolling? | Hide, on both surfaces |
 | OD-C2a | Frozen-window straddling orders | Frozen iff start is inside |
 | OD-C2c | Does frozen block manual drags? | No — optimizer only |
+| — (2026-08-22) | Does Remove Backlog respect the frozen floor? | No — carved out for SAP002 parity; frozen orders shift when reached, via `diagnostics.frozenMoved` |
 | OD-D1a | Uppercase-backfill PK collisions | Keep most recent, log discards to `admin_audit`, report a count |
 | OD-D3a | A scope-level "delete all matrix rows" action? | Yes, behind typed confirmation |
 | OD-D4a | Source label for a no-change transition | New `ui.setup_source_no_change` key, all 5 locales |

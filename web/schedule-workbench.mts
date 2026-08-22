@@ -8507,6 +8507,7 @@ export const OptimizerPreview = {
         [Util.t('ui.opt_pv_backlog_found'), String(backlog.backlogFound)],
         [Util.t('ui.opt_pv_backlog_moved'), String(backlog.moved)],
         [Util.t('ui.opt_pv_backlog_fixed_moved'), String(backlog.fixedMoved)],
+        [Util.t('ui.opt_pv_backlog_frozen_moved'), String(backlog.frozenMoved)],
         [Util.t('ui.opt_pv_backlog_runtime'), `${backlog.movedRuntimeHours.toFixed(1)} h`],
         [Util.t('ui.opt_pv_backlog_largest_delay'), `${backlog.largestDelayMinutes} min`],
       ];
@@ -8865,6 +8866,7 @@ export const OptimizerPreview = {
             from: audit.from?.toISOString() ?? null, to: audit.to?.toISOString() ?? null,
             plant_timezone: audit.timezone, captured_run_at: audit.runAt?.toISOString() ?? null,
             backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, fixed_moved: diagnostics.fixedMoved,
+            frozen_moved: diagnostics.frozenMoved,
             invalid_runtime: diagnostics.invalidRuntimeIds.length, missing_start: diagnostics.missingStartIds.length,
             overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
             boundary_conflicts: diagnostics.boundaryConflicts.length,

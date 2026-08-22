@@ -92,6 +92,7 @@ export interface RemoveBacklogDiagnostics {
   backlogFound: number;
   moved: number;
   fixedMoved: number;
+  frozenMoved: number;
   movedRuntimeHours: number;
   largestDelayMinutes: number;
   invalidRuntimeIds: string[];
@@ -2309,12 +2310,23 @@ export const Engine = {
   },
 
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
-   * has no priority, due-date, fixed-protection, or day-integrity branches --
-   * EXCEPT the C2 (2026-08-20) frozen-horizon guard below, which is
-   * unconditional (no 'backlog'-mode carve-out) and pins/floors exactly like
-   * every other placement site; it does not restore any of the other
-   * intentionally-absent protections (a genuinely Store.isFixed-pinned
-   * order is still moved "when reached", unchanged from before). */
+   * has no priority, due-date, fixed-protection, day-integrity, or
+   * frozen-horizon branches. The C2 (2026-08-20) frozen-horizon guard --
+   * obstacle-skip on encountering a frozen-window order, and a placement
+   * floor on every candidate start -- was removed for this mode on
+   * 2026-08-22 by planner decision (SAP002 "Remove Backlog" parity):
+   * insert-operation semantics require the overdue backlog to compress
+   * fully into now, including into the frozen window. A frozen-window
+   * order is still moved "when reached" by the compressing cursor -- it is
+   * never pulled earlier than its own snapshot start (the
+   * `item.snapshotStart >= now && cursor <= item.snapshotStart` break above
+   * still guarantees that) -- mirroring the pre-existing treatment of a
+   * genuinely Store.isFixed-pinned order, and is now counted separately via
+   * diagnostics.frozenMoved. All other placement sites (runAndApply's
+   * fixedTasks/freeTasks split, the setup-aware evaluator's fixedIds,
+   * autoReflow, Engine.earliestAllowedStart) are unaffected and keep
+   * applying Engine.isFrozenHorizon / Engine.applyFrozenFloor exactly as
+   * before. */
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
     const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
@@ -2337,7 +2349,7 @@ export const Engine = {
     }
 
     const diagnostics: RemoveBacklogDiagnostics = {
-      backlogFound: 0, moved: 0, fixedMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
+      backlogFound: 0, moved: 0, fixedMoved: 0, frozenMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
       invalidRuntimeIds: [], missingStartIds: [], overlongIds: [], calendarSearchFailures: [], boundaryConflicts: [],
     };
     const lines = Array.isArray(opts.lines) && opts.lines.length
@@ -2377,32 +2389,9 @@ export const Engine = {
             continue;
           }
           const runtimeMs = runtimeHours * Config.MS_HOUR;
-          // C2 (2026-08-20): an order whose CURRENT start already falls
-          // inside the plant's frozen window is left EXACTLY where it is --
-          // the same obstacle treatment Engine.isFrozenHorizon gets at every
-          // other placement site (runAndApply's fixedTasks/freeTasks split,
-          // the setup-aware evaluator's fixedIds, autoReflow). This is a NEW,
-          // unconditional guard with no 'backlog'-mode carve-out (the C2
-          // spec's placement-floor requirement is unconditional) -- it does
-          // NOT touch removeBacklog's separate, pre-existing, intentionally
-          // out-of-scope behavior of moving a genuinely Store.isFixed-pinned
-          // order "when reached" (tracked only via diagnostics.fixedMoved
-          // below, never gated here). Passes this function's own plant-local
-          // wall-clock `now` (Engine._plantWallNow) rather than the
-          // real-time default, so removeBacklog's timezone-aware clock and
-          // its frozen-window check always agree on the same instant.
-          if (Engine.isFrozenHorizon(item.task, now)) {
-            const obstacleEnd = item.task.end_date ?? new Date(item.snapshotStart.getTime() + runtimeMs);
-            cursor = new Date(Math.max(cursor.getTime(), obstacleEnd.getTime()));
-            continue;
-          }
           const candidate = item.snapshotStart < now
             ? cursor
             : new Date(Math.max(item.snapshotStart.getTime(), cursor.getTime()));
-          // C2: nothing removeBacklog places may START before the plant's
-          // frozen-horizon boundary either -- the same floor already
-          // threaded through Engine.earliestAllowedStart/autoReflow.
-          const flooredCandidate = Engine.applyFrozenFloor(candidate);
           let start: Date;
           let end: Date;
           let scheduleSegments: OrderScheduleSegment[] | undefined;
@@ -2410,7 +2399,7 @@ export const Engine = {
             // Preserve the existing continuous-bar contract exactly for legacy
             // schedules. A split schedule that is explicitly regenerated under
             // this policy is cleared below as one atomic parent aggregate.
-            const slot = Calendar.findContiguousSlot(line, flooredCandidate, runtimeMs);
+            const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
             if (!('start' in slot)) {
               diagnostics.calendarSearchFailures.push({
                 line, taskId: item.task.id,
@@ -2423,7 +2412,7 @@ export const Engine = {
             if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
             if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
           } else {
-            const allocation = Calendar.allocateRuntime(line, flooredCandidate, Math.round(runtimeHours * 60), splitPolicy);
+            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), splitPolicy);
             if (allocation.kind !== 'allocated') {
               diagnostics.calendarSearchFailures.push({
                 line, taskId: item.task.id,
@@ -2448,6 +2437,7 @@ export const Engine = {
           patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
           if (sourceIsFixed(item.task.id)) diagnostics.fixedMoved++;
+          if (Engine.isFrozenHorizon(item.task, now)) diagnostics.frozenMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
           diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
             Math.round((start.getTime() - item.snapshotStart.getTime()) / Config.MS_MIN));
