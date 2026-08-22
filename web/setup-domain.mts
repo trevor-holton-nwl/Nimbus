@@ -125,11 +125,17 @@ function matchingOverride(
 
 /** Compound-key component join. Distinct from `stateSignature`'s '' join —
  * this joins independently-identified components (machine, order id, a
- * signature string), so a plain space separator is sufficient: it only needs
- * to keep the SAME tuple mapping to the SAME string across build and lookup,
- * not to be collision-proof against adversarial input. */
+ * signature string). Joined with U+0000 (NUL), not a printable separator
+ * like a space: machine codes and state values are real, uncontrolled
+ * strings (e.g. a machine literally named "LINE 1", or a PRT value like
+ * "TOOL A") that legitimately contain spaces, so a space-joined key lets two
+ * DIFFERENT tuples collide on the SAME key string (machine "LINE" + from
+ * "1 A" vs. machine "LINE 1" + from "A" both join to "LINE 1 A"). NUL is not
+ * a character any of these domains can contain, so it is collision-safe for
+ * this purpose — but see the residual checks in `indexedMatrixRow`/
+ * `indexedOverride` below: correctness never depends on the key alone. */
 function joinIndexKey(...parts: ReadonlyArray<string>): string {
-  return parts.join(' ');
+  return parts.join('\0');
 }
 
 /** Sentinel for an absent/null key component (today: a null `predecessorOrderId`).
@@ -155,16 +161,20 @@ export interface SetupResolutionIndex {
   /** The `definition.signature_version` this index was built for. `resolveSetup`
    * ignores the index entirely when this doesn't match the call's definition. */
   signatureVersion: number;
-  /** Line (machine) matrix rows keyed by `machine + ' ' + fromSignature + ' ' + toSignature`.
-   * Only rows that pass the exact build-time validation `matchingMatrixRow` applies
-   * per-row are present; first-row-wins on a duplicate key. */
+  /** Line (machine) matrix rows keyed by `machine + NUL + fromSignature + NUL + toSignature`
+   * (see `joinIndexKey`). Only rows that pass the exact build-time validation
+   * `matchingMatrixRow` applies per-row are present; first-row-wins on a duplicate
+   * key. The key alone is a bucketing optimization, not the correctness
+   * guarantee — `resolveSetup`'s indexed path re-verifies `row.machine` and
+   * both state keys via `indexedMatrixRow` before admitting a hit. */
   machineRows: ReadonlyMap<string, SetupMatrixRow>;
-  /** Plant-default matrix rows (`machine === ''`) keyed by `fromSignature + ' ' + toSignature`.
-   * Same build-time validation and first-row-wins semantics as `machineRows`. */
+  /** Plant-default matrix rows (`machine === ''`) keyed by `fromSignature + NUL + toSignature`.
+   * Same build-time validation, first-row-wins, and residual-verification semantics
+   * as `machineRows`. */
   plantRows: ReadonlyMap<string, SetupMatrixRow>;
   /** Active, version-matched, shape-valid overrides grouped by the portion of
    * `matchingOverride`'s match identity that is fully known at build time —
-   * `machine + ' ' + (predecessorOrderId ?? ABSENT) + ' ' + successorOrderId` —
+   * `machine + NUL + (predecessorOrderId ?? ABSENT) + NUL + successorOrderId` —
    * in original relative order. The state-key equality checks depend on the
    * call's actual predecessor/successor states, which aren't part of any
    * override's identity key — so they are NOT baked into the key. `indexedOverride`
@@ -227,6 +237,29 @@ export function buildSetupResolutionIndex(input: {
   }
 
   return { signatureVersion, machineRows: machineIndex, plantRows: plantIndex, overrides: overrideIndex };
+}
+
+/** Fast-path matrix-row lookup: a Map hit is only a CANDIDATE. Correctness
+ * must not depend on the key encoding alone, so this re-verifies the exact
+ * predicates `matchingMatrixRow` applies beyond what build-time validation
+ * already guarantees invariant of the call — `row.machine === machine` and
+ * `statesEqual` on both from/to keys against the call's actual states —
+ * before admitting the row. `machine` is `input.machine` for the line-row
+ * index and `''` for the plant-row index, mirroring how `matchingMatrixRow`
+ * is called today. */
+function indexedMatrixRow(
+  index: ReadonlyMap<string, SetupMatrixRow>,
+  key: string,
+  machine: string,
+  predecessorState: SetupStateKey,
+  successorState: SetupStateKey,
+): SetupMatrixRow | undefined {
+  const row = index.get(key);
+  if (!row) return undefined;
+  if (row.machine !== machine) return undefined;
+  if (!statesEqual(row.from_key, predecessorState)) return undefined;
+  if (!statesEqual(row.to_key, successorState)) return undefined;
+  return row;
 }
 
 /** Fast-path override lookup: narrows to the (small) group sharing the
@@ -319,8 +352,14 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
   if (index) {
     const fromSig = stateSignature(predecessorState);
     const toSig = stateSignature(successorState);
-    lineRow = index.machineRows.get(joinIndexKey(input.machine, fromSig, toSig));
-    plantRow = index.plantRows.get(joinIndexKey(fromSig, toSig));
+    lineRow = indexedMatrixRow(
+      index.machineRows, joinIndexKey(input.machine, fromSig, toSig),
+      input.machine, predecessorState, successorState,
+    );
+    plantRow = indexedMatrixRow(
+      index.plantRows, joinIndexKey(fromSig, toSig),
+      '', predecessorState, successorState,
+    );
     override = indexedOverride(index, input, predecessorState, successorState);
   } else {
     lineRow = matchingMatrixRow(input.machineRows, input.machine, predecessorState, successorState, definition);
