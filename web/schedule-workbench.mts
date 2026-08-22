@@ -143,7 +143,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS } from './schedule-services.mjs';
 import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
@@ -7698,7 +7698,15 @@ export const OptimizeDialog = (() => {
     if (_mode !== 'backlog') {
       if (Persistence._rankMapsPlant !== plant) {
         const _rankMapFetchT0 = performance.now();
-        await Persistence.loadPriorityRankMaps(plant);
+        // Phase 2 (Pkg D): bound this await so a slow/hung fetch cannot stall
+        // the Run click indefinitely. On timeout we simply proceed — the
+        // ranksFresh/unrankedActiveFields check right below is the existing
+        // safety net (it already treats an incomplete fetch as "unranked" and
+        // surfaces the confirm dialog below), so no new UI is needed here.
+        await Promise.race([
+          Persistence.loadPriorityRankMaps(plant),
+          new Promise<void>(resolve => setTimeout(resolve, 4000)),
+        ]);
         PerfMonitor.record('Optimize.rankMapFetch', performance.now() - _rankMapFetchT0);
       }
       const ranksFresh = Persistence._rankMapsPlant === plant;
@@ -7885,6 +7893,12 @@ interface PreviewExplanationInput {
 
 const PREVIEW_REASON_LIMIT = 8;
 const PREVIEW_MISSING_PAIR_LIMIT = 12;
+// Phase 2 (Pkg D): the deferred Plan B comparison run's search budget. Plan B
+// is a comparison column, not the applied schedule, so it gets a smaller,
+// fixed slice of the engine's normal SETUP_AWARE_DEADLINE_MS rather than a
+// full fresh window — a deliberate, documented tradeoff (faster comparison,
+// possibly less-converged Plan B numbers).
+const ALT_PLAN_BUDGET_MS = Math.min(SETUP_AWARE_DEADLINE_MS, 2500);
 
 /** Reason codes that represent a genuine exclusion (order/line left out of the
  *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
@@ -7980,12 +7994,23 @@ export const OptimizerPreview = {
   _auditDetails: null as OptimizationAuditDetails | null,
   _explanation: null as PreviewExplanation | null,
   /** KPI vectors for the applied plan and one alternate mode — populated in
-   *  runWithPreview, wiped in _clear. Patches are never retained. */
+   *  runWithPreview (now via a deferred background run, see _finalistsPending),
+   *  wiped in _clear. Patches are never retained. */
   _finalists: null as Array<{ label: string; mode: OptimizerMode; kpis: OptimizerKpis; whyNot: string | null }> | null,
+  /** Phase 2 (Pkg D): true from the moment runWithPreview schedules the
+   *  deferred Plan B comparison run until it lands (or bails/fails) and
+   *  clears it. _render() shows a "Computing comparison…" placeholder while
+   *  this is true. Always false when _finalists is non-null. */
+  _finalistsPending: false,
   stale: false,
   _staleReason: null as string | null,
   active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
+  /** Phase 2 (Pkg D): monotonic token, incremented at the top of every
+   *  runWithPreview call. The deferred Plan B callback captures it at
+   *  schedule time and bails silently if it no longer matches (a newer run
+   *  started) or the preview is no longer active (applied/discarded/closed). */
+  _runSeq: 0,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
    *  the user clicks Run, before any await/fetch — gives instant feedback so
@@ -8155,6 +8180,9 @@ export const OptimizerPreview = {
   /** Entry point — call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
   runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
+    // Phase 2 (Pkg D): monotonic run token, captured by the deferred Plan B
+    // callback below so it can detect a superseding run and bail silently.
+    const runSeq = ++OptimizerPreview._runSeq;
     OptimizerPreview._previewDiagnostics = [];
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
     const plant = opts.plant ?? Store.selectedPlant;
@@ -8179,8 +8207,12 @@ export const OptimizerPreview = {
       try {
         // Snapshot every task in the plant — the optimizer may touch any of
         // them transitively (auto-reflow can ripple beyond the chosen window
-        // / lines), so the undo snapshot must stay unfiltered.
-        const candidateSnapshot = snapshotSchedule();
+        // / lines), so the undo snapshot must stay unfiltered. `plant` scopes
+        // only calendars (Phase 2, Pkg D clone reduction) — every consumer of
+        // this snapshot's `calendars` only ever looks up a line that already
+        // passed this same plant's task filter (see snapshotSchedule's doc
+        // comment), so no other plant's calendar entries are ever needed here.
+        const candidateSnapshot = snapshotSchedule(plant);
         const scopedTasks = candidateSnapshot.tasks.filter(task => {
           const mappedPlant = candidateSnapshot.lineSettings[task.MACHINE]?.plant
             ?? candidateSnapshot.masterData?.lines.find(row => row.machine === task.MACHINE)?.plant;
@@ -8215,8 +8247,13 @@ export const OptimizerPreview = {
 
         // Evaluate the established placement algorithm against a detached read
         // model. Store changes only if the planner applies this candidate.
+        // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
+        // once-computed `deadlineAt` rather than letting the engine derive a
+        // fresh SETUP_AWARE_DEADLINE_MS window internally — same numeric
+        // budget, no behavior change, but the option now exists so the
+        // (deferred) alt run below no longer inherits a full fresh one.
         const _evalPrimaryT0 = performance.now();
-        const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts });
+        const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts, deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS });
         PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
 
         // Post-KPIs are calculated from detached patched task values.
@@ -8271,19 +8308,49 @@ export const OptimizerPreview = {
         OptimizerPreview._explanation = explanation;
 
         // Alternate-mode KPI vectors — the only data needed for the plan
-        // comparison table. Patches are computed and immediately discarded;
-        // only the KPI scalars survive for the preview.
-        {
-          const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover' };
-          const altMode = altModeMap[mode];
-          let finalists: typeof OptimizerPreview['_finalists'] = null;
-          if (altMode) {
+        // comparison table. Phase 2 (Pkg D): this run is now DEFERRED until
+        // after the primary preview has painted (see below, after the first
+        // _render() call) instead of running synchronously back-to-back with
+        // the primary evaluation. Until it lands, _finalists stays null and
+        // _finalistsPending tells _render() to show a placeholder.
+        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover' };
+        const altMode = altModeMap[mode];
+        OptimizerPreview._finalists = null;
+        OptimizerPreview._finalistsPending = !!altMode;
+
+        OptimizerPreview.stale = false;
+        OptimizerPreview._staleReason = null;
+
+        footBtns.forEach((b) => { b.disabled = false; });
+        OptimizerPreview._syncApplyButton();
+        OptimizerPreview._render();
+
+        if (altMode) {
+          // Paint first, then compute Plan B off the critical path.
+          // requestAnimationFrame alone still runs before the browser paints
+          // the just-scheduled frame; the extra setTimeout(0) yields to the
+          // event loop (and therefore a paint) before this runs.
+          requestAnimationFrame(() => setTimeout(() => {
+            // Race safety: bail silently — touching neither _finalists nor
+            // _finalistsPending — unless this preview is still the one the
+            // user is looking at. `active` catches apply/discard/abandon
+            // (all route through _clear(), which already resets both
+            // fields); `_runSeq` catches a newer runWithPreview call already
+            // in flight (whose own synchronous block already reset both
+            // fields for itself) so a slow, superseded run can never
+            // resurrect stale finalists or issue an orphan render.
+            if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+            let finalists: typeof OptimizerPreview['_finalists'] = null;
             try {
               const _evalAltT0 = performance.now();
               const altCandidate = evaluateSchedule(candidateSnapshot, {
                 mode: altMode, plant: opts.plant, lines: opts.lines,
                 startDate: opts.startDate, endDate: opts.endDate,
                 respectFixed: opts.respectFixed, respectCalendar: opts.respectCalendar,
+                // Plan B is a comparison column, not the applied schedule —
+                // a smaller, fixed budget is a deliberate tradeoff (see
+                // ALT_PLAN_BUDGET_MS).
+                deadlineAt: performance.now() + ALT_PLAN_BUDGET_MS,
               });
               PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
               const _applyPatchesT0b = performance.now();
@@ -8295,16 +8362,11 @@ export const OptimizerPreview = {
                 { label: 'B', mode: altMode, kpis: altKpis, whyNot: describeFinalistWhyNot(postKpis, altKpis) },
               ];
             } catch { /* alt run failed — table stays absent */ }
-          }
-          OptimizerPreview._finalists = finalists;
+            OptimizerPreview._finalists = finalists;
+            OptimizerPreview._finalistsPending = false;
+            OptimizerPreview._render();
+          }, 0));
         }
-
-        OptimizerPreview.stale = false;
-        OptimizerPreview._staleReason = null;
-
-        footBtns.forEach((b) => { b.disabled = false; });
-        OptimizerPreview._syncApplyButton();
-        OptimizerPreview._render();
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
         OptimizerPreview._previewDiagnostics = [{
@@ -8482,6 +8544,11 @@ export const OptimizerPreview = {
           <tbody>${bodyRows}</tbody>
           <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${esc(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${esc(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
         </table></div>`;
+      } else if (OptimizerPreview._finalistsPending) {
+        // Phase 2 (Pkg D): Plan B now computes in a deferred background run
+        // (after the primary preview paints) instead of blocking the initial
+        // render — show a lightweight placeholder until it lands.
+        planTableHtml = `<p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_plan_computing'))}</p>`;
       }
 
       // §4.3 — aggregate prune tally for the whole run. Only rendered when at
@@ -8813,6 +8880,7 @@ export const OptimizerPreview = {
     OptimizerPreview._auditDetails = null;
     OptimizerPreview._explanation = null;
     OptimizerPreview._finalists = null;
+    OptimizerPreview._finalistsPending = false;
     OptimizerPreview.stale = false;
     OptimizerPreview._staleReason = null;
     if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];

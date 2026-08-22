@@ -351,6 +351,12 @@ export interface EvaluationRequest {
   respectCalendar?: boolean;
   /** Tests and callers that need deterministic candidate placement supply this. */
   now?: Date;
+  /** Phase 2 (Pkg D): an absolute performance.now() timestamp overriding the
+   *  setup-aware evaluators' default SETUP_AWARE_DEADLINE_MS search window
+   *  (schedule-services.mts). Used by the optimizer preview's deferred Plan B
+   *  comparison run, which gets a smaller, fixed budget instead of a full
+   *  fresh deadline on the synchronous path. */
+  deadlineAt?: number;
 }
 
 /** All search limits are intentionally supplied by the caller. Stage 0's
@@ -4817,11 +4823,21 @@ export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: 
 }
 
 /** Apply a detached patch set to detached task values for before/after
- * comparison.  The original snapshot and task objects are never changed. */
+ * comparison. The original snapshot and task objects are never changed.
+ *
+ * Sharing contract (Phase 2, Pkg D — clone reduction): an unpatched entry in
+ * the returned array is the CALLER'S OWN original snapshot task object,
+ * returned BY REFERENCE, not a clone — only patched entries are freshly
+ * cloned. Every consumer of this function's output must therefore treat
+ * unpatched entries as read-only. Verified downstream: the KPI path
+ * (Util.scheduleKpis via schedule-workbench.mts's runWithPreview) reads
+ * fields and separately clones its own `coreTasks` inside
+ * Utilization.computeMatrix; `lateOrderFacts` (this module) only reads
+ * fields off each task. Neither mutates a task object. */
 export function applyPatchesToSnapshot(tasks: ReadonlyArray<NimbusTask>, patches: ReadonlyArray<SchedulePatch>): NimbusTask[] {
   const byId = new Map(patches.map(patch => [String(patch.id), patch.changes]));
   return tasks.map(task => {
     const changes = byId.get(String(task.id));
-    return changes ? { ...structuredClone(task), ...structuredClone(changes) } : structuredClone(task);
+    return changes ? { ...structuredClone(task), ...structuredClone(changes) } : task;
   });
 }

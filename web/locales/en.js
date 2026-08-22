@@ -1512,6 +1512,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_diag_orders_in_scope':     'Orders in scope',
   'ui.opt_pv_diag_rate':                'Iterations/sec',
   // Plan comparison table
+  'ui.opt_pv_plan_computing':           'Computing comparison…',
   'ui.opt_pv_plan_col_current':         'Current',
   'ui.opt_pv_plan_col_current_sub':     'in place now',
   'ui.opt_pv_plan_col_applied':         'Applied',

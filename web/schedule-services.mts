@@ -178,10 +178,27 @@ interface SortTerm {
 
 /** Capture the complete read model for one optimizer candidate.  Every member
  * is cloned at the Store boundary so candidate scheduling cannot hold a live
- * reference that a later Store mutation could alter while it is evaluating. */
-export function snapshotSchedule(): ScheduleSnapshot {
+ * reference that a later Store mutation could alter while it is evaluating.
+ *
+ * `plant` (Phase 2, Pkg D — clone reduction) is optional: when the caller
+ * already knows which plant it is about to evaluate, only THAT plant's lines
+ * are cloned into `calendars` (derived via Store.getPlantForLine, the same
+ * lineSettings/masterData resolution every other line→plant lookup in this
+ * file uses) instead of every line the session has ever visited. Every other
+ * member stays whole (tasks/fixedIds/alerts/blocks/plantBlocks/plants/
+ * lineSettings/masterData/priorityRankMaps) — downstream reads depend on
+ * them being unscoped. Confirmed safe: every ScheduleSnapshot.calendars
+ * consumer (setup-scheduler.mts's freeIntervalsFor/jointWindowForDay/
+ * hasNominalWindow, and sourceLineWorkHours below) only ever looks up a
+ * `line` that already passed the SAME plant's task filter upstream, so a
+ * plant-scoped snapshot never needs another plant's calendar entry. Omitting
+ * `plant` (or passing none) reproduces the prior unscoped behavior exactly. */
+export function snapshotSchedule(plant?: string): ScheduleSnapshot {
   const _pmT0s = performance.now();
   try {
+    const sourceCalendars = plant
+      ? Object.fromEntries(Object.entries(Store.calendars).filter(([line]) => Store.getPlantForLine(line) === plant))
+      : Store.calendars;
     return {
       tasks: structuredClone(Store.tasksArr),
       fixedIds: Array.from(Store.fixedIds),
@@ -189,7 +206,7 @@ export function snapshotSchedule(): ScheduleSnapshot {
       selectedPlant: Store.selectedPlant,
       blocks: structuredClone(Store.blocks),
       plantBlocks: structuredClone(Store.plantBlocks),
-      calendars: structuredClone(Store.calendars),
+      calendars: structuredClone(sourceCalendars),
       plants: structuredClone(Store.plants),
       lineSettings: structuredClone(Store.lineSettings),
       masterData: structuredClone(Store.masterData),
@@ -513,7 +530,11 @@ let _candidateDiagnostics: CandidateDiagnostic[] | null = null;
  *  exactness. Revisit once real per-plant timing data exists. */
 const SETUP_AWARE_EXACT_SEARCH_THRESHOLD = 8;
 const SETUP_AWARE_ITERATION_CAP = 20000;
-const SETUP_AWARE_DEADLINE_MS = 5000;
+// Exported (Phase 2, Pkg D) so schedule-workbench.mts's optimizer preview can
+// compute its own explicit `deadlineAt` for both the primary run and the
+// deferred Plan B comparison run (a fraction of this budget) instead of
+// duplicating the number.
+export const SETUP_AWARE_DEADLINE_MS = 5000;
 
 /** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
  * Live optimizer and repair runs retain their existing ErrorLog behavior. */
@@ -1603,6 +1624,30 @@ Store.subscribe(evt => {
   if (evt.type === 'schedule:hydrated') Alerts.scheduleRecompute();
 }, 'schedule-services.hydrated');
 
+/** Phase 2 (Pkg D) clone-base reuse: `Utilization.computeMatrix`'s preview
+ * path (`utilizationSnapshot` non-null) structured-clones this six-pack on
+ * EVERY call — 2-3 calls per optimizer preview (pre/post/alt KPIs), all
+ * against the SAME `utilizationSnapshot` object reference. Cache the first
+ * call's clones per snapshot so later calls in the same preview reuse them.
+ * Confirmed safe (see the finding recorded in the Task 5 report):
+ * NimbusComputeCore.computeUtilization's only in-place writes to these
+ * inputs are ensureCalendar/ensurePlant filling a MISSING line/plant entry
+ * with the same deterministic default, guarded by an existence check —
+ * idempotent normalization, never a destructive overwrite of real data.
+ * lineSettings/masterData/blocks/plantBlocks are never mutated by the core.
+ * A WeakMap keyed by the snapshot object needs no manual eviction — entries
+ * disappear once the preview releases its snapshot reference. The task list
+ * itself is NOT cached here: it genuinely differs per call (pre/post/alt). */
+interface UtilizationSnapshotClones {
+  lineSettings: Record<string, NimbusLineSetting>;
+  calendars: Record<string, { workHours: WorkHours }>;
+  plants: Record<string, { workHours: WorkHours }>;
+  blocks: NimbusBlock[];
+  plantBlocks: NimbusPlantBlock[];
+  masterData: NimbusMasterData | null;
+}
+const _utilizationSnapshotCloneCache = new WeakMap<Readonly<ScheduleSnapshot>, UtilizationSnapshotClones>();
+
 /* =============================================================================
    UTILIZATION — scheduled vs. available hours per line per day.
    ========================================================================== */
@@ -1637,16 +1682,38 @@ export const Utilization = {
     // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
     // a preview, give it clones of the detached candidate context so that
     // convenience normalization cannot mutate Store (or the candidate itself).
-    const lineSettings = utilizationSnapshot ? structuredClone(utilizationSnapshot.lineSettings) : Store.lineSettings;
-    const calendars = utilizationSnapshot ? structuredClone(utilizationSnapshot.calendars) : Store.calendars;
-    const plants = utilizationSnapshot ? structuredClone(utilizationSnapshot.plants) : Store.plants;
-    const blocks: NimbusBlock[] = utilizationSnapshot
-      ? structuredClone(Array.from(utilizationSnapshot.blocks))
-      : Store.blocks;
-    const plantBlocks: NimbusPlantBlock[] = utilizationSnapshot
-      ? structuredClone(Array.from(utilizationSnapshot.plantBlocks))
-      : Store.plantBlocks;
-    const masterData = utilizationSnapshot ? structuredClone(utilizationSnapshot.masterData) : Store.masterData;
+    // Phase 2 (Pkg D): reuse those clones across repeat calls against the
+    // SAME snapshot instead of re-cloning every time (see
+    // _utilizationSnapshotCloneCache above for the safety finding).
+    let lineSettings: Record<string, NimbusLineSetting>;
+    let calendars: Record<string, { workHours: WorkHours }>;
+    let plants: Record<string, { workHours: WorkHours }>;
+    let blocks: NimbusBlock[];
+    let plantBlocks: NimbusPlantBlock[];
+    let masterData: NimbusMasterData | null;
+    if (utilizationSnapshot) {
+      let clones = _utilizationSnapshotCloneCache.get(utilizationSnapshot);
+      if (!clones) {
+        clones = {
+          lineSettings: structuredClone(utilizationSnapshot.lineSettings),
+          calendars:    structuredClone(utilizationSnapshot.calendars),
+          plants:       structuredClone(utilizationSnapshot.plants),
+          blocks:       structuredClone(Array.from(utilizationSnapshot.blocks)),
+          plantBlocks:  structuredClone(Array.from(utilizationSnapshot.plantBlocks)),
+          masterData:   structuredClone(utilizationSnapshot.masterData),
+        };
+        _utilizationSnapshotCloneCache.set(utilizationSnapshot, clones);
+      }
+      ({ lineSettings, calendars, plants, blocks, plantBlocks, masterData } = clones);
+    } else {
+      lineSettings = Store.lineSettings;
+      calendars    = Store.calendars;
+      plants       = Store.plants;
+      blocks       = Store.blocks;
+      plantBlocks  = Store.plantBlocks;
+      masterData   = Store.masterData;
+    }
+    // The task list genuinely differs per call (pre/post/alt) — never cached.
     const coreTasks: NimbusTask[] = utilizationSnapshot
       ? structuredClone(Array.from(taskList))
       : taskList as NimbusTask[];
@@ -2814,7 +2881,11 @@ export const Engine = {
    *  opts.plant restricts to lines belonging to that plant. Priority ranks are
    *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
    *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
-   *  and every caller's effective plant IS Store.selectedPlant. */
+   *  and every caller's effective plant IS Store.selectedPlant.
+   *  opts.deadlineAt (Phase 2, Pkg D): an optional absolute performance.now()
+   *  timestamp for the setup-aware evaluators' search deadline, consumed where
+   *  DueDateFirstBounds.deadline is built below. Absent it, a fresh
+   *  SETUP_AWARE_DEADLINE_MS window is used, unchanged from before. */
   runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
     const candidateRun = opts.__candidateRun === true;
@@ -2895,7 +2966,13 @@ export const Engine = {
       : setupSnapshot;
     if (mode === 'changeover' || setupSnapshotActiveAndMatching) {
       const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
-      const baseSnapshot = _candidateSnapshot ?? snapshotSchedule();
+      // Phase 2 (Pkg D): scope the fallback snapshot's calendars to this run's
+      // plant — every consumer of ScheduleSnapshot.calendars in this path
+      // (freeIntervalsFor/jointWindowForDay/hasNominalWindow in
+      // setup-scheduler.mts, sourceLineWorkHours above) only ever looks up a
+      // line that survived this same plant's task filter, so no other
+      // plant's lines are ever needed here.
+      const baseSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
       // C2: fold any frozen-window order into the SAME fixedIds set the
       // setup-aware evaluators already treat as immovable — Engine.
       // isFrozenHorizon carries its own distinct reason for the UI (never
@@ -2917,7 +2994,13 @@ export const Engine = {
         exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
         iterationCap: SETUP_AWARE_ITERATION_CAP,
         clock: () => performance.now(),
-        deadline: performance.now() + SETUP_AWARE_DEADLINE_MS,
+        // Phase 2 (Pkg D): an absolute deadline the caller already computed
+        // (e.g. the preview's one-shot primary budget, or the deferred Plan B
+        // comparison's smaller budget) takes precedence over a fresh
+        // SETUP_AWARE_DEADLINE_MS window here. A past `opts.deadlineAt` is
+        // not special-cased: the search just terminates immediately with
+        // tail placement, which is the existing, safe deadline-exceeded path.
+        deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
         now: horizonStart,
         horizonEnd,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
