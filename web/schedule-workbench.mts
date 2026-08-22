@@ -7688,25 +7688,29 @@ export const OptimizeDialog = (() => {
     // a Run clicked before that resolves — or after it failed — would
     // otherwise rank EVERY order 999999 on EVERY field: configured, inert and
     // silent. Awaiting here restores the guarantee the deleted fetch provided.
-    // Note this drops the old 1500 ms AbortSignal bound: back then a missing
-    // wheel still left a usable ORDER_Y fallback, so cutting the fetch short
-    // was cheap; now the ranks are load-bearing, so it is better to wait for
-    // them (loadPriorityRankMaps never rejects — a failing/non-ok response
-    // returns promptly and falls into the `!ranksFresh` confirm below).
+    // Note this replaces the old 1500 ms AbortSignal bound with a 4000 ms
+    // race (Phase 2, Pkg D): back then a missing wheel still left a usable
+    // ORDER_Y fallback, so cutting the fetch short was cheap; now the ranks
+    // are load-bearing, so the fetch is awaited but still BOUNDED rather than
+    // waited on forever. On timeout the flow proceeds regardless —
+    // loadPriorityRankMaps never rejects, and either way (slow fetch or a
+    // failing/non-ok response that returns promptly) the `!ranksFresh` /
+    // unrankedActiveFields check and its confirm dialog right below is the
+    // real safety net, so ranks are never silently skipped.
     let wheelUsed = false;
     let unrankedFields: string[] = [];
     if (_mode !== 'backlog') {
       if (Persistence._rankMapsPlant !== plant) {
         const _rankMapFetchT0 = performance.now();
-        // Phase 2 (Pkg D): bound this await so a slow/hung fetch cannot stall
-        // the Run click indefinitely. On timeout we simply proceed — the
-        // ranksFresh/unrankedActiveFields check right below is the existing
-        // safety net (it already treats an incomplete fetch as "unranked" and
-        // surfaces the confirm dialog below), so no new UI is needed here.
-        await Promise.race([
-          Persistence.loadPriorityRankMaps(plant),
-          new Promise<void>(resolve => setTimeout(resolve, 4000)),
-        ]);
+        // Bound this await so a slow/hung fetch cannot stall the Run click
+        // indefinitely; the timer is cleared once the real fetch settles so
+        // no stray timer lingers when it wins the race.
+        await new Promise<void>(resolve => {
+          let done = false;
+          const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+          const timer = setTimeout(finish, 4000);
+          Persistence.loadPriorityRankMaps(plant).then(finish);
+        });
         PerfMonitor.record('Optimize.rankMapFetch', performance.now() - _rankMapFetchT0);
       }
       const ranksFresh = Persistence._rankMapsPlant === plant;
