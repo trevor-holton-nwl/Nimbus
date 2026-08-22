@@ -1054,12 +1054,20 @@ def ensure_plant_visibility_horizon_columns() -> None:
     max_pull_forward_days' dual-provisioning precedent (this repo's
     schema.sql-vs-boot-hook hazard — see workstream A's completion notes) so a
     normal boot against a pre-existing DB provisions these columns too, not
-    just a fresh schema.sql apply. Kept out of the grid, same as its siblings."""
+    just a fresh schema.sql apply. visibility_horizon_days is registered in
+    column_metadata (2026-08-21) so it also renders in the generic Manage
+    Data Tables grid; horizon_roll_hour_utc stays unregistered — a companion
+    field of the dedicated visibility-horizon route only."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS visibility_horizon_days INTEGER")
         cur.execute(
             "ALTER TABLE plants ADD COLUMN IF NOT EXISTS horizon_roll_hour_utc "
             "INTEGER NOT NULL DEFAULT 19"
+        )
+        cur.execute(
+            "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)"
+            " VALUES ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9)"
+            " ON CONFLICT (table_name, column_name) DO NOTHING"
         )
         conn.commit()
 
@@ -1081,10 +1089,17 @@ def ensure_plant_frozen_horizon_column() -> None:
 def ensure_plant_setup_active_column() -> None:
     """Idempotent plant-level "include setup times in optimizer" flag
     (Workstream D2, 2026-08-20) — relocated off the per-signature-version
-    setup_definition.active. Kept out of the grid, same as its siblings
-    above; changed only through PUT /plant/{plant}/setup-active."""
+    setup_definition.active. Registered in column_metadata (2026-08-21) so
+    it also renders in the generic Manage Data Tables grid, alongside the
+    validated PUT /plant/{plant}/setup-active route the dedicated
+    Settings-pane checkbox uses."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_active BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute(
+            "INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order)"
+            " VALUES ('plants', 'setup_active', 'Setup-Aware Optimization', FALSE, 8)"
+            " ON CONFLICT (table_name, column_name) DO NOTHING"
+        )
         conn.commit()
 
 

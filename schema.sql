@@ -183,10 +183,11 @@ END $$;
 -- Workstream D2 (2026-08-20): the "include setup times in optimizer" flag,
 -- relocated off the per-signature-version setup_definition.active (which
 -- reset to FALSE on every signature bump — see that table's comment below).
--- Deliberately unregistered (no column_metadata row), same as
--- split_order_policy above — never appears in the generic Master Data grid.
--- Written only through the validated PUT /plant/{plant}/setup-active route,
--- following the machine.setup_compatible precedent.
+-- Registered in column_metadata (2026-08-21, see the INSERT below and
+-- migrations/2026-08-21-plants-grid-visibility.sql) so it's also editable
+-- from the generic Admin > Manage Data Tables grid, alongside the validated
+-- PUT /plant/{plant}/setup-active route (following the machine.
+-- setup_compatible precedent) that the dedicated Settings-pane checkbox uses.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS setup_active BOOLEAN NOT NULL DEFAULT FALSE;
 DO $$
 BEGIN
@@ -201,10 +202,12 @@ END $$;
 -- max_pull_forward_days' nullable-optional shape above. horizon_roll_hour_utc
 -- is NOT NULL DEFAULT 19 (mirrors setup_active's NOT NULL DEFAULT shape) so
 -- every plant has a well-defined roll instant even before an admin ever visits
--- the Scheduling Rules panel. Deliberately unregistered (no column_metadata
--- row), same as split_order_policy/max_pull_forward_days — never appears in
--- the generic Master Data grid; changed only through the validated
--- POST /master-data/plants/{plant}/visibility-horizon route. See
+-- the Scheduling Rules panel. visibility_horizon_days is registered in
+-- column_metadata (2026-08-21, see the INSERT below and
+-- migrations/2026-08-21-plants-grid-visibility.sql) so it's also editable
+-- from the generic Admin > Manage Data Tables grid; horizon_roll_hour_utc
+-- stays unregistered — a companion field of the dedicated
+-- POST /master-data/plants/{plant}/visibility-horizon route only. See
 -- docs/multi_change_spec_08.20.26.md's C1 section for the plant-local-midnight-
 -- with-a-UTC-roll-hour design and its three implementation corrections
 -- (three-way coalesce, count_orders' separate WHERE builder, indexing).
@@ -574,6 +577,15 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('plants', 'description',   'Description',     FALSE, 5),
     ('plants', 'product_focus', 'Product Focus',   FALSE, 6),
     ('plants', 'timezone',      'Timezone (IANA)', FALSE, 7)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- 2026-08-21: expose setup_active and visibility_horizon_days as editable
+-- Manage Data Tables grid columns too (verbatim copy in
+-- migrations/2026-08-21-plants-grid-visibility.sql). horizon_roll_hour_utc
+-- stays unregistered — see that column's comment above.
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('plants', 'setup_active',            'Setup-Aware Optimization',  FALSE, 8),
+    ('plants', 'visibility_horizon_days', 'Visibility Horizon (days)', FALSE, 9)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
