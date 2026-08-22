@@ -374,6 +374,11 @@ export interface DueDateFirstBounds {
    *  built or owned by this module beyond the one call that constructs it —
    *  it lives entirely on this bounds object for one evaluator invocation. */
   runContext?: SetupRunContext;
+  /** Phase 1e: overrides `SETUP_AWARE_CONVERGENCE_WINDOW` for this run. Absent
+   * falls back to that constant — the live engine wiring in
+   * schedule-services.mts sets this explicitly alongside the other
+   * `SETUP_AWARE_*` constants; tests may shrink it to make a plateau cheap. */
+  convergenceWindow?: number;
 }
 
 /**
@@ -514,7 +519,12 @@ export interface CandidateDiagnostic {
 export interface SearchDiagnostics {
   candidateCount: number;
   method: 'legacy-detached' | 'due-date-first-exact' | 'due-date-first-greedy' | 'spt-detached';
-  termination: 'completed' | 'no-plant' | 'deadline' | 'iteration-cap' | 'infeasible';
+  /** 'converged' (Phase 1e) means the search stopped by choice after a long
+   * non-improving plateau, with a feasible winner already in hand — it
+   * counts like completion, never like starvation (see the min-changeover
+   * starvation guard and `limitReached` below, both of which deliberately
+   * omit it). */
+  termination: 'completed' | 'no-plant' | 'deadline' | 'iteration-cap' | 'infeasible' | 'converged';
   runtimeMs: number;
   limitReached: boolean;
   events: ReadonlyArray<CandidateDiagnostic>;
@@ -529,6 +539,23 @@ export interface MissingSetupEdge {
 
 const UNCOVERED_SETUP_TRANSITION_REASON = 'No version-matched setup transition covers this state pair';
 const PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON = 'protected-fixed-boundary-outside-horizon';
+
+/** Phase 1e early-convergence exit: once `exactSearch`/`greedySearch` have
+ * evaluated this many candidates in a row with no winner improvement (and a
+ * feasible winner already exists), stop searching and report `'converged'`
+ * rather than continuing to burn iterations/wall-clock on a plateaued
+ * search. Overridable per-run via `bounds.convergenceWindow` (the live
+ * engine wiring in schedule-services.mts defaults it to this constant); a
+ * test can shrink it to make a plateau cheap to construct. */
+export const SETUP_AWARE_CONVERGENCE_WINDOW = 2000;
+
+/** Phase 1.5 tail-pass valve: `placeUnknownTail`/`placeWholeLineAsTail` stop
+ * ATTEMPTING placement once wall-clock time exceeds `bounds.deadline` by more
+ * than this many milliseconds — time-based only, never gated on iteration
+ * budget — routing every remaining order through the existing
+ * 'unknown-setup-tail-unplaced' diagnostic instead (never-freeze: retained at
+ * its current dates, not dropped). */
+export const SETUP_AWARE_TAIL_OVERRUN_MS = 1000;
 
 /** Score index carrying the count of uncovered-but-admitted transitions in a
  * candidate (A2). Appended, never inserted: `score[5]` is read as setup-minute
@@ -589,7 +616,7 @@ interface DueDateCandidate {
 interface SearchRun {
   candidateCount: number;
   method: 'due-date-first-exact' | 'due-date-first-greedy';
-  termination: 'completed' | 'deadline' | 'iteration-cap';
+  termination: 'completed' | 'deadline' | 'iteration-cap' | 'converged';
   winner: DueDateCandidate | null;
   missingEdges: MissingSetupEdge[];
   /** Orders whose setup state (or matrix coverage) could not be resolved
@@ -1788,6 +1815,17 @@ function candidateForSequence(
   sequence: ReadonlyArray<NimbusTask>,
   fragment: Readonly<FragmentContext>,
   adjacency: Readonly<FragmentAdjacency>,
+  // Phase 1e: `exactSearch`/`greedySearch` evaluate many losing candidates
+  // per winner found; building this success-path explanation text (template
+  // strings, fresh Dates) for every one of them is pure waste, since only the
+  // eventual winner's explanation is ever read. Search-time callers pass
+  // `true` to skip building the 'due-date-first-placement' /
+  // 'admitted-without-setup' / 'fixed-incoming-setup' entries below, then
+  // re-run this function once against the chosen winner with the default
+  // `false` to get its real explanation. Failure-path entries and
+  // `missingEdges` are never suppressed — diagnostics must stay intact
+  // regardless of which candidate loses.
+  suppressExplanations = false,
 ): DueDateCandidate {
   const definition = bounds.setup.definition!;
   let predecessorState = fragment.predecessorState;
@@ -1898,12 +1936,14 @@ function candidateForSequence(
         // (schedule-workbench.mts) regex-matches those tokens to stamp
         // outcome:'rejected', and this order was accepted, not rejected. Not
         // added to PRUNE_BUCKET_BY_CODE for the same reason.
-        explanation.push({
-          code: 'admitted-without-setup',
-          message: `Admitted ${taskId(task)} into the covered sequence without a matching setup transition; charged zero setup minutes.`,
-          line,
-          taskId: taskId(task),
-        });
+        if (!suppressExplanations) {
+          explanation.push({
+            code: 'admitted-without-setup',
+            message: `Admitted ${taskId(task)} into the covered sequence without a matching setup transition; charged zero setup minutes.`,
+            line,
+            taskId: taskId(task),
+          });
+        }
         setupRequirement = { kind: 'resolved', minutes: 0 };
       } else {
         effectiveSetupMinutes = resolved.effectiveMin;
@@ -1999,7 +2039,7 @@ function candidateForSequence(
       lateCount += 1;
       latenessMinutes += Math.ceil((last.end.getTime() - due) / (60 * 1000));
     }
-    if (!unknownPredecessor && !uncoveredAdmission) {
+    if (!unknownPredecessor && !uncoveredAdmission && !suppressExplanations) {
       explanation.push({
         code: 'due-date-first-placement',
         message: `Placed ${taskId(task)} after ${effectiveSetupMinutes} minutes of setup.`,
@@ -2081,12 +2121,14 @@ function candidateForSequence(
           });
         } else {
           setupMinutes += resolved.effectiveMin;
-          explanation.push({
-            code: 'fixed-incoming-setup',
-            message: `Reserved ${resolved.effectiveMin} minutes of setup before fixed ${taskId(fixed.task)}.`,
-            line,
-            taskId: taskId(fixed.task),
-          });
+          if (!suppressExplanations) {
+            explanation.push({
+              code: 'fixed-incoming-setup',
+              message: `Reserved ${resolved.effectiveMin} minutes of setup before fixed ${taskId(fixed.task)}.`,
+              line,
+              taskId: taskId(fixed.task),
+            });
+          }
         }
       }
     }
@@ -2113,6 +2155,59 @@ function candidateForSequence(
   };
 }
 
+/** Two patch lists are equivalent for the re-run dev-guard below iff they
+ * name the same ids, in the same order, with the same start/end instants —
+ * schedule segments are derived from the same start/end pair and are not
+ * separately compared. */
+function patchesMatch(left: ReadonlyArray<SchedulePatch>, right: ReadonlyArray<SchedulePatch>): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a.id !== b.id) return false;
+    const aStart = a.changes.start_date instanceof Date ? a.changes.start_date.getTime() : null;
+    const bStart = b.changes.start_date instanceof Date ? b.changes.start_date.getTime() : null;
+    const aEnd = a.changes.end_date instanceof Date ? a.changes.end_date.getTime() : null;
+    const bEnd = b.changes.end_date instanceof Date ? b.changes.end_date.getTime() : null;
+    if (aStart !== bStart || aEnd !== bEnd) return false;
+  }
+  return true;
+}
+
+/**
+ * Phase 1e: `exactSearch`/`greedySearch` evaluate every candidate with
+ * `suppressExplanations` so the many losers never pay for building
+ * placement-message text. Once the search settles on a winner, re-run
+ * `candidateForSequence` exactly once against the winning sequence with
+ * explanations enabled, and use THAT result — `candidateForSequence` is pure
+ * and reads only `snapshot`/`bounds`/its arguments (any `bounds.runContext`
+ * memo it touches is idempotent: a repeat read returns the same cached
+ * value), and it never charges `budget`, so this re-run cannot diverge from
+ * or cost anything the search-time evaluation didn't already pay for. The
+ * dev-guard below compares the re-run's patches (ids + times) against the
+ * search-time winner's and falls back to the search-time result — flagging a
+ * diagnostic rather than throwing — if they somehow differ.
+ */
+function reexplainWinner(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  winner: DueDateCandidate | null,
+  winnerSequence: ReadonlyArray<NimbusTask> | null,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): DueDateCandidate | null {
+  if (!winner || !winnerSequence) return winner;
+  const reexplained = candidateForSequence(snapshot, bounds, line, winnerSequence, fragment, adjacency);
+  if (reexplained.feasible && patchesMatch(reexplained.patches, winner.patches)) return reexplained;
+  winner.explanation.push({
+    code: 'setup-candidate-reexplain-mismatch',
+    message: 'Re-running the winning sequence with explanations enabled produced a different result; kept the search-time result.',
+    line,
+  });
+  return winner;
+}
+
 function exactSearch(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
@@ -2136,6 +2231,17 @@ function exactSearch(
   let candidateCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
+  // Phase 1e: the winning selection at the moment `winner` was last set, so
+  // the post-loop re-run (below) can reproduce it with explanations enabled
+  // without re-deriving it from patches (a partial winner's patches can be
+  // shorter than its full selected sequence — see `due-work-unadmitted`).
+  let winnerSequence: NimbusTask[] | null = null;
+  // Phase 1e early-convergence exit: candidates evaluated since `winner` last
+  // improved. Once this reaches the window AND a feasible winner already
+  // exists, the search stops by choice ('converged') rather than continuing
+  // to churn a plateau.
+  let sinceImprovement = 0;
+  const convergenceWindow = bounds.convergenceWindow ?? SETUP_AWARE_CONVERGENCE_WINDOW;
   const missingEdges: MissingSetupEdge[] = [];
   // A3: since A1, most permutations are feasible (mid-sequence uncovered
   // transitions are admitted, not rejected), so the "explored alternative"
@@ -2251,8 +2357,14 @@ function exactSearch(
         budget.remainingIterations -= 1;
       }
       candidateCount += 1;
-      const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment, adjacency);
-      if (candidate.feasible && (!winner || compareCandidate(candidate, winner, mode) < 0)) winner = candidate;
+      const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment, adjacency, true);
+      if (candidate.feasible && (!winner || compareCandidate(candidate, winner, mode) < 0)) {
+        winner = candidate;
+        winnerSequence = [...selected];
+        sinceImprovement = 0;
+      } else {
+        sinceImprovement += 1;
+      }
       if (!candidate.feasible) {
         missingEdges.push(...candidate.missingEdges);
       } else {
@@ -2264,6 +2376,7 @@ function exactSearch(
           missingEdges.push(edge);
         }
       }
+      if (winner && sinceImprovement >= convergenceWindow) termination = 'converged';
       popFrame();
       continue;
     }
@@ -2288,6 +2401,7 @@ function exactSearch(
     child.previousNormalCursor = previousNormalCursor;
     frames.push(child);
   }
+  winner = reexplainWinner(snapshot, bounds, line, winner, winnerSequence, fragment, adjacency);
   return { candidateCount, method: 'due-date-first-exact', termination, winner, missingEdges, unknownTail: [] };
 }
 
@@ -2332,6 +2446,10 @@ function greedySearch(
   let candidateCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
+  // Phase 1e: see the matching declarations in exactSearch.
+  let winnerSequence: ReadonlyArray<NimbusTask> | null = null;
+  let sinceImprovement = 0;
+  const convergenceWindow = bounds.convergenceWindow ?? SETUP_AWARE_CONVERGENCE_WINDOW;
   const missingEdges: MissingSetupEdge[] = [];
   const seen = new Set<string>();
   // A3: see the matching comment in exactSearch — preserves the "explored
@@ -2361,9 +2479,12 @@ function greedySearch(
       sequence,
       fragment,
       adjacency,
+      true,
     );
     if (!candidate.feasible) {
       missingEdges.push(...candidate.missingEdges);
+      sinceImprovement += 1;
+      if (winner && sinceImprovement >= convergenceWindow) termination = 'converged';
       return null;
     }
     for (const edge of candidate.missingEdges) {
@@ -2373,7 +2494,17 @@ function greedySearch(
       seenFeasibleUncoveredEdgeKeys.add(edgeKey);
       missingEdges.push(edge);
     }
-    if (!winner || compareCandidate(candidate, winner, mode) < 0) winner = candidate;
+    if (!winner || compareCandidate(candidate, winner, mode) < 0) {
+      winner = candidate;
+      winnerSequence = sequence;
+      sinceImprovement = 0;
+    } else {
+      sinceImprovement += 1;
+    }
+    // Phase 1e nuance: a full non-improving sweep already terminates this
+    // hill-climb naturally (`improved` stays false); the window only needs to
+    // cut a long sweep short, and never before `winner` exists.
+    if (winner && sinceImprovement >= convergenceWindow) termination = 'converged';
     return candidate;
   };
 
@@ -2412,6 +2543,7 @@ function greedySearch(
       }
     }
   }
+  winner = reexplainWinner(snapshot, bounds, line, winner, winnerSequence, fragment, adjacency);
   return {
     candidateCount,
     method: 'due-date-first-greedy',
@@ -3032,7 +3164,14 @@ interface BoundaryFallbackCursor {
 /** Enumerate every non-empty subset of removable Due-date-first components
  * lazily in deterministic cardinality/sequence order. One unit of the shared
  * search budget is charged before each subset, so an exponential combination
- * space cannot escape the caller's existing cap or deadline. */
+ * space cannot escape the caller's existing cap or deadline. Phase 1.5
+ * budget-honesty check (requirement 5): the `budget` passed in here is the
+ * SAME `SearchBudget` object `evaluateLineWithFixedBoundaries` received as a
+ * parameter (constructed once per line by its caller) — and every
+ * `searchFragment` continuation run triggered per component-subset option
+ * below (both the terminal-boundary and non-terminal-boundary branches)
+ * reuses that identical object reference too, never a fresh one. Confirmed
+ * by inspection, not by a code change: nothing here needed fixing. */
 function dueDateBoundaryFallbackCursor(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
@@ -3215,8 +3354,28 @@ export function placeUnknownTail(
   let cursor = new Date(start);
   let previousOrderId = initialPredecessorOrderId;
   const deferred: NimbusTask[] = [];
+  // Phase 1.5 tail-pass valve: once wall-clock time has overrun the run's
+  // deadline by more than SETUP_AWARE_TAIL_OVERRUN_MS, stop ATTEMPTING
+  // placement altogether — time-based only, never gated on iteration budget
+  // — and route every remaining order through the same
+  // 'unknown-setup-tail-unplaced' diagnostic shape used below, so the
+  // never-freeze invariant's diagnostics stay intact (retained at current
+  // dates, never dropped silently).
+  const hardStop = bounds.deadline + SETUP_AWARE_TAIL_OVERRUN_MS;
 
   for (let index = 0; index < ordered.length; index += 1) {
+    if (bounds.clock() >= hardStop) {
+      for (const remainingTask of ordered.slice(index)) {
+        deferred.push(remainingTask);
+        explanation.push({
+          code: 'unknown-setup-tail-unplaced',
+          message: `Deferred ${taskId(remainingTask)}: tail placement stopped after overrunning the search deadline.`,
+          line,
+          taskId: taskId(remainingTask),
+        });
+      }
+      break;
+    }
     const task = ordered[index];
     // B2: once the cursor has reached the fragment's own capacity end there
     // is no window left for ANY remaining order (a shorter order behind a
@@ -3401,8 +3560,15 @@ function placeWholeLineAsTail(
   // there is no covered core here, so this is the only predecessor chain
   // `missingEdges` (F1) has to work with across fixed windows.
   let previousOrderId: string | null = null;
+  // Phase 1.5 tail-pass valve: once overrun, skip attempting placement for
+  // every remaining fixed-window gap entirely — `placeUnknownTail` itself
+  // enforces the same hard stop, but checking here too avoids repeatedly
+  // re-entering it (and re-emitting the same per-order diagnostic) once
+  // there's nothing left to attempt. Whatever stays in `remaining` still
+  // flows through the 'unknown-setup-tail-unplaced' loop below.
+  const hardStop = bounds.deadline + SETUP_AWARE_TAIL_OVERRUN_MS;
   for (const window of fixedWindows) {
-    if (remaining.length && cursor < window.start) {
+    if (remaining.length && cursor < window.start && bounds.clock() < hardStop) {
       remaining = applyUnknownTail(
         snapshot, bounds, line, mode, remaining, cursor, window.start, patches, explanation, missingEdges, previousOrderId,
       );
@@ -3410,7 +3576,7 @@ function placeWholeLineAsTail(
     }
     if (window.end > cursor) cursor = new Date(window.end);
   }
-  if (remaining.length) {
+  if (remaining.length && bounds.clock() < hardStop) {
     remaining = applyUnknownTail(
       snapshot, bounds, line, mode, remaining, cursor, bounds.horizonEnd, patches, explanation, missingEdges, previousOrderId,
     );
@@ -4141,7 +4307,19 @@ export function evaluateSptWithSetup(
   const missingEdges: MissingSetupEdge[] = [];
   const score = [0, 0, 0, 0, 0, 0, 0];
 
-  for (const [line, tasks] of [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+  const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
+  let linesRemaining = orderedLines.length;
+  for (const [line, tasks] of orderedLines) {
+    // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
+    // early line can no longer consume the caller's entire `bounds.deadline`
+    // and leave every line behind it with zero — recomputed fresh from the
+    // clock each iteration (not decremented by a fixed slice), so a line
+    // that finishes early lets its unused share roll forward to the rest.
+    const now = bounds.clock();
+    const remainingMs = Math.max(0, bounds.deadline - now);
+    const lineDeadline = Math.min(bounds.deadline, now + remainingMs / linesRemaining);
+    const lineBounds: Readonly<DueDateFirstBounds> = { ...bounds, deadline: lineDeadline };
+    linesRemaining -= 1;
     // Part 2b: a fresh per-line budget so one large line's search can never
     // exhaust the iteration cap for every other line on the plant.
     const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
@@ -4149,7 +4327,7 @@ export function evaluateSptWithSetup(
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any fixed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -4166,7 +4344,7 @@ export function evaluateSptWithSetup(
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -4213,7 +4391,7 @@ export function evaluateSptWithSetup(
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFixedBoundaries(
       snapshot,
-      bounds,
+      lineBounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,
@@ -4298,7 +4476,19 @@ export function evaluateDueDateFirst(
   const missingEdges: MissingSetupEdge[] = [];
   const score = [0, 0, 0, 0, 0, 0, 0];
 
-  for (const [line, tasks] of [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+  const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
+  let linesRemaining = orderedLines.length;
+  for (const [line, tasks] of orderedLines) {
+    // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
+    // early line can no longer consume the caller's entire `bounds.deadline`
+    // and leave every line behind it with zero — recomputed fresh from the
+    // clock each iteration (not decremented by a fixed slice), so a line
+    // that finishes early lets its unused share roll forward to the rest.
+    const now = bounds.clock();
+    const remainingMs = Math.max(0, bounds.deadline - now);
+    const lineDeadline = Math.min(bounds.deadline, now + remainingMs / linesRemaining);
+    const lineBounds: Readonly<DueDateFirstBounds> = { ...bounds, deadline: lineDeadline };
+    linesRemaining -= 1;
     // Part 2b: a fresh per-line budget so one large line's search can never
     // exhaust the iteration cap for every other line on the plant.
     const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
@@ -4306,7 +4496,7 @@ export function evaluateDueDateFirst(
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any fixed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -4323,7 +4513,7 @@ export function evaluateDueDateFirst(
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -4372,7 +4562,7 @@ export function evaluateDueDateFirst(
 
     const result = evaluateLineWithFixedBoundaries(
       snapshot,
-      bounds,
+      lineBounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,

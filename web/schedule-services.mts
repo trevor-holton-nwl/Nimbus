@@ -38,6 +38,7 @@ import {
   evaluateMinChangeover as evaluateMinChangeoverPure,
   evaluateSptWithSetup as evaluateSptWithSetupPure,
   evaluateThroughput as evaluateThroughputPure,
+  SETUP_AWARE_CONVERGENCE_WINDOW,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup-domain.mjs';
 import type {
@@ -2920,6 +2921,7 @@ export const Engine = {
         now: horizonStart,
         horizonEnd,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
+        convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
       };
       let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
       // The setup-aware evaluators group every line for the plant with no

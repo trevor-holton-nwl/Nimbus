@@ -731,8 +731,16 @@ test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap sa
   assert.equal(lowCap.diagnostics.limitReached, true);
   assert.equal(lowCap.diagnostics.candidateCount, 0,
     'two bounded occurrence expansions cannot reach a ten-order leaf');
-  assert.ok(lowCapClockCalls <= 5,
-    'the fixed clock observes only the bounded path, not ten recursive occurrence visits');
+  // Phase 1.5 repair: the never-freeze fallback now tail-places all ten
+  // orders when the covered-core search finds no winner, and the Phase 1.5
+  // tail-pass valve (requirement 4) deliberately reads bounds.clock() once
+  // per tail-placement attempt — plus one more read for the per-line
+  // deadline-share computation (requirement 3). Neither is the "recursive
+  // occurrence visit" this assertion actually guards against, so the bound
+  // is widened to tolerate exactly that many legitimate extra reads while
+  // still catching exactSearch itself degrading to unbounded traversal.
+  assert.ok(lowCapClockCalls <= manyRed.length + 6,
+    'the fixed clock observes only the bounded path plus the never-freeze tail placement, not ten recursive occurrence visits');
 
   const enoughCap = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot(manyRed),
@@ -2953,6 +2961,152 @@ test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empt
 
   assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
     'the guard does not fire when the baseline itself has no patches to fall back to');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4 (Pkg C2) — Phase 1e/1.5: early-convergence exit, per-line deadline
+// fairness, and the tail-pass valve.
+// ---------------------------------------------------------------------------
+
+test('a plateaued search terminates \'converged\' with the same winner an un-windowed run would produce', () => {
+  // The full 6-order (3 RED + 3 BLUE) exact search below explores the
+  // interleaving space exhaustively (20 leaf candidates) and always finds its
+  // global optimum on the very first leaf evaluated (BLUE-then-RED, given
+  // these due dates) — so a small `bounds.convergenceWindow` should let the
+  // search stop after just a handful of non-improving evaluations instead of
+  // exploring all 20, while still producing the identical winning schedule.
+  const reds = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`converge-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`)
+  ));
+  const blues = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`converge-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`)
+  ));
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 5),
+    setupRow('RED', 'BLUE', 5), setupRow('BLUE', 'RED', 5),
+  ] });
+  const snapshot = () => setupSnapshot([...reds, ...blues]);
+  const bounds = overrides => dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, ...overrides });
+
+  const full = SetupScheduler.evaluateDueDateFirst(snapshot(), bounds());
+  assert.equal(full.diagnostics.termination, 'completed', 'sanity: the unwindowed search exhausts the space normally');
+  assert.equal(full.diagnostics.candidateCount, 20, 'sanity: every interleaving of the fixed occurrence order is a distinct leaf');
+
+  const windowed = SetupScheduler.evaluateDueDateFirst(snapshot(), bounds({ convergenceWindow: 3 }));
+  assert.equal(windowed.diagnostics.termination, 'converged');
+  assert.ok(windowed.diagnostics.candidateCount < full.diagnostics.candidateCount,
+    'the plateau exit stops well short of the full 20-candidate enumeration');
+  assert.deepEqual(
+    windowed.patches.map(patch => ({ id: patch.id, start: patch.changes.start_date?.getTime(), end: patch.changes.end_date?.getTime() })),
+    full.patches.map(patch => ({ id: patch.id, start: patch.changes.start_date?.getTime(), end: patch.changes.end_date?.getTime() })),
+    'the plateaued search produces the exact same schedule the exhaustive search would have',
+  );
+});
+
+test('a \'converged\' termination is never treated as budget starvation by evaluateMinChangeover', () => {
+  // Requirement 1: 'converged' means "search finished by choice", not
+  // starvation — the min-changeover starvation guard only checks for
+  // 'deadline'/'iteration-cap', so a candidate pass that converges with a
+  // real winner must still be usable (never silently discarded in favor of
+  // the baseline the way a genuinely starved pass would be).
+  const reds = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`mc-converge-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`)
+  ));
+  const blues = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`mc-converge-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`)
+  ));
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 5),
+    setupRow('RED', 'BLUE', 5), setupRow('BLUE', 'RED', 5),
+  ] });
+  const bounds = dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, convergenceWindow: 3 });
+
+  const result = SetupScheduler.evaluateMinChangeover(setupSnapshot([...reds, ...blues]), bounds);
+
+  assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
+    'a converged candidate pass is not mistaken for a starved one');
+  assert.equal(result.patches.length, 6, 'every order is still admitted from the converged candidate pass');
+});
+
+test('evaluateDueDateFirst gives every line a fair deadline share so a second line still receives real search effort', () => {
+  // Before Phase 1.5, every line read the caller's raw `bounds.deadline`
+  // directly, so a combinatorially heavy first line could consume the
+  // entire shared deadline and leave nothing for the lines behind it — that
+  // starved line would still get SOME schedule (never-freeze tail
+  // placement), but with none of its own search effort. Construct a
+  // shared deadline that is exactly enough for L1's full exact search alone,
+  // then add a genuinely searchable L2 order: L2 must still receive its own
+  // real search placement (not a pure zero-effort tail placement).
+  const reds = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`fair-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`)
+  ));
+  const blues = Array.from({ length: 3 }, (_, index) => (
+    scheduledTask(`fair-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`)
+  ));
+  const l2Task = { ...scheduledTask('fair-l2-only', 1, 'RED', '2026-08-03T10:00:00'), MACHINE: 'L2' };
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 5),
+    setupRow('RED', 'BLUE', 5), setupRow('BLUE', 'RED', 5),
+  ] });
+  setup.machine_states.push({ machine: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'second fairness line' });
+  const l1OnlySnapshot = setupSnapshot([...reds, ...blues]);
+  l1OnlySnapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+  const combinedSnapshot = () => {
+    const snapshot = setupSnapshot([...reds, ...blues, l2Task]);
+    snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
+    snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+    return snapshot;
+  };
+
+  // Measure exactly how many clock() ticks L1's own full exact search needs
+  // in isolation, then give the combined (L1 + L2) run precisely that many —
+  // just enough for L1 alone, nothing left over under the OLD unfair scheme.
+  let neededCalls = 0;
+  const measuringClock = () => { neededCalls += 1; return neededCalls; };
+  const measured = SetupScheduler.evaluateDueDateFirst(
+    l1OnlySnapshot, dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, clock: measuringClock, deadline: 1e9 }),
+  );
+  assert.equal(measured.diagnostics.termination, 'completed', 'sanity: L1 alone completes given unlimited time');
+  const ticksForL1Alone = neededCalls;
+
+  let sharedCalls = 0;
+  const sharedClock = () => { sharedCalls += 1; return sharedCalls; };
+  const combined = SetupScheduler.evaluateDueDateFirst(
+    combinedSnapshot(),
+    dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, clock: sharedClock, deadline: ticksForL1Alone }),
+  );
+
+  const l2Patch = patchFor(combined, 'fair-l2-only');
+  assert.ok(l2Patch, 'L2 still receives a schedule under the shared deadline');
+  assert.ok(combined.explanation.some(reason => reason.code === 'due-date-first-placement' && reason.taskId === 'fair-l2-only'),
+    'L2 was placed via real covered-core search, not a zero-effort tail placement');
+  assert.equal(combined.explanation.some(reason => reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'fair-l2-only'), false,
+    'L2\'s result is not pure tail placement');
+});
+
+test('placeUnknownTail\'s tail-pass valve stops attempting placement once wall-clock time overruns the deadline, without dropping orders', () => {
+  // Requirement 4: the valve is time-based only (hardStop = bounds.deadline +
+  // SETUP_AWARE_TAIL_OVERRUN_MS), never gated on iteration budget. With a
+  // deadline already expired well past that overrun window, every order must
+  // come back unadmitted (not silently dropped), each with an
+  // 'unknown-setup-tail-unplaced' diagnostic — the never-freeze invariant's
+  // guarantee that a stopped attempt is still reported.
+  const a = scheduledTask('valve-a', 1, 'RED', '2026-08-03T09:00:00');
+  const b = scheduledTask('valve-b', 1, 'RED', '2026-08-03T09:30:00');
+  const setup = setupTruth({ rows: [] });
+  const bounds = dueDateBounds(setup, { clock: () => 100000, deadline: 0 });
+
+  const result = SetupScheduler.placeUnknownTail(
+    setupSnapshot([a, b]), bounds, 'L1', [a, b], at('2026-08-03T08:00:00'), at('2026-08-03T18:00:00'), 'due-date-first',
+  );
+
+  assert.deepEqual(result.patches, [], 'no order is attempted once the valve has tripped');
+  assert.deepEqual(result.unadmitted.map(unadmittedTask => unadmittedTask.id).sort(), ['valve-a', 'valve-b'],
+    'both orders are retained, not dropped');
+  for (const id of ['valve-a', 'valve-b']) {
+    assert.ok(result.explanation.some(reason => reason.code === 'unknown-setup-tail-unplaced' && reason.taskId === id),
+      `${id} carries the standard unplaced diagnostic`);
+  }
 });
 
 // ---------------------------------------------------------------------------
