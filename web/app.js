@@ -730,7 +730,20 @@ const NIMBUS = (function () {
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _domReadyGate);
   } else {
-    _domReadyGate();
+    // readyState is already past 'loading' here (the common case, since this
+    // script is fetched/injected well after the HTML shell parses) — calling
+    // _domReadyGate() synchronously would run _bootMain()/Table.init() etc.
+    // BEFORE this IIFE reaches its own `return {...}` below, i.e. before the
+    // `const NIMBUS = ...` assignment above has actually completed. Any boot
+    // code that reads the bare `NIMBUS` global (schedule-workbench.mts and
+    // friends do) throws "NIMBUS is not defined" in that case — caught and
+    // merely logged by each module's boot try/catch, so it fails silently
+    // (e.g. Table.init() aborts before subscribing to Store, so the Orders
+    // grid never repopulates even though data loads fine). Deferring to a
+    // microtask guarantees this script's synchronous execution — including
+    // the IIFE's return — has fully finished first, matching the safety the
+    // DOMContentLoaded-listener branch above already has.
+    queueMicrotask(_domReadyGate);
   }
 
   /* Public namespace for inline onclick handlers in index.html */
