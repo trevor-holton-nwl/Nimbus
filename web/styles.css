@@ -1192,6 +1192,21 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   pointer-events: none !important;
 }
 
+/* Day-boundary gridlines — ungrouped full-height background items, one per
+   local midnight ('day-gridline-<dayKey>' in Timeline.rebuild). They paint
+   beneath the zone washes (shared .vis-background canvas, BackgroundGroup
+   first), so the wash alphas keep the 1px line visible. Month starts get the
+   stronger token. */
+.vis-item.day-gridline {
+  background: transparent !important;
+  border: none !important;
+  border-left: 1px solid var(--line) !important;
+  pointer-events: none !important;
+}
+.vis-item.day-gridline-month {
+  border-left-color: var(--line-strong) !important;
+}
+
 /* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
    line at the exact instant orders stop appearing (Store.visibilityHorizonEnd
    / Timeline.rebuild), deliberately quieter than the frozen-/alert-horizon

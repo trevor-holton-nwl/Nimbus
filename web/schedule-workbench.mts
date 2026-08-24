@@ -165,7 +165,10 @@ import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
  *  synthetic-item call sites for which subset each produces. */
 interface TimelineVisItem {
   id: string;
-  group: string;
+  /** Absent on the ungrouped day-boundary gridlines built inline in
+   *  Timeline.rebuild() — every other item (order/blackout/zone/setup)
+   *  belongs to a machine line group. */
+  group?: string;
   kind: TimelineItemKind;
   /** Every displayed item resolves back to this one logical order. Segment
    * pieces use an internal item id but never become their own business IDs. */
@@ -280,6 +283,7 @@ export const Timeline = {
   _cachedRowH:  null as number | null,
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
+  _healScheduled: false,
   // Remembered vertical scroll offset (vis-timeline's internal scrollTop
   // convention — see _setVScroll/_getVScroll). Replaces the old one-shot
   // _initialVerticalScrollPending guard: "start at the top" is simply the
@@ -305,6 +309,7 @@ export const Timeline = {
     const _WIN_BUF_MS = 90 * 24 * 3600 * 1000;
     Timeline._visItems = new vis.DataView<TimelineVisItem>(Timeline._items, {
       filter: (item: TimelineVisItem) => {
+        if (item.type === 'background') return true;
         const w = Timeline._viewWindow;
         if (!w) return true;
         const s = item.start instanceof Date ? item.start.getTime() : +item.start;
@@ -372,6 +377,21 @@ export const Timeline = {
     };
     Timeline._tl.on('changed', _calibrate);
 
+    // Geometry self-heal: vis-timeline's per-group BackgroundItem.repositionY()
+    // can leave a grouped background band (past-zone/alert-horizon-zone/
+    // frozen-horizon-zone/alertcell-*) at 0px height or hidden when its group
+    // has no visible foreground item at the current zoom (the faee810 bug
+    // class). rAF-coalesced so a burst of 'changed' events in one frame only
+    // runs the pass once.
+    Timeline._tl.on('changed', () => {
+      if (Timeline._healScheduled) return;
+      Timeline._healScheduled = true;
+      requestAnimationFrame(() => {
+        Timeline._healScheduled = false;
+        Timeline._healBackgroundBands();
+      });
+    });
+
     /* -----------------------------------------------------------------
      * NOTE: Input events (select/click, doubleClick, contextmenu, and
      * DataSet drag commits) are ALL owned by the Interaction module.
@@ -422,6 +442,57 @@ export const Timeline = {
   _ganttActive(): boolean {
     if (!Timeline._ganttTab) Timeline._ganttTab = document.getElementById('gantt-tab');
     return Timeline._ganttTab ? Timeline._ganttTab.classList.contains('active') : false;
+  },
+
+  /** Self-heal grouped background-item geometry after every vis 'changed'
+   *  redraw (see the init() hook). vis-timeline's own repositionY() sometimes
+   *  leaves a grouped background band (past-zone/alert-horizon-zone/
+   *  frozen-horizon-zone/alertcell-*) at 0px height or hidden when its group
+   *  currently has no visible foreground item — the white-row regression
+   *  the faee810 CSS revert deferred. This supplies the same per-row pixel
+   *  geometry vis's own repositionY() would, straight from JS.
+   *
+   *  Ungrouped background items (the day-boundary gridlines added by
+   *  rebuild()) are hard-skipped: their parent is the library's reserved
+   *  BackgroundGroup, whose top/height are hardwired to 0 and already sized
+   *  correctly by the library itself — healing those would 0-height them.
+   *
+   *  Entirely best-effort: wrapped in try/catch so any internal-API surprise
+   *  degrades to a silent no-op rather than throwing into the render path. */
+  _healBackgroundBands(): void {
+    if (!Timeline._tl || !Timeline._ganttActive()) return;
+    try {
+      const tlInternal = Timeline._tl as unknown as VisInternalTimeline;
+      const items = tlInternal.itemSet?.items;
+      if (!items) return;
+      const win = Timeline._tl.getWindow();
+      const winStart = win.start.getTime();
+      const winEnd = win.end.getTime();
+      for (const id of Object.keys(items)) {
+        const item = items[id];
+        if (!item) continue;
+        const data = item.data;
+        if (!data || data.type !== 'background' || data.group == null) continue;
+        const start = data.start instanceof Date ? data.start.getTime() : +(data.start ?? NaN);
+        const end   = data.end   instanceof Date ? data.end.getTime()   : +(data.end ?? NaN);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        if (end <= winStart || start >= winEnd) continue; // no window intersection
+        const parent = item.parent;
+        if (!parent || !Number.isFinite(parent.top) || !Number.isFinite(parent.height)) continue;
+        if (parent.isVisible === false) continue; // respect vertical-scroll culling
+        if (!item.displayed) {
+          item.show?.();
+          item.repositionX?.();
+        }
+        const box = item.dom?.box;
+        if (box) {
+          box.style.top = parent.top + 'px';
+          box.style.height = parent.height + 'px';
+        }
+      }
+    } catch {
+      // Best-effort only — never let a vis-internal-API surprise reach the render path.
+    }
   },
 
   /** Handle store updates: refresh vis-timeline WITHOUT echoing back. */
@@ -757,7 +828,7 @@ export const Timeline = {
     const _diffT0 = performance.now();
     const current = Timeline._items.getIds().map(String).filter(id => {
       const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && lines.has(item.group);
+      return item?.kind === 'setup' && !!item.group && lines.has(item.group);
     });
     const currentIds = new Set(current);
     const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
@@ -784,7 +855,7 @@ export const Timeline = {
     for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
     const updates = Timeline._items.getIds().map(String).flatMap(id => {
       const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && newlyAffected.has(item.group)
+      return item?.kind === 'setup' && !!item.group && newlyAffected.has(item.group)
         ? [{ id, className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }]
         : [];
     });
@@ -1065,6 +1136,60 @@ export const Timeline = {
         editable: false,
       };
       desired.set(String(item.id), item);
+    }
+
+    // Day-boundary gridlines — one ungrouped background item per local midnight,
+    // so bars/alert-cells read clearly against day boundaries at aggregate zoom
+    // (pixel-verified: bars/alert-cells were already correctly positioned —
+    // the chart body was just missing gridlines to judge them against). No
+    // `group` — the library routes ungrouped type:'background' items to its
+    // own reserved BackgroundGroup, which sizes/positions them full-height
+    // itself; _healBackgroundBands deliberately never touches these.
+    {
+      const GRIDLINE_MARGIN_DAYS = 3;
+      const GRIDLINE_CAP = 550;
+      const now = new Date();
+      let rangeStart: Date, rangeEnd: Date;
+      if (scopedTasks.length) {
+        let minStart = now.getTime();
+        let maxEnd = now.getTime();
+        for (const t of scopedTasks) {
+          if (t.start_date) {
+            const s = new Date(t.start_date).getTime();
+            if (s < minStart) minStart = s;
+          }
+          if (t.end_date) {
+            const e = new Date(t.end_date).getTime();
+            if (e > maxEnd) maxEnd = e;
+          }
+        }
+        if (Store.visibilityHorizonEnd) {
+          const hz = Store.visibilityHorizonEnd.getTime();
+          if (hz > maxEnd) maxEnd = hz;
+        }
+        rangeStart = new Date(minStart - GRIDLINE_MARGIN_DAYS * Config.MS_DAY);
+        rangeEnd   = new Date(maxEnd + GRIDLINE_MARGIN_DAYS * Config.MS_DAY);
+      } else {
+        rangeStart = new Date(now.getTime() - 45 * Config.MS_DAY);
+        rangeEnd   = new Date(now.getTime() + 45 * Config.MS_DAY);
+      }
+      // Local-midnight iteration via setDate — never add 86,400,000ms, which
+      // drifts every subsequent line off midnight across a DST transition.
+      const d = new Date(rangeStart);
+      d.setHours(0, 0, 0, 0);
+      for (let count = 0; d.getTime() <= rangeEnd.getTime() && count < GRIDLINE_CAP; count++) {
+        const dk = Util.dayKey(d);
+        desired.set(`day-gridline-${dk}`, {
+          id:        `day-gridline-${dk}`,
+          kind:      'zone',
+          start:     new Date(d),
+          end:       new Date(d.getTime() + 60000),
+          type:      'background',
+          className: d.getDate() === 1 ? 'day-gridline day-gridline-month' : 'day-gridline',
+          editable:  false,
+        });
+        d.setDate(d.getDate() + 1);
+      }
     }
 
     PerfMonitor.record('Timeline.rebuild.desiredMap', performance.now() - _pmT0desired);
@@ -5694,7 +5819,16 @@ type InteractionDataSetUpdateProps = { items: Array<string | number>; data?: Tim
  *  documents only the real, STABLE public API) since these are internals that
  *  could change on any vis-timeline upgrade without a version bump signal. */
 interface VisInternalTimeline {
-  itemSet?: { items?: Record<string, { dom?: { box?: HTMLElement } } | undefined> };
+  itemSet?: {
+    items?: Record<string, {
+      dom?: { box?: HTMLElement };
+      data?: { type?: string; group?: string | null; start?: Date; end?: Date };
+      displayed?: boolean;
+      parent?: { top?: number; height?: number; isVisible?: boolean };
+      show?: () => void;
+      repositionX?: () => void;
+    } | undefined>;
+  };
   _setScrollTop?(top: number): void;
   _getScrollTop?(): number;
 }
