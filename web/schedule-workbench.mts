@@ -457,6 +457,13 @@ export const Timeline = {
    *  BackgroundGroup, whose top/height are hardwired to 0 and already sized
    *  correctly by the library itself — healing those would 0-height them.
    *
+   *  Also re-runs X-only layout for foreground order bars ('order'/
+   *  'order-segment'). vis-timeline's internal redraw can leave a foreground
+   *  item's horizontal position stale during continuous panning at low (Day)
+   *  zoom, drifting outside the background band healed above — self-
+   *  correcting only on zoom-in. Mirrors the background heal but touches only
+   *  X; vertical layout is unaffected and left alone.
+   *
    *  Entirely best-effort: wrapped in try/catch so any internal-API surprise
    *  degrades to a silent no-op rather than throwing into the render path. */
   _healBackgroundBands(): void {
@@ -472,11 +479,18 @@ export const Timeline = {
         const item = items[id];
         if (!item) continue;
         const data = item.data;
-        if (!data || data.type !== 'background' || data.group == null) continue;
+        if (!data) continue;
         const start = data.start instanceof Date ? data.start.getTime() : +(data.start ?? NaN);
         const end   = data.end   instanceof Date ? data.end.getTime()   : +(data.end ?? NaN);
         if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
         if (end <= winStart || start >= winEnd) continue; // no window intersection
+
+        if (data.type !== 'background') {
+          // Foreground order bar: heal X position only (see doc comment above).
+          item.repositionX?.();
+          continue;
+        }
+        if (data.group == null) continue; // reserved BackgroundGroup gridlines — never heal these
         const parent = item.parent;
         if (!parent || !Number.isFinite(parent.top) || !Number.isFinite(parent.height)) continue;
         if (parent.isVisible === false) continue; // respect vertical-scroll culling
