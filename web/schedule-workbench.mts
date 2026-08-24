@@ -1668,10 +1668,11 @@ export const TimelineNav = {
       .filter(t => t.start_date && t.end_date);
     if (!tasks.length || !Timeline._tl) return;
 
-    const _today = new Date(); _today.setHours(0, 0, 0, 0);
-    const scheduleMin = _today.getTime();
-    const scheduleMax = scheduleMin + 42 * Config.MS_DAY;
+    // Share the horizon-capped range with the drag/click math (one source of truth).
+    const { scheduleMin, scheduleMax } = TimelineNav._scheduleRange();
+    if (scheduleMin == null || scheduleMax == null) return;
     const totalMs = scheduleMax - scheduleMin;
+    if (totalMs <= 0) return;
 
     const toX = (ms: number): number => ((ms - scheduleMin) / totalMs) * cssW;
 
