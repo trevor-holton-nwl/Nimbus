@@ -6244,7 +6244,6 @@ body.dark .sap-kind-orders { color: var(--accent); }
 }
 .vis-item.setup-item.setup-missing {
   min-width: 10px;
-  position: relative;
   overflow: hidden;
   padding: 0 !important;
   background: var(--warn-vivid) !important;
