@@ -1562,11 +1562,6 @@ export const TimelineNav = {
   _dragStartX: 0,
   _dragStartRange: null as TimelineWindowMs | null,
   _unsubStore: null as (() => void) | null,
-  // Phase 3 (Pkg E): local memo for the plant-scoped minimap matrix — passing
-  // srcTasks to Utilization.computeMatrix bypasses its own shared memo (see
-  // that function's `cacheable = srcTasks === null` guard), so this render
-  // loop would otherwise recompute the matrix on every call.
-  _minimapMatrixCache: null as { key: string; matrix: ReturnType<typeof Utilization.computeMatrix> } | null,
 
   init(): void {
     const el = document.getElementById('timeline-nav');
@@ -1622,7 +1617,7 @@ export const TimelineNav = {
     TimelineNav._unsubStore = Store.subscribe(evt => {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
           || evt.type === 'task:update' || evt.type === 'calendar:change'
-          || evt.type === 'blocks:change') {
+          || evt.type === 'blocks:change' || evt.type === 'alerts:change') {
         setTimeout(() => TimelineNav.render(), 50);
       }
     }, 'TimelineNav');
@@ -1692,42 +1687,26 @@ export const TimelineNav = {
     ctx.fillStyle = navBg;
     ctx.fillRect(0, 0, cssW, cssH);
 
-    // Draw per-day utilization heat bands
-    const days = Math.ceil(totalMs / Config.MS_DAY) + 2;
-    const plant = Store.selectedPlant;
-    let matrix: ReturnType<typeof Utilization.computeMatrix>;
-    if (plant) {
-      // Plant-scoped: pass `tasks` (already filtered to this plant's lines
-      // above) as srcTasks. That bypasses Utilization.computeMatrix's own
-      // shared memo (its `cacheable` guard requires srcTasks === null), so
-      // keep a tiny local one here — this render fires on every
-      // rangechange/pan/resize.
-      const matrixCacheKey = `${Store.rev()}|${plant}|${scheduleMin}|${days}`;
-      if (TimelineNav._minimapMatrixCache?.key === matrixCacheKey) {
-        matrix = TimelineNav._minimapMatrixCache.matrix;
-      } else {
-        matrix = Utilization.computeMatrix(new Date(scheduleMin), days, tasks);
-        TimelineNav._minimapMatrixCache = { key: matrixCacheKey, matrix };
-      }
-    } else {
-      // No plant selected: unchanged global behavior (unreached today, since
-      // `tasks` is empty and render() already returned above in that case —
-      // kept as a safe fallback should that early return ever change).
-      matrix = Utilization.computeMatrix(new Date(scheduleMin), days);
+    // Alert-severity day bands — worst alert per day, same source as the Gantt's
+    // alertcell background items (Store.alerts already excludes dismissed alerts),
+    // replacing the old utilization heat bands (overload/near-capacity are alert
+    // types themselves, so capacity trouble still surfaces here).
+    const plantLines = new Set(tasks.map(t => t.MACHINE || 'Unknown'));
+    const worstByDay: Record<string, 'warn' | 'err'> = {};
+    for (const a of Store.alerts) {
+      if (!a.line || !a.time || !plantLines.has(a.line)) continue;
+      const at = a.time.getTime();
+      if (at < scheduleMin || at >= scheduleMax) continue;
+      const dk = Util.dayKey(a.time);
+      if (a.sev === 'err' || !worstByDay[dk]) worstByDay[dk] = a.sev;
     }
-    const SEV_COLORS: Record<'ok' | 'warn' | 'err', string> = { ok: 'rgba(30,122,74,0.25)', warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
-    for (const line of Object.keys(matrix)) {
-      for (const [dayKey, row] of Object.entries(matrix[line])) {
-        if (!row.pct) continue;
-        const sev = Utilization.sev(row.pct);
-        if (sev === 'ok') continue;
-        const dayStart = new Date(dayKey + 'T00:00:00').getTime();
-        const dayEnd   = dayStart + Config.MS_DAY;
-        const x1 = Math.max(0, toX(dayStart));
-        const x2 = Math.min(cssW, toX(dayEnd));
-        ctx.fillStyle = SEV_COLORS[sev];
-        ctx.fillRect(x1, 0, x2 - x1, cssH);
-      }
+    const SEV_COLORS: Record<'warn' | 'err', string> = { warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
+    for (const [dk, sev] of Object.entries(worstByDay)) {
+      const dayStart = new Date(dk + 'T00:00:00').getTime();
+      const x1 = Math.max(0, toX(dayStart));
+      const x2 = Math.min(cssW, toX(dayStart + Config.MS_DAY));
+      ctx.fillStyle = SEV_COLORS[sev];
+      ctx.fillRect(x1, 0, x2 - x1, cssH);
     }
 
     // Day dividers — snap to local midnight so labels match vis-timeline's local-time headers
