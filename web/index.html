@@ -1321,11 +1321,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
           <div class="panel panel-quiet">
             <header class="panel-head">
-              <h3 data-i18n="ui.fixed_orders">Fixed orders</h3>
+              <h3 data-i18n="ui.firmed_orders">Firmed orders</h3>
               <span class="panel-hint" data-i18n="ui.locked_optimizer">Locked from the optimizer</span>
             </header>
             <div class="panel-body panel-body-flush">
-              <div id="fixed-list" class="fixed-list"></div>
+              <div id="firmed-list" class="firmed-list"></div>
             </div>
           </div>
         </div>
@@ -1494,8 +1494,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <span>⊞</span><span data-i18n="btn.copy_mode">Copy Mode</span>
       </span>
       <button class="btn btn-ghost" data-i18n="btn.export_csv" onclick="NIMBUS.Table.exportCsv()">Export CSV</button>
-      <button class="btn btn-ghost" data-i18n="btn.fix_selected" onclick="NIMBUS.Table.fixSelected(true)">Fix selected</button>
-      <button class="btn btn-ghost" data-i18n="btn.unfix_selected" onclick="NIMBUS.Table.fixSelected(false)">Unfix selected</button>
+      <button class="btn btn-ghost" data-i18n="btn.firm_selected" onclick="NIMBUS.Table.firmSelected(true)">Firm selected</button>
+      <button class="btn btn-ghost" data-i18n="btn.unfirm_selected" onclick="NIMBUS.Table.firmSelected(false)">Unfirm selected</button>
       <button class="btn btn-primary" data-i18n="btn.override_date" onclick="NIMBUS.Table.openOverrideModal()">Override date…</button>
     </div>
 
@@ -2176,8 +2176,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
      CONTEXT MENU (right-click on timeline items)
      ========================================================= -->
 <div class="ctx-menu" id="ctx-menu" hidden>
-  <button data-action="fix" data-i18n="ctx.fix_order">🔒 Fix this order</button>
-  <button data-action="unfix" data-i18n="ctx.unfix_order">🔓 Unfix this order</button>
+  <button data-action="firm" data-i18n="ctx.firm_order">🔒 Firm this order</button>
+  <button data-action="unfirm" data-i18n="ctx.unfirm_order">🔓 Unfirm this order</button>
   <div class="ctx-sep"></div>
   <button data-action="override" data-i18n="ctx.override_datetime">📅 Override date / time…</button>
   <div class="ctx-sep"></div>
@@ -2299,8 +2299,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="form-row chk-row">
         <label class="chk">
-          <input type="checkbox" id="ovr-fix">
-          <span>Also fix this order (lock from optimizer)</span>
+          <input type="checkbox" id="ovr-firm">
+          <span data-i18n="ui.ovr_also_firm">Also firm this order (lock from optimizer)</span>
         </label>
       </div>
       <div class="hint">
@@ -2562,10 +2562,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-section-key">Options</div>
         <div class="opt-section-ctrl">
           <div class="opt-check-row">
-            <label class="opt-check" id="opt-fixed-label">
-              <input type="checkbox" id="opt-chk-fixed" checked>
+            <label class="opt-check" id="opt-firmed-label">
+              <input type="checkbox" id="opt-chk-firmed" checked>
               <span class="opt-check-box"></span>
-              <span>Respect fixed orders</span>
+              <span data-i18n="ui.opt_respect_firmed">Respect firmed orders</span>
             </label>
             <label class="opt-check" id="opt-calendar-label">
               <input type="checkbox" id="opt-chk-calendar" checked>

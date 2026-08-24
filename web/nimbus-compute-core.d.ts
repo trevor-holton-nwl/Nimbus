@@ -25,7 +25,7 @@ declare global {
   interface NimbusAlert {
     id: string;
     sev: 'err' | 'warn';
-    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours' | 'runtime-schedule-mismatch'
+    type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours' | 'runtime-schedule-mismatch'
       | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
     msg: string;
     taskId?: string;
@@ -43,7 +43,7 @@ declare global {
     RUN_TIME?: number | string;
     start_date?: Date | null;
     end_date?: Date | null;
-    fixed?: boolean;
+    firmed?: boolean; // manual firm mirror
     runtime_schedule_mismatch?: boolean;
     scheduleSegments?: Array<{
       sequence: number;

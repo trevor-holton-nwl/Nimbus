@@ -29,7 +29,7 @@ function task(id, start, hours, extra = {}) {
     end_date: new Date(+at(start) + hours * HOUR),
     BASIC_START_DATE: at('2000-01-01T00:00'),
     BASIC_FINISH_DATE: at('2000-01-01T01:00'),
-    fixed: false,
+    firmed: false,
     ...extra,
   };
 }
@@ -39,7 +39,7 @@ function seed({ tasks = [], hours = allDays(8, 16), lineName = line, splitOrderP
   Store.replacePlantBlocks([], 'test');
   Store.replaceCalendars({}, 'test');
   Store.replacePlants({}, 'test');
-  Store.replaceFixedIds(new Set(), 'test');
+  Store.replaceFirmedIds(new Set(), 'test');
   // C2 (2026-08-20): reset between tests, same as every other piece of Store
   // state seed() already resets, so a frozen-horizon test never bleeds into
   // one that doesn't expect it.
@@ -107,14 +107,14 @@ test('Engine compresses backlogged gaps and stops at a future gap', () => {
   assert.equal(patch(result, 'future'), undefined);
 });
 
-test('Engine uses RUN_TIME and moves a fixed order without clearing its fixed state', () => {
-  const fixed = task('fixed-past', '2026-08-12T06:00', 3, { fixed: true });
-  seed({ tasks: [fixed] });
+test('Engine uses RUN_TIME and moves a firmed order without clearing its firmed state', () => {
+  const firmed = task('fixed-past', '2026-08-12T06:00', 3, { firmed: true });
+  seed({ tasks: [firmed] });
   const result = Engine.removeBacklog(opts());
   const change = patch(result, 'fixed-past').changes;
   assert.equal(+change.end_date - +change.start_date, 3 * HOUR);
-  assert.ok(Store.fixedIds.has('fixed-past'));
-  assert.equal(result.diagnostics.fixedMoved, 1);
+  assert.ok(Store.firmedIds.has('fixed-past'));
+  assert.equal(result.diagnostics.firmedMoved, 1);
 });
 
 test('Engine allocates backlog runtime as productive segments when the plant permits partial orders', () => {
@@ -185,7 +185,7 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
 // ---------------------------------------------------------------------------
 // Workstream C2 (2026-08-20), carved out for 'backlog' mode on 2026-08-22.
 //
-// removeBacklog's own doc comment says it deliberately has no fixed-
+// removeBacklog's own doc comment says it deliberately has no firmed-
 // protection/day-integrity/frozen-horizon branches. The original C2 guard
 // (obstacle-skip + placement floor) was removed for this mode by planner
 // decision (SAP002 "Remove Backlog" parity): the overdue backlog compresses
@@ -193,9 +193,9 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
 // order is only ever shifted LATER when the compressing cursor reaches it
 // (never pulled earlier -- the `cursor <= item.snapshotStart` break still
 // guarantees that). Both cases are tracked via diagnostics.frozenMoved,
-// mirroring the pre-existing diagnostics.fixedMoved treatment of a
-// genuinely Store.isFixed-pinned order (see 'Engine uses RUN_TIME and moves
-// a fixed order...' above, unmodified).
+// mirroring the pre-existing diagnostics.firmedMoved treatment of a
+// genuinely Store.isFirmed-pinned order (see 'Engine uses RUN_TIME and moves
+// a firmed order...' above, unmodified).
 // ---------------------------------------------------------------------------
 
 // "now" (plant-local, America/New_York, per opts()' default runAt) is

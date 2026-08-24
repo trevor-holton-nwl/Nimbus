@@ -105,7 +105,7 @@ test('a setup interval before a split successor occupies capacity and reports a 
       }], diagnostics: [],
     },
   };
-  const predecessor = { id: 'fixed-predecessor', fixed: true, MACHINE: 'L', RUN_TIME: 1, start_date: first, end_date: predecessorEnd };
+  const predecessor = { id: 'fixed-predecessor', firmed: true, MACHINE: 'L', RUN_TIME: 1, start_date: first, end_date: predecessorEnd };
   const successor = {
     id: 'split-successor', MACHINE: 'L', RUN_TIME: 4, start_date: successorStart, end_date: successorEnd,
     scheduleSegments: [
@@ -241,7 +241,7 @@ test('standard scheduling regenerates a logical parent as one split aggregate', 
   Store.replacePlantBlocks([], 'test');
   Store.replaceCalendars({}, 'test');
   Store.replacePlants({}, 'test');
-  Store.replaceFixedIds(new Set(), 'test');
+  Store.replaceFirmedIds(new Set(), 'test');
   Store.setMasterData({
     plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed' }],
     lines: [{ machine: line, plant }],
@@ -258,7 +258,7 @@ test('standard scheduling regenerates a logical parent as one split aggregate', 
 
   Engine.runAndApply('spt', {
     plant, lines: [line], startDate: horizonStart, endDate: horizonEnd,
-    respectFixed: true, respectCalendar: true,
+    respectFirmed: true, respectCalendar: true,
   });
 
   const scheduled = Store.tasks['strategy-split'];

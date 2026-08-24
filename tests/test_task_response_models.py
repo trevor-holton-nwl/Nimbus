@@ -43,7 +43,7 @@ SAMPLE_TASK_ROW = {
     "RUN_TIME": 2.5,
     "FORM_SIZE": "MD",
     "notes": None,
-    "firmed": False,
+    "ecc_firmed": False,
     "row_version": 42,
     "schedule_segments": [
         {"sequence": 1, "start_date": "2026-08-01T07:00:00", "end_date": "2026-08-01T15:00:00"},

@@ -9636,7 +9636,7 @@ export const AdminCockpit = {
         plantBlocks:  (Store.plantBlocks || []).length,
         lines:        Object.keys(Store.lineSettings || {}).length,
         plants:       Object.keys(Store.plants || {}).length,
-        fixed:        Store.fixedIds ? Store.fixedIds.size : 0,
+        firmed:       Store.firmedIds ? Store.firmedIds.size : 0,
         alerts:       (Store.alerts || []).length,
       },
       selectedPlant: Store.selectedPlant,

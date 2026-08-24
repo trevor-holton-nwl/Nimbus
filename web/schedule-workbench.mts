@@ -72,7 +72,7 @@
 // moves here in Task 7). All bare `t(...)` i18n calls became `Util.t(...)`,
 // same established convention. `_showMultiInspector`'s generated panel HTML
 // carried FOUR inline onclick strings, not the three this plan's own
-// Architecture section named (`_bulkFix(true)`, `_bulkFix(false)`,
+// Architecture section named (`_bulkFirm(true)`, `_bulkFirm(false)`,
 // `Selection.clear()`, and a fourth it missed — `_unscheduleSelected()`) — all
 // four are now real `addEventListener` wiring via `data-action` attributes
 // instead. `install()`'s three document-level listeners (mousemove/
@@ -87,9 +87,9 @@
 // correct, dormant teardown machinery (see
 // docs/architecture/cq1-compatibility-inventory.md for the full writeup).
 // Task 5's new characterization tests also found that `_onDataSetUpdate`'s
-// header comment ("Fixed orders are reverted in the DataSet and never reach
-// the Store") does not match the actual code — a genuine drag on a fixed
-// order falls through to the same commit path as a non-fixed drag; only a
+// header comment ("Firmed orders are reverted in the DataSet and never reach
+// the Store") does not match the actual code — a genuine drag on a firmed
+// order falls through to the same commit path as a non-firmed drag; only a
 // spurious no-op echo is suppressed. That comment is corrected in place
 // (comment-only; the underlying logic is unchanged, preserving current
 // behavior byte-for-byte per this phase's Global Constraints).
@@ -271,6 +271,9 @@ export const Timeline = {
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
   _alertHorizonIds: [] as string[],
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
+  _rebuildNow: null as Date | null,         // P2: hoisted clock so every item in one rebuild() pass classifies firming against the same instant
+  _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
+  _lastFirmScanTs: 0,                       // P2: throttle for the coarse 30s frozen-band rescan in the 1s ticker
   _visibilityHorizonMarker: false,          // C1: tracks whether the 'visibility-horizon' custom time bar has been added to _tl (addCustomTime/removeCustomTime throw on a duplicate/missing id)
   _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
   _nextColorIdx: 0,
@@ -397,7 +400,7 @@ export const Timeline = {
      * DataSet drag commits) are ALL owned by the Interaction module.
      * This module only owns the view, the store subscription, and the
      * redraw/rebuild plumbing. Keeping input-handling in one place is
-     * what eliminates the select↔setSelection echo loop that made fixed
+     * what eliminates the select↔setSelection echo loop that made firmed
      * orders look like they were being re-scheduled on every click.
      * ----------------------------------------------------------------- */
 
@@ -431,6 +434,26 @@ export const Timeline = {
         }
       }
       if (updates.length) Timeline._items!.update(updates);
+
+      // P2: coarse 30s scan for orders crossing the frozen-horizon band —
+      // symmetric diff against the last-known membership set. Orders leave
+      // the band as "now" advances past them; new members appear when the
+      // server recomputes frozen_horizon_end on the next /tasks refetch.
+      // Also self-heals if the horizon changes mid-session. Cache-only boots
+      // have frozenHorizonEnd null until the first /tasks fetch, matching
+      // the band's own absence in that state.
+      if (Date.now() - Timeline._lastFirmScanTs > 30_000) {
+        Timeline._lastFirmScanTs = Date.now();
+        const scanNow = new Date();
+        const next = new Set<string>();
+        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Engine.isFrozenHorizon(t, scanNow)) next.add(String(t.id));
+        const prev = Timeline._frozenBandIds;
+        if (prev) {
+          for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
+          for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
+        }
+        Timeline._frozenBandIds = next;
+      }
     }, 1000);
 
     /* ----- subscribe to store changes ----------------------------------- */
@@ -578,7 +601,7 @@ export const Timeline = {
       }
     } else if (evt.type === 'task:update' && evt.id != null) {
       Timeline._applyTaskPatch(String(evt.id));
-    } else if (evt.type === 'fixed:change') {
+    } else if (evt.type === 'firmed:change') {
       // just re-render those items' className
       for (const id of (evt.ids as Array<string | number>)) Timeline._applyTaskPatch(String(id));
     } else if (evt.type === 'alerts:change') {
@@ -706,14 +729,12 @@ export const Timeline = {
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.MACHINE || 'Unknown';
-    const ci = Timeline._colorIndex(line);
-    const fixed = Store.isFixed(t.id);
+    const firmed = Engine.firmingStatus(t, Timeline._rebuildNow || undefined).firmed;
     const conflict = Timeline._conflictIds().has(String(t.id));
     const label = t.text || t.ORDER || String(t.id);
-    const cls = ['lc-' + ci];
-    if (fixed) cls.push('fixed-order');
+    const cls = [firmed ? 'order-firmed' : 'order-standard'];
     if (conflict) cls.push('conflict-order');
-    const prefix = fixed ? '🔒 ' : '';
+    const prefix = firmed ? '🔒 ' : '';
     return {
       id:      String(t.id),
       group:   line,
@@ -959,6 +980,11 @@ export const Timeline = {
 
     /* ---- desired items ---------------------------------------------------- */
     const _pmT0desired = performance.now();
+    // Hoisted clock: every item derived in this pass classifies its firming
+    // status against the same instant (see _itemForTask). _itemPatchFor /
+    // _applyTaskPatch run outside a full rebuild and may see this go stale —
+    // that's fine, they fall back to "live now" when it's null.
+    Timeline._rebuildNow = new Date();
     const desired = new Map<string, TimelineVisItem>();
     const itemIdsByTask: Record<string, string[]> = {};
     for (const t of scopedTasks) {
@@ -1081,6 +1107,16 @@ export const Timeline = {
       }
     }
 
+    // P2: snapshot which tasks are currently inside the frozen-horizon band so
+    // the 1s ticker's coarse 30s scan (below) can diff against a known-good
+    // baseline instead of recomputing membership from scratch every tick.
+    {
+      const nowForBand = Timeline._rebuildNow || new Date();
+      const bandIds = new Set<string>();
+      for (const t of scopedTasks) if (Engine.isFrozenHorizon(t, nowForBand)) bandIds.add(String(t.id));
+      Timeline._frozenBandIds = bandIds;
+    }
+
     // C1 (2026-08-20): plant visibility horizon — clamp the vis-timeline `max`
     // option to the far edge the backend already computed and sent down in
     // GET /tasks' meta (Store.visibilityHorizonEnd; see schedule-data.mts and
@@ -1121,7 +1157,7 @@ export const Timeline = {
     // Alert-cell background items — inserted last so they sit on top of the horizon
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
-    const CALENDAR_ALERT_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
+    const CALENDAR_ALERT_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const alertCellMap: Record<string, TimelineAlertCellInfo> = {};
     for (const a of Store.alerts) {
       if (!a.line || !a.time) continue;
@@ -1954,11 +1990,11 @@ export const DependencyOverlay = {
 //    Hierarchy/GanttFilter/Dashboard/etc.) -----------------------------------
 
 /** Table._chipFilters's status radio value — 'late' reads Util.latenessHours,
- *  'conflict'/'atrisk' read Store.alertsByTask() severities, 'fixed' reads
- *  Store.isFixed. Also the shape Table._applyChipFilter's `patch.status` and
+ *  'conflict'/'atrisk' read Store.alertsByTask() severities, 'firmed' reads
+ *  the union via Engine.firmingStatus. Also the shape Table._applyChipFilter's `patch.status` and
  *  the Dashboard KPI-tile-click callers (still stopgap-typed, reached only via
  *  the loose NIMBUS.Table ambient shim) pass in. */
-type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'fixed';
+type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'firmed';
 
 /** Table._chipFilters — the Orders-tab filter-chip bar's live selection state. */
 interface TableChipFilters {
@@ -2320,12 +2356,15 @@ export const Table = {
           resizable: false
         },
         {
-          headerName: Util.t('col.fixed'), field: 'fixed',
+          headerName: Util.t('col.firmed'), colId: 'firmed',
+          // Union value (SAP OR frozen-horizon OR manual), not the raw manual
+          // `fixed` field — see Engine.firmingStatus.
+          valueGetter: (p: { data: NimbusTask }) => Engine.firmingStatus(p.data).firmed,
           width: 60, minWidth: 60, maxWidth: 60, flex: 0,
           pinned: 'left',
           editable: false,
-          cellRenderer: (p: { value: unknown }) => p.value ? '<span title="Fixed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
-          headerTooltip: Util.t('tip.fixed_column')
+          cellRenderer: (p: { value: unknown }) => p.value ? '<span title="Firmed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          headerTooltip: Util.t('tip.firmed_column')
         },
         { headerName: Util.t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
           editable: false, cellClass: 'cell-num' },
@@ -2579,7 +2618,7 @@ export const Table = {
     if (horizonEnd && data.start_date && data.start_date.getTime() > horizonEnd.getTime()) return false;
     if (f.status) {
       if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
-      if (f.status === 'fixed' && !Store.isFixed(data.id)) return false;
+      if (f.status === 'firmed' && !Engine.firmingStatus(data).firmed) return false;
       if (f.status === 'atrisk' || f.status === 'conflict') {
         const rel = Store.alertsByTask().get(String(data.id)) || [];
         if (f.status === 'atrisk'  && !rel.some(a => a.sev === 'warn')) return false;
@@ -2679,7 +2718,7 @@ export const Table = {
       { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
-      { v: 'fixed',    k: Util.t('ui.fixed'),        d: Util.t('ui.status_desc_fixed') },
+      { v: 'firmed',   k: Util.t('ui.firmed'),       d: Util.t('ui.status_desc_firmed') },
     ];
     drop.innerHTML = items.map(i =>
       `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
@@ -2836,7 +2875,7 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL: Record<TableStatusFilter, string> = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), fixed: Util.t('ui.fixed') };
+    const STATUS_LABEL: Record<TableStatusFilter, string> = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);
@@ -2873,7 +2912,7 @@ export const Table = {
   },
 
   _onStore(evt: StoreEvent): void {
-    if (evt.source === 'table' && evt.type !== 'fixed:change') return;
+    if (evt.source === 'table' && evt.type !== 'firmed:change') return;
     if (!Table._api) return;
     if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected'
         || evt.type === 'lineSettings:change') {
@@ -2918,13 +2957,13 @@ export const Table = {
         Table._api.applyTransaction({ update: [t] });
       }
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
-    } else if (evt.type === 'fixed:change') {
+    } else if (evt.type === 'firmed:change') {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
         .map(id => Store.tasks[id])
         .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
       Table._api.applyTransaction({ update: updated });
-      if (Table._chipFilters.status === 'fixed') Table._api.onFilterChanged();
+      if (Table._chipFilters.status === 'firmed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
       // Incremental update: only refresh rows for task IDs that changed alert membership.
       // Fall back to full refresh if changedIds is absent (unscoped recompute).
@@ -3113,13 +3152,13 @@ export const Table = {
     });
   },
 
-  /* ---- public actions: fixing, override modal, export ------------------ */
-  fixSelected(fixed: boolean): void {
+  /* ---- public actions: firming, override modal, export ------------------ */
+  firmSelected(firmed: boolean): void {
     if (!Table._api) return;
     const sel = Table._api.getSelectedRows() as NimbusTask[];
     if (!sel.length) { Toast.show(Util.t('toast.select_rows_first'), 'warn'); return; }
     const ids = sel.map(r => String(r.id));
-    Store.setFixed(ids, fixed, 'table');
+    Store.setFirmed(ids, firmed, 'table');
     Alerts.scheduleRecompute();
   },
 
@@ -3134,8 +3173,8 @@ export const Table = {
     if (!t) return;
     const orderEl = document.getElementById('ovr-order');
     const lineEl = document.getElementById('ovr-line') as HTMLSelectElement | null;
-    const fixEl = document.getElementById('ovr-fix') as HTMLInputElement | null;
-    if (!orderEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+    const firmEl = document.getElementById('ovr-firm') as HTMLInputElement | null;
+    if (!orderEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     Table._selectedId = id;
     orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.MACHINE || '—'}`;
@@ -3145,7 +3184,7 @@ export const Table = {
     Table._fpOvrStart.setDate(t.start_date!, false);
     const lines = Table._getLineOptions();
     lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.MACHINE ? 'selected' : ''}>${l}</option>`).join('');
-    fixEl.checked = !!t.fixed;
+    firmEl.checked = !!t.firmed;
     Modal.open('modal-override');
   },
 
@@ -3156,12 +3195,12 @@ export const Table = {
     if (!t) return;
     const startEl = document.getElementById('ovr-start') as HTMLInputElement | null;
     const lineEl = document.getElementById('ovr-line') as HTMLSelectElement | null;
-    const fixEl = document.getElementById('ovr-fix') as HTMLInputElement | null;
-    if (!startEl || !lineEl || !fixEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+    const firmEl = document.getElementById('ovr-firm') as HTMLInputElement | null;
+    if (!startEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     const newStart = Util.parseDate(startEl.value);
     const newLine  = lineEl.value;
-    const alsoFix  = fixEl.checked;
+    const alsoFirm = firmEl.checked;
     if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
 
     const schedule = Engine.manualSchedulePatchFor(t, newLine, newStart);
@@ -3172,13 +3211,13 @@ export const Table = {
 
     Store.updateTask(id, schedule, 'table');
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
-    if (alsoFix !== Store.isFixed(id)) Store.setFixed([id], alsoFix, 'table');
+    if (alsoFirm !== Store.isFirmed(id)) Store.setFirmed([id], alsoFirm, 'table');
 
     // Override explicitly does NOT auto-reflow (user's manual choice),
     // but we DO recompute alerts so conflicts become visible.
     Alerts.scheduleRecompute();
     Modal.close('modal-override');
-    Toast.show(alsoFix ? Util.t('toast.order_overridden_fixed') : Util.t('toast.order_overridden'), 'success');
+    Toast.show(alsoFirm ? Util.t('toast.order_overridden_firmed') : Util.t('toast.order_overridden'), 'success');
   },
 
   exportCsv(): void {
@@ -3525,6 +3564,15 @@ export const Table = {
  *  a plain string read off the DOM, not a compile-time literal. */
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
+/** P2: after clearing the MANUAL firm layer, tell the planner if the order is
+ *  still firmed via the union (SAP flag or frozen horizon) — otherwise
+ *  "Unfirm" silently no-ops from the planner's point of view. Called from
+ *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
+function notifyResidualFirming(ids: string[]): void {
+  const still = ids.some(id => { const t = Store.tasks[id]; return !!t && Engine.firmingStatus(t).firmed; });
+  if (still) Toast.show(Util.t('toast.still_firmed'));
+}
+
 /* =============================================================================
    INSPECTOR — right-side detail panel shown on the Timeline tab.
    Edits here write through the Store (source: 'inspector').
@@ -3547,9 +3595,9 @@ export const Inspector = {
 
   init(): void {
     Inspector._unsubStore = Store.subscribe(evt => {
-    // Allow fixed:change through even from 'inspector' so the Fix/Unfix
-    // button re-renders after toggleFix() — otherwise it never flips.
-    if (evt.source === 'inspector' && evt.type !== 'fixed:change') return;
+    // Allow firmed:change through even from 'inspector' so the Firm/Unfirm
+    // button re-renders after toggleFirm() — otherwise it never flips.
+    if (evt.source === 'inspector' && evt.type !== 'firmed:change') return;
       if (evt.type === 'plant:selected') {
         const t = Inspector._currentId ? Store.tasks[Inspector._currentId] : null;
         if (!t || !Store.selectedPlant
@@ -3561,7 +3609,7 @@ export const Inspector = {
       if (!Inspector._currentId) return;
       if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
         Inspector._render(Store.tasks[Inspector._currentId]);
-      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change'
+      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
           || evt.type === 'setup-snapshot:replace') {
         const t = Store.tasks[Inspector._currentId];
         if (t) Inspector._render(t);
@@ -3708,14 +3756,8 @@ export const Inspector = {
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
     const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
-    const fixed = Store.isFixed(task.id);
-    // C2 (2026-08-20): a distinct reason from `fixed` above — Engine.
-    // isFrozenHorizon reads Store.frozenHorizonEnd (server-computed) against
-    // this order's CURRENT start, so a planner can tell "the optimizer left
-    // this alone because it starts inside the plant's frozen window" apart
-    // from "someone manually pinned this." Manual drags are never blocked by
-    // either banner — OD-C2c — this is purely explanatory.
-    const frozenHorizon = Engine.isFrozenHorizon(task);
+    const firmed = Store.isFirmed(task.id);        // manual layer — drives the Firm/Unfirm button
+    const firmedUnion = Engine.firmingStatus(task).firmed;  // SAP OR frozen-horizon OR manual — drives the one banner below
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
@@ -3731,8 +3773,7 @@ export const Inspector = {
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
 
     body.innerHTML = `
-      ${fixed ? `<div class="insp-fix-banner">${Util.t('ui.insp_fixed_banner')}</div>` : ''}
-      ${frozenHorizon ? `<div class="insp-fix-banner insp-frozen-banner">${Util.t('ui.insp_frozen_horizon_banner')}</div>` : ''}
+      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${esc(a.msg)}</div>`).join('')}
@@ -3846,9 +3887,9 @@ export const Inspector = {
       </div>
 
       <div class="insp-actions">
-        ${fixed
-          ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFix(false)">${Util.t('btn.unfix')}</button>`
-          : `<button class="btn btn-primary" onclick="NIMBUS.Inspector.toggleFix(true)">${Util.t('btn.fix_order')}</button>`}
+        ${firmed
+          ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFirm(false)">${Util.t('btn.unfirm')}</button>`
+          : `<button class="btn btn-primary" onclick="NIMBUS.Inspector.toggleFirm(true)">${Util.t('btn.firm_order')}</button>`}
         <button class="btn" data-act="override">${Util.t('btn.override_date')}</button>
         <button class="btn btn-ghost" data-act="focus">${Util.t('btn.focus')}</button>
       </div>
@@ -4034,9 +4075,10 @@ export const Inspector = {
     }, 800);
   },
 
-  toggleFix(fixed: boolean): void {
+  toggleFirm(firmed: boolean): void {
     if (!Inspector._currentId) return;
-    Store.setFixed([Inspector._currentId], fixed, 'inspector');
+    Store.setFirmed([Inspector._currentId], firmed, 'inspector');
+    if (!firmed) notifyResidualFirming([Inspector._currentId]);
     Alerts.scheduleRecompute();
   }
 };
@@ -4056,8 +4098,8 @@ export const ContextMenu = {
         const id = ContextMenu._targetId;
         ContextMenu.close();
         if (!id) return;
-        if (action === 'fix')       { Store.setFixed([id], true, 'ctx');  Alerts.scheduleRecompute(); }
-        else if (action === 'unfix'){ Store.setFixed([id], false, 'ctx'); Alerts.scheduleRecompute(); }
+        if (action === 'firm')       { Store.setFirmed([id], true, 'ctx');  Alerts.scheduleRecompute(); }
+        else if (action === 'unfirm'){ Store.setFirmed([id], false, 'ctx'); Alerts.scheduleRecompute(); notifyResidualFirming([id]); }
         else if (action === 'override') { Table._openOverrideModalForId(id); }
         else if (action === 'inspect')  { const t = Store.tasks[id]; if (t) Inspector.show(t); }
       };
@@ -4080,10 +4122,11 @@ export const ContextMenu = {
       if (r.right > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
       if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
     });
-    // Toggle fix/unfix visibility based on state
-    const fixed = Store.isFixed(targetId);
-    (menu.querySelector('[data-action="fix"]') as HTMLElement | null)!.style.display   = fixed ? 'none' : '';
-    (menu.querySelector('[data-action="unfix"]') as HTMLElement | null)!.style.display = fixed ? '' : 'none';
+    // Toggle firm/unfirm visibility based on the MANUAL layer only — see
+    // context-menu spec: visibility keyed off Store.isFirmed.
+    const firmed = Store.isFirmed(targetId);
+    (menu.querySelector('[data-action="firm"]') as HTMLElement | null)!.style.display   = firmed ? 'none' : '';
+    (menu.querySelector('[data-action="unfirm"]') as HTMLElement | null)!.style.display = firmed ? '' : 'none';
   },
   close(): void {
     ContextMenu._targetId = null;
@@ -4153,7 +4196,7 @@ export const Hierarchy = {
         // (e.g. optimize + autoReflow) coalesce into one render.
         Hierarchy._scheduleRender();
       } else if (evt.type === 'calendar:change' || evt.type === 'blocks:change'
-          || evt.type === 'fixed:change' || evt.type === 'plant:selected'
+          || evt.type === 'firmed:change' || evt.type === 'plant:selected'
           || evt.type === 'lineSettings:change') {
         Hierarchy.render();
       }
@@ -4178,9 +4221,9 @@ export const Hierarchy = {
       `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
       `${chip}</summary>` +
       (open ? item.tasks.map((tk, i) => {
-        const fixed = Store.isFixed(tk.id);
-        return `<div class="hier-item${fixed ? ' fixed' : ''}" data-id="${tk.id}">` +
-          (fixed ? '<span class="lock-ico">🔒</span>' : '') +
+        const firmed = Engine.firmingStatus(tk).firmed;
+        return `<div class="hier-item${firmed ? ' firmed' : ''}" data-id="${tk.id}">` +
+          (firmed ? '<span class="lock-ico">🔒</span>' : '') +
           `<span>[${i + 1}] ${tk.ORDER || tk.id}</span></div>`;
       }).join('') : '') +
       `</details>`;
@@ -4844,7 +4887,7 @@ export const Dashboard = {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
           || evt.type === 'task:update' || evt.type === 'alerts:change'
           || evt.type === 'calendar:change' || evt.type === 'blocks:change'
-          || evt.type === 'fixed:change') {
+          || evt.type === 'firmed:change') {
         if (evt.type === 'tasks:bulk') {
           Dashboard._prevKpi = {};
           Dashboard._latenessDrillKey = null;
@@ -5043,7 +5086,7 @@ export const Dashboard = {
     Dashboard._renderHeatmap(_matrix7);
     Dashboard._renderLineStatus();
     Dashboard._renderAlertSummary();
-    Dashboard._renderFixedList();
+    Dashboard._renderFirmedList();
     Dashboard._renderLatenessHeatmap();
     Dashboard._syncLineStatusHeight();
   },
@@ -5110,9 +5153,9 @@ export const Dashboard = {
     const headroom = Math.max(0, Math.round((1 - avgUtil) * 100));
     const headroomSev = avgUtil >= 0.95 ? 'err' : avgUtil >= 0.80 ? 'warn' : 'ok';
 
-    // Four action-oriented tiles, one calm row. Open Alerts and Fixed Orders were
+    // Four action-oriented tiles, one calm row. Open Alerts and Firmed Orders were
     // trimmed off this row — both counts still surface in their own panels below
-    // (alert-summary-count, the fixed-orders list) so nothing is lost, just decluttered.
+    // (alert-summary-count, the firmed-orders list) so nothing is lost, just decluttered.
     const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
         d: Util.t('kpi.orders_total', { n: tasks.length }),
@@ -5561,23 +5604,25 @@ export const Dashboard = {
     }
   },
 
-  _renderFixedList(): void {
-    const list = document.getElementById('fixed-list');
+  _renderFirmedList(): void {
+    const list = document.getElementById('firmed-list');
     if (!list) return;
-    const fixed = Dashboard._filteredTasks().filter(t => Store.isFixed(t.id));
-    if (!fixed.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_fixed_orders')}</div>`; return; }
-    list.innerHTML = fixed.slice(0, 12).map(t => `
-      <div class="fixed-row">
+    // Union count/list (SAP OR frozen-horizon OR manual) — see Engine.firmingStatus.
+    const firmed = Dashboard._filteredTasks().filter(t => Engine.firmingStatus(t).firmed);
+    if (!firmed.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_firmed_orders')}</div>`; return; }
+    list.innerHTML = firmed.slice(0, 12).map(t => `
+      <div class="firmed-row">
         <span class="pin">🔒</span>
         <span class="id">${t.MACHINE || ''}</span>
         <span class="name">${t.text || t.ORDER || t.id}</span>
         <span class="when">${Util.fmtDT(t.start_date).slice(5, 16)}</span>
-        <button class="btn btn-ghost sm" onclick="NIMBUS.Dashboard._unfix('${t.id}')">Unfix</button>
+        <button class="btn btn-ghost sm" onclick="NIMBUS.Dashboard._unfirm('${t.id}')">${Util.t('btn.unfirm_dashboard')}</button>
       </div>
     `).join('');
   },
-  _unfix(id: string): void {
-    Store.setFixed([id], false, 'dashboard');
+  _unfirm(id: string): void {
+    Store.setFirmed([id], false, 'dashboard');
+    notifyResidualFirming([id]);
     Alerts.scheduleRecompute();
   },
   _gotoLine(line: string, dateStr: string): void {
@@ -5905,20 +5950,20 @@ type ContextMenuWithOpenCanvas = typeof ContextMenu & { openCanvas?: (x: number,
         keyboard      ─F / Del / Esc / Z / ←→─►  Interaction  ─►  Store / UndoStack
 
    CRITICAL / CORRECTED (CQ-1 Phase 3 Task 5 — the previous wording here claimed
-   fixed-order drags are "REVERTED in the vis DataSet before it can reach the
+   firmed-order drags are "REVERTED in the vis DataSet before it can reach the
    Store"; the new characterization tests added by this task proved that is
    NOT what `_onDataSetUpdate` actually does, so this comment is corrected to
-   match the real, unchanged behavior rather than the aspiration): fixed
+   match the real, unchanged behavior rather than the aspiration): firmed
    orders carry no per-item `editable:false` (only blackout blocks do — see
    `_itemForBlock`), so vis-timeline lets a user actually drag one. Inside
-   `_onDataSetUpdate`, the `Store.isFixed(id)` branch's `noActualChange` guard
+   `_onDataSetUpdate`, the `Store.isFirmed(id)` branch's `noActualChange` guard
    only distinguishes a genuine drag from a programmatic echo (Timeline.rebuild
    / _applyTaskPatch calling `_items.update()` inside `_suppressEvents`, or a
    redraw racing a drag-commit) — when the guard finds NO real change it drops
    the event, but when there IS a real change it falls through to the same
-   commit path as a non-fixed drag ("Fixed items are user-draggable — fall
+   commit path as a non-firmed drag ("Firmed items are user-draggable — fall
    through to normal update path"). In other words: today, a real drag on a
-   fixed order DOES commit to the Store; only spurious no-op echoes are
+   firmed order DOES commit to the Store; only spurious no-op echoes are
    suppressed. See `tests/modules/schedule-workbench.test.mjs` and
    `docs/architecture/cq1-compatibility-inventory.md` for the tests that
    uncovered this and the full writeup. This phase preserves the behavior
@@ -6344,11 +6389,11 @@ export const Interaction = {
             rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
           }${rel.length > 3 ? '…' : ''}</div>`
         : '';
-      const fixedBadge = Store.isFixed(id)
-        ? `<span class="hov-fixed">🔒 fixed</span>` : '';
+      const firmedBadge = Engine.firmingStatus(t).firmed
+        ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
 
       return `
-        <div class="hov-title">${esc(orderNo)} ${fixedBadge}</div>
+        <div class="hov-title">${esc(orderNo)} ${firmedBadge}</div>
         <div class="hov-mat">${esc(matDesc)}</div>
         <div class="hov-grid">
           <span>Qty</span><span>${esc(qty)}</span>
@@ -6730,8 +6775,8 @@ export const Interaction = {
   },
 
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
-   *  Fixed orders: only a spurious no-op echo (`noActualChange`) is dropped —
-   *  a genuine drag on a fixed order still commits (see the corrected header
+   *  Firmed orders: only a spurious no-op echo (`noActualChange`) is dropped —
+   *  a genuine drag on a firmed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
   _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
     for (const rawId of props.items) {
@@ -6745,8 +6790,8 @@ export const Interaction = {
       const expectedItem = Timeline._itemsForTask(t).find(item => item.id === itemId)
         || Timeline._itemForTask(t);
 
-      /* ----- Fixed-order protection ------------------------------------
-       * If the task is fixed, revert any real drag before it hits the Store.
+      /* ----- Firmed-order protection ------------------------------------
+       * If the task is firmed, revert any real drag before it hits the Store.
        * But first distinguish a *real drag* from a *programmatic echo*:
        * Timeline.rebuild and _applyTaskPatch both call _items.update() inside
        * _suppressEvents, so they won't reach here — but if a redraw races
@@ -6754,7 +6799,7 @@ export const Interaction = {
        * without suppression), we'd see a bogus "change" of zero magnitude.
        * The noActualChange guard catches that case and drops the event.
        * ---------------------------------------------------------------- */
-      if (Store.isFixed(id)) {
+      if (Store.isFirmed(id)) {
         const currentStart = Util.snap(new Date(v.start));
         const currentGroup = v.group || t.MACHINE;
         const noActualChange = t.start_date &&
@@ -6762,10 +6807,10 @@ export const Interaction = {
           currentGroup === t.MACHINE;
 
         if (noActualChange) {
-          this._log('update:ignored', { id, reason: 'fixed task, no change' });
+          this._log('update:ignored', { id, reason: 'firmed task, no change' });
           continue;
         }
-        // Fixed items are user-draggable — fall through to normal update path
+        // Firmed items are user-draggable — fall through to normal update path
       }
 
       const newStart = Util.snap(new Date(v.start));
@@ -6792,10 +6837,10 @@ export const Interaction = {
       this._lastDragEndTs = Date.now();
 
       // Multi-order drag: if the dragged item is part of a multi-selection,
-      // move all non-fixed selected items by the same time + line delta.
+      // move all non-firmed selected items by the same time + line delta.
       const deltaMs  = newStart.getTime() - t.start_date.getTime();
       const lineMoved = newLine !== t.MACHINE;
-      const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFixed(sid));
+      const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFirmed(sid));
 
       if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
         // Snapshot all affected tasks for undo
@@ -6825,13 +6870,13 @@ export const Interaction = {
         // their old absolute positions. Mirrors the deleted regeneration
         // branch's own contract: "Companion parents retain the user's
         // relative drag delta."
-        // (skippedFixed stays empty today — selIds above already excludes fixed
+        // (skippedFirmed stays empty today — selIds above already excludes firmed
         // tasks — but is preserved as-is; not this task's scope to remove.)
         // This loop only computes and validates each companion's patch — no
         // Store or Timeline mutation happens here, since a later companion
         // failing must leave earlier companions (and the dragged item)
         // untouched too.
-        const skippedFixed: string[] = [];
+        const skippedFirmed: string[] = [];
         const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
         const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
         let companionFailed = false;
@@ -6866,7 +6911,7 @@ export const Interaction = {
         }
         Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
-        if (skippedFixed.length) Toast.show(Util.t('toast.fixed_count_not_moved', { count: skippedFixed.length }), 'warn');
+        if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
         UndoStack.push(`Move ${allIds.length} orders`,
           () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
@@ -7087,12 +7132,13 @@ export const Interaction = {
       return;
     }
 
-    // F → toggle Fixed
+    // F → toggle Firmed
     if (e.key.toLowerCase() === 'f' && !mod && Selection.size()) {
       e.preventDefault();
       const ids = Selection.ids();
-      const allFixed = ids.every(id => Store.isFixed(id));
-      Store.setFixed(ids, !allFixed, 'interaction');
+      const allFirmed = ids.every(id => Store.isFirmed(id));
+      Store.setFirmed(ids, !allFirmed, 'interaction');
+      if (allFirmed) notifyResidualFirming(ids); // was firmed, now unfirming
       return;
     }
 
@@ -7106,8 +7152,8 @@ export const Interaction = {
   },
 
   _unscheduleSelected(): void {
-    const ids = Selection.ids().filter(id => !Store.isFixed(id));
-    if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_fixed'), 'warn'); return; }
+    const ids = Selection.ids().filter(id => !Store.isFirmed(id));
+    if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_firmed'), 'warn'); return; }
     // An explicit segment aggregate is atomic. Do not clear just its parent
     // envelope, which Store would correctly reconstruct from its children.
     const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
@@ -7170,11 +7216,11 @@ export const Interaction = {
         </div>
         <div style="font-size:13px;color:#666;margin-bottom:12px;">
           ${Util.fmtHours(s.totalHours)} total run-time · ${s.lines.length} line${s.lines.length === 1 ? '' : 's'}
-          ${s.fixedCount ? ` · ${s.fixedCount} fixed` : ''}
+          ${s.firmedCount ? ` · ${s.firmedCount} firmed` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">
-          <button class="btn btn-ghost" data-action="fix">${Util.t('btn.fix_all')}</button>
-          <button class="btn btn-ghost" data-action="unfix">${Util.t('btn.unfix_all')}</button>
+          <button class="btn btn-ghost" data-action="firm">${Util.t('btn.firm_all')}</button>
+          <button class="btn btn-ghost" data-action="unfirm">${Util.t('btn.unfirm_all')}</button>
           <button class="btn btn-ghost" data-action="unschedule">${Util.t('btn.unschedule_all')}</button>
           <button class="btn btn-ghost" data-action="clear">${Util.t('btn.clear_selection')}</button>
         </div>
@@ -7185,16 +7231,16 @@ export const Interaction = {
     // `_unscheduleSelected()`'s clear-selection sibling, was found alongside
     // them during Task 5's own re-verification of the plan against the real
     // code and converted the same way).
-    panel.querySelector('[data-action="fix"]')?.addEventListener('click', () => Interaction._bulkFix(true));
-    panel.querySelector('[data-action="unfix"]')?.addEventListener('click', () => Interaction._bulkFix(false));
+    panel.querySelector('[data-action="firm"]')?.addEventListener('click', () => Interaction._bulkFirm(true));
+    panel.querySelector('[data-action="unfirm"]')?.addEventListener('click', () => Interaction._bulkFirm(false));
     panel.querySelector('[data-action="unschedule"]')?.addEventListener('click', () => Interaction._unscheduleSelected());
     panel.querySelector('[data-action="clear"]')?.addEventListener('click', () => Selection.clear());
   },
 
-  _bulkFix(fixed: boolean): void {
+  _bulkFirm(firmed: boolean): void {
     const ids = Selection.ids();
     if (!ids.length) return;
-    Store.setFixed(ids, fixed, 'interaction');
+    Store.setFirmed(ids, firmed, 'interaction');
     this._showMultiInspector();
   },
 
@@ -7262,6 +7308,9 @@ interface ColorWheelResponse {
 interface OptimizerDefaults {
   mode?: string;
   preset?: string;
+  respectFirmed?: boolean;
+  /** @deprecated pre-rename key, still read as a fallback for presets saved
+   *  before the fixed→firmed rename — see the `?? _od.respectFixed` read. */
   respectFixed?: boolean;
   respectCalendar?: boolean;
 }
@@ -7288,7 +7337,7 @@ interface OptimizerRunOptions {
   lines?: string[] | null;
   startDate?: Date;
   endDate?: Date;
-  respectFixed?: boolean;
+  respectFirmed?: boolean;
   respectCalendar?: boolean;
   auditDetails?: OptimizationAuditDetails;
   [key: string]: unknown;
@@ -7562,13 +7611,13 @@ export const OptimizeDialog = (() => {
 
   function _applyModeOptions() {
     const backlog = _mode === 'backlog';
-    const fixed = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const firmed = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const calendar = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
-    if (fixed) fixed.disabled = backlog;
+    if (firmed) firmed.disabled = backlog;
     if (calendar) { calendar.checked = backlog || calendar.checked; calendar.disabled = backlog; }
-    const fixedLabel = document.getElementById('opt-fixed-label');
+    const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
-    if (fixedLabel) fixedLabel.title = backlog ? 'Fixed orders move when reached and remain fixed.' : '';
+    if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : '';
     if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 
@@ -7744,16 +7793,20 @@ export const OptimizeDialog = (() => {
     // (horizon preset / changeover / toolbar checkbox state) otherwise.
     let _od: OptimizerDefaults | null = null;
     try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch {}
-    // Sync option checkboxes from the Gantt toolbar's existing chk- elements
-    const rfEl = document.getElementById('chk-respect-fixed') as HTMLInputElement | null;
+    // Sync option checkboxes from the Gantt toolbar's existing chk- elements.
+    // P2: dropped the dead `chk-respect-fixed` read here — no such element
+    // exists in index.html (confirmed via grep), so it was always null and
+    // this mirror never actually ran; the "respect firmed" checkbox is seeded
+    // purely from the saved optimizer defaults below.
     const rcEl = document.getElementById('chk-respect-calendar') as HTMLInputElement | null;
-    const ofEl = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const ofEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const ocEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
-    if (rfEl && ofEl) ofEl.checked = rfEl.checked;
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
-    // Saved defaults override the toolbar mirror when present.
+    // Saved defaults override the toolbar mirror when present. Older saved
+    // presets used the pre-rename `respectFixed` key — fall back to it.
     if (_od && typeof _od === 'object') {
-      if (ofEl && typeof _od.respectFixed === 'boolean')    ofEl.checked = _od.respectFixed;
+      const _respectFirmed = (_od.respectFirmed ?? _od.respectFixed);
+      if (ofEl && typeof _respectFirmed === 'boolean')      ofEl.checked = _respectFirmed;
       if (ocEl && typeof _od.respectCalendar === 'boolean') ocEl.checked = _od.respectCalendar;
     }
     _initPickers();
@@ -7808,7 +7861,7 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
       return;
     }
-    const sfEl = document.getElementById('opt-chk-fixed') as HTMLInputElement | null;
+    const sfEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
 
     // Remember the chosen strategy/window/options as this user's optimizer
@@ -7817,7 +7870,7 @@ export const OptimizeDialog = (() => {
     try {
       Session.setPref('optimizerDefaults', {
         mode: _mode, preset: _preset,
-        respectFixed:    sfEl?.checked ?? true,
+        respectFirmed:   sfEl?.checked ?? true,
         respectCalendar: scEl?.checked ?? true,
       });
     } catch {}
@@ -7915,7 +7968,7 @@ export const OptimizeDialog = (() => {
       lines:           linesScope,
       startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
       endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
-      respectFixed:    sfEl?.checked ?? true,
+      respectFirmed:   sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
       runAt:           new Date(),
       auditDetails: _mode === 'backlog' ? undefined : {
@@ -8036,7 +8089,7 @@ interface PreviewExplanation {
    *  count (see `missingPairs` for the full uncovered-transition list). */
   scheduledWithoutSetup: { orders: number; lines: number };
   /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
-   *  that ended up with neither a patch nor a fixed/pinned exemption — i.e.
+   *  that ended up with neither a patch nor a firmed/pinned exemption — i.e.
    *  "not scheduled". Derived by set difference against `candidate.patches`,
    *  never a field threaded through CandidateResult (see runAndApply's own
    *  B3 comment in schedule-services.mts for why: the worst drops produce no
@@ -8047,7 +8100,7 @@ interface PreviewExplanation {
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
    *  count — per-order placement/acceptance log entries (e.g. 'due-date-first-placement')
    *  are not prunes and are excluded, not rolled into 'other'. */
-  prunes: { setup: number; fixed: number; capacity: number; other: number; total: number };
+  prunes: { setup: number; firmed: number; capacity: number; other: number; total: number };
 }
 
 interface PreviewExplanationInput {
@@ -8059,8 +8112,8 @@ interface PreviewExplanationInput {
    *  using the same plant resolution as B7) that `unplacedOrders` is diffed
    *  against. Omitted only by callers that don't want the tally (none today). */
   unplacedCandidates?: ReadonlyArray<{ id: string; line: string }>;
-  /** Fixed/pinned ids — deliberately never moved, so never counted as unplaced. */
-  fixedIds?: ReadonlySet<string> | ReadonlyArray<string>;
+  /** Firmed/pinned ids — deliberately never moved, so never counted as unplaced. */
+  firmedIds?: ReadonlySet<string> | ReadonlyArray<string>;
 }
 
 const PREVIEW_REASON_LIMIT = 8;
@@ -8069,20 +8122,23 @@ const PREVIEW_MISSING_PAIR_LIMIT = 12;
 /** Reason codes that represent a genuine exclusion (order/line left out of the
  *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
  *  successes or policy-chooser notes (e.g. 'due-date-first-placement',
- *  'fixed-incoming-setup', 'covered-fixed-boundary-fallback') and must never be
+ *  'firmed-incoming-setup', 'covered-firmed-boundary-fallback') and must never be
  *  tallied as prunes — see OPTIMIZER-PREVIEW.md §4.3 open question 2. There is
  *  no 'color block' or 'due date' code in this engine today; only setup,
- *  fixed-boundary and capacity-deferral exclusions are ever emitted. */
-const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'fixed' | 'capacity' | 'other'> = {
+ *  firmed-boundary and capacity-deferral exclusions are ever emitted. */
+const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'firmed' | 'capacity' | 'other'> = {
   'rejected-uncovered-transition': 'setup',
   'setup-incompatible': 'setup',
   'setup-sequence-infeasible': 'setup',
   'setup-definition-unavailable': 'setup',
   'spt-sequence-infeasible': 'setup',
   'setup-signature-incompatible': 'setup',
-  'override-inactive': 'fixed',
-  'fixed-boundary-infeasible': 'fixed',
-  'fixed-boundary-fallback-ambiguous': 'fixed',
+  'override-inactive': 'firmed',
+  'firmed-boundary-infeasible': 'firmed',
+  'firmed-boundary-fallback-ambiguous': 'firmed',
+  'firmed-boundary-invalid': 'firmed',
+  'incoming-firmed-setup-infeasible': 'firmed',
+  'protected-firmed-boundary-outside-horizon': 'firmed',
   'due-work-unadmitted': 'capacity',
   'trailing-fragment-unadmitted': 'capacity',
   'unknown-setup-tail-unplaced': 'capacity',
@@ -8090,7 +8146,7 @@ const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'fixed' | 'capacity' | 'oth
 };
 
 function tallyPrunes(explanation: ReadonlyArray<CandidateReason>): PreviewExplanation['prunes'] {
-  const prunes = { setup: 0, fixed: 0, capacity: 0, other: 0, total: 0 };
+  const prunes = { setup: 0, firmed: 0, capacity: 0, other: 0, total: 0 };
   for (const reason of explanation) {
     const bucket = PRUNE_BUCKET_BY_CODE[reason.code];
     if (!bucket) continue;
@@ -8237,13 +8293,13 @@ export const OptimizerPreview = {
     // B3: derive the unplaced set by difference from candidate.patches, not
     // from a threaded CandidateResult field — see the interface comment on
     // PreviewExplanation.unplacedOrders for why.
-    const fixedIdSet = input.fixedIds instanceof Set
-      ? input.fixedIds
-      : new Set(Array.from(input.fixedIds ?? [], String));
+    const firmedIdSet = input.firmedIds instanceof Set
+      ? input.firmedIds
+      : new Set(Array.from(input.firmedIds ?? [], String));
     const unplacedOrderIds = new Set<string>();
     const unplacedLines = new Set<string>();
     for (const candidateTask of input.unplacedCandidates ?? []) {
-      if (patchedIds.has(candidateTask.id) || fixedIdSet.has(candidateTask.id)) continue;
+      if (patchedIds.has(candidateTask.id) || firmedIdSet.has(candidateTask.id)) continue;
       unplacedOrderIds.add(candidateTask.id);
       unplacedLines.add(candidateTask.line);
     }
@@ -8462,7 +8518,7 @@ export const OptimizerPreview = {
           preKpis,
           postKpis,
           unplacedCandidates,
-          fixedIds: candidateSnapshot.fixedIds,
+          firmedIds: candidateSnapshot.firmedIds,
         });
         const described = OptimizerPreview.describeMissingPairs(
           candidate,
@@ -8516,7 +8572,7 @@ export const OptimizerPreview = {
               const altCandidate = evaluateSchedule(candidateSnapshot, {
                 mode: altMode, plant: opts.plant, lines: opts.lines,
                 startDate: opts.startDate, endDate: opts.endDate,
-                respectFixed: opts.respectFixed, respectCalendar: opts.respectCalendar,
+                respectFirmed: opts.respectFirmed, respectCalendar: opts.respectCalendar,
                 // Controller ruling: Plan B is deferred off the click path,
                 // so background time is acceptable — give it the SAME full
                 // SETUP_AWARE_DEADLINE_MS window as the primary run rather
@@ -8647,7 +8703,7 @@ export const OptimizerPreview = {
       const rows: Array<[string, string]> = [
         [Util.t('ui.opt_pv_backlog_found'), String(backlog.backlogFound)],
         [Util.t('ui.opt_pv_backlog_moved'), String(backlog.moved)],
-        [Util.t('ui.opt_pv_backlog_fixed_moved'), String(backlog.fixedMoved)],
+        [Util.t('ui.opt_pv_backlog_firmed_moved'), String(backlog.firmedMoved)],
         [Util.t('ui.opt_pv_backlog_frozen_moved'), String(backlog.frozenMoved)],
         [Util.t('ui.opt_pv_backlog_runtime'), `${backlog.movedRuntimeHours.toFixed(1)} h`],
         [Util.t('ui.opt_pv_backlog_largest_delay'), `${backlog.largestDelayMinutes} min`],
@@ -8731,7 +8787,7 @@ export const OptimizerPreview = {
       if (p && p.total > 0) {
         const rows: Array<{ label: string; count: number; warn?: boolean }> = [
           { label: Util.t('ui.opt_pv_prune_setup'), count: p.setup, warn: true },
-          { label: Util.t('ui.opt_pv_prune_fixed'), count: p.fixed },
+          { label: Util.t('ui.opt_pv_prune_firmed'), count: p.firmed },
           { label: Util.t('ui.opt_pv_prune_capacity'), count: p.capacity },
           { label: Util.t('ui.opt_pv_prune_other'), count: p.other },
         ].filter(row => row.count > 0).sort((a, b) => b.count - a.count);
@@ -9006,7 +9062,7 @@ export const OptimizerPreview = {
             mode: 'backlog', scope: audit.lines ? 'lines' : 'plant', lines: audit.lines,
             from: audit.from?.toISOString() ?? null, to: audit.to?.toISOString() ?? null,
             plant_timezone: audit.timezone, captured_run_at: audit.runAt?.toISOString() ?? null,
-            backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, fixed_moved: diagnostics.fixedMoved,
+            backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, firmed_moved: diagnostics.firmedMoved,
             frozen_moved: diagnostics.frozenMoved,
             invalid_runtime: diagnostics.invalidRuntimeIds.length, missing_start: diagnostics.missingStartIds.length,
             overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
@@ -9745,15 +9801,15 @@ export const AlertsUIAdapter = {
     }
 
     // -------- Categorize alerts
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
+    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const CAT_MAP: Record<AlertType, string> = {
       overload:             'capacity',
       'near-capacity':      'capacity',
       overlap:              'conflicts',
       blackout:             'calendar',
       closed:               'calendar',
-      'fixed-closed':       'calendar',
-      'fixed-out-of-hours': 'calendar',
+      'firmed-closed':       'calendar',
+      'firmed-out-of-hours': 'calendar',
       'runtime-schedule-mismatch': 'exceptions',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
@@ -9774,10 +9830,11 @@ export const AlertsUIAdapter = {
       const t = Store.tasks?.[id];
       return Util.orderNumber(t);
     };
-    const taskFixed = (id: string) => !!Store.tasks?.[id]?.fixed;
+    // Union (SAP OR frozen-horizon OR manual) — see Engine.firmingStatus.
+    const taskFirmed = (id: string) => { const t = Store.tasks?.[id]; return !!t && Engine.firmingStatus(t).firmed; };
 
     const renderChip = (id: string) => `
-      <span class="ac-chip ${taskFixed(id) ? 'fixed' : ''}" title="${esc(taskPO(id))}">${esc(taskPO(id))}</span>`;
+      <span class="ac-chip ${taskFirmed(id) ? 'firmed' : ''}" title="${esc(taskPO(id))}">${esc(taskPO(id))}</span>`;
 
     const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
@@ -9803,11 +9860,13 @@ export const AlertsUIAdapter = {
       } else if (a.type === 'blackout') {
         headline = 'Blackout violation';
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
-      } else if (a.type === 'fixed-closed') {
-        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order on closed day' : 'Order on closed day';
+      } else if (a.type === 'firmed-closed') {
+        // These rules fire for ANY order on a closed day, firmed or not — the
+        // headline must not claim firmness (see contract: NEW i18n keys).
+        headline = Util.t('ui.alert_headline_closed_day');
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
-      } else if (a.type === 'fixed-out-of-hours') {
-        headline = a.taskId && taskFixed(a.taskId) ? 'Fixed order outside work hours' : 'Order outside work hours';
+      } else if (a.type === 'firmed-out-of-hours') {
+        headline = Util.t('ui.alert_headline_out_of_hours');
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'closed') {
         headline = 'Line closed';
@@ -9929,14 +9988,14 @@ export const AlertsUIAdapter = {
   },
 
   _renderAlertRow(a: NimbusAlert): string {
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'fixed-closed', 'fixed-out-of-hours']);
+    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
     const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
       (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const isCalendar = CALENDAR_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
     const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
-    const override = (a.type === 'closed' || a.type === 'fixed-closed' || a.type === 'fixed-out-of-hours') && a.taskId != null;
+    const override = (a.type === 'closed' || a.type === 'firmed-closed' || a.type === 'firmed-out-of-hours') && a.taskId != null;
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${esc(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +
       `<span class="alert-msg">${esc(a.msg)}</span>` +
@@ -10136,7 +10195,7 @@ export const SandboxAdapter = {
   },
 
   // Fired when the user undoes a PROMOTED (applied=true) scenario via UndoStack —
-  // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/fixedIds
+  // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/firmedIds
   // then emits this instead of calling Alerts/Toast directly (those are cross-module
   // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
   _onReverted() {

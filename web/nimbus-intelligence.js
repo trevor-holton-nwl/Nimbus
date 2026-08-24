@@ -670,15 +670,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const q = text.trim().toLowerCase();
       const bank = [
         {
-          keywords: ['freeze', 'lock', 'fix all', 'pin'],
-          label: 'Freeze: Fix all orders + take snapshot',
+          keywords: ['freeze', 'lock', 'firm all', 'pin'],
+          label: 'Freeze: Firm all orders + take snapshot',
           sub:   'Pins every order and saves a Time Machine checkpoint',
           icon:  '🔒',
           run() {
             CommandPalette.close();
-            NIMBUS.UndoStack?.push?.('Fix All (freeze)', () => {});
-            const unfixedIds = Store.tasksArr.filter(t => !Store.isFixed(t.id)).map(t => t.id);
-            if (unfixedIds.length) Store.setFixed(unfixedIds, true, 'cmd-palette');
+            NIMBUS.UndoStack?.push?.('Firm All (freeze)', () => {});
+            const unfirmedIds = Store.tasksArr.filter(t => !Store.isFirmed(t.id)).map(t => t.id);
+            if (unfirmedIds.length) Store.setFirmed(unfirmedIds, true, 'cmd-palette');
             Alerts.scheduleRecompute();
             const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
             TimeMachine.snapshot(label);
@@ -1112,25 +1112,25 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const n     = ids.length;
       if (!n) return [];
 
-      const stats      = NIMBUS.Selection?.stats?.() || {};
-      const fixedCount = stats.fixedCount || 0;
-      const allFixed   = fixedCount === n;
-      const cmds       = [];
+      const stats       = NIMBUS.Selection?.stats?.() || {};
+      const firmedCount = stats.firmedCount || 0;
+      const allFirmed   = firmedCount === n;
+      const cmds        = [];
 
-      // Fix / Unfix
+      // Firm / Unfirm
       cmds.push({
         type: 'selection',
-        icon:  allFixed ? '🔓' : '🔒',
-        label: allFixed ? `Unfix selected (${n})` : `Fix selected (${n})`,
-        sub:   allFixed ? 'Make all selected orders moveable' : 'Pin all selected orders in place',
+        icon:  allFirmed ? '🔓' : '🔒',
+        label: allFirmed ? `Unfirm selected (${n})` : `Firm selected (${n})`,
+        sub:   allFirmed ? 'Make all selected orders moveable' : 'Pin all selected orders in place',
         run() {
           CommandPalette.close();
-          const newFixed = !allFixed;
-          NIMBUS.UndoStack?.push?.(`${newFixed ? 'Fix' : 'Unfix'} ${n} orders`, () => {});
+          const newFirmed = !allFirmed;
+          NIMBUS.UndoStack?.push?.(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, () => {});
           const validIds = ids.filter(id => Store.tasks[id]);
-          if (validIds.length) Store.setFixed(validIds, newFixed, 'cmd-palette');
+          if (validIds.length) Store.setFirmed(validIds, newFirmed, 'cmd-palette');
           Alerts.scheduleRecompute();
-          Toast.show(newFixed ? t('toast.fixed_orders', { count: n }) : t('toast.unfixed_orders', { count: n }), 'success', 1400);
+          Toast.show(newFirmed ? t('toast.firmed_orders', { count: n }) : t('toast.unfirmed_orders', { count: n }), 'success', 1400);
         }
       });
 
@@ -1280,7 +1280,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           text:             t.text || t.MATERIAL_DESCRIPTION || '',
           COLOR:            t.COLOR     || '',
           FORM_SIZE:        t.FORM_SIZE || '',
-          FIXED:            !!t.FIXED,
+          FIRMED:           !!t.firmed,
         }))
       };
       IntelDB.put('snapshots', snap).then(id => {
@@ -2024,7 +2024,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         text:             t.text             || live?.text              || live?.MATERIAL_DESCRIPTION || '—',
         COLOR:            t.COLOR            || live?.COLOR             || '',
         FORM_SIZE:        t.FORM_SIZE        || live?.FORM_SIZE         || '',
-        FIXED:            t.FIXED            ?? live?.FIXED             ?? false,
+        FIRMED:           t.FIRMED           ?? live?.firmed           ?? false,
       };
     },
 
@@ -2214,7 +2214,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           text:             t.text || t.MATERIAL_DESCRIPTION || '',
           COLOR:            t.COLOR    || '',
           FORM_SIZE:        t.FORM_SIZE || '',
-          FIXED:            !!t.FIXED,
+          FIRMED:           !!t.firmed,
         }));
         const d = Diff.compute(snap.tasks, curr);
         document.getElementById('ni-diff-out').innerHTML = Diff._renderResults(d);

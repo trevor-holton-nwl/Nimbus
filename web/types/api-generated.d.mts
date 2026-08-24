@@ -2118,7 +2118,7 @@ export interface components {
          *     see docs/typescript_migration.md §F/§C. Optional fields are exactly the
          *     ones read via `row.get(...)` with no coercing default (i.e. can be None
          *     from a NaN source row); non-optional fields either have a code-level
-         *     default (e.g. `text`, `firmed`, `user_scheduled`) or come from a groupby
+         *     default (e.g. `text`, `ecc_firmed`, `user_scheduled`) or come from a groupby
          *     key that can't be null.
          */
         TaskDTO: {
@@ -2164,8 +2164,8 @@ export interface components {
             FORM_SIZE?: string | null;
             /** Notes */
             notes?: string | null;
-            /** Firmed */
-            firmed: boolean;
+            /** Ecc Firmed */
+            ecc_firmed: boolean;
             /** Row Version */
             row_version?: number | null;
             /** Schedule Segments */

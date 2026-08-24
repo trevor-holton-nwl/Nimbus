@@ -26,19 +26,19 @@ test('Store.rebuildPlantIndex is public (renamed from _rebuildPlantIndex)', () =
   assert.doesNotThrow(() => Store.rebuildPlantIndex());
 });
 
-test('Store.replaceBlocks/replaceCalendars/replacePlants/replacePlantBlocks/replaceFixedIds replace wholesale and emit', () => {
+test('Store.replaceBlocks/replaceCalendars/replacePlants/replacePlantBlocks/replaceFirmedIds replace wholesale and emit', () => {
   const events = [];
   const off = Store.subscribe(evt => events.push(evt.type));
   Store.replaceBlocks([{ id: 'b1' }], 'unit-test');
   Store.replaceCalendars({ L1: { workHours: {} } }, 'unit-test');
   Store.replacePlants({ '5512': { workHours: {} } }, 'unit-test');
   Store.replacePlantBlocks([{ id: 'pb1' }], 'unit-test');
-  Store.replaceFixedIds(new Set(['t1']), 'unit-test');
+  Store.replaceFirmedIds(new Set(['t1']), 'unit-test');
   off();
   assert.deepEqual(Store.blocks, [{ id: 'b1' }]);
   assert.deepEqual(Store.plantBlocks, [{ id: 'pb1' }]);
-  assert.ok(Store.fixedIds.has('t1'));
-  assert.deepEqual(events, ['blocks:replace', 'calendar:replace', 'plants:replace', 'plantBlocks:replace', 'fixed:replace']);
+  assert.ok(Store.firmedIds.has('t1'));
+  assert.deepEqual(events, ['blocks:replace', 'calendar:replace', 'plants:replace', 'plantBlocks:replace', 'firmed:replace']);
 });
 
 test('Store exposes priorityRankMaps state and setter', () => {
@@ -157,14 +157,14 @@ test('Sandbox.enter is a no-op (returns false) when already active', () => {
 
 test('Sandbox.exit(false) restores the pre-enter snapshot and emits sandbox:exited', () => {
   Store.setTasks([{ id: 'sb2', RUN_TIME: '1' }], 'unit-test');
-  Store.setFixed('sb2', true, 'unit-test');
+  Store.setFirmed('sb2', true, 'unit-test');
   Sandbox.enter('unit-test');
-  Store.setFixed('sb2', false, 'unit-test');
+  Store.setFirmed('sb2', false, 'unit-test');
   const events = [];
   const off = Store.subscribe(evt => events.push(evt));
   const snap = Sandbox.exit(false, 'unit-test');
   off();
-  assert.ok(Store.isFixed('sb2'), 'discard must restore the pre-sandbox fixed flag');
+  assert.ok(Store.isFirmed('sb2'), 'discard must restore the pre-sandbox firmed flag');
   assert.equal(Sandbox.active, false);
   assert.equal(Store.mode(), 'live');
   const exitEvt = events.find(e => e.type === 'sandbox:exited');
@@ -194,7 +194,7 @@ test('Sandbox.exit(false) emits one *:replace event per restored field, pinned s
     'calendar:replace',
     'plants:replace',
     'plantBlocks:replace',
-    'fixed:replace',
+    'firmed:replace',
     'sandbox:exited',
   ]);
 });

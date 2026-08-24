@@ -91,7 +91,7 @@ interface CapacityBlockIndex {
 export interface RemoveBacklogDiagnostics {
   backlogFound: number;
   moved: number;
-  fixedMoved: number;
+  firmedMoved: number;
   frozenMoved: number;
   movedRuntimeHours: number;
   largestDelayMinutes: number;
@@ -186,7 +186,7 @@ interface SortTerm {
  * are cloned into `calendars` (derived via Store.getPlantForLine, the same
  * lineSettings/masterData resolution every other line→plant lookup in this
  * file uses) instead of every line the session has ever visited. Every other
- * member stays whole (tasks/fixedIds/alerts/blocks/plantBlocks/plants/
+ * member stays whole (tasks/firmedIds/alerts/blocks/plantBlocks/plants/
  * lineSettings/masterData/priorityRankMaps) — downstream reads depend on
  * them being unscoped.
  *
@@ -215,7 +215,7 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       : Store.calendars;
     return {
       tasks: structuredClone(Store.tasksArr),
-      fixedIds: Array.from(Store.fixedIds),
+      firmedIds: Array.from(Store.firmedIds), // manual firms only — ECC/frozen derivation joins at the setup-aware fold; do not union here.
       alerts: structuredClone(Store.alerts),
       selectedPlant: Store.selectedPlant,
       blocks: structuredClone(Store.blocks),
@@ -592,15 +592,15 @@ function sourceTask(id: string): NimbusTask | undefined {
   return _candidateSnapshot ? _candidateSnapshot.tasks.find(task => String(task.id) === String(id)) : Store.tasks[id];
 }
 
-function isFixedIdSet(fixed: readonly string[] | ReadonlySet<string>): fixed is ReadonlySet<string> {
-  return !Array.isArray(fixed);
+function isFirmedIdSet(firmed: readonly string[] | ReadonlySet<string>): firmed is ReadonlySet<string> {
+  return !Array.isArray(firmed);
 }
 
-function sourceIsFixed(id: string | number): boolean {
-  if (!_candidateSnapshot) return Store.isFixed(id);
-  const fixed = _candidateSnapshot.fixedIds;
-  if (isFixedIdSet(fixed)) return fixed.has(String(id));
-  return fixed.map(String).includes(String(id));
+function sourceIsFirmed(id: string | number): boolean {
+  if (!_candidateSnapshot) return Store.isFirmed(id);
+  const firmed = _candidateSnapshot.firmedIds;
+  if (isFirmedIdSet(firmed)) return firmed.has(String(id));
+  return firmed.map(String).includes(String(id));
 }
 
 // B6: exported so setup-scheduler.mts's freeIntervalsFor can fall back to the
@@ -2139,7 +2139,7 @@ export const Engine = {
    *  through; autoReflow has no such concept and relies on the default.
    *
    *  Such an order is treated as implicitly pinned by every placement call
-   *  site below — a reason DISTINCT from Store.isFixed (a genuine manual
+   *  site below — a reason DISTINCT from Store.isFirmed (a genuine manual
    *  pin) so the UI can explain why it didn't move without conflating the
    *  two. This check alone never blocks anything — callers decide what
    *  "pinned" means in their own context (excluded from the free/movable
@@ -2149,6 +2149,17 @@ export const Engine = {
     const end = Engine.frozenHorizonEnd();
     if (!end || !task.start_date) return false;
     return task.start_date >= now && task.start_date < end;
+  },
+
+  /** Union firming status. UI/live-path ONLY — reads live Store (isFirmed, frozenHorizonEnd).
+   *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
+   *  fold below, never this. reasons: 'ecc' (SAP), 'frozen' (horizon band), 'manual' (planner). */
+  firmingStatus(task: NimbusTask, now: Date = new Date()): { firmed: boolean; reasons: Array<'ecc'|'frozen'|'manual'> } {
+    const reasons: Array<'ecc'|'frozen'|'manual'> = [];
+    if (task.ecc_firmed) reasons.push('ecc');
+    if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
+    if (Store.isFirmed(task.id)) reasons.push('manual');
+    return { firmed: reasons.length > 0, reasons };
   },
 
   /** Push `at` forward to the frozen-horizon boundary when it falls short —
@@ -2246,7 +2257,7 @@ export const Engine = {
   /** Repair schedules whose authoritative runtime changed after their last
    * valid aggregate was persisted. The existing parent start is the anchor;
    * failures intentionally leave the previous valid intervals and their
-   * critical mismatch flag in place. Fixed is parent-level only and does not
+   * critical mismatch flag in place. Firmed is parent-level only and does not
    * suppress this required runtime correction. */
   reconcileRuntimeSchedules(plant: string | null): void {
     if (!plant) return;
@@ -2310,7 +2321,7 @@ export const Engine = {
   },
 
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
-   * has no priority, due-date, fixed-protection, day-integrity, or
+   * has no priority, due-date, firmed-protection, day-integrity, or
    * frozen-horizon branches. The C2 (2026-08-20) frozen-horizon guard --
    * obstacle-skip on encountering a frozen-window order, and a placement
    * floor on every candidate start -- was removed for this mode on
@@ -2321,9 +2332,9 @@ export const Engine = {
    * never pulled earlier than its own snapshot start (the
    * `item.snapshotStart >= now && cursor <= item.snapshotStart` break above
    * still guarantees that) -- mirroring the pre-existing treatment of a
-   * genuinely Store.isFixed-pinned order, and is now counted separately via
+   * genuinely Store.isFirmed-pinned order, and is now counted separately via
    * diagnostics.frozenMoved. All other placement sites (runAndApply's
-   * fixedTasks/freeTasks split, the setup-aware evaluator's fixedIds,
+   * firmedTasks/freeTasks split, the setup-aware evaluator's firmedIds,
    * autoReflow, Engine.earliestAllowedStart) are unaffected and keep
    * applying Engine.isFrozenHorizon / Engine.applyFrozenFloor exactly as
    * before. */
@@ -2349,7 +2360,7 @@ export const Engine = {
     }
 
     const diagnostics: RemoveBacklogDiagnostics = {
-      backlogFound: 0, moved: 0, fixedMoved: 0, frozenMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
+      backlogFound: 0, moved: 0, firmedMoved: 0, frozenMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
       invalidRuntimeIds: [], missingStartIds: [], overlongIds: [], calendarSearchFailures: [], boundaryConflicts: [],
     };
     const lines = Array.isArray(opts.lines) && opts.lines.length
@@ -2436,7 +2447,7 @@ export const Engine = {
           if (scheduleSegments !== undefined) changes.scheduleSegments = scheduleSegments;
           patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
-          if (sourceIsFixed(item.task.id)) diagnostics.fixedMoved++;
+          if (sourceIsFirmed(item.task.id)) diagnostics.firmedMoved++;
           if (Engine.isFrozenHorizon(item.task, now)) diagnostics.frozenMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
           diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
@@ -2872,12 +2883,12 @@ export const Engine = {
   /** Allocate a sequence already selected by an optimizer strategy. The
    * selection/order remains the strategy's responsibility; this pass only
    * turns each selected logical parent into its calendar-valid aggregate.
-   * Fixed parents are treated as atomic envelope obstacles so no free order is
+   * Firmed parents are treated as atomic envelope obstacles so no free order is
    * interleaved between the productive pieces of another logical order. */
   _dispatchPolicyAware(
     line: string,
     orderedTasks: NimbusTask[],
-    fixedTasks: NimbusTask[],
+    firmedTasks: NimbusTask[],
     cursorInit: Date,
     policy: Exclude<SplitOrderPolicy, 'never'>,
     plant: string | null,
@@ -2896,7 +2907,7 @@ export const Engine = {
       for (let guard = 0; guard < 200; guard++) {
         const candidate = Engine.schedulePatchFor(task, line, requested, policy);
         if (!candidate?.start_date || !candidate.end_date) break;
-        const blocker = fixedTasks.find(f => f.start_date && f.end_date
+        const blocker = firmedTasks.find(f => f.start_date && f.end_date
           && candidate.start_date! < f.end_date && candidate.end_date! > f.start_date);
         if (!blocker?.end_date) {
           scheduled = candidate;
@@ -2921,7 +2932,7 @@ export const Engine = {
     return patches;
   },
 
-  /** Main optimiser. Groups by line, optionally respects fixed + calendar.
+  /** Main optimiser. Groups by line, optionally respects firmed + calendar.
    *  Writes results through Store.
    *  opts.plant restricts to lines belonging to that plant. Priority ranks are
    *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
@@ -2950,7 +2961,7 @@ export const Engine = {
     }
     // Remove Backlog is a schedule-repair pass, not an optimizer. Dispatch it
     // before priority-term creation so this path cannot accidentally read rank
-    // maps, fixed protection, or the day-integrity resequencer.
+    // maps, firmed protection, or the day-integrity resequencer.
     if (mode === 'backlog') {
       const result = Engine.removeBacklog({ ...opts, plant });
       if (candidateRun) return detachedCandidateResult(result.patches, _pmT0e, 'completed', result);
@@ -2970,7 +2981,7 @@ export const Engine = {
     // null, so `?.checked` was always undefined and the `?? true` fallback
     // always applied. This plain default reproduces that real runtime
     // behavior exactly, while making Engine genuinely DOM-free.
-    const respectFixed    = (opts.respectFixed as boolean | undefined)    ?? true;
+    const respectFirmed   = (opts.respectFirmed as boolean | undefined)   ?? true;
     const respectCalendar = (opts.respectCalendar as boolean | undefined) ?? true;
     // An explicit "ignore calendar" run remains continuous: there is no
     // effective availability map from which to derive productive pieces. The
@@ -3018,17 +3029,18 @@ export const Engine = {
       // line that survived this same plant's task filter, so no other
       // plant's lines are ever needed here.
       const baseSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
-      // C2: fold any frozen-window order into the SAME fixedIds set the
-      // setup-aware evaluators already treat as immovable — Engine.
+      // C2: fold any ECC-firmed or frozen-window order into the SAME firmedIds
+      // set the setup-aware evaluators already treat as immovable — Engine.
       // isFrozenHorizon carries its own distinct reason for the UI (never
-      // written to Store.isFixed itself), this is purely an internal input
+      // written to Store.isFirmed itself), this is purely an internal input
       // to the evaluator so it never re-sequences an order it shouldn't touch.
       // Passes horizonStart (this run's own "now", injectedNow-aware for
       // candidate runs) rather than the real-time default, so a detached
-      // preview evaluated at a simulated instant agrees with itself.
-      const frozenIds = baseSnapshot.tasks.filter(t => Engine.isFrozenHorizon(t, horizonStart)).map(t => String(t.id));
+      // preview evaluated at a simulated instant agrees with itself. Never
+      // written back to the Store — this fold is run-local only.
+      const frozenIds = baseSnapshot.tasks.filter(t => t.ecc_firmed || Engine.isFrozenHorizon(t, horizonStart)).map(t => String(t.id));
       const snapshot: ScheduleSnapshot = frozenIds.length
-        ? { ...baseSnapshot, fixedIds: new Set([...Array.from(baseSnapshot.fixedIds, String), ...frozenIds]) }
+        ? { ...baseSnapshot, firmedIds: new Set([...Array.from(baseSnapshot.firmedIds, String), ...frozenIds]) }
         : baseSnapshot;
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
@@ -3092,7 +3104,7 @@ export const Engine = {
       // Surface the never-freeze fallbacks that actually landed in this apply:
       // orders scheduled without a resolvable setup transition (no changeover
       // bar) and, separately, any line still guarded off entirely (only
-      // fixed/override protection can do that now — see Part 1f). Both are
+      // firmed/override protection can do that now — see Part 1f). Both are
       // derived from the applied patches, never the whole-run diagnostics, so
       // a line-scoped/excludeFromOpt run only reports what it actually
       // touched.
@@ -3136,11 +3148,11 @@ export const Engine = {
       // B3: derive the unplaced set by difference, in this one place, rather
       // than threading an unplacedOrderIds field through CandidateResult —
       // the worst drops (plant/line mismatch, this same opts.lines/
-      // excludeFromOpt post-filter, a fixed order the setup-aware path never
+      // excludeFromOpt post-filter, a firmed order the setup-aware path never
       // touches) produce no diagnostic object at all, so there is nothing for
       // a threaded field to collect. An order that places successfully
       // always yields a patch — even when its dates are unchanged — so
-      // "in scope, not fixed, not patched" is exactly "not scheduled".
+      // "in scope, not firmed, not patched" is exactly "not scheduled".
       // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
       // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
       // setup-aware evaluators' own scoping agree on which orders exist for
@@ -3150,7 +3162,7 @@ export const Engine = {
       for (const task of snapshot.tasks) {
         const id = String(task.id);
         if (patchedIds.has(id)) continue;
-        if (sourceIsFixed(task.id)) continue;
+        if (sourceIsFirmed(task.id)) continue;
         const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
         if (taskPlant !== plant) continue;
         const line = task.MACHINE || 'Unknown';
@@ -3203,21 +3215,24 @@ export const Engine = {
       // C2: an order whose start already falls inside the plant's frozen
       // window is routed into the SAME obstacle bucket as a genuine manual
       // pin / aged / out-of-window task — unconditionally (not gated by
-      // respectFixed, same as isAged/isOutOfWin) — so every dispatcher fed
+      // respectFirmed, same as isAged/isOutOfWin) — so every dispatcher fed
       // by this split (_dispatchPolicyAware, the SPT walk below) leaves it
       // untouched. Engine.isFrozenHorizon carries its
       // own distinct reason for the UI; this split itself doesn't care why
       // a task is immovable, only that it is. Passes horizonStart as this
       // check's "now" — the SAME reference isAged/isOutOfWin already use —
       // so all three agree on one clock for this run instead of splitting.
-      const fixedTasks = tasks.filter(t =>
-        (respectFixed && sourceIsFixed(t.id)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, horizonStart)
+      // ECC-firmed rides the respectFirmed gate exactly like a manual firm — so
+      // 'backlog' mode (which sets respect off / moves firmed by design) may
+      // move ECC-firmed orders too (confirmed product decision).
+      const firmedTasks = tasks.filter(t =>
+        (respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, horizonStart)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFixed && sourceIsFixed(t.id)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, horizonStart)
+        !(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, horizonStart)
       );
 
-      fixedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
+      firmedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
 
       // Cursor floor is max(horizonStart, now): extending "From" backwards
       // widens eligibility (older orders become free to move) but never
@@ -3250,7 +3265,7 @@ export const Engine = {
           return 0;
         });
         const selectedOrder = decorated.map(d => d.t);
-        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, fixedTasks, cursor, splitPolicy, plant));
+        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, firmedTasks, cursor, splitPolicy, plant));
         continue;
       }
 
@@ -3268,29 +3283,29 @@ export const Engine = {
       });
       freeTasks = decorated.map(d => d.t);
 
-      // Walk through free tasks, jumping past each fixed task we encounter.
-      let fixIdx = 0;
+      // Walk through free tasks, jumping past each firmed task we encounter.
+      let firmIdx = 0;
       for (const t of freeTasks) {
         const durMs = Util.runHours(t) * Config.MS_HOUR;
         if (durMs <= 0) continue;
         const floor = Engine.earliestAllowedStart(t, plant);
         if (floor && cursor < floor) cursor = new Date(floor);
 
-        // Alternate between fixed-task collision check and calendar adjustment
+        // Alternate between firmed-task collision check and calendar adjustment
         // until cursor is stable. This handles the case where a calendar gap
-        // (blackout, closed hours) pushes cursor into a fixed task's window.
+        // (blackout, closed hours) pushes cursor into a firmed task's window.
         let guard = 0;
         for (; guard < 200; guard++) {
           const prevMs = cursor.getTime();
 
-          // Step 1: jump past any fixed task that cursor + duration would overlap.
-          while (fixIdx < fixedTasks.length) {
-            const f = fixedTasks[fixIdx];
-            if (!f.start_date || !f.end_date) { fixIdx++; continue; }
-            if (cursor >= f.end_date) { fixIdx++; continue; }
+          // Step 1: jump past any firmed task that cursor + duration would overlap.
+          while (firmIdx < firmedTasks.length) {
+            const f = firmedTasks[firmIdx];
+            if (!f.start_date || !f.end_date) { firmIdx++; continue; }
+            if (cursor >= f.end_date) { firmIdx++; continue; }
             if (cursor.getTime() + durMs <= f.start_date.getTime()) break;
             cursor = new Date(f.end_date);
-            fixIdx++;
+            firmIdx++;
           }
 
           // Step 2: advance past any closed/blackout region.
@@ -3303,7 +3318,7 @@ export const Engine = {
           // If cursor didn't move, both constraints are satisfied — done.
           if (cursor.getTime() === prevMs) break;
         }
-        // Guard exhausted without converging: the fixed-task + calendar constraints never
+        // Guard exhausted without converging: the firmed-task + calendar constraints never
         // settled on a stable slot. Placement still proceeds at `cursor`, but surface it
         // so the condition isn't silently swallowed (previously a hard-to-diagnose "why
         // didn't this order move?" at scale).
@@ -3311,7 +3326,7 @@ export const Engine = {
           reportSchedulerDiagnostic(
             'warn', 'engine', 'engine.placement-guard',
             `Placement guard hit 200 iterations on "${line}" for order "${t.text || t.id}" — ` +
-            `schedule may be suboptimal; check fixed orders / blackouts on this line.`,
+            `schedule may be suboptimal; check firmed orders / blackouts on this line.`,
             { line, taskId: t.id },
           );
         }
@@ -3341,9 +3356,10 @@ export const Engine = {
     PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
   },
 
-  /** After a manual edit to one task, re-flow subsequent unfixed orders on the
+  /** After a manual edit to one task, re-flow subsequent unfirmed orders on the
    *  same line to eliminate overlap. Spans day boundaries so Day-1 overflow
-   *  cascades correctly into Day-2 tasks. Does NOT move fixed orders. */
+   *  cascades correctly into Day-2 tasks. Does NOT move firmed orders (manual
+   *  or ECC-firmed). */
   autoReflow(changedId: string): void {
     const changed = Store.tasks[changedId];
     if (!changed || !changed.start_date || !changed.end_date) return;
@@ -3389,9 +3405,9 @@ export const Engine = {
           const requiredSetupMinutes = setupMinutes(predecessor, p);
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          if (Store.isFixed(p.id) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
-            // Fixed, frozen-window, or aged orders don't move — if there's a
-            // conflict, an alert will fire — but later unfixed peers must
+          if (Store.isFirmed(p.id) || !!p.ecc_firmed || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+            // Firmed, frozen-window, or aged orders don't move — if there's a
+            // conflict, an alert will fire — but later unfirmed peers must
             // still be de-overlapped, and the immovable order becomes the
             // setup predecessor they pay for.
             cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
@@ -3436,9 +3452,9 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFixed(p.id) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
-        // Fixed, frozen-window, or aged orders don't move — if there's a
-        // conflict, an alert will fire — but later unfixed peers must still
+      if (Store.isFirmed(p.id) || !!p.ecc_firmed || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+        // Firmed, frozen-window, or aged orders don't move — if there's a
+        // conflict, an alert will fire — but later unfirmed peers must still
         // be de-overlapped, and the immovable order becomes the setup
         // predecessor they pay for.
         cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));

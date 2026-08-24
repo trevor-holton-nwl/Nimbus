@@ -23,7 +23,7 @@ function task(id, runHours) {
     original_end_date: null,
     BASIC_START_DATE: null,
     BASIC_FINISH_DATE: null,
-    fixed: false,
+    firmed: false,
     row_version: null,
   };
 }
@@ -31,7 +31,7 @@ function task(id, runHours) {
 function legacySnapshot(tasks) {
   return {
     tasks,
-    fixedIds: [],
+    firmedIds: [],
     alerts: [],
     selectedPlant: 'P1',
     blocks: [],
@@ -82,10 +82,10 @@ function scheduledTask(id, runHours, color, due, start = null, end = null) {
   };
 }
 
-function setupSnapshot(tasks, { fixedIds = [], lineSettings = {} } = {}) {
+function setupSnapshot(tasks, { firmedIds = [], lineSettings = {} } = {}) {
   return {
     ...legacySnapshot(tasks),
-    fixedIds,
+    firmedIds,
     calendars: { L1: { workHours: OPEN_HOURS } },
     plants: { P1: { workHours: OPEN_HOURS } },
     lineSettings,
@@ -370,12 +370,12 @@ test('evaluateSchedule produces detached SPT patches without publishing or mutat
   // call subscribers, and replace the live task schedule before Apply.
   Store.setTasks([task('live', 9)], 'unit-test');
   Store.setSelectedPlant('P1', 'unit-test');
-  Store.setFixed('live', true, 'unit-test');
+  Store.setFirmed('live', true, 'unit-test');
   Store.setAlerts([{ id: 'existing-alert', type: 'overlap', sev: 'err' }], 'unit-test');
 
   const beforeRevision = Store.rev();
   const beforeTasks = structuredClone(Store.tasks);
-  const beforeFixedIds = Array.from(Store.fixedIds).sort();
+  const beforeFixedIds = Array.from(Store.firmedIds).sort();
   const beforeAlerts = structuredClone(Store.alerts);
   let published = 0;
   const unsubscribe = Store.subscribe(() => { published++; }, 'unit-test-autosave');
@@ -393,7 +393,7 @@ test('evaluateSchedule produces detached SPT patches without publishing or mutat
     assert.equal(result.patches[0].changes.start_date.getTime(), new Date('2026-08-03T08:00:00').getTime());
     assert.equal(Store.rev(), beforeRevision, 'candidate evaluation must not publish Store mutations');
     assert.deepEqual(Store.tasks, beforeTasks, 'candidate patches must not enter live task state');
-    assert.deepEqual(Array.from(Store.fixedIds).sort(), beforeFixedIds, 'candidate evaluation must not alter fixed boundaries');
+    assert.deepEqual(Array.from(Store.firmedIds).sort(), beforeFixedIds, 'candidate evaluation must not alter fixed boundaries');
     assert.deepEqual(Store.alerts, beforeAlerts, 'candidate evaluation must not publish alerts');
     assert.equal(published, 0, 'candidate evaluation must not wake autosave-like subscribers');
   } finally {
@@ -547,7 +547,7 @@ test('evaluateDueDateFirst preserves a fixed run while honoring its incoming and
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([before, fixed, after], { fixedIds: ['fixed-blue'] }),
+    setupSnapshot([before, fixed, after], { firmedIds: ['fixed-blue'] }),
     dueDateBounds(setup),
   );
 
@@ -559,7 +559,7 @@ test('evaluateDueDateFirst preserves a fixed run while honoring its incoming and
 });
 
 test('evaluateDueDateFirst preserves a fixed production run and still patches free work when its incoming setup cannot fit', () => {
-  // Never-freeze semantics (Part 1f): `incoming-fixed-setup-infeasible` skips
+  // Never-freeze semantics (Part 1f): `incoming-firmed-setup-infeasible` skips
   // the reservation and keeps the candidate feasible instead of freezing the
   // whole line. The fixed run itself must still never receive a patch.
   const before = scheduledTask('too-late-before', 1, 'RED', '2026-08-03T09:00:00');
@@ -572,7 +572,7 @@ test('evaluateDueDateFirst preserves a fixed production run and still patches fr
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([before, fixed], { fixedIds: ['fixed-blue-tight'] }),
+    setupSnapshot([before, fixed], { firmedIds: ['fixed-blue-tight'] }),
     dueDateBounds(setup),
   );
 
@@ -596,7 +596,7 @@ test('evaluateDueDateFirst uses each next fixed order as the outgoing setup boun
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([firstFixed, freeMiddle, secondFixed], { fixedIds: ['first-fixed-blue', 'second-fixed-yellow'] }),
+    setupSnapshot([firstFixed, freeMiddle, secondFixed], { firmedIds: ['first-fixed-blue', 'second-fixed-yellow'] }),
     dueDateBounds(setup),
   );
 
@@ -919,7 +919,7 @@ test('evaluateSptWithSetup solves free fragments around a fixed order without ch
   ] });
 
   const result = SetupScheduler.evaluateSptWithSetup(
-    setupSnapshot([longer, fixed, shorter], { fixedIds: ['spt-fixed-blue'] }),
+    setupSnapshot([longer, fixed, shorter], { firmedIds: ['spt-fixed-blue'] }),
     dueDateBounds(setup),
   );
 
@@ -944,7 +944,7 @@ test('evaluateSptWithSetup admits unscheduled short-runtime work before a fixed 
   ] });
 
   const result = SetupScheduler.evaluateSptWithSetup(
-    setupSnapshot([long, fixed, medium, short], { fixedIds: ['spt-pre-fixed-blue'] }),
+    setupSnapshot([long, fixed, medium, short], { firmedIds: ['spt-pre-fixed-blue'] }),
     dueDateBounds(setup),
   );
 
@@ -974,7 +974,7 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
   }] });
 
   const beforeResult = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([beforeFixed, fixedBlue], { fixedIds: ['override-fixed-blue'] }),
+    setupSnapshot([beforeFixed, fixedBlue], { firmedIds: ['override-fixed-blue'] }),
     dueDateBounds(beforeSetup),
   );
 
@@ -995,7 +995,7 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
   }] });
 
   const afterResult = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([afterFixed, fixedBlueAgain], { fixedIds: ['override-fixed-blue-again'] }),
+    setupSnapshot([afterFixed, fixedBlueAgain], { firmedIds: ['override-fixed-blue-again'] }),
     dueDateBounds(afterSetup),
   );
 
@@ -1025,7 +1025,7 @@ test('evaluateDueDateFirst honors an active override already bound between adjac
   });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([fixedBlue, fixedRed], { fixedIds: ['override-fixed-red', 'override-fixed-blue'] }),
+    setupSnapshot([fixedBlue, fixedRed], { firmedIds: ['override-fixed-red', 'override-fixed-blue'] }),
     dueDateBounds(setup),
   );
 
@@ -1033,7 +1033,7 @@ test('evaluateDueDateFirst honors an active override already bound between adjac
   assert.deepEqual(result.unchangedLines, []);
   assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false);
   assert.ok(result.explanation.some(reason => (
-    reason.code === 'fixed-incoming-setup' && reason.taskId === 'override-fixed-blue' && reason.message.includes('10')
+    reason.code === 'firmed-incoming-setup' && reason.taskId === 'override-fixed-blue' && reason.message.includes('10')
   )), 'the bound override must resolve the transition into the second fixed production run');
 });
 
@@ -1052,7 +1052,7 @@ test('evaluateDueDateFirst admits a feasible pre-fixed due prefix and carries th
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([yellow, fixed, red], { fixedIds: ['admitted-fixed-blue'] }),
+    setupSnapshot([yellow, fixed, red], { firmedIds: ['admitted-fixed-blue'] }),
     dueDateBounds(setup),
   );
 
@@ -1070,13 +1070,13 @@ test('evaluateDueDateFirst accepts a zero-minute transition into a fixed run at 
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([fixed], { fixedIds: ['zero-fixed-blue'] }),
+    setupSnapshot([fixed], { firmedIds: ['zero-fixed-blue'] }),
     dueDateBounds(setup),
   );
 
   assert.deepEqual(result.patches, []);
   assert.deepEqual(result.unchangedLines, []);
-  assert.equal(result.missingEdges.some(edge => edge.reason === 'incoming-fixed-setup-infeasible'), false);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'incoming-firmed-setup-infeasible'), false);
 });
 
 test('setup-aware evaluators never freeze a line over a stale-signature line state: they proceed with a null initial state', () => {
@@ -1187,7 +1187,7 @@ test('evaluateDueDateFirst keeps a free active override pair on one side of a fi
   });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([successor, fixed, predecessor], { fixedIds: ['cross-boundary-fixed-yellow'] }),
+    setupSnapshot([successor, fixed, predecessor], { firmedIds: ['cross-boundary-fixed-yellow'] }),
     dueDateBounds(setup),
   );
 
@@ -1255,7 +1255,7 @@ test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([freeRed, fixedBlue], { fixedIds: ['initial-override-fixed-blue'] }),
+      setupSnapshot([freeRed, fixedBlue], { firmedIds: ['initial-override-fixed-blue'] }),
       dueDateBounds(setup),
     );
 
@@ -1264,7 +1264,7 @@ test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-
     assert.deepEqual(result.unchangedLines, []);
     assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false);
     assert.ok(result.explanation.some(reason => (
-      reason.code === 'fixed-incoming-setup'
+      reason.code === 'firmed-incoming-setup'
       && reason.taskId === 'initial-override-fixed-blue'
       && reason.message.includes('10')
     )), `${label} resolves the incoming fixed setup from the protected override`);
@@ -1311,12 +1311,12 @@ test('setup-aware evaluators reject invalid null-predecessor overrides on fixed 
     for (const [caseLabel, snapshot, setup] of [
       [
         'later fixed boundary',
-        setupSnapshot([firstFixed, laterFixed], { fixedIds: ['invalid-null-first-blue', 'invalid-null-later-yellow'] }),
+        setupSnapshot([firstFixed, laterFixed], { firmedIds: ['invalid-null-first-blue', 'invalid-null-later-yellow'] }),
         laterSetup,
       ],
       [
         'stale initial state',
-        setupSnapshot([staleStateFixed], { fixedIds: ['invalid-null-state-blue'] }),
+        setupSnapshot([staleStateFixed], { firmedIds: ['invalid-null-state-blue'] }),
         staleStateSetup,
       ],
     ]) {
@@ -1363,7 +1363,7 @@ test('setup-aware evaluators admit an initial-state free override and its protec
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([yellow, fixed, blue, red], { fixedIds: ['initial-free-fixed-yellow'] }),
+      setupSnapshot([yellow, fixed, blue, red], { firmedIds: ['initial-free-fixed-yellow'] }),
       dueDateBounds(setup),
     );
 
@@ -1410,7 +1410,7 @@ test('setup-aware evaluators leave an initial-state free override unchanged when
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([blue, fixed, red], { fixedIds: ['initial-free-tight-fixed-yellow'] }),
+      setupSnapshot([blue, fixed, red], { firmedIds: ['initial-free-tight-fixed-yellow'] }),
       dueDateBounds(setup),
     );
 
@@ -1458,7 +1458,7 @@ test('setup-aware evaluators keep every earlier fragment patch when trailing cap
     ['SPT', SetupScheduler.evaluateSptWithSetup, 'terminal-old-overlap-red'],
   ]) {
     const result = evaluate(
-      setupSnapshot([oldOverlap, fixed, firstTrailing, before], { fixedIds: ['terminal-fixed-blue'] }),
+      setupSnapshot([oldOverlap, fixed, firstTrailing, before], { firmedIds: ['terminal-fixed-blue'] }),
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T11:30:00') }),
     );
 
@@ -1642,7 +1642,7 @@ test('setup-aware evaluators never freeze on an uncovered pre-fixed transition: 
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([red, fixedBlue], { fixedIds: ['covered-fallback-fixed-blue'] }),
+      setupSnapshot([red, fixedBlue], { firmedIds: ['covered-fallback-fixed-blue'] }),
       dueDateBounds(setup),
     );
 
@@ -1860,7 +1860,7 @@ test('setup-aware evaluators admit a covered pre-fixed order directly, skipping 
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([red, fixedBlue], { fixedIds: ['outgoing-fallback-fixed-blue'] }),
+      setupSnapshot([red, fixedBlue], { firmedIds: ['outgoing-fallback-fixed-blue'] }),
       dueDateBounds(setup),
     );
     const redPatch = patchFor(result, 'outgoing-fallback-red');
@@ -1874,7 +1874,7 @@ test('setup-aware evaluators admit a covered pre-fixed order directly, skipping 
 });
 
 test('setup-aware evaluators admit a covered pre-fixed order even when its incoming setup cannot fit before fixed work', () => {
-  // Never-freeze semantics (Part 1f): `incoming-fixed-setup-infeasible`
+  // Never-freeze semantics (Part 1f): `incoming-firmed-setup-infeasible`
   // skips the reservation and stays feasible, so RED is still admitted
   // directly ahead of fixed BLUE through the normal search rather than
   // being deferred to evaluate from BLUE's outgoing state.
@@ -1893,7 +1893,7 @@ test('setup-aware evaluators admit a covered pre-fixed order even when its incom
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([red, fixedBlue], { fixedIds: ['capacity-fallback-fixed-blue'] }),
+      setupSnapshot([red, fixedBlue], { firmedIds: ['capacity-fallback-fixed-blue'] }),
       dueDateBounds(setup),
     );
     const redPatch = patchFor(result, 'capacity-fallback-red');
@@ -1928,7 +1928,7 @@ test('setup-aware evaluators admit the full pre-fixed sequence directly, skippin
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([b, fixedBlue, a], { fixedIds: ['suffix-fallback-fixed-blue'] }),
+      setupSnapshot([b, fixedBlue, a], { firmedIds: ['suffix-fallback-fixed-blue'] }),
       dueDateBounds(setup),
     );
 
@@ -2011,7 +2011,7 @@ test('fixed-boundary failure retains preserved-anchor and stale-override diagnos
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([fixedRed, anchor], { fixedIds: ['early-exit-fixed-red'] }),
+      setupSnapshot([fixedRed, anchor], { firmedIds: ['early-exit-fixed-red'] }),
       dueDateBounds(setup),
     );
 
@@ -2114,7 +2114,7 @@ test('setup-aware evaluators never schedule through a fixed boundary beyond the 
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([red, fixedBlue], { fixedIds: ['bounded-horizon-fixed-blue'] }),
+      setupSnapshot([red, fixedBlue], { firmedIds: ['bounded-horizon-fixed-blue'] }),
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
     );
 
@@ -2151,7 +2151,7 @@ test('due-date fallback admits the fully-covered internal pair before fixed work
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([red, fixedYellow, blue], { fixedIds: ['fallback-choice-fixed-yellow'] }),
+    setupSnapshot([red, fixedYellow, blue], { firmedIds: ['fallback-choice-fixed-yellow'] }),
     dueDateBounds(setup),
   );
 
@@ -2198,7 +2198,7 @@ test('due-date final-boundary fallback: the fully covered protected pair is admi
       standard_min: 0, remaining_min: 0, status: 'active', reason: 'component fixture',
     }],
   });
-  const snapshot = setupSnapshot([red, fixed, orange, blue], { fixedIds: ['complete-fallback-fixed-yellow'] });
+  const snapshot = setupSnapshot([red, fixed, orange, blue], { firmedIds: ['complete-fallback-fixed-yellow'] });
   snapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 1, RED: 2, ORANGE: 2 } } };
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
@@ -2244,7 +2244,7 @@ test('due-date final-boundary fallback: BLUE is admitted through the fixed bound
   ] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([red, fixedYellow, blue, orange], { fixedIds: ['non-contiguous-fallback-fixed-yellow'] }),
+    setupSnapshot([red, fixedYellow, blue, orange], { firmedIds: ['non-contiguous-fallback-fixed-yellow'] }),
     dueDateBounds(setup, { iterationCap: 512 }),
   );
 
@@ -2262,7 +2262,7 @@ test('due-date final-boundary fallback: BLUE is admitted through the fixed bound
 });
 
 test('due-date earlier fixed-boundary fallback fails closed when multiple local routes are feasible', () => {
-  // Superseded by A7: `fixed-boundary-fallback-ambiguous` used to freeze the
+  // Superseded by A7: `firmed-boundary-fallback-ambiguous` used to freeze the
   // whole line here (the one fail-closed path the earlier never-freeze pass
   // deliberately left alone, since ranking between multiple locally-feasible
   // routes needs a full branching planner this detached evaluator doesn't
@@ -2292,7 +2292,7 @@ test('due-date earlier fixed-boundary fallback fails closed when multiple local 
 
   const result = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([red, firstFixed, blue, secondFixed], {
-      fixedIds: ['ambiguous-earlier-fixed-yellow', 'ambiguous-earlier-fixed-purple'],
+      firmedIds: ['ambiguous-earlier-fixed-yellow', 'ambiguous-earlier-fixed-purple'],
     }),
     dueDateBounds(setup),
   );
@@ -2301,7 +2301,7 @@ test('due-date earlier fixed-boundary fallback fails closed when multiple local 
   assert.equal(patchFor(result, 'ambiguous-earlier-blue').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
   assert.equal(patchFor(result, 'ambiguous-earlier-red').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime());
   assert.deepEqual(result.unchangedLines, []);
-  assert.equal(result.explanation.some(reason => reason.code === 'fixed-boundary-fallback-ambiguous'), false,
+  assert.equal(result.explanation.some(reason => reason.code === 'firmed-boundary-fallback-ambiguous'), false,
     'the ambiguity freeze path no longer fires; both orders are admitted instead');
 });
 
@@ -2338,7 +2338,7 @@ test('due-date earlier fixed-boundary fallback proceeds when exactly one local r
 
   const result = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([red, firstFixed, blue, secondFixed], {
-      fixedIds: ['unique-earlier-fixed-yellow', 'unique-earlier-fixed-purple'],
+      firmedIds: ['unique-earlier-fixed-yellow', 'unique-earlier-fixed-purple'],
     }),
     dueDateBounds(setup),
   );
@@ -2350,7 +2350,7 @@ test('due-date earlier fixed-boundary fallback proceeds when exactly one local r
   assert.equal(patchFor(result, 'unique-earlier-blue').changes.start_date.getTime(), at('2026-08-03T09:00:00').getTime(),
     'BLUE is sequenced last, immediately ahead of the fixed boundary, via the only fully-covered route');
   assert.deepEqual(result.unchangedLines, []);
-  assert.equal(result.explanation.some(reason => reason.code === 'fixed-boundary-fallback-ambiguous'), false);
+  assert.equal(result.explanation.some(reason => reason.code === 'firmed-boundary-fallback-ambiguous'), false);
 });
 
 test('setup-aware evaluators preserve active relations crossing a strictly post-horizon fixed boundary', () => {
@@ -2428,7 +2428,7 @@ test('setup-aware evaluators preserve active relations crossing a strictly post-
       ['SPT', SetupScheduler.evaluateSptWithSetup],
     ]) {
       const result = evaluate(
-        setupSnapshot(fixture.tasks, { fixedIds: [fixture.tasks.at(-1).id] }),
+        setupSnapshot(fixture.tasks, { firmedIds: [fixture.tasks.at(-1).id] }),
         dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
       );
 
@@ -2437,7 +2437,7 @@ test('setup-aware evaluators preserve active relations crossing a strictly post-
       assert.ok(result.missingEdges.some(edge => (
         edge.predecessorOrderId === fixture.predecessorOrderId
         && edge.successorOrderId === fixture.successorOrderId
-        && edge.reason === 'protected-fixed-boundary-outside-horizon'
+        && edge.reason === 'protected-firmed-boundary-outside-horizon'
       )), `${mode} reports the retained boundary constraint`);
       assert.equal(result.missingEdges.some(edge => (
         edge.predecessorOrderId === fixture.predecessorOrderId
@@ -2500,7 +2500,7 @@ test('setup-aware evaluators diagnose stale post-horizon override bindings as in
       ['SPT', SetupScheduler.evaluateSptWithSetup],
     ]) {
       const result = evaluate(
-        setupSnapshot(fixture.tasks, { fixedIds: [fixture.fixedId] }),
+        setupSnapshot(fixture.tasks, { firmedIds: [fixture.fixedId] }),
         dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
       );
 
@@ -2513,7 +2513,7 @@ test('setup-aware evaluators diagnose stale post-horizon override bindings as in
       assert.equal(result.missingEdges.some(edge => (
         edge.predecessorOrderId === fixture.predecessorOrderId
         && edge.successorOrderId === fixture.successorOrderId
-        && edge.reason === 'protected-fixed-boundary-outside-horizon'
+        && edge.reason === 'protected-firmed-boundary-outside-horizon'
       )), false, `${mode} does not protect a stale ${fixture.label} binding`);
     }
   }
@@ -2537,7 +2537,7 @@ test('setup-aware evaluators retain a fixed order at horizonEnd as the terminal 
     ['SPT', SetupScheduler.evaluateSptWithSetup],
   ]) {
     const result = evaluate(
-      setupSnapshot([red, fixedBlue], { fixedIds: ['horizon-terminal-fixed-blue'] }),
+      setupSnapshot([red, fixedBlue], { firmedIds: ['horizon-terminal-fixed-blue'] }),
       dueDateBounds(setup, { horizonEnd: at('2026-08-03T10:00:00') }),
     );
 
@@ -2578,7 +2578,7 @@ test('due-date search retains uncovered rejected alternatives for exact and gree
 
   for (const [label, threshold] of [['exact', 6], ['greedy', 0]]) {
     const result = SetupScheduler.evaluateDueDateFirst(
-      setupSnapshot([red, fixedYellow, blue], { fixedIds: ['rejected-edge-fixed-yellow'] }),
+      setupSnapshot([red, fixedYellow, blue], { firmedIds: ['rejected-edge-fixed-yellow'] }),
       dueDateBounds(setup, { exactSearchThreshold: threshold }),
     );
     const rejectedEdges = result.missingEdges.filter(edge => (
@@ -2674,7 +2674,7 @@ test('unknown-tail overflow before a fixed boundary defers the overflowing order
   const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
 
   const result = SetupScheduler.evaluateDueDateFirst(
-    setupSnapshot([first, second, fixed], { fixedIds: ['overflow-fixed'] }),
+    setupSnapshot([first, second, fixed], { firmedIds: ['overflow-fixed'] }),
     dueDateBounds(setup),
   );
 
@@ -3127,7 +3127,7 @@ test('isSearchConclusive treats \'converged\' exactly like \'completed\', never 
   // constructible: `supportsBoundaryFallback` (the gate that admits a run
   // into the boundary-fallback branches at all) requires `run.winner ===
   // null` AND every one of `run.missingEdges`' reasons to be either
-  // `UNCOVERED_SETUP_TRANSITION_REASON` or 'incoming-fixed-setup-infeasible'.
+  // `UNCOVERED_SETUP_TRANSITION_REASON` or 'incoming-firmed-setup-infeasible'.
   // Reading every `feasible: false` return in `candidateForSequence` shows
   // neither reason is ever attached to an infeasible candidate — both are
   // only ever pushed on an already-FEASIBLE candidate (Part 1f's lenient

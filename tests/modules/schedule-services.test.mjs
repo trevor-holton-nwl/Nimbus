@@ -244,6 +244,54 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
   }
 });
 
+// ---------------------------------------------------------------------------
+// Engine.firmingStatus — union of ecc/frozen/manual firming reasons.
+// ---------------------------------------------------------------------------
+
+test('Engine.firmingStatus reports each reason alone, a combination, and none', () => {
+  const priorEnd = Store.frozenHorizonEnd;
+  const now = new Date('2026-08-20T08:00:00');
+  try {
+    Store.setFrozenHorizonEnd(null, 'unit-test');
+
+    // No reasons at all.
+    Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-none'], now), { firmed: false, reasons: [] });
+
+    // 'ecc' alone -- via task.ecc_firmed, no manual firm.
+    Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-ecc'], now), { firmed: true, reasons: ['ecc'] });
+
+    // 'frozen' alone -- inside the horizon band, not manually firmed, not ECC-firmed.
+    const frozenEnd = new Date('2026-08-25T00:00:00');
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+    Store.setTasks([{ id: 'firming-frozen', RUN_TIME: '1', start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-frozen'], now), { firmed: true, reasons: ['frozen'] });
+    Store.setFrozenHorizonEnd(null, 'unit-test');
+
+    // 'manual' alone -- reflects Store.isFirmed (set via setFirmed), not a stale task.firmed property.
+    Store.setTasks([{ id: 'firming-manual', RUN_TIME: '1', firmed: false, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setFirmed('firming-manual', true, 'unit-test');
+    assert.equal(Store.tasks['firming-manual'].firmed, true, 'setFirmed also mirrors onto task.firmed');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-manual'], now), { firmed: true, reasons: ['manual'] });
+    // Prove the read is live off Store.isFirmed, not a cached task.firmed: force
+    // task.firmed stale (true) while firmedIds no longer contains the id.
+    Store.tasks['firming-manual'].firmed = true;
+    Store.firmedIds.delete('firming-manual');
+    assert.equal(Store.isFirmed('firming-manual'), false);
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-manual'], now), { firmed: false, reasons: [] },
+      'firmingStatus must follow Store.isFirmed, not a stale task.firmed mirror');
+
+    // Combination -- ecc + frozen + manual all at once.
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+    Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    Store.setFirmed('firming-all', true, 'unit-test');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], now), { firmed: true, reasons: ['ecc', 'frozen', 'manual'] });
+  } finally {
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
 test('Engine.runAndApply("spt") leaves an order starting inside the frozen window untouched and never places another order into it (Step 8: legacy walk)', () => {
   const plant = 'FZ-SPT-PLANT';
   const line = 'FZ-SPT-LINE';
@@ -278,7 +326,7 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   ], 'unit-test');
 
   try {
-    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: true, startDate: horizonStart });
+    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart });
     assert.equal(Store.tasks['spt-frozen-in-place'].start_date.getTime(), frozenStart.getTime(),
       'an order already starting inside the frozen window is left EXACTLY where it was -- never rescheduled into or through the window');
     assert.equal(Store.tasks['spt-frozen-in-place'].end_date.getTime(), frozenTaskEnd.getTime());
@@ -391,7 +439,7 @@ test('changeover advances to a future order pull-forward floor instead of stalli
     }], 'child-test');
     const result = Engine.evaluateSchedule('changeover', {
       plant: 'PULL', startDate: now, endDate: new Date('2035-08-31T18:00:00'), now,
-      respectFixed: true, respectCalendar: true,
+      respectFirmed: true, respectCalendar: true,
     }, snapshotSchedule());
     const patch = result.patches.find(candidate => candidate.id === 'future-order');
     const start = patch?.changes.start_date;
@@ -451,7 +499,7 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     }], 'child-test');
     const result = Engine.evaluateSchedule('changeover', {
       plant: 'PULL', startDate: now, endDate: new Date('2036-04-01T18:00:00'), now,
-      respectFixed: true, respectCalendar: true,
+      respectFirmed: true, respectCalendar: true,
     }, snapshotSchedule());
     const patch = result.patches.find(candidate => candidate.id === 'long-wait-order');
     console.log(JSON.stringify({
@@ -661,11 +709,11 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
     { id: 'detached-short', MACHINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '1', start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('DETACHED', 'unit-test');
-  Store.setFixed('detached-long', true, 'unit-test');
+  Store.setFirmed('detached-long', true, 'unit-test');
   Store.setAlerts([{ id: 'detached-alert', type: 'overlap', sev: 'err' }], 'unit-test');
   const beforeRev = Store.rev();
   const beforeTasks = structuredClone(Store.tasks);
-  const beforeFixed = Array.from(Store.fixedIds).sort();
+  const beforeFirmed = Array.from(Store.firmedIds).sort();
   const beforeAlerts = structuredClone(Store.alerts);
   let publications = 0;
   const unsubscribe = Store.subscribe(() => { publications++; }, 'unit-test-autosave');
@@ -676,10 +724,10 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
       now: new Date('2026-08-03T08:00:00'),
     });
     assert.deepEqual(candidate.patches.map(patch => patch.id), ['detached-short'],
-      'fixed work remains an immutable candidate boundary');
+      'firmed work remains an immutable candidate boundary');
     assert.equal(Store.rev(), beforeRev);
     assert.deepEqual(Store.tasks, beforeTasks);
-    assert.deepEqual(Array.from(Store.fixedIds).sort(), beforeFixed);
+    assert.deepEqual(Array.from(Store.firmedIds).sort(), beforeFirmed);
     assert.deepEqual(Store.alerts, beforeAlerts);
     assert.equal(publications, 0, 'candidate evaluation must not wake autosave-style subscribers');
 
@@ -703,7 +751,7 @@ test('Engine.evaluateSetupAware forwards only an explicit detached setup request
       id: 'engine-setup-blue', PLANT: 'ENGINE_SETUP', MACHINE: 'L1', COLOR: 'BLUE', RUN_TIME: 1,
       start_date: null, end_date: null, original_end_date: new Date('2026-08-03T10:00:00'),
     }],
-    fixedIds: [], alerts: [], selectedPlant: 'ENGINE_SETUP', blocks: [], plantBlocks: [],
+    firmedIds: [], alerts: [], selectedPlant: 'ENGINE_SETUP', blocks: [], plantBlocks: [],
     calendars: { L1: { workHours: hours } }, plants: { ENGINE_SETUP: { workHours: hours } },
     lineSettings: {}, masterData: { plants: [{ plant: 'ENGINE_SETUP' }], lines: [{ plant: 'ENGINE_SETUP', machine: 'L1' }] },
     priorityRankMaps: {},
@@ -738,7 +786,7 @@ test('Engine.evaluateSetupAware refuses candidates when setup activation is disa
       id: 'disabled-setup-blue', PLANT: 'DISABLED_SETUP', MACHINE: 'L1', COLOR: 'BLUE', RUN_TIME: 1,
       start_date: null, end_date: null, original_end_date: new Date('2026-08-03T10:00:00'),
     }],
-    fixedIds: [], alerts: [], selectedPlant: 'DISABLED_SETUP', blocks: [], plantBlocks: [],
+    firmedIds: [], alerts: [], selectedPlant: 'DISABLED_SETUP', blocks: [], plantBlocks: [],
     calendars: { L1: { workHours: hours } }, plants: { DISABLED_SETUP: { workHours: hours } },
     lineSettings: {}, masterData: { plants: [{ plant: 'DISABLED_SETUP' }], lines: [{ plant: 'DISABLED_SETUP', machine: 'L1' }] },
     priorityRankMaps: {},
@@ -1281,7 +1329,7 @@ test('Engine.evaluateSchedule preserves changeover-mode placement from the live 
     { id: 'parity-blue-short', MACHINE: 'L1', PLANT: 'PARITY', COLOR: 'BLUE', FORM_SIZE: 'A', RUN_TIME: '1', start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('PARITY', 'unit-test');
-  const options = { startDate, respectFixed: true, respectCalendar: false };
+  const options = { startDate, respectFirmed: true, respectCalendar: false };
   const candidate = Engine.evaluateSchedule('changeover', options);
 
   Engine.runAndApply('changeover', options);
@@ -1310,13 +1358,13 @@ test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending
     { id: 'e2', MACHINE: 'L1', PLANT: '5512', RUN_TIME: '1', start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  Engine.runAndApply('spt', { respectFixed: true, respectCalendar: false });
+  Engine.runAndApply('spt', { respectFirmed: true, respectCalendar: false });
   const e1 = Store.tasks['e1'], e2 = Store.tasks['e2'];
   assert.ok(e1.start_date, 'e1 must have been scheduled (proves the line group was non-empty)');
   assert.ok(e2.start_date <= e1.start_date, 'shorter run-time task (e2) must be scheduled first under SPT');
 });
 
-test('Engine.autoReflow pushes an overlapping unfixed downstream peer forward on the same line', () => {
+test('Engine.autoReflow pushes an overlapping unfirmed downstream peer forward on the same line', () => {
   // Keep this calendar-aware regression in the future: aged orders are
   // intentionally excluded from reflow, and the previous fixed 2026 date is
   // now historical. Pick the next Monday to avoid a default weekend closure.
@@ -1337,7 +1385,7 @@ test('Engine.autoReflow pushes an overlapping unfixed downstream peer forward on
   assert.ok(r2.start_date >= end1, 'downstream peer must have moved to start at/after the changed task\'s end');
 });
 
-test('Engine.runAndApply respects explicit respectFixed/respectCalendar options without reading any DOM element', () => {
+test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options without reading any DOM element', () => {
   // Regression test for the DOM-read fix in Step 4: call runAndApply with both
   // flags explicit and confirm `document.getElementById` is never invoked.
   // The shared harness stub installed at the top of this file
@@ -1353,8 +1401,8 @@ test('Engine.runAndApply respects explicit respectFixed/respectCalendar options 
   try {
     Store.setTasks([{ id: 'e3', MACHINE: 'L1', plant: '5512', RUN_TIME: '1' }], 'unit-test');
     Store.setSelectedPlant('5512', 'unit-test');
-    assert.doesNotThrow(() => Engine.runAndApply('changeover', { respectFixed: true, respectCalendar: true }));
-    assert.equal(calls, 0, 'Engine.runAndApply must not call document.getElementById when respectFixed/respectCalendar are both passed explicitly');
+    assert.doesNotThrow(() => Engine.runAndApply('changeover', { respectFirmed: true, respectCalendar: true }));
+    assert.equal(calls, 0, 'Engine.runAndApply must not call document.getElementById when respectFirmed/respectCalendar are both passed explicitly');
   } finally {
     globalThis.document = priorDocument;
   }
@@ -1706,7 +1754,7 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
     { id: 'cw-red',  MACHINE: 'LC', PLANT: '5512', RUN_TIME: '3', COLOR: 'RED',  start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  Engine.runAndApply('changeover', { respectFixed: true, respectCalendar: false });
+  Engine.runAndApply('changeover', { respectFirmed: true, respectCalendar: false });
   const red = Store.tasks['cw-red'], blue = Store.tasks['cw-blue'];
   assert.ok(red.start_date && blue.start_date, 'both orders must have been scheduled');
   assert.ok(red.start_date <= blue.start_date,
@@ -1924,7 +1972,7 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
 
   try {
     Engine.runAndApply('changeover', {
-      plant, respectFixed: true, respectCalendar: false,
+      plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-17T00:00:00'), endDate: new Date('2026-08-20T00:00:00'),
     });
 
@@ -1975,7 +2023,7 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
       start_date: null, end_date: null, original_end_date: new Date('2026-09-01T13:00:00') },
   ]);
   const opts = {
-    plant, respectFixed: true, respectCalendar: false,
+    plant, respectFirmed: true, respectCalendar: false,
     startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
   };
   const positions = () => ({
@@ -2058,7 +2106,7 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
 
   try {
     Engine.runAndApply('changeover', {
-      plant, respectFixed: true, respectCalendar: false,
+      plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
     });
 
@@ -2122,7 +2170,7 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
 
   try {
     Engine.runAndApply('changeover', {
-      plant, respectFixed: true, respectCalendar: true,
+      plant, respectFirmed: true, respectCalendar: true,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-10-15T00:00:00'),
     });
 
@@ -2180,7 +2228,7 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
 
   try {
     Engine.runAndApply('changeover', {
-      plant, respectFixed: true, respectCalendar: false,
+      plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
     });
 
@@ -2276,7 +2324,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
 
   try {
     Engine.runAndApply('changeover', {
-      plant, respectFixed: true, respectCalendar: false,
+      plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'),
     });
 
@@ -2344,7 +2392,7 @@ test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion o
 
   const openHours = () => { for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test'); };
   const runOpts = {
-    plant, respectFixed: true, respectCalendar: false,
+    plant, respectFirmed: true, respectCalendar: false,
     startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
   };
   const positions = () => ({
@@ -2441,7 +2489,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
   const priorPriorityRankMaps = Store.priorityRankMaps;
 
   const runOpts = {
-    plant, respectFixed: true, respectCalendar: false,
+    plant, respectFirmed: true, respectCalendar: false,
     startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
   };
   const positions = () => ({
@@ -2693,7 +2741,7 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
   Engine.lastSetupAwareResult = { patches: [], score: [], explanation: [], diagnostics: {}, unchangedLines: [], missingEdges: [] };
 
   try {
-    Engine.runAndApply('spt', { plant, respectFixed: true, respectCalendar: false });
+    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
     assert.equal(Engine.lastSetupAwareResult, null, 'a later non-setup-aware run clears the stale result, not just leaves it');
   } finally {
     Store.setTasks(priorTasks, 'unit-test');

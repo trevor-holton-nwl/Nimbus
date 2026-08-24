@@ -404,12 +404,12 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Table.fixSelected(false)"
+      "expression": "NIMBUS.Table.firmSelected(false)"
     },
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Table.fixSelected(true)"
+      "expression": "NIMBUS.Table.firmSelected(true)"
     },
     {
       "file": "index.html",
@@ -609,17 +609,17 @@
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._unfix('${t.id}')"
+      "expression": "NIMBUS.Dashboard._unfirm('${t.id}')"
     },
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFix(false)"
+      "expression": "NIMBUS.Inspector.toggleFirm(false)"
     },
     {
       "file": "schedule-workbench.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFix(true)"
+      "expression": "NIMBUS.Inspector.toggleFirm(true)"
     },
     {
       "file": "schedule-workbench.mjs",
@@ -695,7 +695,7 @@
     "Table._toggleChipDropdown",
     "Table.applyOverride",
     "Table.exportCsv",
-    "Table.fixSelected",
+    "Table.firmSelected",
     "Table.openOverrideModal",
     "Timeline.gotoNow",
     "Timeline.zoomToFit"
@@ -716,13 +716,13 @@
     "Store.alerts",
     "Store.blocks",
     "Store.getPlantForLine",
-    "Store.isFixed",
+    "Store.isFirmed",
     "Store.plantBlocks",
     "Store.pref",
     "Store.rev",
     "Store.roleDefaults",
     "Store.selectedPlant",
-    "Store.setFixed",
+    "Store.setFirmed",
     "Store.subscribe",
     "Store.tasks",
     "Store.tasksArr",

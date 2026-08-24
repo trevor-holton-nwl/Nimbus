@@ -35,7 +35,7 @@ interface StoreState {
   calendars: Record<string, CalendarEntry>;
   blocks: NimbusBlock[];
   alerts: NimbusAlert[];
-  fixedIds: Set<string>;
+  firmedIds: Set<string>;
   meta: { lastOptimize: Date | null };
   plants: Record<string, CalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
@@ -99,7 +99,7 @@ interface SandboxSnapshot {
   calendars: Record<string, CalendarEntry>;
   plants: Record<string, CalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
-  fixedIds: Set<string>;
+  firmedIds: Set<string>;
 }
 
 // Two DI seams replace what used to be direct references from Store into modules
@@ -126,7 +126,7 @@ export const Store = {
     calendars:    {},
     blocks:       [],
     alerts:       [],
-    fixedIds:     new Set<string>(),
+    firmedIds:    new Set<string>(),
     meta:         { lastOptimize: null },
     plants:       {},
     plantBlocks:  [],
@@ -166,13 +166,13 @@ export const Store = {
   get blocks(): NimbusBlock[]    { return this._state.blocks; },
   get alerts(): NimbusAlert[]    { return this._state.alerts; },
   get calendars(): Record<string, CalendarEntry> { return this._state.calendars; },
-  get fixedIds(): Set<string>  { return this._state.fixedIds; },
+  get firmedIds(): Set<string> { return this._state.firmedIds; },
   get tasksArr(): NimbusTask[]      { return Object.values(this._state.tasks); },
   get plants(): Record<string, CalendarEntry>        { return this._state.plants; },
   get plantBlocks(): NimbusPlantBlock[]   { return this._state.plantBlocks; },
   get lineSettings(): Record<string, NimbusLineSetting>  { return this._state.lineSettings; },
   get selectedPlant(): string | null { return this._state.selectedPlant; },
-  // Live reference (same convention as fixedIds above) — callers that alias this
+  // Live reference (same convention as firmedIds above) — callers that alias this
   // Set (GanttFilter/Table/Dashboard) see every future in-place mutation for free.
   get selectedLines(): Set<string> { return this._state.selectedLines; },
   get userSettings(): StoreState['userSettings']  { return this._state.userSettings; },
@@ -185,7 +185,7 @@ export const Store = {
   get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
   get frozenHorizonEnd(): Date | null { return this._state.frozenHorizonEnd; },
 
-  isFixed(id: string | number): boolean     { return this._state.fixedIds.has(String(id)); },
+  isFirmed(id: string | number): boolean    { return this._state.firmedIds.has(String(id)); },
 
   /** Record the timestamp of the last optimizer run. Public equivalent of the
    *  former direct `Store._state.meta.lastOptimize = ...` write (CQ-1 Phase 2
@@ -344,7 +344,7 @@ export const Store = {
     this.emit({ type: 'task:update', id, prev, next, changes, source });
   },
 
-  // Remove a task, cleaning up dependencies, fixedIds, and (if present)
+  // Remove a task, cleaning up dependencies, firmedIds, and (if present)
   // the Selection set. Emits 'task:remove'.
   removeTask(id: string | number, source?: string): NimbusTask | null {
     const key = String(id);
@@ -362,7 +362,7 @@ export const Store = {
       if (!arr.length) delete deps[target];
     }
 
-    this._state.fixedIds.delete(key);
+    this._state.firmedIds.delete(key);
     // `Selection` is declared further down in this same module (a sibling
     // top-level const) — referencing it here is safe even though it appears
     // "before" its declaration in file order, because removeTask() is never
@@ -385,17 +385,17 @@ export const Store = {
     this.emit({ type: 'tasks:bulkUpdate', ids: patches.map(p => p.id), source });
   },
 
-  // Toggle fixed flag on a task (or group of tasks).
-  setFixed(ids: string | number | Array<string | number>, fixed: boolean, source?: string): void {
+  // Toggle firmed flag on a task (or group of tasks).
+  setFirmed(ids: string | number | Array<string | number>, firmed: boolean, source?: string): void {
     const arr = Array.isArray(ids) ? ids : [ids];
     for (const id of arr) {
       const key = String(id);
-      if (fixed) this._state.fixedIds.add(key);
-      else       this._state.fixedIds.delete(key);
+      if (firmed) this._state.firmedIds.add(key);
+      else        this._state.firmedIds.delete(key);
       const t = this._state.tasks[id];
-      if (t) t.fixed = !!fixed;
+      if (t) t.firmed = !!firmed;
     }
-    this.emit({ type: 'fixed:change', ids: arr, fixed, source });
+    this.emit({ type: 'firmed:change', ids: arr, firmed, source });
   },
 
   /* ----- calendar & blocks ---------------------------------------------- */
@@ -611,13 +611,13 @@ export const Store = {
   replaceCalendars(calendars: Record<string, CalendarEntry>, source?: string): void { this._state.calendars = calendars; this.emit({ type: 'calendar:replace', source }); },
   replacePlants(plants: Record<string, CalendarEntry>, source?: string): void { this._state.plants = plants; this.emit({ type: 'plants:replace', source }); },
   replacePlantBlocks(plantBlocks: NimbusPlantBlock[], source?: string): void { this._state.plantBlocks = plantBlocks; this.emit({ type: 'plantBlocks:replace', source }); },
-  replaceFixedIds(idSet: Set<string>, source?: string): void {
-    this._state.fixedIds = new Set([...idSet]);
-    for (const id of this._state.fixedIds) {
+  replaceFirmedIds(idSet: Set<string>, source?: string): void {
+    this._state.firmedIds = new Set([...idSet]);
+    for (const id of this._state.firmedIds) {
       const t = this._state.tasks[id];
-      if (t) t.fixed = true;
+      if (t) t.firmed = true;
     }
-    this.emit({ type: 'fixed:replace', source });
+    this.emit({ type: 'firmed:replace', source });
   },
 
   // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
@@ -810,10 +810,11 @@ export const Store = {
       task.start_date = new Date(task.scheduleSegments[0].startDate);
       task.end_date = new Date(task.scheduleSegments[task.scheduleSegments.length - 1].endDate);
     }
-    // To re-enable SAP firmed→fixed mapping: change the line below back to:
-    //   task.fixed = !!task.fixed || !!task.firmed;
-    task.fixed = !!task.fixed;
-    if (task.fixed) Store._state.fixedIds.add(String(task.id));
+    // task.firmed is the MANUAL (planner) firm mirror only. The SAP flag arrives
+    // separately as task.ecc_firmed and the frozen-horizon reason is derived live —
+    // the three unite in Engine.firmingStatus(); derived firming never enters firmedIds.
+    task.firmed = !!task.firmed;
+    if (task.firmed) Store._state.firmedIds.add(String(task.id));
     if (task.id != null) task.id = String(task.id);
   }
 };
@@ -900,19 +901,19 @@ export const Selection = {
   },
 
   /** Summary for the Inspector multi-selection view. */
-  stats(): { count: number; totalHours: number; lines: string[]; fixedCount: number } {
+  stats(): { count: number; totalHours: number; lines: string[]; firmedCount: number } {
     const ids = [...this._ids];
     let totalHours = 0;
     const lines = new Set<string>();
-    let fixedCount = 0;
+    let firmedCount = 0;
     for (const id of ids) {
       const t = Store.tasks[id];
       if (!t) continue;
       totalHours += Util.runHours(t);
       if (t.MACHINE) lines.add(t.MACHINE);
-      if (Store.isFixed(id)) fixedCount++;
+      if (Store.isFirmed(id)) firmedCount++;
     }
-    return { count: ids.length, totalHours, lines: [...lines], fixedCount };
+    return { count: ids.length, totalHours, lines: [...lines], firmedCount };
   },
 
   on(fn: (payload: SelectionEmitPayload) => void): () => void { this._listeners.add(fn); return () => this._listeners.delete(fn); },
@@ -990,7 +991,7 @@ export const Sandbox = {
       calendars:   Util.clone(Store.calendars),
       plants:      Util.clone(Store.plants),
       plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
-      fixedIds:    new Set([...Store.fixedIds]),
+      firmedIds:   new Set([...Store.firmedIds]),
     };
     this.active = true;
     Store.emit({ type: 'sandbox:entered', source });
@@ -1005,14 +1006,14 @@ export const Sandbox = {
       // Promote sandbox state to real state with a single undoable entry.
       UndoStack.push('Discard What-If scenario', () => {
         Store.setTasks(snap.tasks, 'undo');
-        Store.replaceFixedIds(snap.fixedIds, 'undo');
+        Store.replaceFirmedIds(snap.firmedIds, 'undo');
         Store.emit({ type: 'sandbox:reverted', source: 'undo' });
       });
     } else {
       // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
       // fires its own '<field>:replace' event (distinct from that field's normal
       // '<field>:change' event) — a future consumer of 'blocks:change' /
-      // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'fixed:change'
+      // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'firmed:change'
       // must also handle the '*:replace' counterpart or it will silently miss
       // updates that happen via a What-If discard. See
       // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
@@ -1022,7 +1023,7 @@ export const Sandbox = {
       Store.replaceCalendars(snap.calendars, 'sandbox');
       Store.replacePlants(snap.plants, 'sandbox');
       Store.replacePlantBlocks(snap.plantBlocks, 'sandbox');
-      Store.replaceFixedIds(snap.fixedIds, 'sandbox');
+      Store.replaceFirmedIds(snap.firmedIds, 'sandbox');
     }
 
     this.active = false;

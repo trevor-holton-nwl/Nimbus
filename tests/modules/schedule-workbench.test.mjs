@@ -86,6 +86,25 @@ test('Timeline._vScrollTop starts at 0 (replaces the old one-shot _initialVertic
   assert.equal(typeof Timeline._vScrollTop, 'number');
 });
 
+test('Timeline._itemForTask: className reflects firming status (order-firmed for a manually-firmed task, order-standard otherwise)', () => {
+  const id = 'firm-class-1';
+  const start = new Date('2026-07-01T08:00:00');
+  const end   = new Date('2026-07-01T12:00:00');
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'PFC1', MATERIAL_NUMBER: 'MFC1', MACHINE: 'L1',
+    plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+  }], 'test');
+
+  const standardItem = Timeline._itemForTask(Store.tasks[id]);
+  assert.match(standardItem.className, /\border-standard\b/, 'a task with no firming reason renders as order-standard');
+  assert.doesNotMatch(standardItem.className, /\border-firmed\b/);
+
+  Store.setFirmed([id], true, 'test');
+  const firmedItem = Timeline._itemForTask(Store.tasks[id]);
+  assert.match(firmedItem.className, /\border-firmed\b/, 'a manually-firmed task renders as order-firmed');
+  assert.doesNotMatch(firmedItem.className, /\border-standard\b/);
+});
+
 test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {
   // This fails if setup changes route through full Timeline.rebuild(), if the
   // public line-scoped batch seam is removed, or if a stale setup bar survives.
@@ -975,27 +994,27 @@ test('Interaction.uninstall removes every document-level listener install() atta
 
 // The single most safety-critical behavior in this module: what actually
 // happens when a vis-timeline DataSet 'update' event reports a changed
-// start/end/group for a FIXED task. Writing this test uncovered that the
-// module's own header comment ("Fixed orders are reverted in the DataSet and
+// start/end/group for a FIRMED task. Writing this test uncovered that the
+// module's own header comment ("Firmed orders are reverted in the DataSet and
 // never reach the Store") does not match the real code — see the corrected
 // comment above `_onDataSetUpdate` in schedule-workbench.mjs. These two tests
 // pin the REAL current behavior (a "verbatim move" task must not change
 // logic), not the aspirational behavior the stale comment described.
 
-test('Interaction._onDataSetUpdate: the fixed-task noActualChange guard checks only start+group (not end) — a same-start/same-group echo with a changed end is still swallowed', () => {
+test('Interaction._onDataSetUpdate: the firmed-task noActualChange guard checks only start+group (not end) — a same-start/same-group echo with a changed end is still swallowed', () => {
   const id = 'fx-echo-1';
   const start = new Date('2026-07-01T08:00:00');
   const end   = new Date('2026-07-01T12:00:00');
   // Same start and same group as the Store, but a DIFFERENT end — the
-  // fixed-order noActualChange guard (schedule-workbench.mjs _onDataSetUpdate)
+  // firmed-order noActualChange guard (schedule-workbench.mjs _onDataSetUpdate)
   // deliberately compares only start+group, not end, so this must still be
   // treated as a no-op by that guard specifically. A same-start/same-end/
   // same-group scenario would be caught just as well by the generic `moved`
-  // check further down (start+end+line) regardless of whether the fixed-only
+  // check further down (start+end+line) regardless of whether the firmed-only
   // guard exists at all, which is why that shape doesn't actually characterize
   // this guard (confirmed by mutation: disabling the guard while keeping that
   // shape still passed). This shape — start+group unchanged, end changed —
-  // only stays a no-op because of the fixed-specific guard; if the guard is
+  // only stays a no-op because of the firmed-specific guard; if the guard is
   // removed or broken, this scenario falls through to the generic `moved`
   // check, which DOES see the changed end and commits it, failing this test.
   const differentEnd = new Date('2026-07-01T14:00:00');
@@ -1003,20 +1022,20 @@ test('Interaction._onDataSetUpdate: the fixed-task noActualChange guard checks o
     id, PRODUCTION_ORDER: 'PFX1', MATERIAL_NUMBER: 'MFX1', MACHINE: 'L1',
     plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
-  Store.setFixed([id], true, 'test');
+  Store.setFirmed([id], true, 'test');
   Selection.clear();
 
   Timeline._items = { get: (i) => (i === id ? { start, end: differentEnd, group: 'L1' } : undefined) };
   try {
     Interaction._onDataSetUpdate({ items: [id] });
-    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'the fixed-task guard must treat a same-start/same-group echo as a no-op even when end differs');
-    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'the fixed-task guard must not let the changed end leak into the Store');
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'the firmed-task guard must treat a same-start/same-group echo as a no-op even when end differs');
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'the firmed-task guard must not let the changed end leak into the Store');
   } finally {
     Timeline._items = undefined;
   }
 });
 
-test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today — fixed-order protection only suppresses no-op echoes, not real drags', () => {
+test('Interaction._onDataSetUpdate: a genuine drag on a firmed task commits today — firmed-order protection only suppresses no-op echoes, not real drags', () => {
   const id = 'fx-real-1';
   const start = new Date('2026-07-01T08:00:00');
   const end   = new Date('2026-07-01T12:00:00');
@@ -1026,7 +1045,7 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
     id, PRODUCTION_ORDER: 'PFX2', MATERIAL_NUMBER: 'MFX2', MACHINE: 'L1',
     plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
-  Store.setFixed([id], true, 'test');
+  Store.setFirmed([id], true, 'test');
   Selection.clear();
 
   Timeline._items = { get: (i) => (i === id ? { start: draggedStart, end: draggedEnd, group: 'L1' } : undefined) };
@@ -1034,7 +1053,7 @@ test('Interaction._onDataSetUpdate: a genuine drag on a fixed task commits today
     Interaction._onDataSetUpdate({ items: [id] });
     assert.equal(
       Store.tasks[id].start_date.getTime(), draggedStart.getTime(),
-      'current behavior: a genuine drag on a fixed task commits to the Store — it is NOT reverted (see the corrected header comment in schedule-workbench.mjs)'
+      'current behavior: a genuine drag on a firmed task commits to the Store — it is NOT reverted (see the corrected header comment in schedule-workbench.mjs)'
     );
     assert.equal(Store.tasks[id].end_date.getTime(), draggedEnd.getTime());
   } finally {

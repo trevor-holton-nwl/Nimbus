@@ -109,7 +109,7 @@ interface LandingViewPref {
 interface OptimizerDefaultsPref {
   mode?: string;
   preset?: string;
-  respectFixed?: boolean;
+  respectFirmed?: boolean;
   respectCalendar?: boolean;
 }
 
@@ -756,7 +756,7 @@ const SessionUIAdapter = {
     // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
     const od      = Session.pref('optimizerDefaults') as OptimizerDefaultsPref | null | undefined;
     const odMode: string = (od && od.mode && ['spt', 'changeover'].includes(od.mode)) ? od.mode : 'changeover';
-    const odFixed = od ? od.respectFixed !== false : true;
+    const odFirmed = od ? (od.respectFirmed ?? (od as any).respectFixed) !== false : true;
     const odCal   = od ? od.respectCalendar !== false : true;
     pane.innerHTML = `
       <div class="form-row">
@@ -786,8 +786,8 @@ const SessionUIAdapter = {
           ${SessionUIAdapter._optTag('changeover', Util.t('us.opt_mode_changeover'), odMode)}
         </select>
         <label class="us-toggle-row" style="margin-top:8px">
-          <input type="checkbox" id="us-opt-fixed"${odFixed ? ' checked' : ''}>
-          <span>${Util.t('us.opt_respect_fixed')}</span>
+          <input type="checkbox" id="us-opt-firmed"${odFirmed ? ' checked' : ''}>
+          <span>${Util.t('us.opt_respect_firmed')}</span>
         </label>
         <label class="us-toggle-row">
           <input type="checkbox" id="us-opt-calendar"${odCal ? ' checked' : ''}>
@@ -812,21 +812,21 @@ const SessionUIAdapter = {
     // Optimizer defaults — preserve any stored preset; the dialog's run() keeps
     // it fresh from the user's last actual run.
     const modeSel  = pane.querySelector<HTMLSelectElement>('#us-opt-mode');
-    const fixedChk = pane.querySelector<HTMLInputElement>('#us-opt-fixed');
+    const firmedChk = pane.querySelector<HTMLInputElement>('#us-opt-firmed');
     const calChk   = pane.querySelector<HTMLInputElement>('#us-opt-calendar');
     const writeOpt = () => {
       const existing = (Session.pref('optimizerDefaults') as OptimizerDefaultsPref | undefined) || {};
       Session.setPref('optimizerDefaults', {
         mode: modeSel!.value,
         preset: ['horizon', '2w'].includes(existing.preset ?? '') ? existing.preset : 'horizon',
-        respectFixed: fixedChk!.checked,
+        respectFirmed: firmedChk!.checked,
         respectCalendar: calChk!.checked,
       });
       const clr = pane.querySelector<HTMLElement>('#us-opt-clear');
       if (clr) clr.hidden = false;
     };
     if (modeSel)  modeSel.addEventListener('change', writeOpt);
-    if (fixedChk) fixedChk.addEventListener('change', writeOpt);
+    if (firmedChk) firmedChk.addEventListener('change', writeOpt);
     if (calChk)   calChk.addEventListener('change', writeOpt);
     const optClear = pane.querySelector<HTMLElement>('#us-opt-clear');
     if (optClear) optClear.addEventListener('click', () => {
@@ -2205,9 +2205,9 @@ const App = {
 
     /* Keep alerts + dashboard in sync */
     Store.subscribe(evt => {
-      // Any change touching schedule/fixed/calendar → recompute alerts.
+      // Any change touching schedule/firmed/calendar → recompute alerts.
       if (evt.type === 'task:update' || evt.type === 'tasks:bulk'
-          || evt.type === 'tasks:bulkUpdate' || evt.type === 'fixed:change'
+          || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
           || evt.type === 'calendar:change' || evt.type === 'blocks:change'
           || evt.type === 'plantBlocks:change') {
           Alerts.scheduleRecompute();

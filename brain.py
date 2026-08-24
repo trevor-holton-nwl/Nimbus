@@ -1173,7 +1173,7 @@ class TaskDTO(BaseModel):
     see docs/typescript_migration.md §F/§C. Optional fields are exactly the
     ones read via `row.get(...)` with no coercing default (i.e. can be None
     from a NaN source row); non-optional fields either have a code-level
-    default (e.g. `text`, `firmed`, `user_scheduled`) or come from a groupby
+    default (e.g. `text`, `ecc_firmed`, `user_scheduled`) or come from a groupby
     key that can't be null."""
     model_config = ConfigDict(populate_by_name=True)
 
@@ -1198,7 +1198,7 @@ class TaskDTO(BaseModel):
     RUN_TIME: float | None = None
     FORM_SIZE: str | None = None
     notes: str | None = None
-    firmed: bool
+    ecc_firmed: bool
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
@@ -1530,7 +1530,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "RUN_TIME": row.get("RUN_TIME"),
                 "FORM_SIZE": row.get("FORM_SIZE"),
                 "notes": row.get("NOTES"),
-                "firmed": row.get("FIRMING_INDICATOR") == "X",
+                "ecc_firmed": row.get("FIRMING_INDICATOR") == "X",
                 # Optimistic-concurrency token (Postgres xmin). The client echoes it
                 # back on edit so the server can reject writes computed from stale data.
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,

@@ -103,6 +103,11 @@ h1, h2, h3, h4 {
   --l0: #89419f; --l1: #2d5f8c; --l2: #4f7a3c; --l3: #8b4c7e; --l4: #b14a3e;
   --l5: #3c6e7a; --l6: #7a5a2a; --l7: #5e498b; --l8: #ae4268; --l9: #4a7a5e;
 
+  /* P2: order-bar firming status colors (replace per-line lc-N coloring on
+     Gantt bars — union of SAP/frozen-horizon/manual firming, not per-line). */
+  --bar-standard: #1f5fbf;
+  --bar-firmed:   #b02a20;
+
   /* Radii + spacing */
   --r-sm: 4px; --r-md: 4px; --r-lg: 8px; --r-xl: 14px;
   --shadow-sm: 0 1px 2px rgba(12,28,48,0.06);
@@ -742,7 +747,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .panel-body-chart { height: 252px; }   /* Chart.js responsive mode needs explicit parent height */
 .panel-body-flush { padding: 0; }
 /* Quiet panel — a visually recessive treatment for secondary/reference dashboard
-   panels (alerts, fixed orders, projected lateness) so they read as supporting
+   panels (alerts, firmed orders, projected lateness) so they read as supporting
    detail behind the promoted utilization/line-status pair, not equal-weight charts. */
 .panel-quiet .panel-head {
   background: var(--bg-subtle);
@@ -906,20 +911,20 @@ textarea { min-height: 60px; padding: 7px 10px; }
   text-align: center; color: var(--fg-faint); font-size: 12.5px;
 }
 
-/* Fixed orders list */
-.fixed-list { max-height: 260px; overflow: auto; }
-.fixed-row {
+/* Firmed orders list */
+.firmed-list { max-height: 260px; overflow: auto; }
+.firmed-row {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
   font-size: 12.5px;
 }
-.fixed-row:last-child { border-bottom: none; }
-.fixed-row .pin { color: var(--accent); font-size: 13px; }
-.fixed-row .id  { font-family: 'JetBrains Mono', monospace; color: var(--fg-mute); font-size: 11px; }
-.fixed-row .name { flex: 1; font-weight: 500; }
-.fixed-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fg-mute); }
-.fixed-row button { margin-left: 6px; }
+.firmed-row:last-child { border-bottom: none; }
+.firmed-row .pin { color: var(--accent); font-size: 13px; }
+.firmed-row .id  { font-family: 'JetBrains Mono', monospace; color: var(--fg-mute); font-size: 11px; }
+.firmed-row .name { flex: 1; font-weight: 500; }
+.firmed-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fg-mute); }
+.firmed-row button { margin-left: 6px; }
 
 /* =============================================================================
    TIMELINE TAB
@@ -1027,7 +1032,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   transition: background var(--t-fast);
 }
 .hier-item:hover { background: var(--bg-subtle); }
-.hier-item.fixed { color: var(--accent-hot); font-weight: 600; }
+.hier-item.firmed { color: var(--accent-hot); font-weight: 600; }
 .hier-item .lock-ico { font-size: 10px; }
 
 /* Timeline wrapper */
@@ -1069,14 +1074,6 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border: 2px solid var(--accent) !important;
   box-shadow: 0 0 0 2px var(--accent-wash);
 }
-.vis-item.fixed-order {
-  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.85);
-  background-image: repeating-linear-gradient(
-    -45deg,
-    rgba(255,255,255,0.22) 0 6px,
-    transparent 6px 12px
-  );
-}
 .vis-item.conflict-order {
   outline: 2px solid var(--err) !important;
   outline-offset: -2px;
@@ -1100,26 +1097,17 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   width: 2px !important;
 }
 
-/* Production-line colour classes for timeline items */
-.vis-item.lc-0 { background: var(--l0); border-color: var(--l0); }
-.vis-item.lc-1 { background: var(--l1); border-color: var(--l1); }
-.vis-item.lc-2 { background: var(--l2); border-color: var(--l2); }
-.vis-item.lc-3 { background: var(--l3); border-color: var(--l3); }
-.vis-item.lc-4 { background: var(--l4); border-color: var(--l4); }
-.vis-item.lc-5 { background: var(--l5); border-color: var(--l5); }
-.vis-item.lc-6 { background: var(--l6); border-color: var(--l6); }
-.vis-item.lc-7 { background: var(--l7); border-color: var(--l7); }
-.vis-item.lc-8 { background: var(--l8); border-color: var(--l8); }
-.vis-item.lc-9 { background: var(--l9); border-color: var(--l9); }
+/* Firming-status colour classes for timeline items (P2: replaces per-line
+   lc-N coloring for order bars — _colorIndex/--l0..--l9 remain in use
+   elsewhere: Hierarchy, group headers, Orders-grid line cell, Dashboard). */
+.vis-item.order-standard { background: var(--bar-standard); border-color: var(--bar-standard); color: #fff; }
+.vis-item.order-firmed   { background: var(--bar-firmed);   border-color: var(--bar-firmed);   color: #fff; }
 
 /* One logical order may occupy multiple productive intervals. Keep the line
    * color intact, then use a shared inner keyline and compact continuation
    * marker so pieces read as one parent without looking like separate orders. */
 .vis-item.split-order-segment {
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.62);
-}
-.vis-item.fixed-order.split-order-segment {
-  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.85), inset 0 0 0 3px rgba(255,255,255,0.42);
 }
 .vis-item.split-order-segment-continuation {
   border-left: 2px dashed rgba(255,255,255,0.82) !important;
@@ -1267,7 +1255,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   margin-bottom: 2px;
   color: var(--fg, #e7e7ea);
 }
-#nimbus-hover-card .hov-fixed {
+#nimbus-hover-card .hov-firmed {
   font-weight: 500;
   font-size: 10px;
   color: var(--fg-mute, #9b9ca3);
@@ -1408,7 +1396,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   padding: 2px 7px; border-radius: 10px;
   background: var(--bg-subtle); border: 1px solid transparent; color: var(--fg-mute);
 }
-.ac-chip.fixed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
+.ac-chip.firmed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
 .ac-chip-sep { font-size: 11px; color: var(--fg-mute); padding: 0 2px; }
 
 .ac-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
@@ -1483,7 +1471,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 .insp-notes-counter { font-size: 10px; color: var(--fg-faint); text-align: right; margin-top: 3px; }
 
 .insp-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-.insp-fix-banner {
+.insp-firmed-banner {
   background: var(--accent-wash);
   border: 1px solid var(--accent-soft);
   border-radius: var(--r-md);
@@ -1495,7 +1483,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   font-weight: 500;
 }
 /* Frozen-horizon banner (Workstream C2, 2026-08-20) — same shape as
-   .insp-fix-banner above but green-toned (matches the Gantt's
+   .insp-firmed-banner above but green-toned (matches the Gantt's
    .frozen-horizon-zone band) so a planner reads it as a DISTINCT reason from
    a genuine manual pin, not a restyled duplicate of the same banner. */
 .insp-frozen-banner {
@@ -1565,11 +1553,6 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   display: inline-flex; align-items: center; gap: 6px;
 }
 .ag-theme-quartz .cell-line-tag .dot { width: 8px; height: 8px; border-radius: 2px; }
-.ag-theme-quartz .cell-fixed {
-  background-color: var(--accent-wash) !important;
-  color: var(--accent-hot);
-  font-weight: 600;
-}
 .ag-theme-quartz .row-alert { background-color: var(--err-soft) !important; }
 .ag-theme-quartz .row-warn  { background-color: var(--warn-soft) !important; }
 .ag-theme-quartz .ag-cell.ag-cell-copy-flash {
@@ -5067,6 +5050,10 @@ body.dark {
   --tab-md-bg: #1c3d28;  --tab-md-bg-hover: #224830;  /* Master Data tab — dark green in dark mode */
   --err:      #d94a3a;  --err-soft:  #2e1210;
   --info:     #4a88c8;  --info-soft: #10203c;
+
+  /* P2: order-bar firming status colors, dark-mode re-lit */
+  --bar-standard: #4d9fff;
+  --bar-firmed:   #d94a3a;
 
   /* Undefined-token dark counterparts (Task 1 only defined these for light) */
   --border:          #263850;      /* same as --line */

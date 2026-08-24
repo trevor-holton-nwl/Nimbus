@@ -512,21 +512,21 @@
       }
     }
 
-    /* 4. FIXED-BUT-ON-CLOSED-DAY */
+    /* 4. FIRMED-BUT-ON-CLOSED-DAY */
     for (const t of activeTasks) {
       const line = t.MACHINE || 'Unknown';
       const badInterval = scheduleIntervals(t).find(interval =>
         !workWindow(line, interval.start, calendars, plants, lineSettings, masterData));
       if (badInterval) {
         alerts.push({
-          id:  `fixclosed-${t.id}`, sev: 'warn', type: 'fixed-closed',
-          msg: `${t.fixed ? 'Fixed order' : 'Order'} "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
+          id:  `firmclosed-${t.id}`, sev: 'warn', type: 'firmed-closed',
+          msg: `${t.firmed ? 'Firmed order' : 'Order'} "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
           taskId: t.id, line, time: badInterval.start
         });
       }
     }
 
-    /* 5. FIXED-OUT-OF-HOURS */
+    /* 5. FIRMED-OUT-OF-HOURS */
     for (const t of activeTasks) {
       const line = t.MACHINE || 'Unknown';
       const parts = [];
@@ -545,8 +545,8 @@
       }
       if (parts.length) {
         alerts.push({
-          id:  `fixhours-${t.id}`, sev: 'warn', type: 'fixed-out-of-hours',
-          msg: `${t.fixed ? 'Fixed order' : 'Order'} "${orderNumber(t)}" ${parts.join(' and ')}.`,
+          id:  `firmhours-${t.id}`, sev: 'warn', type: 'firmed-out-of-hours',
+          msg: `${t.firmed ? 'Firmed order' : 'Order'} "${orderNumber(t)}" ${parts.join(' and ')}.`,
           taskId: t.id, line, time: alertTime
         });
       }

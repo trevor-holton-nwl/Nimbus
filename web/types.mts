@@ -46,9 +46,10 @@ export interface NimbusTask {
   original_end_date: Date | null;
   BASIC_START_DATE: Date | null;
   BASIC_FINISH_DATE: Date | null;
-  fixed: boolean;
-  /** SAP firmed→fixed mapping is currently commented out/disabled. */
-  firmed?: boolean;
+  /** Manual (planner) firm mirror of Store.firmedIds — never derived. See Engine.firmingStatus for the ECC/frozen/manual union. */
+  firmed: boolean;
+  /** SAP FIRMING_INDICATOR == 'X' (read-only; from the /tasks DTO). */
+  ecc_firmed?: boolean;
   /** Opaque Postgres xmin; sent back to the server as `base_version`. */
   row_version: number | null;
   COLOR?: string;
@@ -415,7 +416,7 @@ export type OptimizerMode = 'spt' | 'changeover' | 'backlog';
 
 export type AlertType =
   | 'overlap' | 'overload' | 'near-capacity' | 'closed'
-  | 'blackout' | 'fixed-closed' | 'fixed-out-of-hours'
+  | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours'
   | 'runtime-schedule-mismatch';
 
 export type AlertSev = 'err' | 'warn';
@@ -441,7 +442,7 @@ export type ConstraintKey = 'colorWheel' | 'prt01' | 'prt02';
 
 export type StoreEventType =
   | 'tasks:bulk' | 'task:update' | 'task:remove' | 'tasks:bulkUpdate'
-  | 'fixed:change' | 'calendar:change' | 'blocks:change' | 'plantBlocks:change'
+  | 'firmed:change' | 'calendar:change' | 'blocks:change' | 'plantBlocks:change'
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
   | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
@@ -475,7 +476,7 @@ export type NaiveLocalTs = string;
  *  two (§F). */
 export type IsoUtcTs = string;
 
-/** The in-memory Store shape: Dates are real Date objects, fixedIds is a real Set. */
+/** The in-memory Store shape: Dates are real Date objects, firmedIds is a real Set. */
 export interface LiveState {
   tasks: NimbusTask[];
   blocks: NimbusBlock[];
@@ -483,14 +484,14 @@ export interface LiveState {
   plants: Record<string, { workHours: WorkHours }>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
-  fixedIds: Set<string>;
+  firmedIds: Set<string>;
   selectedPlant: string | null;
   userSettings: Record<string, unknown>;
 }
 
 /** The localStorage-serialized shape (Persistence._saveCache / Config.LS_KEY,
  *  gated by Config.SCHEMA_VERSION). JSON.stringify turns every Date into an
- *  ISO string and the fixedIds Set into a string[]. `tasks` is deliberately
+ *  ISO string and the firmedIds Set into a string[]. `tasks` is deliberately
  *  NOT NimbusTask[] — its date fields are strings on disk, not Dates (T-6);
  *  re-coerced back into NimbusTask via Persistence._prepTask on read. `tasks`
  *  may also be PARTIAL: _writeCacheWithQuotaGuard writes progressively
@@ -503,7 +504,7 @@ export interface StoredState {
   tasks: Array<Record<string, unknown>>;
   blocks: NimbusBlock[];
   calendars: Record<string, { workHours: WorkHours }>;
-  fixedIds: string[];
+  firmedIds: string[];
   plants: Record<string, { workHours: WorkHours }>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;

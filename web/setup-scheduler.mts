@@ -329,7 +329,9 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
  * as immutable and never fills missing calendar defaults back into this object. */
 export interface ScheduleSnapshot {
   tasks: ReadonlyArray<NimbusTask>;
-  fixedIds: ReadonlySet<string> | ReadonlyArray<string>;
+  /** Manually firmed ids; callers additionally fold ECC-firmed and
+   * frozen-horizon ids in before invoking. */
+  firmedIds: ReadonlySet<string> | ReadonlyArray<string>;
   alerts: ReadonlyArray<unknown>;
   selectedPlant: string | null;
   blocks: ReadonlyArray<NimbusBlock>;
@@ -347,7 +349,7 @@ export interface EvaluationRequest {
   lines?: ReadonlyArray<string> | null;
   startDate?: Date | string | number | null;
   endDate?: Date | string | number | null;
-  respectFixed?: boolean;
+  respectFirmed?: boolean;
   respectCalendar?: boolean;
   /** Tests and callers that need deterministic candidate placement supply this. */
   now?: Date;
@@ -544,7 +546,7 @@ export interface MissingSetupEdge {
 }
 
 const UNCOVERED_SETUP_TRANSITION_REASON = 'No version-matched setup transition covers this state pair';
-const PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON = 'protected-fixed-boundary-outside-horizon';
+const PROTECTED_FIRMED_BOUNDARY_OUTSIDE_HORIZON_REASON = 'protected-firmed-boundary-outside-horizon';
 
 /** Phase 1e early-convergence exit: once `exactSearch`/`greedySearch` have
  * evaluated this many candidates in a row with no winner improvement (and a
@@ -607,13 +609,13 @@ interface DueDateCandidate {
   policyKey: string;
   sequenceKey: string;
   /** Orders deliberately deferred from this capacity-bounded fragment. They
-   * remain eligible for the next fragment after a fixed boundary. */
+   * remain eligible for the next fragment after a firmed boundary. */
   unadmitted: NimbusTask[];
   explanation: CandidateReason[];
   missingEdges: MissingSetupEdge[];
   /** The predecessor identity/state this covered core actually ended on, set
    * only on a feasible result. A subsequent `placeUnknownTail` call or a
-   * fixed boundary's incoming-setup reservation chains from this rather than
+   * firmed boundary's incoming-setup reservation chains from this rather than
    * re-deriving it from the fragment's original predecessor. */
   finalState?: SetupStateKey | null;
   finalPredecessorOrderId?: string | null;
@@ -680,13 +682,13 @@ function worseTermination(
 /** A per-line counter. Constructed fresh inside the per-line loop of both
  * `evaluateDueDateFirst` and `evaluateSptWithSetup` (Part 2b) so one large
  * line's search can never exhaust the budget for every other line on the
- * plant; a fixed-boundary fragment run still shares it with every other
+ * plant; a firmed-boundary fragment run still shares it with every other
  * fragment on the same line. */
 interface SearchBudget {
   remainingIterations: number;
 }
 
-interface FixedBoundary {
+interface FirmedBoundary {
   task: NimbusTask;
   state: SetupStateKey;
   start: Date;
@@ -710,8 +712,8 @@ interface FragmentContext {
    * past a binding whose predecessor has been deleted; ordinary known-state
    * evaluation retains the existing fail-closed override behavior. */
   allowsDeletedPredecessorBinding?: boolean;
-  nextFixed?: FixedBoundary;
-  /** An active override crossing a fixed boundary makes the named free order
+  nextFirmed?: FirmedBoundary;
+  /** An active override crossing a firmed boundary makes the named free order
    * the exact first/last member of this obstacle-free fragment. */
   requiredFirstOrderId?: string;
   requiredLastOrderId?: string;
@@ -733,24 +735,24 @@ type FragmentMode = 'due-date-first' | 'spt' | 'min-changeover' | 'throughput';
 interface BoundaryOverrideLocks {
   requiredFirstOrderId?: string;
   requiredLastOrderId?: string;
-  /** A persisted current line state can bind directly to the first fixed
+  /** A persisted current line state can bind directly to the first firmed
    * order. In that case no free work may occupy the preceding fragment. */
   requiresInitialState?: boolean;
   /** Like `requiresInitialState`, but the protected predecessor is a
    * preserved current first order rather than persisted line state. */
   requiresInitialPredecessorId?: string;
-  /** A fixed predecessor and successor can be a protected occurrence too. The
+  /** A firmed predecessor and successor can be a protected occurrence too. The
    * successor fragment must remain empty so no free production breaks that
    * physical adjacency. */
-  requiredFixedPredecessorId?: string;
-  requiredFixedSuccessorId?: string;
+  requiredFirmedPredecessorId?: string;
+  requiredFirmedSuccessorId?: string;
   issue?: MissingSetupEdge;
 }
 
 /** A persisted initial state can itself be the protected predecessor of a
  * free order. Unlike an ordinary free/free pair, that successor must be the
  * very first physical order in the plan and therefore belongs before the
- * first fixed boundary even when its due date is later. */
+ * first firmed boundary even when its due date is later. */
 interface InitialFreeOverrideLock {
   requiredFirstOrderId?: string;
   issue?: MissingSetupEdge;
@@ -784,7 +786,7 @@ interface LineInitialContext {
 
 /** Active occurrence overrides are physical adjacency constraints, not merely
  * a preferred setup-duration lookup. These maps only contain pairs whose two
- * free orders belong to the fragment currently being searched; fixed-boundary
+ * free orders belong to the fragment currently being searched; firmed-boundary
  * pairs stay with BoundaryOverrideLocks. */
 interface FragmentAdjacency {
   predecessorBySuccessor: ReadonlyMap<string, string>;
@@ -1218,7 +1220,7 @@ function initialFreeOverrideLock(
     }
     const successorOrderId = String(override.successor_order_id);
     const successor = freeById.get(successorOrderId);
-    // Fixed successors are validated by boundaryOverrideLocks. A missing
+    // Firmed successors are validated by boundaryOverrideLocks. A missing
     // successor has already been diagnosed without freezing this line.
     if (!successor) continue;
     const successorState = orderState(bounds, successor, definition);
@@ -1235,8 +1237,8 @@ function initialFreeOverrideLock(
   return { requiredFirstOrderId, issue };
 }
 
-/** Extract only fragment-local active overrides. A non-local free/fixed pair
- * is deliberately left to the fixed-boundary lock layer, where its physical
+/** Extract only fragment-local active overrides. A non-local free/firmed pair
+ * is deliberately left to the firmed-boundary lock layer, where its physical
  * boundary can be validated without letting the override follow an order. */
 function fragmentAdjacency(
   bounds: Readonly<DueDateFirstBounds>,
@@ -1285,7 +1287,7 @@ function fragmentAdjacency(
 
     const predecessor = byId.get(predecessorId);
     if (!predecessor) {
-      // The immediate physical predecessor can be a fixed boundary or a
+      // The immediate physical predecessor can be a firmed boundary or a
       // preserved unknown-state anchor, so it is intentionally absent from
       // this fragment's free list. A truly deleted predecessor is diagnosed
       // at line scope and is not allowed to freeze unrelated later work.
@@ -1343,7 +1345,7 @@ function fragmentAdjacency(
 
 /** Free/free active override chains are indivisible while assigning work to
  * obstacle-free fragments. Without this, due-based partitioning can put one
- * end before a fixed run and the other after it, even though both endpoints
+ * end before a firmed run and the other after it, even though both endpoints
  * are individually valid. Fragment-local validation still owns the exact
  * order/state binding; this helper only prevents the physical pair splitting. */
 function freeOverrideComponents(
@@ -1416,7 +1418,7 @@ function sequenceAdjacencyFailure(
     return inactiveOverrideEdge(
       line,
       fragment.requiredLastOrderId,
-      fragment.nextFixed ? taskId(fragment.nextFixed.task) : undefined,
+      fragment.nextFirmed ? taskId(fragment.nextFirmed.task) : undefined,
     );
   }
   for (let index = 0; index < sequence.length; index += 1) {
@@ -1539,11 +1541,11 @@ function orderedByProductiveRuntime(tasks: ReadonlyArray<NimbusTask>): NimbusTas
   ));
 }
 
-function taskIsFixed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): boolean {
-  const fixedIds = snapshot.fixedIds instanceof Set
-    ? snapshot.fixedIds
-    : new Set(Array.from(snapshot.fixedIds, String));
-  return task.fixed === true || fixedIds.has(taskId(task));
+function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): boolean {
+  const firmedIds = snapshot.firmedIds instanceof Set
+    ? snapshot.firmedIds
+    : new Set(Array.from(snapshot.firmedIds, String));
+  return task.firmed === true || firmedIds.has(taskId(task));
 }
 
 // B7: resolve an order's plant the same way the legacy engine does
@@ -1869,7 +1871,7 @@ function candidateForSequence(
   // strings, fresh Dates) for every one of them is pure waste, since only the
   // eventual winner's explanation is ever read. Search-time callers pass
   // `true` to skip building the 'due-date-first-placement' /
-  // 'admitted-without-setup' / 'fixed-incoming-setup' entries below, then
+  // 'admitted-without-setup' / 'firmed-incoming-setup' entries below, then
   // re-run this function once against the chosen winner with the default
   // `false` to get its real explanation. Failure-path entries and
   // `missingEdges` are never suppressed — diagnostics must stay intact
@@ -1888,7 +1890,7 @@ function candidateForSequence(
   let latenessMinutes = 0;
   const unadmitted: NimbusTask[] = [];
   // A1/A2: count of uncovered-but-admitted transitions in this sequence
-  // (mid-sequence + fixed-boundary-incoming). Rolled into score[SCORE_UNCOVERED]
+  // (mid-sequence + firmed-boundary-incoming). Rolled into score[SCORE_UNCOVERED]
   // on the feasible return below so `compareCandidate` can minimize it —
   // minimizing uncovered edges is what drives same-signature grouping.
   let uncoveredEdgeCount = 0;
@@ -2101,15 +2103,15 @@ function candidateForSequence(
     predecessorOrderId = taskId(task);
   }
 
-  if (fragment.nextFixed) {
-    const fixed = fragment.nextFixed;
+  if (fragment.nextFirmed) {
+    const firmed = fragment.nextFirmed;
     const inactiveOverride = inactiveOverrideForTransition(
       bounds,
       line,
       predecessorState,
-      fixed.state,
+      firmed.state,
       predecessorOrderId,
-      taskId(fixed.task),
+      taskId(firmed.task),
       fragment.lineOrderIds,
       fragment.allowsDeletedPredecessorBinding,
     );
@@ -2120,20 +2122,20 @@ function candidateForSequence(
       };
     }
     // An uncovered matrix pair or a temporally infeasible reservation
-    // (`incoming-fixed-setup-infeasible`) is a missing-setup-data fact, not a
+    // (`incoming-firmed-setup-infeasible`) is a missing-setup-data fact, not a
     // reason to freeze the whole line (Part 1f): skip the reservation, keep
     // the diagnostic edge, and stay feasible. `deriveSetupObservation`/alerts
     // surface it against the applied schedule instead of a fake bar here.
     if (predecessorState === null) {
-      missingEdges.push(unknownInitialStateEdge(line, fixed.task));
+      missingEdges.push(unknownInitialStateEdge(line, firmed.task));
     } else {
       const resolved = resolveSetup({
         definition,
         machine: line,
         predecessorState,
-        successorState: fixed.state,
+        successorState: firmed.state,
         predecessorOrderId,
-        successorOrderId: taskId(fixed.task),
+        successorOrderId: taskId(firmed.task),
         plantRows: bounds.setup.plant_rows,
         machineRows: bounds.setup.machine_rows,
         overrides: bounds.setup.overrides,
@@ -2141,41 +2143,41 @@ function candidateForSequence(
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
         // A1: counted into uncoveredEdgeCount (only this !resolved.covered
-        // branch — not `incoming-fixed-setup-infeasible` below, which is a
+        // branch — not `incoming-firmed-setup-infeasible` below, which is a
         // capacity fact about a covered transition, not a coverage gap).
         // The reason stays UNCOVERED_SETUP_TRANSITION_REASON (resolved.reason)
-        // rather than 'scheduled-without-setup': this is the fixed order's own
+        // rather than 'scheduled-without-setup': this is the firmed order's own
         // incoming edge, not an order this call placed, and
         // `candidateEntersBoundaryUncovered` keys on this exact reason.
         uncoveredEdgeCount += 1;
         missingEdges.push({
           line,
           predecessorOrderId,
-          successorOrderId: taskId(fixed.task),
+          successorOrderId: taskId(firmed.task),
           reason: resolved.reason,
         });
       } else {
-        const setupStart = new Date(fixed.start.getTime() - resolved.effectiveMin * 60 * 1000);
+        const setupStart = new Date(firmed.start.getTime() - resolved.effectiveMin * 60 * 1000);
         const fitsIncomingSetup = resolved.effectiveMin === 0
-          ? cursor <= fixed.start
+          ? cursor <= firmed.start
           : setupStart >= cursor && freeIntervalsFor(
-            snapshot, line, bounds.setup.plant, cursor, fixed.start, bounds.runContext,
-          ).some(interval => interval.start <= setupStart && interval.end >= fixed.start);
+            snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
+          ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
         if (!fitsIncomingSetup) {
           missingEdges.push({
             line,
             predecessorOrderId,
-            successorOrderId: taskId(fixed.task),
-            reason: 'incoming-fixed-setup-infeasible',
+            successorOrderId: taskId(firmed.task),
+            reason: 'incoming-firmed-setup-infeasible',
           });
         } else {
           setupMinutes += resolved.effectiveMin;
           if (!suppressExplanations) {
             explanation.push({
-              code: 'fixed-incoming-setup',
-              message: `Reserved ${resolved.effectiveMin} minutes of setup before fixed ${taskId(fixed.task)}.`,
+              code: 'firmed-incoming-setup',
+              message: `Reserved ${resolved.effectiveMin} minutes of setup before firmed ${taskId(firmed.task)}.`,
               line,
-              taskId: taskId(fixed.task),
+              taskId: taskId(firmed.task),
             });
           }
         }
@@ -2295,7 +2297,7 @@ function exactSearch(
   // A3: since A1, most permutations are feasible (mid-sequence uncovered
   // transitions are admitted, not rejected), so the "explored alternative"
   // diagnostic — an edge collected only from `!candidate.feasible` below —
-  // would otherwise vanish for permutations whose OWN incoming-fixed-boundary
+  // would otherwise vanish for permutations whose OWN incoming-firmed-boundary
   // transition is uncovered (still `UNCOVERED_SETUP_TRANSITION_REASON`, since
   // that leniency predates A1 and is unaffected by it). Collect those from
   // feasible candidates too, Set-guarded so a large search cannot push
@@ -2397,7 +2399,7 @@ function exactSearch(
     const frame = frames.at(-1)!;
     if (selected.length === totalTasks) {
       // A zero-order fragment has no selected occurrence to charge as a
-      // traversal edge, but it still evaluates a fixed-boundary transition.
+      // traversal edge, but it still evaluates a firmed-boundary transition.
       if (totalTasks === 0) {
         if (budget.remainingIterations <= 0) {
           termination = 'iteration-cap';
@@ -2503,7 +2505,7 @@ function greedySearch(
   const seen = new Set<string>();
   // A3: see the matching comment in exactSearch — preserves the "explored
   // alternative" diagnostic for a feasible candidate's own uncovered
-  // incoming-fixed-boundary edge, now that most permutations no longer fail
+  // incoming-firmed-boundary edge, now that most permutations no longer fail
   // outright on a mid-sequence uncovered transition.
   const seenFeasibleUncoveredEdgeKeys = new Set<string>();
 
@@ -2619,7 +2621,7 @@ function uniqueMissingEdges(edges: ReadonlyArray<MissingSetupEdge>): MissingSetu
 
 /** Build the set of missing-edge keys a winning candidate itself admitted, so
  * `appendRejectedCoverageDiagnostics` can skip reporting the winner's own
- * incoming-fixed-boundary edge as "Rejected …" (A3) — otherwise the winner's
+ * incoming-firmed-boundary edge as "Rejected …" (A3) — otherwise the winner's
  * own pair would be reported as rejected, contradicting the placement just
  * made. */
 function winnerEdgeKeySet(candidate: Readonly<DueDateCandidate> | null | undefined): ReadonlySet<string> {
@@ -2632,7 +2634,7 @@ function winnerEdgeKeySet(candidate: Readonly<DueDateCandidate> | null | undefin
  * alternate productive-time sequence.
  * `winnerEdgeKeys` (A3) — the keys of edges the just-selected winner itself
  * carries — are skipped here: since A3 also collects a feasible candidate's
- * own uncovered incoming-fixed-boundary edge (see `exactSearch`/
+ * own uncovered incoming-firmed-boundary edge (see `exactSearch`/
  * `greedySearch`), the winner's own edge can otherwise appear in `edges` and
  * get reported as "Rejected …" even though it was the placement just made. */
 function appendRejectedCoverageDiagnostics(
@@ -2865,26 +2867,26 @@ function setupCompatibilityForLine(
 function boundaryOverrideLocks(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
-  fixed: ReadonlyArray<FixedBoundary>,
+  firmed: ReadonlyArray<FirmedBoundary>,
   free: ReadonlyArray<NimbusTask>,
   initialState: SetupStateKey | null,
   initialPredecessorOrderId: string | null,
 ): ReadonlyMap<string, BoundaryOverrideLocks> {
   const definition = bounds.setup.definition!;
-  const fixedById = new Map(fixed.map(boundary => [taskId(boundary.task), boundary]));
-  const fixedIndexById = new Map(fixed.map((boundary, index) => [taskId(boundary.task), index]));
+  const firmedById = new Map(firmed.map(boundary => [taskId(boundary.task), boundary]));
+  const firmedIndexById = new Map(firmed.map((boundary, index) => [taskId(boundary.task), index]));
   const freeById = new Map(free.map(task => [taskId(task), task]));
   const locks = new Map<string, BoundaryOverrideLocks>();
 
-  const lockFor = (fixedId: string): BoundaryOverrideLocks => {
-    const existing = locks.get(fixedId);
+  const lockFor = (firmedId: string): BoundaryOverrideLocks => {
+    const existing = locks.get(firmedId);
     if (existing) return existing;
     const created: BoundaryOverrideLocks = {};
-    locks.set(fixedId, created);
+    locks.set(firmedId, created);
     return created;
   };
-  const conflict = (fixedId: string, successorOrderId: string): void => {
-    const lock = lockFor(fixedId);
+  const conflict = (firmedId: string, successorOrderId: string): void => {
+    const lock = lockFor(firmedId);
     lock.issue = { line, successorOrderId, reason: 'override-inactive' };
   };
 
@@ -2892,18 +2894,18 @@ function boundaryOverrideLocks(
     if (override.status !== 'active' || override.machine !== line || override.signature_version !== definition.signature_version) {
       continue;
     }
-    const successorFixed = fixedById.get(override.successor_order_id);
-    const predecessorFixed = override.predecessor_order_id ? fixedById.get(override.predecessor_order_id) : undefined;
+    const successorFirmed = firmedById.get(override.successor_order_id);
+    const predecessorFirmed = override.predecessor_order_id ? firmedById.get(override.predecessor_order_id) : undefined;
 
-    if (successorFixed && override.predecessor_order_id === initialPredecessorOrderId) {
-      const successorId = taskId(successorFixed.task);
-      const successorIndex = fixedIndexById.get(successorId);
+    if (successorFirmed && override.predecessor_order_id === initialPredecessorOrderId) {
+      const successorId = taskId(successorFirmed.task);
+      const successorIndex = firmedIndexById.get(successorId);
       const lock = lockFor(successorId);
       if (successorIndex !== 0
         || initialState === null
         || stateKey(override.predecessor_state_key) !== stateKey(initialState)
-        || stateKey(override.successor_state_key) !== stateKey(successorFixed.state)
-        || lock.requiredFixedPredecessorId
+        || stateKey(override.successor_state_key) !== stateKey(successorFirmed.state)
+        || lock.requiredFirmedPredecessorId
         || lock.requiredLastOrderId) {
         conflict(successorId, override.successor_order_id);
       } else {
@@ -2913,57 +2915,57 @@ function boundaryOverrideLocks(
       continue;
     }
 
-    if (predecessorFixed && successorFixed) {
-      const predecessorId = taskId(predecessorFixed.task);
-      const successorId = taskId(successorFixed.task);
-      const predecessorIndex = fixedIndexById.get(predecessorId);
-      const successorIndex = fixedIndexById.get(successorId);
+    if (predecessorFirmed && successorFirmed) {
+      const predecessorId = taskId(predecessorFirmed.task);
+      const successorId = taskId(successorFirmed.task);
+      const predecessorIndex = firmedIndexById.get(predecessorId);
+      const successorIndex = firmedIndexById.get(successorId);
       const predecessorLock = lockFor(predecessorId);
       const successorLock = lockFor(successorId);
       if (predecessorIndex === undefined
         || successorIndex !== predecessorIndex + 1
         || predecessorLock.requiredFirstOrderId
-        || (predecessorLock.requiredFixedSuccessorId && predecessorLock.requiredFixedSuccessorId !== successorId)
+        || (predecessorLock.requiredFirmedSuccessorId && predecessorLock.requiredFirmedSuccessorId !== successorId)
         || successorLock.requiredLastOrderId
-        || (successorLock.requiredFixedPredecessorId && successorLock.requiredFixedPredecessorId !== predecessorId)) {
+        || (successorLock.requiredFirmedPredecessorId && successorLock.requiredFirmedPredecessorId !== predecessorId)) {
         conflict(predecessorId, override.successor_order_id);
         conflict(successorId, override.successor_order_id);
       } else {
-        predecessorLock.requiredFixedSuccessorId = successorId;
-        successorLock.requiredFixedPredecessorId = predecessorId;
+        predecessorLock.requiredFirmedSuccessorId = successorId;
+        successorLock.requiredFirmedPredecessorId = predecessorId;
       }
       continue;
     }
 
-    if (successorFixed && override.predecessor_order_id) {
+    if (successorFirmed && override.predecessor_order_id) {
       const predecessor = freeById.get(override.predecessor_order_id);
       if (!predecessor) {
-        conflict(taskId(successorFixed.task), override.successor_order_id);
+        conflict(taskId(successorFirmed.task), override.successor_order_id);
         continue;
       }
-      const lock = lockFor(taskId(successorFixed.task));
+      const lock = lockFor(taskId(successorFirmed.task));
       if (lock.requiresInitialState
-        || lock.requiredFixedPredecessorId
+        || lock.requiredFirmedPredecessorId
         || (lock.requiredLastOrderId && lock.requiredLastOrderId !== taskId(predecessor))) {
-        conflict(taskId(successorFixed.task), override.successor_order_id);
+        conflict(taskId(successorFirmed.task), override.successor_order_id);
       } else {
         lock.requiredLastOrderId = taskId(predecessor);
       }
     }
 
-    if (predecessorFixed) {
+    if (predecessorFirmed) {
       const successor = freeById.get(override.successor_order_id);
       if (!successor) {
         // A removed successor is reported by missingSuccessorOverrideEdges;
         // it does not justify freezing unrelated remaining work on the line.
-        if (!fixedById.has(override.successor_order_id)) continue;
-        conflict(taskId(predecessorFixed.task), override.successor_order_id);
+        if (!firmedById.has(override.successor_order_id)) continue;
+        conflict(taskId(predecessorFirmed.task), override.successor_order_id);
         continue;
       }
-      const lock = lockFor(taskId(predecessorFixed.task));
-      if (lock.requiredFixedSuccessorId
+      const lock = lockFor(taskId(predecessorFirmed.task));
+      if (lock.requiredFirmedSuccessorId
         || (lock.requiredFirstOrderId && lock.requiredFirstOrderId !== taskId(successor))) {
-        conflict(taskId(predecessorFixed.task), override.successor_order_id);
+        conflict(taskId(predecessorFirmed.task), override.successor_order_id);
       } else {
         lock.requiredFirstOrderId = taskId(successor);
       }
@@ -2972,30 +2974,30 @@ function boundaryOverrideLocks(
   return locks;
 }
 
-interface OutOfHorizonFixedOverrideAudit {
+interface OutOfHorizonFirmedOverrideAudit {
   protectedEdges: MissingSetupEdge[];
   inactiveEdges: MissingSetupEdge[];
 }
 
-/** A hard candidate horizon may omit ordinary future fixed production, but it
+/** A hard candidate horizon may omit ordinary future firmed production, but it
  * cannot erase an active exact relation to that production. A valid matching
  * pair must fail closed because the detached plan cannot preserve it without
  * scheduling through the caller's bound. A stale or missing pair is instead
  * retained as an inactive diagnostic, never silently dropped or protected. */
-function auditOutOfHorizonFixedOverrides(
+function auditOutOfHorizonFirmedOverrides(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   initialState: SetupStateKey | null,
   initial: Readonly<LineInitialContext>,
-): OutOfHorizonFixedOverrideAudit {
+): OutOfHorizonFirmedOverrideAudit {
   const definition = bounds.setup.definition!;
   const tasksById = new Map(initial.allTasks.map(task => [taskId(task), task]));
-  const postHorizonFixedIds = new Set(initial.allTasks.flatMap(task => {
+  const postHorizonFirmedIds = new Set(initial.allTasks.flatMap(task => {
     const start = timestamp(task.start_date);
-    return taskIsFixed(snapshot, task) && start && start > bounds.horizonEnd ? [taskId(task)] : [];
+    return taskIsFirmed(snapshot, task) && start && start > bounds.horizonEnd ? [taskId(task)] : [];
   }));
-  if (!postHorizonFixedIds.size) return { protectedEdges: [], inactiveEdges: [] };
+  if (!postHorizonFirmedIds.size) return { protectedEdges: [], inactiveEdges: [] };
 
   const stateForEndpoint = (orderId: string | null): SetupStateKey | null => {
     if (orderId === null) return initial.predecessorOrderId === null ? initialState : null;
@@ -3014,8 +3016,8 @@ function auditOutOfHorizonFixedOverrides(
       ? null
       : String(override.predecessor_order_id);
     const successorOrderId = String(override.successor_order_id);
-    if (!postHorizonFixedIds.has(predecessorOrderId ?? '')
-      && !postHorizonFixedIds.has(successorOrderId)) {
+    if (!postHorizonFirmedIds.has(predecessorOrderId ?? '')
+      && !postHorizonFirmedIds.has(successorOrderId)) {
       continue;
     }
     const predecessorState = stateForEndpoint(predecessorOrderId);
@@ -3030,7 +3032,7 @@ function auditOutOfHorizonFixedOverrides(
       line,
       predecessorOrderId,
       successorOrderId,
-      reason: PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
+      reason: PROTECTED_FIRMED_BOUNDARY_OUTSIDE_HORIZON_REASON,
     });
   }
   const sortEdges = (edges: ReadonlyArray<MissingSetupEdge>): MissingSetupEdge[] => (
@@ -3043,39 +3045,39 @@ function auditOutOfHorizonFixedOverrides(
   return { protectedEdges: sortEdges(protectedEdges), inactiveEdges: sortEdges(inactiveEdges) };
 }
 
-function protectedOutOfHorizonFixedBoundaryReasons(
+function protectedOutOfHorizonFirmedBoundaryReasons(
   line: string,
   edges: ReadonlyArray<MissingSetupEdge>,
 ): CandidateReason[] {
   return edges.map(edge => ({
-    code: PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
-    message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} crosses a fixed boundary outside the caller horizon.`,
+    code: PROTECTED_FIRMED_BOUNDARY_OUTSIDE_HORIZON_REASON,
+    message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} crosses a firmed boundary outside the caller horizon.`,
     line,
     taskId: edge.successorOrderId ?? undefined,
   }));
 }
 
-function inactiveOutOfHorizonFixedOverrideReasons(
+function inactiveOutOfHorizonFirmedOverrideReasons(
   line: string,
   edges: ReadonlyArray<MissingSetupEdge>,
 ): CandidateReason[] {
   return edges.map(edge => ({
     code: 'override-inactive',
-    message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} no longer matches a fixed boundary outside the caller horizon.`,
+    message: `Active override ${edge.predecessorOrderId ?? 'initial state'} -> ${edge.successorOrderId ?? 'unknown'} no longer matches a firmed boundary outside the caller horizon.`,
     line,
     taskId: edge.successorOrderId ?? undefined,
   }));
 }
 
-function belongsBeforeFixedBoundary(task: NimbusTask, boundary: FixedBoundary, mode: FragmentMode): boolean {
+function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode): boolean {
   if (mode === 'due-date-first') return dueTimestamp(task) <= boundary.start.getTime();
   // Pure SPT is ordered only by productive runtime. A stale or null planned
-  // date must not pre-partition work behind the next fixed order; bounded
+  // date must not pre-partition work behind the next firmed order; bounded
   // fragment placement decides what capacity can actually be admitted first.
   return true;
 }
 
-/** Represent whole free components that may safely defer around a fixed
+/** Represent whole free components that may safely defer around a firmed
  * boundary. A reroute is permitted only for a coverage failure or for setup
  * capacity that cannot fit before the boundary; an active free/free component
  * always moves together. */
@@ -3084,25 +3086,25 @@ interface BoundaryFallbackOption {
   deferred: NimbusTask[];
 }
 
-/** Only setup-coverage and fixed incoming-capacity failures can safely try a
+/** Only setup-coverage and firmed incoming-capacity failures can safely try a
  * different obstacle-free fragment admission. Broken override bindings and
  * unknown states remain hard failures rather than excuses to drop work. */
 function supportsBoundaryFallback(run: Readonly<SearchRun>): boolean {
   return run.missingEdges.length > 0 && run.missingEdges.every(edge => (
     edge.reason === UNCOVERED_SETUP_TRANSITION_REASON
-    || edge.reason === 'incoming-fixed-setup-infeasible'
+    || edge.reason === 'incoming-firmed-setup-infeasible'
   ));
 }
 
 /** F3b secondary hardening: Part 1f's incoming-boundary leniency means
  * `candidateForSequence` still reports `feasible: true` for a fragment whose
- * LAST order's transition into `fragment.nextFixed` is uncovered — it just
+ * LAST order's transition into `fragment.nextFirmed` is uncovered — it just
  * skips the reservation and pushes a diagnostic edge rather than freezing.
  * That is correct for the covered-core search itself, but the non-terminal
  * fallback-ambiguity count below must not treat such a "leniently tolerated"
  * route as equally genuine to one whose incoming reservation is actually
  * covered — otherwise a single order that can never really enter this
- * boundary (e.g. RED when only BLUE -> fixed is covered) counts as a second
+ * boundary (e.g. RED when only BLUE -> firmed is covered) counts as a second
  * "feasible" route and manufactures a false ambiguity where only one real
  * route exists. */
 function candidateEntersBoundaryUncovered(
@@ -3120,7 +3122,7 @@ interface BoundaryFallbackComponentPlan {
 }
 
 /** Resolve the deterministic ordered free components eligible for a local
- * fixed-boundary fallback. A component is atomic: active free/free overrides
+ * firmed-boundary fallback. A component is atomic: active free/free overrides
  * may never be split across a boundary, and required boundary endpoints can
  * never be deferred. */
 function boundaryFallbackComponentPlan(
@@ -3132,7 +3134,7 @@ function boundaryFallbackComponentPlan(
   freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
   mode: FragmentMode,
 ): BoundaryFallbackComponentPlan | null {
-  if (!fragment.nextFixed || !admitted.length) return null;
+  if (!fragment.nextFirmed || !admitted.length) return null;
   const baseOrder = mode === 'spt'
     ? orderedByProductiveRuntime(admitted)
     : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted, bounds.runContext);
@@ -3215,7 +3217,7 @@ interface BoundaryFallbackCursor {
  * search budget is charged before each subset, so an exponential combination
  * space cannot escape the caller's existing cap or deadline. Phase 1.5
  * budget-honesty check (requirement 5): the `budget` passed in here is the
- * SAME `SearchBudget` object `evaluateLineWithFixedBoundaries` received as a
+ * SAME `SearchBudget` object `evaluateLineWithFirmedBoundaries` received as a
  * parameter (constructed once per line by its caller) — and every
  * `searchFragment` continuation run triggered per component-subset option
  * below (both the terminal-boundary and non-terminal-boundary branches)
@@ -3295,18 +3297,18 @@ interface EvaluatedBoundaryFallback {
 }
 
 /** A final-boundary fallback can be scored only after its deferred work has
- * been evaluated from the fixed order's outgoing state. Rebuild its complete
- * free-order candidate from actual patches so partially admitted pre-fixed
+ * been evaluated from the firmed order's outgoing state. Rebuild its complete
+ * free-order candidate from actual patches so partially admitted pre-firmed
  * work is not counted twice in policy or admitted-work scoring. */
 function completeFinalBoundaryCandidate(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   tasksById: ReadonlyMap<string, NimbusTask>,
-  preFixed: DueDateCandidate,
+  preFirmed: DueDateCandidate,
   continuation: DueDateCandidate,
 ): DueDateCandidate {
-  const patches = [...preFixed.patches, ...continuation.patches];
+  const patches = [...preFirmed.patches, ...continuation.patches];
   const orderedTasks = patches.map(patch => tasksById.get(patch.id)!);
   const joinKey = (left: string, right: string): string => (
     left && right ? `${left}\u0000${right}` : left || right
@@ -3317,20 +3319,20 @@ function completeFinalBoundaryCandidate(
     score: [
       0,
       policyScore(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
-      (preFixed.score[2] ?? 0) + (continuation.score[2] ?? 0),
-      (preFixed.score[3] ?? 0) + (continuation.score[3] ?? 0),
+      (preFirmed.score[2] ?? 0) + (continuation.score[2] ?? 0),
+      (preFirmed.score[3] ?? 0) + (continuation.score[3] ?? 0),
       -patches.length,
-      (preFixed.score[5] ?? 0) + (continuation.score[5] ?? 0),
+      (preFirmed.score[5] ?? 0) + (continuation.score[5] ?? 0),
       // A2: sum both halves' uncovered-edge counts — required, since
       // compareBoundaryFallback routes through compareCandidate, which reads
       // score[SCORE_UNCOVERED] directly.
-      (preFixed.score[SCORE_UNCOVERED] ?? 0) + (continuation.score[SCORE_UNCOVERED] ?? 0),
+      (preFirmed.score[SCORE_UNCOVERED] ?? 0) + (continuation.score[SCORE_UNCOVERED] ?? 0),
     ],
     policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
-    sequenceKey: joinKey(preFixed.patches.map(patch => patch.id).join('|'), continuation.patches.map(patch => patch.id).join('|')),
+    sequenceKey: joinKey(preFirmed.patches.map(patch => patch.id).join('|'), continuation.patches.map(patch => patch.id).join('|')),
     unadmitted: [],
-    explanation: [...preFixed.explanation, ...continuation.explanation],
-    missingEdges: [...preFixed.missingEdges, ...continuation.missingEdges],
+    explanation: [...preFirmed.explanation, ...continuation.explanation],
+    missingEdges: [...preFirmed.missingEdges, ...continuation.missingEdges],
   };
 }
 
@@ -3511,38 +3513,38 @@ export function placeUnknownTail(
   return { patches, explanation, unadmitted: deferred, missingEdges };
 }
 
-/** The incoming setup a covered core reserved before a fixed boundary stays
+/** The incoming setup a covered core reserved before a firmed boundary stays
  * authoritative (Part 1c): tail capacity for the same fragment must end at
  * that reservation's start, never inside it. Re-derives the same reservation
  * `candidateForSequence` already validated, from the covered core's actual
  * final predecessor rather than the fragment's original one. An unknown
  * final predecessor state means the reservation itself cannot be computed —
- * the fixed order's own incoming setup then also becomes a diagnostic
+ * the firmed order's own incoming setup then also becomes a diagnostic
  * further downstream, and tail capacity simply runs to the boundary. */
 function tailCapacityEnd(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   fragmentEnd: Date,
-  nextFixed: FixedBoundary | undefined,
+  nextFirmed: FirmedBoundary | undefined,
   finalState: SetupStateKey | null,
   finalPredecessorOrderId: string | null,
 ): Date {
-  if (!nextFixed || finalState === null) return fragmentEnd;
+  if (!nextFirmed || finalState === null) return fragmentEnd;
   const definition = bounds.setup.definition!;
   const resolved = resolveSetup({
     definition,
     machine: line,
     predecessorState: finalState,
-    successorState: nextFixed.state,
+    successorState: nextFirmed.state,
     predecessorOrderId: finalPredecessorOrderId,
-    successorOrderId: taskId(nextFixed.task),
+    successorOrderId: taskId(nextFirmed.task),
     plantRows: bounds.setup.plant_rows,
     machineRows: bounds.setup.machine_rows,
     overrides: bounds.setup.overrides,
     index: bounds.runContext?.resolutionIndex ?? undefined,
   });
   const reserveMinutes = resolved.covered && resolved.effectiveMin !== null ? resolved.effectiveMin : 0;
-  return new Date(nextFixed.start.getTime() - reserveMinutes * 60 * 1000);
+  return new Date(nextFirmed.start.getTime() - reserveMinutes * 60 * 1000);
 }
 
 /** Cursor to start tail placement from: the covered core's last placed
@@ -3579,7 +3581,7 @@ function applyUnknownTail(
  * Whole-line fallback (Part 1e) for a line that cannot be evaluated as
  * setup-aware at all — no compatible setup definition, or the line is
  * explicitly `setup_compatible === false`. Free orders are still placed
- * (policy-then-due or SPT order, zero setup capacity) around whatever fixed
+ * (policy-then-due or SPT order, zero setup capacity) around whatever firmed
  * orders exist, rather than skipping the line; overflow at the very end
  * stays at its current dates with a diagnostic.
  */
@@ -3590,9 +3592,9 @@ function placeWholeLineAsTail(
   tasks: ReadonlyArray<NimbusTask>,
   mode: FragmentMode,
 ): { patches: SchedulePatch[]; explanation: CandidateReason[]; missingEdges: MissingSetupEdge[] } {
-  const free = tasks.filter(task => !taskIsFixed(snapshot, task));
-  const fixedWindows = tasks
-    .filter(task => taskIsFixed(snapshot, task))
+  const free = tasks.filter(task => !taskIsFirmed(snapshot, task));
+  const firmedWindows = tasks
+    .filter(task => taskIsFirmed(snapshot, task))
     .flatMap(task => {
       const start = timestamp(task.start_date);
       const end = timestamp(task.end_date);
@@ -3607,16 +3609,16 @@ function placeWholeLineAsTail(
   let cursor = new Date(bounds.now);
   // Track the last order actually placed by this function's own tail calls —
   // there is no covered core here, so this is the only predecessor chain
-  // `missingEdges` (F1) has to work with across fixed windows.
+  // `missingEdges` (F1) has to work with across firmed windows.
   let previousOrderId: string | null = null;
   // Phase 1.5 tail-pass valve: once overrun, skip attempting placement for
-  // every remaining fixed-window gap entirely — `placeUnknownTail` itself
+  // every remaining firmed-window gap entirely — `placeUnknownTail` itself
   // enforces the same hard stop, but checking here too avoids repeatedly
   // re-entering it (and re-emitting the same per-order diagnostic) once
   // there's nothing left to attempt. Whatever stays in `remaining` still
   // flows through the 'unknown-setup-tail-unplaced' loop below.
   const hardStop = bounds.deadline + SETUP_AWARE_TAIL_OVERRUN_MS;
-  for (const window of fixedWindows) {
+  for (const window of firmedWindows) {
     if (remaining.length && cursor < window.start && bounds.clock() < hardStop) {
       remaining = applyUnknownTail(
         snapshot, bounds, line, mode, remaining, cursor, window.start, patches, explanation, missingEdges, previousOrderId,
@@ -3641,7 +3643,7 @@ function placeWholeLineAsTail(
   return { patches, explanation, missingEdges };
 }
 
-function evaluateLineWithFixedBoundaries(
+function evaluateLineWithFirmedBoundaries(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
@@ -3664,7 +3666,7 @@ function evaluateLineWithFixedBoundaries(
     ...missingPredecessorEdges,
     ...preservedAnchorEdges,
   ];
-  const postHorizonOverrideAudit = auditOutOfHorizonFixedOverrides(
+  const postHorizonOverrideAudit = auditOutOfHorizonFirmedOverrides(
     snapshot, bounds, line, initialState, initial,
   );
   const ordinaryEdgeKeys = new Set(ordinaryBaseMissingEdges.map(missingEdgeKey));
@@ -3677,22 +3679,22 @@ function evaluateLineWithFixedBoundaries(
     ...missingSuccessorOverrideReasons(line, missingSuccessorEdges),
     ...missingPredecessorOverrideReasons(line, missingPredecessorEdges),
     ...missingPredecessorOverrideReasons(line, preservedAnchorEdges),
-    ...inactiveOutOfHorizonFixedOverrideReasons(line, additionalInactivePostHorizonEdges),
+    ...inactiveOutOfHorizonFirmedOverrideReasons(line, additionalInactivePostHorizonEdges),
   ];
   if (postHorizonOverrideAudit.protectedEdges.length) {
     return unchangedLineResult(
       line,
-      PROTECTED_FIXED_BOUNDARY_OUTSIDE_HORIZON_REASON,
-      'An active fixed-boundary override cannot be preserved inside the caller scheduling horizon.',
+      PROTECTED_FIRMED_BOUNDARY_OUTSIDE_HORIZON_REASON,
+      'An active firmed-boundary override cannot be preserved inside the caller scheduling horizon.',
       [...baseMissingEdges, ...postHorizonOverrideAudit.protectedEdges],
-      [...baseExplanation, ...protectedOutOfHorizonFixedBoundaryReasons(line, postHorizonOverrideAudit.protectedEdges)],
+      [...baseExplanation, ...protectedOutOfHorizonFirmedBoundaryReasons(line, postHorizonOverrideAudit.protectedEdges)],
     );
   }
-  const fixed: FixedBoundary[] = [];
-  for (const task of tasks.filter(task => taskIsFixed(snapshot, task))) {
+  const firmed: FirmedBoundary[] = [];
+  for (const task of tasks.filter(task => taskIsFirmed(snapshot, task))) {
     const start = timestamp(task.start_date);
     const end = timestamp(task.end_date);
-    // An equal-start fixed run remains the terminal incoming boundary: its
+    // An equal-start firmed run remains the terminal incoming boundary: its
     // setup can still occupy time inside the caller horizon. Strictly later
     // unprotected runs cannot lend capacity to this detached candidate.
     if (start && start > bounds.horizonEnd) continue;
@@ -3700,21 +3702,21 @@ function evaluateLineWithFixedBoundaries(
     if (!start || !end || end <= start || !state) {
       return unchangedLineResult(
         line,
-        'fixed-boundary-invalid',
-        'A fixed order lacks a usable interval or setup state.',
+        'firmed-boundary-invalid',
+        'A firmed order lacks a usable interval or setup state.',
         [
           ...baseMissingEdges,
-          { line, successorOrderId: taskId(task), reason: 'fixed-boundary-invalid' },
+          { line, successorOrderId: taskId(task), reason: 'firmed-boundary-invalid' },
         ],
         baseExplanation,
       );
     }
-    fixed.push({ task, state, start, end });
+    firmed.push({ task, state, start, end });
   }
-  fixed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
+  firmed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
 
-  const free = tasks.filter(task => !taskIsFixed(snapshot, task));
-  const locks = boundaryOverrideLocks(bounds, line, fixed, free, initialState, initial.predecessorOrderId);
+  const free = tasks.filter(task => !taskIsFirmed(snapshot, task));
+  const locks = boundaryOverrideLocks(bounds, line, firmed, free, initialState, initial.predecessorOrderId);
   const initialFreeLock = initialFreeOverrideLock(
     bounds, line, free, initialState, initial.predecessorOrderId,
   );
@@ -3728,8 +3730,8 @@ function evaluateLineWithFixedBoundaries(
     );
   }
   if (initialFreeLock.requiredFirstOrderId
-    && fixed.length
-    && locks.get(taskId(fixed[0].task))?.requiresInitialState) {
+    && firmed.length
+    && locks.get(taskId(firmed[0].task))?.requiresInitialState) {
     return unchangedLineResult(
       line,
       'override-inactive',
@@ -3770,7 +3772,7 @@ function evaluateLineWithFixedBoundaries(
     // trapped in this local `candidate` and never reach `run.missingEdges`,
     // so neither the live-run toast nor OptimizerPreview's tally would ever
     // see these orders. Filtered to that one reason so we don't newly leak
-    // 'initial-state-unknown' / 'incoming-fixed-setup-infeasible' winner
+    // 'initial-state-unknown' / 'incoming-firmed-setup-infeasible' winner
     // edges (already-existing, differently-consumed diagnostics) into every
     // line result.
     missingEdges.push(...candidate.missingEdges.filter(edge => edge.reason === 'scheduled-without-setup'));
@@ -3792,25 +3794,25 @@ function evaluateLineWithFixedBoundaries(
     return applyWinner(run);
   };
 
-  for (let boundaryIndex = 0; boundaryIndex < fixed.length; boundaryIndex += 1) {
-    const boundary = fixed[boundaryIndex];
-    // F3: only a fragment before a LATER fixed boundary needs the caller to
+  for (let boundaryIndex = 0; boundaryIndex < firmed.length; boundaryIndex += 1) {
+    const boundary = firmed[boundaryIndex];
+    // F3: only a fragment before a LATER firmed boundary needs the caller to
     // own arbitration — that is the "cannot legitimately rank two
-    // alternatives ahead of later fixed boundaries" scenario the ambiguity
+    // alternatives ahead of later firmed boundaries" scenario the ambiguity
     // guard below exists for. The terminal boundary's local fallback already
     // compares every complete candidate directly (no separate ambiguity
     // guard is needed there), so letting its own per-boundary run resolve
     // coverage via demotion first — exactly like the trailing fragment —
     // is safe and matches every other never-freeze fragment's behavior.
-    const isTerminalBoundary = boundaryIndex === fixed.length - 1;
+    const isTerminalBoundary = boundaryIndex === firmed.length - 1;
     if (boundary.start < fragmentStart) {
       return unchangedLineResult(
         line,
-        'fixed-boundary-invalid',
-        'Fixed boundaries overlap or precede the scheduling horizon.',
+        'firmed-boundary-invalid',
+        'Firmed boundaries overlap or precede the scheduling horizon.',
         [
           ...baseMissingEdges,
-          { line, successorOrderId: taskId(boundary.task), reason: 'fixed-boundary-invalid' },
+          { line, successorOrderId: taskId(boundary.task), reason: 'firmed-boundary-invalid' },
         ],
         baseExplanation,
       );
@@ -3820,17 +3822,17 @@ function evaluateLineWithFixedBoundaries(
       return unchangedLineResult(
         line,
         'override-inactive',
-        'An active occurrence override cannot be preserved at this fixed boundary.',
+        'An active occurrence override cannot be preserved at this firmed boundary.',
         [...baseMissingEdges, boundaryLock.issue],
         baseExplanation,
       );
     }
-    if (boundaryLock?.requiredFixedPredecessorId
-      && predecessorOrderId !== boundaryLock.requiredFixedPredecessorId) {
+    if (boundaryLock?.requiredFirmedPredecessorId
+      && predecessorOrderId !== boundaryLock.requiredFirmedPredecessorId) {
       return unchangedLineResult(
         line,
         'override-inactive',
-        'An active occurrence override no longer has its bound fixed predecessor.',
+        'An active occurrence override no longer has its bound firmed predecessor.',
         [...baseMissingEdges, {
           line,
           predecessorOrderId,
@@ -3871,8 +3873,8 @@ function evaluateLineWithFixedBoundaries(
     }
 
     const reservedForAnotherBoundary = new Set<string>();
-    for (let futureIndex = boundaryIndex; futureIndex < fixed.length; futureIndex += 1) {
-      const futureLock = locks.get(taskId(fixed[futureIndex].task));
+    for (let futureIndex = boundaryIndex; futureIndex < firmed.length; futureIndex += 1) {
+      const futureLock = locks.get(taskId(firmed[futureIndex].task));
       if (futureLock?.requiredFirstOrderId) reservedForAnotherBoundary.add(futureLock.requiredFirstOrderId);
       if (futureLock?.requiredLastOrderId && futureIndex !== boundaryIndex) {
         reservedForAnotherBoundary.add(futureLock.requiredLastOrderId);
@@ -3883,7 +3885,7 @@ function evaluateLineWithFixedBoundaries(
     let componentConflict: MissingSetupEdge | null = null;
     const admitted = boundaryLock?.requiresInitialState
       || boundaryLock?.requiresInitialPredecessorId
-      || boundaryLock?.requiredFixedPredecessorId
+      || boundaryLock?.requiredFirmedPredecessorId
       ? []
       : remaining.filter(task => {
         const id = taskId(task);
@@ -3905,13 +3907,13 @@ function evaluateLineWithFixedBoundaries(
         }
         if (needsThisFragment) return true;
         if (reservedForFutureFragment) return false;
-        return members.some(member => belongsBeforeFixedBoundary(freeById.get(member)!, boundary, mode));
+        return members.some(member => belongsBeforeFirmedBoundary(freeById.get(member)!, boundary, mode));
       });
     if (componentConflict) {
       return unchangedLineResult(
         line,
         'override-inactive',
-        'An active occurrence override cannot remain adjacent across fixed boundaries.',
+        'An active occurrence override cannot remain adjacent across firmed boundaries.',
         [...baseMissingEdges, componentConflict],
         baseExplanation,
       );
@@ -3925,20 +3927,20 @@ function evaluateLineWithFixedBoundaries(
       predecessorOrderId,
       lineOrderIds,
       allowsDeletedPredecessorBinding: initial.preservedAnchor !== undefined,
-      nextFixed: boundary,
+      nextFirmed: boundary,
       requiredFirstOrderId,
       requiredLastOrderId: boundaryLock?.requiredLastOrderId,
     };
     const run = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode);
-    // A failed pre-fixed sequence may still have a fully covered route after
-    // the fixed run. Search bounded whole-component deferrals under the same
+    // A failed pre-firmed sequence may still have a fully covered route after
+    // the firmed run. Search bounded whole-component deferrals under the same
     // shared budget; the rejected edge stays visible when a later route wins.
     let winner = accept(run, false);
     // Tracks whichever run's unknown-tail set actually corresponds to the
     // admitted batch that produced `winner` (Part 1c) — the plain run, or
     // whichever fallback run below replaces it.
     let tailSource: ReadonlyArray<NimbusTask> = run.unknownTail;
-    let deferredAcrossFixed: NimbusTask[] = [];
+    let deferredAcrossFirmed: NimbusTask[] = [];
     const fallbackRuns: SearchRun[] = [];
     const continuationRuns: SearchRun[] = [];
     if (!winner && run.termination === 'completed' && supportsBoundaryFallback(run)) {
@@ -3956,11 +3958,11 @@ function evaluateLineWithFixedBoundaries(
           if (fallbackRun.winner) {
             winner = applyWinner(fallbackRun);
             tailSource = fallbackRun.unknownTail;
-            deferredAcrossFixed = option.deferred;
+            deferredAcrossFirmed = option.deferred;
             missingEdges.push(...run.missingEdges);
             explanation.push({
-              code: 'covered-fixed-boundary-fallback',
-              message: `Deferred ${deferredAcrossFixed.length} order(s) past fixed ${taskId(boundary.task)} to preserve a covered fixed boundary.`,
+              code: 'covered-firmed-boundary-fallback',
+              message: `Deferred ${deferredAcrossFirmed.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
               line,
               taskId: taskId(boundary.task),
             });
@@ -3969,7 +3971,7 @@ function evaluateLineWithFixedBoundaries(
           if (fallbackRun.termination !== 'completed') break;
         }
       } else if (isTerminalBoundary) {
-        // Only the terminal fixed boundary can be compared locally without
+        // Only the terminal firmed boundary can be compared locally without
         // changing planner architecture: each option is extended through the
         // one remaining free fragment, yielding a complete candidate.
         const completeFallbacks: EvaluatedBoundaryFallback[] = [];
@@ -4030,8 +4032,8 @@ function evaluateLineWithFixedBoundaries(
           );
           appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
           explanation.push({
-            code: 'fixed-boundary-fallback-ambiguous',
-            message: `The bounded fallback search could not compare every route around fixed ${taskId(boundary.task)}.`,
+            code: 'firmed-boundary-fallback-ambiguous',
+            message: `The bounded fallback search could not compare every route around firmed ${taskId(boundary.task)}.`,
             line,
             taskId: taskId(boundary.task),
           });
@@ -4070,17 +4072,17 @@ function evaluateLineWithFixedBoundaries(
           appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.continuation!.missingEdges, selectedFallbackEdgeKeys);
           applyCandidate(selectedFallback.candidate);
           explanation.push({
-            code: 'covered-fixed-boundary-fallback',
-            message: `Deferred ${selectedFallback.option.deferred.length} order(s) past fixed ${taskId(boundary.task)} to preserve a covered fixed boundary.`,
+            code: 'covered-firmed-boundary-fallback',
+            message: `Deferred ${selectedFallback.option.deferred.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
             line,
             taskId: taskId(boundary.task),
           });
-          // This complete candidate already spans the fixed boundary through
+          // This complete candidate already spans the firmed boundary through
           // to the horizon end (Part 1c): place each half's unknown tail
-          // against its own capacity — the pre-fixed half up to fixed's
+          // against its own capacity — the pre-firmed half up to firmed's
           // reserved incoming setup, the continuation half up to the
           // horizon, since there is no further fragment to defer to.
-          const preFixedTailUnadmitted = applyUnknownTail(
+          const preFirmedTailUnadmitted = applyUnknownTail(
             snapshot, bounds, line, mode, selectedFallback.run.unknownTail,
             tailCursorFor(selectedFallback.run.winner, fragmentStart),
             tailCapacityEnd(
@@ -4098,7 +4100,7 @@ function evaluateLineWithFixedBoundaries(
             patches, explanation, missingEdges,
             selectedFallback.continuation!.winner!.finalPredecessorOrderId ?? taskId(boundary.task),
           );
-          for (const task of [...preFixedTailUnadmitted, ...continuationTailUnadmitted]) {
+          for (const task of [...preFirmedTailUnadmitted, ...continuationTailUnadmitted]) {
             explanation.push({
               code: 'unknown-setup-tail-unplaced',
               message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
@@ -4111,8 +4113,8 @@ function evaluateLineWithFixedBoundaries(
           };
         }
       } else {
-        // A local pre-fixed fragment cannot legitimately rank two alternatives
-        // ahead of later fixed boundaries. Accept the only proven route; when
+        // A local pre-firmed fragment cannot legitimately rank two alternatives
+        // ahead of later firmed boundaries. Accept the only proven route; when
         // there is more than one (or the shared budget stops enumeration), fail
         // closed instead of inventing a local admission-first objective.
         const feasibleFallbacks: EvaluatedBoundaryFallback[] = [];
@@ -4150,10 +4152,10 @@ function evaluateLineWithFixedBoundaries(
           missingEdges.push(...run.missingEdges, ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges));
           appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
           explanation.push({
-            code: 'fixed-boundary-fallback-ambiguous',
+            code: 'firmed-boundary-fallback-ambiguous',
             message: completeEnumeration
-              ? `Multiple covered fallback routes remain before fixed ${taskId(boundary.task)}; no local route was selected.`
-              : `The bounded fallback search could not enumerate every route before fixed ${taskId(boundary.task)}.`,
+              ? `Multiple covered fallback routes remain before firmed ${taskId(boundary.task)}; no local route was selected.`
+              : `The bounded fallback search could not enumerate every route before firmed ${taskId(boundary.task)}.`,
             line,
             taskId: taskId(boundary.task),
           });
@@ -4178,12 +4180,12 @@ function evaluateLineWithFixedBoundaries(
           const selectedFallback = feasibleFallbacks[0];
           winner = applyWinner(selectedFallback.run);
           tailSource = selectedFallback.run.unknownTail;
-          deferredAcrossFixed = selectedFallback.option.deferred;
+          deferredAcrossFirmed = selectedFallback.option.deferred;
           missingEdges.push(...run.missingEdges);
           appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, winnerEdgeKeySet(winner));
           explanation.push({
-            code: 'covered-fixed-boundary-fallback',
-            message: `Deferred ${deferredAcrossFixed.length} order(s) past fixed ${taskId(boundary.task)} to preserve a covered fixed boundary.`,
+            code: 'covered-firmed-boundary-fallback',
+            message: `Deferred ${deferredAcrossFirmed.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
             line,
             taskId: taskId(boundary.task),
           });
@@ -4209,8 +4211,8 @@ function evaluateLineWithFixedBoundaries(
       const isOverrideConflict = attemptedEdges.some(edge => edge.reason === 'override-inactive');
       if (isOverrideConflict) {
         explanation.push({
-          code: 'fixed-boundary-infeasible',
-          message: `Cannot preserve the required incoming setup before fixed ${taskId(boundary.task)}.`,
+          code: 'firmed-boundary-infeasible',
+          message: `Cannot preserve the required incoming setup before firmed ${taskId(boundary.task)}.`,
           line,
           taskId: taskId(boundary.task),
         });
@@ -4247,7 +4249,7 @@ function evaluateLineWithFixedBoundaries(
       snapshot, bounds, line, mode, tailSource, tailCursorFor(winner, fragmentStart), tailEnd, patches, explanation,
       missingEdges, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
-    remaining = [...winner.unadmitted, ...deferredAcrossFixed, ...tailUnadmitted, ...later];
+    remaining = [...winner.unadmitted, ...deferredAcrossFirmed, ...tailUnadmitted, ...later];
     fragmentStart = new Date(boundary.end);
     predecessorState = boundary.state;
     predecessorOrderId = taskId(boundary.task);
@@ -4388,7 +4390,7 @@ export function evaluateSptWithSetup(
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
-      // a policy/due-ordered tail placement around any fixed orders.
+      // a policy/due-ordered tail placement around any firmed orders.
       const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
@@ -4451,7 +4453,7 @@ export function evaluateSptWithSetup(
       });
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
-    const result = evaluateLineWithFixedBoundaries(
+    const result = evaluateLineWithFirmedBoundaries(
       snapshot,
       lineBounds,
       line,
@@ -4562,7 +4564,7 @@ export function evaluateDueDateFirst(
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
-      // a policy/due-ordered tail placement around any fixed orders.
+      // a policy/due-ordered tail placement around any firmed orders.
       const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
@@ -4627,7 +4629,7 @@ export function evaluateDueDateFirst(
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
 
-    const result = evaluateLineWithFixedBoundaries(
+    const result = evaluateLineWithFirmedBoundaries(
       snapshot,
       lineBounds,
       line,

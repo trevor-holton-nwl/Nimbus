@@ -140,11 +140,11 @@
    attached (see the header comment on uninstall() in schedule-workbench.mjs).
    The plan's inline-handler-migration mandate's one concrete instance —
    _showMultiInspector's inline onclick strings — turned out to be four call
-   sites, not the three originally named (_bulkFix(true), _bulkFix(false),
+   sites, not the three originally named (_bulkFirm(true), _bulkFirm(false),
    Selection.clear(), and a fourth, _unscheduleSelected(), missed by the
    plan's prose); all four now wire through real addEventListener calls
    instead. Writing the first-ever test for _onDataSetUpdate also found the
-   module's own header comment describing fixed-order drag protection didn't
+   module's own header comment describing firmed-order drag protection didn't
    match the code — the comment was corrected, the logic (correctly) left
    unchanged. One same-phase forward reference, AlertsUIAdapter.showForCell
    (...), is left calling through the shared NIMBUS binding until

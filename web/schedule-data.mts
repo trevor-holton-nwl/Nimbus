@@ -419,9 +419,9 @@ export const Persistence = {
           }
         }).filter(Boolean) as NimbusTask[];
 
-        // Restore user state (blocks, calendars, fixedIds, lineSettings) from localStorage
+        // Restore user state (blocks, calendars, firmedIds, lineSettings) from localStorage
         // before setTasks so alerts compute with the correct context. The backend is
-        // authoritative for task schema; the cache owns blocks/calendars/fixedIds AND
+        // authoritative for task schema; the cache owns blocks/calendars/firmedIds AND
         // any manually-positioned task dates the user has placed beyond the auto-snap baseline.
         let cacheData = null;
         try {
@@ -463,9 +463,9 @@ export const Persistence = {
         stats.rendered = Store.tasksArr.length;
         Persistence._currentLoadedPlant = plant;
 
-        // Apply fixed flag to tasks restored from cache
-        for (const id of Store.fixedIds) {
-          const t = Store.tasks[id]; if (t) t.fixed = true;
+        // Apply firmed flag to tasks restored from cache
+        for (const id of Store.firmedIds) {
+          const t = Store.tasks[id]; if (t) t.firmed = true;
         }
 
         (payload.links || []).forEach(link => {
@@ -693,7 +693,7 @@ export const Persistence = {
         const durationMs = t.end_date.getTime() - t.start_date.getTime();
         if (durationMs <= 0) continue;
 
-        if (t.fixed || (t.scheduleSegments?.length ?? 0) >= 2 || t.runtime_schedule_mismatch) continue;
+        if (t.firmed || (t.scheduleSegments?.length ?? 0) >= 2 || t.runtime_schedule_mismatch) continue;
 
         // Backend has a scheduled_start/end persisted for this task — the user
         // owns its position. Never re-snap on load; alerts will flag any
@@ -1009,8 +1009,8 @@ export const Persistence = {
         }
       }
       Store.setTasks(tasks, 'persistence');
-      for (const id of Store.fixedIds) {
-        const t = Store.tasks[id]; if (t) t.fixed = true;
+      for (const id of Store.firmedIds) {
+        const t = Store.tasks[id]; if (t) t.firmed = true;
       }
       for (const t of tasks) {
         Store.ensureCalendar(t.MACHINE || 'Unknown');
@@ -1024,7 +1024,7 @@ export const Persistence = {
 
   // Restore non-task user state from a cache snapshot. Called both from _loadCache()
   // and from the backend load path (where the backend owns task dates but localStorage
-  // owns everything else: blocks, calendars, fixedIds, lineSettings, plants).
+  // owns everything else: blocks, calendars, firmedIds, lineSettings, plants).
   _restoreNonTaskState(data: Partial<StoredState>): void {
     if (data.lineSettings && Object.keys(data.lineSettings).length) {
       const ls = Store.lineSettings;
@@ -1046,9 +1046,10 @@ export const Persistence = {
       for (const k of Object.keys(cal)) delete cal[k];
       Object.assign(cal, data.calendars);
     }
-    if (Array.isArray(data.fixedIds)) {
-      Store.fixedIds.clear();
-      for (const id of data.fixedIds) Store.fixedIds.add(String(id));
+    const _legacyIds = (data as any).firmedIds ?? (data as any).fixedIds;  // pre-rename caches used 'fixedIds'
+    if (Array.isArray(_legacyIds)) {
+      Store.firmedIds.clear();
+      for (const id of _legacyIds) Store.firmedIds.add(String(id));
     }
     if (data.plants && Object.keys(data.plants).length) {
       const pl = Store.plants;
@@ -1122,10 +1123,10 @@ export const Persistence = {
         }
       }
     }
-    // Fix a couple of example orders to showcase the feature.
+    // Firm a couple of example orders to showcase the feature.
     if (tasks.length > 6) {
-      tasks[2].fixed = true;
-      tasks[10].fixed = true;
+      tasks[2].firmed = true;
+      tasks[10].firmed = true;
     }
     Store.setTasks(tasks as unknown as NimbusTask[], 'persistence');
     // Calendars, plant, and line settings
@@ -1150,7 +1151,7 @@ export const Persistence = {
     Persistence._saveCache();
 
     // Only send tasks that changed since the last successful save. The backend
-    // only persists start_date/end_date so fixed/line changes don't need to be
+    // only persists start_date/end_date so firmed/line changes don't need to be
     // in this payload. tasks:bulk (reload/undo) clears _dirtyIds because Store
     // state came from a known-good source that doesn't need to be written back.
     const dirtyTasks = Persistence._dirtyIds.size > 0
@@ -1421,7 +1422,7 @@ export const Persistence = {
         tasks:          Store.tasksArr,
         blocks:         Store.blocks,
         calendars:      Store.calendars,
-        fixedIds:       [...Store.fixedIds],
+        firmedIds:      [...Store.firmedIds],
         plants:         Store.plants,
         plantBlocks:    Store.plantBlocks,
         lineSettings:   Store.lineSettings,
@@ -1460,7 +1461,7 @@ export const Persistence = {
       { ...baseMeta,
         selectedPlant: snapshot.selectedPlant,
         lineSettings:  snapshot.lineSettings,
-        fixedIds:      snapshot.fixedIds,
+        firmedIds:     snapshot.firmedIds,
         tasks:         [] },
     ];
     for (let i = 0; i < tiers.length; i++) {
