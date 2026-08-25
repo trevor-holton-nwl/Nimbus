@@ -143,7 +143,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, scheduleAlertsForPatches } from './schedule-services.mjs';
+import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, scheduleAlertsForPatches, effectiveFirmedIdSet } from './schedule-services.mjs';
 import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
 import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
@@ -8143,6 +8143,7 @@ const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'firmed' | 'capacity' | 'ot
   'trailing-fragment-unadmitted': 'capacity',
   'unknown-setup-tail-unplaced': 'capacity',
   'initial-state-unknown': 'other',
+  'firmed-boundary-state-unknown': 'other',
 };
 
 function tallyPrunes(explanation: ReadonlyArray<CandidateReason>): PreviewExplanation['prunes'] {
@@ -8214,6 +8215,7 @@ export const OptimizerPreview = {
     plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
   } | null,
   _auditDetails: null as OptimizationAuditDetails | null,
+  _syntheticSetup: false,
   _explanation: null as PreviewExplanation | null,
   /** KPI vectors for the applied plan and one alternate mode — populated in
    *  runWithPreview (now via a deferred background run, see _finalistsPending),
@@ -8503,6 +8505,7 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
+        OptimizerPreview._syntheticSetup = mode === 'changeover' && !(Store.setupSnapshot && Store.setupSnapshot.plant === plant && Store.setupSnapshot.plant_active);
         // B3: the same run-scoped candidate pool used for the KPI comparison
         // (plant, via `scopedTasks` above using the B7 line→plant fallback,
         // plus opts.lines and excludeFromOpt) — NOT the time-windowed
@@ -8512,13 +8515,14 @@ export const OptimizerPreview = {
           .filter(t => !lineSet || lineSet.has(t.MACHINE))
           .filter(t => !candidateSnapshot.lineSettings[t.MACHINE || '']?.excludeFromOpt)
           .map(t => ({ id: String(t.id), line: t.MACHINE || 'Unknown' }));
+        const runNow = opts.startDate ? new Date(opts.startDate) : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
         const explanation = OptimizerPreview.summarizeCandidate(candidate, {
           productionBefore: snapshot.filter(inScope).length,
           productionAfter: postTasks.length,
           preKpis,
           postKpis,
           unplacedCandidates,
-          firmedIds: candidateSnapshot.firmedIds,
+          firmedIds: effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true),
         });
         const described = OptimizerPreview.describeMissingPairs(
           candidate,
@@ -9081,6 +9085,25 @@ export const OptimizerPreview = {
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
     Toast.show(Util.t('toast.opt_applied'), 'success');
+    // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
+    if (OptimizerPreview._explanation) {
+      const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
+      if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
+        Toast.show(Util.t('toast.optimize_missing_setup_summary', {
+          orders: scheduledWithoutSetup.orders,
+          lines: scheduledWithoutSetup.lines,
+        }), 'warn');
+      }
+      if (unplacedOrders.orders) {
+        Toast.show(Util.t('toast.optimize_orders_left_in_place', {
+          orders: unplacedOrders.orders,
+          lines: unplacedOrders.lines,
+        }), 'warn');
+      }
+    }
+    if (candidate.unchangedLines.length) {
+      Toast.show(Util.t('toast.optimize_lines_guarded', { count: candidate.unchangedLines.length }), 'warn');
+    }
     OptimizerPreview._clear();
     // The trial is now the committed baseline. Phase 3 (Pkg E): route through
     // Confidence's own debounced scheduler (Util.debounce-wrapped in
@@ -9124,6 +9147,7 @@ export const OptimizerPreview = {
     OptimizerPreview._backlogResult = null;
     OptimizerPreview._backlogAudit = null;
     OptimizerPreview._auditDetails = null;
+    OptimizerPreview._syntheticSetup = false;
     OptimizerPreview._explanation = null;
     OptimizerPreview._finalists = null;
     OptimizerPreview._finalistsPending = false;

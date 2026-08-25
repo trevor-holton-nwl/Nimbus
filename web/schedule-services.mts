@@ -238,6 +238,27 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
   if (patches.length) Store.updateMany(Array.from(patches), 'engine');
 }
 
+/** The setup-aware evaluators' single notion of "immovable" for a run: the
+ * caller's own firmed set (manual `Store.isFirmed` ids), folded with every
+ * ECC-firmed and frozen-horizon task. `respectFirmed` gates BOTH the manual
+ * ids and the ECC fold — matching the legacy per-line walk's
+ * `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` gate exactly
+ * — while `Engine.isFrozenHorizon` always folds in regardless, since the
+ * frozen horizon is a scheduling-window constraint, not a firming concept.
+ * Pure and run-local: never written back to Store. */
+export function effectiveFirmedIdSet(
+  tasks: ReadonlyArray<NimbusTask>,
+  baseFirmedIds: ReadonlySet<string> | ReadonlyArray<string>,
+  horizonStart: Date,
+  respectFirmed: boolean,
+): Set<string> {
+  const ids = new Set<string>(respectFirmed ? Array.from(baseFirmedIds, String) : []);
+  for (const t of tasks) {
+    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, horizonStart)) ids.add(String(t.id));
+  }
+  return ids;
+}
+
 /** Resolved setup is observation data for capacity/alerts, never a task or a
  * persisted link.  This is the sole main-thread projection sent to the core
  * and worker; they must not receive raw setup rows or re-resolve transitions. */
@@ -3034,14 +3055,19 @@ export const Engine = {
       // isFrozenHorizon carries its own distinct reason for the UI (never
       // written to Store.isFirmed itself), this is purely an internal input
       // to the evaluator so it never re-sequences an order it shouldn't touch.
-      // Passes horizonStart (this run's own "now", injectedNow-aware for
-      // candidate runs) rather than the real-time default, so a detached
-      // preview evaluated at a simulated instant agrees with itself. Never
-      // written back to the Store — this fold is run-local only.
-      const frozenIds = baseSnapshot.tasks.filter(t => t.ecc_firmed || Engine.isFrozenHorizon(t, horizonStart)).map(t => String(t.id));
-      const snapshot: ScheduleSnapshot = frozenIds.length
-        ? { ...baseSnapshot, firmedIds: new Set([...Array.from(baseSnapshot.firmedIds, String), ...frozenIds]) }
-        : baseSnapshot;
+      // respectFirmed gates BOTH the manual firmed ids and the ECC-firmed
+      // fold, exactly like the legacy walk's `(respectFirmed && (sourceIsFirmed
+      // (t.id) || !!t.ecc_firmed))` guard below — unchecking "Respect firmed"
+      // in the Optimize dialog must free ECC-firmed orders here too, not just
+      // in the legacy per-line path. The frozen-horizon fold is unconditional
+      // regardless of respectFirmed, since it is a scheduling-window
+      // constraint, not a firming concept. Passes horizonStart (this run's
+      // own "now", injectedNow-aware for candidate runs) rather than the
+      // real-time default, so a detached preview evaluated at a simulated
+      // instant agrees with itself. Never written back to the Store — this
+      // fold is run-local only (see effectiveFirmedIdSet).
+      const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, horizonStart, respectFirmed);
+      const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
         // mode === 'changeover' (effectiveSetupSnapshot is always the real
@@ -3156,13 +3182,19 @@ export const Engine = {
       // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
       // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
       // setup-aware evaluators' own scoping agree on which orders exist for
-      // this plant.
+      // this plant. "Firmed" here means membership in `effectiveFirmedIds` —
+      // the SAME effectively-folded set (manual + ECC-firmed, gated by
+      // respectFirmed, plus the unconditional frozen-horizon fold; see
+      // effectiveFirmedIdSet) actually handed to the evaluator above, not
+      // just a manual `sourceIsFirmed` check — so an ECC-firmed or
+      // frozen-horizon order the evaluator deliberately left untouched is
+      // never miscounted here as "left in place".
       const unplacedLines = new Set<string>();
       let unplacedCount = 0;
       for (const task of snapshot.tasks) {
         const id = String(task.id);
         if (patchedIds.has(id)) continue;
-        if (sourceIsFirmed(task.id)) continue;
+        if (effectiveFirmedIds.has(id)) continue;
         const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
         if (taskPlant !== plant) continue;
         const line = task.MACHINE || 'Unknown';

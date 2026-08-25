@@ -690,7 +690,11 @@ interface SearchBudget {
 
 interface FirmedBoundary {
   task: NimbusTask;
-  state: SetupStateKey;
+  /** Nullable (never-freeze widening, e24b12b follow-up): an in-progress or
+   * past firmed order with an unresolvable setup state (e.g. a blank
+   * signature under strict_blanks) still occupies a real, valid interval —
+   * it is admitted as an opaque time block rather than freezing the line. */
+  state: SetupStateKey | null;
   start: Date;
   end: Date;
 }
@@ -1061,7 +1065,7 @@ function inactiveOverrideForTransition(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   predecessorState: SetupStateKey | null,
-  successorState: SetupStateKey,
+  successorState: SetupStateKey | null,
   predecessorOrderId: string | null,
   successorOrderId: string,
   lineOrderIds: ReadonlySet<string>,
@@ -1082,9 +1086,12 @@ function inactiveOverrideForTransition(
       continue;
     }
     if (override.predecessor_order_id !== predecessorOrderId
-      // An unknown predecessor state can never confirm a bound override; treat
-      // it as a mismatch rather than skipping the check.
+      // An unknown predecessor or successor state can never confirm a bound
+      // override; treat it as a mismatch rather than skipping the check. A
+      // null successor state means the firmed boundary itself has an
+      // unresolvable setup state.
       || predecessorState === null
+      || successorState === null
       || stateKey(override.predecessor_state_key) !== stateKey(predecessorState)
       || stateKey(override.successor_state_key) !== stateKey(successorState)) {
       return { line, predecessorOrderId, successorOrderId, reason: 'override-inactive' };
@@ -2126,7 +2133,9 @@ function candidateForSequence(
     // reason to freeze the whole line (Part 1f): skip the reservation, keep
     // the diagnostic edge, and stay feasible. `deriveSetupObservation`/alerts
     // surface it against the applied schedule instead of a fake bar here.
-    if (predecessorState === null) {
+    // A null `firmed.state` (never-freeze widening) means the boundary's own
+    // setup state is unresolvable — the same zero-minute skip applies.
+    if (predecessorState === null || firmed.state === null) {
       missingEdges.push(unknownInitialStateEdge(line, firmed.task));
     } else {
       const resolved = resolveSetup({
@@ -2903,6 +2912,9 @@ function boundaryOverrideLocks(
       const lock = lockFor(successorId);
       if (successorIndex !== 0
         || initialState === null
+        // A firmed boundary with an unresolvable setup state (never-freeze
+        // widening) can never confirm a bound override's exact state match.
+        || successorFirmed.state === null
         || stateKey(override.predecessor_state_key) !== stateKey(initialState)
         || stateKey(override.successor_state_key) !== stateKey(successorFirmed.state)
         || lock.requiredFirmedPredecessorId
@@ -3529,7 +3541,10 @@ function tailCapacityEnd(
   finalState: SetupStateKey | null,
   finalPredecessorOrderId: string | null,
 ): Date {
-  if (!nextFirmed || finalState === null) return fragmentEnd;
+  // A null `nextFirmed.state` (never-freeze widening) means the boundary's
+  // own setup state is unresolvable — there is nothing to reserve minutes
+  // against, so tail capacity simply runs to the boundary's start.
+  if (!nextFirmed || finalState === null || nextFirmed.state === null) return fragmentEnd;
   const definition = bounds.setup.definition!;
   const resolved = resolveSetup({
     definition,
@@ -3698,18 +3713,33 @@ function evaluateLineWithFirmedBoundaries(
     // setup can still occupy time inside the caller horizon. Strictly later
     // unprotected runs cannot lend capacity to this detached candidate.
     if (start && start > bounds.horizonEnd) continue;
-    const state = orderState(bounds, task, definition);
-    if (!start || !end || end <= start || !state) {
-      return unchangedLineResult(
+    if (!start || !end || end <= start) {
+      // Never-freeze (e24b12b follow-up): an unusable interval cannot become
+      // a boundary at all — an in-progress/SAP-firmed order can legitimately
+      // have odd interval data. Skip it as a boundary rather than freezing
+      // every other order on the line; it stays excluded from `free` via
+      // `taskIsFirmed` above and keeps its own current dates either way.
+      baseMissingEdges.push({ line, successorOrderId: taskId(task), reason: 'firmed-boundary-invalid' });
+      baseExplanation.push({
+        code: 'firmed-boundary-invalid',
+        message: `Firmed order ${taskId(task)} lacks a usable interval; skipped as a boundary.`,
         line,
-        'firmed-boundary-invalid',
-        'A firmed order lacks a usable interval or setup state.',
-        [
-          ...baseMissingEdges,
-          { line, successorOrderId: taskId(task), reason: 'firmed-boundary-invalid' },
-        ],
-        baseExplanation,
-      );
+        taskId: taskId(task),
+      });
+      continue;
+    }
+    const state = orderState(bounds, task, definition);
+    if (state === null) {
+      // Never-freeze: an unresolvable setup state (e.g. a blank signature
+      // under strict_blanks) still occupies a real, valid interval — admit
+      // it as an opaque time block rather than freezing the line.
+      baseMissingEdges.push(unknownInitialStateEdge(line, task));
+      baseExplanation.push({
+        code: 'firmed-boundary-state-unknown',
+        message: `Firmed order ${taskId(task)} has an unresolvable setup state; treated as an opaque time block.`,
+        line,
+        taskId: taskId(task),
+      });
     }
     firmed.push({ task, state, start, end });
   }
@@ -3794,6 +3824,15 @@ function evaluateLineWithFirmedBoundaries(
     return applyWinner(run);
   };
 
+  // Monotone-cursor union bookkeeping (never-freeze, e24b12b follow-up): an
+  // SAP ECC-firmed order folded into `firmedIds` may already be in progress
+  // or fully in the past, so its boundary can legitimately start at or
+  // before `fragmentStart`. Tracks the latest boundary END actually adopted
+  // as a predecessor so a shorter, earlier-ending past run can never
+  // overwrite the effective predecessor state established by a later-ending
+  // one — the same union model `placeWholeLineAsTail` already uses.
+  let lastAdoptedBoundaryEnd = Number.NEGATIVE_INFINITY;
+
   for (let boundaryIndex = 0; boundaryIndex < firmed.length; boundaryIndex += 1) {
     const boundary = firmed[boundaryIndex];
     // F3: only a fragment before a LATER firmed boundary needs the caller to
@@ -3805,18 +3844,6 @@ function evaluateLineWithFirmedBoundaries(
     // coverage via demotion first — exactly like the trailing fragment —
     // is safe and matches every other never-freeze fragment's behavior.
     const isTerminalBoundary = boundaryIndex === firmed.length - 1;
-    if (boundary.start < fragmentStart) {
-      return unchangedLineResult(
-        line,
-        'firmed-boundary-invalid',
-        'Firmed boundaries overlap or precede the scheduling horizon.',
-        [
-          ...baseMissingEdges,
-          { line, successorOrderId: taskId(boundary.task), reason: 'firmed-boundary-invalid' },
-        ],
-        baseExplanation,
-      );
-    }
     const boundaryLock = locks.get(taskId(boundary.task));
     if (boundaryLock?.issue) {
       return unchangedLineResult(
@@ -3870,6 +3897,40 @@ function evaluateLineWithFirmedBoundaries(
         }],
         baseExplanation,
       );
+    }
+
+    // Never-freeze clamp (e24b12b follow-up): an SAP ECC-firmed order that is
+    // already in progress or fully in the past has a boundary that starts at
+    // or before the cursor — a zero-width (or negative-width) pre-fragment
+    // that needs no search at all. Every override-lock check above already
+    // ran and would have failed closed on a genuine conflict; anything else
+    // is folded into the cursor via the same monotone-union model
+    // `placeWholeLineAsTail` uses, instead of freezing the whole line.
+    if (boundary.start.getTime() <= fragmentStart.getTime()) {
+      if (boundary.end.getTime() > fragmentStart.getTime()) {
+        // Spanning: the boundary's run still occupies time ahead of the
+        // cursor (in progress) — jump the cursor to its end and adopt it as
+        // the predecessor for whatever comes next.
+        fragmentStart = new Date(boundary.end);
+        predecessorState = boundary.state;
+        predecessorOrderId = taskId(boundary.task);
+        lastAdoptedBoundaryEnd = Math.max(lastAdoptedBoundaryEnd, boundary.end.getTime());
+      } else if (boundary.end.getTime() > lastAdoptedBoundaryEnd) {
+        // Fully past: the cursor does not move, but the latest-ENDING past
+        // run defines the effective predecessor state for what comes next —
+        // an earlier-ending past run must not overwrite a later one.
+        predecessorState = boundary.state;
+        predecessorOrderId = taskId(boundary.task);
+        lastAdoptedBoundaryEnd = boundary.end.getTime();
+      }
+      requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+      explanation.push({
+        code: 'firmed-boundary-elapsed',
+        message: `Firmed ${taskId(boundary.task)} has already elapsed or is in progress; adopted as predecessor without a search fragment.`,
+        line,
+        taskId: taskId(boundary.task),
+      });
+      continue;
     }
 
     const reservedForAnotherBoundary = new Set<string>();

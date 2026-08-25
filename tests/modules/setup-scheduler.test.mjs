@@ -3290,3 +3290,156 @@ test('activePriorityKeys and Engine.flattenConstraints agree on the same plants.
     Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
+
+test('an in-progress firmed boundary never freezes the line: free work is patched after it, using its state as predecessor', () => {
+  // Regression for the e24b12b never-freeze bug: an SAP ECC-firmed order
+  // folded into `firmedIds` can already be in progress (start < bounds.now),
+  // tripping the old `boundary.start < fragmentStart` freeze guard. The line
+  // must still schedule, with the in-progress boundary's own state acting as
+  // predecessor once its run ends.
+  const inProgress = scheduledTask(
+    'inprogress-blue', 1, 'BLUE', '2026-08-03T09:00:00', '2026-08-03T07:00:00', '2026-08-03T09:00:00',
+  );
+  const freeRed = scheduledTask('inprogress-free-red', 1, 'RED', '2026-08-03T13:00:00');
+  const setup = setupTruth({ rows: [setupRow('BLUE', 'RED', 15)] });
+
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([inProgress, freeRed], { firmedIds: ['inprogress-blue'] }),
+      dueDateBounds(setup),
+    );
+
+    assert.equal(patchFor(result, 'inprogress-blue'), undefined, `${label}: an in-progress firmed run must never become a candidate patch`);
+    assert.ok(patchFor(result, 'inprogress-free-red'), `${label}: free work must still be patched`);
+    assert.equal(patchFor(result, 'inprogress-free-red').changes.start_date.getTime(), at('2026-08-03T09:15:00').getTime(),
+      `${label}: free RED starts 15 setup minutes after the in-progress boundary ends, using BLUE (its state) as predecessor`);
+    assert.deepEqual(result.unchangedLines, [], `${label}: the line must never freeze`);
+    assert.equal(result.missingEdges.some(edge => edge.reason === 'firmed-boundary-invalid'), false,
+      `${label}: an in-progress boundary is not an invalid boundary`);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'due-date-first-placement' && reason.taskId === 'inprogress-free-red' && reason.message.includes('15')
+    )), `${label}: the 15-minute BLUE -> RED setup reservation is reported`);
+  }
+});
+
+test('a fully-past firmed boundary never freezes the line: free work uses its state as predecessor, not the persisted machine state', () => {
+  // The persisted current machine state is GREEN (setupTruth's default), but
+  // a fully-elapsed firmed run (end <= bounds.now) must still be adopted as
+  // the effective predecessor for whatever free work follows, rather than
+  // falling back to the persisted state and reserving the wrong transition.
+  const pastRun = scheduledTask(
+    'past-yellow', 1, 'YELLOW', '2026-08-03T07:30:00', '2026-08-03T06:00:00', '2026-08-03T07:30:00',
+  );
+  const freeRed = scheduledTask('past-free-red', 1, 'RED', '2026-08-03T13:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 999), // deliberately wrong/huge if the persisted state were used instead
+    setupRow('YELLOW', 'RED', 20),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([pastRun, freeRed], { firmedIds: ['past-yellow'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'past-yellow'), undefined, 'a fully-past firmed run must never become a candidate patch');
+  assert.equal(patchFor(result, 'past-free-red').changes.start_date.getTime(), at('2026-08-03T08:20:00').getTime(),
+    'free RED starts at bounds.now plus the YELLOW -> RED setup (20 min), not the GREEN -> RED (999 min) persisted-state transition');
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'firmed-boundary-invalid'), false);
+});
+
+test('overlapping firmed boundaries never freeze the line: free work is scheduled after the later-ending boundary', () => {
+  // Two SAP ECC-firmed runs on the same line can genuinely overlap in the
+  // source data. The old code froze the whole line the instant a second
+  // boundary's start preceded the cursor established by the first; the fix
+  // folds both into the monotone cursor instead.
+  const first = scheduledTask(
+    'overlap-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T09:00:00', '2026-08-03T11:00:00',
+  );
+  const second = scheduledTask(
+    'overlap-yellow', 1, 'YELLOW', '2026-08-03T12:00:00', '2026-08-03T10:00:00', '2026-08-03T12:00:00',
+  );
+  const freeRed = scheduledTask('overlap-free-red', 1, 'RED', '2026-08-03T15:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0),
+    setupRow('YELLOW', 'RED', 0),
+  ] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([first, second, freeRed], { firmedIds: ['overlap-blue', 'overlap-yellow'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'overlap-blue'), undefined, 'the first firmed run must never become a candidate patch');
+  assert.equal(patchFor(result, 'overlap-yellow'), undefined, 'the second, overlapping firmed run must never become a candidate patch');
+  assert.ok(patchFor(result, 'overlap-free-red'), 'free work must still be patched');
+  assert.ok(patchFor(result, 'overlap-free-red').changes.start_date.getTime() >= at('2026-08-03T12:00:00').getTime(),
+    'free RED starts no earlier than the later-ending overlapping boundary');
+  assert.deepEqual(result.unchangedLines, []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'firmed-boundary-invalid'), false);
+});
+
+test('a blank-signature (unresolvable-state) firmed boundary never freezes the line: it is admitted as an opaque time block', () => {
+  // strict_blanks (setupDefinition's default) makes a blank COLOR resolve to
+  // a null setup state. A firmed order with a genuinely usable interval but
+  // an unresolvable state must still occupy that interval as an opaque time
+  // block, rather than freezing the whole line the way the old
+  // `!state` freeze branch did.
+  const blankFirmed = scheduledTask(
+    'blank-state-firmed', 1, '', '2026-08-03T10:00:00', '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const freeRed = scheduledTask('blank-state-free-red', 1, 'RED', '2026-08-03T13:00:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([blankFirmed, freeRed], { firmedIds: ['blank-state-firmed'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'blank-state-firmed'), undefined, 'the blank-signature firmed run must never become a candidate patch');
+  assert.ok(patchFor(result, 'blank-state-free-red'), 'free work must still be patched');
+  assert.ok(
+    patchFor(result, 'blank-state-free-red').changes.start_date.getTime() >= at('2026-08-03T10:00:00').getTime(),
+    'free RED does not overlap the blank-signature firmed window',
+  );
+  assert.equal(patchFor(result, 'blank-state-free-red').changes.start_date.getTime(), at('2026-08-03T10:00:00').getTime(),
+    'free RED is admitted immediately after the boundary with zero setup minutes (unknown predecessor state)');
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'firmed-boundary-state-unknown' && reason.taskId === 'blank-state-firmed'
+  )), 'the unresolvable firmed state is reported via firmed-boundary-state-unknown');
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'initial-state-unknown' && edge.successorOrderId === 'blank-state-firmed'
+  )), 'an initial-state-unknown edge is retained for the blank-signature boundary');
+});
+
+test('a firmed boundary starting exactly at bounds.now schedules cleanly with no patch before the horizon start', () => {
+  // The zero-width pre-fragment case (boundary.start === fragmentStart):
+  // must take the clamp path without ever calling into a search fragment
+  // for an empty window, and must never throw or backdate a patch before
+  // bounds.now.
+  const atNow = scheduledTask(
+    'at-now-blue', 1, 'BLUE', '2026-08-03T09:00:00', '2026-08-03T08:00:00', '2026-08-03T09:00:00',
+  );
+  const freeRed = scheduledTask('at-now-free-red', 1, 'RED', '2026-08-03T13:00:00');
+  const setup = setupTruth({ rows: [setupRow('BLUE', 'RED', 10)] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([atNow, freeRed], { firmedIds: ['at-now-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(patchFor(result, 'at-now-blue'), undefined);
+  const redPatch = patchFor(result, 'at-now-free-red');
+  assert.ok(redPatch, 'free work is still patched');
+  for (const patch of result.patches) {
+    assert.ok(patch.changes.start_date.getTime() >= at('2026-08-03T08:00:00').getTime(),
+      'no patch is ever backdated before bounds.now');
+  }
+  assert.equal(redPatch.changes.start_date.getTime(), at('2026-08-03T09:10:00').getTime(),
+    'free RED starts 10 setup minutes after the boundary ends at 09:00');
+  assert.deepEqual(result.unchangedLines, []);
+});

@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation,
-  MIN_PRODUCTIVE_SEGMENT_MINUTES, scheduleAlertsForPatches,
+  MIN_PRODUCTIVE_SEGMENT_MINUTES, scheduleAlertsForPatches, effectiveFirmedIdSet,
 } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 import { Toast, Util, Config } from '../../web/application-foundation.mjs';
@@ -2904,4 +2904,130 @@ test('scheduleAlertsForPatches scopes to exactly the resolved lines for normal p
     assert.deepEqual(new Set(getLinesCalls()[0]), new Set(['L1', 'L2']),
       'the scoped lines set must contain exactly the lines the patches resolved to, deduplicated');
   });
+});
+
+// ---------------------------------------------------------------------------
+// effectiveFirmedIdSet -- the single fold the setup-aware branch of
+// runAndApply uses to decide which orders are immovable for a run, and the
+// bugfix pinned here: respectFirmed must gate ECC-firmed orders exactly like
+// it gates manual firms, while the frozen-horizon fold is unconditional.
+// ---------------------------------------------------------------------------
+
+test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true, and only frozen under respectFirmed=false', () => {
+  const now = new Date('2026-08-20T08:00:00');
+  const priorEnd = Store.frozenHorizonEnd;
+  const frozenEnd = new Date('2026-08-25T00:00:00');
+  try {
+    Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+
+    const manualTask = { id: 'manual-id', start_date: new Date('2026-08-30T09:00:00') };
+    const eccTask = { id: 'ecc-id', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') };
+    const frozenTask = { id: 'frozen-id', start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
+    const plainTask = { id: 'plain-id', start_date: new Date('2026-08-30T09:00:00') };
+    const tasks = [manualTask, eccTask, frozenTask, plainTask];
+    const baseFirmedIds = new Set(['manual-id']);
+
+    const withRespect = effectiveFirmedIdSet(tasks, baseFirmedIds, now, true);
+    assert.deepEqual(withRespect, new Set(['manual-id', 'ecc-id', 'frozen-id']),
+      'respectFirmed=true folds manual + ecc + frozen, leaving the plain task out');
+
+    const withoutRespect = effectiveFirmedIdSet(tasks, baseFirmedIds, now, false);
+    assert.deepEqual(withoutRespect, new Set(['frozen-id']),
+      'respectFirmed=false drops BOTH the manual firmed id and the ecc fold, leaving only the unconditional frozen-horizon fold');
+
+    // baseFirmedIds may also arrive as a plain array (ScheduleSnapshot.firmedIds'
+    // documented alternate shape) -- effectiveFirmedIdSet must coerce either way.
+    const withArrayInput = effectiveFirmedIdSet(tasks, ['manual-id'], now, true);
+    assert.deepEqual(withArrayInput, new Set(['manual-id', 'ecc-id', 'frozen-id']));
+  } finally {
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Engine.runAndApply('changeover', ...) -- respectFirmed must gate the
+// setup-aware branch's ECC-firmed fold, mirroring the legacy walk's
+// `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` guard. Before
+// this fix, unchecking "Respect firmed" in the Optimize dialog had no effect
+// on an ECC-firmed order in changeover mode; a frozen-horizon order must stay
+// immovable regardless, since the frozen fold is unconditional.
+// ---------------------------------------------------------------------------
+
+test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respectFirmed, while a frozen-horizon order stays immovable regardless', () => {
+  const plant = 'CO-RESPECT-PLANT';
+  const line = 'CO-RESPECT-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = Store.masterData;
+  const priorEnd = Store.frozenHorizonEnd;
+  const priorCalendar = Store.calendars[line];
+  const priorSetup = Store.setupSnapshot;
+  const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  // No active setup definition -- 'changeover' still routes through the
+  // setup-aware evaluator via Engine._syntheticZeroCostSetupSnapshot (B3a),
+  // so this exercises the exact branch the fix targets.
+  Store.replaceSetupSnapshot(null, 'unit-test');
+  Store.setMasterData({
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setCalendar(line, ALL_DAY, 'unit-test');
+
+  const horizonStart = new Date('2026-08-20T08:00:00');
+  const frozenEnd = new Date('2026-08-23T00:00:00');
+  Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+
+  // An ECC-firmed order manually placed far past the horizon a fresh
+  // scheduling pass would ever choose for it -- if freed, the evaluator's
+  // own placement logic lands it somewhere else and it must show up in the
+  // applied result; if kept firmed, it is a boundary and is left untouched
+  // (never patched -- setup-scheduler.mts's `free` filter excludes it).
+  const eccOriginalStart = new Date('2026-10-01T09:00:00');
+  const eccOriginalEnd = new Date('2026-10-01T10:00:00');
+  // A frozen-horizon order -- inside [horizonStart, frozenEnd) -- must never
+  // move, independent of respectFirmed.
+  const frozenStart = new Date('2026-08-21T09:00:00');
+  const frozenTaskEnd = new Date('2026-08-21T10:00:00');
+
+  const baseTasks = [
+    { id: 'co-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '1', ecc_firmed: true, start_date: eccOriginalStart, end_date: eccOriginalEnd },
+    { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
+  ];
+
+  try {
+    // --- respectFirmed omitted (defaults true): ECC-firmed order untouched.
+    Store.setTasks(structuredClone(baseTasks), 'unit-test');
+    Engine.runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart });
+    assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
+      'with respectFirmed defaulted to true, an ECC-firmed order must be left exactly where it was');
+    assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
+      'a frozen-horizon order is never moved');
+
+    // --- respectFirmed: true (explicit): same result.
+    Store.setTasks(structuredClone(baseTasks), 'unit-test');
+    Engine.runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart });
+    assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
+      'with respectFirmed: true, the ECC-firmed order must still be left exactly where it was');
+    assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime());
+
+    // --- respectFirmed: false: the ECC-firmed order is freed and must be
+    // re-placed by the evaluator (a patch lands, moving it off its manually-set,
+    // far-future, otherwise-never-chosen date); the frozen order still never moves.
+    Store.setTasks(structuredClone(baseTasks), 'unit-test');
+    Engine.runAndApply('changeover', { plant, respectFirmed: false, respectCalendar: true, startDate: horizonStart });
+    assert.notEqual(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
+      'with respectFirmed: false, the ECC-firmed order must be freed and re-placed by the evaluator, not left in place');
+    assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
+      'the frozen-horizon fold is unconditional -- respectFirmed: false must not free it too');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
 });
