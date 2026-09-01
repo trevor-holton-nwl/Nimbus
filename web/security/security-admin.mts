@@ -8,8 +8,8 @@
 // ahead of SystemConfig's comment block in the original file, not
 // Security's — moved here with the code that actually uses them).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { Session } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { Session } from './session.mjs';
 import type { TopLevelTab } from '../platform/types.mjs';
 
 /** One `GET /security/users` row (`auth.list_users`) — username, role, and

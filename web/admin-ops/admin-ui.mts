@@ -7,9 +7,10 @@
 // source ranges combined into this one file per that phase's per-domain
 // grouping.
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import type { StoreEvent } from '../schedule-state.mjs';
-import { Session, Persistence } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import type { StoreEvent } from '../platform/store.mjs';
+import { Session } from '../security/session.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
 import { ORDER_FIELD_CATALOG } from '../scheduling/order-field-catalog.mjs';
 import { AdminTables } from '../master-data/admin-tables.mjs';
 // AdminCockpit's _setSub dispatches to these three sub-tab renderers.

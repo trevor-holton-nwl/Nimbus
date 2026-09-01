@@ -24,12 +24,14 @@
 // ESM cycle is safe).
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import type { StoreEvent } from '../schedule-state.mjs';
-import { Alerts, Engine } from '../schedule-services.mjs';
-import type { SetupObservation } from '../schedule-services.mjs';
+import { Store } from '../platform/store.mjs';
+import type { StoreEvent } from '../platform/store.mjs';
+import { Alerts } from '../insights/services.mjs';
+import { Engine } from '../optimization/engine.mjs';
+import type { SetupObservation } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
-import { Session, Persistence } from '../schedule-data.mjs';
+import { Session } from '../security/session.mjs';
+import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
 import { Timeline, TimelineNav, setupDiagnosticLabel, setupSourceLabel } from './gantt.mjs';

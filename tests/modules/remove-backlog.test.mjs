@@ -1,8 +1,9 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Calendar, Engine } from '../../web/schedule-services.mjs';
-import { Store } from '../../web/schedule-state.mjs';
+import { Calendar } from '../../web/calendar/calendar-engine.mjs';
+import { Engine } from '../../web/optimization/engine.mjs';
+import { Store } from '../../web/platform/store.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');

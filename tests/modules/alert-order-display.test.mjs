@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Util } from '../../web/platform/foundation.mjs';
-import { deriveSetupObservation } from '../../web/schedule-services.mjs';
+import { deriveSetupObservation } from '../../web/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 const Core = require('../../web/nimbus-compute-core.js');

@@ -25,7 +25,7 @@ const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, m
 test('discoverModuleSources picks up the CQ-1 extracted .mjs files (blind-spot regression guard)', () => {
   const files = moduleSources.map(m => m.file);
   assert.ok(files.includes('platform/foundation.mjs'), files.join(', '));
-  assert.ok(files.includes('schedule-state.mjs'), files.join(', '));
+  assert.ok(files.includes('platform/store.mjs'), files.join(', '));
   assert.ok(files.includes('app-entry.mjs'), files.join(', '));
 });
 

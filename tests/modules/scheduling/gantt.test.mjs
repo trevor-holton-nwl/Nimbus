@@ -8,9 +8,11 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../web/scheduling/gantt.mjs';
-import { Store, Selection } from '../../../web/schedule-state.mjs';
+import { Store } from '../../../web/platform/store.mjs';
+import { Selection } from '../../../web/scheduling/selection.mjs';
 import { Util } from '../../../web/platform/foundation.mjs';
-import { Alerts, Engine } from '../../../web/schedule-services.mjs';
+import { Alerts } from '../../../web/insights/services.mjs';
+import { Engine } from '../../../web/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 

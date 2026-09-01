@@ -6,8 +6,9 @@
  * Timeline; the workbench owns the one explicit Store commit after Apply.
  */
 
-import type { RemoveBacklogResult } from '../schedule-services.mjs';
-import { Engine, candidateDefaultWorkHours, MIN_PRODUCTIVE_SEGMENT_MINUTES } from '../schedule-services.mjs';
+import type { RemoveBacklogResult } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
+import { candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
@@ -4873,16 +4874,6 @@ export function evaluateThroughput(
     evaluateDueDateFirst(snapshot, bounds, 'throughput'),
     thresholds,
   );
-}
-
-/**
- * Evaluate against the existing placement algorithm, but with its reads bound
- * to `snapshot`.  The Engine adapter shares the legacy mode implementation;
- * it emits patches and never applies them while evaluating a candidate.
- */
-export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
-  const { mode = 'changeover', ...opts } = request;
-  return Engine.evaluateSchedule(mode, opts, snapshot);
 }
 
 /** Apply a detached patch set to detached task values for before/after

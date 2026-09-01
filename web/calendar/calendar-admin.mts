@@ -3,8 +3,8 @@
 // docs/architecture/domain-refactor-plan.md, which split that 11,308-line
 // mega-module into 9 domain files).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { CalendarSync } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { CalendarSync } from './calendar-sync.mjs';
 import type { NimbusBlock } from '../platform/types.mjs';
 
 /* =============================================================================

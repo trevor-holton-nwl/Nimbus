@@ -14,14 +14,18 @@
 // nor OptimizerPreview ever referenced it.
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
-import { Store, UndoStack, Sandbox } from '../schedule-state.mjs';
-import type { StoreEvent } from '../schedule-state.mjs';
-import { Alerts, Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, scheduleAlertsForPatches, effectiveFirmedIdSet } from '../schedule-services.mjs';
-import type { RemoveBacklogResult } from '../schedule-services.mjs';
-import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
+import { Store, UndoStack } from '../platform/store.mjs';
+import { Sandbox } from './sandbox.mjs';
+import type { StoreEvent } from '../platform/store.mjs';
+import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
+import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import type { RemoveBacklogResult } from './scheduler-contract.mjs';
+import { applyPatchesToSnapshot } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
-import { Session, Persistence, CalendarSync } from '../schedule-data.mjs';
+import { Session } from '../security/session.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================

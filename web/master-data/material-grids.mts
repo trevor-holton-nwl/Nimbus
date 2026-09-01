@@ -18,7 +18,7 @@
 // rather than two near-duplicate modules.
 /* global agGrid, NIMBUS */
 import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
+import { Store } from '../platform/store.mjs';
 
 // -- Local type declarations -------------------------------------------------
 

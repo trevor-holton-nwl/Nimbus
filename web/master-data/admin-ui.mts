@@ -6,9 +6,11 @@
 // combined into this one file per that phase's per-domain grouping.
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { Engine } from '../schedule-services.mjs';
-import { CalendarSync, Session, Persistence } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { Engine } from '../optimization/engine.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import { Session } from '../security/session.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport } from '../platform/types.mjs';

@@ -60,9 +60,11 @@
 // other now-same-file forward reference).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import type { VirtualList } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { Alerts, Engine } from '../schedule-services.mjs';
-import { Persistence, Session } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { Alerts } from '../insights/services.mjs';
+import { Engine } from '../optimization/engine.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
+import { Session } from '../security/session.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
 import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';

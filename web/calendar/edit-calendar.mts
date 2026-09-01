@@ -11,8 +11,8 @@
 // to optimization/optimize-ui.mjs with SandboxAdapter instead).
 /* global NIMBUS */
 import { Util, Toast } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { CalendarSync } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { CalendarSync } from './calendar-sync.mjs';
 import type { WorkHours } from '../platform/types.mjs';
 
 /** EditCalendar.applyPreset's three named quick-pick presets (Weekdays,

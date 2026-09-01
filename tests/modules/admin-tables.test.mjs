@@ -5,9 +5,9 @@
 // (renders into #admin-table-browser-host, talks to AG Grid) and is exactly
 // the kind of thing this repo's test convention deliberately leaves to
 // manual verification rather than a heavyweight DOM-stubbed test (see
-// tests/modules/schedule-data.test.mjs for what that stubbing looks like
-// when it IS worth it — not needed here since neither pure helper touches
-// document/window).
+// tests/modules/scheduling/persistence.test.mjs for what that stubbing looks
+// like when it IS worth it — not needed here since neither pure helper
+// touches document/window).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminTables, parseFilterPasteText, buildTableQueryParams } from '../../web/master-data/admin-tables.mjs';

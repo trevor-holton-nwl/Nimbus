@@ -1,37 +1,72 @@
-// schedule-services.mts — CQ-1 schedule-services module.
+// optimization/engine.mjs — Engine (Phase P4 of
+// docs/architecture/domain-refactor-plan.md, which split schedule-services.mts
+// (3,544 lines) into 4 domain files, AND broke import cycle 1 between the
+// former schedule-services.mts and optimization/setup-scheduler.mjs as part
+// of the same move — see this phase's task brief Part B and
+// optimization/scheduler-contract.mjs's header comment). Owns the optimizer
+// (dispatch, auto-reflow), the detached candidate-evaluation machinery
+// (`_candidateSnapshot`/the `source*` accessors below, which let the SAME
+// Calendar capacity math answer either "against live Store" or "against one
+// detached candidate snapshot" depending on whether a candidate run is in
+// flight), setup-observation derivation, and the `evaluateSchedule` adapter
+// that used to live in setup-scheduler.mts (see below).
 //
-// Owns calendar capacity math, the Compute worker client, Alerts computation,
-// Utilization, and Engine (optimizer + auto-reflow). Delegates
-// algorithmic truth to nimbus-compute-core.js and preserves the existing
-// worker protocol byte-for-byte. May import from schedule-data.mjs; must
-// never be imported by it. DOM/UI code that was co-located with these
-// modules in app.js (the calendar blackout-block tab; the alerts drawer,
-// bell badge, and cell-briefing modal) stays in app.js as thin adapters
-// (`CalendarUI`, `AlertsUIAdapter`) — see
-// docs/architecture/cq1-compatibility-inventory.md.
+// Cross-file notes (real couplings, not new ones — all three predate this
+// phase, inside the single schedule-services.mts file, as sibling top-level
+// declarations the file's own comments already flagged as forward-references
+// safe only because nothing fires until well after module evaluation
+// completes):
+//   - `Calendar` (calendar/calendar-engine.mjs) is imported for placement
+//     (`Engine.runAndApply`/`autoReflow`/`reconcileRuntimeSchedules` etc. call
+//     Calendar directly). The REVERSE edge is real too: Calendar's own
+//     capacity methods (`workWindow`/`nextAvailable`/`allocateRuntime`/etc.)
+//     must honor the SAME detached-candidate snapshot Engine installs during
+//     a candidate run, so they call this file's `sourceBlocks`/
+//     `sourcePlantBlocks`/`sourceGetPlantForLine`/`sourceLineWorkHours`/
+//     `sourcePlantWorkHours`/`reportSchedulerDiagnostic` (exported below) —
+//     and `Calendar.allocateRuntime` also calls
+//     `Engine.minProductiveSegmentMinutesFor`. This is a genuine two-way ESM
+//     cycle between this file and calendar/calendar-engine.mjs; safe under
+//     the same rule as every other cycle in this split — every cross-
+//     reference is inside a method body invoked after both modules finish
+//     loading, never at top-level evaluation. `RuntimeAllocation` and the
+//     `placeWithSetup`/`PlaceWithSetupRequest`/`PlacementResult` re-exports
+//     below exist for calendar/calendar-engine.mjs to consume through this
+//     SAME cycle edge (see the note on those below) rather than opening a
+//     second, independent cycle edge directly against
+//     optimization/setup-scheduler.mjs.
+//   - `Alerts`/`scheduleAlertsForPatches` (insights/services.mjs) are
+//     imported because `Alerts.applyFix`'s auto-fix action calls
+//     `Engine.splitOrderPolicyFor`/`schedulePatchFor`/`autoReflow`/
+//     `runAndApply` (the REVERSE edge), and this file's own
+//     `runAndApply`/`autoReflow`/`reconcileRuntimeSchedules` call
+//     `Alerts.clearDismissed`/`scheduleRecompute`/`scheduleRecomputeLines`/
+//     `scheduleAlertsForPatches`. A genuine two-way ESM cycle between this
+//     file and insights/services.mjs; safe under the same rule.
+//   - `deriveSetupObservation`/`SetupObservation` are consumed by
+//     insights/services.mjs's `Compute._snap`/`Alerts`/`Utilization` (a
+//     one-directional edge — insights/services.mjs imports from here, this
+//     file never imports insights/services.mjs for this).
 //
-// This file subscribes (once, below Alerts) to the `schedule:hydrated` Store
-// event that schedule-data.mjs's Persistence emits after every load/cache-
-// restore/demo-seed, and triggers Alerts.scheduleRecompute() in response —
-// the resolution for the one real data→services dependency Persistence used
-// to satisfy with a direct `Alerts.scheduleRecompute()` call. This is a Store
-// event subscription, not an import: schedule-data.mjs still never imports
-// this file.
-//
-// nimbus-compute-core.js is loaded as a classic, parser-blocking <script> in
-// index.html BEFORE app-entry.mjs's static imports run (see index.html's
-// document.write chain), so `globalThis.NimbusComputeCore` (== window in the
-// browser) is already populated by the time any function in this file is
-// actually called. Referencing it via `globalThis` (rather than a bare
-// identifier) keeps this file lint-clean under the `web/**/*.mjs` ESLint
-// block, which does not declare NimbusComputeCore as a global (unlike the
-// classic-script block covering the now-deleted app.js copy of Calendar).
-// Node tests import this module directly and must set
-// `globalThis.NimbusComputeCore` themselves before calling into Calendar —
-// see tests/modules/schedule-services.test.mjs and the load-legacy-app.mjs
-// VM harness for the two bootstrap sites.
-import { Config, Util, ErrorLog, PerfMonitor, Toast } from './platform/foundation.mjs';
-import { Store, UndoStack } from './schedule-state.mjs';
+// This whole `optimization/setup-scheduler.mjs` import block (the 4 pure
+// evaluators, `placeWithSetup`, `SETUP_AWARE_CONVERGENCE_WINDOW`, and the 9
+// types below) moves here with `Engine` per this phase's brief Part B step 1
+// — but `placeWithSetup`/`PlaceWithSetupRequest`/`PlacementResult` are
+// actually consumed only by `Calendar.placeWithSetup`
+// (calendar/calendar-engine.mjs), not by anything in this file; they are
+// re-exported below so calendar/calendar-engine.mjs can pull them through
+// the cycle edge this file already has with it, rather than opening a
+// second cycle edge straight into optimization/setup-scheduler.mjs. Likewise
+// `RuntimeAllocation` (this file, per the brief's line-range table) is
+// re-exported for the same reason: its only real consumer is
+// `Calendar.allocateRuntime`. `EvaluationRequest` is an additional type this
+// file's `evaluateSchedule` adapter needs that the brief's original 8-type
+// list did not include (the adapter used to live IN setup-scheduler.mts, so
+// it referenced this locally-defined type without an import).
+import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
+import { Store } from '../platform/store.mjs';
+import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
@@ -39,8 +74,8 @@ import {
   evaluateSptWithSetup as evaluateSptWithSetupPure,
   evaluateThroughput as evaluateThroughputPure,
   SETUP_AWARE_CONVERGENCE_WINDOW,
-} from './optimization/setup-scheduler.mjs';
-import { resolveSetup, stateForOrder } from './setup/setup-domain.mjs';
+} from './setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
@@ -50,121 +85,37 @@ import type {
   PlaceWithSetupRequest,
   SchedulePatch,
   ScheduleSnapshot,
-} from './optimization/setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from './platform/types.mjs';
+  EvaluationRequest,
+} from './setup-scheduler.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
+import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
+// Structurally identical to the copy in calendar/calendar-engine.mjs and
+// insights/services.mjs (and platform/store.mjs's exported version) — same
+// "duplicate this trivial 3-line type per file" convention already
+// established between schedule-state.mts and schedule-services.mjs before
+// this split.
 interface CalendarEntry {
   workHours: WorkHours;
 }
 
-interface BlockRec {
-  s: number;
-  e: number;
-  startDate: Date;
-  endDate: Date;
-}
-
-interface RunBlocksIndex {
-  byLine: Map<string, BlockRec[]>;
-  byPlant: Map<string, BlockRec[]>;
-}
-
-interface CapRec {
-  s: Date;
-  e: Date;
-  plant: string | null;
-}
-
-interface PlantCapRec {
-  s: Date;
-  e: Date;
-}
-
-interface CapacityBlockIndex {
-  lineBlocks: Map<string, CapRec[]>;
-  globalLine: CapRec[];
-  plantBlocks: Map<string, PlantCapRec[]>;
-  globalPlant: PlantCapRec[];
-}
-
-export interface RemoveBacklogDiagnostics {
-  backlogFound: number;
-  moved: number;
-  firmedMoved: number;
-  frozenMoved: number;
-  movedRuntimeHours: number;
-  largestDelayMinutes: number;
-  invalidRuntimeIds: string[];
-  missingStartIds: string[];
-  overlongIds: string[];
-  calendarSearchFailures: Array<{ line: string; taskId?: string; reason: 'no-operating-interval' | 'search-exhausted' }>;
-  boundaryConflicts: Array<{ line: string; movedTaskId: string; protectedTaskId?: string; type: 'overlap' }>;
-}
-
-export interface RemoveBacklogResult {
-  patches: Array<{ id: string; changes: Partial<NimbusTask> }>;
-  diagnostics: RemoveBacklogDiagnostics;
-}
-
-type BacklogSlot =
-  | { kind: 'slot'; start: Date }
-  | { kind: 'overlong'; start: Date }
-  | { kind: 'unavailable' | 'exhausted' };
+export { MIN_PRODUCTIVE_SEGMENT_MINUTES };
+// Re-exported for compatibility — anything importing `RemoveBacklogResult`
+// from this file (rather than from optimization/scheduler-contract.mjs
+// directly) keeps working. Nothing in this codebase does so today (checked
+// before adding this), but the brief's Part B step 1 asks for it explicitly.
+export type { RemoveBacklogResult };
+// Re-exported so calendar/calendar-engine.mjs's Calendar.placeWithSetup can
+// consume these through the cycle edge this file already has with it — see
+// this file's header comment.
+export { placeWithSetupPure };
+export type { PlaceWithSetupRequest, PlacementResult };
 
 export type RuntimeAllocation =
   | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
   | { kind: 'unavailable' | 'exhausted' };
-
-/** B3 (2026-08-21): default productive-segment floor (minutes) — no split
- * piece may be shorter than this, except one complete unsplit order below
- * the boundary. Phase-1 shipped this fixed system-wide; it is now the
- * DEFAULT ONLY, plant-overridable via `plants.min_productive_segment_minutes`
- * — see `Engine.minProductiveSegmentMinutesFor`, which resolves the per-plant
- * value and falls back to this default when unset/null. Keep allocator
- * arithmetic on this named boundary. Canonical for both this file's
- * `Calendar.allocateRuntime` (non-setup-aware) path and setup-scheduler.mjs's
- * `placeWithSetup` (setup-aware) path, which pulls this in through its
- * existing import of this module rather than declaring its own copy. */
-export const MIN_PRODUCTIVE_SEGMENT_MINUTES = 30;
-
-/** Fields common to both the ALERTS and UTILIZATION worker payloads (Compute._snap's return). */
-interface WorkerSnapshotBase {
-  tasks: NimbusTask[];
-  blocks: NimbusBlock[];
-  plantBlocks: NimbusPlantBlock[];
-  calendars: Record<string, CalendarEntry>;
-  plants: Record<string, CalendarEntry>;
-  lineSettings: Record<string, NimbusLineSetting>;
-  masterData: NimbusMasterData | null;
-  setup: SetupObservation;
-}
-
-/** Utilization.computeMatrix's row shape — tasks RESOLVED to objects (see T-8 in
- *  docs/archive/typescript_migration.md: this is deliberately NOT the same type as the
- *  ambient NimbusUtilizationRow, whose `tasks: string[]` is the pre-resolution
- *  worker/core contract shape). */
-interface UtilizationRowResolved {
-  date: Date;
-  scheduled: number;
-  capacity: number;
-  effectiveCapacity: number;
-  tasks: NimbusTask[];
-  pct?: number;
-}
-
-interface UtilizationMatrixResolved {
-  [line: string]: Record<string, UtilizationRowResolved>;
-}
-
-/** Utilization.dayByLine/todayByLine's row shape — a THIRD, distinct shape:
- *  no date/tasks at all. */
-interface DayByLineRow {
-  capacity: number;
-  effectiveCapacity: number;
-  scheduled: number;
-  pct: number;
-}
 
 /** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
  *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
@@ -573,7 +524,7 @@ export const SETUP_AWARE_DEADLINE_MS = 5000;
 
 /** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
  * Live optimizer and repair runs retain their existing ErrorLog behavior. */
-function reportSchedulerDiagnostic(
+export function reportSchedulerDiagnostic(
   level: CandidateDiagnostic['level'],
   scope: string,
   code: string,
@@ -589,14 +540,14 @@ function reportSchedulerDiagnostic(
 }
 
 function sourceTasks(): ReadonlyArray<NimbusTask> { return _candidateSnapshot?.tasks ?? Store.tasksArr; }
-function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSnapshot?.blocks ?? Store.blocks; }
-function sourcePlantBlocks(): ReadonlyArray<NimbusPlantBlock> { return _candidateSnapshot?.plantBlocks ?? Store.plantBlocks; }
+export function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSnapshot?.blocks ?? Store.blocks; }
+export function sourcePlantBlocks(): ReadonlyArray<NimbusPlantBlock> { return _candidateSnapshot?.plantBlocks ?? Store.plantBlocks; }
 function sourceLineSettings(): Readonly<Record<string, NimbusLineSetting>> { return _candidateSnapshot?.lineSettings ?? Store.lineSettings; }
 function sourceMasterData(): NimbusMasterData | null { return _candidateSnapshot?.masterData ?? Store.masterData; }
 function sourcePriorityRankMaps() { return _candidateSnapshot?.priorityRankMaps ?? Store.priorityRankMaps; }
 function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selectedPlant ?? Store.selectedPlant; }
 
-function sourceGetPlantForLine(line: string): string | null {
+export function sourceGetPlantForLine(line: string): string | null {
   if (!_candidateSnapshot) return Store.getPlantForLine(line);
   return _candidateSnapshot.lineSettings[line]?.plant
     ?? _candidateSnapshot.masterData?.lines.find(row => row.machine === line)?.plant
@@ -624,22 +575,9 @@ function sourceIsFirmed(id: string | number): boolean {
   return firmed.map(String).includes(String(id));
 }
 
-// B6: exported so setup-scheduler.mts's freeIntervalsFor can fall back to the
-// same default work hours as the alerts path (setupDefaultWorkHours above)
-// and the detached-candidate path (sourceLineWorkHours/sourcePlantWorkHours
-// below), instead of returning [] and silently placing nothing for a whole
-// plant/line missing a calendar.
-export function candidateDefaultWorkHours(): WorkHours {
-  const workHours: WorkHours = {};
-  for (let day = 0; day < 7; day++) {
-    workHours[day] = Config.WEEKEND_OFF && (day === 0 || day === 6)
-      ? null
-      : [Config.DEFAULT_SHIFT[0], Config.DEFAULT_SHIFT[1]];
-  }
-  return workHours;
-}
 
-function sourceLineWorkHours(line: string): WorkHours {
+
+export function sourceLineWorkHours(line: string): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensureCalendar(line);
     return Store.calendars[line].workHours;
@@ -647,7 +585,7 @@ function sourceLineWorkHours(line: string): WorkHours {
   return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
 }
 
-function sourcePlantWorkHours(plant: string): WorkHours {
+export function sourcePlantWorkHours(plant: string): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensurePlant(plant);
     return Store.plants[plant].workHours;
@@ -682,1299 +620,6 @@ function detachedCandidateResult(
   };
 }
 
-/* =============================================================================
-   CALENDAR — capacity math only (working hours, blackout-block availability).
-   All functions operate on a `line` (string) + Date objects. The blackout-
-   block-TAB UI (render/openBlockModal/saveBlockFromModal/etc.) stayed behind
-   in app.js as `CalendarUI` — see CalendarUI there for the UI half.
-   ========================================================================== */
-export const Calendar = {
-  /* ---------- Per-run caches (installed by Engine.runAndApply) ----------- */
-  // workWindow memoization, keyed by `${line}|${startOfDayMs}`. Values are
-  // `null` (closed day) or the same [Date, Date] tuple returned to every
-  // caller during one run — callers must NOT mutate window endpoints.
-  _runCache: null as { ww: Map<string, [Date, Date] | null> } | null,
-  // Pre-parsed blackout blocks scoped to the plant being optimized.
-  // { byLine: Map<line|'__any__', BlockRec[]>, byPlant: Map<plant|'__any__', BlockRec[]> }
-  // where BlockRec = { s: ms, e: ms, startDate: Date, endDate: Date }.
-  _runBlocks: null as RunBlocksIndex | null,
-
-  /** Install per-run caches. Called once at the top of Engine.runAndApply. */
-  _beginRun(plant: string | null): void {
-    Calendar._runCache  = { ww: new Map() };
-    Calendar._runBlocks = Calendar._indexBlocks(plant);
-  },
-  /** Tear down per-run caches. Called in a finally{} so it always runs. */
-  _endRun(): void {
-    Calendar._runCache  = null;
-    Calendar._runBlocks = null;
-  },
-  /** Parse every blackout block once and bucket by line / plant for O(1) lookup. */
-  _indexBlocks(plant: string | null): RunBlocksIndex {
-    const byLine = new Map<string, BlockRec[]>();
-    for (const b of sourceBlocks()) {
-      // A block applies only within its own plant (line:null = all lines in that
-      // plant). Un-stamped legacy blocks (no b.plant) fall back to global behavior.
-      if (b.plant && plant && b.plant !== plant) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      const key = b.line || '__any__';
-      let arr = byLine.get(key);
-      if (!arr) { arr = []; byLine.set(key, arr); }
-      arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
-    }
-    const byPlant = new Map<string, BlockRec[]>();
-    for (const b of sourcePlantBlocks()) {
-      if (b.plant && plant && b.plant !== plant) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      const key = b.plant || '__any__';
-      let arr = byPlant.get(key);
-      if (!arr) { arr = []; byPlant.set(key, arr); }
-      arr.push({ s: s.getTime(), e: e.getTime(), startDate: s, endDate: e });
-    }
-    return { byLine, byPlant };
-  },
-
-  /** Returns [startDate, endDate] for a workHours map + date, or null if closed.
-   *  Delegates to the shared compute core (single source of truth; handles the
-   *  fractional-hour split so 08:30 isn't floored to 08:00). */
-  _dayWindow(workHours: WorkHours, date: Date): [Date, Date] | null {
-    return globalThis.NimbusComputeCore!._dayWindow(workHours, date);
-  },
-
-  /** Returns [startDate, endDate] for a line+day, intersected with plant hours.
-   *  Returns null if either the line or plant is closed that day, or the
-   *  intersection is empty. */
-  workWindow(line: string, date: Date): [Date, Date] | null {
-    const rc = Calendar._runCache;
-    let key = '';
-    if (rc) {
-      const d = new Date(date); d.setHours(0, 0, 0, 0);
-      key = line + '|' + d.getTime();
-      if (rc.ww.has(key)) return rc.ww.get(key)!;
-    }
-
-    const lineWin = Calendar._dayWindow(sourceLineWorkHours(line), date);
-    if (!lineWin) {
-      if (rc) rc.ww.set(key, null);
-      return null;
-    }
-
-    const plant = sourceGetPlantForLine(line);
-    let result: [Date, Date];
-    if (plant) {
-      const plantWin = Calendar._dayWindow(sourcePlantWorkHours(plant), date);
-      if (!plantWin) {
-        if (rc) rc.ww.set(key, null);
-        return null;
-      }
-      const s = new Date(Math.max(lineWin[0].getTime(), plantWin[0].getTime()));
-      const e = new Date(Math.min(lineWin[1].getTime(), plantWin[1].getTime()));
-      if (s >= e) {
-        if (rc) rc.ww.set(key, null);
-        return null;
-      }
-      result = [s, e];
-    } else {
-      result = lineWin;
-    }
-
-    if (rc) rc.ww.set(key, result);
-    return result;
-  },
-
-  /** Total working hours in a day for a given line, after blackouts. Does not apply buffer.
-   *  Uses interval union so overlapping (or accidentally duplicated) blackout
-   *  blocks can never double-count and drive capacity negative. */
-  /** Pre-parse + bucket all blackout blocks ONCE so a tight (line × day) loop can
-   *  reuse the parsed Date objects instead of re-parsing every block per cell.
-   *  Pass the returned index as the 3rd arg of dailyCapacityHours. Cheap to build
-   *  (one parse pass over Store.blocks/plantBlocks); build it once per matrix call.
-   *  Distinct from _indexBlocks(plant), which builds the Engine-run _runBlocks cache. */
-  _indexCapacityBlocks(): CapacityBlockIndex {
-    const lineBlocks = new Map<string, CapRec[]>(), globalLine: CapRec[] = [], plantBlocks = new Map<string, PlantCapRec[]>(), globalPlant: PlantCapRec[] = [];
-    for (const b of Store.blocks) {
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      // Carry the block's plant so dailyCapacityHours can scope line:null blocks
-      // (globalLine) to their own plant; line-code reuse across plants is likewise
-      // resolved by plant, not just the line string.
-      const rec: CapRec = { s, e, plant: b.plant || null };
-      if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push(rec); }
-      else globalLine.push(rec);
-    }
-    for (const b of Store.plantBlocks) {
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (b.plant) { let a = plantBlocks.get(b.plant); if (!a) plantBlocks.set(b.plant, a = []); a.push({ s, e }); }
-      else globalPlant.push({ s, e });
-    }
-    return { lineBlocks, globalLine, plantBlocks, globalPlant };
-  },
-
-  dailyCapacityHours(line: string, date: Date, idx?: CapacityBlockIndex): number {
-    const win = Calendar.workWindow(line, date);
-    if (!win) return 0;
-    const winHours = (win[1].getTime() - win[0].getTime()) / Config.MS_HOUR;
-
-    const plant = Store.getPlantForLine(line);
-    let intervals: Array<{ s: Date; e: Date }>;
-    if (idx) {
-      // Reuse pre-parsed, bucketed intervals (no parseDate per cell). line:null
-      // blocks (globalLine) apply only within their own plant.
-      intervals = [];
-      const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) if (!x.plant || x.plant === plant) intervals.push(x);
-      for (const x of idx.globalLine) if (!x.plant || x.plant === plant) intervals.push(x);
-      const pb = idx.plantBlocks.get(plant!); if (pb) for (const x of pb) intervals.push(x);
-      for (const x of idx.globalPlant) intervals.push(x);
-    } else {
-      intervals = [];
-      for (const b of Store.blocks) {
-        if (b.plant && b.plant !== plant) continue;
-        if (b.line && b.line !== line) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
-      }
-      for (const b of Store.plantBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
-      }
-    }
-
-    const consumed = Util.mergedOverlapHours(win, intervals);
-    return Math.max(0, winHours - consumed);
-  },
-
-  /** Maximum schedulable hours after deducting the capacity buffer.
-   *  Nothing should be scheduled past this value (= total − buffer). */
-  /** Apply a line's capacity buffer to an already-computed full-capacity value.
-   *  The single source of truth for the buffer formula — callers that have already
-   *  computed dailyCapacityHours (matrix cells, the alert overload loop) call this
-   *  instead of effectiveCapacityHours so the full-capacity scan is not repeated.
-   *  Delegates to the shared compute core. */
-  effectiveFromCapacity(line: string, full: number): number {
-    return globalThis.NimbusComputeCore!.effectiveFromCapacity(line, full, Store.lineSettings as any);
-  },
-
-  effectiveCapacityHours(line: string, date: Date): number {
-    return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
-  },
-
-  /** True if `date` is inside the working window and not inside any blackout. */
-  isAvailable(line: string, date: Date): boolean {
-    const win = Calendar.workWindow(line, date);
-    if (!win) return false;
-    if (date < win[0] || date >= win[1]) return false;
-
-    const plant = Store.getPlantForLine(line);
-    for (const b of Store.blocks) {
-      if (b.plant && b.plant !== plant) continue;
-      if (b.line && b.line !== line) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    for (const b of Store.plantBlocks) {
-      if (b.plant && b.plant !== plant) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    return true;
-  },
-
-  /** Advances `from` forward until a contiguous block of `durationMs` is
-   *  available on `line`. Returns the starting Date (snapped). */
-  nextAvailable(line: string, from: Date, durationMs: number): Date {
-    let cur = Util.snap(new Date(from));
-    const MAX_ITERS = 90 * 24;  // 90-day explicit bound: max day-jumps
-    let iter = 0;
-
-    while (iter++ < MAX_ITERS) {
-      const win = Calendar.workWindow(line, cur);
-      if (!win) {
-        // jump to start of next day
-        const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-        cur = next; continue;
-      }
-      if (cur < win[0]) cur = new Date(win[0]);
-      if (cur >= win[1]) {
-        // out of today's window — jump to tomorrow 00:00
-        const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-        cur = next; continue;
-      }
-      const candidateEnd = new Date(cur.getTime() + durationMs);
-      // Check that the whole range [cur, candidateEnd] fits in the window
-      // and doesn't overlap any blackout block.
-      if (candidateEnd > win[1]) {
-        // Won't fit in today's window — jump to tomorrow
-        const next = new Date(cur); next.setDate(next.getDate() + 1); next.setHours(0,0,0,0);
-        cur = next; continue;
-      }
-      const conflict = Calendar._overlapsBlock(line, cur, candidateEnd);
-      if (conflict) {
-        cur = Util.snap(new Date(conflict.end));
-        continue;
-      }
-      return cur;
-    }
-    // Loop exhausted: no feasible slot found within 90 days. Log for diagnostics.
-    const plant = sourceGetPlantForLine(line);
-    reportSchedulerDiagnostic(
-      'error',
-      'calendar',
-      'calendar.next-available-exhausted',
-      `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`,
-    );
-    // fallback: return the original from; caller must handle
-    return Util.snap(new Date(from));
-  },
-
-  /** True when a proposed range is entirely inside one effective operating
-   * interval and clear of both line and plant blackout blocks. */
-  fitsContinuous(line: string, start: Date, durationMs: number): boolean {
-    const win = Calendar.workWindow(line, start);
-    const end = new Date(start.getTime() + durationMs);
-    return !!win && start >= win[0] && end <= win[1] && !Calendar._overlapsBlock(line, start, end);
-  },
-
-  /** Find the first minute at or after `from` that is operating time. This is
-   * intentionally weaker than `nextAvailable`: it is only used by the
-   * documented continuous-bar exception for inherently overlong orders. */
-  nextOperatingInstant(line: string, from: Date): Date | null {
-    const startMs = from.getTime();
-    const roundedMs = startMs % Config.MS_MIN ? startMs + Config.MS_MIN - (startMs % Config.MS_MIN) : startMs;
-    let cur = new Date(roundedMs);
-    const limit = new Date(cur);
-    limit.setDate(limit.getDate() + 90);
-    while (cur < limit) {
-      const win = Calendar.workWindow(line, cur);
-      if (!win || cur >= win[1]) {
-        cur.setDate(cur.getDate() + 1);
-        cur.setHours(0, 0, 0, 0);
-        continue;
-      }
-      if (cur < win[0]) cur = new Date(win[0]);
-      const blackout = Calendar._overlapsBlock(line, cur, new Date(cur.getTime() + Config.MS_MIN));
-      if (blackout) {
-        const blackoutEnd = blackout.end.getTime();
-        const nextMinute = blackoutEnd % Config.MS_MIN
-          ? blackoutEnd + Config.MS_MIN - (blackoutEnd % Config.MS_MIN)
-          : blackoutEnd;
-        cur = new Date(nextMinute);
-        continue;
-      }
-      return cur;
-    }
-    return null;
-  },
-
-  /** Is there any nominal (hours-only) plant/line intersection in the next
-   * 90 calendar days large enough for this runtime? Dated blackouts are
-   * intentionally ignored: they can exhaust normal placement, but do not make
-   * a fundamentally fittable order "inherently overlong". */
-  hasNominalWindow(line: string, from: Date, durationMs: number): boolean {
-    const cur = new Date(from);
-    cur.setHours(0, 0, 0, 0);
-    for (let day = 0; day < 90; day++) {
-      const win = Calendar.workWindow(line, cur);
-      if (win && win[1].getTime() - win[0].getTime() >= durationMs) return true;
-      cur.setDate(cur.getDate() + 1);
-    }
-    return false;
-  },
-
-  /** Backlog must preserve minute-level candidates: the established
-   * `nextAvailable` helper snaps to the application's coarser drag grid, which
-   * could turn an 08:01 request into 08:00 and incorrectly fit it before shift
-   * close. Keep that legacy behavior intact and use this exact-minute variant
-   * only for the new heuristic. */
-  _nextContiguousMinuteSlot(line: string, from: Date, durationMs: number): Date | null {
-    const ceilMinute = (date: Date): Date => {
-      const ms = date.getTime();
-      const remainder = ms % Config.MS_MIN;
-      return new Date(remainder ? ms + Config.MS_MIN - remainder : ms);
-    };
-    let cur = ceilMinute(new Date(from));
-    const limit = new Date(cur);
-    limit.setDate(limit.getDate() + 90);
-    while (cur < limit) {
-      const win = Calendar.workWindow(line, cur);
-      if (!win || cur >= win[1]) {
-        cur.setDate(cur.getDate() + 1);
-        cur.setHours(0, 0, 0, 0);
-        continue;
-      }
-      if (cur < win[0]) cur = new Date(win[0]);
-      const end = new Date(cur.getTime() + durationMs);
-      if (end > win[1]) {
-        cur.setDate(cur.getDate() + 1);
-        cur.setHours(0, 0, 0, 0);
-        continue;
-      }
-      const blackout = Calendar._overlapsBlock(line, cur, end);
-      if (blackout) {
-        cur = ceilMinute(new Date(blackout.end));
-        continue;
-      }
-      return cur;
-    }
-    return null;
-  },
-
-  /** Backlog-specific placement contract. Unlike legacy `nextAvailable`, its
-   * fallback is never accepted as a real ordinary slot. */
-  findContiguousSlot(line: string, from: Date, durationMs: number): BacklogSlot {
-    const operatingStart = Calendar.nextOperatingInstant(line, from);
-    if (!operatingStart) return { kind: 'unavailable' };
-    if (!Calendar.hasNominalWindow(line, from, durationMs)) return { kind: 'overlong', start: operatingStart };
-    const start = Calendar._nextContiguousMinuteSlot(line, from, durationMs);
-    return start ? { kind: 'slot', start } : { kind: 'exhausted' };
-  },
-
-  _ceilMinute(date: Date): Date {
-    const ms = date.getTime();
-    const remainder = ms % Config.MS_MIN;
-    return new Date(remainder ? ms + Config.MS_MIN - remainder : ms);
-  },
-
-  _floorMinute(date: Date): Date {
-    return new Date(date.getTime() - (date.getTime() % Config.MS_MIN));
-  },
-
-  /** All blackout intervals applicable to one concrete parent range, merged so
-   * overlapping line/plant blocks never create a false productive gap. */
-  _blockingIntervals(line: string, start: Date, end: Date): Array<{ start: Date; end: Date }> {
-    const intervals: Array<{ start: Date; end: Date }> = [];
-    const add = (s: Date, e: Date): void => {
-      if (s < end && e > start) {
-        intervals.push({
-          start: new Date(Math.max(s.getTime(), start.getTime())),
-          end: new Date(Math.min(e.getTime(), end.getTime())),
-        });
-      }
-    };
-    const cached = Calendar._runBlocks;
-    if (cached) {
-      for (const block of cached.byLine.get(line) || []) add(block.startDate, block.endDate);
-      for (const block of cached.byLine.get('__any__') || []) add(block.startDate, block.endDate);
-      const plant = sourceGetPlantForLine(line);
-      if (plant) for (const block of cached.byPlant.get(plant) || []) add(block.startDate, block.endDate);
-      for (const block of cached.byPlant.get('__any__') || []) add(block.startDate, block.endDate);
-    } else {
-      const plant = sourceGetPlantForLine(line);
-      for (const block of sourceBlocks()) {
-        if (block.plant && block.plant !== plant) continue;
-        if (block.line && block.line !== line) continue;
-        const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
-        if (s && e) add(s, e);
-      }
-      for (const block of sourcePlantBlocks()) {
-        if (block.plant && block.plant !== plant) continue;
-        const s = Util.parseDate(block.start), e = Util.parseDate(block.end);
-        if (s && e) add(s, e);
-      }
-    }
-    intervals.sort((a, b) => a.start.getTime() - b.start.getTime());
-    const merged: Array<{ start: Date; end: Date }> = [];
-    for (const interval of intervals) {
-      const prior = merged[merged.length - 1];
-      if (prior && interval.start <= prior.end) {
-        if (interval.end > prior.end) prior.end = interval.end;
-      } else {
-        merged.push({ start: new Date(interval.start), end: new Date(interval.end) });
-      }
-    }
-    return merged;
-  },
-
-  /** Enumerate effective operating fragments without mutating task or calendar
-   * state. The 90-day cap is shared with the existing slot search. */
-  _freeIntervals(line: string, from: Date): Array<{ start: Date; end: Date }> {
-    const earliest = Calendar._ceilMinute(new Date(from));
-    const day = new Date(earliest); day.setHours(0, 0, 0, 0);
-    const out: Array<{ start: Date; end: Date }> = [];
-    for (let offset = 0; offset < 90; offset++) {
-      const date = new Date(day); date.setDate(day.getDate() + offset);
-      const win = Calendar.workWindow(line, date);
-      if (!win) continue;
-      let cursor = Calendar._ceilMinute(new Date(Math.max(win[0].getTime(), earliest.getTime())));
-      const windowEnd = Calendar._floorMinute(win[1]);
-      if (cursor >= windowEnd) continue;
-      for (const block of Calendar._blockingIntervals(line, cursor, windowEnd)) {
-        const freeEnd = Calendar._floorMinute(block.start);
-        if (freeEnd > cursor) out.push({ start: new Date(cursor), end: freeEnd });
-        const next = Calendar._ceilMinute(block.end);
-        if (next > cursor) cursor = next;
-        if (cursor >= windowEnd) break;
-      }
-      if (cursor < windowEnd) out.push({ start: new Date(cursor), end: new Date(windowEnd) });
-    }
-    return out;
-  },
-
-  _hasNominalOperatingWindow(line: string, from: Date): boolean {
-    const day = new Date(from); day.setHours(0, 0, 0, 0);
-    for (let offset = 0; offset < 90; offset++) {
-      const date = new Date(day); date.setDate(day.getDate() + offset);
-      const win = Calendar.workWindow(line, date);
-      if (win && win[1] > win[0]) return true;
-    }
-    return false;
-  },
-
-  /** Allocate canonical runtime minutes under the selected plant policy. This
-   * is deliberately task-store pure: callers receive a complete parent patch
-   * or a bounded failure and decide when to mutate/preview/persist it. */
-  allocateRuntime(line: string, earliestStart: Date, runtimeMinutes: number,
-                  policy: SplitOrderPolicy = 'never'): RuntimeAllocation {
-    const totalMinutes = Math.round(Number(runtimeMinutes));
-    if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return { kind: 'exhausted' };
-    const durationMs = totalMinutes * Config.MS_MIN;
-    const from = Calendar._ceilMinute(new Date(earliestStart));
-    const normalizedPolicy: SplitOrderPolicy =
-      policy === 'overlong_only' || policy === 'partial_allowed' ? policy : 'never';
-
-    if (normalizedPolicy === 'never') {
-      const slot = Calendar.findContiguousSlot(line, from, durationMs);
-      if (!('start' in slot)) return { kind: slot.kind };
-      return {
-        kind: 'allocated', start: slot.start,
-        end: new Date(slot.start.getTime() + durationMs), scheduleSegments: [],
-      };
-    }
-
-    const inherentlyOverlong = !Calendar.hasNominalWindow(line, from, durationMs);
-    if (normalizedPolicy === 'overlong_only' && !inherentlyOverlong) {
-      const start = Calendar._nextContiguousMinuteSlot(line, from, durationMs);
-      return start
-        ? { kind: 'allocated', start, end: new Date(start.getTime() + durationMs), scheduleSegments: [] }
-        : { kind: 'exhausted' };
-    }
-    if (!Calendar._hasNominalOperatingWindow(line, from)) return { kind: 'unavailable' };
-
-    const minSegmentMinutes = Engine.minProductiveSegmentMinutesFor(sourceGetPlantForLine(line));
-    const pieces: Array<{ start: Date; end: Date }> = [];
-    let remaining = totalMinutes;
-    for (const free of Calendar._freeIntervals(line, from)) {
-      const capacity = Math.floor((free.end.getTime() - free.start.getTime()) / Config.MS_MIN);
-      if (capacity <= 0) continue;
-      let take = Math.min(remaining, capacity);
-      if (remaining > take && remaining - take < minSegmentMinutes) {
-        take = remaining - minSegmentMinutes;
-      }
-      // A partial piece must never be smaller than the plant's configured (or
-      // default 30-minute) floor. Skip a tiny fragment and continue the
-      // bounded search for a usable one.
-      if (take < minSegmentMinutes
-          && !(pieces.length === 0 && remaining === totalMinutes
-               && totalMinutes < minSegmentMinutes && take === totalMinutes)) {
-        continue;
-      }
-      const end = new Date(free.start.getTime() + take * Config.MS_MIN);
-      pieces.push({ start: new Date(free.start), end });
-      remaining -= take;
-      if (remaining === 0) break;
-    }
-    if (remaining !== 0 || !pieces.length) return { kind: 'exhausted' };
-
-    const merged: Array<{ start: Date; end: Date }> = [];
-    for (const piece of pieces) {
-      const prior = merged[merged.length - 1];
-      if (prior && prior.end.getTime() === piece.start.getTime()) prior.end = piece.end;
-      else merged.push({ start: new Date(piece.start), end: new Date(piece.end) });
-    }
-    const start = merged[0].start;
-    const end = merged[merged.length - 1].end;
-    return {
-      kind: 'allocated', start, end,
-      scheduleSegments: merged.length >= 2
-        ? merged.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
-        : [],
-    };
-  },
-
-  /** Adapter for the pure setup-placement primitive. It gathers the same
-   * effective operating fragments the existing allocator uses, including
-   * line/plant hours and blackouts, but never reads setup state or mutates a
-   * task. Setup-aware Engine activation remains intentionally deferred. */
-  placeWithSetup(
-    line: string,
-    request: Omit<PlaceWithSetupRequest, 'freeIntervals' | 'isInherentlyOverlong'>,
-  ): PlacementResult {
-    const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
-    const durationMs = runtimeMinutes * Config.MS_MIN;
-    const isInherentlyOverlong = Number.isFinite(runtimeMinutes) && runtimeMinutes > 0
-      && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs);
-    return placeWithSetupPure({
-      ...request,
-      freeIntervals: Calendar._freeIntervals(line, request.earliestStart),
-      isInherentlyOverlong,
-    });
-  },
-
-  /** Find the first blackout block overlapping [start,end) on `line`, else null. */
-  _overlapsBlock(line: string, start: Date, end: Date): { start: Date; end: Date } | null {
-    const rb = Calendar._runBlocks;
-    if (rb) {
-      const startMs = start.getTime ? start.getTime() : +start;
-      const endMs   = end.getTime   ? end.getTime()   : +end;
-      const scanLine = rb.byLine.get(line);
-      if (scanLine) {
-        for (const b of scanLine) {
-          if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-        }
-      }
-      const scanLineAny = rb.byLine.get('__any__');
-      if (scanLineAny) {
-        for (const b of scanLineAny) {
-          if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-        }
-      }
-      const plant = sourceGetPlantForLine(line);
-      const scanPlant = plant ? rb.byPlant.get(plant) : null;
-      if (scanPlant) {
-        for (const b of scanPlant) {
-          if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-        }
-      }
-      const scanPlantAny = rb.byPlant.get('__any__');
-      if (scanPlantAny) {
-        for (const b of scanPlantAny) {
-          if (startMs < b.e && endMs > b.s) return { start: b.startDate, end: b.endDate };
-        }
-      }
-      return null;
-    }
-
-    const plant = sourceGetPlantForLine(line);
-    for (const b of sourceBlocks()) {
-      if (b.plant && b.plant !== plant) continue;
-      if (b.line && b.line !== line) continue;
-      const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
-      if (!bs || !be) continue;
-      if (start < be && end > bs) return { start: bs, end: be };
-    }
-    for (const b of sourcePlantBlocks()) {
-      if (b.plant && b.plant !== plant) continue;
-      const bs = Util.parseDate(b.start), be = Util.parseDate(b.end);
-      if (!bs || !be) continue;
-      if (start < be && end > bs) return { start: bs, end: be };
-    }
-    return null;
-  },
-};
-
-/* =============================================================================
-   COMPUTE — singleton Web Worker wrapper for off-main-thread computation.
-   Alerts.recompute and Utilization pre-warming post through here.
-   Falls back to synchronous (main-thread) compute if the worker is unavailable.
-   ========================================================================== */
-export const Compute = (() => {
-  let _worker: Worker | null = null;
-  let _dead   = false;
-  let _crashCount = 0;
-  let _seq    = 0;
-  const _pending = new Map<number, { resolve: (value: any) => void; reject: (reason?: any) => void }>(); // id → { resolve, reject }
-
-  function _init(): Worker | null {
-    if (_dead || _worker) return _worker;
-    try {
-      // Cache-bust the worker with the build id so a redeployed worker isn't served
-      // stale from the HTTP cache — otherwise mirrored Calendar/Alerts fixes here
-      // would silently diverge from the worker's hand-port. (Config.BUILD_ID tracks
-      // NIMBUS_BUILD_ID, kept in sync with APP_VERSION on every deploy.)
-      _worker = new Worker('nimbus-worker.js?v=' + Config.BUILD_ID);
-      _worker.onmessage = ({ data }) => {
-        const p = _pending.get(data.id);
-        if (!p) return;
-        _pending.delete(data.id);
-        if (data.type === 'ERROR') {
-          // Worker reported a compute failure (see §1.7 contract): carries
-          // error/stack/failingType. Log before rejecting so the failure is
-          // visible even if the caller swallows the rejection.
-          const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
-          ErrorLog.error('worker', wMsg,
-            { failingType: data.failingType, jobId: data.jobId },
-            { errorCode: 'worker.compute', stack: data.stack });
-          p.reject(new Error(data.error));
-        } else {
-          p.resolve(data);
-        }
-      };
-      _worker.onerror = (ev) => {
-        // Build {message, filename, lineno, colno} from the ErrorEvent and log
-        // BEFORE deciding whether to disable the worker (the only record of why
-        // the worker crashed).
-        const detail = {
-          message:  ev?.message || 'worker error',
-          filename: ev?.filename || '',
-          lineno:   ev?.lineno ?? null,
-          colno:    ev?.colno ?? null,
-        };
-        _crashCount++;
-        const logFn = _crashCount === 1 ? 'warn' : 'error';
-        try {
-          ErrorLog[logFn]('worker', `worker crashed (attempt ${_crashCount}): ${detail.message}`, detail,
-            { errorCode: 'worker.compute' });
-        } catch {}
-        for (const p of _pending.values()) p.reject(new Error('worker error'));
-        _pending.clear();
-        _worker = null;
-        if (_crashCount >= 2) {
-          // Permanent failure: give up on the worker for the session.
-          _dead = true;
-        }
-        // Otherwise: allow retry on next _init() call (bounded at 1 retry + permanent fail on 2nd crash).
-      };
-    } catch {
-      _dead = true;
-      return null;
-    }
-    return _worker;
-  }
-
-  function _post(type: 'ALERTS' | 'UTILIZATION', payload: Record<string, unknown>): Promise<any> {
-    const w = _init();
-    if (!w) return Promise.reject(new Error('worker unavailable'));
-    return new Promise((resolve, reject) => {
-      const id = ++_seq;
-      _pending.set(id, { resolve, reject });
-      // Diagnostic-only measurement: setup stays scoped and has no activation gate.
-      if (payload.setup) {
-        const _setupCloneT0 = performance.now();
-        structuredClone(payload.setup);
-        PerfMonitor.record('Worker.setupClone:' + type, performance.now() - _setupCloneT0);
-      }
-      const _cloneT0 = performance.now();
-      w.postMessage({ type, id, payload });
-      PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
-    });
-  }
-
-  // Alerts/Utilization compute never read these (docs/scheduling_priority.md
-  // R10) — dropped before the structured-clone postMessage, the documented
-  // dominant main-thread cost of the Worker.* round trip. Excludes only the
-  // three fields Stage 1 added; every other field ships exactly as before.
-  function _stripPriorityFields(t: NimbusTask): NimbusTask {
-    const { PRT_01, PRT_02, PRODUCTION_VERSION, ...rest } = t;
-    return rest as NimbusTask;
-  }
-
-  function _snap(): WorkerSnapshotBase {
-    const plant = Store.selectedPlant;
-    if (!plant) {
-      // Setup state must be resolved from the un-stripped source: stateForOrder
-      // reads PRT_01/PRT_02/PRODUCTION_VERSION, and _stripPriorityFields deletes
-      // exactly those before transport. Deriving from the stripped copy would
-      // silently blank every state for any definition using those fields.
-      const src = Store.tasksArr;
-      const setup = deriveSetupObservation(Store.setupSnapshot, src, undefined, {
-        calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
-        masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
-      });
-      const tasks = src.map(_stripPriorityFields);
-      // No plant selected — nothing is rendered; fall back to the global snapshot.
-      return {
-        tasks,
-        blocks:       Store._state.blocks,
-        plantBlocks:  Store._state.plantBlocks,
-        calendars:    Store._state.calendars,
-        plants:       Store._state.plants,
-        lineSettings: Store._state.lineSettings,
-        masterData:   Store._state.masterData,
-        setup,
-      };
-    }
-    // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
-    // on the main thread on every postMessage (the dominant main-thread cost of the
-    // Worker.* round trip), so we send only the selected plant's data. calendars and
-    // lineSettings MUST be scoped too: computeUtilization derives its line set from
-    // Object.keys(calendars), and those maps accumulate entries for every line visited
-    // this session — an unscoped map would make the worker compute (and clone back) a
-    // matrix for lines that aren't even on screen.
-    const lines = new Set(Store.linesForSelectedPlant());
-    const pick = <T,>(obj: Record<string, T>): Record<string, T> => {
-      const out: Record<string, T> = {};
-      for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
-      return out;
-    };
-    // Same rule as the no-plant branch above: derive from the un-stripped
-    // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
-    const src = Store.tasksByPlant(plant);
-    const setup = deriveSetupObservation(Store.setupSnapshot, src, lines, {
-      calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-      lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
-      blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-      plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-    });
-    const tasks = src.map(_stripPriorityFields);
-    return {
-      tasks,
-      blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-      plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-      calendars:    pick(Store._state.calendars),
-      plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-      lineSettings: pick(Store._state.lineSettings),
-      masterData:   Store._state.masterData,
-      setup,
-    };
-  }
-
-  return {
-    available(): boolean { return !_dead && typeof Worker !== 'undefined'; },
-
-    alerts(opts: { lines?: Set<string> } = {}, dismissed?: Set<string>): Promise<{ alerts: NimbusAlert[]; elapsed: number }> {
-      const _t0 = performance.now();
-      return _post('ALERTS', {
-        ..._snap(),
-        dismissed: [...(dismissed || [])],
-        opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
-      }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
-    },
-
-    utilization(startMs: number, days: number): Promise<{ matrix: NimbusUtilizationMatrix }> {
-      const _t0 = performance.now();
-      return _post('UTILIZATION', { ..._snap(), startMs, days })
-        .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
-    },
-  };
-})();
-
-/* =============================================================================
-   ALERTS — computation only (detect and maintain the active alert list).
-   Re-runs on any task/block/calendar change. Alerts are de-duplicated by id.
-   The DOM half (drawer, bell badge, cell-briefing modal) stayed behind in
-   app.js, renamed `AlertsUIAdapter` — see
-   docs/architecture/cq1-compatibility-inventory.md.
-   ========================================================================== */
-// Adaptive debounced dispatcher constants — all callers funnel through
-// scheduleRecompute/scheduleRecomputeLines below so rapid successive
-// mutations (drag → autoReflow → explicit call) collapse into one recompute.
-// The delay scales with the last recompute's measured cost (×1.5, clamped) so
-// small/incremental updates stay snappy while a heavy full recompute on a
-// large board doesn't thrash the main thread — replacing the old fixed 80 ms
-// window that was too short at scale. Declared here (rather than after the
-// object literal, as in the pre-TS version) purely so _armTimer's closure
-// below can reference them — TDZ-safe either way since _armTimer only reads
-// them when called, well after module evaluation completes.
-const _ALERTS_MIN_DEBOUNCE_MS = 90;
-const _ALERTS_MAX_DEBOUNCE_MS = 500;
-export const Alerts = {
-  recompute(opts: { lines?: Set<string> } = {}): void {
-    // Never post the global (all-line) snapshot to the worker: when no plant is
-    // selected nothing is rendered, so route to the cheap sync path instead of
-    // structured-cloning every line's calendars/lineSettings/masterData across.
-    if (Compute.available() && Store.selectedPlant) {
-      const reqRev = Store.rev();
-      Compute.alerts(opts, Alerts._dismissed)
-        .then(({ alerts, elapsed }) => {
-          if (Store.rev() !== reqRev) return; // stale result — a newer compute is in-flight
-          const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
-          if (onlyLines) {
-            const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-            Store.setAlerts(retained.concat(alerts), 'alerts');
-          } else {
-            Store.setAlerts(alerts, 'alerts');
-          }
-          Alerts._lastMs = elapsed;
-        })
-        .catch((e) => {
-          ErrorLog.warn('worker', 'compute fell back to main thread', { error: String(e?.message || e) });
-          Alerts._recomputeSync(opts);
-        });
-      return;
-    }
-    Alerts._recomputeSync(opts);
-  },
-
-  _recomputeSync(opts: { lines?: Set<string> } = {}): void {
-    // Synchronous fallback (worker unavailable / no plant selected). Delegates to
-    // nimbus-compute-core — the SAME implementation the worker runs — so a worker-dead
-    // session and a healthy one produce identical alerts (no "two brains" divergence).
-    // Reads the same GLOBAL Store data the previous inline rule engine did (all tasks/
-    // blocks/plant-blocks/calendars/…). The core writes calendar defaults into
-    // Store.calendars/plants exactly as Store.ensure* did (same in-place side effect).
-    const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    const onlyLines = (opts.lines instanceof Set && opts.lines.size) ? opts.lines : null;
-    const { alerts: kept } = globalThis.NimbusComputeCore!.computeAlerts({
-      tasks:        Store.tasksArr,
-      blocks:       Store.blocks,
-      plantBlocks:  Store.plantBlocks,
-      calendars:    Store.calendars,
-      plants:       Store.plants,
-      lineSettings: Store.lineSettings as any,
-      masterData:   Store.masterData as unknown as NimbusMasterData,
-      setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined, {
-        calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
-        masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
-      }),
-      dismissed:    [...Alerts._dismissed],
-      opts:         { lines: onlyLines ? [...onlyLines] : null },
-    });
-    if (onlyLines) {
-      // Incremental merge: retain alerts on untouched lines, replace only the affected
-      // ones. Callers of the scoped path never move a task across lines.
-      const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-      Store.setAlerts(retained.concat(kept), 'alerts');
-    } else {
-      Store.setAlerts(kept, 'alerts');
-    }
-    Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
-    PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);
-  },
-
-  _dismissed: new Set<string>(),
-
-  dismiss(alertId: string): void {
-    Alerts._dismissed.add(alertId);
-    Store.dismissAlert(alertId, 'alerts');
-  },
-  dismissAll(): void {
-    for (const a of Store.alerts) Alerts._dismissed.add(a.id);
-    Store.dismissAllAlerts('alerts');
-  },
-  // Clear dismissals (so new runs of recompute() can re-surface the same issue).
-  // Returns whether any dismissal actually existed — callers that follow this
-  // with a SCOPED recompute (scheduleAlertsForPatches) need this: a scoped
-  // merge retains the untouched lines' previously-computed (dismissal-filtered)
-  // alert lists as-is, so a dismissal on an untouched line would otherwise
-  // never re-surface until some later full recompute happened to run.
-  clearDismissed(): boolean {
-    const had = Alerts._dismissed.size > 0;
-    Alerts._dismissed.clear();
-    return had;
-  },
-
-  applyFix(alertId: string): void {
-    const a = Store.alerts.find(x => x.id === alertId);
-    if (!a) return;
-
-    if (a.type === 'overlap' || a.type === 'blackout') {
-      const task = Store.tasks[a.taskId!];
-      if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
-      const line = task.MACHINE || 'Unknown';
-      const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
-      const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
-
-      // For overlap: start searching from end of the overlapping peer
-      let searchFrom = task.start_date;
-      if (a.type === 'overlap') {
-        const peerId = a.id.replace(/^ovl-/, '').split('-')[0];
-        const peer = peerId ? Store.tasks[peerId] : null;
-        if (peer && peer.end_date) searchFrom = peer.end_date;
-        else searchFrom = task.start_date;
-      }
-
-      const snap = UndoStack.snapshotTasks([task.id]);
-      let newStart: Date;
-      let changes: Partial<NimbusTask>;
-      if (splitPolicy === 'never') {
-        newStart = Calendar.nextAvailable(line, searchFrom, dur);
-        const newEnd = new Date(newStart.getTime() + dur);
-        changes = { start_date: newStart, end_date: newEnd };
-        if (task.scheduleSegments?.length && task.scheduleSegments.length >= 2) changes.scheduleSegments = [];
-      } else {
-        const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
-        Calendar._beginRun(plant);
-        try {
-          changes = Engine.schedulePatchFor(task, line, searchFrom, splitPolicy) || {};
-        } finally {
-          Calendar._endRun();
-        }
-        if (!changes.start_date || !changes.end_date) {
-          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
-          return;
-        }
-        newStart = changes.start_date;
-      }
-      Store.updateTask(task.id, changes, 'alerts');
-      try { Engine.autoReflow(task.id); } catch {}
-      UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
-      Alerts.dismiss(alertId);
-      Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
-
-    } else if (a.type === 'overload') {
-      // Scope the changeover optimizer to just this line+day so the optimize and the
-      // undo snapshot cover the SAME tasks. (Passing no opts re-optimized the whole
-      // plant over a 35-day horizon while the snapshot only captured one line+day,
-      // so undo silently lost every cross-line / cross-day move.)
-      const line = a.line, day = Util.dayKey(a.time || new Date());
-      const dayStart = Util.startOfDay(a.time || new Date())!;
-      const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
-      // Snapshot a SUPERSET of what the optimizer can move: every task on this line
-      // that runAndApply would NOT treat as aged/out-of-window — i.e. its free-set
-      // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
-      // dayKey(start) missed cross-midnight orders and lost them on undo.
-      const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
-        (t.MACHINE || 'Unknown') === line &&
-        (!t.end_date   || t.end_date   >= dayStart) &&
-        (!t.start_date || t.start_date <= dayEnd)
-      ).map(t => t.id));
-      Engine.runAndApply('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd });
-      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
-      Alerts.dismiss(alertId);
-    }
-  },
-
-  // -- Adaptive debounced dispatcher state/methods -----------------------
-  // Declared as literal properties (rather than post-hoc `Alerts.x = ...`
-  // assignments, as in the pre-TS version) so TypeScript's object-literal
-  // type inference includes them on Alerts's own type — see schedule-state.mts's
-  // identical treatment of Store._alertsByTaskSrc/_rev for the precedent.
-  _lastMs: 0,
-  _timer: null as ReturnType<typeof setTimeout> | null,
-  _pendingFull: false,
-  _pendingLines: new Set<string>(),
-  _fire(): void {
-    const full  = Alerts._pendingFull;
-    const lines = Alerts._pendingLines;
-    Alerts._pendingFull = false;
-    Alerts._pendingLines = new Set();
-    Alerts._timer = null;
-    Alerts.recompute(full ? {} : { lines });
-  },
-  _armTimer(): void {
-    const delay = Math.min(_ALERTS_MAX_DEBOUNCE_MS,
-                           Math.max(_ALERTS_MIN_DEBOUNCE_MS, Math.round(Alerts._lastMs * 1.5)));
-    if (Alerts._timer) clearTimeout(Alerts._timer);
-    Alerts._timer = setTimeout(Alerts._fire, delay);
-  },
-  // Full recompute — the default for block / calendar / plant / line-membership changes.
-  scheduleRecompute(): void {
-    Alerts._pendingFull = true;
-    Alerts._armTimer();
-  },
-  // Incremental recompute scoped to specific lines. Only safe for callers that never move a
-  // task across lines (optimize / auto-reflow only shift dates within a line); anything that
-  // could change line membership or global state must use scheduleRecompute() instead. If a
-  // full recompute is also pending in the same window, the full one wins (always correct).
-  scheduleRecomputeLines(lines: Set<string> | null | undefined): void {
-    if (lines) for (const l of lines) Alerts._pendingLines.add(l);
-    Alerts._armTimer();
-  },
-};
-
-/** Phase 3 (Pkg E): shared post-apply alert-recompute scoping for optimizer
- *  patches (used by both Engine.runAndApply's setup-aware branch and
- *  OptimizerPreview.apply). The optimizer only ever shifts dates within a
- *  line — never moves a task across lines/machines — which is exactly the
- *  invariant scheduleRecomputeLines' doc comment above requires of its
- *  callers. Defensive fallback: if any patch's `changes` actually carries a
- *  MACHINE field (shouldn't happen today), or a patch id can't be resolved
- *  to a line at all, fall back to the full recompute rather than trust a
- *  possibly-incomplete scope.
- *
- *  Both call sites gate the call on `Alerts.clearDismissed()`'s return value
- *  BEFORE reaching this function: if any dismissal actually existed, they
- *  call `Alerts.scheduleRecompute()` directly and skip this scoped helper
- *  entirely — a scoped merge retains untouched lines' stale (dismissal-
- *  filtered) alert lists as-is, so a cleared dismissal on an untouched line
- *  would otherwise never re-surface until some later full recompute. */
-export function scheduleAlertsForPatches(
-  patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
-  resolveLine: (id: string) => string | undefined,
-): void {
-  // No patches to scope to (e.g. an apply that changed nothing) — fall back
-  // to a full recompute rather than silently skip one.
-  if (!patches.length) { Alerts.scheduleRecompute(); return; }
-  const lines = new Set<string>();
-  for (const p of patches) {
-    if ('MACHINE' in p.changes) { Alerts.scheduleRecompute(); return; }
-    const line = resolveLine(p.id);
-    if (!line) { Alerts.scheduleRecompute(); return; }
-    lines.add(line);
-  }
-  Alerts.scheduleRecomputeLines(lines);
-}
-
-// schedule-data.mjs's Persistence used to call `Alerts.scheduleRecompute()` directly
-// after every hydration (load()'s two branches, _loadCache(), _loadDemo()) — a reverse
-// dependency schedule-data.mjs must never take (it may not import schedule-services.mjs).
-// Persistence now emits this Store event instead; subscribe here, the legitimate
-// importer of both Store and Alerts, so the recompute still fires exactly the same way.
-Store.subscribe(evt => {
-  if (evt.type === 'schedule:hydrated') Alerts.scheduleRecompute();
-}, 'schedule-services.hydrated');
-
-/** Phase 2 (Pkg D) clone-base reuse: `Utilization.computeMatrix`'s preview
- * path (`utilizationSnapshot` non-null) structured-clones this six-pack on
- * EVERY call — 2-3 calls per optimizer preview (pre/post/alt KPIs), all
- * against the SAME `utilizationSnapshot` object reference. Cache the first
- * call's clones per snapshot so later calls in the same preview reuse them.
- * Confirmed safe (see the finding recorded in the Task 5 report):
- * NimbusComputeCore.computeUtilization's only in-place writes to these
- * inputs are ensureCalendar/ensurePlant filling a MISSING line/plant entry
- * with the same deterministic default, guarded by an existence check —
- * idempotent normalization, never a destructive overwrite of real data.
- * lineSettings/masterData/blocks/plantBlocks are never mutated by the core.
- * A WeakMap keyed by the snapshot object needs no manual eviction — entries
- * disappear once the preview releases its snapshot reference. The task list
- * itself is NOT cached here: it genuinely differs per call (pre/post/alt). */
-interface UtilizationSnapshotClones {
-  lineSettings: Record<string, NimbusLineSetting>;
-  calendars: Record<string, { workHours: WorkHours }>;
-  plants: Record<string, { workHours: WorkHours }>;
-  blocks: NimbusBlock[];
-  plantBlocks: NimbusPlantBlock[];
-  masterData: NimbusMasterData | null;
-}
-const _utilizationSnapshotCloneCache = new WeakMap<Readonly<ScheduleSnapshot>, UtilizationSnapshotClones>();
-
-/* =============================================================================
-   UTILIZATION — scheduled vs. available hours per line per day.
-   ========================================================================== */
-export const Utilization = {
-  _cache: null as { key: string; matrix: UtilizationMatrixResolved } | null,  // memoized result of the Store-backed compute path
-  /** Returns { [line]: { [dayKey]: { scheduled, capacity, pct, tasks } } }.
-   *  Pass `srcTasks` to scope the result to a filtered task subset.
-   *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
-   *  every Store mutation, so a cache hit always reflects current data. Subset calls
-   *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
-  computeMatrix(
-    startDate: Date,
-    days: number = 7,
-    srcTasks: NimbusTask[] | null = null,
-    utilizationSnapshot: Readonly<ScheduleSnapshot> | null = null,
-  ): UtilizationMatrixResolved {
-    const start = Util.startOfDay(startDate)!;
-    const cacheable = srcTasks === null && !utilizationSnapshot;
-    // Scope the memo key by selected plant. The worker prewarm (_prewarm) writes a
-    // PLANT-SCOPED matrix; this sync path is otherwise GLOBAL. Without a plant
-    // discriminator (and a matching line set) the two collide under one key and a
-    // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
-    const selectedPlant = utilizationSnapshot ? utilizationSnapshot.selectedPlant : Store.selectedPlant;
-    const scope = selectedPlant || 'all';
-    const revision = utilizationSnapshot ? 'detached' : Store.rev();
-    const cacheKey = `${start.getTime()}|${days}|${revision}|${scope}`;
-    if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
-      return Utilization._cache.matrix;
-    }
-    const _pmT0u = performance.now();
-    const taskList = srcTasks !== null ? srcTasks : (utilizationSnapshot?.tasks ?? Store.tasksArr);
-    // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
-    // a preview, give it clones of the detached candidate context so that
-    // convenience normalization cannot mutate Store (or the candidate itself).
-    // Phase 2 (Pkg D): reuse those clones across repeat calls against the
-    // SAME snapshot instead of re-cloning every time (see
-    // _utilizationSnapshotCloneCache above for the safety finding).
-    let lineSettings: Record<string, NimbusLineSetting>;
-    let calendars: Record<string, { workHours: WorkHours }>;
-    let plants: Record<string, { workHours: WorkHours }>;
-    let blocks: NimbusBlock[];
-    let plantBlocks: NimbusPlantBlock[];
-    let masterData: NimbusMasterData | null;
-    if (utilizationSnapshot) {
-      let clones = _utilizationSnapshotCloneCache.get(utilizationSnapshot);
-      if (!clones) {
-        clones = {
-          lineSettings: structuredClone(utilizationSnapshot.lineSettings),
-          calendars:    structuredClone(utilizationSnapshot.calendars),
-          plants:       structuredClone(utilizationSnapshot.plants),
-          blocks:       structuredClone(Array.from(utilizationSnapshot.blocks)),
-          plantBlocks:  structuredClone(Array.from(utilizationSnapshot.plantBlocks)),
-          masterData:   structuredClone(utilizationSnapshot.masterData),
-        };
-        _utilizationSnapshotCloneCache.set(utilizationSnapshot, clones);
-      }
-      ({ lineSettings, calendars, plants, blocks, plantBlocks, masterData } = clones);
-    } else {
-      lineSettings = Store.lineSettings;
-      calendars    = Store.calendars;
-      plants       = Store.plants;
-      blocks       = Store.blocks;
-      plantBlocks  = Store.plantBlocks;
-      masterData   = Store.masterData;
-    }
-    // The task list genuinely differs per call (pre/post/alt) — never cached.
-    const coreTasks: NimbusTask[] = utilizationSnapshot
-      ? structuredClone(Array.from(taskList))
-      : taskList as NimbusTask[];
-
-    // Reproduce the exact line set the inline builder used: task lines, plus (when this
-    // is NOT a filtered subset) either the selected plant's lines or every visited
-    // calendar line. Passed explicitly so the core pins the same set.
-    const lineSet = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
-    if (srcTasks === null) {
-      if (utilizationSnapshot && selectedPlant) {
-        for (const [line, settings] of Object.entries(lineSettings)) {
-          const mappedPlant = settings.plant
-            ?? masterData?.lines.find(row => row.machine === line)?.plant;
-          if (mappedPlant === selectedPlant) lineSet.add(line);
-        }
-      } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
-      else Object.keys(calendars).forEach(l => lineSet.add(l));
-    }
-    // Detached candidate snapshots deliberately do not retain setup truth;
-    // never reach back into Store while rendering one. Live paths resolve once
-    // and hand the core only the resulting plant/line-scoped observations.
-    const setup = utilizationSnapshot
-      ? { intervals: [], diagnostics: [] }
-      : deriveSetupObservation(Store.setupSnapshot, coreTasks, lineSet, {
-        calendars, plants, lineSettings, masterData, blocks, plantBlocks,
-      });
-
-    // Delegate the matrix build to nimbus-compute-core — the single source of truth,
-    // shared with the worker's UTILIZATION path. The core returns row.tasks as task IDs
-    // (its worker contract); resolve them back to task OBJECTS here, which is what
-    // computeMatrix's callers expect (they read task fields off the rows).
-    const { matrix } = globalThis.NimbusComputeCore!.computeUtilization({
-      tasks:        coreTasks,
-      lineSettings: lineSettings as any,
-      calendars,
-      plants,
-      blocks,
-      plantBlocks,
-      masterData:   masterData as unknown as NimbusMasterData,
-      startMs:      start.getTime(),
-      days,
-      lines:        [...lineSet],
-      setup,
-    });
-    const byId = new Map(taskList.map(t => [t.id, t]));
-    for (const line of Object.keys(matrix)) {
-      const rows = matrix[line];
-      for (const k of Object.keys(rows)) {
-        rows[k].tasks = rows[k].tasks.map(id => byId.get(id)).filter(Boolean) as unknown as string[];
-      }
-    }
-
-    if (cacheable) Utilization._cache = { key: cacheKey, matrix: matrix as unknown as UtilizationMatrixResolved };
-    PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
-    return matrix as unknown as UtilizationMatrixResolved;
-  },
-
-  /** Severity bucket from a utilisation ratio.
-   *  overloadAt defaults to OVERLOAD_THRESHOLD but callers should pass
-   *  effectiveCapacity/capacity so the buffer limit is respected. */
-  sev(pct: number, overloadAt: number = Config.OVERLOAD_THRESHOLD): 'err' | 'warn' | 'ok' {
-    if (pct > overloadAt)               return 'err';
-    if (pct > Config.WARN_THRESHOLD)    return 'warn';
-    return 'ok';
-  },
-
-  /** Today's utilisation summary keyed by line. */
-  todayByLine(): Record<string, DayByLineRow> {
-    return Utilization.dayByLine(new Date());
-  },
-
-  /** Utilisation summary for any given day, keyed by line.
-   *  Pass `srcTasks` to scope the result to a filtered task subset. */
-  dayByLine(date: Date, srcTasks: NimbusTask[] | null = null): Record<string, DayByLineRow> {
-    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
-    const d = Util.startOfDay(date) || Util.startOfDay(new Date())!;
-    const dEndMs = (() => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.getTime(); })();
-    const out: Record<string, DayByLineRow> = {};
-    const lines = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
-    const dayKeyTarget = Util.dayKey(d);
-    // Pre-parse blackout blocks once; reused for both capacity and the per-task clip below.
-    const blockIdx = Calendar._indexCapacityBlocks();
-    for (const line of lines) {
-      const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
-      const effectiveCap = Calendar.effectiveFromCapacity(line, cap);
-      const workWin = Calendar.workWindow(line, d);
-      let sched = 0;
-      if (workWin) {
-        const plant = Store.getPlantForLine(line);
-        const blackouts: Array<{ s: Date; e: Date }> = [];
-        // line:null blocks (globalLine) apply only within their own plant; concrete
-        // blocks under a reused line code are likewise resolved by plant.
-        const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) if (!x.plant || x.plant === plant) blackouts.push(x);
-        for (const x of blockIdx.globalLine) if (!x.plant || x.plant === plant) blackouts.push(x);
-        const _pb = blockIdx.plantBlocks.get(plant!); if (_pb) for (const x of _pb) blackouts.push(x);
-        for (const x of blockIdx.globalPlant) blackouts.push(x);
-        for (const t of taskList) {
-          if ((t.MACHINE || 'Unknown') !== line) continue;
-          if (!t.start_date) continue;
-          const intervals = Util.scheduleIntervals(t);
-          if (intervals.length >= 2) {
-            for (const interval of intervals) {
-              const tStartMs = interval.start.getTime();
-              const tEndMs = interval.end.getTime();
-              if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
-              const workingHrs = Util.mergedOverlapHours(workWin, [{ s: interval.start, e: interval.end }]);
-              if (workingHrs <= 0) continue;
-              const blackoutsClipped = blackouts
-                .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
-                .map(b => ({
-                  s: new Date(Math.max(b.s.getTime(), tStartMs)),
-                  e: new Date(Math.min(b.e.getTime(), tEndMs))
-                }));
-              sched += Math.max(0, workingHrs - Util.mergedOverlapHours(workWin, blackoutsClipped));
-            }
-            continue;
-          }
-          if (!t.end_date) {
-            if (Util.dayKey(t.start_date) === dayKeyTarget) sched += Util.runHours(t);
-            continue;
-          }
-          const tStartMs = t.start_date.getTime();
-          const tEndMs   = t.end_date.getTime();
-          if (tEndMs <= tStartMs) continue;
-          if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
-          const taskRunHrs = Util.runHours(t);
-          if (taskRunHrs <= 0) continue;
-          const workingHrs = Util.mergedOverlapHours(workWin, [{ s: t.start_date, e: t.end_date }]);
-          if (workingHrs <= 0) continue;
-          const blackoutsClipped = blackouts
-            .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
-            .map(b => ({
-              s: new Date(Math.max(b.s.getTime(), tStartMs)),
-              e: new Date(Math.min(b.e.getTime(), tEndMs))
-            }));
-          const blackoutOverlap = Util.mergedOverlapHours(workWin, blackoutsClipped);
-          const dayHrs = Math.max(0, workingHrs - blackoutOverlap);
-          // Cap at RUN_TIME so SAP-bloated end_dates don't over-attribute.
-          sched += Math.min(dayHrs, taskRunHrs);
-        }
-      }
-      out[line] = {
-        capacity: cap, effectiveCapacity: effectiveCap, scheduled: sched,
-        pct: cap > 0 ? sched / cap : (sched > 0 ? 1 : 0)
-      };
-    }
-    return out;
-  },
-
-  // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
-  // call returns instantly from cache. Declared as a literal method (rather than a
-  // post-hoc `Utilization._prewarm = ...` assignment, as in the pre-TS version) so
-  // TypeScript's object-literal type inference includes it on Utilization's own type
-  // — same treatment as Alerts's debounce methods above.
-  _prewarm(): void {
-    // Skip when no plant is selected — _snap would otherwise post the global all-line
-    // snapshot to the worker for a matrix nothing on screen consumes.
-    if (!Compute.available() || !Store.selectedPlant) return;
-    const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
-    const startMs = Util.startOfDay(new Date())!.getTime();
-    const rev     = Store.rev();
-    Compute.utilization(startMs, 7)
-      .then(({ matrix }) => {
-        if (Store.rev() !== rev) return; // stale — a newer mutation arrived
-        for (const line of Object.keys(matrix)) {
-          for (const k of Object.keys(matrix[line])) {
-            const row = matrix[line][k];
-            row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean) as unknown as string[];
-          }
-        }
-        Utilization._cache = { key: `${startMs}|7|${rev}|${plant}`, matrix: matrix as unknown as UtilizationMatrixResolved };
-      })
-      .catch(() => {});
-  },
-};
-// Debounced so a drag-storm / autoReflow burst (many task:update/bulkUpdate events in
-// quick succession) collapses into ONE worker round-trip — i.e. one synchronous
-// structured-clone of the snapshot — instead of one per mutation.
-let _prewarmTimer: ReturnType<typeof setTimeout> | null = null;
-Store.subscribe(evt => {
-  if (evt.type !== 'tasks:bulk' && evt.type !== 'tasks:bulkUpdate' && evt.type !== 'task:update') return;
-  if (_prewarmTimer) clearTimeout(_prewarmTimer);
-  _prewarmTimer = setTimeout(() => { _prewarmTimer = null; Utilization._prewarm(); }, 200);
-}, 'Utilization.prewarm');
 
 /* =============================================================================
    ENGINE — scheduling + optimisation.
@@ -3541,4 +2186,20 @@ Store.subscribe(evt => {
     }
     for (const plant of plants) Engine.reconcileRuntimeSchedules(plant);
   }
-}, 'schedule-services.runtime-reconcile');
+}, 'engine.runtime-reconcile');
+
+/**
+ * Evaluate against the existing placement algorithm, but with its reads bound
+ * to `snapshot`.  This adapter shares the legacy mode implementation; it
+ * emits patches and never applies them while evaluating a candidate.
+ *
+ * Moved here verbatim from optimization/setup-scheduler.mts (this phase's
+ * cycle-break, Part B step 3 — see optimization/scheduler-contract.mjs's
+ * header comment for the full mechanics). Its only external caller is
+ * optimization/optimize-ui.mts, which now imports it from here instead of
+ * from setup-scheduler.mjs.
+ */
+export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
+  const { mode = 'changeover', ...opts } = request;
+  return Engine.evaluateSchedule(mode, opts, snapshot);
+}

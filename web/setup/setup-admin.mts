@@ -6,8 +6,9 @@
 // placement: this surface is a versioned observation and maintenance
 // console only.
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { Session, Persistence } from '../schedule-data.mjs';
+import { Store } from '../platform/store.mjs';
+import { Session } from '../security/session.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
 import type { SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from '../platform/types.mjs';
 // `Plant.gotoTab` is called from `reviewMissingPairs` below (the missing-setup
 // review handoff navigates to Master Data > Plant > Settings). This creates a

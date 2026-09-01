@@ -13,7 +13,7 @@
 // ever referenced them. Relocated here, where they are actually used, rather
 // than left duplicated across a spurious edge into optimization/optimize-ui.mjs.
 import { Config, Util } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
+import { Store } from '../platform/store.mjs';
 import type { PriorityListEntry, PriorityListResponse } from '../platform/types.mjs';
 
 /** One entry / the overall shape of the `GET /color-wheel/{plant}` response

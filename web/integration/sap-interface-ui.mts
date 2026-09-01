@@ -4,7 +4,7 @@
 // docs/architecture/domain-refactor-plan.md, which split that
 // 11,308-line mega-module into 9 domain files).
 import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
-import { Session } from '../schedule-data.mjs';
+import { Session } from '../security/session.mjs';
 
 // SAP transport kinds — must mirror sap_sync._CONNECTORS' keys in the backend contract.
 type SapTransport = 'file_drop' | 'odata' | 'rfc';

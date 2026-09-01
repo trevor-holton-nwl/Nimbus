@@ -22,11 +22,13 @@
 // precedent as setup-admin.mts's Plant cycle from Phase P2).
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
-import { Store, Selection, UndoStack } from '../schedule-state.mjs';
-import type { StoreEvent } from '../schedule-state.mjs';
-import { Utilization, Alerts, Engine, deriveSetupObservation } from '../schedule-services.mjs';
-import type { SetupObservation } from '../schedule-services.mjs';
-import { Persistence } from '../schedule-data.mjs';
+import { Store, UndoStack } from '../platform/store.mjs';
+import { Selection } from './selection.mjs';
+import type { StoreEvent } from '../platform/store.mjs';
+import { Utilization, Alerts } from '../insights/services.mjs';
+import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
+import type { SetupObservation } from '../optimization/engine.mjs';
+import { Persistence } from './persistence.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';

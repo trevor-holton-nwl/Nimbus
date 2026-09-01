@@ -1565,7 +1565,7 @@ def get_plant_setup_active(plant: str) -> bool:
 
 # Top-level pages a role's access can be toggled for. Must mirror the frontend
 # TopLevelTab union (web/types.mts) and Session.DEFAULT_PAGE_ACCESS
-# (web/schedule-data.mts) — keep the three in sync.
+# (web/security/session.mts) — keep the three in sync.
 PAGE_ACCESS_KEYS = ('home', 'gantt', 'labor', 'masterdata', 'admin')
 
 

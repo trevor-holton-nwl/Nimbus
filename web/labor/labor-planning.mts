@@ -3,9 +3,10 @@
 // of docs/architecture/domain-refactor-plan.md, which split that
 // 11,308-line mega-module into 9 domain files).
 import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
-import { Store, UndoStack } from '../schedule-state.mjs';
-import { Calendar, Utilization } from '../schedule-services.mjs';
-import { Session } from '../schedule-data.mjs';
+import { Store, UndoStack } from '../platform/store.mjs';
+import { Calendar } from '../calendar/calendar-engine.mjs';
+import { Utilization } from '../insights/services.mjs';
+import { Session } from '../security/session.mjs';
 // Injected getter seam so LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` — see
 // shell/tab-resolvers.mts.

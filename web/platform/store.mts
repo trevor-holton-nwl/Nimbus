@@ -1,16 +1,35 @@
-// schedule-state.mts — CQ-1 schedule-state module.
-// Owns schedule state, derived indexes, selection, undo, sandbox snapshots,
-// and synchronous post-commit events. Every mutator takes a `source` and
-// every emitted event carries {type, source, revision, mode, ...}. See
+// platform/store.mjs — Store + UndoStack (Phase P4 of
+// docs/architecture/domain-refactor-plan.md, which split schedule-state.mts
+// (1,034 lines) into 3 domain files). Owns schedule state, derived indexes,
+// undo, and synchronous post-commit events. Every mutator takes a `source`
+// and every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
-import { Config, Util, PerfMonitor, ErrorLog, Toast } from './platform/foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './platform/types.mjs';
+//
+// `Selection` (scheduling/selection.mjs) and `Sandbox` (optimization/
+// sandbox.mjs) are real cross-file imports, not new couplings — they were
+// sibling top-level consts in the single-file module and Store.removeTask()/
+// Store.mode() already referenced them "before their declaration" in file
+// order, safe only because neither call fires until well after module
+// evaluation completes. Splitting them into separate files turns that into a
+// genuine two-way ESM import cycle (store.mjs ↔ selection.mjs, store.mjs ↔
+// sandbox.mjs); it stays safe under the same rule — every cross-reference
+// below is inside a method body invoked after both modules finish loading,
+// never at top-level evaluation. This is the same pattern already
+// established between scheduling/gantt.mjs and scheduling/orders.mjs (Phase
+// P3).
+import { Config, Util, PerfMonitor, ErrorLog, Toast } from './foundation.mjs';
+import { Selection } from '../scheduling/selection.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, StoreMode, OrderScheduleSegment } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
 type SettingsDefaultsResolver = () => Record<string, unknown>;
 
-interface CalendarEntry {
+/** Shared with optimization/sandbox.mjs's SandboxSnapshot (calendars/plants
+ *  fields) — exported so that file imports this exact declaration instead of
+ *  redeclaring a structurally-identical shadow copy. */
+export interface CalendarEntry {
   workHours: WorkHours;
 }
 
@@ -23,7 +42,7 @@ interface StoreEventInput {
 /** What a subscriber actually receives — StoreEventInput plus the two fields emit() always adds.
  *  Exported (CQ-1 Phase 6 Task 1) so a module that keeps a named `Store.subscribe` callback as a
  *  real method (rather than an inline arrow relying on contextual inference, e.g. Timeline._onStore
- *  in schedule-workbench.mts) can name this type explicitly instead of redeclaring a shadow copy. */
+ *  in scheduling/gantt.mjs) can name this type explicitly instead of redeclaring a shadow copy. */
 export interface StoreEvent extends StoreEventInput {
   revision: number;
   mode: StoreMode;
@@ -48,7 +67,7 @@ interface StoreState {
   selectedLines: Set<string>;
   masterData: NimbusMasterData | null;
   /** Stage 3: per-plant rank-map cache for the optimizer's hot path, fetched by
-   *  Persistence.loadPriorityRankMaps (schedule-data.mts) on plant load/switch and
+   *  Persistence.loadPriorityRankMaps (scheduling/persistence.mts) on plant load/switch and
    *  after a priority-list upload/delete. Shape: {machine_or_empty: {field_key:
    *  {VALUE: RANK}}} — matches GET /priority-rank-maps verbatim, no reshaping. */
   priorityRankMaps: PriorityRankMaps;
@@ -66,7 +85,7 @@ interface StoreState {
   /** C1 (2026-08-20): the currently-selected plant's visibility-horizon end
    *  instant, as computed server-side and echoed in GET /tasks' `meta.
    *  visibility_horizon_end` — null when unlimited or before any load. Set on
-   *  every successful /tasks load (schedule-data.mts) so Timeline.rebuild's
+   *  every successful /tasks load (scheduling/persistence.mts) so Timeline.rebuild's
    *  Gantt `max` clamp and Table's Orders-grid filter both read the SAME
    *  already-computed instant instead of each carrying their own copy of the
    *  plant-local-midnight/roll-hour clock math the backend already did. */
@@ -75,16 +94,10 @@ interface StoreState {
    *  instant, as computed server-side and echoed in GET /tasks' `meta.
    *  frozen_horizon_end` — null when off (frozen_horizon_days NULL/0) or
    *  before any load. Same reasoning as visibilityHorizonEnd above: read by
-   *  Engine.frozenHorizonEnd/isFrozenHorizon (schedule-services.mts) and
-   *  Timeline's `.frozen-horizon-zone` band (schedule-workbench.mts) instead
+   *  Engine.frozenHorizonEnd/isFrozenHorizon (optimization/engine.mts) and
+   *  Timeline's `.frozen-horizon-zone` band (scheduling/gantt.mts) instead
    *  of either carrying its own copy of the anchor-day/roll-hour clock math. */
   frozenHorizonEnd: Date | null;
-}
-
-interface SelectionEmitPayload {
-  kind: SelectionEmitKind;
-  ids: string[];
-  anchor: string | null;
 }
 
 interface UndoEntry {
@@ -93,19 +106,10 @@ interface UndoEntry {
   at: number;
 }
 
-interface SandboxSnapshot {
-  tasks: NimbusTask[];
-  blocks: NimbusBlock[];
-  calendars: Record<string, CalendarEntry>;
-  plants: Record<string, CalendarEntry>;
-  plantBlocks: NimbusPlantBlock[];
-  firmedIds: Set<string>;
-}
-
 // Two DI seams replace what used to be direct references from Store into modules
 // that stay in app.js (Session, Settings) — each defaults to a safe fallback
 // (no scoping / no defaults) when unset. Selection needs no such seam: it is a
-// sibling top-level export in this same module (see below), so `removeTask()`
+// real cross-file import (see header comment above) — `removeTask()`
 // references it directly — same as `mode()` does for `Sandbox`.
 let _allowedPlantsResolver: AllowedPlantsResolver = () => null;
 let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
@@ -154,10 +158,10 @@ export const Store = {
   setAllowedPlantsResolver(fn: AllowedPlantsResolver): void { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
   setSettingsDefaultsResolver(fn: SettingsDefaultsResolver): void { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
   rev(): number { return this._rev || 0; },
-  // 'draft' once What-If mode is active. `Sandbox` is declared further down in
-  // this same module (a sibling top-level const) — referencing it here is safe
-  // even though it appears "before" its declaration in file order, because
-  // mode() is never *called* until well after module evaluation completes.
+  // 'draft' once What-If mode is active. `Sandbox` is a real cross-file import
+  // (optimization/sandbox.mjs, see this file's header comment) forming a
+  // two-way ESM cycle with this module — safe because mode() is never
+  // *called* until well after both modules finish loading.
   mode(): StoreMode { return (typeof Sandbox !== 'undefined' && Sandbox.active) ? 'draft' : 'live'; },
 
   /* ----- basic access ---------------------------------------------------- */
@@ -363,11 +367,11 @@ export const Store = {
     }
 
     this._state.firmedIds.delete(key);
-    // `Selection` is declared further down in this same module (a sibling
-    // top-level const) — referencing it here is safe even though it appears
-    // "before" its declaration in file order, because removeTask() is never
-    // *called* until well after module evaluation completes (same reasoning
-    // as Store.mode()'s reference to Sandbox, above).
+    // `Selection` is a real cross-file import (scheduling/selection.mjs, see
+    // this file's header comment) forming a two-way ESM cycle with this
+    // module — safe because removeTask() is never *called* until well after
+    // both modules finish loading (same reasoning as Store.mode()'s
+    // reference to Sandbox, above).
     if (typeof Selection !== 'undefined') Selection.remove(key);
     this.emit({ type: 'task:remove', id: key, prev, source });
     return prev;
@@ -820,125 +824,6 @@ export const Store = {
 };
 
 /* =============================================================================
-   SELECTION — multi-select store, independent of vis-timeline internals.
-   Single source of truth for "which orders are selected". All UIs (Timeline,
-   Table, Inspector, ContextMenu) subscribe to this. Never persisted, never
-   autosaved.
-   ========================================================================== */
-export const Selection = {
-  _ids: new Set<string>(),           // Set<string>
-  _anchor: null as string | null,              // id of last-single-clicked item (for Shift range)
-  _listeners: new Set<(payload: SelectionEmitPayload) => void>(),
-
-  /** @returns {string[]} currently selected ids */
-  ids(): string[] { return [...this._ids]; },
-  has(id: string | number): boolean { return this._ids.has(String(id)); },
-  size(): number { return this._ids.size; },
-  clear(): void {
-    if (!this._ids.size) return;
-    this._ids.clear();
-    this._anchor = null;
-    this._emit('clear');
-  },
-  set(ids: Array<string | number>): void {
-    const next = new Set(ids.map(String));
-    if (_setsEqual(next, this._ids)) return;
-    this._ids = next;
-    this._anchor = ids.length ? String(ids[ids.length - 1]) : null;
-    this._emit('set');
-  },
-  add(ids: string | number | Array<string | number>): void {
-    const arr = Array.isArray(ids) ? ids : [ids];
-    let changed = false;
-    for (const id of arr) {
-      const s = String(id);
-      if (!this._ids.has(s)) { this._ids.add(s); changed = true; }
-    }
-    if (changed) {
-      this._anchor = String(arr[arr.length - 1]);
-      this._emit('add');
-    }
-  },
-  remove(ids: string | number | Array<string | number>): void {
-    const arr = Array.isArray(ids) ? ids : [ids];
-    let changed = false;
-    for (const id of arr) {
-      if (this._ids.delete(String(id))) changed = true;
-    }
-    if (changed) this._emit('remove');
-  },
-  toggle(id: string | number): void {
-    const s = String(id);
-    if (this._ids.has(s)) this._ids.delete(s);
-    else { this._ids.add(s); this._anchor = s; }
-    this._emit('toggle');
-  },
-
-  /** Select every id from anchor to target on the same line (inclusive). */
-  selectRange(targetId: string | number): void {
-    const target = String(targetId);
-    const anchor = this._anchor;
-    if (!anchor || anchor === target) { this.set([target]); return; }
-
-    const ta = Store.tasks[anchor];
-    const tt = Store.tasks[target];
-    if (!ta || !tt || ta.MACHINE !== tt.MACHINE) {
-      this.set([target]);
-      return;
-    }
-    const line = ta.MACHINE;
-    const peers = Store.tasksArr
-      .filter(t => t.MACHINE === line && t.start_date)
-      .sort((a, b) => Number(a.start_date) - Number(b.start_date));
-    const ia = peers.findIndex(t => String(t.id) === anchor);
-    const it = peers.findIndex(t => String(t.id) === target);
-    if (ia < 0 || it < 0) { this.set([target]); return; }
-    const [lo, hi] = ia < it ? [ia, it] : [it, ia];
-    const range = peers.slice(lo, hi + 1).map(t => String(t.id));
-    const keep = this._anchor;
-    this.set(range);
-    this._anchor = keep; // preserve anchor for further Shift-clicks
-  },
-
-  /** Summary for the Inspector multi-selection view. */
-  stats(): { count: number; totalHours: number; lines: string[]; firmedCount: number } {
-    const ids = [...this._ids];
-    let totalHours = 0;
-    const lines = new Set<string>();
-    let firmedCount = 0;
-    for (const id of ids) {
-      const t = Store.tasks[id];
-      if (!t) continue;
-      totalHours += Util.runHours(t);
-      if (t.MACHINE) lines.add(t.MACHINE);
-      if (Store.isFirmed(id)) firmedCount++;
-    }
-    return { count: ids.length, totalHours, lines: [...lines], firmedCount };
-  },
-
-  on(fn: (payload: SelectionEmitPayload) => void): () => void { this._listeners.add(fn); return () => this._listeners.delete(fn); },
-  _emit(kind: SelectionEmitKind): void {
-    const payload = { kind, ids: [...this._ids], anchor: this._anchor };
-    for (const l of this._listeners) {
-      try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${(e as Error).message}`); }
-    }
-  },
-
-  /** [{plant, id}] for the currently selected ids — additive convenience for
-   *  consumers that need plant scoping alongside the raw id (e.g. cross-plant
-   *  bulk actions). Existing bare-ID methods above are unchanged. */
-  selectedRefs(): Array<{ plant: string | null; id: string }> {
-    return [...this._ids].map(id => ({ plant: Store.tasks[id]?.plant ?? null, id }));
-  },
-};
-
-function _setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
-/* =============================================================================
    UNDO STACK — minimal, in-memory, destructive ops only (10 levels).
    Used by drag-commits and unschedule actions in the Interaction module.
    ========================================================================== */
@@ -968,67 +853,5 @@ export const UndoStack = {
   restoreTasks(snapshot: NimbusTask[]): void {
     const patches = snapshot.map(s => ({ id: s.id, changes: s }));
     Store.updateMany(patches, 'undo');
-  },
-};
-
-/* =============================================================================
-   SANDBOX — "What-If" mode state + snapshots only. Deep-clones Store state so
-   planners can try changes freely without affecting the live schedule. The DOM
-   banner/buttons, Toast messages, and cross-module side effects (Confidence
-   snapshot/restore, Persistence.saveAll, CalendarSync flush/hydration) are NOT
-   this module's concern — they live in app.js's `SandboxAdapter`, which
-   subscribes to the `sandbox:entered`/`sandbox:exited` events emitted below.
-   ========================================================================== */
-export const Sandbox = {
-  active: false,
-  _snapshot: null as SandboxSnapshot | null,
-
-  enter(source?: string): boolean {
-    if (this.active) return false;
-    this._snapshot = {
-      tasks:       Store.tasksArr.map(t => Util.clone(t)),
-      blocks:      Store.blocks.map(b => Util.clone(b)),
-      calendars:   Util.clone(Store.calendars),
-      plants:      Util.clone(Store.plants),
-      plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
-      firmedIds:   new Set([...Store.firmedIds]),
-    };
-    this.active = true;
-    Store.emit({ type: 'sandbox:entered', source });
-    return true;
-  },
-
-  exit(apply: boolean, source?: string): SandboxSnapshot | null {
-    if (!this.active) return null;
-    const snap = this._snapshot!;
-
-    if (apply) {
-      // Promote sandbox state to real state with a single undoable entry.
-      UndoStack.push('Discard What-If scenario', () => {
-        Store.setTasks(snap.tasks, 'undo');
-        Store.replaceFirmedIds(snap.firmedIds, 'undo');
-        Store.emit({ type: 'sandbox:reverted', source: 'undo' });
-      });
-    } else {
-      // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
-      // fires its own '<field>:replace' event (distinct from that field's normal
-      // '<field>:change' event) — a future consumer of 'blocks:change' /
-      // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'firmed:change'
-      // must also handle the '*:replace' counterpart or it will silently miss
-      // updates that happen via a What-If discard. See
-      // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
-      // event-sequence test in tests/modules/schedule-state.test.mjs.
-      Store.setTasks(snap.tasks, 'sandbox');
-      Store.replaceBlocks(snap.blocks, 'sandbox');
-      Store.replaceCalendars(snap.calendars, 'sandbox');
-      Store.replacePlants(snap.plants, 'sandbox');
-      Store.replacePlantBlocks(snap.plantBlocks, 'sandbox');
-      Store.replaceFirmedIds(snap.firmedIds, 'sandbox');
-    }
-
-    this.active = false;
-    this._snapshot = null;
-    Store.emit({ type: 'sandbox:exited', applied: !!apply, source, snapshot: snap });
-    return snap;
   },
 };

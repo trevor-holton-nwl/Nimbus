@@ -6,11 +6,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Dashboard, AlertsUIAdapter } from '../../../web/insights/insights-ui.mjs';
 import { Table } from '../../../web/scheduling/orders.mjs';
-import { Store } from '../../../web/schedule-state.mjs';
-import { Alerts } from '../../../web/schedule-services.mjs';
+import { Store } from '../../../web/platform/store.mjs';
+import { Alerts } from '../../../web/insights/services.mjs';
 
 // Same split-realm/no-DOM situation documented in
-// tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
+// tests/modules/optimization/engine.test.mjs and
+// tests/modules/scheduling/persistence.test.mjs.
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = {
     getElementById() { return null; },

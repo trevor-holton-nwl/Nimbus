@@ -7,9 +7,24 @@ import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
 import * as foundation from '../../../web/platform/foundation.mjs';
-import * as state from '../../../web/schedule-state.mjs';
-import * as services from '../../../web/schedule-services.mjs';
-import * as data from '../../../web/schedule-data.mjs';
+// schedule-state.mjs, schedule-services.mjs, and schedule-data.mjs were split
+// in Phase P4 of docs/architecture/domain-refactor-plan.md into 10 domain
+// files — reconstruct the same __NIMBUS_STATE/__NIMBUS_SERVICES/
+// __NIMBUS_DATA bridge shapes app-entry.mjs builds, so this VM harness stays
+// a faithful mirror of the real boot path (same pattern already used below
+// for __NIMBUS_WORKBENCH/__NIMBUS_PLANT_ADMIN, Phases P2/P3).
+import { Store, UndoStack } from '../../../web/platform/store.mjs';
+import { Selection } from '../../../web/scheduling/selection.mjs';
+import { Sandbox } from '../../../web/optimization/sandbox.mjs';
+import { Calendar, candidateDefaultWorkHours } from '../../../web/calendar/calendar-engine.mjs';
+import { Compute, Alerts, scheduleAlertsForPatches, Utilization } from '../../../web/insights/services.mjs';
+import {
+  Engine, snapshotSchedule, applySchedulePatches, effectiveFirmedIdSet,
+  deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, MIN_PRODUCTIVE_SEGMENT_MINUTES,
+} from '../../../web/optimization/engine.mjs';
+import { Persistence } from '../../../web/scheduling/persistence.mjs';
+import { CalendarSync } from '../../../web/calendar/calendar-sync.mjs';
+import { Session } from '../../../web/security/session.mjs';
 // schedule-workbench.mjs was split in Phase P3 of
 // docs/architecture/domain-refactor-plan.md into 6 domain files — reconstruct
 // the same __NIMBUS_WORKBENCH bridge shape app-entry.mjs builds, so this VM
@@ -245,9 +260,14 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // plant-admin/shell/material-grids bridges are populated before it runs (see
   // web/app-entry.mjs) — pre-populate them here just like a real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
-  sandbox.window.__NIMBUS_STATE = state;
-  sandbox.window.__NIMBUS_SERVICES = services;
-  sandbox.window.__NIMBUS_DATA = data;
+  sandbox.window.__NIMBUS_STATE = { Store, UndoStack, Selection, Sandbox };
+  sandbox.window.__NIMBUS_SERVICES = {
+    Calendar, candidateDefaultWorkHours,
+    Compute, Alerts, scheduleAlertsForPatches, Utilization,
+    Engine, snapshotSchedule, applySchedulePatches, effectiveFirmedIdSet,
+    deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, MIN_PRODUCTIVE_SEGMENT_MINUTES,
+  };
+  sandbox.window.__NIMBUS_DATA = { Persistence, CalendarSync, Session };
   sandbox.window.__NIMBUS_WORKBENCH = workbench;
   sandbox.window.__NIMBUS_PLANT_ADMIN = plantAdmin;
   sandbox.window.__NIMBUS_SHELL = shell;
@@ -265,7 +285,7 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // a real browser, application-foundation.mjs and app.js share the one page
   // window/document, so it doesn't arise there.
   if (typeof globalThis.document === 'undefined') globalThis.document = document_;
-  // Same split-realm quirk for `NimbusComputeCore`: schedule-services.mjs's
+  // Same split-realm quirk for `NimbusComputeCore`: calendar/calendar-engine.mjs's
   // Calendar (host realm, imported above) now delegates to it via
   // `globalThis.NimbusComputeCore` (see that file for why — nimbus-compute-
   // core.js is a UMD module with no ES `export`, so it can't be statically
@@ -286,7 +306,7 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // invocation's fetchImpl_ so calls originating in application-foundation.mjs
   // land in the same fetchCalls/stub the vm-sandboxed app.js code uses.
   globalThis.fetch = fetchImpl_;
-  // Same split-realm quirk for `localStorage`: schedule-data.mjs's Persistence (host
+  // Same split-realm quirk for `localStorage`: scheduling/persistence.mjs's Persistence (host
   // realm, imported above) reads/writes bare `localStorage` directly (cache save/load,
   // selected-plant restore) — code that used to live inside app.js and so read the vm
   // sandbox's `localStorage` stub directly. Node has no global `localStorage` by

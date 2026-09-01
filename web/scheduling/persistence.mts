@@ -1,51 +1,48 @@
-// schedule-data.mts — CQ-1 schedule-data module.
-//
-// Owns backend fetch + localStorage cache (Persistence), backend-
-// authoritative persistence of per-plant/per-line working hours + blackout
-// blocks (CalendarSync), and the mandatory-login client session's pure
-// state/API (Session — currentUser/actor/isAdmin/allowedPlants/pref/setPref/
-// signIn/signOut/refresh/onAuthDenied). Must NEVER import from
-// schedule-services.mjs — only the reverse direction is allowed. Two real
-// cross-package dependencies were found during Phase 2 research and are
-// resolved here without a reverse import:
-//   - Persistence._snapToWorkingHours/_dueEndOfShift used to call
-//     Calendar._beginRun/_endRun/nextAvailable/workWindow directly. They now
-//     go through an injected seam, `Persistence.setCalendarService({...})`,
-//     wired once from app.js boot glue after schedule-services.mjs's Calendar
-//     is available (see app.js's bridge destructure).
+// scheduling/persistence.mjs — Persistence (Phase P4 of
+// docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
+// (2,204 lines) into 3 domain files). Owns backend fetch + localStorage
+// cache, demo fallback, and save. Must NEVER import from
+// optimization/engine.mjs, calendar/calendar-engine.mjs, or
+// insights/services.mjs — only the reverse direction is allowed. The two
+// real cross-package dependencies below predate this phase (Phase 2
+// research, schedule-data.mts's original split from app.js) and are
+// preserved exactly as they were:
+//   - Persistence._snapToWorkingHours/_dueEndOfShift call Calendar via an
+//     injected seam, `Persistence.setCalendarService({...})`, wired once
+//     from app.js boot glue after calendar/calendar-engine.mjs's Calendar is
+//     available (see app.js's bridge destructure) — never a direct import.
 //   - Persistence used to call `Alerts.scheduleRecompute()` after every
-//     hydration. It now emits a `{ type: 'schedule:hydrated', source }` Store
-//     event instead; schedule-services.mjs subscribes to it once (see the
-//     bottom of that file, added alongside Alerts in Task 2/this task).
+//     hydration. It emits a `{ type: 'schedule:hydrated', source }` Store
+//     event instead; optimization/engine.mjs subscribes to it once.
+//
+// `CalendarSync` (calendar/calendar-sync.mjs) is a real cross-file import
+// forming a two-way ESM cycle with that module — CalendarSync's flush path
+// calls back into this file's `_dirtyIds`/`_forceIds`/`_snapToWorkingHours`/
+// `_saveCache`/`_relayDueDateCorrections` (see calendar/calendar-sync.mjs's
+// header comment). Safe under the same rule used throughout this split:
+// every cross-reference is inside a method body invoked after both modules
+// finish loading, never at top-level evaluation. This dependency predates
+// this phase (it existed between two sibling consts in the single-file
+// module) — the split only turns it into a real ESM cycle.
+//
 // Session's DOM/settings-pane half (gates, the user-settings modal, profile/
 // password self-service — ~600 lines that used to live inline in the same
-// IIFE) stays in app.js as `SessionUIAdapter` (Task 5), mirroring the Phase 1
-// Sandbox/SandboxAdapter split: `signIn`/`signOut`/`refresh` emit a
-// `{ type: 'session:changed', kind }` Store event instead of calling
-// `_applyGates()`/DOM code inline; `SessionUIAdapter.init()` (app.js) is the
-// sole subscriber. `Session.updateCachedUser(patch)` is the one small public
-// method added for a reverse-direction need the plan's own interface list
-// didn't spell out: `SessionUIAdapter.saveProfile` (app.js) needs to merge a
-// patch into the cached session blob after a successful profile PATCH, but
-// the blob's localStorage key (`KEY`) is intentionally private to this
-// module — same "small public method" resolution CLAUDE.md's Global
-// Constraints prescribe for every reverse-direction need, never a bare
-// `KEY` export or a `window`/`globalThis` reach-around.
-// DOM/UI code that was co-located with these modules in app.js stays there —
-// see docs/architecture/cq1-compatibility-inventory.md.
-import { Config, Util, ErrorLog, Toast } from './platform/foundation.mjs';
-import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from './platform/types.mjs';
-import type { components } from './types/api-generated.mjs';
+// IIFE) stays in app.js as `SessionUIAdapter` — see security/session.mjs's
+// header comment. DOM/UI code that was co-located with these modules in
+// app.js stays there — see docs/architecture/cq1-compatibility-inventory.md.
+import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Store } from '../platform/store.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from '../platform/types.mjs';
+import type { components } from '../types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
 //    of this phase) — see docs/archive/typescript_migration.md §F. Endpoints brain.py
-//    does not yet model (/health, /plant-calendar, /master-data/*, /security/*)
-//    get hand-written local interfaces below instead, per this phase's scope.
+//    does not yet model (/health, /master-data/*) get hand-written local
+//    interfaces below instead, per this phase's scope.
 type TasksResponse        = components['schemas']['TasksResponse'];
-type TaskDTOWire          = components['schemas']['TaskDTO'];
 type BulkUpdateResult     = components['schemas']['BulkUpdateResult'];
-type TaskUpdateResultWire = components['schemas']['TaskUpdateResult'];
 type TasksRefreshResponse = components['schemas']['TasksRefreshResponse'];
 type BaselineCorrectResult = components['schemas']['BaselineCorrectResult'];
 
@@ -84,45 +81,6 @@ interface HealthResponse {
   color_wheel?: unknown;
 }
 
-/** GET /plant-calendar (brain.py) response envelope. */
-interface PlantCalendarConfig {
-  plant_work_hours?: WorkHours;
-  line_work_hours?: Record<string, WorkHours>;
-  machine_blackouts?: Array<{ id: string; machine: string | null; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
-  plant_blackouts?: Array<{ id: string; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
-}
-
-/** The subset of GET/POST /security/* fields this file reads/writes
- *  (brain.py's /security/login, /security/me, /security/me/settings). */
-interface SessionUserBlob {
-  username: string;
-  role: string | null;
-  is_admin?: boolean;
-  allowed_plants?: string[] | null;
-  first_name?: string | null;
-  last_name?: string | null;
-  settings?: Record<string, unknown>;
-  role_settings?: Record<string, unknown>;
-}
-
-/** The cached shape written to localStorage under Session's own KEY —
- *  a superset of SessionUserBlob with is_admin always present post-cache. */
-interface CachedSessionUser {
-  username: string;
-  role: string | null;
-  is_admin?: boolean;
-  allowed_plants: string[] | null;
-  first_name: string | null;
-  last_name: string | null;
-  settings: Record<string, unknown>;
-  role_settings: Record<string, unknown>;
-  // Epoch ms this session was established (signIn only — refresh() carries it
-  // forward, never resets it). Optional: sessions cached before this field
-  // existed predate it, same reasoning as is_admin? above; isExpired() below
-  // treats a missing/non-numeric value as expired rather than never-expiring.
-  loggedInAt?: number;
-}
-
 /** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
  *  `Error` so both the retry-vs-terminal check and the rejection log can read
  *  them back — mirrors nimbus-worker.ts's `err as Error` idiom (Phase 0). */
@@ -155,21 +113,8 @@ interface LoadStats {
   errors: number;
 }
 
-/** Return shape shared by every CalendarSync write helper (`_post` and its
- *  callers). `skipped` marks the two guarded no-op paths (`_hydrating` /
- *  `Sandbox.active`) — additive vs. the bare `{ ok; status?; error? }` shape
- *  named in this phase's plan, since the existing early-return literal
- *  `{ ok: true, skipped: true }` needs it and this file's zero-behavior-change
- *  discipline forbids dropping that field to fit a narrower type. */
-interface CalendarSyncResult {
-  ok: boolean;
-  status?: number;
-  error?: string;
-  skipped?: boolean;
-}
-
 /** The injected calendar-capacity seam (Persistence.setCalendarService) —
- *  schedule-data.mts must never import schedule-services.mts directly (see
+ *  this file must never import calendar/calendar-engine.mjs directly (see
  *  this file's header comment); this is the whole shape it's allowed to see. */
 interface CalendarService {
   beginRun(plant: string | null): void;
@@ -179,7 +124,7 @@ interface CalendarService {
 }
 
 // Injected calendar-capacity seam — replaces the former direct `Calendar.*` references
-// (schedule-data.mts must never import schedule-services.mjs). Defaults to a no-op so a
+// (this file must never import calendar/calendar-engine.mjs). Defaults to a no-op so a
 // snap-affecting load path degrades to "skip snapping" instead of throwing when called
 // before app.js's boot glue wires the real Calendar functions (see
 // Persistence.setCalendarService below).
@@ -236,8 +181,8 @@ export const Persistence = {
     errors: 0
   } as LoadStats,
 
-  /** Inject the calendar-capacity seam (`schedule-services.mjs`'s `Calendar`). Wired
-   *  once from app.js boot glue right after the schedule-services.mjs bridge resolves.
+  /** Inject the calendar-capacity seam (`calendar/calendar-engine.mjs`'s `Calendar`). Wired
+   *  once from app.js boot glue right after the calendar/calendar-engine.mjs bridge resolves.
    *  Until this is called, snap-affecting load paths no-op rather than throw — see
    *  `_snapToWorkingHours`. */
   setCalendarService(svc: CalendarService): void { _calendarService = svc; },
@@ -275,7 +220,7 @@ export const Persistence = {
     // triggers the alert recompute that renders the auto-fix buttons. Without this
     // clear, that window has the NEW plant's tasks and alerts on screen while
     // Store.priorityRankMaps still holds the OLD plant's ranks — so an overload
-    // auto-fix (which cannot await freshness: schedule-services.mts must not import
+    // auto-fix (which cannot await freshness: optimization/engine.mts must not import
     // this module) would produce a plausible-looking sequence built from the wrong
     // plant's priority lists. Clearing converts that failure mode into the one the
     // rest of the feature is already built around: nothing ranked yet, i.e. every
@@ -344,7 +289,7 @@ export const Persistence = {
         Store.setVisibilityHorizonEnd(horizonEndIso ? new Date(horizonEndIso) : null, 'persistence');
         // C2 (2026-08-20): same reasoning, for the plant's frozen-horizon
         // boundary (db.compute_frozen_horizon_end) — Engine.earliestAllowedStart/
-        // isFrozenHorizon (schedule-services.mts) and Timeline's
+        // isFrozenHorizon (optimization/engine.mts) and Timeline's
         // .frozen-horizon-zone band both read Store.frozenHorizonEnd rather
         // than each carrying their own copy of the clock math.
         const frozenEndIso = (payload?.meta?.frozen_horizon_end as string | null | undefined) ?? null;
@@ -1549,656 +1494,3 @@ export const Persistence = {
   }, 1200)
 };
 
-/* =============================================================================
-   CALENDAR SYNC — backend-authoritative persistence of per-plant/per-line
-   working hours + blackout blocks (dedicated /plant-calendar/* endpoints).
-   - fetchPlantConfig(plant): GET a plant's config and hydrate Store (backend
-     authoritative; localStorage stays the offline fallback).
-   - immediate per-edit saves: working hours (batched per plant), blackouts
-     (delta — upsert on add/edit, explicit delete on remove).
-   - per-slice migration: push slices the backend still lacks (first upgrade / retry).
-   Two guards live in the single _post choke point: _hydrating (don't POST while
-   applying a backend GET) and Sandbox.active (What-If edits stay local until
-   promoted). Block scoping/keying uses the block's stored `plant` + stable id.
-   ========================================================================== */
-export const CalendarSync = {
-  _hydrating: false,
-  _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
-  _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
-  _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
-
-  /* ----- load / hydration ----------------------------------------------- */
-  fetchPlantConfig(plant: string | null): Promise<void> {
-    if (!plant) return Promise.resolve();
-    // Ensure the line→plant index is current before _applyConfig so getPlantForLine
-    // resolves reliably even when the master-data fetch REJECTED (the .finally still
-    // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
-    Store.rebuildPlantIndex();
-    return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
-                            { signal: AbortSignal.timeout(8000) })
-      .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(cfg => CalendarSync._applyConfig(plant, cfg))
-      .catch(e => {
-        // The localStorage restore already painted the UI — degrade gracefully.
-        ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
-        Toast.show(Util.t('toast.calendar_offline_cache'), 'info');
-      });
-  },
-
-  _applyConfig(plant: string, cfg: PlantCalendarConfig): void {
-    // Never overwrite live What-If state — mirror the _post guard. A plant switch or a
-    // late in-flight fetch during What-If must not clobber sandbox edits (the write path
-    // already no-ops under Sandbox.active; the hydration write path must too). (F2)
-    // Record the plant so Sandbox.exit can re-hydrate it — otherwise a config GET that
-    // resolves mid-What-If is dropped and the plant shows stale cached state all session.
-    if (typeof Sandbox !== 'undefined' && Sandbox.active) {
-      CalendarSync._deferredHydrationPlant = plant;
-      return;
-    }
-    cfg = cfg || {};
-    // Evaluate emptiness PER SLICE. Backend is authoritative only for the slices it
-    // actually has; slices it still lacks are left intact locally and migrated up
-    // (below) — so a partial migration (or first upgrade) can never let a
-    // clear-and-replace wipe an un-persisted slice.
-    const has = {
-      plantHours:     !!cfg.plant_work_hours,
-      lineHours:      Object.keys(cfg.line_work_hours || {}).length > 0,
-      lineBlackouts:  (cfg.machine_blackouts || []).length > 0,
-      plantBlackouts: (cfg.plant_blackouts || []).length > 0,
-    };
-    // A missing blackout slice is the migration path for older local caches.
-    // Remove legacy global state before emitting or migrating it: those blocks
-    // must never be fanned out or re-posted as copies for every plant.
-    if (!has.lineBlackouts)  CalendarSync._discardLegacyGlobalLineBlocks();
-    if (!has.plantBlackouts) CalendarSync._discardLegacyGlobalPlantBlocks();
-    this._hydrating = true;
-    try {
-      if (has.plantHours) {
-        Store.ensurePlant(plant);
-        Store.plants[plant].workHours = cfg.plant_work_hours!;
-      }
-      if (has.lineHours) {
-        // Clear this plant's line calendars (backend line set ∪ getPlantForLine===plant), then apply.
-        const backendLines = new Set(Object.keys(cfg.line_work_hours!));
-        for (const line of Object.keys(Store.calendars)) {
-          if (backendLines.has(line) || Store.getPlantForLine(line) === plant) delete Store.calendars[line];
-        }
-        for (const [line, wh] of Object.entries(cfg.line_work_hours!)) {
-          Store.ensureCalendar(line);
-          Store.calendars[line].workHours = wh;
-        }
-      }
-      if (has.lineBlackouts) {
-        // Clear by the block's OWN stored plant (never a runtime getPlantForLine
-        // derivation, which can be null before master data loads). Preserve backend ids.
-        // In-place filter (no reference reassignment) so Store.blocks' identity is stable.
-        const keptBlocks = Store.blocks.filter(b => b.plant !== plant);
-        Store.blocks.length = 0;
-        Store.blocks.push(...keptBlocks);
-        for (const b of cfg.machine_blackouts!) {
-          Store.blocks.push({ id: b.id, line: b.machine || null, plant,
-            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusBlock);
-        }
-      }
-      if (has.plantBlackouts) {
-        const keptPlantBlocks = Store.plantBlocks.filter(b => b.plant !== plant);
-        Store.plantBlocks.length = 0;
-        Store.plantBlocks.push(...keptPlantBlocks);
-        for (const b of cfg.plant_blackouts!) {
-          Store.plantBlocks.push({ id: b.id, plant,
-            start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusPlantBlock);
-        }
-      }
-      // Notify subscribers + refresh the offline cache with backend truth. These
-      // emits fire while _hydrating=true, so no POST-back to the backend.
-      Store.emit({ type: 'calendar:change',    source: 'calendar-sync', plant });
-      Store.emit({ type: 'blocks:change',      source: 'calendar-sync', plant });
-      Store.emit({ type: 'plantBlocks:change', source: 'calendar-sync', plant });
-    } finally {
-      this._hydrating = false;
-    }
-    // Backend-authoritative working hours just landed. The initial ingest snap
-    // (Persistence._snapToWorkingHours at load) ran against default/stale hours, and is
-    // never otherwise re-run — so fresh (non-user-scheduled) orders may sit outside the
-    // real working window. Re-snap against the now-correct hours and re-render/cache.
-    // Idempotent when hours match; _snapToWorkingHours re-baselines each pass, so a
-    // second pass leaves the correct final baseline (no set-once needed). (F7)
-    // Deliberately NOT gated on (has.plantHours || has.lineHours): "backend has no
-    // override" is still an authoritative answer (use defaults) that the due-date
-    // correction phase needs in order to relay — gating on has.* left the relay
-    // permanently dead for every plant that has never had custom hours saved to the
-    // backend, which is the common case (CalendarSync never migrates auto-seeded
-    // default hours up), not a rare one.
-    if (Store.tasksArr.length) {
-      try {
-        // A slow (8s) fetchPlantConfig can resolve AFTER the user started editing this
-        // session. tasks:bulk clears _dirtyIds/_forceIds (reload semantics, app.js:14840),
-        // so snapshot and restore them — the re-snap only re-places non-user-scheduled
-        // orders (user moves are startMoved-skipped) and must not drop pending saves.
-        const dirtySnapshot  = new Set(Persistence._dirtyIds);
-        const forceSnapshot  = new Set(Persistence._forceIds);
-        const { movedIds, corrections } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
-        Persistence._saveCache();
-        // Only emit and re-render if tasks actually moved; idempotent when hours haven't
-        // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
-        if (movedIds.length) {
-          Store.emit({ type: 'tasks:bulkUpdate', ids: movedIds, source: 'calendar-resnap' });
-        }
-        for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
-        for (const id of forceSnapshot) Persistence._forceIds.add(id);
-        // Backend-authoritative hours have now landed — this is the only point
-        // in the session safe to PERSIST due-date-baseline corrections. The
-        // earlier pre-hydration call in Persistence.load may have computed
-        // against Config.DEFAULT_SHIFT / stale cached hours, and this
-        // correction is deliberately freeze-once (see _snapToWorkingHours) —
-        // persisting from that first pass could lock in a wrong value before
-        // the accurate hours ever get a chance to run.
-        Persistence._relayDueDateCorrections(corrections);
-      } catch (e) {
-        ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${(e as Error).message}`);
-      }
-    }
-    // Migrate the slices the backend still lacks but local has. Covers first upgrade
-    // (backend fully empty) AND partial-migration retry. Each slice is one atomic POST
-    // (all-or-nothing); a failed slice stays un-migrated and retries next load.
-    // Idempotent via client-supplied ids + ON CONFLICT, so re-sending is harmless.
-    this._migrateMissingSlices(plant, has);
-  },
-
-  _migrateMissingSlices(plant: string, has: { plantHours: boolean; lineHours: boolean; lineBlackouts: boolean; plantBlackouts: boolean }): void {
-    if (!plant) return;
-    const jobs: Array<Promise<{ ok: boolean; status?: number; error?: string }>> = [];
-    if (!has.plantHours) {
-      const wh = Store.plants[plant]?.workHours || null;
-      // Don't migrate the auto-seeded DEFAULT_SHIFT — a missing backend row means
-      // "no override", which the client already reproduces from the seed. Migrating it
-      // would freeze today's default and hide a future DEFAULT_SHIFT policy change. (F11)
-      if (wh && !CalendarSync._isDefaultWorkHours(wh)) jobs.push(this.savePlantHours(plant, wh));
-    }
-    if (!has.lineHours) {
-      const lines = Object.keys(Store.calendars)
-        .filter(l => Store.getPlantForLine(l) === plant
-                  && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
-        .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
-      if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
-    }
-    if (!has.lineBlackouts) {
-      // Migrate this plant's own blocks: already-stamped for it, or line-mapped to it.
-      const blks = Store.blocks.filter(b =>
-        b.plant === plant || (!b.plant && b.line && Store.getPlantForLine(b.line) === plant));
-      blks.forEach(b => { b.plant = plant; });
-      if (blks.length) jobs.push(this._post('/plant-calendar/line-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, true)) }, 'migrate-line-blackouts'));
-    }
-    if (!has.plantBlackouts) {
-      const blks = Store.plantBlocks.filter(b => b.plant === plant);
-      if (blks.length) jobs.push(this._post('/plant-calendar/plant-blackouts', { plant, upserts: blks.map(b => this._blockPayload(b, false)) }, 'migrate-plant-blackouts'));
-    }
-    if (jobs.length) {
-      Promise.all(jobs).then(rs => {
-        if (rs.every(r => r && r.ok)) {
-          ErrorLog.info('calendar-sync', `Migrated local calendar/blackout config for plant ${plant} to backend`);
-          Toast.show(Util.t('toast.calendar_migrated'), 'info', 4000);
-        }
-      });
-    }
-  },
-
-  // True when a weekly workHours map equals the DEFAULT_SHIFT / WEEKEND_OFF seed, i.e.
-  // represents "no override" — used to skip migrating auto-seeded defaults. (F11)
-  _isDefaultWorkHours(wh: WorkHours | null | undefined): boolean {
-    if (!wh) return true;
-    for (let d = 0; d < 7; d++) {
-      const v = wh[d];
-      if (Config.WEEKEND_OFF && (d === 0 || d === 6)) {
-        if (v !== null && v !== undefined) return false;
-        continue;
-      }
-      if (!Array.isArray(v) || v.length !== 2) return false;
-      if (v[0] !== Config.DEFAULT_SHIFT[0] || v[1] !== Config.DEFAULT_SHIFT[1]) return false;
-    }
-    return true;
-  },
-
-  // Legacy global blackouts were previously replicated as `${id}::${plant}`.
-  // The suffix is the old migration's reserved marker, so a matching stored
-  // plant is unambiguously a generated copy rather than a current local block.
-  _isLegacyFanoutCopy(block: { id?: unknown; plant?: string | null }): boolean {
-    const id = typeof block?.id === 'string' ? block.id : '';
-    const plant = typeof block?.plant === 'string' ? block.plant : '';
-    return !!id && !!plant && id.endsWith(`::${plant}`);
-  },
-
-  // Global blackout state is no longer valid. Preserve line-specific legacy
-  // blocks so they can still be mapped to their owning plant, but discard
-  // unscoped global blocks and their old replicated copies before migration.
-  _discardLegacyGlobalLineBlocks(): void {
-    const before = Store.blocks.length;
-    const keep = Store.blocks.filter(b => {
-      if (!b.plant && !b.line) return false;
-      if (!b.line && CalendarSync._isLegacyFanoutCopy(b)) return false;
-      return true;
-    });
-    if (keep.length === before) return;
-    Store.blocks.length = 0;
-    Store.blocks.push(...keep);
-    ErrorLog.info('calendar-sync', `Discarded ${before - keep.length} legacy global line blackout(s)`);
-  },
-
-  _discardLegacyGlobalPlantBlocks(): void {
-    const before = Store.plantBlocks.length;
-    const keep = Store.plantBlocks.filter(b => b.plant && !CalendarSync._isLegacyFanoutCopy(b));
-    if (keep.length === before) return;
-    Store.plantBlocks.length = 0;
-    Store.plantBlocks.push(...keep);
-    ErrorLog.info('calendar-sync', `Discarded ${before - keep.length} legacy global plant blackout(s)`);
-  },
-
-  /* ----- immediate per-edit saves --------------------------------------- */
-  savePlantHours(plant: string | null, workHours: WorkHours | undefined): Promise<CalendarSyncResult> {
-    if (!plant) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/plant-hours', { plant, work_hours: workHours }, 'plant-hours');
-  },
-
-  // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
-  // fan-out from a single plant-hours edit into ONE /line-hours request.
-  saveLineHours(plant: string | null, line: string, workHours: WorkHours): void {
-    if (!plant || !line) return;
-    (this._pendingLineHours[plant] ||= {})[line] = workHours;
-    clearTimeout(this._whDebounce[plant]);
-    this._whDebounce[plant] = setTimeout(() => this._flushLineHours(plant), 600);
-  },
-  _flushLineHours(plant: string): Promise<CalendarSyncResult> | undefined {
-    const pending = this._pendingLineHours[plant];
-    if (!pending || !Object.keys(pending).length) return;
-    delete this._pendingLineHours[plant];
-    const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
-    return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
-  },
-
-  saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {
-    if (!block?.plant) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/line-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, true)] }, 'line-blackout-upsert');
-  },
-  saveLineBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
-    if (!plant || !id) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/line-blackouts', { plant, deletes: [id] }, 'line-blackout-delete');
-  },
-  savePlantBlackoutUpsert(block: NimbusPlantBlock): Promise<CalendarSyncResult> {
-    if (!block?.plant) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/plant-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, false)] }, 'plant-blackout-upsert');
-  },
-  savePlantBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
-    if (!plant || !id) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/plant-blackouts', { plant, deletes: [id] }, 'plant-blackout-delete');
-  },
-
-  /** Promote path (What-If → live): push the plant's current calendar/blackout state
-   *  as upserts, PLUS the blackout ids deleted during the What-If session as explicit
-   *  deletes. `removed` = { line:[ids], plant:[ids] } is computed by Sandbox.exit while
-   *  the pre-sandbox snapshot is still alive (it is nulled before flush). Without the
-   *  deletes, a blackout removed in What-If would resurrect from the backend on the next
-   *  hydration. (F3) */
-  flushPlant(plant: string, removed?: { line: string[]; plant: string[] }): void {
-    if (!plant) return;
-    removed = removed || { line: [], plant: [] };
-    this.savePlantHours(plant, Store.plants[plant]?.workHours);
-    const lines = Object.keys(Store.calendars)
-      .filter(l => Store.getPlantForLine(l) === plant)
-      .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
-    if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
-    const lineBk = Store.blocks.filter(b => b.plant === plant);
-    const lineDeletes = removed.line || [];
-    if (lineBk.length || lineDeletes.length) {
-      this._post('/plant-calendar/line-blackouts',
-        { plant, upserts: lineBk.map(b => this._blockPayload(b, true)), deletes: lineDeletes }, 'promote-line-blackouts');
-    }
-    const plantBk = Store.plantBlocks.filter(b => b.plant === plant);
-    const plantDeletes = removed.plant || [];
-    if (plantBk.length || plantDeletes.length) {
-      this._post('/plant-calendar/plant-blackouts',
-        { plant, upserts: plantBk.map(b => this._blockPayload(b, false)), deletes: plantDeletes }, 'promote-plant-blackouts');
-    }
-  },
-
-  /* ----- internals ------------------------------------------------------- */
-  _blockPayload(b: NimbusBlock | NimbusPlantBlock, withLine: boolean): { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; machine?: string | null } {
-    const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-    const o: { id: string; start: IsoUtcTs | null; end: IsoUtcTs | null; reason: string | null; machine?: string | null } =
-      { id: b.id, start: s ? s.toISOString() : null, end: e ? e.toISOString() : null, reason: b.reason || null };
-    // Outgoing wire key is "machine" (backend's _prepare_blackouts reads
-    // b.get("machine")); NimbusBlock's own internal field stays "line" — see
-    // types.mts NimbusBlock comment for why the internal name wasn't renamed.
-    if (withLine) o.machine = (b as NimbusBlock).line || null;
-    return o;
-  },
-
-  _post(path: string, body: Record<string, unknown>, label: string): Promise<CalendarSyncResult> {
-    // Single choke point for every backend write. Two guards: never POST while
-    // applying a backend GET (_hydrating), and never leak What-If edits (Sandbox).
-    if (this._hydrating || (typeof Sandbox !== 'undefined' && Sandbox.active)) {
-      return Promise.resolve({ ok: true, skipped: true });
-    }
-    return Util.fetchTraced(`${Config.API_BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    }).then(r => {
-      if (!r.ok) {
-        if (r.status === 400 || r.status === 409) Toast.show(Util.t('toast.plant_not_mastered'), 'error', 6000);
-        else                                       Toast.show(Util.t('toast.calendar_saved_locally'), 'info');
-        ErrorLog.warn('calendar-sync', `${label} failed: HTTP ${r.status}`);
-        return { ok: false, status: r.status };
-      }
-      return { ok: true };
-    }).catch(e => {
-      // The edit is already in Store + localStorage; only backend sync is deferred.
-      ErrorLog.warn('calendar-sync', `${label} error: ${e.message}`);
-      Toast.show(Util.t('toast.calendar_saved_locally'), 'info');
-      return { ok: false, error: e.message };
-    });
-  },
-};
-
-/* =============================================================================
-   SESSION — mandatory-login client session, pure state/API half. Backed by
-   localStorage (mirrors the LangSwitcher get/set idiom in
-   nimbus-intelligence.js), never the backend — the backend is the source of
-   truth for the password check (POST /security/login); once authenticated,
-   the session is just { username, role, ... } cached locally so a page reload
-   doesn't force a re-login.
-     Session.currentUser()   — { username, role, ... } | null
-     Session.actor()         — username for X-User/x-user-email headers, else 'system'
-     Session.isAdmin()       — true iff current user's role === 'admin' (or is_admin)
-     Session.allowedPlants() — null (unrestricted) | string[] (role_plants scope)
-     Session.canAccessTab(tab) — per-role top-level page visibility (Security >
-       Roles "Page Access" toggles); admins always pass. DEFAULT_PAGE_ACCESS
-       fills in for any tab a role hasn't customized.
-     Session.pref(key) / .setPref(key, value) / .flushPrefs() — per-user
-       settings: optimistic Store write + a debounced PATCH /security/me/settings
-     Session.signIn(u, p)    — POST /security/login; persists session, emits
-                                {type:'session:changed', kind:'signin'}
-     Session.signOut()       — clears session, emits kind:'signout', reloads the page
-     Session.refresh()       — reconciles cached role/settings/plant-scope against
-                                GET /security/me; emits kind:'refresh'
-     Session.onAuthDenied()  — a gated request came back 403; re-reconciles via refresh()
-     Session.updateCachedUser(patch) — merge `patch` into the cached session blob;
-       the seam app.js's SessionUIAdapter.saveProfile uses instead of reaching into
-       this module's private `KEY` constant directly.
-   DOM/settings-pane code that used to live inline in this same IIFE (gates, the
-   user-settings modal, profile/password self-service, personalization/workflow
-   panes) stays in app.js as `SessionUIAdapter`, which owns the sole subscription
-   to the `session:changed` event emitted below — mirrors the Phase 1
-   Sandbox/SandboxAdapter split exactly.
-   ========================================================================== */
-export const Session = (() => {
-  const KEY = 'nimbus.session';
-
-  function currentUser(): CachedSessionUser | null {
-    // Guard (not the `as string` assertion) so the type checker is satisfied
-    // without relying on JSON.parse(null) throwing into the catch below — but
-    // the try/catch itself stays wrapped around BOTH the read and the parse,
-    // unlike the brief's own inline guard example, which would have dropped
-    // it and let a malformed cached JSON string throw uncaught instead of
-    // returning null (a real behavior regression this file's zero-behavior-
-    // change discipline forbids).
-    try {
-      const raw = localStorage.getItem(KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
-  }
-
-  function actor(): string {
-    const u = currentUser();
-    return u ? u.username : 'system';
-  }
-
-  function isAdmin(): boolean {
-    const u = currentUser();
-    // Prefer the reconciled is_admin flag (set by refresh() from GET /security/me,
-    // which mirrors the backend's require_admin grace) and fall back to the role
-    // cached at login for sessions that predate a refresh.
-    return !!u && (u.is_admin === true || u.role === 'admin');
-  }
-
-  // null = unrestricted (every plant); array = the caller's role_plants scope.
-  // Mirrors isAdmin()'s fallback posture: trusts whatever was last cached
-  // (login or refresh()) rather than blocking on a fresh network call.
-  function allowedPlants(): string[] | null {
-    const u = currentUser();
-    return u && Array.isArray(u.allowed_plants) ? u.allowed_plants : null;
-  }
-
-  // Every page is on by default except Admin Cockpit. Must mirror
-  // master_data.py's PAGE_ACCESS_KEYS / set_role_page_access default posture
-  // and the Security > Roles tab's own copy in plant-and-administration.mts —
-  // keep all three in sync.
-  const DEFAULT_PAGE_ACCESS: Record<TopLevelTab, boolean> = {
-    home: true, gantt: true, labor: true, masterdata: true, admin: false,
-  };
-
-  // Per-role top-level page visibility. Admins always pass (super-admin escape
-  // hatch, same posture as isAdmin() itself) — this is UI-visibility gating
-  // only, not endpoint-level enforcement (see brain.py's admin route note).
-  // Deliberately reads ONLY role_settings (never the per-user settings
-  // override) — unlike theme/lang, page access is a role-level control, not a
-  // user preference. auth.get_role_settings() always returns {} for the
-  // 'admin' role itself, so an admin-role user's own role_settings.pages is
-  // never consulted — irrelevant here since isAdmin() already short-circuits.
-  function canAccessTab(tab: TopLevelTab): boolean {
-    if (isAdmin()) return true;
-    const u = currentUser();
-    const pages = (u?.role_settings?.pages ?? null) as Partial<Record<TopLevelTab, boolean>> | null;
-    const override = pages?.[tab];
-    return override ?? DEFAULT_PAGE_ACCESS[tab];
-  }
-
-  async function signIn(username: string, password: string): Promise<SessionUserBlob> {
-    const res = await fetch(`${Config.API_BASE}/security/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.detail || 'Invalid username or password');
-    }
-    const data = await res.json() as SessionUserBlob;
-    // Per-user settings + role defaults are the authoritative DB blobs; the
-    // login response may not carry them (only GET /security/me is guaranteed to),
-    // so default to {} and let refresh() fill them from /security/me at boot.
-    const settings = data.settings || {};
-    const roleSettings = data.role_settings || {};
-    localStorage.setItem(KEY, JSON.stringify({
-      username: data.username, role: data.role,
-      allowed_plants: data.allowed_plants ?? null,
-      first_name: data.first_name || null, last_name: data.last_name || null,
-      settings, role_settings: roleSettings,
-      loggedInAt: Date.now(),
-    }));
-    Store.setUserSettings(settings, 'session-signin');
-    Store.setRoleDefaults(roleSettings, 'session-signin');
-    Store.emit({ type: 'session:changed', kind: 'signin' });
-    return data;
-  }
-
-  function signOut() {
-    localStorage.removeItem(KEY);
-    Store.emit({ type: 'session:changed', kind: 'signout' });
-    location.reload();
-  }
-
-  // 12-hour local cache lifetime, checked ONLY at the boot gate (app.js
-  // _domReadyGate) — not a live in-tab timer, so a tab left open past 12h
-  // keeps working until its next reload. A missing/non-numeric loggedInAt
-  // (a session cached before this field existed, or a corrupted blob) counts
-  // as expired rather than never-expiring — Date.now() - undefined is NaN,
-  // and NaN > threshold is false, so this must be checked explicitly rather
-  // than folded into the arithmetic comparison alone.
-  function isExpired(): boolean {
-    const u = currentUser();
-    if (!u) return false;   // no session cached — not "expired", just signed out
-    if (typeof u.loggedInAt !== 'number') return true;
-    return Date.now() - u.loggedInAt > Config.SESSION_MAX_AGE_MS;
-  }
-
-  // Clears a stale/expired cached session pre-boot. Deliberately NOT signOut():
-  // no event emit, no reload — the boot gate calls this once, synchronously,
-  // before _domReadyGate falls through to the same showLoginScreen() path an
-  // ordinary "not logged in" state already uses.
-  function clearExpired(): void {
-    localStorage.removeItem(KEY);
-  }
-
-  // Reconcile the role cached at login (which the admin UI gates on) against the
-  // backend's LIVE view via GET /security/me. The cached role can go stale — a DB
-  // reseed, a role change, or a since-deleted identity — leaving the UI offering
-  // admin controls that every request then 403s. Fire-and-forget at boot; also
-  // called after a denied admin action. Never clobbers the cache on a transient
-  // network/HTTP error (only a definitive answer updates it).
-  async function refresh(): Promise<SessionUserBlob | null> {
-    const u = currentUser();
-    if (!u) return null;                       // signed out — nothing to reconcile
-    try {
-      // Cache-busted like /tasks (see DEPLOYMENT.md) — this URL never varies,
-      // and the corp proxy caches GET responses keyed on URL regardless of
-      // normal cache semantics, so an uncached fetch here would keep re-adopting
-      // whatever settings blob was first ever fetched instead of DB truth.
-      const r = await Util.fetchTraced(
-        `${Config.API_BASE}/security/me?_cb=${Date.now()}`,
-        { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
-      );
-      if (!r.ok) return null;
-      const me = await r.json() as SessionUserBlob;
-      // GET /security/me now carries the caller's own settings blob + their role's
-      // defaults; cache both (localStorage = cache of DB truth so the app boots
-      // offline from the cached blob) and push them into Store for Store.pref().
-      const settings = me.settings || {};
-      const roleSettings = me.role_settings || {};
-      localStorage.setItem(KEY, JSON.stringify({
-        username: me.username || u.username,
-        role: me.role || null,
-        is_admin: !!me.is_admin,
-        allowed_plants: me.allowed_plants ?? null,
-        first_name: me.first_name || null,
-        last_name: me.last_name || null,
-        settings, role_settings: roleSettings,
-        loggedInAt: u.loggedInAt, // carried forward, never reset — the 12h clock is anchored to signIn()
-      }));
-      Store.setUserSettings(settings, 'session-refresh');
-      Store.setRoleDefaults(roleSettings, 'session-refresh');
-      // Plant-scope enforcement is Store-only business logic — safe to keep in
-      // this pure module. The actual PlantSelector DOM refresh/toast, and the
-      // admin-tab eviction (App._currentTab is DOM/UI state this module must
-      // never read), happen in SessionUIAdapter's session:changed subscriber
-      // (app.js) instead — this just reports the fact via the emitted event.
-      let plantAccessChanged = false;
-      const allowed = allowedPlants();
-      if (allowed && Store.selectedPlant && !allowed.includes(Store.selectedPlant)) {
-        Store.setSelectedPlant(null, 'session-refresh');
-        plantAccessChanged = true;
-      }
-      Store.emit({ type: 'session:changed', kind: 'refresh', plantAccessChanged });
-      return me;
-    } catch { return null; }
-  }
-
-  // A backend admin gate returned 403 though the UI believed we were an admin —
-  // the cached role is stale. Reconcile (which hides admin UI / navigates off the
-  // Admin tab if we were demoted, via SessionUIAdapter's session:changed
-  // subscriber) and tell the user plainly, rather than leaving a dead-end
-  // "HTTP 403" in the panel.
-  function onAuthDenied(): void {
-    refresh();
-    try { Toast.show(Util.t('sec.access_revoked'), 'error'); } catch {}
-  }
-
-  /* ── Self-service preference writes (Personalization / Workflow) ─────────
-     setPref(key, value) is OPTIMISTIC (mirrors _savePlantHorizon's write-then-
-     revert shape): Store.userSettings updates immediately so the UI reflects the
-     change, then a debounced PATCH /security/me/settings persists it. On success
-     we adopt the server's full merged blob and mirror it to the nimbus.session
-     cache; on failure we revert only this batch's keys in Store AND the cache and
-     Toast an i18n error. Multiple rapid setPref calls coalesce into one PATCH. */
-  let _prefTimer: ReturnType<typeof setTimeout> | null = null;
-  let _prefPending: Record<string, unknown> = {};   // key → queued new value for the next PATCH
-  let _prefPrev: Record<string, unknown>    = {};   // key → pre-edit value, for revert on failure
-
-  async function _flushPrefs(): Promise<void> {
-    _prefTimer = null;
-    const patch = _prefPending; _prefPending = {};
-    const prev  = _prefPrev;    _prefPrev = {};
-    if (!Object.keys(patch).length) return;
-    try {
-      const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/settings`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ settings: patch }),
-      });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
-      const updated = await r.json() as { settings?: Record<string, unknown> };
-      // Server returns the full merged blob — adopt it as truth + mirror to cache.
-      const settings = updated.settings || {};
-      Store.setUserSettings(settings, 'settings-pref');
-      const u = currentUser();
-      if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings }));
-    } catch (e) {
-      // Revert only the keys this failed batch touched — in Store and the cache —
-      // leaving keys a still-pending batch owns untouched.
-      Store.setUserSettings(prev, 'settings-pref-revert');
-      const u = currentUser();
-      if (u) {
-        const cached: Record<string, unknown> = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
-        for (const k of Object.keys(prev)) {
-          if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
-        }
-        localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
-      }
-      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
-      ErrorLog.error('settings', `Save preference failed: ${(e as Error).message}`);
-    }
-  }
-
-  function setPref(key: string, value: unknown): void {
-    // Capture the pre-edit value once per batch (first writer wins) so a revert
-    // restores the value from before this batch, not an intermediate optimistic one.
-    if (!(key in _prefPrev)) _prefPrev[key] = Store.userSettings[key];
-    _prefPending[key] = value;
-    Store.setUserSettings({ [key]: value }, 'settings-pref');   // optimistic
-    if (_prefTimer) clearTimeout(_prefTimer);
-    _prefTimer = setTimeout(_flushPrefs, 600);
-  }
-
-  // Flush any pending pref writes immediately and return the PATCH promise. The
-  // language switch must await this BEFORE location.reload() — a reload cancels
-  // the debounced timer and in-flight fetch, so without an explicit flush the DB
-  // (and the session cache _flushPrefs refreshes on success) would never catch up
-  // and the next boot would revert the language from stale truth.
-  function flushPrefs(): Promise<void> {
-    if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
-    return _flushPrefs();
-  }
-
-  // Convenience read — resolves via Store.pref (user ?? role ?? system default).
-  function pref(key: string): unknown { return Store.pref(key); }
-
-  // Merge `patch` into the cached session blob and persist it. The narrow seam
-  // app.js's SessionUIAdapter.saveProfile() uses to update first_name/last_name
-  // in the cache after a successful PATCH /security/me, without reaching into
-  // this module's private `KEY` constant — SessionUIAdapter is a consumer of
-  // Session's public API only, same direction every other *UIAdapter follows.
-  function updateCachedUser(patch: Partial<CachedSessionUser>): CachedSessionUser | null {
-    const u = currentUser();
-    if (!u) return null;
-    const merged = { ...u, ...patch } as CachedSessionUser;
-    localStorage.setItem(KEY, JSON.stringify(merged));
-    return merged;
-  }
-
-  return {
-    currentUser, actor, isAdmin, allowedPlants, canAccessTab, DEFAULT_PAGE_ACCESS,
-    signIn, signOut, refresh, onAuthDenied,
-    setPref, flushPrefs, pref, updateCachedUser,
-    isExpired, clearExpired,
-  };
-})();

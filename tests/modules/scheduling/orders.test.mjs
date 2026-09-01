@@ -7,9 +7,10 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu, Printer } from '../../../web/scheduling/orders.mjs';
 import { Timeline } from '../../../web/scheduling/gantt.mjs';
-import { Store } from '../../../web/schedule-state.mjs';
+import { Store } from '../../../web/platform/store.mjs';
 import { Util } from '../../../web/platform/foundation.mjs';
-import { Alerts, Engine } from '../../../web/schedule-services.mjs';
+import { Alerts } from '../../../web/insights/services.mjs';
+import { Engine } from '../../../web/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 

@@ -1,34 +1,44 @@
-// Tests for web/schedule-services.mjs — CQ-1 Phase 2.
+// Tests for web/optimization/engine.mjs, split from
+// tests/modules/schedule-services.test.mjs (Phase P4 of
+// docs/architecture/domain-refactor-plan.md, which split schedule-services.mts
+// into 4 domain files: optimization/scheduler-contract.mjs,
+// optimization/engine.mjs, calendar/calendar-engine.mjs,
+// insights/services.mjs). By far the largest of the four split test files,
+// mirroring the source split's own imbalance (Engine absorbed most of the
+// original file). Two of this phase's 5 accepted pre-existing baseline test
+// failures live here (`Engine.autoReflow reserves a covered incoming setup
+// before moving a downstream peer`, `Engine.autoReflow resolves equal-start
+// successors by id before reserving setup`).
 //
-// schedule-services.mjs's Calendar capacity-math functions delegate to
+// Engine's setup-observation/dispatch functions delegate to
 // nimbus-compute-core.js via the ambient `globalThis.NimbusComputeCore`
-// global (the SAME mechanism app.js used pre-extraction: nimbus-compute-core.js
-// is a UMD module that, in a real browser, is loaded by a parser-blocking
-// <script> before app-entry.mjs's static imports run, so window.NimbusComputeCore
-// already exists by the time schedule-services.mjs's functions are called).
-// Under a plain Node ESM import (this file), nothing sets that global
-// automatically, so we bootstrap it here via createRequire — mirroring
-// tests/modules/helpers/load-legacy-app.mjs's identical bootstrap for the VM
-// harness. This must run before any test() body calls a Calendar function,
-// but does NOT need to run before the `import` below is evaluated: importing
-// schedule-services.mjs only defines objects/functions at module-eval time,
-// it never calls into NimbusComputeCore until a function is invoked.
+// global (a real browser loads it via a parser-blocking <script> before
+// app-entry.mjs's static imports run). Under plain Node ESM (this file)
+// nothing sets that global automatically, so we bootstrap it here via
+// createRequire — mirroring tests/modules/helpers/load-legacy-app.mjs's
+// identical bootstrap. Two tests spawn a child Node process running an
+// inline module script (`spawnSync` below) to probe optimizer behavior in a
+// clean module cache; that child script's own `import()` calls were updated
+// to the new file paths (./web/platform/store.mjs,
+// ./web/optimization/engine.mjs) — a plain string inside a template
+// literal, not a static import, so `npm run build` cannot catch a stale path
+// there; only a whole-tree text grep for the old filenames would.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
-  Calendar, Compute, Alerts, Utilization, Engine, snapshotSchedule, deriveSetupObservation,
-  MIN_PRODUCTIVE_SEGMENT_MINUTES, scheduleAlertsForPatches, effectiveFirmedIdSet,
-} from '../../web/schedule-services.mjs';
-import { Store } from '../../web/schedule-state.mjs';
-import { Toast, Util, Config } from '../../web/platform/foundation.mjs';
+  Engine, snapshotSchedule, deriveSetupObservation,
+  MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
+} from '../../../web/optimization/engine.mjs';
+import { Store } from '../../../web/platform/store.mjs';
+import { Toast, Util, Config } from '../../../web/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
-globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
 
 // Engine.runAndApply's early-return guards (no tasks / no plant selected) call
-// Toast.show(Util.t(...)) — application-foundation.mjs's Toast/Util reference
+// Toast.show(Util.t(...)) — platform/foundation.mjs's Toast/Util reference
 // bare `window`/`document`, same split-realm quirk documented in
 // tests/modules/helpers/load-legacy-app.mjs. A minimal stub (matching that
 // harness's approach) keeps those guard paths a real no-op under plain Node
@@ -55,6 +65,7 @@ test('Engine derives a due-date-day pull-forward floor using calendar days', () 
     'crossing daylight saving still subtracts seven calendar dates and lands at local midnight');
 });
 
+
 test('Engine leaves undated orders and disabled pull-forward limits unrestricted', () => {
   Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: null }], lines: [] }, 'unit-test');
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN', BASIC_FINISH_DATE: new Date('2026-08-17') }, 'OPEN'), null);
@@ -65,6 +76,7 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
 // ---------------------------------------------------------------------------
 // B3 (2026-08-21) — plant-configurable productive-segment floor.
 // ---------------------------------------------------------------------------
+
 
 test('Engine.minProductiveSegmentMinutesFor resolves the plant override and falls back to the default', () => {
   Store.setMasterData({ plants: [{ plant: 'SEG', min_productive_segment_minutes: 15 }], lines: [] }, 'unit-test');
@@ -92,6 +104,7 @@ test('Engine.minProductiveSegmentMinutesFor resolves the plant override and fall
 // tests set/restore that field directly, mirroring how the pull-forward
 // tests above set/restore Store.masterData.
 // ---------------------------------------------------------------------------
+
 
 test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozenHorizonEnd directly', () => {
   const priorEnd = Store.frozenHorizonEnd;
@@ -131,6 +144,7 @@ test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozen
   }
 });
 
+
 test('Engine.isFrozenHorizon requires BOTH bounds — an already-overdue order is never frozen, no matter how old (regression closed)', () => {
   // This is the exact defect the C2 review caught: an earlier version of
   // isFrozenHorizon checked only `start_date < end`, which is trivially true
@@ -154,6 +168,7 @@ test('Engine.isFrozenHorizon requires BOTH bounds — an already-overdue order i
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
 });
+
 
 test('Engine.earliestAllowedStart folds the frozen-horizon floor in as an ADDITIONAL floor, maxed with pull-forward (C2)', () => {
   const priorMasterData = Store.masterData;
@@ -187,6 +202,7 @@ test('Engine.earliestAllowedStart folds the frozen-horizon floor in as an ADDITI
   }
 });
 
+
 test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free) -- dragging INTO the window', () => {
   const priorMasterData = Store.masterData;
   const priorEnd = Store.frozenHorizonEnd;
@@ -209,6 +225,7 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
 });
+
 
 test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free) -- dragging OUT of the window', () => {
   // Whole-branch review companion to the INTO case above: the C2 brief asked for
@@ -247,6 +264,7 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
 // ---------------------------------------------------------------------------
 // Engine.firmingStatus — union of ecc/frozen/manual firming reasons.
 // ---------------------------------------------------------------------------
+
 
 test('Engine.firmingStatus reports each reason alone, a combination, and none', () => {
   const priorEnd = Store.frozenHorizonEnd;
@@ -291,6 +309,7 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
 });
+
 
 test('Engine.runAndApply("spt") leaves an order starting inside the frozen window untouched and never places another order into it (Step 8: legacy walk)', () => {
   const plant = 'FZ-SPT-PLANT';
@@ -342,6 +361,7 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
+
 
 test('Engine.autoReflow leaves a frozen-window peer exactly in place even when it would otherwise be pushed by an overlapping predecessor (Step 8: autoReflow)', () => {
   const plant = 'FZ-REFLOW-PLANT';
@@ -404,6 +424,7 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
   }
 });
 
+
 test('changeover advances to a future order pull-forward floor instead of stalling on an ineligible queue', () => {
   const child = String.raw`
     import { createRequire } from 'node:module';
@@ -411,8 +432,8 @@ test('changeover advances to a future order pull-forward floor instead of stalli
     globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
     globalThis.window = {};
     globalThis.document = { getElementById: () => null };
-    const { Store } = await import('./web/schedule-state.mjs');
-    const { Engine, snapshotSchedule } = await import('./web/schedule-services.mjs');
+    const { Store } = await import('./web/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./web/optimization/engine.mjs');
     const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
     const now = new Date('2035-08-06T08:00:00');
     Store.setMasterData({
@@ -456,6 +477,7 @@ test('changeover advances to a future order pull-forward floor instead of stalli
   assert.deepEqual(JSON.parse(run.stdout.trim()), { year: 2035, month: 7, date: 10, hour: 8 });
 });
 
+
 test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, never silent) instead of using the retired legacy force-placement escape hatch', () => {
   // B3a (2026-08-21): this test used to pin the LEGACY day-integrity
   // dispatcher's FORCE_PLACE_AFTER_DAYS escape hatch (Engine.
@@ -477,8 +499,8 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
     globalThis.window = {};
     globalThis.document = { getElementById: () => null };
-    const { Store } = await import('./web/schedule-state.mjs');
-    const { Engine, snapshotSchedule } = await import('./web/schedule-services.mjs');
+    const { Store } = await import('./web/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./web/optimization/engine.mjs');
     const closed = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, null]));
     const now = new Date('2035-08-06T08:00:00');
     Store.setMasterData({
@@ -520,99 +542,6 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     'leaving the order unplaced must be surfaced in the result, never a silent drop');
 });
 
-test('Calendar exposes capacity-math methods only (no render/openBlockModal/DOM)', () => {
-  assert.equal(typeof Calendar.workWindow, 'function');
-  assert.equal(typeof Calendar.dailyCapacityHours, 'function');
-  assert.equal(typeof Calendar.nextAvailable, 'function');
-  assert.equal(Calendar.render, undefined, 'Calendar must not carry UI methods after the split');
-  assert.equal(Calendar.openBlockModal, undefined);
-  assert.equal(Calendar.saveBlockFromModal, undefined);
-});
-
-test('Calendar.workWindow returns null outside working hours, a window inside them', () => {
-  Store.setCalendar('L1', { 1: [7, 19] }, 'unit-test'); // Monday 7am-7pm
-  const monday = new Date('2026-08-03T12:00:00'); // a Monday, midday
-  const win = Calendar.workWindow('L1', monday);
-  assert.ok(win === null || Array.isArray(win));
-});
-
-test('Compute.available reflects Worker constructor availability', () => {
-  assert.equal(typeof Compute.available(), 'boolean');
-});
-
-test('Compute has no underscore-prefixed properties reachable on the export (closure-private by construction)', () => {
-  const keys = Object.keys(Compute);
-  assert.ok(keys.every(k => !k.startsWith('_')), 'Compute must stay fully encapsulated, as before the move');
-  assert.deepEqual(keys.sort(), ['alerts', 'available', 'utilization']);
-});
-
-test('Alerts exposes computation methods only (no showForCell/toggleDrawer/render*)', () => {
-  assert.equal(typeof Alerts.recompute, 'function');
-  assert.equal(typeof Alerts.scheduleRecompute, 'function');
-  assert.equal(typeof Alerts.applyFix, 'function');
-  assert.equal(Alerts.showForCell, undefined, 'DOM modal must not travel with the computation module');
-  assert.equal(Alerts.toggleDrawer, undefined);
-  assert.equal(Alerts._renderDrawer, undefined);
-  assert.equal(Alerts._renderBell, undefined);
-});
-
-test('Alerts.recompute with no worker/no plant falls back to sync compute', () => {
-  Store.setSelectedPlant(null, 'unit-test'); // no plant -> forces sync path regardless of Compute.available()
-  Store.setTasks([], 'unit-test');
-  assert.doesNotThrow(() => Alerts.recompute());
-});
-
-test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (adaptive delay)', async () => {
-  let recomputeCalls = 0;
-  const orig = Alerts.recompute;
-  Alerts.recompute = (...args) => { recomputeCalls++; return orig.apply(Alerts, args); };
-  Alerts.scheduleRecompute();
-  await new Promise(r => setTimeout(r, 600)); // > _ALERTS_MAX_DEBOUNCE_MS
-  assert.ok(recomputeCalls >= 1);
-  Alerts.recompute = orig;
-});
-
-test('Store "schedule:hydrated" event triggers Alerts.scheduleRecompute (schedule-data -> schedule-services seam)', () => {
-  // Regression test for the reverse-dependency seam Task 4 introduced:
-  // schedule-data.mjs may not import schedule-services.mjs, so Persistence/
-  // CalendarSync (5 call sites: load()'s two branches, _loadCache(),
-  // _loadDemo()) emit a `{ type: 'schedule:hydrated' }` Store event instead of
-  // calling Alerts.scheduleRecompute() directly. schedule-services.mjs
-  // subscribes to that event once, at module-eval time, and forwards to
-  // Alerts.scheduleRecompute(). Verify the seam actually fires end to end —
-  // not just that each half compiles — so a typo'd event-type string or a
-  // deleted subscription fails this suite instead of silently going dark
-  // (the prior gap: alerts would stop recomputing after every load/cache
-  // restore/demo-seed with nothing catching the regression).
-  let calls = 0;
-  const origSchedule = Alerts.scheduleRecompute;
-  Alerts.scheduleRecompute = (...args) => { calls++; };
-  try {
-    Store.emit({ type: 'schedule:hydrated', source: 'unit-test' });
-    assert.equal(calls, 1, 'the schedule:hydrated subscriber must call Alerts.scheduleRecompute exactly once');
-  } finally {
-    Alerts.scheduleRecompute = origSchedule;
-  }
-});
-
-test('Utilization.computeMatrix memoizes on (startMs, days, Store.rev(), plant scope)', () => {
-  Store.setTasks([], 'unit-test');
-  Store.setSelectedPlant('5512', 'unit-test');
-  const day = new Date('2026-08-03');
-  const m1 = Utilization.computeMatrix(day, 7);
-  const m2 = Utilization.computeMatrix(day, 7);
-  assert.equal(m1, m2, 'same key must return the identical cached matrix object');
-  Store.setTasks([{ id: 'u1', RUN_TIME: '1', MACHINE: 'L1', plant: '5512' }], 'unit-test');
-  const m3 = Utilization.computeMatrix(day, 7);
-  assert.notEqual(m3, m1, 'a Store mutation must bump Store.rev() and invalidate the memo');
-});
-
-test('Utilization.dayByLine is unmemoized — two calls with the same args recompute independently', () => {
-  const a = Utilization.dayByLine(new Date());
-  const b = Utilization.dayByLine(new Date());
-  assert.deepEqual(a, b);
-  assert.notEqual(a, b, 'must not be the same cached object reference — dayByLine has no memo');
-});
 
 test('Engine exposes the documented public API and no DOM-dependent surprises', () => {
   assert.equal(typeof Engine.runAndApply, 'function');
@@ -621,11 +550,13 @@ test('Engine exposes the documented public API and no DOM-dependent surprises', 
   assert.ok(Array.isArray(Engine.CONSTRAINT_CATALOG));
 });
 
+
 test('Engine.runAndApply no-ops with a toast when there are no tasks', () => {
   Store.setTasks([], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
   assert.doesNotThrow(() => Engine.runAndApply('spt'));
 });
+
 
 test('Engine.autoReflow reserves a covered incoming setup before moving a downstream peer', () => {
   // This fails if reflow only protects productive runtime: the blue successor
@@ -662,6 +593,7 @@ test('Engine.autoReflow reserves a covered incoming setup before moving a downst
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
+
 
 test('Engine.autoReflow resolves equal-start successors by id before reserving setup', () => {
   // This fails if equal starts retain object insertion order: z-first would
@@ -703,6 +635,7 @@ test('Engine.autoReflow resolves equal-start successors by id before reserving s
   }
 });
 
+
 test('Engine.evaluateSchedule snapshots the live read model without publishing a candidate', () => {
   Store.setTasks([
     { id: 'detached-long', MACHINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '5', start_date: null, end_date: null },
@@ -738,6 +671,7 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
     unsubscribe();
   }
 });
+
 
 test('Engine.evaluateSetupAware forwards only an explicit detached setup request', () => {
   // This fails if Task 3 leaves the pure evaluator unreachable from the
@@ -776,6 +710,7 @@ test('Engine.evaluateSetupAware forwards only an explicit detached setup request
   assert.equal(Store.rev(), beforeRev, 'explicit setup candidate routing must not publish to Store');
 });
 
+
 test('Engine.evaluateSetupAware refuses candidates when setup activation is disabled', () => {
   // This fails if a false activation flag can still reach either setup-aware
   // evaluator and produce patches from observation-only setup data.
@@ -806,6 +741,7 @@ test('Engine.evaluateSetupAware refuses candidates when setup activation is disa
 
   assert.throws(() => Engine.evaluateSetupAware('due-date-first', bounds, snapshot), /disabled/i);
 });
+
 
 test('deriveSetupObservation resolves one scoped override interval without invoking Engine', () => {
   // This fails if the worker-facing setup observation is unavailable, resolves
@@ -840,6 +776,7 @@ test('deriveSetupObservation resolves one scoped override interval without invok
   }]);
   assert.deepEqual(observation.diagnostics, []);
 });
+
 
 test('deriveSetupObservation keeps inactive setup truth visible without enabling scheduling', () => {
   // This fails if the activation gate suppresses observation-only setup bars,
@@ -877,36 +814,6 @@ test('deriveSetupObservation keeps inactive setup truth visible without enabling
     diagnostic.type === 'setup-uncovered' && diagnostic.successorOrderId === 'yellow'));
 });
 
-test('Alerts publishes scoped setup observations without invoking Engine, including Fix It', () => {
-  // This fails if alerts bypass the shared setup projection, resolve matrices in
-  // the core, or make a setup diagnostic recursively optimize on Fix It.
-  const state = value => [{ fieldKey: 'colorWheel', value }];
-  Store.setTasks([{
-    id: 'uncovered-order', PLANT: 'P-ALERT', MACHINE: 'L-ALERT', COLOR: 'RED', RUN_TIME: 1,
-    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
-  }], 'unit-test');
-  Store.setSelectedPlant('P-ALERT', 'unit-test');
-  Store.replaceSetupSnapshot({
-    plant: 'P-ALERT',
-    definition: { plant: 'P-ALERT', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
-    plant_rows: [], machine_rows: [],
-    machine_states: [{ machine: 'L-ALERT', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
-    overrides: [],
-  }, 'unit-test');
-  const originalRun = Engine.runAndApply;
-  let engineRuns = 0;
-  Engine.runAndApply = (...args) => { engineRuns++; return originalRun.apply(Engine, args); };
-  try {
-    Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
-    const setupAlert = Store.alerts.find(alert => alert.type === 'setup-uncovered');
-    assert.ok(setupAlert, 'the scoped worker/core payload must include the unresolved setup observation');
-    Alerts.applyFix(setupAlert.id);
-    Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
-    assert.equal(engineRuns, 0, 'setup observation alerts must never invoke Engine, even after explicit Fix It');
-  } finally {
-    Engine.runAndApply = originalRun;
-  }
-});
 
 test('deriveSetupObservation keeps a covered zero-minute override active', () => {
   // This fails if override validity is inferred from visible positive bars
@@ -933,6 +840,7 @@ test('deriveSetupObservation keeps a covered zero-minute override active', () =>
   assert.deepEqual(observation.intervals, []);
   assert.deepEqual(observation.diagnostics, []);
 });
+
 
 test('D4: an identical-signature covered transition pushes a fully-populated no-change diagnostic, never an interval', () => {
   // Before D4, deriveSetupObservation pushed neither an interval nor a
@@ -965,6 +873,7 @@ test('D4: an identical-signature covered transition pushes a fully-populated no-
   });
 });
 
+
 test('D4: a genuinely uncovered (different-signature, no-matrix-row) zero-minute transition stays a distinct, alert-worthy diagnostic — not the no-change shape', () => {
   // Both this and the previous test resolve to zero minutes, but they are not
   // the same state: an uncovered transition keeps its existing 'setup-uncovered'
@@ -991,6 +900,7 @@ test('D4: a genuinely uncovered (different-signature, no-matrix-row) zero-minute
   assert.equal(noChange, undefined, 'an uncovered transition must never be reported as a no-change transition');
 });
 
+
 test('D4: computeAlerts never raises an alert for a setup-no-change diagnostic, but does for setup-uncovered', () => {
   // The no-change diagnostic type is deliberately excluded from
   // computeAlerts' diagnosticTypes allowlist (nimbus-compute-core.js) — this
@@ -1015,6 +925,7 @@ test('D4: computeAlerts never raises an alert for a setup-no-change diagnostic, 
   assert.ok(alerts.some(a => a.type === 'setup-uncovered'), 'an uncovered transition must still surface as an alert (unaffected by D4)');
 });
 
+
 test('deriveSetupObservation never projects one plant setup truth onto another plant', () => {
   // This fails if a stale selected-plant snapshot leaks setup capacity or
   // diagnostics onto a task that explicitly belongs to another plant.
@@ -1033,6 +944,7 @@ test('deriveSetupObservation never projects one plant setup truth onto another p
 
   assert.deepEqual(observation, { intervals: [], diagnostics: [] });
 });
+
 
 test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as predecessor-state-unknown (showing the Order Number), and the chain recovers on the next valid order', () => {
   // The core regression this feature exists for. Before this fix, a null
@@ -1093,6 +1005,7 @@ test('deriveSetupObservation: a blank-signature MIDDLE order breaks the chain as
   }
 });
 
+
 test('deriveSetupObservation excludes a NULL/absent-PLANT order even when its MACHINE code belongs to another plant\'s setup', () => {
   // This fails if a truthy-only PLANT check (the pre-fix behavior) lets a
   // null/undefined-PLANT order leak into ANY plant's chain merely because its
@@ -1116,6 +1029,7 @@ test('deriveSetupObservation excludes a NULL/absent-PLANT order even when its MA
     'an order with no resolvable PLANT must never enter any plant\'s setup chain, even on a matching line code');
 });
 
+
 test('deriveSetupObservation skips an order with an empty/absent MACHINE instead of bucketing it under \'Unknown\'', () => {
   // This fails if the old `|| 'Unknown'` fallback is still in effect: it would
   // chain every line-less order across the whole plant together, producing
@@ -1136,6 +1050,7 @@ test('deriveSetupObservation skips an order with an empty/absent MACHINE instead
     'orders with no production line must be skipped entirely, never bucketed together under an implicit line');
 });
 
+
 test('deriveSetupObservation emits current-state-diverged when asserted state conflicts with the observed plan', () => {
   // This fails if the projection never compares a real asserted line state to
   // the planned state that completed before its observed-at timestamp.
@@ -1155,6 +1070,7 @@ test('deriveSetupObservation emits current-state-diverged when asserted state co
 
   assert.ok(observation.diagnostics.some(diagnostic => diagnostic.type === 'current-state-diverged'));
 });
+
 
 test('deriveSetupObservation marks an active override inactive when its line has no scheduled intervals, but only when that line is explicitly in scope', () => {
   // This fails if override checks only iterate lines that happened to have a
@@ -1178,6 +1094,7 @@ test('deriveSetupObservation marks an active override inactive when its line has
   assert.deepEqual(observation.diagnostics.map(diagnostic => diagnostic.type), ['override-inactive']);
 });
 
+
 test('deriveSetupObservation does not surface an orphaned override diagnostic for a line outside the caller\'s scope', () => {
   // This is the scoping half of the fix above: on the (always unscoped in the
   // old code) caller path, pulling in EVERY active override's line — including
@@ -1199,6 +1116,7 @@ test('deriveSetupObservation does not surface an orphaned override diagnostic fo
 
   assert.deepEqual(observation.diagnostics, [], 'a line neither in scope nor carrying loaded orders must not surface an orphaned-override diagnostic');
 });
+
 
 test('deriveSetupObservation measures setup availability against a preceding blackout', () => {
   // This fails if availability is the raw predecessor-to-successor wall time
@@ -1223,6 +1141,7 @@ test('deriveSetupObservation measures setup availability against a preceding bla
   assert.equal(observation.intervals[0].availableMinutes, 0);
 });
 
+
 test('deriveSetupObservation intersects line and plant hours when measuring setup availability', () => {
   // This fails if a wider line calendar is allowed to admit setup after the
   // plant-level capacity window has closed.
@@ -1246,6 +1165,7 @@ test('deriveSetupObservation intersects line and plant hours when measuring setu
 
   assert.equal(observation.intervals[0].availableMinutes, 0);
 });
+
 
 test('deriveSetupObservation uses the setup snapshot plant for a reused line capacity window', () => {
   // This fails if a same-named line's first master-data/line-settings plant
@@ -1275,6 +1195,7 @@ test('deriveSetupObservation uses the setup snapshot plant for a reused line cap
   assert.equal(observation.intervals[0].availableMinutes, 60);
 });
 
+
 test('deriveSetupObservation uses the core default line calendar when its record is absent', () => {
   // Core capacity supplies the standard 07:00â€“19:00 weekday line calendar for
   // an absent entry, then intersects it with the stored plant window.
@@ -1298,6 +1219,7 @@ test('deriveSetupObservation uses the core default line calendar when its record
   assert.equal(observation.intervals[0].availableMinutes, 120);
 });
 
+
 test('deriveSetupObservation uses the core default plant calendar when its record is absent', () => {
   // Core capacity supplies the standard 07:00â€“19:00 weekday plant calendar for
   // an absent entry, then intersects it with the stored line window.
@@ -1320,6 +1242,7 @@ test('deriveSetupObservation uses the core default plant calendar when its recor
 
   assert.equal(observation.intervals[0].availableMinutes, 120);
 });
+
 
 test('Engine.evaluateSchedule preserves changeover-mode placement from the live path', () => {
   const startDate = new Date('2035-08-06T08:00:00');
@@ -1347,6 +1270,7 @@ test('Engine.evaluateSchedule preserves changeover-mode placement from the live 
     'detached evaluation must reuse the same changeover/day-integrity placement as the live path');
 });
 
+
 test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending run-hours', () => {
   // PLANT (uppercase) is the real field name — db.py's query_orders aliases
   // `o.plant AS "PLANT"`, and Store.rebuildPlantIndex()/tasksByPlant() key off
@@ -1363,6 +1287,7 @@ test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending
   assert.ok(e1.start_date, 'e1 must have been scheduled (proves the line group was non-empty)');
   assert.ok(e2.start_date <= e1.start_date, 'shorter run-time task (e2) must be scheduled first under SPT');
 });
+
 
 test('Engine.autoReflow pushes an overlapping unfirmed downstream peer forward on the same line', () => {
   // Keep this calendar-aware regression in the future: aged orders are
@@ -1384,6 +1309,7 @@ test('Engine.autoReflow pushes an overlapping unfirmed downstream peer forward o
   assert.ok(r2.start_date.getTime() !== start2.getTime(), 'peer must have actually moved (proves the peer set was non-empty)');
   assert.ok(r2.start_date >= end1, 'downstream peer must have moved to start at/after the changed task\'s end');
 });
+
 
 test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options without reading any DOM element', () => {
   // Regression test for the DOM-read fix in Step 4: call runAndApply with both
@@ -1415,13 +1341,14 @@ test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options
 //
 // NOTE on `Store.setMasterData(...)` vs. the plan's illustrative
 // `Store.masterData = {...}`: `masterData` is a getter-ONLY accessor on Store
-// (web/schedule-state.mts) — a bare assignment throws "Cannot set property
+// (web/platform/store.mts) — a bare assignment throws "Cannot set property
 // masterData of #<Object> which has only a getter" under ESM strict mode.
 // `setMasterData` is the real public setter (and the one Persistence itself
 // uses), so these tests go through it. Appended at the END of the file on
 // purpose: setMasterData rebuilds Store's line→plant index, which the
 // pre-existing Engine tests above depend on.
 // ---------------------------------------------------------------------------
+
 
 test('flattenConstraints does pre-order DFS, drops duplicates, skips disabled subtrees', () => {
   Store.setMasterData({ plants: [{ plant: 'P1', constraints: [
@@ -1435,6 +1362,7 @@ test('flattenConstraints does pre-order DFS, drops duplicates, skips disabled su
   ] }], lines: [] }, 'unit-test');
   assert.deepEqual(Engine.flattenConstraints('P1'), ['colorWheel', 'prt01']);
 });
+
 
 test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has no stored tree', () => {
   Store.setMasterData({ plants: [{ plant: 'P2', constraints: null }], lines: [] }, 'unit-test');
@@ -1452,6 +1380,7 @@ test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has n
 // (_sortTerms goes through flattenConstraints, which has always walked the
 // tree). Semantics must stay identical to flattenConstraints': a disabled node
 // takes its whole subtree with it, and any reachable enabled occurrence counts.
+
 
 test('constraintEnabled finds a key nested BELOW the root, not just at the top level', () => {
   Store.setMasterData({ plants: [{ plant: 'CE1', constraints: [
@@ -1472,6 +1401,7 @@ test('constraintEnabled finds a key nested BELOW the root, not just at the top l
   assert.deepEqual(Engine.flattenConstraints('CE1'), ['colorWheel', 'prt01', 'prt02']);
 });
 
+
 test('constraintEnabled returns false for a nested key whose ancestor is disabled (subtree is off)', () => {
   Store.setMasterData({ plants: [{ plant: 'CE2', constraints: [
     { key: 'prt01', enabled: false, order: 1, children: [
@@ -1484,6 +1414,7 @@ test('constraintEnabled returns false for a nested key whose ancestor is disable
   assert.deepEqual(Engine.flattenConstraints('CE2'), [], 'flattenConstraints must agree: nothing is in effect');
 });
 
+
 test('constraintEnabled returns false for a nested key that is itself disabled', () => {
   Store.setMasterData({ plants: [{ plant: 'CE3', constraints: [
     { key: 'prt01', enabled: true, order: 1, children: [
@@ -1493,6 +1424,7 @@ test('constraintEnabled returns false for a nested key that is itself disabled',
   assert.equal(Engine.constraintEnabled('CE3', 'colorWheel'), false);
   assert.deepEqual(Engine.flattenConstraints('CE3'), ['prt01']);
 });
+
 
 test('constraintEnabled: any REACHABLE enabled occurrence wins, matching the one flattenConstraints emits', () => {
   Store.setMasterData({ plants: [{ plant: 'CE4', constraints: [
@@ -1506,6 +1438,7 @@ test('constraintEnabled: any REACHABLE enabled occurrence wins, matching the one
     'flattenConstraints emits it, so constraintEnabled must not claim otherwise');
 });
 
+
 test('constraintEnabled preserves the flat top-level behavior it always had', () => {
   Store.setMasterData({ plants: [{ plant: 'CE5', constraints: [
     { key: 'colorWheel', enabled: false, order: 1 },
@@ -1517,6 +1450,7 @@ test('constraintEnabled preserves the flat top-level behavior it always had', ()
   // to the everything-else-OFF default (same answer here, different reason).
   assert.equal(Engine.constraintEnabled('CE5', 'prt02'), false);
 });
+
 
 test('constraintEnabled: a configured tree that OMITS the key returns false, not the colorWheel default', () => {
   // Reachable in practice: removing the Color Wheel row in the tree UI leaves a
@@ -1540,6 +1474,7 @@ test('constraintEnabled: a configured tree that OMITS the key returns false, not
   assert.equal(Engine.constraintEnabled('CE9', 'productionVersion'), false);
 });
 
+
 test('constraintEnabled: duplicate root keys resolve position-independently, like flattenConstraints', () => {
   // off-then-on and on-then-off must give the same answer: flattenConstraints
   // emits the key as long as SOME reachable occurrence is enabled, regardless
@@ -1561,6 +1496,7 @@ test('constraintEnabled: duplicate root keys resolve position-independently, lik
   assert.deepEqual(Engine.flattenConstraints('CE11'), []);
 });
 
+
 test('constraintEnabled preserves the never-configured default (colorWheel ON, rest OFF)', () => {
   Store.setMasterData({ plants: [{ plant: 'CE6', constraints: null }], lines: [] }, 'unit-test');
   assert.equal(Engine.constraintEnabled('CE6', 'colorWheel'), true);
@@ -1573,6 +1509,7 @@ test('constraintEnabled preserves the never-configured default (colorWheel ON, r
   assert.equal(Engine.constraintEnabled('CE7', 'prt01'), false);
 });
 
+
 test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning over plant-wide', () => {
   Store.setMasterData({ plants: [{ plant: 'P3', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 5 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
@@ -1582,6 +1519,7 @@ test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning
   const keyNoLine = terms[0].get({ COLOR: 'red', MACHINE: 'L99' });
   assert.equal(keyNoLine, '0000005|RED');  // falls back to plant-wide for an unmapped line
 });
+
 
 test('_sortTerms groups unranked values together, after ranked ones, instead of interleaving (N12)', () => {
   Store.setMasterData({ plants: [{ plant: 'P4', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
@@ -1594,6 +1532,7 @@ test('_sortTerms groups unranked values together, after ranked ones, instead of 
   assert.notEqual(blueKey, greenKey);     // both rank 999999 but keys still differ by value
   assert.ok(blueKey.startsWith('0999999|') && greenKey.startsWith('0999999|'));  // grouped under the same rank prefix
 });
+
 
 test('_sortTerms keeps the rank half exactly 7 digits for fractional and oversized ranks', () => {
   // Ranks are floats end to end (brain.py persists float(rank); JSON round-trips
@@ -1616,12 +1555,14 @@ test('_sortTerms keeps the rank half exactly 7 digits for fractional and oversiz
     'fractional rank 1.4 must still sort before integer rank 3 — the unguarded encoding inverted this');
 });
 
+
 test('_sortTerms with no rank map for the field falls back to 999999 for every value (no crash)', () => {
   Store.setMasterData({ plants: [{ plant: 'P5', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
   Store.setPriorityRankMaps({}, 'unit-test');
   const terms = Engine._sortTerms('changeover', { plant: 'P5' });
   assert.equal(terms[0].get({ PRT_01: 'DOG', MACHINE: 'L1' }), '0999999|DOG');
 });
+
 
 test('_sortTerms maps every registered priority key to its REAL task field, not key.toUpperCase()', () => {
   // Task 0's audit defect 4a: 'prt01' -> 'PRT_01' (not 'PRT01'),
@@ -1659,6 +1600,7 @@ test('_sortTerms maps every registered priority key to its REAL task field, not 
 // shared singleton across this whole file.
 // ---------------------------------------------------------------------------
 
+
 test('setConstraintCatalog merges a partial response over existing entries, not wiping the other three', () => {
   const before = Engine.CONSTRAINT_CATALOG.map(c => ({ ...c }));
   try {
@@ -1686,6 +1628,7 @@ test('setConstraintCatalog merges a partial response over existing entries, not 
   }
 });
 
+
 test('setConstraintCatalog fills desc from the local field_key -> description fallback (backend carries none)', () => {
   // Regression coverage: the prior task's implementation hardcoded desc: ''
   // for every entry once the registry started driving CONSTRAINT_CATALOG,
@@ -1706,6 +1649,7 @@ test('setConstraintCatalog fills desc from the local field_key -> description fa
   }
 });
 
+
 test('setConstraintCatalog with an empty/falsy fields array is a no-op', () => {
   const before = Engine.CONSTRAINT_CATALOG;
   Engine.setConstraintCatalog([]);
@@ -1715,6 +1659,7 @@ test('setConstraintCatalog with an empty/falsy fields array is a no-op', () => {
   Engine.setConstraintCatalog(undefined);
   assert.equal(Engine.CONSTRAINT_CATALOG, before, 'undefined must leave the existing catalog untouched');
 });
+
 
 test('setFieldTaskFields merges a partial response over the hardcoded defaults, not wiping the other three', () => {
   const before = { ...Engine._fieldTaskFields };
@@ -1729,6 +1674,7 @@ test('setFieldTaskFields merges a partial response over the hardcoded defaults, 
   }
 });
 
+
 test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
   const before = { ...Engine._fieldTaskFields };
   Engine.setFieldTaskFields([]);
@@ -1738,6 +1684,7 @@ test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
   Engine.setFieldTaskFields(undefined);
   assert.deepEqual(Engine._fieldTaskFields, before, 'undefined must leave the existing defaults untouched');
 });
+
 
 test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
   // The one call site Task 0's audit flagged as silently breakable:
@@ -1774,6 +1721,7 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
    Plus the two contained _sortTerms fixes (dead term, empty-override shadowing).
    ------------------------------------------------------------------------ */
 
+
 test('effectiveConstraintPaths credits the ENABLED duplicate, not the disabled one before it', () => {
   // The reviewer's exact repro. Real optimizer order is prt01 -> prt02 ->
   // colorWheel: the colorWheel at index 1 is OFF, so index 3 is what takes
@@ -1795,6 +1743,7 @@ test('effectiveConstraintPaths credits the ENABLED duplicate, not the disabled o
   assert.ok(!paths.has('1'), 'the switched-OFF row must never be reported as in effect');
 });
 
+
 test('effectiveConstraintPaths: a node under a disabled ancestor loses to an enabled copy below', () => {
   const tree = [
     { key: 'prt01', enabled: false, order: 1, children: [{ key: 'colorWheel', enabled: true, order: 1 }] },
@@ -1807,6 +1756,7 @@ test('effectiveConstraintPaths: a node under a disabled ancestor loses to an ena
     'only the root-level enabled colorWheel is in effect — not the one inside the disabled subtree');
   assert.ok(!paths.has('0.0'), 'a child of a disabled parent is unreachable, so it cannot be the effective occurrence');
 });
+
 
 test('effectiveConstraintPaths addresses ORIGINAL array positions, not the order-sorted view', () => {
   // Array order deliberately disagrees with `order` — what a persisted tree from
@@ -1826,6 +1776,7 @@ test('effectiveConstraintPaths addresses ORIGINAL array positions, not the order
   assert.equal(Engine.effectiveConstraintPaths([]).size, 0);
 });
 
+
 test('effectiveConstraintPaths still reaches a repeated node CHILD that introduces a new key', () => {
   // A repeated parent contributes nothing itself but must not swallow its
   // subtree — flattenConstraints walks children regardless of the dedupe.
@@ -1841,6 +1792,7 @@ test('effectiveConstraintPaths still reaches a repeated node CHILD that introduc
   assert.ok(paths.has('1.0'), 'but the child prt01 under the repeat is still reached and effective');
 });
 
+
 test('unrankedActiveFields reports every ACTIVE field with no ranks — not just colorWheel', () => {
   Store.setMasterData({ plants: [{ plant: 'UF1', constraints: [
     { key: 'colorWheel', enabled: true,  order: 1 },
@@ -1851,6 +1803,7 @@ test('unrankedActiveFields reports every ACTIVE field with no ranks — not just
   assert.deepEqual(Engine.unrankedActiveFields('UF1'), ['prt01'],
     'colorWheel has ranks; prt02 is switched off; only the enabled-but-empty prt01 is reported');
 });
+
 
 test('unrankedActiveFields treats an EMPTY cache (failed fetch) as every active field unranked', () => {
   // This is what lets OptimizeDialog.run() cover "ranks unavailable" with the
@@ -1867,12 +1820,14 @@ test('unrankedActiveFields treats an EMPTY cache (failed fetch) as every active 
   assert.ok(!Engine.flattenConstraints('UF2').includes('colorWheel'));
 });
 
+
 test('unrankedActiveFields counts a per-LINE override as ranked (no plant-wide list required)', () => {
   Store.setMasterData({ plants: [{ plant: 'UF3', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
   Store.setPriorityRankMaps({ L01: { prt01: { DOG: 1 } } }, 'unit-test');
   assert.deepEqual(Engine.unrankedActiveFields('UF3'), [],
     'a plant configured purely with per-line overrides must not be reported as unconfigured');
 });
+
 
 test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FORM_SIZE', () => {
   // Never-configured plant: byte-identical to the hardcoded pair it replaces.
@@ -1892,6 +1847,7 @@ test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FO
   assert.deepEqual(Engine.changeoverTaskFields('CO3'), ['FORM_SIZE']);
 });
 
+
 test('_sortTerms skips the term for an unregistered key instead of adding a constant one', () => {
   Store.setMasterData({ plants: [{ plant: 'DT1', constraints: [
     { key: 'legacyGone', enabled: true, order: 1 },
@@ -1903,6 +1859,7 @@ test('_sortTerms skips the term for an unregistered key instead of adding a cons
   assert.equal(Engine._sortTerms('changeover', { plant: 'DT1' }).length, 4,
     'an unregistered key must not contribute a term returning the same string for every task');
 });
+
 
 test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list', () => {
   // Reachable state: the generic upload route rejects only a row-less file, so an
@@ -1927,6 +1884,7 @@ test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list'
 // F12 gap 3 (Part 3 integration): Engine.runAndApply's setup-aware live-run
 // surfacing — Engine.lastSetupAwareResult and the toast.optimize_missing_setup_summary
 // warn toast, both landing at F1's dedicated 'scheduled-without-setup' reason.
+
 
 test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast for a live setup-aware run', () => {
   const plant = 'SETUP-LIVE-PLANT';
@@ -2007,6 +1965,7 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
 // this change — the single most important regression guard for this task.
 // ---------------------------------------------------------------------------
 
+
 test('B3a: an inactive plant\'s changeover run produces identical sequencing to a real active plant with an empty matrix', () => {
   const plant = 'B3A-PARITY-PLANT';
   const line = 'B3A-PARITY-LINE';
@@ -2075,6 +2034,7 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
   }
 });
 
+
 test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnostics (no toast, no reported uncovered edges)', () => {
   const plant = 'B3A-QUIET-PLANT';
   const line = 'B3A-QUIET-LINE';
@@ -2130,6 +2090,7 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
     Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
+
 
 test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalendarable order still raises "orders left in place", but not "missing setup summary"', () => {
   // The two suppressions must now be independent: toast.
@@ -2197,6 +2158,7 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
   }
 });
 
+
 test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so an inactive plant\'s Timeline shows no setup bars after a changeover run', () => {
   // Timeline draws setup bars/diagnostics from deriveSetupObservation(
   // Store.setupSnapshot, ...) (schedule-workbench.mts's Timeline.
@@ -2261,7 +2223,7 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
 // real matrix coverage still sees its diagnostics exactly as before —
 // runAndApply's gate (`setupSnapshotActiveAndMatching`) sets
 // `effectiveSetupSnapshot = Store.setupSnapshot` verbatim for this case (see
-// schedule-services.mts around the `effectiveSetupSnapshot` ternary), so
+// optimization/engine.mts around the `effectiveSetupSnapshot` ternary), so
 // nothing about Task 5's synthetic-fallback mechanism is even reachable here.
 //
 // Also deliberately distinct from the pre-existing 'SETUP-LIVE-PLANT' test
@@ -2274,6 +2236,7 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
 // the OTHER of the two producers of that reason string, and the affected
 // order stays admitted in sequence rather than being demoted to the tail.
 // ---------------------------------------------------------------------------
+
 
 test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovered matrix pair still surfaces scheduled-without-setup and places both orders in sequence', () => {
   const plant = 'B3B-COVERAGE-PLANT';
@@ -2380,6 +2343,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
 // priority rank explains "BLUE first".
 // ---------------------------------------------------------------------------
 
+
 test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion order, due-date proximity, or a fixed algorithm order', () => {
   const plant = 'B4-FIELD-ORDER-PLANT';
   const line = 'B4-FIELD-ORDER-LINE';
@@ -2476,6 +2440,7 @@ test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion o
     Store.setPriorityRankMaps(priorPriorityRankMaps, 'unit-test');
   }
 });
+
 
 test('B4: priority rank wins over a cheaper setup reorder under a REAL active-and-matching snapshot, and the identical ordering holds under Task 5\'s synthetic snapshot too', () => {
   const plant = 'B4-PRIORITY-VS-COST-PLANT';
@@ -2599,6 +2564,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
 // >=2 scheduleSegments (placed there by a prior optimizer run).
 // ---------------------------------------------------------------------------
 
+
 test('Engine.manualSchedulePatchFor is policy-independent: a non-"never" plant with an all-closed calendar still commits verbatim, no calendar lookup at all', () => {
   // Before this task, a non-"never" split_order_policy routed through
   // Engine.schedulePatchFor -> Calendar.allocateRuntime, a real
@@ -2645,6 +2611,7 @@ test('Engine.manualSchedulePatchFor is policy-independent: a non-"never" plant w
     else delete Store.calendars[line];
   }
 });
+
 
 test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegments) task by the requested delta, preserving segment count and relative spacing', () => {
   const plant = 'B1-SHIFT-PLANT';
@@ -2712,6 +2679,7 @@ test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegment
   }
 });
 
+
 test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup-aware run', () => {
   // F8: lastSetupAwareResult must mirror lastBacklogResult's clear-then-set
   // lifecycle — a later run that does NOT go through the setup-aware branch
@@ -2750,168 +2718,6 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
   }
 });
 
-test('Alerts.applyFix still calls Engine.autoReflow for overlap alerts (Task 3: B2)', () => {
-  // Task 3: B2 deleted manual-edit autoReflow calls but kept Alerts.applyFix's.
-  // This verifies Engine.autoReflow is still called from applyFix for overlap type.
-  const line = 'REFLOW-OVERLAP-TEST-LINE';
-  const plant = '5512';
-  const start1 = new Date('2026-08-25T08:00:00');
-  const end1 = new Date('2026-08-25T10:00:00');
-  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
-  const end2 = new Date('2026-08-25T11:00:00');
-  const priorPlant = Store.selectedPlant;
-  const priorAutoReflow = Engine.autoReflow;
-
-  let autoReflowCallCount = 0;
-  Engine.autoReflow = (id) => {
-    autoReflowCallCount++;
-    return priorAutoReflow.call(Engine, id);
-  };
-
-  Store.setSelectedPlant(plant, 'unit-test');
-  Store.setTasks([
-    { id: 'overlap-anchor', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start1, end_date: end1 },
-    { id: 'overlap-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start2, end_date: end2 },
-  ], 'unit-test');
-
-  try {
-    // Simulate an overlap alert and apply the fix
-    Alerts._recomputeSync();
-    const overlapAlert = Store.alerts.find(a => a.type === 'overlap');
-    assert.ok(overlapAlert, 'an overlap alert must be present');
-    const callCountBefore = autoReflowCallCount;
-    Alerts.applyFix(overlapAlert.id);
-    assert.ok(autoReflowCallCount > callCountBefore,
-      'Engine.autoReflow must be called inside applyFix for overlap alerts (Task 3: B2 kept this call)');
-  } finally {
-    Engine.autoReflow = priorAutoReflow;
-    Store.setSelectedPlant(priorPlant, 'unit-test');
-  }
-});
-
-test('Alerts.applyFix still calls Engine.autoReflow for blackout alerts (Task 3: B2)', () => {
-  // Task 3: B2 deleted manual-edit autoReflow calls but kept Alerts.applyFix's.
-  // applyFix handles both 'overlap' and 'blackout' via the same branch (line 1476),
-  // calling Engine.autoReflow at line 1515. This test verifies the call path by
-  // mocking an alert and confirming autoReflow is invoked for 'blackout' type.
-  const line = 'REFLOW-BLACKOUT-TEST-LINE';
-  const plant = '5512';
-  const taskId = 'blackout-test-task';
-  const start = new Date('2026-08-25T08:00:00');
-  const end = new Date('2026-08-25T10:00:00');
-  const priorPlant = Store.selectedPlant;
-  const priorAutoReflow = Engine.autoReflow;
-  const priorAlerts = structuredClone(Store.alerts);
-
-  let autoReflowCallCount = 0;
-  Engine.autoReflow = (id) => {
-    autoReflowCallCount++;
-    return priorAutoReflow.call(Engine, id);
-  };
-
-  Store.setSelectedPlant(plant, 'unit-test');
-  Store.setTasks([
-    { id: taskId, PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
-  ], 'unit-test');
-  // Manually inject a blackout alert to avoid complex setup
-  const fakeAlert = {
-    id: 'blackout-test-alert',
-    type: 'blackout',
-    taskId: taskId,
-  };
-  Store.setAlerts([fakeAlert], 'unit-test');
-
-  try {
-    const callCountBefore = autoReflowCallCount;
-    Alerts.applyFix(fakeAlert.id);
-    assert.ok(autoReflowCallCount > callCountBefore,
-      'Engine.autoReflow must be called inside applyFix for blackout alerts (Task 3: B2 kept this call)');
-  } finally {
-    Engine.autoReflow = priorAutoReflow;
-    Store.setAlerts(priorAlerts, 'unit-test');
-    Store.setSelectedPlant(priorPlant, 'unit-test');
-  }
-});
-
-// ---------------------------------------------------------------------------
-// scheduleAlertsForPatches (Phase 3, Pkg E) — shared post-apply alert-recompute
-// scoping for optimizer patches. Mocks Alerts.scheduleRecompute/
-// scheduleRecomputeLines (same pattern as the debounce test above) to verify
-// routing without waiting on the real debounce timer.
-// ---------------------------------------------------------------------------
-
-function withMockedAlertScheduling(fn) {
-  const priorFull = Alerts.scheduleRecompute;
-  const priorLines = Alerts.scheduleRecomputeLines;
-  let fullCalls = 0;
-  let linesCalls = [];
-  Alerts.scheduleRecompute = () => { fullCalls++; };
-  Alerts.scheduleRecomputeLines = (lines) => { linesCalls.push(lines); };
-  try {
-    fn({ getFullCalls: () => fullCalls, getLinesCalls: () => linesCalls });
-  } finally {
-    Alerts.scheduleRecompute = priorFull;
-    Alerts.scheduleRecomputeLines = priorLines;
-  }
-}
-
-test('scheduleAlertsForPatches falls back to a full recompute for an empty patch list', () => {
-  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
-    scheduleAlertsForPatches([], () => 'L1');
-    assert.equal(getFullCalls(), 1, 'an empty patch list must trigger exactly one full recompute');
-    assert.equal(getLinesCalls().length, 0, 'the scoped variant must never be called for an empty patch list');
-  });
-});
-
-test('scheduleAlertsForPatches falls back to a full recompute when a patch carries a MACHINE change', () => {
-  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
-    const patches = [
-      { id: 'p1', changes: { start_date: new Date('2026-08-21T08:00:00') } },
-      { id: 'p2', changes: { MACHINE: 'NEW-LINE' } },
-    ];
-    scheduleAlertsForPatches(patches, () => 'L1');
-    assert.equal(getFullCalls(), 1,
-      'a patch whose changes carry a MACHINE field must fall back to a full recompute, never a scoped one');
-    assert.equal(getLinesCalls().length, 0);
-  });
-});
-
-test('scheduleAlertsForPatches falls back to a full recompute when a patch id resolves to no line', () => {
-  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
-    const patches = [
-      { id: 'resolvable', changes: { start_date: new Date('2026-08-21T08:00:00') } },
-      { id: 'unresolvable', changes: { start_date: new Date('2026-08-21T09:00:00') } },
-    ];
-    const resolveLine = (id) => (id === 'resolvable' ? 'L1' : undefined);
-    scheduleAlertsForPatches(patches, resolveLine);
-    assert.equal(getFullCalls(), 1,
-      'an id that resolves to no line must fall back to a full recompute rather than trust an incomplete scope');
-    assert.equal(getLinesCalls().length, 0);
-  });
-});
-
-test('scheduleAlertsForPatches scopes to exactly the resolved lines for normal patches', () => {
-  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
-    const patches = [
-      { id: 'a', changes: { start_date: new Date('2026-08-21T08:00:00') } },
-      { id: 'b', changes: { start_date: new Date('2026-08-21T09:00:00') } },
-      { id: 'c', changes: { start_date: new Date('2026-08-21T10:00:00') } },
-    ];
-    const lineById = { a: 'L1', b: 'L2', c: 'L1' };
-    scheduleAlertsForPatches(patches, (id) => lineById[id]);
-    assert.equal(getFullCalls(), 0, 'normal, fully-resolvable patches must never trigger a full recompute');
-    assert.equal(getLinesCalls().length, 1, 'exactly one scoped call must be made');
-    assert.deepEqual(new Set(getLinesCalls()[0]), new Set(['L1', 'L2']),
-      'the scoped lines set must contain exactly the lines the patches resolved to, deduplicated');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// effectiveFirmedIdSet -- the single fold the setup-aware branch of
-// runAndApply uses to decide which orders are immovable for a run, and the
-// bugfix pinned here: respectFirmed must gate ECC-firmed orders exactly like
-// it gates manual firms, while the frozen-horizon fold is unconditional.
-// ---------------------------------------------------------------------------
 
 test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true, and only frozen under respectFirmed=false', () => {
   const now = new Date('2026-08-20T08:00:00');
@@ -2952,6 +2758,7 @@ test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true,
 // on an ECC-firmed order in changeover mode; a frozen-horizon order must stay
 // immovable regardless, since the frozen fold is unconditional.
 // ---------------------------------------------------------------------------
+
 
 test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respectFirmed, while a frozen-horizon order stays immovable regardless', () => {
   const plant = 'CO-RESPECT-PLANT';
@@ -3031,3 +2838,4 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
+

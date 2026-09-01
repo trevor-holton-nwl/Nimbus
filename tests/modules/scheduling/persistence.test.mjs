@@ -1,14 +1,19 @@
-// Tests for web/schedule-data.mjs — CQ-1 Phase 2 Task 4.
+// Tests for web/scheduling/persistence.mjs, split from
+// tests/modules/schedule-data.test.mjs (Phase P4 of
+// docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
+// into 3 domain files: scheduling/persistence.mjs, calendar/calendar-sync.mjs,
+// security/session.mjs).
 //
-// Persistence/CalendarSync reach ErrorLog/Toast (application-foundation.mjs), which
-// reference bare `document`/`window` — same split-realm-free, DOM-less environment as
-// tests/modules/schedule-services.test.mjs. Minimal stubs keep those paths a real no-op
-// instead of throwing "document/window is not defined".
+// Persistence reaches ErrorLog/Toast (platform/foundation.mjs), which
+// reference bare `document`/`window` — same split-realm-free, DOM-less
+// environment as tests/modules/optimization/engine.test.mjs. Minimal stubs
+// keep those paths a real no-op instead of throwing "document/window is not
+// defined".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Persistence, CalendarSync, Session } from '../../web/schedule-data.mjs';
-import { Store } from '../../web/schedule-state.mjs';
-import { Config } from '../../web/platform/foundation.mjs';
+import { Persistence } from '../../../web/scheduling/persistence.mjs';
+import { Store } from '../../../web/platform/store.mjs';
+import { Config } from '../../../web/platform/foundation.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {
@@ -172,58 +177,6 @@ test('a load that needs to snap a task to working hours calls the injected calen
   assert.ok(calls.some(c => c[0] === 'endRun'), 'must call the injected endRun');
 });
 
-test('CalendarSync is exported alongside Persistence with its documented public API', () => {
-  assert.equal(typeof CalendarSync.fetchPlantConfig, 'function');
-  assert.equal(typeof CalendarSync.savePlantHours, 'function');
-  assert.equal(typeof CalendarSync.saveLineBlackoutUpsert, 'function');
-  assert.equal(typeof CalendarSync.flushPlant, 'function');
-});
-
-test('CalendarSync discards legacy global plant blackout copies instead of fanning them out', () => {
-  const priorMasterData = Store.masterData;
-  const priorBlocks = Store.plantBlocks;
-  const plants = [{ plant: '1006' }, { plant: '5512' }, { plant: '7000' }];
-  const start = new Date('2026-08-18T08:00:00');
-  const end = new Date('2026-08-18T12:00:00');
-  try {
-    Store.setMasterData({ plants, lines: [] }, 'test');
-    Store.replacePlantBlocks([
-      { id: 'legacy', plant: null, start, end, reason: 'old-global' },
-      { id: 'legacy::1006', plant: '1006', start, end, reason: 'old-global' },
-      { id: 'legacy::5512', plant: '5512', start, end, reason: 'old-global' },
-      { id: 'legacy::7000', plant: '7000', start, end, reason: 'old-global' },
-      { id: 'real-1006', plant: '1006', start, end, reason: 'plant-local' },
-    ], 'test');
-    CalendarSync._discardLegacyGlobalPlantBlocks();
-    assert.deepEqual(Store.plantBlocks.map(b => b.id), ['real-1006']);
-  } finally {
-    Store.setMasterData(priorMasterData, 'test-restore');
-    Store.replacePlantBlocks(priorBlocks, 'test-restore');
-  }
-});
-
-test('CalendarSync discards legacy global line blackout copies instead of fanning them out', () => {
-  const priorMasterData = Store.masterData;
-  const priorBlocks = Store.blocks;
-  const plants = [{ plant: '1006' }, { plant: '5512' }, { plant: '7000' }];
-  const start = new Date('2026-08-18T08:00:00');
-  const end = new Date('2026-08-18T12:00:00');
-  try {
-    Store.setMasterData({ plants, lines: [] }, 'test');
-    Store.replaceBlocks([
-      { id: 'legacy-line', plant: null, line: null, start, end, reason: 'old-global' },
-      { id: 'legacy-line::1006', plant: '1006', line: null, start, end, reason: 'old-global' },
-      { id: 'legacy-line::5512', plant: '5512', line: null, start, end, reason: 'old-global' },
-      { id: 'legacy-line::7000', plant: '7000', line: null, start, end, reason: 'old-global' },
-      { id: 'real-line', plant: '1006', line: 'LINE-1', start, end, reason: 'line-local' },
-    ], 'test');
-    CalendarSync._discardLegacyGlobalLineBlocks();
-    assert.deepEqual(Store.blocks.map(b => b.id), ['real-line']);
-  } finally {
-    Store.setMasterData(priorMasterData, 'test-restore');
-    Store.replaceBlocks(priorBlocks, 'test-restore');
-  }
-});
 
 test('Persistence.loadPriorityRankMaps returns a real awaitable promise and null-clears the cache', async () => {
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
@@ -399,8 +352,8 @@ test('Persistence.loadSetupSnapshot suppresses an older plant response after a n
 // sits inside the master-data Promise.all's .finally(). Without an early clear,
 // the new plant's orders and alerts are on screen while Store.priorityRankMaps
 // still holds the OLD plant's ranks, and Alerts.applyFix's overload branch —
-// which cannot await freshness (schedule-services.mjs must not import
-// schedule-data.mjs) — would sequence against the wrong plant's priority lists.
+// which cannot await freshness (optimization/engine.mjs must not import
+// this module) — would sequence against the wrong plant's priority lists.
 // ---------------------------------------------------------------------------
 
 test('Persistence.load drops the previous plant\'s rank maps immediately on a plant switch, before the new fetch resolves', () => {
@@ -512,59 +465,3 @@ test('Persistence._loadDemo clears stale visibility/frozen horizon state from a 
     'demo orders belong to no real plant, so any retained frozen horizon is categorically wrong for them');
 });
 
-test('Session exposes only the pure session/pref API (no DOM-rendering methods)', () => {
-  assert.equal(typeof Session.currentUser, 'function');
-  assert.equal(typeof Session.actor, 'function');
-  assert.equal(typeof Session.isAdmin, 'function');
-  assert.equal(typeof Session.allowedPlants, 'function');
-  assert.equal(typeof Session.pref, 'function');
-  assert.equal(typeof Session.setPref, 'function');
-  assert.equal(Session._renderUserButton, undefined);
-  assert.equal(Session._renderSettingsPanes, undefined);
-  assert.equal(Session.saveProfile, undefined);
-});
-
-test('Session.currentUser()/actor()/isAdmin()/allowedPlants() read straight from localStorage', () => {
-  const origGetItem = globalThis.localStorage.getItem;
-  globalThis.localStorage.getItem = (k) => k === 'nimbus.session'
-    ? JSON.stringify({ username: 'trevor', role: 'admin', allowed_plants: ['5512'] })
-    : null;
-  try {
-    assert.deepEqual(Session.currentUser(), { username: 'trevor', role: 'admin', allowed_plants: ['5512'] });
-    assert.equal(Session.actor(), 'trevor');
-    assert.equal(Session.isAdmin(), true);
-    assert.deepEqual(Session.allowedPlants(), ['5512']);
-  } finally {
-    globalThis.localStorage.getItem = origGetItem;
-  }
-});
-
-test('Session.signIn emits a session:changed event instead of touching DOM directly', async () => {
-  const events = [];
-  const off = Store.subscribe(evt => { if (evt.type === 'session:changed') events.push(evt); });
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.resolve({
-    ok: true,
-    json: () => Promise.resolve({
-      username: 'trevor', role: 'admin', allowed_plants: null,
-      first_name: 'Trevor', last_name: 'Holton', settings: {}, role_settings: {},
-    }),
-  });
-  try {
-    const data = await Session.signIn('trevor', 'pw');
-    assert.equal(data.username, 'trevor');
-  } finally {
-    globalThis.fetch = origFetch;
-    off();
-  }
-  assert.ok(events.some(e => e.kind === 'signin'), 'signIn must emit a session:changed/signin event');
-});
-
-test('Session.updateCachedUser merges a patch into the cached session blob', () => {
-  globalThis.localStorage.setItem('nimbus.session', JSON.stringify({ username: 'trevor', role: 'admin' }));
-  const merged = Session.updateCachedUser({ first_name: 'Trevor', last_name: 'Holton' });
-  assert.equal(merged.first_name, 'Trevor');
-  assert.equal(merged.username, 'trevor', 'existing fields must be preserved, not clobbered');
-  const stored = JSON.parse(globalThis.localStorage.getItem('nimbus.session'));
-  assert.equal(stored.last_name, 'Holton');
-});

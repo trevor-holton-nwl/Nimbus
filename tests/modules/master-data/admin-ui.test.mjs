@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Plant, ProdLines, MasterData } from '../../../web/master-data/admin-ui.mjs';
-import { CalendarSync } from '../../../web/schedule-data.mjs';
-import { Store } from '../../../web/schedule-state.mjs';
+import { CalendarSync } from '../../../web/calendar/calendar-sync.mjs';
+import { Store } from '../../../web/platform/store.mjs';
 
 test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.init, 'function');

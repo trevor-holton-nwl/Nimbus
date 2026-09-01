@@ -19,8 +19,10 @@
 // no import edge is needed in the other direction.
 /* global NIMBUS */
 import { Config, Util, VirtualList } from '../platform/foundation.mjs';
-import { Store } from '../schedule-state.mjs';
-import { Calendar, Utilization, Alerts, Engine } from '../schedule-services.mjs';
+import { Store } from '../platform/store.mjs';
+import { Calendar } from '../calendar/calendar-engine.mjs';
+import { Utilization, Alerts } from './services.mjs';
+import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mjs';
 import type { NimbusTask, AlertType, UtilSevBucket } from '../platform/types.mjs';

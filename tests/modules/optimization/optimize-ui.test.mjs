@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../web/optimization/optimize-ui.mjs';
 import { Timeline } from '../../../web/scheduling/gantt.mjs';
-import { Store } from '../../../web/schedule-state.mjs';
+import { Store } from '../../../web/platform/store.mjs';
 import { Util, ErrorLog } from '../../../web/platform/foundation.mjs';
-import { Alerts, Utilization } from '../../../web/schedule-services.mjs';
-import { Persistence } from '../../../web/schedule-data.mjs';
+import { Alerts, Utilization } from '../../../web/insights/services.mjs';
+import { Persistence } from '../../../web/scheduling/persistence.mjs';
 
 const require = createRequire(import.meta.url);
 
