@@ -12,7 +12,21 @@ import * as state from './schedule-state.mjs';
 import * as services from './schedule-services.mjs';
 import * as data from './schedule-data.mjs';
 import * as workbench from './schedule-workbench.mjs';
-import * as plantAdmin from './plant-and-administration.mjs';
+// plant-and-administration.mjs was split in Phase P2 of
+// docs/architecture/domain-refactor-plan.md into 9 domain files. The
+// __NIMBUS_PLANT_ADMIN bridge below is reconstructed explicitly from their
+// named exports so it keeps exposing the exact same key set app.js's
+// destructure (and tests/modules/helpers/load-legacy-app.mjs's VM harness)
+// already depend on.
+import { SetupAdmin } from './setup/setup-admin.mjs';
+import { CalendarUI } from './calendar/calendar-admin.mjs';
+import { Plant, ProdLines, MasterData } from './master-data/admin-ui.mjs';
+import { PriorityListMapping } from './priority-lists/mapping.mjs';
+import { LaborPlanning } from './labor/labor-planning.mjs';
+import { AdminCockpit, SystemConfig } from './admin-ops/admin-ui.mjs';
+import { Interface } from './integration/sap-interface-ui.mjs';
+import { Security } from './security/security-admin.mjs';
+import { setActiveTabResolvers } from './shell/tab-resolvers.mjs';
 import * as shell from './shell/application-shell.mjs';
 import * as materialGrids from './master-data/material-grids.mjs';
 // Stage 0 setup resolution is a pure module. Keep it in the static module
@@ -26,7 +40,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
   win.__NIMBUS_SERVICES = services;
   win.__NIMBUS_DATA = data;
   win.__NIMBUS_WORKBENCH = workbench;
-  win.__NIMBUS_PLANT_ADMIN = plantAdmin;
+  win.__NIMBUS_PLANT_ADMIN = { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, PriorityListMapping, LaborPlanning, AdminCockpit, SystemConfig, Interface, Security, setActiveTabResolvers };
   win.__NIMBUS_SHELL = shell;
   win.__NIMBUS_MATERIAL_GRIDS = materialGrids;
 

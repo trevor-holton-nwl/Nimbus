@@ -11,9 +11,23 @@ import * as state from '../../../web/schedule-state.mjs';
 import * as services from '../../../web/schedule-services.mjs';
 import * as data from '../../../web/schedule-data.mjs';
 import * as workbench from '../../../web/schedule-workbench.mjs';
-import * as plantAdmin from '../../../web/plant-and-administration.mjs';
+// plant-and-administration.mjs was split in Phase P2 of
+// docs/architecture/domain-refactor-plan.md into 9 domain files — reconstruct
+// the same __NIMBUS_PLANT_ADMIN bridge shape app-entry.mjs builds, so this VM
+// harness stays a faithful mirror of the real boot path.
+import { SetupAdmin } from '../../../web/setup/setup-admin.mjs';
+import { CalendarUI } from '../../../web/calendar/calendar-admin.mjs';
+import { Plant, ProdLines, MasterData } from '../../../web/master-data/admin-ui.mjs';
+import { PriorityListMapping } from '../../../web/priority-lists/mapping.mjs';
+import { LaborPlanning } from '../../../web/labor/labor-planning.mjs';
+import { AdminCockpit, SystemConfig } from '../../../web/admin-ops/admin-ui.mjs';
+import { Interface } from '../../../web/integration/sap-interface-ui.mjs';
+import { Security } from '../../../web/security/security-admin.mjs';
+import { setActiveTabResolvers } from '../../../web/shell/tab-resolvers.mjs';
 import * as shell from '../../../web/shell/application-shell.mjs';
 import * as materialGrids from '../../../web/master-data/material-grids.mjs';
+
+const plantAdmin = { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, PriorityListMapping, LaborPlanning, AdminCockpit, SystemConfig, Interface, Security, setActiveTabResolvers };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');

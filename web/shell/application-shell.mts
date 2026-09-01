@@ -64,7 +64,9 @@ import { Store } from '../schedule-state.mjs';
 import { Alerts, Engine } from '../schedule-services.mjs';
 import { Persistence, Session } from '../schedule-data.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from '../schedule-workbench.mjs';
-import { AdminCockpit, Plant, ProdLines, LaborPlanning } from '../plant-and-administration.mjs';
+import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
+import { Plant, ProdLines } from '../master-data/admin-ui.mjs';
+import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 

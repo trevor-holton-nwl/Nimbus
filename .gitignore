@@ -19,12 +19,20 @@ web/schedule-state.mjs
 web/schedule-services.mjs
 web/schedule-data.mjs
 web/schedule-workbench.mjs
-web/plant-and-administration.mjs
 web/shell/application-shell.mjs
 web/master-data/material-grids.mjs
 web/setup/setup-domain.mjs
 web/optimization/setup-scheduler.mjs
 web/master-data/admin-tables.mjs
+web/shell/tab-resolvers.mjs
+web/setup/setup-admin.mjs
+web/calendar/calendar-admin.mjs
+web/master-data/admin-ui.mjs
+web/priority-lists/mapping.mjs
+web/labor/labor-planning.mjs
+web/admin-ops/admin-ui.mjs
+web/integration/sap-interface-ui.mjs
+web/security/security-admin.mjs
 
 # Intermediate OpenAPI JSON dump (regenerated every `npm run generate:api-types`
 # run) — the generated web/types/api-generated.d.mts it feeds IS committed.

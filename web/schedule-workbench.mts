@@ -149,7 +149,7 @@ import { applyPatchesToSnapshot, evaluateSchedule } from './optimization/setup-s
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './optimization/setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from './setup/setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
-import { SetupAdmin } from './plant-and-administration.mjs';
+import { SetupAdmin } from './setup/setup-admin.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey, SetupOccurrenceOverride } from './platform/types.mjs';
 import { ORDER_FIELD_CATALOG } from './scheduling/order-field-catalog.mjs';
 
