@@ -29,7 +29,15 @@ None — this is a frontend-only shell/boot domain.
 - **Script/module load order matters.** `app-entry.mjs` (a `<script type="module">`) imports the real ES modules, bridges their exports onto `window.__NIMBUS_*` globals, then injects `app.js` and `nimbus-intelligence.js` as classic scripts in that order, then deletes all the bridge globals (`app-entry.mjs` lines ~99-106) since `app.js` only reads them synchronously at its own IIFE top and `nimbus-intelligence.js` never reads them at all. Locale files load before all of this (first in the script chain) because `app.js` reads them when defining `window.t`.
 - **Classic-script constraints.** `nimbus-intelligence.js` must stay non-module for the bare-`NIMBUS`-identifier reason above — don't convert it to an ES module without re-solving that coupling.
 - **i18n routing.** Route all new/changed UI text through `data-i18n`/`t()`, even tiny badges, rather than hardcoding to match a pre-existing hardcoded neighbor — `tests/modules/locale-completeness.test.mjs` pins coverage.
-- **Flatpickr standard.** Never use native `<input type="date">`/`datetime-local`/`time` — see the root `CLAUDE.md`'s Flatpickr table for the exact `enableTime`/`noCalendar`/`dateFormat`/`altFormat` matrix (link there rather than duplicating). The one exception (AG Grid inline `start_date` cell editor) is native `datetime-local`.
+- **Flatpickr standard.** All date and time inputs use [Flatpickr](https://flatpickr.js.org/) — never native `<input type="date">`, `datetime-local`, or `time`. Flatpickr loads via CDN in `index.html` (before `styles.css`). The NIMBUS amber theme lives mid-`styles.css` under `/* Flatpickr calendar — NIMBUS amber theme */`, with dark-mode counterparts later in the file. **Exception:** the AG Grid inline `start_date` cell editor (`Table._DateTimeEditor`) is a native `datetime-local`.
+
+  | Type | `enableTime` | `noCalendar` | `dateFormat` | `altInput` | `altFormat` |
+  |------|:---:|:---:|---|:---:|---|
+  | Date-only | — | — | `"Y-m-d"` | `true` | `"M j, Y"` |
+  | Datetime | `true` | — | `"Y-m-d\\TH:i"` | `true` | `"M j, Y · h:i K"` |
+  | Time-only (hours table) | `true` | `true` | `"H:i"` | — | — |
+
+  Modal pickers are **module-level, lazily initialized, and conventionally named `_fp*`** — built once behind an `if (!Module._fpX)` guard, then `Module._fpX.setDate(d, false)` (`false` suppresses `onChange`); table time inputs are built inline per row. `grep -n "flatpickr(" web/*.mjs` finds every instance. With `altInput: true`, existing `.value` reads keep working: the hidden original input holds the `dateFormat` value, the visible alt input shows `altFormat`.
 - **CSP is Report-Only, not yet enforced.** `index.html:17` carries a `Content-Security-Policy-Report-Only` meta tag pending removal of the remaining static inline `onclick=`/`onchange=` handlers — don't assume CSP is actually blocking anything yet.
 
 ## Integration points
