@@ -25,7 +25,13 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-load_dotenv()
+# Pinned to this file's own directory (repo root) rather than a bare
+# load_dotenv()'s upward search — from inside a git worktree (no local .env
+# of its own), an unscoped search walks up and silently loads the MAIN
+# repo's .env, which may point at the live Azure pilot DB (see CLAUDE.md's
+# DB-safety note). tests/conftest.py already pins its own load_dotenv() the
+# same way for the same reason; this makes bare `import db` safe too.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up).
 log = logging.getLogger("nimbus.db")
