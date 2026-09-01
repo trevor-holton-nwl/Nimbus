@@ -47,3 +47,48 @@ def test_backend_source_and_config_are_never_served(client, path):
 def test_markdown_files_are_never_served(client):
     r = client.get("/scheduling/CLAUDE.md")
     assert r.status_code == 404
+
+
+# GET /setup/{plant} and GET /master-data/{table} are bare 2-path-segment API
+# routes, the same shape as a request for a static file directly inside
+# web/setup/ or web/master-data/ (e.g. web/setup/setup-domain.mjs from the
+# frontend domain reorganization). Without domain_static_asset_mw in brain.py,
+# Starlette's router matches those API routes first and the static file is
+# never reached. These pin that fix using hand-written fixtures (not the
+# tsc-compiled .mjs files, which don't exist until `npm run build` runs).
+@pytest.mark.parametrize("path", [
+    "/setup/_static-delivery-check.mjs",
+    "/master-data/_static-delivery-check.mjs",
+])
+def test_domain_static_files_are_served_not_shadowed_by_api_route(client, path):
+    r = client.get(path)
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+    assert r.headers.get("cache-control") == "no-cache"
+
+
+@pytest.mark.parametrize("path", [
+    "/setup/_nonexistent-static-check.mjs",
+    "/master-data/_nonexistent-static-check.mjs",
+])
+def test_domain_static_lookalike_paths_404_without_reaching_api_route(client, path):
+    # A dotted final segment under these two prefixes is treated as a
+    # filename, not a route parameter — even when the file doesn't exist, so
+    # it must 404 like a missing static asset rather than fall through into
+    # get_setup()/md_list() (which would 401/404 for a different reason).
+    r = client.get(path)
+    assert r.status_code == 404
+
+
+def test_setup_route_still_reachable_for_real_plant_codes(client):
+    # A real plant code never contains a dot, so it must still reach the
+    # actual API route (get_setup requires auth -> 401 here, not 404).
+    r = client.get("/setup/5512")
+    assert r.status_code == 401
+
+
+def test_master_data_route_still_reachable_for_real_table_names(client):
+    # An unknown-but-dotless table name must still reach md_list's own
+    # not-found handling, not the static-asset short-circuit.
+    r = client.get("/master-data/not-a-real-table")
+    assert r.status_code == 404
