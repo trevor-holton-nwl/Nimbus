@@ -12,7 +12,7 @@
     "build:watch": "tsc -p tsconfig.worker.json --watch",
     "pretest": "npm run build",
     "test:legacy": "node --test \"tests/js/*.test.js\"",
-    "test:modules": "node --test \"tests/modules/*.test.mjs\"",
+    "test:modules": "node --test \"tests/modules/**/*.test.mjs\"",
     "test": "npm run test:legacy && npm run test:modules",
     "check:legacy-surface": "node scripts/legacy-surface.mjs",
     "check:static-assets": "node scripts/check-static-assets.mjs",
