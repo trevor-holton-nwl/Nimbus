@@ -114,7 +114,14 @@ export function findForbiddenFiles(dir) {
       found.push(...findForbiddenFiles(full));
       continue;
     }
-    if (FORBIDDEN_BASENAMES.has(entry.name) || !ALLOWED_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+    const ext = extname(entry.name).toLowerCase();
+    // .md is not in ALLOWED_EXTENSIONS (broad .md would leak arbitrary docs
+    // placed anywhere under web/) — but a future per-domain web/<domain>/CLAUDE.md
+    // (P6; Claude Code's ancestor-directory doc auto-load) is allowed by exact
+    // basename only. brain.py's block_markdown_mw still 404s any *.md request
+    // at the HTTP layer regardless, so this carve-out never actually serves it.
+    const isAllowedMarkdown = ext === '.md' && entry.name === 'CLAUDE.md';
+    if (FORBIDDEN_BASENAMES.has(entry.name) || (!ALLOWED_EXTENSIONS.has(ext) && !isAllowedMarkdown)) {
       found.push(full);
     }
   }

@@ -42,3 +42,8 @@ def test_non_mjs_static_responses_are_not_forced_no_cache(client):
 ])
 def test_backend_source_and_config_are_never_served(client, path):
     assert client.get(path).status_code == 404
+
+
+def test_markdown_files_are_never_served(client):
+    r = client.get("/scheduling/CLAUDE.md")
+    assert r.status_code == 404

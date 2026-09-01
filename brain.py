@@ -382,6 +382,19 @@ async def static_mjs_no_cache_mw(request: Request, call_next):
     return response
 
 
+# Future domain phases (P6) place a CLAUDE.md inside each web/<domain>/ folder
+# so Claude Code's ancestor-directory doc auto-load picks it up while editing
+# that domain's source. Those files must never be reachable through the public
+# StaticFiles mount on the live Azure pilot — this is a security boundary, so
+# it short-circuits before call_next/routing rather than just adjusting
+# headers on the way out.
+@api.middleware("http")
+async def block_markdown_mw(request: Request, call_next):
+    if request.url.path.endswith(".md"):
+        return Response(status_code=404)
+    return await call_next(request)
+
+
 # Error semantics: surface real HTTP status codes behind ONE consistent JSON
 # envelope — {status:"error", message, detail} — instead of the legacy
 # `200 + {status:"error"}` AND instead of FastAPI's default {"detail": ...}.

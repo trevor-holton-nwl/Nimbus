@@ -10,7 +10,7 @@
 //   node scripts/legacy-surface.mjs --write  # write / overwrite contract
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,8 +28,9 @@ const CONTRACT_PATH = resolve(ROOT, 'tests/contracts/cq1-legacy-surface.json');
 // ---------------------------------------------------------------------------
 export function discoverModuleSources(root = ROOT) {
   const webDir = resolve(root, 'web');
-  return readdirSync(webDir)
+  return readdirSync(webDir, { recursive: true })
     .filter(f => f.endsWith('.mjs'))
+    .map(f => f.split(sep).join('/'))
     .sort()
     .map(f => ({ file: f, source: readFileSync(resolve(webDir, f), 'utf8') }));
 }
