@@ -10,6 +10,25 @@
 // A true leaf: no imports of its own beyond the ambient NimbusTask type, and
 // it must stay that way — nothing it exports may start importing back into
 // optimization/engine.mjs or optimization/setup-scheduler.mjs.
+//
+// This leaf breaks the NAMED cycle (schedule-services/engine.mjs <->
+// setup-scheduler.mjs), but setup-scheduler.mjs still imports
+// candidateDefaultWorkHours from calendar/calendar-engine.mjs, which in turn
+// imports Engine/the pure evaluators back from engine.mjs — so
+// engine.mjs -> setup-scheduler.mjs -> calendar-engine.mjs -> engine.mjs is a
+// real transitive loop, and combined with engine.mjs's separate direct cycle
+// with insights/services.mjs, all four files form one strongly-connected
+// component (contradicting the "setup-scheduler is a detached module"
+// framing elsewhere in this codebase's docs). P4's review empirically
+// confirmed this is safe today — every cross-reference in the loop is
+// touched only inside a function/method body invoked after all four modules
+// finish top-level evaluation, verified by loading them under every possible
+// entry order with no TDZ ReferenceError — but it is NOT two independent
+// 2-file cycles the way it might look from any single file's imports.
+// Reason about the whole four-file loop, not just your own two neighbors,
+// before adding a new top-level (module-evaluation-time) reference anywhere
+// in engine.mjs, setup-scheduler.mjs, calendar-engine.mjs, or
+// insights/services.mjs.
 import type { NimbusTask } from '../platform/types.mjs';
 
 export interface RemoveBacklogDiagnostics {
