@@ -1,5 +1,7 @@
 # CQ-1 Compatibility Inventory
 
+> **Historical (P6, 2026-09-01):** this inventory documents the seven CQ-1 mega-modules (`application-foundation.mjs`, `schedule-state.mjs`, `schedule-services.mjs`, `schedule-data.mjs`, `schedule-workbench.mjs`, `plant-and-administration.mjs`, `application-shell.mjs`) as they existed before the domain refactor split each of them into per-domain files under `web/<domain>/`. It also carries known drift predating that split (a phantom `UtilStrip` row, a retired `WelcomeSplash` row, and several newer modules missing from its tables) — not corrected here. **For current module ownership, see the per-domain `CLAUDE.md` network** (root `CLAUDE.md`'s directory table is the index). Kept for its still-relevant history on the inline-handler backlog and the honest final-criteria accounting (§6-§8).
+
 ## CQ-1 status: COMPLETE (as of Phase 4 Task 7) — module extraction is done; several deliberately deferred/open items remain (see §6-§8)
 
 The seven-file module extraction itself is finished and verified. It ships

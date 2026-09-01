@@ -1,5 +1,7 @@
 # TypeScript Migration
 
+> **Archive note (P6, 2026-09-01):** this doc's Phases 0-7 were executed and are historically accurate for the 7 CQ-1 mega-modules named below, but those files no longer exist — the domain-refactor split (see `docs/architecture/domain-refactor-plan.md`) broke each of them into per-domain files under `web/<domain>/`. **Current module ownership lives in the per-domain `CLAUDE.md` network** (root `CLAUDE.md`'s directory table is the index); treat every `web/schedule-*.mts`/`web/plant-and-administration.mts`/`web/application-shell.mts` path below as historical, not live.
+
 Tracks NIMBUS's frontend migration from untyped vanilla JS to real, compiled TypeScript. This is a multi-session effort — update the phase table below as work lands, the same way `docs/MIGRATION.md` tracks other long-running follow-up work.
 
 > **This document is deliberately front-loaded.** The [Codebase migration map](#codebase-migration-map-read-before-any-phase) section below captures a full read of the ~25k-line frontend done up front (bridge topology, every domain data shape, the string-enum inventory, the API/persistence contract surface, and the `.d.ts`-vs-reality drift list). It exists so each future phase reads *findings here* instead of re-deriving them from the source every time — the analysis was the expensive part; spend it once. When a phase lands, correct anything here that turned out wrong rather than letting it rot.
@@ -203,16 +205,18 @@ Every converted module is a *tracked hand-written `.mjs` today* that becomes *ge
 
 ## Phase table
 
-| Phase | Scope | Status |
-|---|---|---|
-| 0 | Foundation: `tsconfig.json` + `tsconfig.worker.json`, build/typecheck npm scripts, CI step, Docker multi-stage build, ESLint TS support, ambient `.d.ts` for compute-core + CDN libs, pilot-convert `nimbus-worker.ts` | **Done** |
-| 1 | `application-foundation.mjs` → `.mts` (`Config`, `Util`, `VirtualList`, `PerfMonitor`, `ErrorLog`, `Toast`, `Modal`) **+ create `web/types.ts`** with the domain typedefs from §C/§D. **Foundation is the DAG leaf (zero imports) — convert it first** so every downstream `.mts` can resolve typed `Config`/`Util` via a real `.mts` sibling, rather than hitting `TS7016 "could not find a declaration file"` on an untyped `.mjs`. | **Done** |
-| 2 | `schedule-state.mjs` → `.mts` (`Store`, `Selection`, `UndoStack`, `Sandbox`) — the state core; heaviest domain-type payoff | **Done** |
-| 3 | `schedule-services.mjs` → `.mts` (`Calendar`, `Compute`, `Alerts`, `Utilization`, `Engine`) | **Done** |
-| 4 | `schedule-data.mjs` → `.mts` (`Persistence`, `CalendarSync`, `Session`) — do the API-contract + `StoredState`/`LiveState` typedefs here (§F/§G) | **Done** |
-| 5 | `application-shell.mjs` → `.mts` | **Done** |
-| 6 | `schedule-workbench.mjs` (7,517 lines) — largest file; likely needs its own sub-phasing | **Done** |
-| 7 | `plant-and-administration.mjs` (6,916 lines) — second-largest; likely needs its own sub-phasing | **Done** |
+**Current location column added P6 (2026-09-01):** each Phase 1-7 mega-module named below was itself later split by the domain refactor into the per-domain files under `web/<domain>/` shown in the last column — see that domain's own `CLAUDE.md` for what it owns today, not this table.
+
+| Phase | Scope (as it was at the time) | Status | Current location (post-domain-split) |
+|---|---|---|---|
+| 0 | Foundation: `tsconfig.json` + `tsconfig.worker.json`, build/typecheck npm scripts, CI step, Docker multi-stage build, ESLint TS support, ambient `.d.ts` for compute-core + CDN libs, pilot-convert `nimbus-worker.ts` | **Done** | unchanged — stays at `web/` root |
+| 1 | `application-foundation.mjs` → `.mts` (`Config`, `Util`, `VirtualList`, `PerfMonitor`, `ErrorLog`, `Toast`, `Modal`) **+ create `web/types.ts`** with the domain typedefs from §C/§D. **Foundation is the DAG leaf (zero imports) — convert it first** so every downstream `.mts` can resolve typed `Config`/`Util` via a real `.mts` sibling, rather than hitting `TS7016 "could not find a declaration file"` on an untyped `.mjs`. | **Done** | `web/platform/foundation.mts` + `web/platform/types.mts` |
+| 2 | `schedule-state.mjs` → `.mts` (`Store`, `Selection`, `UndoStack`, `Sandbox`) — the state core; heaviest domain-type payoff | **Done** | `Store`/`UndoStack` → `web/platform/store.mts`; `Selection` → `web/scheduling/selection.mts`; `Sandbox` → `web/optimization/sandbox.mts` |
+| 3 | `schedule-services.mjs` → `.mts` (`Calendar`, `Compute`, `Alerts`, `Utilization`, `Engine`) | **Done** | `Calendar` → `web/calendar/calendar-engine.mts`; `Compute`/`Alerts`/`Utilization` → `web/insights/services.mts`; `Engine` → `web/optimization/engine.mts` |
+| 4 | `schedule-data.mjs` → `.mts` (`Persistence`, `CalendarSync`, `Session`) — do the API-contract + `StoredState`/`LiveState` typedefs here (§F/§G) | **Done** | `Persistence` → `web/scheduling/persistence.mts`; `CalendarSync` → `web/calendar/calendar-sync.mts`; `Session` → `web/security/session.mts` |
+| 5 | `application-shell.mjs` → `.mts` | **Done** | `web/shell/application-shell.mts` |
+| 6 | `schedule-workbench.mjs` (7,517 lines) — largest file; likely needs its own sub-phasing | **Done** | split across `web/scheduling/gantt.mts`, `web/scheduling/orders.mts`, `web/optimization/optimize-ui.mts`, `web/calendar/edit-calendar.mts`, `web/insights/insights-ui.mts`, `web/priority-lists/viewers.mts` |
+| 7 | `plant-and-administration.mjs` (6,916 lines) — second-largest; likely needs its own sub-phasing | **Done** | split across `web/setup/setup-admin.mts`, `web/calendar/calendar-admin.mts`, `web/master-data/admin-ui.mts`, `web/priority-lists/mapping.mts`, `web/labor/labor-planning.mts`, `web/admin-ops/admin-ui.mts`, `web/integration/sap-interface-ui.mts`, `web/security/security-admin.mts` |
 
 > **Execution order corrected 2026-08-01 — Phases 5-7 run 6 → 7 → 5, not numerically.** §A's DAG shows `application-shell` importing from both `schedule-workbench` and `plant-and-administration` (`application-shell.mjs:32-37`), not the reverse — the table's numbering is a historical label, not a dependency order. `tsconfig.json` sets `allowJs: false`, so once `application-shell.mts` exists and tries to resolve `import { Timeline, … } from './schedule-workbench.mjs'` against a plain untyped `.mjs` with no covering `.d.ts`, that's a hard `TS2307 "Cannot find module"` build failure, not a soft `any`. Converting workbench and plant-admin first means shell's imports resolve to real typed `.mts` siblings when its turn comes, the same DAG-respecting order Phase 0→4 already used for the lower four modules. Phase numbers are kept as-is for continuity with earlier notes in this doc; only the *execution* order changes.
 >
