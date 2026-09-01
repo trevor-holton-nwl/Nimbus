@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { evaluateSchedule } from '../../web/setup-scheduler.mjs';
-import * as SetupScheduler from '../../web/setup-scheduler.mjs';
-import { ErrorLog } from '../../web/application-foundation.mjs';
+import { evaluateSchedule } from '../../web/optimization/setup-scheduler.mjs';
+import * as SetupScheduler from '../../web/optimization/setup-scheduler.mjs';
+import { ErrorLog } from '../../web/platform/foundation.mjs';
 import { Store } from '../../web/schedule-state.mjs';
 import { Engine } from '../../web/schedule-services.mjs';
 

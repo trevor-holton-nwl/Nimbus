@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Persistence, CalendarSync, Session } from '../../web/schedule-data.mjs';
 import { Store } from '../../web/schedule-state.mjs';
-import { Config } from '../../web/application-foundation.mjs';
+import { Config } from '../../web/platform/foundation.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {

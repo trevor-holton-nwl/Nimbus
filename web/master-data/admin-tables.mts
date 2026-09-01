@@ -8,14 +8,14 @@
 // backed editable grid: no create/edit/delete path exists anywhere in this
 // module (OD-E3) — every request here is a GET.
 //
-// New, standalone module — mirrors master-data-grids.mts's own placement
+// New, standalone module — mirrors material-grids.mts's own placement
 // rationale (not folded into plant-and-administration.mts, which is already
 // 8000+ lines carrying nine other modules). Unlike MaterialGrids, this file
 // needs no window.__NIMBUS_* classic-script bridge: plant-and-
 // administration.mts (AdminCockpit) is itself a real ES module, so it can
 // (and does) `import { AdminTables } from './admin-tables.mjs'` directly —
 // the same real-ESM-to-real-ESM pattern application-shell.mts already uses
-// for `import { MaterialGrids } from './master-data-grids.mjs'`. A window
+// for `import { MaterialGrids } from './material-grids.mjs'`. A window
 // bridge is only needed at the app-entry.mjs -> app.js classic-script
 // boundary, which this module never needs to cross (AdminCockpit calls
 // `AdminTables.render()` directly; nothing in index.html or
@@ -31,7 +31,7 @@
 // module must never call _assert_plant_allowed-equivalent logic or filter
 // the catalog by Store.selectedPlant.
 /* global agGrid, NIMBUS */
-import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
+import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 
 // -- Backend contract types (admin_tables.py / brain.py) ---------------------
 

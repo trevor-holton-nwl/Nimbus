@@ -6,14 +6,14 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
-import * as foundation from '../../../web/application-foundation.mjs';
+import * as foundation from '../../../web/platform/foundation.mjs';
 import * as state from '../../../web/schedule-state.mjs';
 import * as services from '../../../web/schedule-services.mjs';
 import * as data from '../../../web/schedule-data.mjs';
 import * as workbench from '../../../web/schedule-workbench.mjs';
 import * as plantAdmin from '../../../web/plant-and-administration.mjs';
-import * as shell from '../../../web/application-shell.mjs';
-import * as materialGrids from '../../../web/master-data-grids.mjs';
+import * as shell from '../../../web/shell/application-shell.mjs';
+import * as materialGrids from '../../../web/master-data/material-grids.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');

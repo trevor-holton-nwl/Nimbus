@@ -13,18 +13,18 @@ node_modules/
 # *.js/*.mjs glob, so hand-written fixtures like web/_static-delivery-check.mjs
 # are never accidentally ignored.
 web/nimbus-worker.js
-web/types.mjs
-web/application-foundation.mjs
+web/platform/types.mjs
+web/platform/foundation.mjs
 web/schedule-state.mjs
 web/schedule-services.mjs
 web/schedule-data.mjs
 web/schedule-workbench.mjs
 web/plant-and-administration.mjs
-web/application-shell.mjs
-web/master-data-grids.mjs
-web/setup-domain.mjs
-web/setup-scheduler.mjs
-web/admin-tables.mjs
+web/shell/application-shell.mjs
+web/master-data/material-grids.mjs
+web/setup/setup-domain.mjs
+web/optimization/setup-scheduler.mjs
+web/master-data/admin-tables.mjs
 
 # Intermediate OpenAPI JSON dump (regenerated every `npm run generate:api-types`
 # run) — the generated web/types/api-generated.d.mts it feeds IS committed.

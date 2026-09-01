@@ -22,7 +22,7 @@ import {
   MIN_PRODUCTIVE_SEGMENT_MINUTES, scheduleAlertsForPatches, effectiveFirmedIdSet,
 } from '../../web/schedule-services.mjs';
 import { Store } from '../../web/schedule-state.mjs';
-import { Toast, Util, Config } from '../../web/application-foundation.mjs';
+import { Toast, Util, Config } from '../../web/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');

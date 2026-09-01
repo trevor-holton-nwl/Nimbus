@@ -30,7 +30,7 @@
 // `globalThis.NimbusComputeCore` themselves before calling into Calendar —
 // see tests/modules/schedule-services.test.mjs and the load-legacy-app.mjs
 // VM harness for the two bootstrap sites.
-import { Config, Util, ErrorLog, PerfMonitor, Toast } from './application-foundation.mjs';
+import { Config, Util, ErrorLog, PerfMonitor, Toast } from './platform/foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
@@ -39,8 +39,8 @@ import {
   evaluateSptWithSetup as evaluateSptWithSetupPure,
   evaluateThroughput as evaluateThroughputPure,
   SETUP_AWARE_CONVERGENCE_WINDOW,
-} from './setup-scheduler.mjs';
-import { resolveSetup, stateForOrder } from './setup-domain.mjs';
+} from './optimization/setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup/setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
@@ -50,8 +50,8 @@ import type {
   PlaceWithSetupRequest,
   SchedulePatch,
   ScheduleSnapshot,
-} from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from './types.mjs';
+} from './optimization/setup-scheduler.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from './platform/types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 interface CalendarEntry {

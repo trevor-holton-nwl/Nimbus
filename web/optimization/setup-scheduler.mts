@@ -6,10 +6,10 @@
  * Timeline; the workbench owns the one explicit Store commit after Apply.
  */
 
-import type { RemoveBacklogResult } from './schedule-services.mjs';
-import { Engine, candidateDefaultWorkHours, MIN_PRODUCTIVE_SEGMENT_MINUTES } from './schedule-services.mjs';
-import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from './setup-domain.mjs';
-import type { SetupResolutionIndex } from './setup-domain.mjs';
+import type { RemoveBacklogResult } from '../schedule-services.mjs';
+import { Engine, candidateDefaultWorkHours, MIN_PRODUCTIVE_SEGMENT_MINUTES } from '../schedule-services.mjs';
+import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
+import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
   NimbusBlock,
   ConstraintConfig,
@@ -25,7 +25,7 @@ import type {
   SetupStateKey,
   SplitOrderPolicy,
   WorkHours,
-} from './types.mjs';
+} from '../platform/types.mjs';
 
 export interface SchedulePatch {
   id: string;

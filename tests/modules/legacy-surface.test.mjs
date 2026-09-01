@@ -24,7 +24,7 @@ const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, m
 
 test('discoverModuleSources picks up the CQ-1 extracted .mjs files (blind-spot regression guard)', () => {
   const files = moduleSources.map(m => m.file);
-  assert.ok(files.includes('application-foundation.mjs'), files.join(', '));
+  assert.ok(files.includes('platform/foundation.mjs'), files.join(', '));
   assert.ok(files.includes('schedule-state.mjs'), files.join(', '));
   assert.ok(files.includes('app-entry.mjs'), files.join(', '));
 });
@@ -32,11 +32,11 @@ test('discoverModuleSources picks up the CQ-1 extracted .mjs files (blind-spot r
 test('inlineHandlers picks up an onchange-shaped string from an .mjs module, not just index.html/app.js', () => {
   // Regression guard for the exact drift the review flagged: a doc-comment
   // containing an onchange="..."-shaped string moved from app.js into
-  // application-foundation.mjs during the migration and silently disappeared
+  // application-foundation.mjs (now platform/foundation.mjs) during the migration and silently disappeared
   // from the contract because the scanner only read 3 hardcoded files.
   assert.ok(
-    surface.inlineHandlers.some(h => h.file === 'application-foundation.mjs'),
-    'expected at least one inlineHandlers entry sourced from application-foundation.mjs'
+    surface.inlineHandlers.some(h => h.file === 'platform/foundation.mjs'),
+    'expected at least one inlineHandlers entry sourced from platform/foundation.mjs'
   );
 });
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../web/application-foundation.mjs';
-import { Util, ErrorLog } from '../../web/application-foundation.mjs';
+import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../web/platform/foundation.mjs';
+import { Util, ErrorLog } from '../../web/platform/foundation.mjs';
 
 test('Config exposes the documented constants', () => {
   assert.equal(Config.STEP_MS, 15 * 60 * 1000);

@@ -3,8 +3,8 @@
 // and synchronous post-commit events. Every mutator takes a `source` and
 // every emitted event carries {type, source, revision, mode, ...}. See
 // docs/architecture/cq1-compatibility-inventory.md for the full contract.
-import { Config, Util, PerfMonitor, ErrorLog, Toast } from './application-foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './types.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast } from './platform/foundation.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, SelectionEmitKind, StoreMode, OrderScheduleSegment } from './platform/types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;

@@ -7,17 +7,17 @@
 // exists only to hand off values across the classic-script boundary, not as a
 // permanent global. This file shrinks over Phase 2-4 as more of app.js's
 // content moves into real modules, and disappears once app.js does.
-import * as foundation from './application-foundation.mjs';
+import * as foundation from './platform/foundation.mjs';
 import * as state from './schedule-state.mjs';
 import * as services from './schedule-services.mjs';
 import * as data from './schedule-data.mjs';
 import * as workbench from './schedule-workbench.mjs';
 import * as plantAdmin from './plant-and-administration.mjs';
-import * as shell from './application-shell.mjs';
-import * as materialGrids from './master-data-grids.mjs';
+import * as shell from './shell/application-shell.mjs';
+import * as materialGrids from './master-data/material-grids.mjs';
 // Stage 0 setup resolution is a pure module. Keep it in the static module
 // graph for build/runtime validation, without exposing a classic-script bridge.
-import './setup-domain.mjs';
+import './setup/setup-domain.mjs';
 
 export function bootEntry({ window: win = (typeof window !== 'undefined' ? window : undefined), loadScript } = {}) {
   if (!win) return Promise.reject(new Error('NIMBUS boot error: no window available for bootEntry'));

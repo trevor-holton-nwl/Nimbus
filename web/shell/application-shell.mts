@@ -58,15 +58,15 @@
 // were even though Timeline/TimelineNav/Table are now also directly imported
 // above (the same "no further change needed" idiom Phase 3/4 used for every
 // other now-same-file forward reference).
-import { Config, Util, ErrorLog, Toast, Modal } from './application-foundation.mjs';
-import type { VirtualList } from './application-foundation.mjs';
-import { Store } from './schedule-state.mjs';
-import { Alerts, Engine } from './schedule-services.mjs';
-import { Persistence, Session } from './schedule-data.mjs';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from './schedule-workbench.mjs';
-import { AdminCockpit, Plant, ProdLines, LaborPlanning } from './plant-and-administration.mjs';
-import { MaterialGrids } from './master-data-grids.mjs';
-import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from './types.mjs';
+import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
+import type { VirtualList } from '../platform/foundation.mjs';
+import { Store } from '../schedule-state.mjs';
+import { Alerts, Engine } from '../schedule-services.mjs';
+import { Persistence, Session } from '../schedule-data.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from '../schedule-workbench.mjs';
+import { AdminCockpit, Plant, ProdLines, LaborPlanning } from '../plant-and-administration.mjs';
+import { MaterialGrids } from '../master-data/material-grids.mjs';
+import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
 

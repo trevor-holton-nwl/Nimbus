@@ -17,8 +17,8 @@
 // The two grids are ~85% identical, modeled as two GridSpecs over one engine
 // rather than two near-duplicate modules.
 /* global agGrid, NIMBUS */
-import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
-import { Store } from './schedule-state.mjs';
+import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Store } from '../schedule-state.mjs';
 
 // -- Local type declarations -------------------------------------------------
 

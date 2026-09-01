@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeShadowDiagnostics, resolveSetup, stateForOrder } from '../../web/setup-domain.mjs';
+import { computeShadowDiagnostics, resolveSetup, stateForOrder } from '../../web/setup/setup-domain.mjs';
 
 const definition = {
   plant: '5512',

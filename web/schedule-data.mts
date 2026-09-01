@@ -33,9 +33,9 @@
 // `KEY` export or a `window`/`globalThis` reach-around.
 // DOM/UI code that was co-located with these modules in app.js stays there —
 // see docs/architecture/cq1-compatibility-inventory.md.
-import { Config, Util, ErrorLog, Toast } from './application-foundation.mjs';
+import { Config, Util, ErrorLog, Toast } from './platform/foundation.mjs';
 import { Store, Sandbox } from './schedule-state.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, LiveState, StoredState, NaiveLocalTs, IsoUtcTs, TopLevelTab, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from './platform/types.mjs';
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2

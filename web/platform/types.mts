@@ -405,7 +405,7 @@ export interface ResolveSetupInput {
    *  matches `definition.signature_version`; otherwise `resolveSetup` falls back
    *  to the unindexed scan unchanged. This is a type-only import — `setup-domain.mts`
    *  and this module do not form a runtime circular dependency. */
-  index?: import('./setup-domain.mjs').SetupResolutionIndex;
+  index?: import('../setup/setup-domain.mjs').SetupResolutionIndex;
 }
 
 // ---------------------------------------------------------------------------

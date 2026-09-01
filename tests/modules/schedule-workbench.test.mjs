@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } from '../../web/schedule-workbench.mjs';
 import { Store, Selection } from '../../web/schedule-state.mjs';
-import { Util, ErrorLog } from '../../web/application-foundation.mjs';
+import { Util, ErrorLog } from '../../web/platform/foundation.mjs';
 import { Alerts, Utilization, Engine } from '../../web/schedule-services.mjs';
 import { Persistence } from '../../web/schedule-data.mjs';
 

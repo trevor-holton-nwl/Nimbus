@@ -37,20 +37,20 @@
 // call sites changes. AdminCockpit is by far the largest single module
 // moved in this migration (~2,260 lines).
 /* global NIMBUS */
-import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from './application-foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from './platform/foundation.mjs';
 import { Store, UndoStack } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Engine, Utilization } from './schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from './schedule-data.mjs';
 import { AlertsUIAdapter, PriorityListViewer } from './schedule-workbench.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from './types.mjs';
-import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, TopLevelTab, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from './platform/types.mjs';
+import { ORDER_FIELD_CATALOG } from './scheduling/order-field-catalog.mjs';
 // Workstream E's universal table browser (admin-tables.mjs) is a standalone
 // module, same placement rationale as MaterialGrids (master-data-grids.mjs) —
 // a plain real-ESM import, not a window.__NIMBUS_* bridge, since both files
 // are real ES modules in the same build graph (see admin-tables.mts's own
 // header comment for why no bridge is needed here).
-import { AdminTables } from './admin-tables.mjs';
+import { AdminTables } from './master-data/admin-tables.mjs';
 
 // Injected getter seam so Plant/LaborPlanning can ask "am I currently the
 // visible tab/sub-tab?" without a bare reference to `App` (which lives in

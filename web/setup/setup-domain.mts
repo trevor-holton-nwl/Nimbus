@@ -22,7 +22,7 @@ import type {
   SetupMatrixRow,
   SetupOccurrenceOverride,
   SetupStateKey,
-} from './types.mjs';
+} from '../platform/types.mjs';
 
 const ORDER_FIELD_BY_SIGNATURE_FIELD: Readonly<Record<string, string>> = {
   colorWheel: 'COLOR',

@@ -140,18 +140,18 @@
 // `application-shell.mjs` respectively in Phase 4 (see this plan's Architecture
 // section and the compatibility inventory).
 /* global NIMBUS */
-import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './application-foundation.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from './platform/foundation.mjs';
 import { Store, Selection, UndoStack, Sandbox } from './schedule-state.mjs';
 import type { StoreEvent } from './schedule-state.mjs';
 import { Calendar, Utilization, Alerts, Engine, snapshotSchedule, deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, scheduleAlertsForPatches, effectiveFirmedIdSet } from './schedule-services.mjs';
 import type { RemoveBacklogResult, SetupObservation } from './schedule-services.mjs';
-import { applyPatchesToSnapshot, evaluateSchedule } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
-import { resolveSetup, stateForOrder } from './setup-domain.mjs';
+import { applyPatchesToSnapshot, evaluateSchedule } from './optimization/setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './optimization/setup-scheduler.mjs';
+import { resolveSetup, stateForOrder } from './setup/setup-domain.mjs';
 import { Session, Persistence, CalendarSync } from './schedule-data.mjs';
 import { SetupAdmin } from './plant-and-administration.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey, SetupOccurrenceOverride } from './types.mjs';
-import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertType, AlertSev, UtilSevBucket, OptimizerMode, WorkHours, PriorityListEntry, PriorityListResponse, SplitOrderPolicy, TimelineItemKind, SetupSnapshot, SetupStateKey, SetupOccurrenceOverride } from './platform/types.mjs';
+import { ORDER_FIELD_CATALOG } from './scheduling/order-field-catalog.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own

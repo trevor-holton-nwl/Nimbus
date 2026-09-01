@@ -2,11 +2,6 @@
   "version": 1,
   "inlineHandlers": [
     {
-      "file": "application-foundation.mjs",
-      "attribute": "onchange",
-      "expression": "..."
-    },
-    {
       "file": "index.html",
       "attribute": "onchange",
       "expression": "NIMBUS.EditCalendar.onToggle(0,this.checked)"
@@ -540,6 +535,11 @@
       "file": "plant-and-administration.mjs",
       "attribute": "oncontextmenu",
       "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
+    },
+    {
+      "file": "platform/foundation.mjs",
+      "attribute": "onchange",
+      "expression": "..."
     },
     {
       "file": "schedule-workbench.mjs",
