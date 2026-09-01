@@ -29,13 +29,9 @@ jobs:
         # Blocking gate over the hand-written JS (app.js, intelligence, worker,
         # compute-core). Kept green.
         run: npm run lint:ci
-      - name: ESLint full report (locales — non-blocking)
-        # Surfaces the pre-existing duplicate-key errors in locales/*.js
-        # (CODE_REVIEW_FINDINGS.md Appendix A.1). Non-blocking until that
-        # separate i18n cleanup lands; flip to blocking once locales are clean.
-        run: npm run lint:errors
-        continue-on-error: true
-      - name: ESLint full gate
+      - name: ESLint full gate (incl. locales — errors block)
+        # Locales' pre-existing duplicate-key errors (CODE_REVIEW_FINDINGS.md
+        # Appendix A.1) are fixed; this now runs as the sole, blocking copy.
         run: npm run lint:errors
       - name: JS unit tests
         run: npm test
