@@ -11,7 +11,18 @@ import * as foundation from './platform/foundation.mjs';
 import * as state from './schedule-state.mjs';
 import * as services from './schedule-services.mjs';
 import * as data from './schedule-data.mjs';
-import * as workbench from './schedule-workbench.mjs';
+// schedule-workbench.mjs was split in Phase P3 of
+// docs/architecture/domain-refactor-plan.md into 6 domain files. The
+// __NIMBUS_WORKBENCH bridge below is reconstructed explicitly from their
+// named exports so it keeps exposing the exact same 18-key set app.js's
+// destructure (and tests/modules/helpers/load-legacy-app.mjs's VM harness)
+// already depend on.
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from './scheduling/gantt.mjs';
+import { Table, Inspector, ContextMenu, Printer } from './scheduling/orders.mjs';
+import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from './optimization/optimize-ui.mjs';
+import { Dashboard, AlertsUIAdapter } from './insights/insights-ui.mjs';
+import { ColorWheelViewer, PriorityListViewer } from './priority-lists/viewers.mjs';
+import { EditCalendar } from './calendar/edit-calendar.mjs';
 // plant-and-administration.mjs was split in Phase P2 of
 // docs/architecture/domain-refactor-plan.md into 9 domain files. The
 // __NIMBUS_PLANT_ADMIN bridge below is reconstructed explicitly from their
@@ -39,7 +50,7 @@ export function bootEntry({ window: win = (typeof window !== 'undefined' ? windo
   win.__NIMBUS_STATE = state;
   win.__NIMBUS_SERVICES = services;
   win.__NIMBUS_DATA = data;
-  win.__NIMBUS_WORKBENCH = workbench;
+  win.__NIMBUS_WORKBENCH = { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter };
   win.__NIMBUS_PLANT_ADMIN = { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, PriorityListMapping, LaborPlanning, AdminCockpit, SystemConfig, Interface, Security, setActiveTabResolvers };
   win.__NIMBUS_SHELL = shell;
   win.__NIMBUS_MATERIAL_GRIDS = materialGrids;

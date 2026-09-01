@@ -36,8 +36,8 @@
 //   - `Dashboard._chartToday` (the resize handler's home-tab branch) was dead
 //     code — grep + `git log -S` across the whole repo's history confirm no
 //     commit ever assigned `Dashboard._chartToday` anything, predating even
-//     the CQ-1 split. Dashboard (schedule-workbench.mts, out of this task's
-//     scope) has no such property, so the reference doesn't compile against
+//     the CQ-1 split. Dashboard (insights/insights-ui.mts as of Phase P3, out
+//     of this task's scope) has no such property, so the reference doesn't compile against
 //     its real type. Removed — it was always a no-op at runtime.
 //   - `Table._api.sizeColumnsToFit()` (Orders sub-tab activation) needed a
 //     real method added to `NimbusVendor.AgGridApi` in web/types/vendor.d.ts
@@ -48,7 +48,7 @@
 // NIMBUS is the classic-script global app.js's IIFE assigns its return value
 // to (`const NIMBUS = (function () {...})()`) — a bare reference to it
 // resolves correctly from inside a real ES module sharing the same page
-// realm, the same idiom already established in schedule-workbench.mjs and
+// realm, the same idiom already established in scheduling/gantt.mjs and
 // plant-and-administration.mjs (see their own `/* global NIMBUS */` notes and
 // docs/architecture/cq1-compatibility-inventory.md). Used below only for
 // cross-file calls into nimbus-intelligence.js's DarkMode/LangSwitcher (which
@@ -63,7 +63,9 @@ import type { VirtualList } from '../platform/foundation.mjs';
 import { Store } from '../schedule-state.mjs';
 import { Alerts, Engine } from '../schedule-services.mjs';
 import { Persistence, Session } from '../schedule-data.mjs';
-import { Timeline, TimelineNav, DependencyOverlay, Table, Hierarchy, GanttFilter, Dashboard, AlertsUIAdapter } from '../schedule-workbench.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from '../scheduling/gantt.mjs';
+import { Table } from '../scheduling/orders.mjs';
+import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
 import { Plant, ProdLines } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
@@ -104,10 +106,10 @@ interface LandingViewPref {
 }
 
 /** Session.pref('optimizerDefaults') shape. Duplicated (not imported) from
- *  schedule-workbench.mts's own non-exported OptimizerDefaults local
- *  interface of the same shape — that type isn't part of that module's
- *  public surface, so each file scopes its own view, same as
- *  SessionUserView above. */
+ *  optimization/optimize-ui.mts's own non-exported OptimizerDefaults local
+ *  interface of the same shape (schedule-workbench.mts pre-Phase-P3) — that
+ *  type isn't part of that module's public surface, so each file scopes its
+ *  own view, same as SessionUserView above. */
 interface OptimizerDefaultsPref {
   mode?: string;
   preset?: string;

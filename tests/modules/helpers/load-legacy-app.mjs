@@ -10,7 +10,16 @@ import * as foundation from '../../../web/platform/foundation.mjs';
 import * as state from '../../../web/schedule-state.mjs';
 import * as services from '../../../web/schedule-services.mjs';
 import * as data from '../../../web/schedule-data.mjs';
-import * as workbench from '../../../web/schedule-workbench.mjs';
+// schedule-workbench.mjs was split in Phase P3 of
+// docs/architecture/domain-refactor-plan.md into 6 domain files — reconstruct
+// the same __NIMBUS_WORKBENCH bridge shape app-entry.mjs builds, so this VM
+// harness stays a faithful mirror of the real boot path.
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../web/scheduling/gantt.mjs';
+import { Table, Inspector, ContextMenu, Printer } from '../../../web/scheduling/orders.mjs';
+import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../web/optimization/optimize-ui.mjs';
+import { Dashboard, AlertsUIAdapter } from '../../../web/insights/insights-ui.mjs';
+import { ColorWheelViewer, PriorityListViewer } from '../../../web/priority-lists/viewers.mjs';
+import { EditCalendar } from '../../../web/calendar/edit-calendar.mjs';
 // plant-and-administration.mjs was split in Phase P2 of
 // docs/architecture/domain-refactor-plan.md into 9 domain files — reconstruct
 // the same __NIMBUS_PLANT_ADMIN bridge shape app-entry.mjs builds, so this VM
@@ -28,6 +37,7 @@ import * as shell from '../../../web/shell/application-shell.mjs';
 import * as materialGrids from '../../../web/master-data/material-grids.mjs';
 
 const plantAdmin = { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, PriorityListMapping, LaborPlanning, AdminCockpit, SystemConfig, Interface, Security, setActiveTabResolvers };
+const workbench = { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '../../..');
@@ -291,13 +301,14 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // rather than fabricate a second, divergent window.
   globalThis.window = sandbox.window;
 
-  // NOTE (CQ-1 Phase 3 Task 1): schedule-workbench.mjs's `Timeline` references a
+  // NOTE (CQ-1 Phase 3 Task 1): scheduling/gantt.mjs's (schedule-workbench.mjs
+  // pre-Phase-P3) `Timeline` references a
   // handful of app.js-resident siblings (App, Inspector, Interaction, GanttFilter,
   // EmptyState) via the bare `NIMBUS` binding rather than direct imports — safe in
   // a real browser (classic-script top-level `const`/`let` share one realm-wide
   // declarative scope with any module on the same page), but `NIMBUS` here only
   // exists inside THIS vm sandbox's context (`ctx.__NIMBUS__` below), not on the
-  // host realm where schedule-workbench.mjs (a real ES module, imported above)
+  // host realm where scheduling/gantt.mjs (a real ES module, imported above)
   // actually executes. No current test calls a Timeline method that reaches
   // `NIMBUS` (rebuild()/focus()/gotoLineDay()/_renderEmptyOverlay() all do), so
   // this hasn't needed a fix yet — if a future test (e.g. Task 5's Interaction
@@ -309,7 +320,8 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   //
   // IMPORTANT — this VM harness cannot substitute for a real-browser smoke test
   // of this pattern: it never populates `globalThis.NIMBUS`, so any of the
-  // dozens of `NIMBUS.X` call sites across `schedule-workbench.mjs` that a test
+  // dozens of `NIMBUS.X` call sites across the former `schedule-workbench.mjs`
+  // (now `scheduling/gantt.mjs`/`scheduling/orders.mjs`/etc.) that a test
   // happens to reach would throw ReferenceError here rather than silently pass,
   // but nothing in this suite reaches most of them (see above), so a broken
   // `NIMBUS.EmptyState.render`/`NIMBUS.App.goto`/`NIMBUS.GanttFilter.isolateLine`

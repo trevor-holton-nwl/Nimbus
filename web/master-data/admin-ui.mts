@@ -9,7 +9,8 @@ import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs
 import { Store } from '../schedule-state.mjs';
 import { Engine } from '../schedule-services.mjs';
 import { CalendarSync, Session, Persistence } from '../schedule-data.mjs';
-import { AlertsUIAdapter, PriorityListViewer } from '../schedule-workbench.mjs';
+import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
+import { PriorityListViewer } from '../priority-lists/viewers.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
@@ -177,8 +178,8 @@ export const Plant = {
     // cq1-legacy-surface contract snapshot. Wired here instead, same pattern as
     // everything above. Both modals are always-present static markup, so a
     // single boot-time wiring is sufficient. `PriorityListViewer` lives in
-    // schedule-workbench.mjs and is already imported at the top of this file;
-    // `PriorityListMapping` is defined below in this same module.
+    // priority-lists/viewers.mjs and is already imported at the top of this
+    // file; `PriorityListMapping` is defined below in this same module.
     const mapModal = document.getElementById('modal-priority-mapping');
     // Backdrop click, target-guarded exactly as the inline handler was — only a
     // click on the backdrop itself dismisses, never one that bubbled up from the

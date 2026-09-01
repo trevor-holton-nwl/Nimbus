@@ -18,7 +18,12 @@ web/platform/foundation.mjs
 web/schedule-state.mjs
 web/schedule-services.mjs
 web/schedule-data.mjs
-web/schedule-workbench.mjs
+web/scheduling/gantt.mjs
+web/scheduling/orders.mjs
+web/optimization/optimize-ui.mjs
+web/insights/insights-ui.mjs
+web/priority-lists/viewers.mjs
+web/calendar/edit-calendar.mjs
 web/shell/application-shell.mjs
 web/master-data/material-grids.mjs
 web/setup/setup-domain.mjs

@@ -477,6 +477,41 @@
       "expression": "NIMBUS.OptimizeDialog.filterPlants(this.value)"
     },
     {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onchange",
+      "expression": "..."
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._latenessDrillClear()"
+    },
+    {
+      "file": "insights/insights-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.Dashboard._unfirm('${t.id}')"
+    },
+    {
       "file": "labor/labor-planning.mjs",
       "attribute": "onchange",
       "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
@@ -537,107 +572,77 @@
       "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
     },
     {
+      "file": "optimization/optimize-ui.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
+    },
+    {
+      "file": "optimization/optimize-ui.mjs",
+      "attribute": "onclick",
+      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
+    },
+    {
       "file": "platform/foundation.mjs",
       "attribute": "onchange",
       "expression": "..."
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "..."
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onColorChange(this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.GanttFilter._onFormChange(this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('color', this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('date', this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.Table._onChipChange('status', this)"
-    },
-    {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
-    },
-    {
-      "file": "schedule-workbench.mjs",
+      "file": "priority-lists/viewers.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.ColorWheelViewer._toggleExpand(this)"
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
+      "file": "scheduling/gantt.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onColorChange(this)"
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
+      "file": "scheduling/gantt.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.GanttFilter._onFormChange(this)"
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
+      "file": "scheduling/orders.mjs",
+      "attribute": "onchange",
+      "expression": "..."
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrillClear()"
+      "file": "scheduling/orders.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('color', this)"
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._unfirm('${t.id}')"
+      "file": "scheduling/orders.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('date', this)"
     },
     {
-      "file": "schedule-workbench.mjs",
+      "file": "scheduling/orders.mjs",
+      "attribute": "onchange",
+      "expression": "NIMBUS.Table._onChipChange('status', this)"
+    },
+    {
+      "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Inspector.toggleFirm(false)"
     },
     {
-      "file": "schedule-workbench.mjs",
+      "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Inspector.toggleFirm(true)"
     },
     {
-      "file": "schedule-workbench.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
-    },
-    {
-      "file": "schedule-workbench.mjs",
+      "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._closeNotePopover()"
     },
     {
-      "file": "schedule-workbench.mjs",
+      "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._saveNotePopover('${id}')"
     },
     {
-      "file": "schedule-workbench.mjs",
+      "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
     }
