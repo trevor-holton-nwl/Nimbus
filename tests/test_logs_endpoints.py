@@ -10,6 +10,7 @@ whole file if it cannot be constructed on this machine.
 import pytest
 
 try:
+    from fastapi.routing import iter_route_contexts
     from starlette.testclient import TestClient
 
     import brain
@@ -25,8 +26,14 @@ def tc():
     # users happen to exist in a developer's local database — but first
     # confirm the route actually still requires require_admin, so overriding
     # it can't silently mask the dependency having been dropped from the route.
+    #
+    # P5 note: brain.api.routes now holds one _IncludedRouter per domain
+    # router (api.include_router(...)) rather than flat route objects —
+    # fastapi.routing.iter_route_contexts() is the public helper (also used
+    # internally by app.openapi()) that walks included routers and yields
+    # the real per-path route contexts (.path/.methods/.dependencies).
     route = next(
-        route for route in brain.api.routes
+        route for route in iter_route_contexts(brain.api.routes)
         if getattr(route, "path", None) == "/logs/backend" and "GET" in route.methods
     )
     assert any(

@@ -35,7 +35,7 @@ from psycopg.types.json import Jsonb
 from db import _pool, _str_id
 import db
 import master_data as md
-import setup_data
+import server.setup.data as setup_data
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up).
 log = logging.getLogger("nimbus.sap")

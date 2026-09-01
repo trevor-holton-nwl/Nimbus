@@ -35,8 +35,8 @@ COPY . .
 
 # The frontend now lives under web/ in the repo, so a single directory copy is
 # the whole isolation boundary: the public ingress serves ONLY /app/web, which
-# never contains brain.py / db.py / master_data.py / schema.sql. Add a new
-# frontend file under web/ and it's picked up automatically — no list to maintain.
+# never contains brain.py / db.py / master_data.py / server/ / schema.sql. Add
+# a new frontend file under web/ and it's picked up automatically — no list to maintain.
 # Copied from the webbuild stage (not this stage's own COPY . .) so the served
 # tree includes tsc's compiled output, not just the checked-in .ts/.mts sources.
 COPY --from=webbuild /build/web/ /app/web/

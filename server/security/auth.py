@@ -19,7 +19,7 @@ import os
 import secrets
 
 import psycopg
-from fastapi import HTTPException, Request
+from fastapi import Header, HTTPException, Request
 from psycopg.types.json import Jsonb
 
 # Import the shared pool from the existing db module (same idiom as master_data.py).
@@ -640,3 +640,27 @@ def ensure_bootstrap_admin() -> None:
                 (_BOOTSTRAP_ADMIN_USERNAME, password_hash, "admin"),
             )
         conn.commit()
+
+
+# =============================================================================
+# API-KEY DEPLOYMENT GUARD (P5 relocation — moved here verbatim from brain.py,
+# unchanged, per docs/architecture/domain-refactor-plan.md §4's router-mechanics
+# note: "Auth guards live in server/security/auth.py; route modules import
+# them (one-way)." require_api_key is a Depends() guard referenced by every one
+# of the 9 domain routers, so it needs a home outside brain.py that none of
+# them create a cycle importing — this is that home.
+#
+# Optional shared-secret guard for destructive / DDL / maintenance routes. It is a
+# NO-OP until NIMBUS_API_KEY is set in the environment, so the (login-less) frontend
+# keeps working untouched in dev; set the env var AND have admin clients send the
+# matching X-API-Key header to lock these routes down for a hosted deployment.
+# NOTE: this is a deployment-config patch, NOT user-level auth — actor identity is
+# still taken from spoofable X-User / x-user-email headers. Proper per-user auth/SSO
+# with server-verified identity is the real fix (see MIGRATION.md → "User security").
+# =============================================================================
+NIMBUS_API_KEY = os.getenv("NIMBUS_API_KEY")
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)):
+    if NIMBUS_API_KEY and x_api_key != NIMBUS_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")

@@ -6,7 +6,7 @@ structure for the sibling PATCH /security/me (name) feature.
 from fastapi import HTTPException
 import pytest
 
-import auth
+import server.security.auth as auth
 
 ZZ_USER_A = "zztest_pw_a"
 ZZ_USER_B = "zztest_pw_b"

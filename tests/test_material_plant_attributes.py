@@ -17,6 +17,7 @@ reachable, and that the write route can never be captured by the generic
 """
 import master_data as md
 import brain
+from fastapi.routing import iter_route_contexts
 from starlette.routing import compile_path
 
 
@@ -129,7 +130,12 @@ def test_max_attribute_updates_ceiling_rejects_oversized_batches():
 
 
 def _master_data_paths():
-    return [getattr(r, "path", None) for r in brain.api.routes if (getattr(r, "path", "") or "").startswith("/master-data")]
+    # P5 note: brain.api.routes now holds one _IncludedRouter per domain
+    # router — iter_route_contexts() walks those to yield the real per-path
+    # route contexts (same helper app.openapi() uses internally), preserving
+    # registration order both within and across the included routers.
+    return [getattr(r, "path", None) for r in iter_route_contexts(brain.api.routes)
+            if (getattr(r, "path", "") or "").startswith("/master-data")]
 
 
 def test_material_grid_routes_are_registered_before_the_table_catchall():
@@ -167,7 +173,7 @@ def test_new_master_data_routes_are_not_admin_gated():
     these grids. A `require_admin` dependency creeping onto any of the three
     new routes would silently lock non-admin planners out."""
     by_path = {}
-    for r in brain.api.routes:
+    for r in iter_route_contexts(brain.api.routes):
         p = getattr(r, "path", None)
         if p in ("/master-data/_material-grid", "/master-data/_material-plant-grid",
                  "/master-data/material-plants/attributes"):

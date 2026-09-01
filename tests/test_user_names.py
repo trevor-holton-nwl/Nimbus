@@ -6,7 +6,7 @@ endpoint.
 from fastapi import HTTPException
 import pytest
 
-import auth
+import server.security.auth as auth
 
 
 @pytest.mark.pg

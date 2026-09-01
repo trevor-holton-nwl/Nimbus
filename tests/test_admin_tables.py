@@ -19,6 +19,7 @@ import re
 import sys
 
 import pytest
+from fastapi.routing import iter_route_contexts
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -26,7 +27,7 @@ if ROOT not in sys.path:
 
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
-import admin_tables as at  # noqa: E402
+import server.master_data.browser as at  # noqa: E402
 import brain  # noqa: E402
 
 
@@ -104,8 +105,12 @@ _ADMIN_TABLE_CONCRETE_PATHS = [
 def test_admin_table_routes_declare_require_admin(method, path):
     # Route objects carry the templated path ("/admin/tables/{table}"), not
     # a concrete resolved one.
+    # P5 note: brain.api.routes now holds one _IncludedRouter per domain
+    # router — iter_route_contexts() walks those to yield real per-path
+    # route contexts (.path/.methods/.dependencies), same helper app.openapi()
+    # uses internally.
     route = next(
-        r for r in brain.api.routes
+        r for r in iter_route_contexts(brain.api.routes)
         if getattr(r, "path", None) == path and method in r.methods
     )
     assert any(dep.dependency is brain.require_admin for dep in route.dependencies), (

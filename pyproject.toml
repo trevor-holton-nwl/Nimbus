@@ -7,8 +7,8 @@ extend-select = ["B", "SIM", "PLW"]   # bugbear, simplify, pylint-warnings — o
 ignore = ["B008"]                      # FastAPI idiom: Body(...)/File(...)/Query(...) in arg defaults
 
 [tool.ruff.lint.per-file-ignores]
-"brain.py" = ["PLW0603"]               # intentional module-level color-wheel cache: GLOBAL_CW / PLANT_CWS / CW_LOADED_AT
-"db.py"    = ["PLW0603"]               # intentional lazy table-allowlist cache: _MAINT_TABLE_ALLOWLIST
+"db.py" = ["PLW0603"]               # intentional lazy table-allowlist cache: _MAINT_TABLE_ALLOWLIST
+"server/priority_lists/cache.py" = ["PLW0603"]  # intentional module-level priority-list cache: PLANT_LISTS / CW_LOADED_AT (moved here from brain.py in P5)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

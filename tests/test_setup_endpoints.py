@@ -4,7 +4,7 @@ import pytest
 try:
     from starlette.testclient import TestClient
 
-    import auth
+    import server.security.auth as auth
     import brain
 except Exception as exc:  # pragma: no cover - depends on local application imports
     pytest.skip(f"brain/TestClient unavailable in this environment: {exc}", allow_module_level=True)
@@ -144,7 +144,11 @@ def _install_matrix_rows_double(monkeypatch):
     service = _SetupServiceWithMatrixRows()
     for name in ("current_signature_version", "page_matrix_rows", "get_setup_snapshot"):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
-    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
+    # P5 note: NIMBUS_API_KEY/require_api_key now live in server/security/auth.py
+    # (moved there per docs/architecture/domain-refactor-plan.md §4's "auth
+    # guards live in server/security/auth.py" rule) — the real guard reads the
+    # module-level constant from there, not from brain.
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
     brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
@@ -182,7 +186,11 @@ def tc(monkeypatch):
     # (Workstream D2) via brain.md.get_plant_setup_active — stub it so this
     # DB-double-backed fixture never opens a real Postgres connection.
     monkeypatch.setattr(brain.md, "get_plant_setup_active", lambda plant: False, raising=False)
-    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "setup-test-key")
+    # P5 note: NIMBUS_API_KEY/require_api_key now live in server/security/auth.py
+    # (moved there per docs/architecture/domain-refactor-plan.md §4's "auth
+    # guards live in server/security/auth.py" rule) — the real guard reads the
+    # module-level constant from there, not from brain.
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[brain.require_admin] = lambda: "owner@example.com"
     brain.api.dependency_overrides[auth.require_authenticated] = lambda: "scheduler@example.com"
@@ -464,7 +472,9 @@ def test_override_creation_requires_an_explicit_predecessor_key_for_initial_stat
 
 def test_setup_writes_reject_missing_api_key(monkeypatch):
     """The API-key guard remains active even when a scheduler identity is otherwise authorized."""
-    monkeypatch.setattr(brain, "NIMBUS_API_KEY", "required-key")
+    # P5 note: NIMBUS_API_KEY/require_api_key now live in server/security/auth.py
+    # — the real guard reads the module-level constant from there, not from brain.
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
     brain.api.dependency_overrides[auth.require_setup_scheduler] = lambda: "scheduler@example.com"
     brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["5512"]
     try:
