@@ -1104,6 +1104,21 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS prt_02             TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS production_version TEXT;
 
 -- ----------------------------------------------------------------------------
+-- 9 SAP COOIS extract fields, upload-sourced (no post-upsert stamping like
+-- prt_01/prt_02 above). Hidden by default in web/order-field-catalog.mjs;
+-- an admin opts them into the grid/Inspector via System Configuration.
+-- ----------------------------------------------------------------------------
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS planned_order_initial_quantity NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS reduced_quantity               NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_category                 TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_type                     TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bom_alternative                INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bom_usage                      INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS labor_hours                    NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS machine_hours                  NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS no_of_fte                      NUMERIC;
+
+-- ----------------------------------------------------------------------------
 -- One-time: copy every existing color_wheel row into priority_list as a
 -- plant-wide (machine = '') 'colorWheel' entry. Keyed on plant_label (the raw
 -- plant name as typed), NOT plant_key (a _cw_safe_name() slug) — priority_list

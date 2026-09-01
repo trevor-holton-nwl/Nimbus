@@ -479,6 +479,15 @@ _ORDERS_SELECT = f"""
         form_size             AS "FORM_SIZE",
         notes                 AS "NOTES",
         firming_indicator     AS "FIRMING_INDICATOR",
+        planned_order_initial_quantity AS "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)",
+        reduced_quantity                AS "REDUCED_QUANTITY_(GMEIN)",
+        order_category                  AS "ORDER_CATEGORY",
+        order_type                      AS "ORDER_TYPE",
+        bom_alternative                 AS "BOM_ALTERNATIVE",
+        bom_usage                       AS "BOM_USAGE",
+        labor_hours                     AS "LABOR_HOURS_(MEINH)",
+        machine_hours                   AS "MACHINE_HOURS_(MEINH)",
+        no_of_fte                       AS "NO_OF_FTE_(MEINH)",
         -- Optimistic-concurrency token. xmin is the txid that last wrote the row;
         -- it changes on every UPDATE, gives exact integer equality (no timestamp
         -- precision/tz fragility), and needs no schema column. Cast via text because
@@ -1645,9 +1654,12 @@ _UPSERT_SQL = """
         id, production_order, material_number, material_description,
         machine, plant, basic_start_date, basic_finish_date,
         run_time, color, prt_01, prt_02, production_version,
-        order_quantity, form_size, firming_indicator, upload_batch_id, updated_at
+        order_quantity, form_size, firming_indicator,
+        planned_order_initial_quantity, reduced_quantity, order_category, order_type,
+        bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
+        upload_batch_id, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
@@ -1696,6 +1708,15 @@ _UPSERT_SQL = """
         order_quantity        = EXCLUDED.order_quantity,
         form_size             = EXCLUDED.form_size,
         firming_indicator     = EXCLUDED.firming_indicator,
+        planned_order_initial_quantity = EXCLUDED.planned_order_initial_quantity,
+        reduced_quantity                = EXCLUDED.reduced_quantity,
+        order_category                  = EXCLUDED.order_category,
+        order_type                      = EXCLUDED.order_type,
+        bom_alternative                 = EXCLUDED.bom_alternative,
+        bom_usage                       = EXCLUDED.bom_usage,
+        labor_hours                     = EXCLUDED.labor_hours,
+        machine_hours                   = EXCLUDED.machine_hours,
+        no_of_fte                       = EXCLUDED.no_of_fte,
         upload_batch_id       = EXCLUDED.upload_batch_id,
         updated_at            = NOW()
     RETURNING (xmax = 0) AS inserted
@@ -1708,12 +1729,16 @@ _UPSERT_SQL = """
 # clause expects: id, production_order, material_number, material_description,
 # machine, plant, basic_start_date, basic_finish_date, run_time, color,
 # prt_01, prt_02, production_version, order_quantity, form_size, firming_indicator,
+# planned_order_initial_quantity, reduced_quantity, order_category, order_type,
+# bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
 # upload_batch_id.
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "machine", "plant", "basic_start_date", "basic_finish_date",
     "run_time", "color", "prt_01", "prt_02", "production_version",
     "order_quantity", "form_size", "firming_indicator",
+    "planned_order_initial_quantity", "reduced_quantity", "order_category", "order_type",
+    "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
 )
 
 
@@ -2198,6 +2223,19 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     if qcol in df.columns:
         df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
 
+    # 9 SAP COOIS extract fields — upload-sourced (unlike prt_01/prt_02/
+    # production_version, which are NULL from upload and backfilled by
+    # db._stamp_order_attributes). Numeric/integer columns coerced upfront
+    # like qcol above so downstream _num/_int just check pd.notna.
+    _SAP_NUMERIC_COLS = (
+        "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)", "REDUCED_QUANTITY_(GMEIN)",
+        "LABOR_HOURS_(MEINH)", "MACHINE_HOURS_(MEINH)", "NO_OF_FTE_(MEINH)",
+    )
+    _SAP_INTEGER_COLS = ("BOM_ALTERNATIVE", "BOM_USAGE")
+    for col in _SAP_NUMERIC_COLS + _SAP_INTEGER_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     # ---------- Build per-row dicts (keyed by orders columns) ----------
     # The id + cumcount dedup, chunked upsert, plant backfill, ambiguous-plant
     # warning, and upload_audit insert now live in upsert_orders() so the SAP
@@ -2208,6 +2246,18 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             return None
         val = row.get(col)
         return None if pd.isna(val) else val
+
+    def _num(row, col):
+        if col not in df.columns:
+            return None
+        val = row.get(col)
+        return None if pd.isna(val) else float(val)
+
+    def _int(row, col):
+        if col not in df.columns:
+            return None
+        val = row.get(col)
+        return None if pd.isna(val) else int(val)
 
     def _ts(val):
         return val.to_pydatetime() if pd.notna(val) else None
@@ -2227,6 +2277,15 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "order_quantity": float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
             "form_size": _v(r, "FORM_SIZE"),
             "firming_indicator": _v(r, "FIRMING_INDICATOR"),
+            "planned_order_initial_quantity": _num(r, "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"),
+            "reduced_quantity": _num(r, "REDUCED_QUANTITY_(GMEIN)"),
+            "order_category": _v(r, "ORDER_CATEGORY"),
+            "order_type": _v(r, "ORDER_TYPE"),
+            "bom_alternative": _int(r, "BOM_ALTERNATIVE"),
+            "bom_usage": _int(r, "BOM_USAGE"),
+            "labor_hours": _num(r, "LABOR_HOURS_(MEINH)"),
+            "machine_hours": _num(r, "MACHINE_HOURS_(MEINH)"),
+            "no_of_fte": _num(r, "NO_OF_FTE_(MEINH)"),
         })
 
     result = upsert_orders(

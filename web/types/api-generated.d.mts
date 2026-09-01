@@ -424,7 +424,7 @@ export interface paths {
         /**
          * Get Live Missing Master Data
          * @description Live (not batch-scoped) missing-master-data report for one plant's
-         *     Optimization tab (docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+         *     Optimization tab (docs/superpowers/plans/archive/2026-08-11-priority-lists-stage-2.md
          *     Decision 3). Same JSON/CSV shape as GET /upload/{batch_id}/missing-master-data
          *     so the frontend shares one renderer.
          */
@@ -564,7 +564,7 @@ export interface paths {
         /**
          * Upload Priority List
          * @description Generic priority-list upload (Stage 2) — one file per plant [+ optional
-         *     machine override]. See docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+         *     machine override]. See docs/superpowers/plans/archive/2026-08-11-priority-lists-stage-2.md
          *     Decisions 5-6 for the Line-column and implicit-rank rules, and Decision 9b
          *     for why this shares _resolve_priority_list_columns/_persist_priority_list
          *     with the legacy POST /color-wheel/{plant}.
@@ -666,8 +666,13 @@ export interface paths {
         get?: never;
         /**
          * Set Setup Active
-         * @description Toggle whether setup-aware optimization is live for this plant (the
-         *     single "Include Setup Times in Optimizer" checkbox).
+         * @description VESTIGIAL BUT RETAINED (Workstream D2, 2026-08-20): this used to be the
+         *     "Include Setup Times in Optimizer" checkbox's write path. That checkbox
+         *     now writes plants.setup_active via PUT /plant/{plant}/setup-active
+         *     instead — no UI or optimizer gate reads setup_definition.active any
+         *     more. Kept, unchanged, because removing it means also removing every
+         *     caller/test of it, which was judged higher blast radius than leaving one
+         *     unread write path in place.
          */
         put: operations["set_setup_active_setup__plant__active_put"];
         post?: never;
@@ -690,6 +695,33 @@ export interface paths {
          */
         get: operations["get_setup_setup__plant__get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/plant/{plant}/setup-active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Plant Setup Active Route
+         * @description Persist the plant-level "include setup times in optimizer" flag.
+         *
+         *     Payload: { subnetwork?, active: bool }. Relocated off the per-signature-
+         *     version setup_definition.active (see PUT /setup/{plant}/active above,
+         *     now vestigial-but-retained) onto a durable plant-level setting, following
+         *     the machine.setup_compatible precedent: unregistered column, dedicated
+         *     validated endpoint. This is intentionally separate from that route and
+         *     from machine.setup_compatible — three independent gates, never conflated.
+         */
+        put: operations["set_plant_setup_active_route_plant__plant__setup_active_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -992,6 +1024,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin List Tables
+         * @description Catalog listing of every table in the `public` schema, discovered
+         *     fresh on this request (see admin_tables.list_tables — no process-level
+         *     cache, unlike db._get_maint_table_allowlist). Response:
+         *         { "tables": [ { table, approx_row_count, internal,
+         *                          pk_columns: [str], fk_columns: [{column, ref_table, ref_column}] }, ... ] }
+         *     `internal` is a flag, not a filter — schema_migrations/admin_audit/
+         *     column_metadata/sap_sync_*\/sap_field_map still appear, just marked.
+         */
+        get: operations["admin_list_tables_admin_tables_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tables/{table}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin Table Rows
+         * @description Paginated rows for one table, PK/FK-aware, filterable by any real
+         *     column of that table (see _admin_tables_query_filters for transport).
+         *     Response:
+         *         { "columns": [ { name, sql_type, is_nullable, ordinal_position,
+         *                           is_pk, is_fk, ref_table, ref_column } ],
+         *           "rows": [ {col: value, ...}, ... ],
+         *           "meta": { "total": int, "limit": int, "offset": int } }
+         *     `meta.total` is the full filtered count ignoring limit/offset, mirroring
+         *     GET /tasks' paging contract. A filter value with no matching row is not
+         *     an error — it simply contributes nothing to `rows`.
+         */
+        get: operations["admin_table_rows_admin_tables__table__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tables/{table}/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Admin Table Export Csv
+         * @description Streaming CSV export of `table` (same filter transport as
+         *     GET /admin/tables/{table}), soft-capped at admin_tables.EXPORT_ROW_CAP
+         *     (~250k) rows. Table/filter validation happens up front, BEFORE the
+         *     StreamingResponse is constructed, so a bad table/column name comes back
+         *     as a normal 404/400 rather than a truncated-looking CSV body.
+         *
+         *     If the cap is hit, the CSV stream itself carries the truncation signal
+         *     (a response header can't work here — this is a real stream, so whether
+         *     the cap will be hit isn't known until the body is already underway):
+         *     the last line is `# NIMBUS_TRUNCATED,resume_offset=<N>,rows_written=<N>`.
+         *     A client must treat any line starting with that prefix as a marker, not
+         *     a data row, and may resume via ?offset=<resume_offset>. No trailing
+         *     marker at all means the export was not truncated.
+         */
+        get: operations["admin_table_export_csv_admin_tables__table__export_csv_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/master-data/_material-grid": {
         parameters: {
             query?: never;
@@ -1216,6 +1335,74 @@ export interface paths {
          * @description Persist a nullable, non-negative whole-calendar-day scheduling floor.
          */
         post: operations["md_set_plant_max_pull_forward_days_master_data_plants__plant__max_pull_forward_days_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/plants/{plant}/min-productive-segment-minutes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Min Productive Segment Minutes
+         * @description Persist the B3 plant productive-segment floor: a required positive
+         *     integer minute count (the column is NOT NULL DEFAULT 30 — pass 30 to
+         *     reset to the system default rather than omitting the field).
+         */
+        post: operations["md_set_plant_min_productive_segment_minutes_master_data_plants__plant__min_productive_segment_minutes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/plants/{plant}/visibility-horizon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Visibility Horizon
+         * @description Persist the C1 plant visibility-horizon setting (how far into the future
+         *     a planner can see on the Gantt/Orders tab).
+         *
+         *     Payload: { subnetwork?, visibility_horizon_days: int|null, horizon_roll_hour_utc: int }.
+         *     Both fields are saved together — see master_data.set_plant_visibility_horizon.
+         */
+        post: operations["md_set_plant_visibility_horizon_master_data_plants__plant__visibility_horizon_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/plants/{plant}/frozen-horizon-days": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Frozen Horizon Days
+         * @description Persist the C2 plant frozen-horizon setting: a nullable whole-calendar-day
+         *     window (NULL or 0 = off, unlike C1's visibility_horizon_days) inside which
+         *     the optimizer may not place or move any order.
+         */
+        post: operations["md_set_plant_frozen_horizon_days_master_data_plants__plant__frozen_horizon_days_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1777,9 +1964,9 @@ export interface paths {
         put?: never;
         /**
          * Plant Calendar Line Blackouts Post
-         * @description Delta write of line blackouts. Payload:
-         *     { plant, upserts:[{id, line?, start, end, reason?}], deletes?:[id] }.
-         *     line omitted/null = all lines in this plant.
+         * @description Delta write of machine blackouts. Payload:
+         *     { plant, upserts:[{id, machine?, start, end, reason?}], deletes?:[id] }.
+         *     machine omitted/null = all machines in this plant.
          */
         post: operations["plant_calendar_line_blackouts_post_plant_calendar_line_blackouts_post"];
         delete?: never;
@@ -2115,7 +2302,7 @@ export interface components {
          * TaskDTO
          * @description One row of GET /tasks's `data` array. Field set mirrors the dict literal
          *     built in get_tasks (brain.py, the `data.append({...})` block) verbatim —
-         *     see docs/typescript_migration.md §F/§C. Optional fields are exactly the
+         *     see docs/archive/typescript_migration.md §F/§C. Optional fields are exactly the
          *     ones read via `row.get(...)` with no coercing default (i.e. can be None
          *     from a NaN source row); non-optional fields either have a code-level
          *     default (e.g. `text`, `ecc_firmed`, `user_scheduled`) or come from a groupby
@@ -2166,6 +2353,24 @@ export interface components {
             notes?: string | null;
             /** Ecc Firmed */
             ecc_firmed: boolean;
+            /** Planned Order Initial Quantity (Gmein) */
+            "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"?: number | null;
+            /** Reduced Quantity (Gmein) */
+            "REDUCED_QUANTITY_(GMEIN)"?: number | null;
+            /** Order Category */
+            ORDER_CATEGORY?: string | null;
+            /** Order Type */
+            ORDER_TYPE?: string | null;
+            /** Bom Alternative */
+            BOM_ALTERNATIVE?: number | null;
+            /** Bom Usage */
+            BOM_USAGE?: number | null;
+            /** Labor Hours (Meinh) */
+            "LABOR_HOURS_(MEINH)"?: number | null;
+            /** Machine Hours (Meinh) */
+            "MACHINE_HOURS_(MEINH)"?: number | null;
+            /** No Of Fte (Meinh) */
+            "NO_OF_FTE_(MEINH)"?: number | null;
             /** Row Version */
             row_version?: number | null;
             /** Schedule Segments */
@@ -3290,6 +3495,45 @@ export interface operations {
             };
         };
     };
+    set_plant_setup_active_route_plant__plant__setup_active_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_setup_coverage_setup__plant__coverage_get: {
         parameters: {
             query?: {
@@ -3882,6 +4126,93 @@ export interface operations {
             };
         };
     };
+    admin_list_tables_admin_tables_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    admin_table_rows_admin_tables__table__get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                table: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_table_export_csv_admin_tables__table__export_csv_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                table: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     md_material_grid_master_data__material_grid_get: {
         parameters: {
             query: {
@@ -4258,6 +4589,123 @@ export interface operations {
         };
     };
     md_set_plant_max_pull_forward_days_master_data_plants__plant__max_pull_forward_days_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_min_productive_segment_minutes_master_data_plants__plant__min_productive_segment_minutes_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_visibility_horizon_master_data_plants__plant__visibility_horizon_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_frozen_horizon_days_master_data_plants__plant__frozen_horizon_days_post: {
         parameters: {
             query?: never;
             header?: {

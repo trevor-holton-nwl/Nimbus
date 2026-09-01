@@ -1,5 +1,5 @@
 """
-Regression guard for Phase 4's response_model= additions (docs/typescript_migration.md).
+Regression guard for Phase 4's response_model= additions (docs/archive/typescript_migration.md).
 
 FastAPI's response_model serializes the return value THROUGH the Pydantic model —
 any dict key the handler returns that isn't declared on the model is silently
@@ -44,6 +44,15 @@ SAMPLE_TASK_ROW = {
     "FORM_SIZE": "MD",
     "notes": None,
     "ecc_firmed": False,
+    "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": 1000.0,
+    "REDUCED_QUANTITY_(GMEIN)": 50.0,
+    "ORDER_CATEGORY": "PP01",
+    "ORDER_TYPE": "ZP01",
+    "BOM_ALTERNATIVE": 1,
+    "BOM_USAGE": 1,
+    "LABOR_HOURS_(MEINH)": 2.0,
+    "MACHINE_HOURS_(MEINH)": 1.5,
+    "NO_OF_FTE_(MEINH)": 1.0,
     "row_version": 42,
     "schedule_segments": [
         {"sequence": 1, "start_date": "2026-08-01T07:00:00", "end_date": "2026-08-01T15:00:00"},

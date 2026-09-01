@@ -3834,7 +3834,10 @@ export const Inspector = {
       </div>
 
       ${(() => {
-        const moreKeys = ['PLANT', 'FIRMING_INDICATOR'];
+        const moreKeys = ['PLANT', 'FIRMING_INDICATOR',
+          'PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)', 'REDUCED_QUANTITY_(GMEIN)',
+          'ORDER_CATEGORY', 'ORDER_TYPE', 'BOM_ALTERNATIVE', 'BOM_USAGE',
+          'LABOR_HOURS_(MEINH)', 'MACHINE_HOURS_(MEINH)', 'NO_OF_FTE_(MEINH)'];
         const rows = moreKeys.map(key => {
           if (!Inspector._fieldVisible(key)) return '';
           const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
@@ -8096,7 +8099,7 @@ interface PreviewExplanation {
    *  diagnostic object at all, so there is nothing else to collect from). */
   unplacedOrders: { orders: number; lines: number };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
-  /** Aggregate prune tally for the whole run (§4.3 OPTIMIZER-PREVIEW.md), bucketed
+  /** Aggregate prune tally for the whole run (§4.3 docs/archive/OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
    *  count — per-order placement/acceptance log entries (e.g. 'due-date-first-placement')
    *  are not prunes and are excluded, not rolled into 'other'. */
@@ -8123,7 +8126,7 @@ const PREVIEW_MISSING_PAIR_LIMIT = 12;
  *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
  *  successes or policy-chooser notes (e.g. 'due-date-first-placement',
  *  'firmed-incoming-setup', 'covered-firmed-boundary-fallback') and must never be
- *  tallied as prunes — see OPTIMIZER-PREVIEW.md §4.3 open question 2. There is
+ *  tallied as prunes — see docs/archive/OPTIMIZER-PREVIEW.md §4.3 open question 2. There is
  *  no 'color block' or 'due date' code in this engine today; only setup,
  *  firmed-boundary and capacity-deferral exclusions are ever emitted. */
 const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'firmed' | 'capacity' | 'other'> = {
@@ -8160,7 +8163,7 @@ function tallyPrunes(explanation: ReadonlyArray<CandidateReason>): PreviewExplan
 /** Target KPIs a finalist's whyNot sentence is scored against — the same three
  *  targets the verdict banner scores (changeovers, late_count, late_h); span_h
  *  and peak_util_pct are context-only, never part of a finalist's rationale.
- *  `phrase` renders the quantified delta the OPTIMIZER-PREVIEW.md §4.2 example
+ *  `phrase` renders the quantified delta the docs/archive/OPTIMIZER-PREVIEW.md §4.2 example
  *  uses ("one more late order and 65 h more slip"), not just a KPI name. */
 const FINALIST_TARGET_KEYS: ReadonlyArray<{
   key: keyof OptimizerKpis;
@@ -8174,7 +8177,7 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
 /** One-sentence rationale for why an alternate finalist wasn't applied. Compares
  *  only the scored targets against the applied plan — never fabricates a "best
  *  balance" claim, since this is a 2-wide mode-swap comparison, not a true beam
- *  (see OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
+ *  (see docs/archive/OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
 function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): string {
   const worse: string[] = [];
   const better: string[] = [];

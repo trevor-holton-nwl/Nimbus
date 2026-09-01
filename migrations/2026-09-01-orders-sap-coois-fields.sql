@@ -1,0 +1,12 @@
+-- 9 SAP COOIS extract fields (planned/reduced quantity, order category/type,
+-- BOM alternative/usage, labor/machine hours, FTE count) — already in
+-- schema.sql; this makes them deployable via the migrations ledger.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS planned_order_initial_quantity NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS reduced_quantity               NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_category                 TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_type                     TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bom_alternative                INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bom_usage                      INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS labor_hours                    NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS machine_hours                  NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS no_of_fte                      NUMERIC;

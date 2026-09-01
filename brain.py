@@ -1170,7 +1170,7 @@ class ScheduleSegmentDTO(BaseModel):
 class TaskDTO(BaseModel):
     """One row of GET /tasks's `data` array. Field set mirrors the dict literal
     built in get_tasks (brain.py, the `data.append({...})` block) verbatim —
-    see docs/typescript_migration.md §F/§C. Optional fields are exactly the
+    see docs/archive/typescript_migration.md §F/§C. Optional fields are exactly the
     ones read via `row.get(...)` with no coercing default (i.e. can be None
     from a NaN source row); non-optional fields either have a code-level
     default (e.g. `text`, `ecc_firmed`, `user_scheduled`) or come from a groupby
@@ -1199,6 +1199,15 @@ class TaskDTO(BaseModel):
     FORM_SIZE: str | None = None
     notes: str | None = None
     ecc_firmed: bool
+    planned_order_initial_quantity_gmein: float | None = Field(default=None, alias="PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)")
+    reduced_quantity_gmein: float | None = Field(default=None, alias="REDUCED_QUANTITY_(GMEIN)")
+    ORDER_CATEGORY: str | None = None
+    ORDER_TYPE: str | None = None
+    BOM_ALTERNATIVE: int | None = None
+    BOM_USAGE: int | None = None
+    labor_hours_meinh: float | None = Field(default=None, alias="LABOR_HOURS_(MEINH)")
+    machine_hours_meinh: float | None = Field(default=None, alias="MACHINE_HOURS_(MEINH)")
+    no_of_fte_meinh: float | None = Field(default=None, alias="NO_OF_FTE_(MEINH)")
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
@@ -1531,6 +1540,15 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "FORM_SIZE": row.get("FORM_SIZE"),
                 "notes": row.get("NOTES"),
                 "ecc_firmed": row.get("FIRMING_INDICATOR") == "X",
+                "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": row.get("PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"),
+                "REDUCED_QUANTITY_(GMEIN)": row.get("REDUCED_QUANTITY_(GMEIN)"),
+                "ORDER_CATEGORY": row.get("ORDER_CATEGORY"),
+                "ORDER_TYPE": row.get("ORDER_TYPE"),
+                "BOM_ALTERNATIVE": row.get("BOM_ALTERNATIVE"),
+                "BOM_USAGE": row.get("BOM_USAGE"),
+                "LABOR_HOURS_(MEINH)": row.get("LABOR_HOURS_(MEINH)"),
+                "MACHINE_HOURS_(MEINH)": row.get("MACHINE_HOURS_(MEINH)"),
+                "NO_OF_FTE_(MEINH)": row.get("NO_OF_FTE_(MEINH)"),
                 # Optimistic-concurrency token (Postgres xmin). The client echoes it
                 # back on edit so the server can reject writes computed from stale data.
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
@@ -2044,7 +2062,7 @@ def get_live_missing_master_data(
         plant: str, format: str | None = Query(default=None),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Live (not batch-scoped) missing-master-data report for one plant's
-    Optimization tab (docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+    Optimization tab (docs/superpowers/plans/archive/2026-08-11-priority-lists-stage-2.md
     Decision 3). Same JSON/CSV shape as GET /upload/{batch_id}/missing-master-data
     so the frontend shares one renderer."""
     try:
@@ -2170,7 +2188,7 @@ async def upload_priority_list(
         rank_column: str | None = Form(default=None),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Generic priority-list upload (Stage 2) — one file per plant [+ optional
-    machine override]. See docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md
+    machine override]. See docs/superpowers/plans/archive/2026-08-11-priority-lists-stage-2.md
     Decisions 5-6 for the Line-column and implicit-rank rules, and Decision 9b
     for why this shares _resolve_priority_list_columns/_persist_priority_list
     with the legacy POST /color-wheel/{plant}."""
