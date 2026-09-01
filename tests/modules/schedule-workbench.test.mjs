@@ -1335,7 +1335,7 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
 
 test('combined is no longer an optimizer strategy users can select', () => {
   const { readFileSync } = require('node:fs');
-  const types = readFileSync(new URL('../../web/types.mts', import.meta.url), 'utf8');
+  const types = readFileSync(new URL('../../web/platform/types.mts', import.meta.url), 'utf8');
   const dialogMarkup = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
 
   assert.doesNotMatch(types, /'combined'/,

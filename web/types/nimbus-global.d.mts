@@ -17,7 +17,7 @@
  * add it to this same object — do not create a second ambient declaration
  * or inline `as any` at the call site.
  */
-import type { NimbusTask, NimbusLineSetting } from '../types.mjs';
+import type { NimbusTask, NimbusLineSetting } from '../platform/types.mjs';
 
 declare global {
   const NIMBUS:
