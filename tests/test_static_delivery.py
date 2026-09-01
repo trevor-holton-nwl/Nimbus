@@ -92,3 +92,13 @@ def test_master_data_route_still_reachable_for_real_table_names(client):
     # not-found handling, not the static-asset short-circuit.
     r = client.get("/master-data/not-a-real-table")
     assert r.status_code == 404
+
+
+def test_setup_3segment_route_with_dotted_final_segment_still_reachable(client):
+    # GET /setup/{plant}/missing-pairs.csv is a real, shipped 3-segment route
+    # whose own final segment contains a dot. The static-asset gate must be
+    # scoped to exactly 2 segments so this keeps reaching get_setup's sibling
+    # handler (auth-gated -> 401), not the static-asset short-circuit (which
+    # would wrongly 404 it, since no static file exists at that path).
+    r = client.get("/setup/5512/missing-pairs.csv")
+    assert r.status_code == 401

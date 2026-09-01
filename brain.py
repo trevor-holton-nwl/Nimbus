@@ -391,36 +391,43 @@ async def request_id_mw(request: Request, call_next):
 # "/<segment>/{param}"-shaped API route. Do not generalize this to "any
 # static file anywhere," which would be needless surface area.
 #
+# Also scoped to EXACTLY 2 path segments (the prefix segment + one more) —
+# matching the bug as it's actually shaped. brain.py has real, shipped
+# 3+-segment routes under these prefixes whose own final segment contains a
+# dot, e.g. GET /setup/{plant}/missing-pairs.csv — those must keep falling
+# through to call_next() unconditionally, since no static file collides with
+# them and treating them like the 2-segment case would 404 a real endpoint
+# that should reach its auth-gated handler instead.
+#
 # A real plant code (Config.KNOWN_PLANTS, e.g. "5512") or table name
 # (master_data.ALLOWED_TABLES, snake_case) never contains a ".", so "does the
-# final path segment contain a dot" cleanly distinguishes a filename from a
-# route parameter. When it does look like a filename, this middleware owns
-# the response outright — serving the file if it exists, or a bare 404 if it
-# doesn't — rather than falling through to call_next(): falling through would
-# still hit the same colliding API route (Starlette matches on path shape,
-# not on whether the segment looks like a filename), producing a misleading
-# 401/422 from get_setup()/md_list() instead of a plain 404.
+# second segment contain a dot" cleanly distinguishes a filename from a route
+# parameter at that depth. When it does look like a filename, this middleware
+# owns the response outright — serving the file if it exists, or a bare 404
+# if it doesn't — rather than falling through to call_next(): falling through
+# would still hit the same colliding 2-segment API route (Starlette matches
+# on path shape, not on whether the segment looks like a filename), producing
+# a misleading 401/422 from get_setup()/md_list() instead of a plain 404.
 #
 # Must run *before* (i.e. inside/downstream of) static_mjs_no_cache_mw below
 # so a .mjs file served here still gets stamped no-cache by that middleware —
 # Starlette's `@api.middleware("http")` stack nests in reverse declaration
 # order (the last-declared middleware ends up outermost), so declaring this
 # one first, above static_mjs_no_cache_mw, makes it the inner of the two.
-_DOMAIN_STATIC_PREFIXES = ("/setup/", "/master-data/")
+_DOMAIN_STATIC_PREFIXES = ("setup", "master-data")
 
 
 @api.middleware("http")
 async def domain_static_asset_mw(request: Request, call_next):
     path = request.url.path
-    if any(path.startswith(prefix) for prefix in _DOMAIN_STATIC_PREFIXES):
-        last_segment = path.rsplit("/", 1)[-1]
-        if "." in last_segment:
-            static_root = Path(STATIC_DIR).resolve()
-            candidate = (static_root / path.lstrip("/")).resolve()
-            if candidate.is_relative_to(static_root) and candidate.is_file():
-                media_type = "text/javascript" if candidate.suffix == ".mjs" else None
-                return FileResponse(candidate, media_type=media_type)
-            return Response(status_code=404)
+    segments = path.strip("/").split("/")
+    if len(segments) == 2 and segments[0] in _DOMAIN_STATIC_PREFIXES and "." in segments[1]:
+        static_root = Path(STATIC_DIR).resolve()
+        candidate = (static_root / segments[0] / segments[1]).resolve()
+        if candidate.is_relative_to(static_root) and candidate.is_file():
+            media_type = "text/javascript" if candidate.suffix == ".mjs" else None
+            return FileResponse(candidate, media_type=media_type)
+        return Response(status_code=404)
     return await call_next(request)
 
 
