@@ -3,7 +3,7 @@
  *
  * nimbus-compute-core.js is a UMD module (Node `module.exports` / Web Worker `self` /
  * browser `window`) and is deliberately NOT compiled by tsc — see
- * docs/typescript_migration.md's Phase 0 write-up for why (its three-way export branch
+ * docs/archive/typescript_migration.md's Phase 0 write-up for why (its three-way export branch
  * can't be faithfully reproduced by tsc's own `--module umd` emit, and the compute logic
  * inside is safety-critical and pinned byte-for-byte by tests/js/compute-core.test.js).
  *
@@ -16,7 +16,7 @@
  * Everything below is declared inside `declare global` (rather than as ordinary module
  * exports) so it's usable from plain global-script sources like nimbus-worker.ts without
  * an `import` — adding an import there would reclassify it as a module and change its
- * compiled output shape (see docs/typescript_migration.md's nimbus-worker.ts trap).
+ * compiled output shape (see docs/archive/typescript_migration.md's nimbus-worker.ts trap).
  */
 
 export {};

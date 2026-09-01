@@ -3,7 +3,7 @@
 # frontend (same origin). Build in the cloud with:  az acr build -r <ACR> -t nimbus:v1 .
 
 # Frontend build stage: compiles the TypeScript modules tracked in
-# docs/typescript_migration.md (web/*.ts, web/*.mts) to their in-place .js/.mjs
+# docs/archive/typescript_migration.md (web/*.ts, web/*.mts) to their in-place .js/.mjs
 # output. COPY web ./web happens right before RUN npm run build so Docker's layer
 # cache invalidates correctly whenever any file under web/ changes — no risk of a
 # stale compiled-output layer surviving a source edit.

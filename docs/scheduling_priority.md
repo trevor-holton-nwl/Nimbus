@@ -3,13 +3,20 @@
 Tracks NIMBUS's move from a single per-plant **color wheel** to **per-plant, per-field priority
 lists** arranged in a configurable priority tree, and the optimizer work to honor them. This is a
 multi-stage effort — update the stage table below as work lands, the same way
-`docs/typescript_migration.md` tracks its phases.
+`docs/archive/typescript_migration.md` tracks its phases.
 
 > **This document is deliberately front-loaded.** The [Decisions](#decisions) and
 > [Review findings](#review-findings) sections capture two full design-review passes done against
 > the live code before any implementation, including the options that were *rejected* and why.
 > Each stage should read findings *here* instead of re-deriving them. When a stage lands, correct
 > anything here that turned out wrong rather than letting it rot.
+
+> **Stale-mode notice:** measurements and code excerpts below reference `Engine.runAndApply('combined')`,
+> `Engine._sortTerms('combined')`, and `Engine._dispatchDayIntegrity` as they existed on 2026-08-11.
+> **`'combined'`/"Smart" mode was removed in commit `b002b32`, and `_dispatchDayIntegrity` was deleted
+> in commit `1678865`** — see `CLAUDE.md`'s Key Patterns section. Treat every `'combined'`-mode claim
+> here as a historical snapshot, not current behavior; the priority-list/rank-map architecture itself
+> is still current.
 
 ## Stages
 
@@ -33,7 +40,7 @@ checks against the shipped code, and carries the Risk 2 before/after differentia
 numbers, and the two residual findings the implementation left open. Read §9-14 for what Stage 3
 actually does today; read §1-8 for why it was built that way.
 
-**Stage 1 status (2026-08-11):** all code from `docs/superpowers/plans/2026-08-10-priority-lists-stage-1.md`
+**Stage 1 status (2026-08-11):** all code from `docs/superpowers/plans/archive/2026-08-10-priority-lists-stage-1.md`
 is written, tested at the pure-logic level, and both `npm run build`/`typecheck` and the Python test
 suite pass. **Not done:** the migration has not been applied to any database (local or Azure), and
 pre-ship check #1 (population counts for `material_plants.color`/`prt_01`/`prt_02` per plant) was

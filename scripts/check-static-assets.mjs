@@ -90,7 +90,7 @@ const FORBIDDEN_BASENAMES = new Set([
 // would otherwise ship to the public mount undetected. Extending this list is a
 // deliberate, visible change; that's the point.
 //
-// .ts/.mts: TypeScript source (docs/typescript_migration.md) compiles in place next
+// .ts/.mts: TypeScript source (docs/archive/typescript_migration.md) compiles in place next
 // to its own .js/.mjs output, so both the source and the compiled file legitimately
 // coexist under web/ and both ship in the image — this is an internal single-container
 // tool, not a public artifact, so shipping readable source alongside its own compiled

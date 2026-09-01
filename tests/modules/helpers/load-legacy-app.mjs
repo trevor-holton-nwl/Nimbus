@@ -304,7 +304,7 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   // (or an explicit record if one couldn't be run) — none was run during Phase 3;
   // this is recorded as an outstanding, unverified environment gate in that
   // plan's Completion Gate section
-  // (`docs/superpowers/plans/2026-07-17-cq1-phase-3-workbench.md`), not silently
+  // (`docs/superpowers/plans/archive/2026-07-17-cq1-phase-3-workbench.md`), not silently
   // assumed to be covered by this harness.
   const ctx = createContext(sandbox);
 

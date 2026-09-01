@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Stale-mode notice:** this plan (dated 2026-08-11) was written and executed while `'combined'`/"Smart"
+> mode and `Engine._dispatchDayIntegrity` were still live. Both were removed afterward (`'combined'` in
+> commit `b002b32`, `_dispatchDayIntegrity` in commit `1678865` — see `CLAUDE.md`'s Key Patterns section).
+> The rank-map/priority-tree architecture this plan shipped is still current; its `'combined'`/
+> `_dispatchDayIntegrity` references are not.
+
 **Goal:** Let an admin arrange the four rankable fields into a per-plant priority tree (with per-line overrides already uploaded in Stage 2), see the exact effective sort sequence that tree produces, and have the optimizer actually honor it — while proving, not assuming, that this is the *only* stage that changes sequencing and that it does so correctly.
 
 **Architecture:** A term-factory rewrite of `Engine._sortTerms` reads a new `Store.priorityRankMaps` cache (fetched once per plant, refreshed after any Stage 2 upload) instead of the single hardcoded `colorMap`. `Engine.flattenConstraints` turns a nested `ConstraintConfig` tree into the same flat ordered key list `_sortTerms` already consumes — meaning `_dispatchDayIntegrity`, `runAndApply`, and every other optimizer entry point need **zero** changes (proven below, not assumed). `Plant._renderSettingsPane` is rebuilt from a flat on/off list into an indented tree with a live effective-sequence readout, sourced from the now-dynamic `GET /priority-fields` registry.
@@ -33,7 +39,7 @@ into those tasks inline and summarized here:
 
 ## Global Constraints
 
-Same design-system rules as `docs/superpowers/plans/2026-08-11-priority-lists-stage-2.md`'s Global Constraints section — copied here by reference, not relaxed for this stage:
+Same design-system rules as `docs/superpowers/plans/archive/2026-08-11-priority-lists-stage-2.md`'s Global Constraints section — copied here by reference, not relaxed for this stage:
 - Searchable comboboxes over plain selects for anything plant/line-scoped (not directly triggered this stage — no new line picker — but the tree UI's field-add control must still not become a bubble/chip selector if it ever lists more than a handful of fields).
 - CTA/Chrome Color Rule, Hairline-over-shadow, no colored side-stripes, Mono-Means-Machine for generated numbers (rank badges, coverage figures repeated in the tree), 4px/8px radius discipline, fast transitions, full i18n via `Util.t()`.
 - **New for this stage:** `DESIGN.md` §5's KPI-tile top-border pattern is the one sanctioned colored-accent exception — if the effective-sequence panel wants a severity cue (e.g. "this field has no list uploaded"), reuse that exact pattern rather than inventing a new one.

@@ -1,6 +1,6 @@
 /*
  * Hand-written ambient declarations for third-party libraries loaded via CDN <script>
- * tags in index.html (NOT via npm) — see docs/typescript_migration.md's Phase 0 write-up.
+ * tags in index.html (NOT via npm) — see docs/archive/typescript_migration.md's Phase 0 write-up.
  *
  * Kept intentionally minimal: only the API surface actually called from NIMBUS code
  * (cross-checked against tests/modules/helpers/load-legacy-app.mjs's CDN stubs and
@@ -14,7 +14,7 @@ declare global {
   // Structurally relocated inside this `declare global` block (previously declared
   // at module top level, outside `declare global`) so `NimbusVendor.X` is nameable
   // from any .mts file in the program, not just from ambient declarations inside
-  // this file — see docs/typescript_migration.md Phase 6 Global Constraints (the
+  // this file — see docs/archive/typescript_migration.md Phase 6 Global Constraints (the
   // "NimbusVendor namespace is not yet globally referenceable by name" note). Pure
   // structural move: same interface bodies, same members, zero behavior change.
   namespace NimbusVendor {

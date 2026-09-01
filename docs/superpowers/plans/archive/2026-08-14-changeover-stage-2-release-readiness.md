@@ -8,7 +8,7 @@
 
 **Tech Stack:** FastAPI, PostgreSQL, TypeScript ES modules, vanilla DOM, Node test runner, pytest.
 
-**Spec:** `docs/changeover_matrix.md`, `docs/changeover_matrix_stage_2.md`
+**Spec:** `docs/changeover_matrix.md`, `docs/archive/changeover_matrix_stage_2.md`
 
 ## Global Constraints
 
@@ -56,7 +56,7 @@
 ### Task 3: Evidence and release-gate verification
 
 **Files:**
-- Modify: `docs/changeover_matrix_stage_2.md`
+- Modify: `docs/archive/changeover_matrix_stage_2.md`
 - Modify: `docs/MIGRATION.md`
 
 **Produces:** An auditable release record that distinguishes passed automated checks from deferred external gates.
@@ -65,5 +65,5 @@
 - [ ] Run `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`, `py -m pytest -m "not pg"`, and `ruff check .`; record inherited failures separately from Stage 2 failures.
 - [ ] Run browser UAT for permissions, policy hydration after plant switch, rejected alternatives, dark mode, keyboard access, and safe disable; save screenshots/measurements.
 - [ ] Replay a representative plant snapshot through all three policies and obtain scheduling-owner approval for any accepted new-lateness Throughput case.
-- [ ] Record exact command outputs, runtime/candidate measurements, external approver, deployment implications, and any unresolved blocker in `docs/changeover_matrix_stage_2.md`.
+- [ ] Record exact command outputs, runtime/candidate measurements, external approver, deployment implications, and any unresolved blocker in `docs/archive/changeover_matrix_stage_2.md`.
 - [ ] Commit with `docs: record setup stage 2 validation`.

@@ -13,7 +13,7 @@
  * module and tsc adds CommonJS exports-object boilerplate that would throw at
  * runtime (Web Workers have no `exports`/`module` global). The NimbusComputeCore
  * ambient type (from nimbus-compute-core.d.ts) is a true global, so it's usable here
- * without an import. See docs/typescript_migration.md for the full write-up.
+ * without an import. See docs/archive/typescript_migration.md for the full write-up.
  *
  * Message protocol
  * ----------------

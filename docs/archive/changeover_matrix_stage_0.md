@@ -252,7 +252,7 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup;
 ### Task 8: Stage 0 activation review and handoff
 
 **Files:**
-- Modify: `docs/changeover_matrix_stage_0.md` only to record measured results and checked boxes during execution.
+- Modify: `docs/archive/changeover_matrix_stage_0.md` only to record measured results and checked boxes during execution.
 - Modify: `docs/MIGRATION.md` with migration/application ordering and rollback behavior.
 
 - [ ] **Step 1: Verify no schedule-facing code consumes setup minutes by searching Engine, Calendar, Alerts, Utilization, Timeline, Interaction, and persistence save paths.**

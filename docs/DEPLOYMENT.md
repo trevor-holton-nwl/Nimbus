@@ -40,7 +40,7 @@ az acr build --registry acrnimbusdev --image nimbus:v2 .
 az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:v2
 ```
 - Changed frontend JS/CSS? Bump `NIMBUS_BUILD_ID` in `index.html` — it single-source-drives the `?v=` on every asset URL and the `app-entry.mjs` cache-bust guard, so browsers don't serve stale assets. (There is **no** separate `APP_VERSION` in `app.js` anymore — that constant moved into `app-entry.mjs`'s `runCacheBustGuard()`, which reads `NIMBUS_BUILD_ID` directly.)
-- Edited a `.ts`/`.mts` file? `az acr build` compiles it automatically in the cloud (the multi-stage `Dockerfile`'s `node:20-slim` builder runs `npm run build`), so a redeploy needs nothing extra. For **local** dev only, run `npm run build` before `uvicorn brain:api` serves the fresh output — see `docs/typescript_migration.md`.
+- Edited a `.ts`/`.mts` file? `az acr build` compiles it automatically in the cloud (the multi-stage `Dockerfile`'s `node:20-slim` builder runs `npm run build`), so a redeploy needs nothing extra. For **local** dev only, run `npm run build` before `uvicorn brain:api` serves the fresh output — see `docs/archive/typescript_migration.md`.
 - Do **not** re-run `schema.sql` on a normal redeploy — it's idempotent and ledger-guarded now (safe if you do), but a redeploy never needs it since the schema already exists.
 
 ## First-time provisioning (already done — recorded for rebuilds / new environments)

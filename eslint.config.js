@@ -3,7 +3,7 @@
 // app.js / nimbus-intelligence.js / locales/*.js are plain <script> files
 // (sourceType: 'script', not modules) that attach to a single global `window.NIMBUS`;
 // all third-party libs come from CDN as globals. A per-file, non-bundling TypeScript
-// build now covers some modules (docs/typescript_migration.md) — nimbus-worker.ts is
+// build now covers some modules (docs/archive/typescript_migration.md) — nimbus-worker.ts is
 // the Phase 0 pilot (a TS "global script", same worker-only shape as its predecessor
 // nimbus-worker.js); .mts blocks below are ready for Phase 1+ browser modules.
 //
@@ -83,7 +83,7 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Standalone Web Worker, now TypeScript (see docs/typescript_migration.md Phase 0):
+    // Standalone Web Worker, now TypeScript (see docs/archive/typescript_migration.md Phase 0):
     // worker globals only (self/postMessage/onmessage), no DOM, no NIMBUS. Deliberately
     // sourceType: 'script' — nimbus-worker.ts has no top-level import/export so tsc emits
     // it unwrapped; ESLint needs to agree it isn't a module either.
@@ -167,7 +167,7 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Browser TypeScript modules under web/ (docs/typescript_migration.md Phase 1+ —
+    // Browser TypeScript modules under web/ (docs/archive/typescript_migration.md Phase 1+ —
     // no real files yet as of Phase 0; this block is ready for schedule-state.mts etc.
     // as each phase converts a module). Same reasoning as the nimbus-worker.ts block
     // above for the no-undef/no-unused-vars swap.

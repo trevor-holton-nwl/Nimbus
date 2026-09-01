@@ -45,7 +45,7 @@ test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
   // "REFERENCE DATA" observation eyebrow, CSV-export button, and delete-row
   // wiring they backed have no remaining callers.
   // ui.setup_inherited backed the old flat edge-list table's `tr.inherited`
-  // row styling; the grid rebuild (docs/setup_matrix_ui_redesign.md) replaced
+  // row styling; the grid rebuild (docs/archive/setup_matrix_ui_redesign.md) replaced
   // that table and never carried this key's usage forward.
   const REQUIRED_SETUP = [
     'ui.setup_matrix_title',

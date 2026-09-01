@@ -3,7 +3,7 @@
 **Status:** implemented 2026-08-14 (design agreed same day, then extended and built in one pass — see §10 Execution record).
 **Scope:** presentation layer only — markup, copy, CSS grouping, and i18n inside the Plant → System Settings
 sub-tab. No backend, API, schema, or permission-logic changes. Stage 0's "observation-only" guarantee
-(`docs/changeover_matrix_stage_0.md`) is unaffected: this redesign changes how the existing data is presented
+(`docs/archive/changeover_matrix_stage_0.md`) is unaffected: this redesign changes how the existing data is presented
 and labeled, not what it does.
 
 ## 1. Problem

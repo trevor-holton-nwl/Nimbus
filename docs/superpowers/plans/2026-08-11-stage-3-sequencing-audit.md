@@ -1,5 +1,10 @@
 # Stage 3 — sequencing-impact audit (pre- and post-implementation)
 
+> **Stale-mode notice:** this audit was run 2026-08-11 against code where `'combined'`/"Smart" mode
+> and `Engine._dispatchDayIntegrity` were still live. Both were removed after this date (`'combined'`
+> in commit `b002b32`, `_dispatchDayIntegrity` in commit `1678865` — see `CLAUDE.md`'s Key Patterns
+> section). Read every `'combined'`/`_dispatchDayIntegrity` reference below as a historical snapshot.
+
 > **Two parts.** **§1-8** is the *pre-implementation* audit (Task 0, run against `8bf2f94` before any
 > Stage 3 code existed) — it establishes why the stage was built the way it was. **§9-14** is the
 > *post-implementation* verification (Task 10, run against `e71e986` after all 11 tasks landed) — it

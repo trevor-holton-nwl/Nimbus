@@ -142,7 +142,7 @@ export interface SetupPolicyConfig {
 ### Task 5: Real-plant validation, performance regression, and release gate
 
 **Files:**
-- Modify: `docs/changeover_matrix_stage_2.md` only to record checked gates and measurements during execution.
+- Modify: `docs/archive/changeover_matrix_stage_2.md` only to record checked gates and measurements during execution.
 - Modify: `docs/MIGRATION.md` with activation/rollback procedures.
 
 - [ ] **Step 1: Replay representative real-plant schedules through Due-date first, Min Changeover, and Throughput first using identical immutable snapshots.**

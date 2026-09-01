@@ -2,7 +2,7 @@
   "name": "nimbus",
   "version": "0.0.0",
   "private": true,
-  "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. Static frontend with no runtime bundler; this package.json backs the ESLint static-analysis gate and a per-file (non-bundling) TypeScript build for modules that have been migrated — see docs/typescript_migration.md.",
+  "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. Static frontend with no runtime bundler; this package.json backs the ESLint static-analysis gate and a per-file (non-bundling) TypeScript build for modules that have been migrated — see docs/archive/typescript_migration.md.",
   "scripts": {
     "lint": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mjs\" \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts scripts tests/modules",
     "lint:errors": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts --quiet",

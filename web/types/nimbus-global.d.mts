@@ -1,6 +1,6 @@
 /*
  * web/types/nimbus-global.d.mts — ambient shim for the bare `NIMBUS` global
- * identifier (docs/typescript_migration.md §A implication #2). `NIMBUS` is
+ * identifier (docs/archive/typescript_migration.md §A implication #2). `NIMBUS` is
  * `app.js`'s own top-level `const` — part of the classic-script shared page
  * realm, never a module import. schedule-workbench.mjs, plant-and-
  * administration.mjs, and application-shell.mjs each reach a handful of
@@ -85,7 +85,7 @@ declare global {
          *  until Task 7). `toggleDrawer` dropped: real TS call sites never call
          *  it via `NIMBUS.AlertsUIAdapter.toggleDrawer()` (only present inside
          *  generated onclick="..." HTML-attribute strings, which tsc never
-         *  type-checks) — see docs/typescript_migration.md Phase 6 Task 3. */
+         *  type-checks) — see docs/archive/typescript_migration.md Phase 6 Task 3. */
         AlertsUIAdapter?: {
           focus?(alertId: string): void;
           showForCell?(line: string, dayKey: string): void;

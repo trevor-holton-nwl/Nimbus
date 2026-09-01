@@ -347,7 +347,7 @@ test('SetupAdmin.fetchListRows scopes the List view page fetch by machine, not t
   }
 });
 
-// Setup Matrix grid redesign (docs/setup_matrix_ui_redesign.md) — the
+// Setup Matrix grid redesign (docs/archive/setup_matrix_ui_redesign.md) — the
 // from-state x to-state grid replacing the old flat edge-list table.
 
 test('cartesianStates builds one state per combination, in field order', () => {

@@ -1,5 +1,5 @@
 {
-  // Config for real browser ESM modules (docs/typescript_migration.md Phase 1+ —
+  // Config for real browser ESM modules (docs/archive/typescript_migration.md Phase 1+ —
   // web/*.mts). No real .mts files exist yet as of Phase 0; nimbus-worker.ts (a
   // classic, non-module worker script) deliberately uses the separate
   // tsconfig.worker.json instead — see that file's header comment for why a single
@@ -26,7 +26,7 @@
     "web/types/nimbus-global.d.mts"
   ],
   // Compiled output lands in place, in the same directory as its source
-  // (rootDir === outDir === "web" — see docs/typescript_migration.md). TS's default
+  // (rootDir === outDir === "web" — see docs/archive/typescript_migration.md). TS's default
   // `exclude` is [outDir], which here would swallow the entire web/ tree, including
   // every file in `include` above — so it must be explicitly overridden to empty.
   "exclude": []

@@ -5,8 +5,8 @@
 placement, due-date search, capacity diagnostics, derived Gantt bars, preview explanations). Live for a plant
 via the single "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15) rather than
 the multi-step authorization flow this document assumed — see that document's §1.1/§15 for the correction and
-what changed. `docs/changeover_matrix_stage_1.md`'s checkbox tracking is stale; treat git log as authoritative.
-**Supersedes:** the live feature requirements in `docs/Setup_teardown_bars.md`, which remains the historical
+what changed. `docs/archive/changeover_matrix_stage_1.md`'s checkbox tracking is stale; treat git log as authoritative.
+**Supersedes:** the live feature requirements in `docs/archive/Setup_teardown_bars.md`, which remains the historical
 description of pre-feature NIMBUS.
 
 ## 1. Product decision

@@ -1,7 +1,7 @@
 /*
  * web/types.mts — shared domain typedefs for the TypeScript migration.
  *
- * Source material: docs/typescript_migration.md §C (domain data shapes) and
+ * Source material: docs/archive/typescript_migration.md §C (domain data shapes) and
  * §D (string-literal enum inventory), a full read of the frontend done once
  * up front so later phases read findings here instead of re-deriving them.
  * This file has zero runtime code — every export is a `type`/`interface` and
@@ -16,7 +16,7 @@
  * bare identifier `NimbusTask` without `import type { NimbusTask } from
  * './types.mjs'` silently gets the older 6-field ambient subset instead of
  * this one. Always import explicitly. Do not merge/rename either side to
- * "fix" this — see docs/typescript_migration.md trap T-5.
+ * "fix" this — see docs/archive/typescript_migration.md trap T-5.
  */
 
 // ---------------------------------------------------------------------------
@@ -467,7 +467,7 @@ export type WorkerResponseType = 'ALERTS' | 'UTILIZATION' | 'ERROR';
 
 /** Naive local timestamp, NO trailing "Z"/offset — the /tasks read path's and
  *  the task-save path's (Util.toLocalSeconds) wire encoding. Parsed as LOCAL
- *  time by `new Date(...)`. See docs/typescript_migration.md §F. */
+ *  time by `new Date(...)`. See docs/archive/typescript_migration.md §F. */
 export type NaiveLocalTs = string;
 
 /** UTC ISO-8601 timestamp (Date#toISOString(), trailing "Z") — the blackout-
@@ -496,7 +496,7 @@ export interface LiveState {
  *  re-coerced back into NimbusTask via Persistence._prepTask on read. `tasks`
  *  may also be PARTIAL: _writeCacheWithQuotaGuard writes progressively
  *  smaller tiers (last 2000 / last 500 / none) on QuotaExceededError. See
- *  docs/typescript_migration.md §G. */
+ *  docs/archive/typescript_migration.md §G. */
 export interface StoredState {
   _schemaVersion: number;
   _buildId: string | null;

@@ -31,7 +31,7 @@
 // `App`/`Timeline`/etc.
 //
 // TypeScript migration Phase 5 Task 1 converts this file to real TypeScript —
-// the last of the seven CQ-1 modules (see docs/typescript_migration.md). Two
+// the last of the seven CQ-1 modules (see docs/archive/typescript_migration.md). Two
 // real (not `NIMBUS`-ambient) findings surfaced during conversion:
 //   - `Dashboard._chartToday` (the resize handler's home-tab branch) was dead
 //     code — grep + `git log -S` across the whole repo's history confirm no
@@ -920,7 +920,7 @@ const SessionUIAdapter = {
    and calls App._bootMain() — the same boot path a resumed session takes.
 
    Layout/visual design ported from the "NIMBUS Login" mockup (see
-   docs/superpowers/specs/2026-08-02-login-screen-redesign-design.md): a
+   docs/superpowers/specs/archive/2026-08-02-login-screen-redesign-design.md): a
    split screen — an animated factory-floor canvas (FactoryScene, below) on
    the left, a fixed-dark-chrome sign-in panel on the right. The panel is
    --chrome-* tokens in both light and dark mode by design (not themed).

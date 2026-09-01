@@ -22,7 +22,7 @@ __pycache__
 
 # Node / lint tooling. NOTE: package.json + package-lock.json are NOT ignored —
 # the webbuild stage needs them for `npm ci` + the tsc build (see Dockerfile and
-# docs/typescript_migration.md). Only node_modules and dev-only configs are stripped.
+# docs/archive/typescript_migration.md). Only node_modules and dev-only configs are stripped.
 node_modules
 eslint.config.js
 pyproject.toml

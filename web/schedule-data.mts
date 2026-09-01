@@ -39,7 +39,7 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSe
 import type { components } from './types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
-//    of this phase) — see docs/typescript_migration.md §F. Endpoints brain.py
+//    of this phase) — see docs/archive/typescript_migration.md §F. Endpoints brain.py
 //    does not yet model (/health, /plant-calendar, /master-data/*, /security/*)
 //    get hand-written local interfaces below instead, per this phase's scope.
 type TasksResponse        = components['schemas']['TasksResponse'];

@@ -9,7 +9,7 @@
   // needs zero module wrapper (Workers have no `exports`/`module` global; the
   // CommonJS __esModule marker tsc would otherwise add throws at runtime). "module":
   // "none" is the classic-script emit tsc needs for this file. See
-  // docs/typescript_migration.md.
+  // docs/archive/typescript_migration.md.
   "compilerOptions": {
     "target": "es2022",
     "lib": ["es2022", "webworker"],

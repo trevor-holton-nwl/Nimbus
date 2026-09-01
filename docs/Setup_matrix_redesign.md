@@ -13,7 +13,7 @@ noise/alignment findings (§4-5), the scale problem (§6), the cell-semantics ga
 redesign (§9 bands B-D) — is untouched and still an accurate, unimplemented proposal.
 **Scope:** the **Setup Matrix** inner tab only (Master Data › Plant › System Settings › Setup Matrix),
 rendered by `SetupAdmin` in `web/plant-and-administration.mts:127-1129`.
-**Supersedes:** the IA half of `docs/setup_matrix_ui_redesign.md` (implemented earlier the same day). That
+**Supersedes:** the IA half of `docs/archive/setup_matrix_ui_redesign.md` (implemented earlier the same day). That
 pass fixed real bugs — the `btn.copy` literal, the misleading "REFERENCE DATA" eyebrow, the flat 11-zone
 stack — and introduced the from×to grid. This document says what it did **not** fix, and proposes the
 structural change it explicitly deferred.

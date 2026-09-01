@@ -3521,7 +3521,7 @@ the original messages.
 > Updated both documents with the full agreed design context:
 >
 > - [changeover_matrix.md](<C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/changeover_matrix.md>) is now the authoritative setup-only specification.
-> - [Setup_teardown_bars.md](<C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/Setup_teardown_bars.md>) is clearly marked historical and includes a final decision summary.
+> - [Setup_teardown_bars.md](<C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/archive/Setup_teardown_bars.md>) is clearly marked historical and includes a final decision summary.
 >
 > Captured decisions include:
 >
@@ -3752,7 +3752,7 @@ the original messages.
 > The authoritative document and historical summary were both updated:
 >
 > - [changeover_matrix.md](</C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/changeover_matrix.md>)
-> - [Setup_teardown_bars.md](</C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/Setup_teardown_bars.md>)
+> - [Setup_teardown_bars.md](</C:/Users/PJ29587/OneDrive - Newell Brands/Documents/AI_ML Testing/Claude/docs/archive/Setup_teardown_bars.md>)
 >
 > The final audit covered 26 major decisions: **26/26 present**, with no placeholders or formatting whitespace issues. I don’t see another important decision from our available discussion that remains uncaptured. The remaining uncertainties are explicitly labeled as deferred rather than silently lost.
 >
@@ -3776,4 +3776,4 @@ the original messages.
 ## Document relationships
 
 This transcript preserves the discussion. The implementation requirements remain authoritative in
-`docs/changeover_matrix.md`; `docs/Setup_teardown_bars.md` remains historical.
+`docs/changeover_matrix.md`; `docs/archive/Setup_teardown_bars.md` remains historical.

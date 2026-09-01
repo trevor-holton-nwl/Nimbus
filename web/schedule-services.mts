@@ -141,7 +141,7 @@ interface WorkerSnapshotBase {
 }
 
 /** Utilization.computeMatrix's row shape — tasks RESOLVED to objects (see T-8 in
- *  docs/typescript_migration.md: this is deliberately NOT the same type as the
+ *  docs/archive/typescript_migration.md: this is deliberately NOT the same type as the
  *  ambient NimbusUtilizationRow, whose `tasks: string[]` is the pre-resolution
  *  worker/core contract shape). */
 interface UtilizationRowResolved {

@@ -74,7 +74,7 @@ to ever promoting the new Report-Only CSP (§7's closing paragraphs, `index.html
 to enforcing mode.
 
 See §8 at the end of this document for the full, honest accounting against
-`docs/superpowers/specs/2026-07-16-cq1-frontend-module-migration-design.md`'s
+`docs/superpowers/specs/archive/2026-07-16-cq1-frontend-module-migration-design.md`'s
 "Verification and completion" paragraph — including the criteria this
 migration does **not** fully satisfy (inline-handler elimination, `hydrate`
 mode, global-ID-uniqueness enforcement) and what each would take to close.
@@ -1249,7 +1249,7 @@ task's scope, not part of Task 6.
 ## 8. CQ-1 Completion — Final Criteria Report (Phase 4 Task 7)
 
 This section is the whole-migration completion gate, checked against
-`docs/superpowers/specs/2026-07-16-cq1-frontend-module-migration-design.md`'s
+`docs/superpowers/specs/archive/2026-07-16-cq1-frontend-module-migration-design.md`'s
 own "Verification and completion" paragraph — not against this plan's stated
 intentions. Each criterion below is reported honestly: fully met, partially
 met, or not met, with what closing the gap would take.

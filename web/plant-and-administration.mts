@@ -303,7 +303,7 @@ export const SetupAdmin = (() => {
   // values (Store.priorityRankMaps) — not bounded to states that already have
   // a matrix row — so a value that exists in a priority list but has never
   // been scheduled yet already has a header and an editable cell. See
-  // docs/setup_matrix_ui_redesign.md §3.2 Group 1.
+  // docs/archive/setup_matrix_ui_redesign.md §3.2 Group 1.
 
   /** Order-independent signature for a state key, so a row's stored
    *  `from_key`/`to_key` matches a candidate cross-product state regardless
@@ -440,7 +440,7 @@ export const SetupAdmin = (() => {
    *  merged with the edits, because that scope's import path is a
    *  delete-then-insert replace (setup_data.replace_plant_matrix), not an
    *  upsert — sending only the edited cells there would silently wipe every
-   *  other plant-default row. See docs/setup_matrix_ui_redesign.md §7. */
+   *  other plant-default row. See docs/archive/setup_matrix_ui_redesign.md §7. */
   function buildSaveRequests(edits: ReadonlyArray<SetupGridEdit>, signatureVersion: number, existingPlantRows: ReadonlyArray<SetupMatrixRow>): {
     upsert: Array<{ machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }>;
     deletes: Array<{ machine: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }>;
@@ -1613,7 +1613,7 @@ export const SetupAdmin = (() => {
 
   /** Lasso range-select, copy, delete, and Excel-paste on the grid — the same
    *  interaction model as LaborPlanning's Aggregate grid (see
-   *  docs/setup_matrix_ui_redesign.md §5), adapted for the grid's row/col
+   *  docs/archive/setup_matrix_ui_redesign.md §5), adapted for the grid's row/col
    *  state axes instead of group/week axes. Wired once per `target` (the
    *  panel host persists across renderSnapshot() repaints; only its
    *  innerHTML is replaced), guarded by a dataset flag exactly like
@@ -2262,7 +2262,7 @@ export const Plant = {
   // dropzones and no explanation.
   _priorityLoadError: null as string | null,
   _currentPlantTab: 'general',
-  // System Settings' inner tab strip (docs/setup_matrix_ui_redesign.md §3.1)
+  // System Settings' inner tab strip (docs/archive/setup_matrix_ui_redesign.md §3.1)
   // — separate from _currentPlantTab, which is the outer General/Optimization/
   // System Settings strip. Defaults to 'rules' so the four simple numeric/
   // dropdown settings are what a visitor sees first, not the Setup Matrix

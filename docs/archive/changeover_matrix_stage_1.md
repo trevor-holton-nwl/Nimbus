@@ -243,7 +243,7 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 **Files:**
 - Modify: `web/plant-and-administration.mts` or the existing settings owner for per-plant activation.
 - Modify: `docs/MIGRATION.md`
-- Modify: `docs/changeover_matrix_stage_1.md` only to record checked gates and measurements during execution.
+- Modify: `docs/archive/changeover_matrix_stage_1.md` only to record checked gates and measurements during execution.
 
 - [ ] **Step 1: Keep activation disabled unless definition/version, reachable coverage, current-state acknowledgement, and performance gates all pass.**
 
