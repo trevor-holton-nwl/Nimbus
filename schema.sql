@@ -1207,8 +1207,6 @@ CREATE TABLE IF NOT EXISTS setup_matrix (
     updated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
     PRIMARY KEY (plant, machine, signature_version, from_key, to_key)
 );
-CREATE INDEX IF NOT EXISTS idx_setup_matrix_plant_machine_version
-    ON setup_matrix (plant, machine, signature_version);
 
 -- The most recently accepted physical setup state for each plant/machine.
 CREATE TABLE IF NOT EXISTS machine_setup_state (
