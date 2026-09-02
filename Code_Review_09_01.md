@@ -27,7 +27,23 @@ All three P0s and eleven of the twelve P1s are now fixed on `main` (10 commits, 
 
 Also found and fixed one thing **not** in the original P1-11 write-up: the fail-open cascade-preview bug existed in *two* places in `frontend/master-data/admin-ui.mts` (the single-delete path the finding named, plus an equally-bad bulk-delete path that had no confirm dialog at all on preview failure) — both fixed in `ed2f16d`.
 
-Findings not addressed this pass (deferred, unchanged from the original audit): P0-2's structural half (still a spoofable header — Entra migration is the plan of record), P1-7, P1-9, and everything in §5–§9 (P2/P3 code quality, performance, architecture, dead code).
+Findings not addressed by the first pass (deferred at the time): P0-2's structural half (still a spoofable header — Entra migration is the plan of record), P1-7, P1-9, and everything in §5–§9 (P2/P3 code quality, performance, architecture, dead code).
+
+### 0.1 Second remediation pass — 2026-09-02 (polish batch)
+
+A follow-up pass picked off the highest-value, lowest-risk items from the P2/P3 backlog in §5–§9 that the first pass explicitly deferred — small, self-contained fixes that don't touch the frozen auth-trust-model internals or the xmin concurrency contract. Done in an isolated worktree/branch (`chore/code-review-polish-2026-09-02`), verified (`npm run build`/`typecheck`/`lint`/`test`, `check:static-assets`, `check:legacy-surface`, `python -m pytest`), then fast-forward-merged into `main` and the worktree pruned. Zero new test regressions — the JS suite's same 5 pre-existing failures (unrelated: `Engine.autoReflow`/`OptimizerPreview` setup-placement tests) reproduce identically on unmodified `main`; the Python suite passed 286/286 (104 skipped, Postgres-gated, unchanged).
+
+| Commit | Covers |
+|---|---|
+| `e9f3fa3` | Bootstrap-admin default, `require_admin`/`whoami` grace-period logging, `POST /audit/log` auth gate, `/health` raw-exception redaction, `COLOR_WHEEL_DIR` repo-relative default |
+| `ada40ec` | Dropped redundant `idx_setup_matrix_plant_machine_version` index (schema.sql + dated migration) |
+| `a4ddd6c` | Firmed-order no-op guard `end` comparison, `DependencyOverlay` cycle guard, `PerfMonitor.subscribe` unsubscribe return, `Modal.confirm` reentrancy guard, missing-key-column toast + new i18n key, `SystemConfig` toast tone typo, stale `viewers.mts` comment, and the full remaining `Util.escapeHtml()` migration (14 files, ~30 call sites) |
+
+One live-code correction found during verification, not caught in the original write-up: several local `esc`/`_esc` helpers across the codebase escaped `&<>"` but not `'` — migrating them to `Util.escapeHtml()` (which does escape `'`) was treated as a safe, one-directional fix (HTML-entity-escaping an additional character can only prevent it being interpreted as syntax, never break correct rendering) rather than left alone to "preserve behavior." A few files (`viewers.mts`, several `insights-ui.mts`/`orders.mts`/`setup-admin.mts` call sites) had this exact gap and are now closed.
+
+**Process note worth recording:** the first attempt at this batch dispatched ~15 parallel subagents into one shared worktree; one agent ran `git stash`/`stash pop` mid-task to isolate its own build output, which silently reverted roughly ten other agents' completed edits (files reverted to their pre-batch `main` state) while leaving one stray scratch file behind. This was caught by re-diffing every file each agent claimed to have touched against what was actually on disk before committing anything — about a third of the batch's fixes had to be redone by hand rather than trusted from agent self-reports. No destructive git command was used to recover; the redo was applied directly. Worth remembering: don't run `git stash` inside a worktree other agents are concurrently editing.
+
+Findings not addressed this pass (deferred, unchanged): P0-2's structural half, P1-7, P1-9, legacy color-wheel plant-scoping (the setup domain's own `CLAUDE.md` documents the looser validation there as an intentional back-compat decision — needs a product call, not a silent fix), `GET /master-data/{table}` auth (deliberate pilot posture), a uniform `require_api_key` sweep across admin routes, capacity-math triplication consolidation, the single-replica architecture note, and a newly-noticed (not yet written up) `forEach`/`return` early-exit bug adjacent to the missing-key-column toast in `master-data/admin-ui.mts`'s save-validation loop.
 
 ---
 
@@ -75,7 +91,7 @@ Below those, the findings are the normal texture of a fast-moving codebase: a ha
 - **Impact:** Full system takeover for anyone with network access to the live pilot, if the two env vars aren't set. This is a documented/accepted pilot gap pending the Entra migration — but "planned to fix" doesn't reduce present exposure, and the live URL has been public since 2026-06-30.
 - **Recommendation:** (1) **Verify today** that `NIMBUS_API_KEY` and `NIMBUS_ALLOWED_ORIGINS` are actually set on `ca-nimbus-dev` — this is a 5-minute check with the highest risk-reduction-per-effort in this report. (2) Apply `require_api_key` uniformly to *all* admin routes, not just destructive ones. (3) Change the bootstrap-admin default to something generic. (4) Keep the Entra migration the top structural priority.
 - **Priority:** P0 (code-level exposure High confidence; live exploitability depends on unverified env config) · **Category:** Security
-- **Status: ⏳ OPEN.** Not a code fix — recommendation (1) is a manual Azure config check nobody has confirmed yet; recommendations (2)-(4) are structural/deferred to the Entra migration, deliberately not re-scoped here (see `docs/DEPLOYMENT.md`, `Entra_Auth_Migration.md`). `auth.py`'s trust-model internals were intentionally left untouched by every other fix in this remediation pass.
+- **Status: ⏳ OPEN**, except recommendation (3). Recommendation (1) is a manual Azure config check nobody has confirmed yet; (2) and (4) are structural/deferred to the Entra migration, deliberately not re-scoped here (see `docs/DEPLOYMENT.md`, `Entra_Auth_Migration.md`). **(3) ✅ RESOLVED (`e9f3fa3`, 2026-09-02)** — the hardcoded `"PJ29587"` bootstrap-admin default is now `"admin"` (`auth.py`, env-overridable via `NIMBUS_BOOTSTRAP_ADMIN_USERNAME` as before). `auth.py`'s actual trust-model *logic* (identity resolution, access-control decisions) remains intentionally untouched — only this one default constant and, separately, some grace-path logging (§7) changed.
 
 ### P0-3 — `schema.sql` cannot bootstrap a fresh database; `orders.plant` exists in no migration
 - **Location:** `schema.sql:81-82` (index) vs `schema.sql:34-60` (CREATE TABLE — verified: no `plant` column) vs `schema.sql:350` (ALTER adds `plant`); `migrations/` (no file adds `orders.plant`)
@@ -157,12 +173,12 @@ The cross-match of ~90 backend routes against every frontend call site found **n
 ## 5. Code Quality Findings
 
 **Bugs (beyond §2):**
-- `Modal.confirm()` is not reentrant — `foundation.mts:1465-1490`. Concurrent confirms cross-fire listeners: one click can resolve both pending promises, executing an action the user never saw confirmed. P2/Med.
+- `Modal.confirm()` is not reentrant — `foundation.mts:1465-1490`. Concurrent confirms cross-fire listeners: one click can resolve both pending promises, executing an action the user never saw confirmed. P2/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** A module-level busy flag + queue now serializes concurrent `confirm()` calls instead of double-attaching listeners.
 - Labor `_lineData` cache is merge-only — `labor-planning.mts:216-235`. Server-side-cleared overrides keep rendering and feeding exception math until full plant reselect. P2/Med.
-- `SystemConfig._save` failure toast uses tone `'err'` where every other call site uses `'error'` — `admin-ops/admin-ui.mts:2807-2810`; the save-failure signal renders unstyled. P2/Med.
-- Firmed-order no-op guard compares `start`/`group` but not `end` — `gantt.mts:3489-3501`; asymmetric with the non-firmed check below it. P3/Med.
-- `DependencyOverlay` critical-path recursion has no cycle guard — `gantt.mts:1739-1761`; cyclic dependency data stack-overflows on every pan/zoom. P3/Med.
-- Missing-key-column toast always says "no plant selected" even for non-plant-keyed tables — `admin-ui.mts:3376-3381`. P3/High.
+- `SystemConfig._save` failure toast uses tone `'err'` where every other call site uses `'error'` — `admin-ops/admin-ui.mts:2807-2810`; the save-failure signal renders unstyled. P2/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).**
+- Firmed-order no-op guard compares `start`/`group` but not `end` — `gantt.mts:3489-3501`; asymmetric with the non-firmed check below it. P3/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).**
+- `DependencyOverlay` critical-path recursion has no cycle guard — `gantt.mts:1739-1761`; cyclic dependency data stack-overflows on every pan/zoom. P3/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Added a per-DFS-path `visiting` set; previously it failed safe via a top-level `try/catch` (returned 0 on `RangeError`) rather than actually crashing, but wasted recursion.
+- Missing-key-column toast always says "no plant selected" even for non-plant-keyed tables — `admin-ui.mts:3376-3381`. P3/High. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02)** — new `toast.missing_required_key` i18n key. **Not fixed:** the `forEach`/`return` right next to it only skips one row instead of aborting the whole save — a separate, still-open bug, deliberately not folded into this fix.
 - KPI-tile → table filter navigation relies on a blind `setTimeout(…, 120)` — `insights-ui.mts:487-522`; silently no-ops on slow first tab mount. P3/Med.
 - `calendar-engine.mts:308-405`: three day-walk loops share a hardcoded 90-day cap; two of three exhaustion paths return silently with no diagnostic. P3/Med.
 
@@ -173,9 +189,9 @@ The cross-match of ~90 backend routes against every frontend call site found **n
 - The completion-time `COALESCE(...)` formula is duplicated verbatim 3× inside one SQL statement — `backend/setup/data.py:462-498`; the codebase has already been bitten once by exactly this duplication pattern. P2.
 - Flatpickr re-instantiated per cell per render, never destroyed — `calendar-admin.mts:100-101`; slow leak on repeated filter switching. P2.
 - No loading/busy state during `/tasks` fetch or `saveAll()`; grid stays fully editable mid-flight, compounding the race findings. P2.
-- Platform exports no shared `escapeHtml()` — at least four local `esc()`/`_esc()`/`_htmlEsc()` reimplementations; `Modal.confirm`'s `detail` is documented as raw HTML with no guardrail. Centralize. P2. — **🟡 PARTIAL:** `Util.escapeHtml()` now exists (`ed2f16d`) and is used at the 3 real-XSS call sites fixed in this pass (a fuller grep during that work found the reimplementation count is actually ~14 files, not ~4) — migrating the rest, and `Modal.confirm`'s raw-HTML `detail` guardrail, remain open P2 cleanup.
+- Platform exports no shared `escapeHtml()` — at least four local `esc()`/`_esc()`/`_htmlEsc()` reimplementations; `Modal.confirm`'s `detail` is documented as raw HTML with no guardrail. Centralize. P2. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** `Util.escapeHtml()` (added `ed2f16d`) is now used everywhere — the remaining ~14 files / ~30 call sites found during the first pass's grep are all migrated, and each now-dead local helper removed. Several local helpers didn't escape a single quote; migrating closes that gap. `Modal.confirm`'s raw-HTML `detail` param itself is unchanged (still accepts trusted HTML by design) — not a guardrail gap, just documented behavior.
 - i18n gaps cluster in: master-data delete/paste modals, Labor Planning KPI/Inputs/Capacity tabs, the entire CommandPalette (~40 strings, invisible to the locale-completeness test), Gantt hover-card labels, Optimize dialog tooltips, setup machine-state editor, SAP config UI. P2 collectively — the repo's own stated convention is being bypassed on its most-used surfaces.
-- `PerfMonitor.subscribe()` returns no unsubscribe, unlike `Store`/`ErrorLog` — an API trap. P3.
+- `PerfMonitor.subscribe()` returns no unsubscribe, unlike `Store`/`ErrorLog` — an API trap. P3. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Now returns an unsubscribe closure, matching `Store`/`ErrorLog`; its one caller (`admin-ops/admin-ui.mts:556`) already ignored the return value, so this is a backward-compatible widening.
 - `FactoryScene` (~650 lines of decorative login-canvas code) inlined in the boot-critical `application-shell.mts`; lazy-load it. P3.
 
 ---
@@ -205,9 +221,9 @@ Covered in §2: P0-1 (unguarded task routes), P0-2 (header auth + CORS `*` + har
 - **Admin routes inconsistently API-key-gated** — `security/routes.py`, `admin_ops/routes.py:30-246`: `/diagnostics/db` and `/logs/backend` (full structured log incl. tracebacks, slow-query text) are `require_admin`-only, while destructive siblings also require the API key. Uniform `require_api_key` when set. P2/Med.
 - **Legacy color-wheel GETs skip plant scoping** — `priority_lists/routes.py:498-561`: a plant-restricted user can read other plants' priority data via the legacy endpoint even though the generic endpoint for the same data enforces scoping. P2/High.
 - **`GET /master-data/{table}` fully unauthenticated** — documented, deliberate pilot posture, but any anonymous caller enumerates all master data cross-plant (incl. `roles`, `role_plants`). Require `require_authenticated` before pilot scope expands. P2/High.
-- **`admin_exists()` grace period is unbounded** — `auth.py:527-536`: any state where zero admin rows exist (partial restore, migration race) leaves `require_admin` fully open to everyone, indefinitely, silently. Log loudly and continuously. P2/Med.
-- **`POST /audit/log` is open and unvalidated** — `master_data/routes.py:58-64`: anyone can append arbitrary JSON (spoofed user/action, unbounded growth). P3/Med.
-- **`/health` returns raw exception text unauthenticated** — `admin_ops/routes.py:36-59`: could leak internal hostnames/ports on DB failure. Redact. P3/Med.
+- **`admin_exists()` grace period is unbounded** — `auth.py:527-536`: any state where zero admin rows exist (partial restore, migration race) leaves `require_admin` fully open to everyone, indefinitely, silently. Log loudly and continuously. P2/Med. — **🟡 PARTIAL (`e9f3fa3`, 2026-09-02).** `require_admin`/`whoami` now log a warning whenever the grace path grants access. The grace period itself is still unbounded by design (unchanged access-control logic, per `auth.py`'s frozen-pending-Entra convention) — this closes the "silently" half, not the "unbounded" half.
+- **`POST /audit/log` is open and unvalidated** — `master_data/routes.py:58-64`: anyone can append arbitrary JSON (spoofed user/action, unbounded growth). P3/Med. — **🟡 PARTIAL (`e9f3fa3`, 2026-09-02).** Gated with `Depends(auth.require_authenticated)` — no longer fully open to anonymous callers. The body is still an unvalidated bare `dict` (no Pydantic model) — that half is unaddressed.
+- **`/health` returns raw exception text unauthenticated** — `admin_ops/routes.py:36-59`: could leak internal hostnames/ports on DB failure. Redact. P3/Med. — **✅ RESOLVED (`e9f3fa3`, 2026-09-02).** Confirmed both `db.get_health_stats()` and `db.get_pool_stats()` genuinely did `"error": str(e)` on failure (not hypothetical). Redacted to a generic string inside the `/health` handler only — `db.py`'s two functions and the admin-gated `/diagnostics/db` deep-dive (which needs the real text) are untouched.
 - **Client-side password minimum mirrors the weak 4-char server rule** — `security-admin.mts:426,463` + `auth.py:287-296`. Fix server-side first. P3.
 - **Latent escaping traps** — `_optTag()` label unescaped (`application-shell.mts:365-368`), `EmptyState.render()` raw interpolation (`:1520-1531`), BOM scope bar (`admin-ui.mts:2818`): safe with current callers, no contract stopping the next caller. Fold into the shared-escape-helper work. P3.
 
@@ -224,7 +240,7 @@ Covered in §2: P0-1 (unguarded task routes), P0-2 (header auth + CORS `*` + har
 - **`list_rows` orders by positional column luck** — `master_data.py:291-293`: self-documented in sibling functions as "only works by seed-order luck"; apply their explicit key-membership filter. P3/Med.
 - **Calendar's line filter ignores the global `Store.selectedLines`** — `calendar-admin.mts:23`: inconsistent with the app-wide filter convention every other tab follows. P3.
 - **Non-emitting Store setters** (`store.mts:203-266`) — correct and well-commented, but only comments enforce the exception. Informational.
-- **Redundant index** — `schema.sql:1201-1202`: `idx_setup_matrix_plant_machine_version` is a strict prefix of the table's PK. P3/Low.
+- **Redundant index** — `schema.sql:1201-1202`: `idx_setup_matrix_plant_machine_version` is a strict prefix of the table's PK. P3/Low. — **✅ RESOLVED (`ada40ec`, 2026-09-02).** Dropped from `schema.sql`; `migrations/2026-09-02-drop-redundant-setup-matrix-index.sql` added so the ledger-only rebuild path (deploys apply `migrations/`, never `schema.sql`) also drops it on the live Azure DB.
 - **Intentional soft-FK convention verified** — `workcenter_mapping`/`color_wheel`/`priority_list` deliberately carry no FK to `plants`/`machine` (supports ingest-before-master-data ordering, explicitly commented). Not a defect; recorded so future audits don't re-flag it.
 
 ---
@@ -236,8 +252,8 @@ Covered in §2: P0-1 (unguarded task routes), P0-2 (header auth + CORS `*` + har
 - `/security/bootstrap-status`, `/master-data/_audit`, `/color-wheels`, plain `/diagnostics`, dedicated `visibility-horizon` POST — uncalled endpoints (§3). P3.
 - `setup_definition.active` — self-documented vestigial column. P3.
 - `RemoveBacklogDiagnostics.movedRuntimeHours` — populated, never consumed by its only reader. P3.
-- `COLOR_WHEEL_DIR` defaults to a hardcoded personal Windows path — `priority_lists/audit_log.py:30`. Silently degrades audit durability on any other machine. P3.
-- Stale comment in `viewers.mts:252-258` claiming no identity header is sent (fetchTraced auto-attaches it). P3.
+- `COLOR_WHEEL_DIR` defaults to a hardcoded personal Windows path — `priority_lists/audit_log.py:30`. Silently degrades audit durability on any other machine. P3. — **✅ RESOLVED (`e9f3fa3`, 2026-09-02).** Fallback is now repo-relative (`data/color_wheels`, auto-created via `os.makedirs(..., exist_ok=True)`); the `COLOR_WHEEL_DIR` env-var override is unchanged for deployments that set it.
+- Stale comment in `viewers.mts:252-258` claiming no identity header is sent (fetchTraced auto-attaches it). P3. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Also corrected the file location in this doc: it's `frontend/priority-lists/viewers.mts`, not a scheduling-domain file.
 - **Stale project memory/docs:** the four 2026-07-03 setup-scheduler defects (multi-day window bypass, force-place off-by-one, SPT non-determinism, force-place/fixed overlap) are recorded as "shipped unfixed" but the `_dispatchDayIntegrity` path they lived in is fully removed — they are resolved by replacement. Update the records.
 
 ---
@@ -288,7 +304,7 @@ Ranked by value; per project convention, these are targeted additions, not new s
 20. Upload size caps; scoped machine fetch in `syncLineSettings`; compute-core loop bucketing.
 
 **Optional cleanup (P3):**
-21. i18n sweep (CommandPalette first — extend the locale-completeness test to cover it so the gap can't silently regrow), dead endpoints/branches, `COLOR_WHEEL_DIR` default, bootstrap-admin username default, redundant index, stale comments, and the stale memory/doc records about the four resolved scheduler defects.
+21. i18n sweep (CommandPalette first — extend the locale-completeness test to cover it so the gap can't silently regrow), dead endpoints/branches, and the stale memory/doc records about the four resolved scheduler defects. — `COLOR_WHEEL_DIR` default, bootstrap-admin username default, redundant index, and stale comments are **✅ DONE (`e9f3fa3`/`ada40ec`/`a4ddd6c`, 2026-09-02)** — see §0.1.
 
 **Dependencies worth noting:** items 2→5→12 form a chain (auth identity must exist before scoping can use it; the test should land with the fix). Item 8 (shared escape helper) should precede any further XSS point-fixes so they're done once. Item 15's parity test should precede consolidation so behavior is pinned.
 
