@@ -291,32 +291,28 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
 
 // -- Filter bar (generic, config-driven) --------------------------------------
 
-function _esc(s: unknown): string {
-  return String(s).replace(/[&<>"]/g, c => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
-}
-
 function _renderFilterBar(spec: GridSpec): void {
   const bar = document.getElementById(spec.barId);
   if (!bar) return;
   bar.innerHTML =
-    `<span class="dash-filter-label">${_esc(Util.t('ui.filter_label'))}</span>` +
+    `<span class="dash-filter-label">${Util.escapeHtml(Util.t('ui.filter_label'))}</span>` +
     spec.filters.map(f => `
       <div class="dash-filter-group">
-        <button class="dash-filter-btn" data-mdf="${_esc(f.field)}">
+        <button class="dash-filter-btn" data-mdf="${Util.escapeHtml(f.field)}">
           <span class="mdf-label" id="${spec.barId}-${f.field}-label"></span>
           <span class="dash-filter-arrow">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="${spec.barId}-${f.field}-dropdown" hidden>
           <div class="dash-filter-paste-row">
             <input type="text" class="dash-filter-paste-input" id="${spec.barId}-${f.field}-search"
-                   placeholder="${_esc(Util.t('ph.search_or_paste'))}"
-                   title="${_esc(Util.t('tip.search_or_paste'))}" autocomplete="off">
+                   placeholder="${Util.escapeHtml(Util.t('ph.search_or_paste'))}"
+                   title="${Util.escapeHtml(Util.t('tip.search_or_paste'))}" autocomplete="off">
           </div>
           <div class="dash-filter-checklist" id="${spec.barId}-${f.field}-checklist"></div>
           <div class="dash-filter-hint" id="${spec.barId}-${f.field}-cap" hidden></div>
         </div>
       </div>`).join('') +
-    `<button class="dash-filter-clear" id="${spec.barId}-clear" hidden>${_esc(Util.t('btn.clear_filters'))}</button>` +
+    `<button class="dash-filter-clear" id="${spec.barId}-clear" hidden>${Util.escapeHtml(Util.t('btn.clear_filters'))}</button>` +
     `<span class="dash-filter-hint" id="${spec.barId}-hint"></span>`;
   _wireFilterBar(spec);
 }

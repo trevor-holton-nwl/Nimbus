@@ -38,9 +38,6 @@ export const ColorWheelViewer = (() => {
   let _search  = '';
   let _sort: 'priority' | 'name' = 'priority';
 
-  const _esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) =>
-    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
-
   // Map common color name fragments → hex for the swatch tiles
   const COLOR_MAP: Record<string, string> = {
     RED:'#e74c3c', BLUE:'#3498db', GREEN:'#2ecc71', YELLOW:'#f1c40f',
@@ -106,7 +103,7 @@ export const ColorWheelViewer = (() => {
       })
       .catch((err: Error) => {
         _entries = [];
-        if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.cw_no_wheel_for_plant', { plant: _esc(_plant) })}</div>`;
+        if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.cw_no_wheel_for_plant', { plant: Util.escapeHtml(_plant) })}</div>`;
         const metaEl = document.getElementById('cw-viewer-meta');
         if (metaEl) metaEl.textContent = err.message.includes('404') ? Util.t('empty.cw_no_file') : err.message;
       });
@@ -149,11 +146,11 @@ export const ColorWheelViewer = (() => {
       const tc     = taskCounts[Util.norm(e.color || '')] || 0;
       const pri    = e.order_y != null && e.order_y < 999999 ? e.order_y : '—';
       return `<div class="cw-viewer-row">
-        <div class="cw-swatch" style="${hex ? `background:${hex}` : 'background:var(--bg-strong)'}" title="${_esc(e.color)}">
-          ${!hex ? `<span class="cw-swatch-letter">${_esc(letter)}</span>` : ''}
+        <div class="cw-swatch" style="${hex ? `background:${hex}` : 'background:var(--bg-strong)'}" title="${Util.escapeHtml(e.color)}">
+          ${!hex ? `<span class="cw-swatch-letter">${Util.escapeHtml(letter)}</span>` : ''}
         </div>
         <div class="cw-row-body">
-          <div class="cw-row-name">${_esc(e.color)}</div>
+          <div class="cw-row-name">${Util.escapeHtml(e.color)}</div>
           <div class="cw-row-sub">
             ${Util.t('ui.priority_label')} <strong>${pri}</strong>
             ${tc ? `<span class="cw-row-dot">·</span><span class="cw-row-tasks">${Util.t('ui.active_orders', { count: tc, plural: tc !== 1 ? 's' : '' })}</span>` : ''}
@@ -163,7 +160,7 @@ export const ColorWheelViewer = (() => {
         <button class="cw-row-expand" onclick="NIMBUS.ColorWheelViewer._toggleExpand(this)">▾</button>
         <div class="cw-row-detail">
           ${tc
-            ? `<span class="cw-detail-stat ok">${Util.t('ui.active_orders', { count: tc, plural: tc !== 1 ? 's' : '' })} ${Util.t('ui.on_plant_label')} <strong>${_esc(_plant)}</strong></span>`
+            ? `<span class="cw-detail-stat ok">${Util.t('ui.active_orders', { count: tc, plural: tc !== 1 ? 's' : '' })} ${Util.t('ui.on_plant_label')} <strong>${Util.escapeHtml(_plant)}</strong></span>`
             : `<span class="cw-detail-stat mute">${Util.t('ui.no_active_for_color')}</span>`}
         </div>
       </div>`;
@@ -207,9 +204,6 @@ export const PriorityListViewer = (() => {
   let _entries: PriorityListEntry[] = [];
   let _search = '';
 
-  const _esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) =>
-    (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
-
   // `line` (optional, defaults to '' = plant-wide) — a field card's per-line
   // override rows carry a line, and previewing one without threading it
   // through would always 404-fall-back to the plant-wide list (or "no list"
@@ -251,10 +245,11 @@ export const PriorityListViewer = (() => {
 
     // Util.fetchTraced (not bare fetch) — GET /priority-list/{plant}/{field_key}
     // isn't admin-gated, but it does call _assert_plant_allowed server-side
-    // (brain.py:1943) to scope by the caller's role_plants; with no identity
-    // header a plant-restricted user could preview ANY plant's priority
-    // list, not just plants they're allowed to see (same class of bug as
-    // plant-and-administration.mts's fetch trio, just in a different file).
+    // (brain.py:1943) to scope by the caller's role_plants. fetchTraced
+    // automatically attaches an x-user-email identity header via
+    // Util.setActorResolver (see frontend/platform/foundation.mts). Any
+    // residual access-control concern here is about server-side plant-scoping
+    // enforcement, not header presence.
     const qs = _line ? `?machine=${encodeURIComponent(_line)}` : '';
     Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(_plant!)}/${encodeURIComponent(_fieldKey!)}${qs}`,
           { signal: AbortSignal.timeout(8000) })
@@ -297,8 +292,8 @@ export const PriorityListViewer = (() => {
       const pri = e.rank < 999999 ? e.rank : '—';
       return `
         <div class="cw-viewer-row">
-          <div class="cw-viewer-rank">${_esc(pri)}</div>
-          <div class="cw-viewer-name">${_esc(e.value)}</div>
+          <div class="cw-viewer-rank">${Util.escapeHtml(pri)}</div>
+          <div class="cw-viewer-name">${Util.escapeHtml(e.value)}</div>
         </div>`;
     }).join('');
   }

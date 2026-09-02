@@ -493,8 +493,7 @@ export const Table = {
             const note = p.value != null ? String(p.value).trim() : '';
             if (!note) return `<span class="nb-note-empty">✎ <em>${Util.t('ui.add_note')}</em></span>`;
             const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
-            const esc = note.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-            return `<span class="nb-note-preview" title="${esc}">✎ ${preview}</span>`;
+            return `<span class="nb-note-preview" title="${Util.escapeHtml(note)}">✎ ${preview}</span>`;
           }
         }
       ] as TableColDef[],
@@ -758,9 +757,8 @@ export const Table = {
     }
     const q = Table._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     drop.innerHTML = visible.length
-      ? visible.map(c => `<label><input type="checkbox" value="${esc(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${esc(c)}</label>`).join('')
+      ? visible.map(c => `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${Util.escapeHtml(c)}</label>`).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
   },
 
@@ -1393,8 +1391,6 @@ export const Table = {
     if (!rel.length) return;
     const t = Store.tasks[taskId];
     const po = Util.orderNumber(t);
-    const _esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
 
     const rows = rel.map(a => {
       const icon  = a.sev === 'err' ? '🔴' : '🟡';
@@ -1402,9 +1398,9 @@ export const Table = {
       return `
         <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
           <span style="flex-shrink:0;font-size:13px;margin-top:1px">${icon}</span>
-          <span style="flex:1;font-size:12.5px;color:var(--fg);line-height:1.45">${_esc(a.msg)}</span>
+          <span style="flex:1;font-size:12.5px;color:var(--fg);line-height:1.45">${Util.escapeHtml(a.msg)}</span>
           ${date ? `<span style="flex-shrink:0;font-size:10.5px;color:var(--fg-mute);white-space:nowrap;margin-top:2px">${date}</span>` : ''}
-          <button data-alert-id="${_esc(a.id)}"
+          <button data-alert-id="${Util.escapeHtml(a.id)}"
             style="flex-shrink:0;padding:2px 10px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:none;cursor:pointer;color:var(--fg-mute);white-space:nowrap;margin-top:1px">
             Go to
           </button>
@@ -1416,7 +1412,7 @@ export const Table = {
     dlg.innerHTML = `
       <div style="padding:20px;min-width:320px;max-width:440px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ Alerts — Order <span style="color:var(--accent)">${_esc(po)}</span></h3>
+          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ Alerts — Order <span style="color:var(--accent)">${Util.escapeHtml(po)}</span></h3>
           <button data-alert-close style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute)">✕</button>
         </div>
         <div>${rows}</div>
@@ -1436,8 +1432,6 @@ export const Table = {
     Table._closeNotePopover();
     const task = Store.tasks[id];
     if (!task) return;
-    const _esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
 
     const pop = document.createElement('div');
     pop.id = 'nb-note-popover';
@@ -1447,7 +1441,7 @@ export const Table = {
         <span>Order Note</span>
         <button class="nb-note-pop-close" onclick="NIMBUS.Table._closeNotePopover()">✕</button>
       </div>
-      <textarea id="nb-note-ta" maxlength="500" placeholder="Add a note…">${_esc(cur)}</textarea>
+      <textarea id="nb-note-ta" maxlength="500" placeholder="Add a note…">${Util.escapeHtml(cur)}</textarea>
       <div class="nb-note-pop-footer">
         <span id="nb-note-cnt">${cur.length}/500</span>
         <div class="nb-note-pop-btns">
@@ -1568,9 +1562,8 @@ export const Table = {
       const query = q.toLowerCase().trim();
       this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
       this._activeIdx = 0;
-      const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${esc(v)}</div>`).join('')
+        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${Util.escapeHtml(v)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
       this._list.querySelectorAll('.nse-opt').forEach((el) => {
         el.addEventListener('mousedown', (e: Event) => { e.preventDefault(); this._choose(Number((el as HTMLElement).dataset.i)); });
@@ -1809,7 +1802,6 @@ export const Inspector = {
     if (!task) { Inspector.clear(); return; }
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
-    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const firmed = Store.isFirmed(task.id);        // manual layer — drives the Firm/Unfirm button
     const firmedUnion = Engine.firmingStatus(task).firmed;  // SAP OR frozen-horizon OR manual — drives the one banner below
     const lineOptions = Table._getLineOptions();
@@ -1830,41 +1822,41 @@ export const Inspector = {
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
-        ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${esc(a.msg)}</div>`).join('')}
+        ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(a.msg)}</div>`).join('')}
       </div>` : ''}
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_order_section')}</h4>
         <div class="insp-row"><label>${Util.t('ui.insp_id')}</label>
-          <div class="insp-val">${esc(task.id)}</div></div>
+          <div class="insp-val">${Util.escapeHtml(task.id)}</div></div>
           <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
-          <div class="insp-val">${esc(task.ORDER || task.id)}</div></div>
+          <div class="insp-val">${Util.escapeHtml(task.ORDER || task.id)}</div></div>
         ${Inspector._fieldVisible('MATERIAL_NUMBER') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_material_no')}</label>
-          <div class="insp-val">${esc(task.MATERIAL_NUMBER || '—')}</div></div>` : ''}
+          <div class="insp-val">${Util.escapeHtml(task.MATERIAL_NUMBER || '—')}</div></div>` : ''}
         ${Inspector._fieldVisible('MATERIAL_DESCRIPTION') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_material_desc')}</label>
-          <div class="insp-val">${esc(task.MATERIAL_DESCRIPTION || '—')}</div></div>` : ''}
+          <div class="insp-val">${Util.escapeHtml(task.MATERIAL_DESCRIPTION || '—')}</div></div>` : ''}
         ${Inspector._fieldVisible('ORDER_QUANTITY_(GMEIN)') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_qty')}</label>
-          <div class="insp-val">${esc(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>` : ''}
+          <div class="insp-val">${Util.escapeHtml(task['ORDER_QUANTITY_(GMEIN)'] || 0)}</div></div>` : ''}
         ${Inspector._fieldVisible('COLOR') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_color')}</label>
-          <div class="insp-val">${esc(task.COLOR || '—')}</div></div>` : ''}
+          <div class="insp-val">${Util.escapeHtml(task.COLOR || '—')}</div></div>` : ''}
         ${Inspector._fieldVisible('FORM_SIZE') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_form')}</label>
-          <div class="insp-val">${esc(task.FORM_SIZE || '—')}</div></div>` : ''}
+          <div class="insp-val">${Util.escapeHtml(task.FORM_SIZE || '—')}</div></div>` : ''}
         ${['PRT_01', 'PRT_02', 'PRODUCTION_VERSION'].map(key => {
           if (!Inspector._fieldVisible(key)) return '';
           const field = ORDER_FIELD_CATALOG.find(c => c.key === key);
           if (!field) return '';
           const value = (task as unknown as Record<string, unknown>)[key] ?? '';
           return `<div class="insp-row"><label>${Util.t(field.i18nInspectorKey)}</label>
-            <div class="insp-val"><input type="text" data-field="${key}" value="${esc(value)}"></div></div>`;
+            <div class="insp-val"><input type="text" data-field="${key}" value="${Util.escapeHtml(value)}"></div></div>`;
         }).join('')}
         <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
           <div class="insp-val"><select data-field="MACHINE">
-            ${lineOptions.map(l => `<option value="${esc(l)}" ${l === task.MACHINE ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+            ${lineOptions.map(l => `<option value="${Util.escapeHtml(l)}" ${l === task.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('')}
           </select></div></div>
       </div>
 
@@ -1898,7 +1890,7 @@ export const Inspector = {
           if (!f) return '';
           const val = (task as unknown as Record<string, unknown>)[key];
           return `<div class="insp-row"><label>${Util.t(f.i18nInspectorKey)}</label>
-            <div class="insp-val">${esc(val ?? '—')}</div></div>`;
+            <div class="insp-val">${Util.escapeHtml(val ?? '—')}</div></div>`;
         }).join('');
         return rows ? `<div class="insp-card">
           <h4>${Util.t('ui.insp_more_section')}</h4>
@@ -1921,24 +1913,24 @@ export const Inspector = {
         </div>
       </div>` : ''}
 
-      <div class="insp-card insp-setup-detail" aria-label="${esc(Util.t('ui.setup_detail_title'))}">
-        <h4>${esc(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${esc(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${esc(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_source'))}</label><div class="insp-val">${esc(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${esc(Util.t('ui.setup_override'))}</label><div class="insp-val">${esc(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
-        ${setupCapacityConflict ? `<p class="insp-setup-warning">${esc(setupCapacityConflict)}</p>` : ''}
-        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${esc(Util.t('ui.setup_missing'))}: ${esc(setupDetail.missingDetail)}</p>` : ''}
+      <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
+        <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_source'))}</label><div class="insp-val">${Util.escapeHtml(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
+        ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
+        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
         ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
       </div>
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_notes_section')}</h4>
         <div class="insp-notes-wrap">
-          <textarea data-field="notes" maxlength="500" placeholder="${Util.t('ph.add_note')}" rows="3">${esc(task.notes || '')}</textarea>
+          <textarea data-field="notes" maxlength="500" placeholder="${Util.t('ph.add_note')}" rows="3">${Util.escapeHtml(task.notes || '')}</textarea>
           <div class="insp-notes-counter"><span id="insp-notes-rem">${500 - (task.notes || '').length}</span> ${Util.t('ui.remaining')}</div>
         </div>
       </div>

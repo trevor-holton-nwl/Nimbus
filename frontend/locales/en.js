@@ -117,6 +117,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.missing_key_rows':            'All {{count}} row(s) missing required key: {{keys}}',
   'toast.no_valid_rows':               'No valid rows to paste',
   'toast.no_plant_selected':           'No plant selected',
+  'toast.missing_required_key':        'Missing required field(s)',
   'toast.cascade_preview_failed':      'Could not verify what this delete would affect — try again.',
   'toast.bom_upload_done':             '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected',
   'toast.bom_upload_failed':           'BOM upload failed',

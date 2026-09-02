@@ -29,7 +29,6 @@ export const PriorityListMapping = (() => {
   // `<img src=x onerror=...>` would otherwise execute in an admin's
   // browser). Same escape regex this file uses everywhere else (see
   // `_renderOptimization`'s local `esc`).
-  const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
 
   function open(headers: string[], sample: Record<string, unknown>[],
                 onConfirm: (v: string, r: string) => void, onCancel?: () => void): void {
@@ -37,18 +36,18 @@ export const PriorityListMapping = (() => {
     _onCancel = onCancel || null;
     const valSel = document.getElementById('pl-mapping-value-col') as HTMLSelectElement;
     const rankSel = document.getElementById('pl-mapping-rank-col') as HTMLSelectElement;
-    valSel.innerHTML = headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
+    valSel.innerHTML = headers.map(h => `<option value="${Util.escapeHtml(h)}">${Util.escapeHtml(h)}</option>`).join('');
     // ROW_ORDER_SENTINEL, not '' — an empty value is indistinguishable server-side
     // from "the client sent no rank_column at all", so brain.py's
     // _resolve_priority_list_columns fell through to auto-detection and could rank
     // by a column (e.g. ORDER) the user had just explicitly declined. Must stay in
     // sync with brain.ROW_ORDER_SENTINEL and index.html's static <option>.
     rankSel.innerHTML = `<option value="${ROW_ORDER_SENTINEL}">${Util.t('ui.mapping_rank_none')}</option>` +
-      headers.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('');
+      headers.map(h => `<option value="${Util.escapeHtml(h)}">${Util.escapeHtml(h)}</option>`).join('');
     const sampleEl = document.getElementById('pl-mapping-sample');
     if (sampleEl) {
-      sampleEl.innerHTML = `<table class="pl-sample-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${
-        sample.slice(0, 5).map(row => `<tr>${headers.map(h => `<td>${esc(row[h])}</td>`).join('')}</tr>`).join('')
+      sampleEl.innerHTML = `<table class="pl-sample-table"><thead><tr>${headers.map(h => `<th>${Util.escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${
+        sample.slice(0, 5).map(row => `<tr>${headers.map(h => `<td>${Util.escapeHtml(row[h])}</td>`).join('')}</tr>`).join('')
       }</tbody></table>`;
     }
     const el = document.getElementById('modal-priority-mapping');

@@ -35,10 +35,9 @@ interface ComboboxOpts {
 
 function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
   if (!containerEl) return;
-  const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
   containerEl.innerHTML = `
     <div class="hps-combobox md-bom-combobox">
-      <input type="text" class="hps-input" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"
+      <input type="text" class="hps-input" placeholder="${Util.escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"
              aria-haspopup="listbox" aria-expanded="false">
       <button type="button" class="hps-clear" hidden>&times;</button>
       <div class="hps-dropdown" role="listbox" hidden></div>
@@ -68,7 +67,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
       return;
     }
     dropdown.innerHTML = filtered.map((o, i) =>
-      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${esc(o)}</div>`
+      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${Util.escapeHtml(o)}</div>`
     ).join('');
     activeIdx = Math.max(0, filtered.indexOf(selected));
     highlight();
@@ -202,8 +201,6 @@ export const SetupAdmin = (() => {
   // always act on the latest render instead of a stale closure.
   let _gridEditorCtx: { target: HTMLElement; snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions } | null = null;
 
-  const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
   const keyText = (key: SetupStateKey): string => key.map(part => `${part.fieldKey}=${part.value}`).join(' | ');
   const keyId = (row: Pick<SetupMatrixRow, 'from_key' | 'to_key'>): string => `${JSON.stringify(row.from_key)}→${JSON.stringify(row.to_key)}`;
   const headers = (): HeadersInit => ({ 'content-type': 'application/json', 'x-user-email': Session.actor() });
@@ -230,7 +227,7 @@ export const SetupAdmin = (() => {
    *  §4-5). Inline markup, not the EmptyState module itself, so this has no
    *  dependency on that module's mount/action wiring. */
   function emptyState(message: string, hint?: string): string {
-    return `<div class="empty-state setup-empty-state"><p>${esc(message)}</p>${hint ? `<p class="setup-empty-state-hint">${esc(hint)}</p>` : ''}</div>`;
+    return `<div class="empty-state setup-empty-state"><p>${Util.escapeHtml(message)}</p>${hint ? `<p class="setup-empty-state-hint">${Util.escapeHtml(hint)}</p>` : ''}</div>`;
   }
 
   function permissionsFor({ isAdmin, setupScheduler, plantAllowed }: { isAdmin: boolean; setupScheduler: boolean; plantAllowed: boolean }): SetupPermissions {
@@ -771,24 +768,24 @@ export const SetupAdmin = (() => {
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     backdrop.innerHTML = `<div class="modal setup-mass-upload-modal" role="dialog" aria-modal="true" aria-labelledby="setup-mass-upload-title">
-      <header class="modal-head"><h3 id="setup-mass-upload-title">${esc(Util.t('ui.setup_mass_upload_title'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close aria-label="${esc(Util.t('btn.close'))}">&times;</button></header>
+      <header class="modal-head"><h3 id="setup-mass-upload-title">${Util.escapeHtml(Util.t('ui.setup_mass_upload_title'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close aria-label="${Util.escapeHtml(Util.t('btn.close'))}">&times;</button></header>
       <div class="modal-body setup-mass-upload-body">
         <div class="setup-mass-upload-section">
-          <span class="label">${esc(Util.t('ui.setup_mass_upload_step1'))}</span>
-          <p class="setup-panel-hint">${esc(Util.t('ui.setup_mass_upload_hint'))}</p>
+          <span class="label">${Util.escapeHtml(Util.t('ui.setup_mass_upload_step1'))}</span>
+          <p class="setup-panel-hint">${Util.escapeHtml(Util.t('ui.setup_mass_upload_hint'))}</p>
           <textarea class="input setup-mass-upload-textarea" data-setup-mass-upload-text rows="6"></textarea>
         </div>
         <div class="setup-mass-upload-section">
-          <span class="label">${esc(Util.t('ui.setup_mass_upload_step2'))}</span>
+          <span class="label">${Util.escapeHtml(Util.t('ui.setup_mass_upload_step2'))}</span>
           <div class="setup-mass-upload-kpis" data-setup-mass-upload-kpis></div>
           <div class="setup-mass-upload-rejects" data-setup-mass-upload-rejects></div>
         </div>
-        <label class="setup-check"><input type="checkbox" data-setup-mass-upload-clear-blank>${esc(Util.t('ui.setup_mass_upload_clear_blank'))}</label>
+        <label class="setup-check"><input type="checkbox" data-setup-mass-upload-clear-blank>${Util.escapeHtml(Util.t('ui.setup_mass_upload_clear_blank'))}</label>
       </div>
       <footer class="modal-foot">
-        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-download disabled>${esc(Util.t('btn.setup_mass_upload_download_rejected'))}</button>
-        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close>${esc(Util.t('btn.cancel'))}</button>
-        <button type="button" class="btn btn-primary sm" data-setup-mass-upload-stage disabled>${esc(Util.t('btn.setup_mass_upload_stage', { count: 0 }))}</button>
+        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-download disabled>${Util.escapeHtml(Util.t('btn.setup_mass_upload_download_rejected'))}</button>
+        <button type="button" class="btn btn-ghost sm" data-setup-mass-upload-close>${Util.escapeHtml(Util.t('btn.cancel'))}</button>
+        <button type="button" class="btn btn-primary sm" data-setup-mass-upload-stage disabled>${Util.escapeHtml(Util.t('btn.setup_mass_upload_stage', { count: 0 }))}</button>
       </footer>
     </div>`;
     let lastOutcome: MassUploadOutcome = { ready: [], rejected: [], overwrites: 0 };
@@ -797,13 +794,13 @@ export const SetupAdmin = (() => {
       const clearOnBlank = backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.checked;
       lastOutcome = parseMassUploadText(text, definition, rows, clearOnBlank);
       backdrop.querySelector('[data-setup-mass-upload-kpis]')!.innerHTML = `
-        <div class="setup-mass-upload-kpi ok"><span>${esc(Util.t('ui.setup_mass_upload_ready'))}</span><strong>${lastOutcome.ready.length}</strong></div>
-        <div class="setup-mass-upload-kpi err"><span>${esc(Util.t('ui.setup_mass_upload_rejected'))}</span><strong>${lastOutcome.rejected.length}</strong></div>
-        <div class="setup-mass-upload-kpi"><span>${esc(Util.t('ui.setup_mass_upload_overwrites'))}</span><strong>${lastOutcome.overwrites}</strong></div>`;
+        <div class="setup-mass-upload-kpi ok"><span>${Util.escapeHtml(Util.t('ui.setup_mass_upload_ready'))}</span><strong>${lastOutcome.ready.length}</strong></div>
+        <div class="setup-mass-upload-kpi err"><span>${Util.escapeHtml(Util.t('ui.setup_mass_upload_rejected'))}</span><strong>${lastOutcome.rejected.length}</strong></div>
+        <div class="setup-mass-upload-kpi"><span>${Util.escapeHtml(Util.t('ui.setup_mass_upload_overwrites'))}</span><strong>${lastOutcome.overwrites}</strong></div>`;
       const shown = lastOutcome.rejected.slice(0, 12);
       const more = lastOutcome.rejected.length - shown.length;
-      backdrop.querySelector('[data-setup-mass-upload-rejects]')!.innerHTML = shown.map(r => `<div class="setup-mass-upload-reject-row">${esc(r.message)}</div>`).join('')
-        + (more > 0 ? `<div class="setup-mass-upload-reject-row muted">${esc(Util.t('ui.setup_mass_upload_more_rejected', { count: more }))}</div>` : '');
+      backdrop.querySelector('[data-setup-mass-upload-rejects]')!.innerHTML = shown.map(r => `<div class="setup-mass-upload-reject-row">${Util.escapeHtml(r.message)}</div>`).join('')
+        + (more > 0 ? `<div class="setup-mass-upload-reject-row muted">${Util.escapeHtml(Util.t('ui.setup_mass_upload_more_rejected', { count: more }))}</div>` : '');
       backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.disabled = lastOutcome.ready.length === 0;
       backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.textContent = Util.t('btn.setup_mass_upload_stage', { count: lastOutcome.ready.length });
       backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.disabled = lastOutcome.rejected.length === 0;
@@ -850,10 +847,10 @@ export const SetupAdmin = (() => {
   function render(target: HTMLElement | null, plant: string | null = Store.selectedPlant): void {
     if (!target) return;
     _lastTarget = target;
-    if (!plant) { target.innerHTML = `<div class="setup-empty">${esc(Util.t('toast.no_plant_selected'))}</div>`; return; }
+    if (!plant) { target.innerHTML = `<div class="setup-empty">${Util.escapeHtml(Util.t('toast.no_plant_selected'))}</div>`; return; }
     const snapshot = Store.setupSnapshot;
     if (!snapshot || snapshot.plant !== plant) {
-      target.innerHTML = `<div class="setup-empty">${esc(Util.t('ui.loading'))}</div>`;
+      target.innerHTML = `<div class="setup-empty">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
       Persistence.loadSetupSnapshot(plant).then(() => {
         if (Store.selectedPlant === plant) render(target, plant);
       });
@@ -914,33 +911,33 @@ export const SetupAdmin = (() => {
     // collapses to a filter chip on the grid — not the OptimizerPreview
     // modal's own copy of this table (schedule-workbench.mts), which is a
     // separate surface (the run-time comparison dialog) left untouched.
-    const missingChipHtml = review ? `<span class="setup-review-chip">${esc(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${esc(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
+    const missingChipHtml = review ? `<span class="setup-review-chip">${Util.escapeHtml(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${Util.escapeHtml(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
     const totalPairs = coverage?.reachable?.total_pairs ?? 0;
     const missingPairs = coverage?.reachable?.missing_pairs ?? 0;
     const coverageInlineHtml = coverage
-      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${esc(Util.t('ui.setup_coverage_inline', { covered: Math.max(0, totalPairs - missingPairs), total: totalPairs }))} · ${esc(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
+      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${Util.escapeHtml(Util.t('ui.setup_coverage_inline', { covered: Math.max(0, totalPairs - missingPairs), total: totalPairs }))} · ${Util.escapeHtml(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
       : '';
     const signatureChipHtml = definitionFields.length
-      ? definitionFields.map(field => esc(fieldLabel(field))).join(' &rsaquo; ')
-      : esc(Util.t('ui.setup_no_definition_short'));
+      ? definitionFields.map(field => Util.escapeHtml(fieldLabel(field))).join(' &rsaquo; ')
+      : Util.escapeHtml(Util.t('ui.setup_no_definition_short'));
     const scaleReadoutHtml = definitionFields.length
-      ? `<p class="setup-scale-readout">${esc(Util.t('ui.setup_scale_readout', {
+      ? `<p class="setup-scale-readout">${Util.escapeHtml(Util.t('ui.setup_scale_readout', {
           fields: definitionFields.map(field => `${fieldValueSet(Store.priorityRankMaps, field, _lineScope).length} ${fieldLabel(field).toLowerCase()}`).join(' × '),
           states: definitionFields.length ? Math.max(...definitionFields.map(field => fieldValueSet(Store.priorityRankMaps, field, _lineScope).length)) : 0,
         }))}</p>`
       : '';
     const coverageTilesHtml = coverage
       ? `<div class="setup-coverage-tiles">
-          <div class="setup-coverage-tile"><span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_recorded'))}</span><span class="setup-coverage-tile-num">${totalPairs - missingPairs}</span></div>
-          <button type="button" class="setup-coverage-tile${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter><span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_gaps'))}</span><span class="setup-coverage-tile-num">${missingPairs}</span></button>
+          <div class="setup-coverage-tile"><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_recorded'))}</span><span class="setup-coverage-tile-num">${totalPairs - missingPairs}</span></div>
+          <button type="button" class="setup-coverage-tile${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_gaps'))}</span><span class="setup-coverage-tile-num">${missingPairs}</span></button>
         </div>`
       : '';
     target.innerHTML = `
       <section class="setup-admin" aria-labelledby="setup-admin-title">
         <header class="setup-context-bar">
           <div class="setup-context-main">
-            <h3 id="setup-admin-title">${esc(Util.t('ui.setup_matrix_title'))}</h3>
-            <p>${esc(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
+            <h3 id="setup-admin-title">${Util.escapeHtml(Util.t('ui.setup_matrix_title'))}</h3>
+            <p>${Util.escapeHtml(Util.t('ui.setup_matrix_sub', { plant: snapshot.plant }))}</p>
           </div>
           <div class="setup-context-controls">
             <!-- Workstream D2 (2026-08-20): the "Include Setup Times in Optimizer"
@@ -948,76 +945,76 @@ export const SetupAdmin = (() => {
                  setting, plants.setup_active) — see Plant._renderSettingsPane's
                  setup-active panel. This chip stays; it now reads
                  snapshot.plant_active via activationStatus's third argument. -->
-            <span class="setup-status-chip ${status.active ? 'ok' : 'warn'}" title="${esc(status.reason)}"><span class="dot"></span>${status.active ? esc(Util.t('ui.setup_activation_active')) : esc(Util.t('ui.setup_activation_inactive'))}</span>
+            <span class="setup-status-chip ${status.active ? 'ok' : 'warn'}" title="${Util.escapeHtml(status.reason)}"><span class="dot"></span>${status.active ? Util.escapeHtml(Util.t('ui.setup_activation_active')) : Util.escapeHtml(Util.t('ui.setup_activation_inactive'))}</span>
           </div>
         </header>
 
         <div class="panel setup-panel">
           <div class="panel-head">
-            <span class="mono-eyebrow">${esc(Util.t('ui.setup_step1_definition'))}</span>
-            <p class="panel-hint">${esc(Util.t('ui.setup_signature_popover_hint'))}</p>
+            <span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_step1_definition'))}</span>
+            <p class="panel-hint">${Util.escapeHtml(Util.t('ui.setup_signature_popover_hint'))}</p>
           </div>
           <div class="panel-body setup-standard-rail">
             <div class="setup-signature-wrap">
-              <span class="mono-eyebrow">${esc(Util.t('ui.setup_band_signature_label'))}</span>
+              <span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_band_signature_label'))}</span>
               <div class="setup-signature-line">
                 <span class="setup-signature-chip">${signatureChipHtml}</span>
-                <button type="button" class="btn btn-ghost sm" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">${esc(Util.t('btn.setup_edit_signature'))}</button>
+                <button type="button" class="btn btn-ghost sm" data-setup-signature-edit aria-expanded="${_signaturePopoverOpen}" aria-haspopup="true">${Util.escapeHtml(Util.t('btn.setup_edit_signature'))}</button>
               </div>
               ${scaleReadoutHtml}
             </div>
             <div class="setup-scope-wrap">
-              <label class="mono-eyebrow" for="setup-line-combobox">${esc(Util.t('ui.setup_scope_label'))}</label>
+              <label class="mono-eyebrow" for="setup-line-combobox">${Util.escapeHtml(Util.t('ui.setup_scope_label'))}</label>
               <span id="setup-line-combobox"></span>
               ${_lineScope ? renderLineState(state ?? undefined, definition, permissions) : ''}
             </div>
             <div class="setup-coverage-wrap">
-              <span class="mono-eyebrow">${esc(Util.t('ui.setup_coverage_label'))}</span>
+              <span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_label'))}</span>
               ${coverageTilesHtml}
               ${missingChipHtml}
             </div>
           </div>
 
           <div class="setup-popover" data-setup-signature-popover ${_signaturePopoverOpen ? '' : 'hidden'}>
-            <div class="panel-head"><span class="label">${esc(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${esc(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${esc(Util.t('ui.setup_read_only'))}</span>`}</div>
-            <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${esc(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" ${definitionFields.length === 1 ? 'disabled' : ''} aria-label="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button>` : ''}</div>`).join('')}</div>
-            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${esc(Util.t('ui.setup_strict_blanks'))}</label>
-            ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${esc(Util.t('btn.setup_add_field'))}</button>` : ''}
-            <p class="setup-popover-hint">${esc(Util.t('ui.setup_version_note', { version: (version ?? 0) + 1 }))}</p>
+            <div class="panel-head"><span class="label">${Util.escapeHtml(Util.t('ui.setup_step1_definition'))}</span>${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-save-definition>${Util.escapeHtml(Util.t('btn.save'))}</button>` : `<span class="panel-hint">${Util.escapeHtml(Util.t('ui.setup_read_only'))}</span>`}</div>
+            <div class="setup-field-order" data-setup-field-order>${definitionFields.map((field, index) => `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}" ${permissions.definitionWrite ? '' : 'disabled'}>${_registeredFields.map(option => `<option value="${option}"${option === field ? ' selected' : ''}>${Util.escapeHtml(fieldLabel(option))}</option>`).join('')}</select>${permissions.definitionWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" ${index === 0 ? 'disabled' : ''} aria-label="${Util.escapeHtml(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" ${index === definitionFields.length - 1 ? 'disabled' : ''} aria-label="${Util.escapeHtml(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" ${definitionFields.length === 1 ? 'disabled' : ''} aria-label="${Util.escapeHtml(Util.t('btn.remove'))}">${Util.escapeHtml(Util.t('btn.remove'))}</button>` : ''}</div>`).join('')}</div>
+            <label class="setup-check"><input type="checkbox" data-setup-strict ${definition?.strict_blanks !== false ? 'checked' : ''} ${permissions.definitionWrite ? '' : 'disabled'}>${Util.escapeHtml(Util.t('ui.setup_strict_blanks'))}</label>
+            ${permissions.definitionWrite ? `<button class="btn btn-ghost sm" data-setup-add-field>${Util.escapeHtml(Util.t('btn.setup_add_field'))}</button>` : ''}
+            <p class="setup-popover-hint">${Util.escapeHtml(Util.t('ui.setup_version_note', { version: (version ?? 0) + 1 }))}</p>
           </div>
         </div>
 
         <div class="panel setup-panel">
           <div class="panel-head">
             <div class="setup-view-toolbar">
-              <span class="mono-eyebrow">${esc(Util.t('ui.setup_section_matrix'))}</span>
+              <span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_section_matrix'))}</span>
               <div class="setup-view-tabs" role="tablist">
-                <button type="button" role="tab" aria-selected="${_setupView === 'list'}" class="setup-view-tab${_setupView === 'list' ? ' active' : ''}" data-setup-view="list">${esc(Util.t('ui.setup_view_list'))}</button>
-                <button type="button" role="tab" aria-selected="${_setupView === 'matrix'}" class="setup-view-tab${_setupView === 'matrix' ? ' active' : ''}" data-setup-view="matrix">${esc(Util.t('ui.setup_view_matrix'))}</button>
+                <button type="button" role="tab" aria-selected="${_setupView === 'list'}" class="setup-view-tab${_setupView === 'list' ? ' active' : ''}" data-setup-view="list">${Util.escapeHtml(Util.t('ui.setup_view_list'))}</button>
+                <button type="button" role="tab" aria-selected="${_setupView === 'matrix'}" class="setup-view-tab${_setupView === 'matrix' ? ' active' : ''}" data-setup-view="matrix">${Util.escapeHtml(Util.t('ui.setup_view_matrix'))}</button>
               </div>
             </div>
             <div class="setup-view-actions">
-              <button type="button" class="btn btn-primary sm" data-setup-mass-upload-open>${esc(Util.t('btn.setup_mass_upload'))}</button>
-              <button type="button" class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${esc(Util.t('btn.setup_export_matrix'))}</button>
-              <button type="button" class="btn btn-ghost sm" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${esc(Util.t('btn.setup_copy_matrix'))}</button>
-              ${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm setup-import-label">${esc(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
-              <button type="button" class="btn btn-ghost sm" data-setup-history-open>${esc(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
+              <button type="button" class="btn btn-primary sm" data-setup-mass-upload-open>${Util.escapeHtml(Util.t('btn.setup_mass_upload'))}</button>
+              <button type="button" class="btn btn-ghost sm" data-setup-export-matrix ${permissions.export ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_export_matrix'))}</button>
+              <button type="button" class="btn btn-ghost sm" data-setup-copy-matrix ${permissions.copy ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_copy_matrix'))}</button>
+              ${permissions.matrixWrite && definition ? `<label class="btn btn-ghost sm setup-import-label">${Util.escapeHtml(Util.t('ui.setup_import_csv'))}<input type="file" accept=".csv,text/csv" data-setup-import hidden></label>` : ''}
+              <button type="button" class="btn btn-ghost sm" data-setup-history-open>${Util.escapeHtml(Util.t('btn.setup_audit_toggle', { count: overrides.length }))}</button>
             </div>
           </div>
           <div class="panel-body">
             <div class="setup-grid-toolbar">
-              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${esc(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${esc(_gridFilterFrom)}">
-              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${esc(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${esc(_gridFilterTo)}">
-              ${_setupView === 'list' ? `<label class="setup-check"><input type="checkbox" data-setup-list-hide-empty ${_hideEmptyStates ? 'checked' : ''}>${esc(Util.t('ui.setup_list_hide_empty'))}</label>` : ''}
+              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-from placeholder="${Util.escapeHtml(Util.t('ui.setup_grid_filter_from_placeholder'))}" value="${Util.escapeHtml(_gridFilterFrom)}">
+              <input type="text" class="input setup-grid-filter" data-setup-grid-filter-to placeholder="${Util.escapeHtml(Util.t('ui.setup_grid_filter_to_placeholder'))}" value="${Util.escapeHtml(_gridFilterTo)}">
+              ${_setupView === 'list' ? `<label class="setup-check"><input type="checkbox" data-setup-list-hide-empty ${_hideEmptyStates ? 'checked' : ''}>${Util.escapeHtml(Util.t('ui.setup_list_hide_empty'))}</label>` : ''}
             </div>
             <div id="setup-list-mount" ${_setupView === 'list' ? '' : 'hidden'}></div>
             <div id="setup-grid-table-mount" ${_setupView === 'matrix' ? '' : 'hidden'}></div>
           </div>
           <div class="setup-action-bar">
-            <span data-setup-grid-dirty-count>${esc(Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size }))}</span>
+            <span data-setup-grid-dirty-count>${Util.escapeHtml(Util.t('ui.setup_grid_dirty_count', { count: _gridDirty.size }))}</span>
             <div class="setup-action-buttons">
-              <button class="btn btn-ghost sm" data-setup-grid-discard ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.discard'))}</button>
-              <button class="btn btn-primary sm" data-setup-grid-save ${_gridDirty.size ? '' : 'disabled'}>${esc(Util.t('btn.save'))}</button>
+              <button class="btn btn-ghost sm" data-setup-grid-discard ${_gridDirty.size ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.discard'))}</button>
+              <button class="btn btn-primary sm" data-setup-grid-save ${_gridDirty.size ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.save'))}</button>
             </div>
           </div>
         </div>
@@ -1044,9 +1041,9 @@ export const SetupAdmin = (() => {
    *  `wireCompatibility` still need a mount point in the DOM). */
   function renderLineState(state: LineSetupState | undefined, definition: SetupDefinition | null, permissions: SetupPermissions): string {
     const fieldLines = state
-      ? state.state_key.map(part => `<span>${esc(fieldLabel(part.fieldKey))}: ${esc(part.value)}</span>`).join('')
-      : `<span>${esc(Util.t('ui.setup_state_unknown'))}</span>`;
-    return `<div class="setup-state-inline" data-setup-state-inline><div class="setup-state-readout">${fieldLines}<span>${esc(Util.t('ui.setup_state_source'))}: ${esc(state?.source || '—')}</span><span>${esc(Util.t('ui.setup_observed_at'))}: ${esc(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${esc(Util.t('btn.setup_update_state'))}</button>` : ''}</div>`;
+      ? state.state_key.map(part => `<span>${Util.escapeHtml(fieldLabel(part.fieldKey))}: ${Util.escapeHtml(part.value)}</span>`).join('')
+      : `<span>${Util.escapeHtml(Util.t('ui.setup_state_unknown'))}</span>`;
+    return `<div class="setup-state-inline" data-setup-state-inline><div class="setup-state-readout">${fieldLines}<span>${Util.escapeHtml(Util.t('ui.setup_state_source'))}: ${Util.escapeHtml(state?.source || '—')}</span><span>${Util.escapeHtml(Util.t('ui.setup_observed_at'))}: ${Util.escapeHtml(state?.observed_at || '—')}</span></div>${permissions.stateWrite && definition ? `<button class="btn btn-ghost sm" data-setup-edit-state>${Util.escapeHtml(Util.t('btn.setup_update_state'))}</button>` : ''}</div>`;
   }
 
   function overridesFor(snapshot: SetupSnapshot): SetupSnapshot['overrides'] {
@@ -1064,9 +1061,9 @@ export const SetupAdmin = (() => {
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     backdrop.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-history-title">
-      <header class="modal-head"><h3 id="setup-history-title">${esc(Util.t('ui.setup_override_audit'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-history-close aria-label="${esc(Util.t('btn.close'))}">&times;</button></header>
-      <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${esc(override.status.toUpperCase())}</strong><span>${esc(override.machine)} &middot; ${esc(keyText(override.predecessor_state_key))} &rarr; ${esc(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${esc(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
-      <footer class="modal-foot"><button type="button" class="btn btn-ghost sm" data-setup-history-close>${esc(Util.t('btn.close'))}</button></footer>
+      <header class="modal-head"><h3 id="setup-history-title">${Util.escapeHtml(Util.t('ui.setup_override_audit'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-history-close aria-label="${Util.escapeHtml(Util.t('btn.close'))}">&times;</button></header>
+      <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${Util.escapeHtml(override.status.toUpperCase())}</strong><span>${Util.escapeHtml(override.machine)} &middot; ${Util.escapeHtml(keyText(override.predecessor_state_key))} &rarr; ${Util.escapeHtml(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${Util.escapeHtml(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
+      <footer class="modal-foot"><button type="button" class="btn btn-ghost sm" data-setup-history-close>${Util.escapeHtml(Util.t('btn.close'))}</button></footer>
     </div>`;
     const close = (): void => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
     const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
@@ -1119,7 +1116,7 @@ export const SetupAdmin = (() => {
     target.querySelector<HTMLButtonElement>('[data-setup-add-field]')?.addEventListener('click', () => {
       const holder = target.querySelector<HTMLElement>('[data-setup-field-order]'); if (!holder || holder.querySelectorAll('select').length >= _registeredFields.length) return;
       const index = holder.querySelectorAll('select').length;
-      holder.insertAdjacentHTML('beforeend', `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${esc(fieldLabel(option))}</option>`).join('')}</select><button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" aria-label="${esc(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" disabled aria-label="${esc(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" aria-label="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button></div>`);
+      holder.insertAdjacentHTML('beforeend', `<div class="setup-field-row"><span>${index + 1}</span><select data-setup-field="${index}">${_registeredFields.map(option => `<option value="${option}">${Util.escapeHtml(fieldLabel(option))}</option>`).join('')}</select><button type="button" class="btn btn-ghost sm" data-setup-field-up="${index}" aria-label="${Util.escapeHtml(Util.t('btn.setup_field_up'))}">&uarr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-down="${index}" disabled aria-label="${Util.escapeHtml(Util.t('btn.setup_field_down'))}">&darr;</button><button type="button" class="btn btn-ghost sm" data-setup-field-remove="${index}" aria-label="${Util.escapeHtml(Util.t('btn.remove'))}">${Util.escapeHtml(Util.t('btn.remove'))}</button></div>`);
       syncSignatureFieldControls(holder);
     });
     // Reorder-by-value-swap: the field-row DOM nodes never move (so their
@@ -1275,16 +1272,16 @@ export const SetupAdmin = (() => {
       // attribute unsplittable, silently dropping the edit.
       const fromSig = stateSig(row.from_key), toSig = stateSig(row.to_key);
       const key = `${fromSig} ${toSig}`;
-      return `<tr data-setup-list-row-from="${esc(fromSig)}" data-setup-list-row-to="${esc(toSig)}">
-        <td class="setup-num">${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select value="${esc(key)}" ${_listSelected.has(key) ? 'checked' : ''} aria-label="${esc(Util.t('ui.setup_list_select_row'))}">` : ''}</td>
-        <td class="mono">${esc(v.fromText)}</td>
-        <td class="mono">${esc(v.toText)}</td>
-        <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${esc(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
-        <td class="setup-num">${esc(v.plantValue)}</td>
-        <td><span class="${v.sourceClass}">${esc(v.sourceLabel)}</span></td>
+      return `<tr data-setup-list-row-from="${Util.escapeHtml(fromSig)}" data-setup-list-row-to="${Util.escapeHtml(toSig)}">
+        <td class="setup-num">${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select value="${Util.escapeHtml(key)}" ${_listSelected.has(key) ? 'checked' : ''} aria-label="${Util.escapeHtml(Util.t('ui.setup_list_select_row'))}">` : ''}</td>
+        <td class="mono">${Util.escapeHtml(v.fromText)}</td>
+        <td class="mono">${Util.escapeHtml(v.toText)}</td>
+        <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${Util.escapeHtml(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
+        <td class="setup-num">${Util.escapeHtml(v.plantValue)}</td>
+        <td><span class="${v.sourceClass}">${Util.escapeHtml(v.sourceLabel)}</span></td>
         <td class="setup-num">
-          ${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${esc(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}
-          ${permissions.matrixWrite ? `<button type="button" class="setup-list-delete" data-setup-list-delete title="${esc(Util.t('btn.setup_list_delete_row'))}" aria-label="${esc(Util.t('btn.setup_list_delete_row'))}">&times;</button>` : ''}
+          ${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${Util.escapeHtml(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}
+          ${permissions.matrixWrite ? `<button type="button" class="setup-list-delete" data-setup-list-delete title="${Util.escapeHtml(Util.t('btn.setup_list_delete_row'))}" aria-label="${Util.escapeHtml(Util.t('btn.setup_list_delete_row'))}">&times;</button>` : ''}
         </td>
       </tr>`;
     }).join('');
@@ -1292,38 +1289,38 @@ export const SetupAdmin = (() => {
       const status = listNewRowStatus(row, definition);
       return `<tr data-setup-list-new-row="${row.id}" class="setup-list-new-row">
         <td></td>
-        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_from'))}" value="${esc(row.from)}" data-setup-list-new-from></td>
-        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_to'))}" value="${esc(row.to)}" data-setup-list-new-to></td>
-        <td><input type="text" class="input" placeholder="${esc(Util.t('ph.setup_list_minutes'))}" value="${esc(row.minutes)}" data-setup-list-new-minutes></td>
+        <td><input type="text" class="input" placeholder="${Util.escapeHtml(Util.t('ph.setup_list_from'))}" value="${Util.escapeHtml(row.from)}" data-setup-list-new-from></td>
+        <td><input type="text" class="input" placeholder="${Util.escapeHtml(Util.t('ph.setup_list_to'))}" value="${Util.escapeHtml(row.to)}" data-setup-list-new-to></td>
+        <td><input type="text" class="input" placeholder="${Util.escapeHtml(Util.t('ph.setup_list_minutes'))}" value="${Util.escapeHtml(row.minutes)}" data-setup-list-new-minutes></td>
         <td class="setup-num">—</td>
-        <td class="setup-list-new-status">${esc(status)}</td>
+        <td class="setup-list-new-status">${Util.escapeHtml(status)}</td>
         <td class="setup-num"><button type="button" class="setup-list-remove" data-setup-list-new-remove>&times;</button></td>
       </tr>`;
     }).join('');
     mount.innerHTML = `
       <table class="setup-table setup-list-table">
         <thead><tr>
-          <th>${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select-all ${allSelected ? 'checked' : ''} aria-label="${esc(Util.t('ui.setup_list_select_all'))}">` : ''}</th>
-          <th>${esc(Util.t('ui.setup_list_col_from'))}</th>
-          <th>${esc(Util.t('ui.setup_list_col_to'))}</th>
-          <th class="setup-num">${esc(Util.t('ui.setup_list_col_minutes'))}</th>
-          <th class="setup-num">${esc(Util.t('ui.setup_list_col_plant_value'))}</th>
-          <th>${esc(Util.t('ui.setup_list_col_source'))}</th>
+          <th>${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select-all ${allSelected ? 'checked' : ''} aria-label="${Util.escapeHtml(Util.t('ui.setup_list_select_all'))}">` : ''}</th>
+          <th>${Util.escapeHtml(Util.t('ui.setup_list_col_from'))}</th>
+          <th>${Util.escapeHtml(Util.t('ui.setup_list_col_to'))}</th>
+          <th class="setup-num">${Util.escapeHtml(Util.t('ui.setup_list_col_minutes'))}</th>
+          <th class="setup-num">${Util.escapeHtml(Util.t('ui.setup_list_col_plant_value'))}</th>
+          <th>${Util.escapeHtml(Util.t('ui.setup_list_col_source'))}</th>
           <th></th>
         </tr></thead>
         <tbody>${bodyRows}${newRowsHtml}</tbody>
       </table>
       <div class="setup-list-footer">
-        ${permissions.matrixWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-list-add-pair>${esc(Util.t('ui.setup_list_add_pair'))}</button>` : '<span></span>'}
-        <span class="setup-list-count">${esc(Util.t('ui.setup_list_showing', { shown: rows.length, total: _listMeta.total, from: _gridFilterFrom || Util.t('ui.setup_plant_default') }))}</span>
+        ${permissions.matrixWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-list-add-pair>${Util.escapeHtml(Util.t('ui.setup_list_add_pair'))}</button>` : '<span></span>'}
+        <span class="setup-list-count">${Util.escapeHtml(Util.t('ui.setup_list_showing', { shown: rows.length, total: _listMeta.total, from: _gridFilterFrom || Util.t('ui.setup_plant_default') }))}</span>
       </div>
       ${permissions.matrixWrite ? `
       <div class="setup-list-bulk-actions">
-        <button type="button" class="btn btn-ghost sm" data-setup-list-delete-selected ${_listSelected.size ? '' : 'disabled'}>${esc(Util.t('btn.setup_list_delete_selected', { count: _listSelected.size }))}</button>
+        <button type="button" class="btn btn-ghost sm" data-setup-list-delete-selected ${_listSelected.size ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_list_delete_selected', { count: _listSelected.size }))}</button>
         <div class="setup-list-delete-all">
-          <label for="setup-list-delete-all-confirm">${esc(Util.t('ui.setup_delete_all_hint', { plant: snapshot.plant }))}</label>
-          <input type="text" id="setup-list-delete-all-confirm" class="input" data-setup-list-delete-all-confirm placeholder="${esc(Util.t('ph.setup_delete_all_confirm', { plant: snapshot.plant }))}" value="${esc(_deleteAllConfirmText)}">
-          <button type="button" class="btn btn-danger sm" data-setup-list-delete-all ${deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant) ? '' : 'disabled'}>${esc(Util.t('btn.setup_list_delete_all'))}</button>
+          <label for="setup-list-delete-all-confirm">${Util.escapeHtml(Util.t('ui.setup_delete_all_hint', { plant: snapshot.plant }))}</label>
+          <input type="text" id="setup-list-delete-all-confirm" class="input" data-setup-list-delete-all-confirm placeholder="${Util.escapeHtml(Util.t('ph.setup_delete_all_confirm', { plant: snapshot.plant }))}" value="${Util.escapeHtml(_deleteAllConfirmText)}">
+          <button type="button" class="btn btn-danger sm" data-setup-list-delete-all ${deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant) ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_list_delete_all'))}</button>
         </div>
       </div>` : ''}`;
     wireListView(target, snapshot, definition, permissions);
@@ -1560,7 +1557,7 @@ export const SetupAdmin = (() => {
       return;
     }
     const axisCapNote = (rowAxis.truncated || colAxis.truncated)
-      ? `<p class="setup-grid-cap-note">${esc(Util.t('ui.setup_grid_axis_capped', { shown: Math.max(rowStates.length, colStates.length), total: Math.max(rowAxis.total, colAxis.total) }))}</p>`
+      ? `<p class="setup-grid-cap-note">${Util.escapeHtml(Util.t('ui.setup_grid_axis_capped', { shown: Math.max(rowStates.length, colStates.length), total: Math.max(rowAxis.total, colAxis.total) }))}</p>`
       : '';
     // "You are here" (§9-C.5): mark the row matching the scoped line's known
     // current state, making the old standalone Line Status panel unnecessary.
@@ -1573,7 +1570,7 @@ export const SetupAdmin = (() => {
     for (let tier = 0; tier < tierCount; tier++) {
       const runs = tierRuns(colStates, tier);
       const corner = tier === 0 ? `<th rowspan="${tierCount}" colspan="${tierCount}" class="setup-grid-corner"></th>` : '';
-      theadRows.push(`<tr>${corner}${runs.map(run => `<th colspan="${run.span}" class="setup-grid-col-head">${esc(run.value)}</th>`).join('')}</tr>`);
+      theadRows.push(`<tr>${corner}${runs.map(run => `<th colspan="${run.span}" class="setup-grid-col-head">${Util.escapeHtml(run.value)}</th>`).join('')}</tr>`);
     }
     const rowSpanMaps = Array.from({ length: tierCount }, (_, tier) => {
       const map = new Map<number, number>();
@@ -1585,8 +1582,8 @@ export const SetupAdmin = (() => {
       const headerCells = Array.from({ length: tierCount }, (_, tier) => {
         const span = rowSpanMaps[tier].get(r);
         if (span === undefined) return '';
-        const mark = youAreHere && tier === tierCount - 1 ? `<span class="setup-grid-here-badge" title="${esc(Util.t('ui.setup_you_are_here_hint', { line: _lineScope }))}">${esc(Util.t('ui.setup_you_are_here'))}</span>` : '';
-        return `<th rowspan="${span}" scope="row" class="setup-grid-row-head">${esc(rowState.parts[tier] ?? '')}${mark}</th>`;
+        const mark = youAreHere && tier === tierCount - 1 ? `<span class="setup-grid-here-badge" title="${Util.escapeHtml(Util.t('ui.setup_you_are_here_hint', { line: _lineScope }))}">${Util.escapeHtml(Util.t('ui.setup_you_are_here'))}</span>` : '';
+        return `<th rowspan="${span}" scope="row" class="setup-grid-row-head">${Util.escapeHtml(rowState.parts[tier] ?? '')}${mark}</th>`;
       }).join('');
       const dataCells = colStates.map((colState, c) => {
         const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
@@ -1595,11 +1592,11 @@ export const SetupAdmin = (() => {
         const missing = value === null;
         const cellState = gridCellState(rowState, colState, existing, dirty, _lineScope);
         const cellClass = ['setup-grid-td', `setup-grid-${cellState}`, permissions.matrixWrite ? 'setup-grid-editable' : ''].filter(Boolean).join(' ');
-        const display = cellState === 'uncovered' ? '&middot;' : (value !== null ? esc(String(value)) : '');
+        const display = cellState === 'uncovered' ? '&middot;' : (value !== null ? Util.escapeHtml(String(value)) : '');
         const title = cellState === 'uncovered' ? Util.t('ui.setup_grid_uncovered_hint')
           : cellState === 'implicit-zero' ? Util.t('ui.setup_grid_implicit_zero_hint')
           : cellState === 'line-override' ? Util.t('ui.setup_grid_line_override_hint') : '';
-        return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}" ${permissions.matrixWrite ? 'tabindex="0"' : ''}${title ? ` title="${esc(title)}"` : ''}>${display}</td>`;
+        return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}" ${permissions.matrixWrite ? 'tabindex="0"' : ''}${title ? ` title="${Util.escapeHtml(title)}"` : ''}>${display}</td>`;
       }).join('');
       return `<tr${youAreHere ? ' class="setup-grid-here-row"' : ''}>${headerCells}${dataCells}</tr>`;
     }).join('');
@@ -1922,7 +1919,7 @@ export const SetupAdmin = (() => {
     const current = snapshot.machine_states.find(state => state.machine === line);
     const initial = new Map((current?.state_key || []).map(pair => [pair.fieldKey, pair.value]));
     const editor = document.createElement('div'); editor.className = 'setup-state-editor'; editor.dataset.setupStateEditor = 'true';
-    editor.innerHTML = `${definition.fields.map(field => `<label>${esc(field)}<input class="input" data-setup-state-field="${esc(field)}" value="${esc(initial.get(field) || '')}"></label>`).join('')}<label>${esc(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><label>Shop-floor reason<input class="input" data-setup-state-reason></label><button class="btn btn-primary sm" data-setup-save-state>${esc(Util.t('btn.save'))}</button>`;
+    editor.innerHTML = `${definition.fields.map(field => `<label>${Util.escapeHtml(field)}<input class="input" data-setup-state-field="${Util.escapeHtml(field)}" value="${Util.escapeHtml(initial.get(field) || '')}"></label>`).join('')}<label>${Util.escapeHtml(Util.t('ui.setup_observed_at'))}<input class="input" data-setup-observed-at></label><label>Shop-floor reason<input class="input" data-setup-state-reason></label><button class="btn btn-primary sm" data-setup-save-state>${Util.escapeHtml(Util.t('btn.save'))}</button>`;
     host.appendChild(editor);
     const observed = editor.querySelector<HTMLInputElement>('[data-setup-observed-at]')!;
     const reason = editor.querySelector<HTMLInputElement>('[data-setup-state-reason]')!;
@@ -1958,7 +1955,7 @@ export const SetupAdmin = (() => {
     const statePanel = target.querySelector('.setup-state .panel-body');
     if (!statePanel) return;
     const compat = document.createElement('div'); compat.className = 'setup-compatibility';
-    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${esc(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${esc(Util.t('ui.setup_compatibility_reason'))}" value="${esc(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${esc(Util.t('btn.save'))}</button><p>${esc(Util.t('ui.setup_not_global_exclusion'))}</p>`;
+    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${Util.escapeHtml(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${Util.escapeHtml(Util.t('ui.setup_compatibility_reason'))}" value="${Util.escapeHtml(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.save'))}</button><p>${Util.escapeHtml(Util.t('ui.setup_not_global_exclusion'))}</p>`;
     statePanel.appendChild(compat);
     const checkbox = compat.querySelector<HTMLInputElement>('[data-setup-compatible]')!;
     const reason = compat.querySelector<HTMLInputElement>('[data-setup-compatibility-reason]')!;

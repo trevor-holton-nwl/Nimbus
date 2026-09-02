@@ -117,6 +117,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.missing_key_rows':            'Todas as {{count}} linha(s) estão faltando chave obrigatória: {{keys}}',
   'toast.no_valid_rows':               'Nenhuma linha válida para colar',
   'toast.no_plant_selected':           'Nenhuma planta selecionada',
+  'toast.missing_required_key':        'Campos obrigatórios ausentes',
   'toast.cascade_preview_failed':      'Não foi possível verificar o que esta exclusão afetaria — tente novamente.',
   'toast.bom_upload_done':             '{{inserted}} adicionados, {{updated}} atualizados, {{rejected}} rejeitados',
   'toast.bom_upload_failed':           'Falha ao enviar a Lista de Materiais',

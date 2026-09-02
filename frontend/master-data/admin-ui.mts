@@ -761,7 +761,6 @@ export const Plant = {
   _renderOptimization(plantName: string | null): void {
     const body = document.getElementById('plant-opt-body');
     if (!body) return;
-    const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
     const relTime = (ts: string | null | undefined): string => {
       if (!ts) return Util.t('ui.unknown_time');
       const diff = Math.round((Date.now() - new Date(ts).getTime()) / 1000);
@@ -806,8 +805,8 @@ export const Plant = {
           <div class="cw-active-card">
             <div class="cw-active-icon">${f.field_key === 'colorWheel' ? '🎨' : '🔧'}</div>
             <div class="cw-active-info">
-              <div class="cw-active-name">${esc(w.filename || '—')}</div>
-              <div class="cw-active-meta">${w.row_count ?? '?'} ${Util.t('ui.values')} &middot; ${relTime(w.uploaded_at)} &middot; ${esc(w.uploaded_by || 'system')}</div>
+              <div class="cw-active-name">${Util.escapeHtml(w.filename || '—')}</div>
+              <div class="cw-active-meta">${w.row_count ?? '?'} ${Util.t('ui.values')} &middot; ${relTime(w.uploaded_at)} &middot; ${Util.escapeHtml(w.uploaded_by || 'system')}</div>
               ${covHtml}
             </div>
             <div class="cw-active-actions">
@@ -845,18 +844,18 @@ export const Plant = {
           : '';
         return `
         <div class="pl-override-row">
-          <span class="pl-override-line">${esc(o.machine)}</span>
+          <span class="pl-override-line">${Util.escapeHtml(o.machine)}</span>
           <span class="pl-override-meta">${o.row_count} ${Util.t('ui.values')} &middot; ${relTime(o.uploaded_at)}</span>
           ${lineCovHtml}
-          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="${esc(o.machine)}">👁</button>
-          <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${esc(o.machine)}">⌫</button>
+          <button class="btn btn-ghost sm" data-action="preview" data-field="${f.field_key}" data-line="${Util.escapeHtml(o.machine)}">👁</button>
+          <button class="btn btn-ghost sm cw-delete-btn" data-action="delete" data-field="${f.field_key}" data-line="${Util.escapeHtml(o.machine)}">⌫</button>
         </div>`;
       }).join('');
 
       return `
         <div class="pl-field-card" data-field="${f.field_key}">
           <div class="pl-field-card-head">
-            <h4>${esc(label)}</h4>
+            <h4>${Util.escapeHtml(label)}</h4>
           </div>
           ${activeOrDrop}
           <div class="pl-overrides">${overridesHtml}</div>
@@ -870,7 +869,7 @@ export const Plant = {
     // "we couldn't reach the server". `admin-status error` is this file's
     // established error-surfacing class (see _uploadPriorityList's status line).
     const loadErrHtml = Plant._priorityLoadError
-      ? `<div class="admin-status error" style="margin-bottom:12px">${esc(Util.t('ui.priority_lists_load_error', { msg: Plant._priorityLoadError }))}</div>`
+      ? `<div class="admin-status error" style="margin-bottom:12px">${Util.escapeHtml(Util.t('ui.priority_lists_load_error', { msg: Plant._priorityLoadError }))}</div>`
       : '';
     // Only claim to know the exception count when the report actually loaded.
     // On failure say so, rather than letting the panel's absence read as "no
@@ -878,7 +877,7 @@ export const Plant = {
     // when loadErrHtml is already up — that banner covers the whole-tab failure,
     // so a second one about the sub-report would just be noise.
     const missingErrHtml = (Plant._missingDataOk || Plant._priorityLoadError) ? '' :
-      `<div class="admin-status warn" style="margin-top:12px">${esc(Util.t('ui.mmd_load_error'))}</div>`;
+      `<div class="admin-status warn" style="margin-top:12px">${Util.escapeHtml(Util.t('ui.mmd_load_error'))}</div>`;
 
     const missingHtml = Plant._missingDataOk && Plant._missingMasterData && Plant._missingMasterData.unmatched_pairs > 0 ? `
       <div class="pl-mmd-panel">
@@ -891,7 +890,7 @@ export const Plant = {
         <div class="pl-mmd-list">
           ${Plant._missingMasterData.exceptions.slice(0, 20).map((e: { material_number: string; order_count: number; reason: string }) => `
             <div class="pl-mmd-row">
-              <span class="pl-mmd-material">${esc(e.material_number)}</span>
+              <span class="pl-mmd-material">${Util.escapeHtml(e.material_number)}</span>
               <span class="pl-mmd-count">${e.order_count} ${Util.t('ui.orders')}</span>
               <span class="pl-mmd-reason">${Util.t(`ui.mmd_reason_${e.reason}`)}</span>
             </div>`).join('')}
@@ -1290,11 +1289,10 @@ export const Plant = {
       const desc = Engine._fieldDescriptions[hit.node.key];
       if (!desc) return;
       e.preventDefault();
-      // `esc()` (defined below, in scope by the time this fires): a constraint
-      // key can be arbitrary JSONB-stored text (see the comment on `esc`'s own
-      // definition), and _label() falls back to echoing the raw key when
-      // neither the locale nor the catalog recognizes it.
-      Plant._openFieldInfoMenu(e, consRow!, esc(_label(hit.node.key)), [esc(desc)]);
+      // `Util.escapeHtml()`: a constraint key can be arbitrary JSONB-stored text,
+      // and _label() falls back to echoing the raw key when neither the locale nor
+      // the catalog recognizes it.
+      Plant._openFieldInfoMenu(e, consRow!, Util.escapeHtml(_label(hit.node.key)), [Util.escapeHtml(desc)]);
     });
 
     const alertDaysInp = pane.querySelector('#sys-alert-horizon-days') as HTMLInputElement;
@@ -1534,12 +1532,6 @@ export const Plant = {
     let _ranksLoaded: boolean | null = null;
 
     // Same escape used elsewhere in this file. Constraint keys are normally
-    // backend-registry values, but plants.constraints JSONB stores whatever
-    // `key` a POST supplied (master_data._normalize_constraint_tree only
-    // `str()`s it), and Util.t echoes an unknown key back verbatim — so a
-    // stored key reaches innerHTML as text and must be escaped.
-    const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
-
     /** Display label for a constraint key. Locale first (Stage 2 registered
      *  `constraint.<field_key>` for all five locales); Util.t echoes the key
      *  back when there's no entry, in which case the backend registry's own
@@ -1659,8 +1651,8 @@ export const Plant = {
         // (colorWheel on) and the optimizer really does apply it. Show that
         // fallback rather than claiming nothing is in effect.
         seqPanelEl.innerHTML = flat.length
-          ? flat.map(k => `<span class="pl-seq-chip">${esc(_label(k))}</span>`).join(arrow)
-          : `<span class="pl-seq-empty">${esc(Util.t('ui.no_constraints_configured'))}</span>`;
+          ? flat.map(k => `<span class="pl-seq-chip">${Util.escapeHtml(_label(k))}</span>`).join(arrow)
+          : `<span class="pl-seq-empty">${Util.escapeHtml(Util.t('ui.no_constraints_configured'))}</span>`;
         return;
       }
 
@@ -1670,8 +1662,8 @@ export const Plant = {
         // key is not in the PERSISTED tree yet (an unsaved add — `flat` is the
         // persisted collapse, so a pending edit can never claim to be in force).
         const isEffective = effectivePaths.has(path) && flat.includes(key);
-        return `<span class="pl-seq-chip${isEffective ? '' : ' pl-seq-chip-noeffect'}">${esc(_label(key))}`
-             + `${isEffective ? '' : ` <em>(${esc(Util.t('ui.no_effect'))})</em>`}</span>`;
+        return `<span class="pl-seq-chip${isEffective ? '' : ' pl-seq-chip-noeffect'}">${Util.escapeHtml(_label(key))}`
+             + `${isEffective ? '' : ` <em>(${Util.escapeHtml(Util.t('ui.no_effect'))})</em>`}</span>`;
       }).join(arrow);
     }
 
@@ -1688,10 +1680,10 @@ export const Plant = {
      *  tree — the tree's own size bound. */
     function _addPicker(cls: string, enabled: boolean, placeholder: string): string {
       const opts = Engine.CONSTRAINT_CATALOG
-        .map(c => `<option value="${esc(c.key)}">${esc(_label(c.key))}</option>`).join('');
+        .map(c => `<option value="${Util.escapeHtml(c.key)}">${Util.escapeHtml(_label(c.key))}</option>`).join('');
       return `<select class="cons-add ${cls}" ${enabled ? '' : 'disabled'}`
-           + ` title="${esc(enabled ? placeholder : Util.t('ui.all_fields_used'))}">`
-           + `<option value="" selected>+ ${esc(placeholder)}</option>${opts}</select>`;
+           + ` title="${Util.escapeHtml(enabled ? placeholder : Util.t('ui.all_fields_used'))}">`
+           + `<option value="" selected>+ ${Util.escapeHtml(placeholder)}</option>${opts}</select>`;
     }
 
     function renderConstraints(): void {
@@ -1723,11 +1715,11 @@ export const Plant = {
         return `
           <div class="constraint-row" data-path="${path}" data-depth="${depth}" style="margin-left:${depth * 24}px">
             <div class="cons-reorder">
-              <button class="cons-up" ${idx === 0 ? 'disabled' : ''} title="${esc(Util.t('ui.move_up'))}">&#9650;</button>
-              <button class="cons-dn" ${idx === siblings.length - 1 ? 'disabled' : ''} title="${esc(Util.t('ui.move_down'))}">&#9660;</button>
+              <button class="cons-up" ${idx === 0 ? 'disabled' : ''} title="${Util.escapeHtml(Util.t('ui.move_up'))}">&#9650;</button>
+              <button class="cons-dn" ${idx === siblings.length - 1 ? 'disabled' : ''} title="${Util.escapeHtml(Util.t('ui.move_down'))}">&#9660;</button>
             </div>
             <div class="cons-meta">
-              <div class="cons-label">${esc(_label(node.key))}</div>
+              <div class="cons-label">${Util.escapeHtml(_label(node.key))}</div>
               <!-- Scheduling Rules density pass (2026-08-21): the field
                    description that used to render here unconditionally moved
                    to the right-click "More info" popover (see the
@@ -1735,14 +1727,14 @@ export const Plant = {
                    Engine._fieldDescriptions). The "no list uploaded" warning
                    is left in place -- it's an active, actionable alert about
                    THIS row's current state, not reference documentation. -->
-              ${noList ? `<div class="cons-desc"><span class="cons-warn">${esc(Util.t('ui.constraint_no_list'))}</span></div>` : ''}
+              ${noList ? `<div class="cons-desc"><span class="cons-warn">${Util.escapeHtml(Util.t('ui.constraint_no_list'))}</span></div>` : ''}
             </div>
             <label class="cons-toggle">
               <input type="checkbox" ${node.enabled ? 'checked' : ''}>
-              <span>${esc(Util.t(node.enabled ? 'ui.constraint_on' : 'ui.constraint_off'))}</span>
+              <span>${Util.escapeHtml(Util.t(node.enabled ? 'ui.constraint_on' : 'ui.constraint_off'))}</span>
             </label>
             ${canNest ? _addPicker('cons-add-child', canAddAnywhere, Util.t('ui.add_sub_priority')) : ''}
-            <button class="btn btn-ghost sm cons-remove" title="${esc(Util.t('btn.remove'))}">${esc(Util.t('btn.remove'))}</button>
+            <button class="btn btn-ghost sm cons-remove" title="${Util.escapeHtml(Util.t('btn.remove'))}">${Util.escapeHtml(Util.t('btn.remove'))}</button>
           </div>
           ${childrenHtml}`;
       };
@@ -2511,10 +2503,9 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
   // pickers); Task 12 added a third call site whose options list is line
   // names, and the dropdown's own option-row rendering below never escaped
   // `o` in the first place — cheap to close now rather than carry forward.
-  const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]);
   containerEl.innerHTML = `
     <div class="hps-combobox md-bom-combobox">
-      <input type="text" class="hps-input" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false"
+      <input type="text" class="hps-input" placeholder="${Util.escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"
              aria-haspopup="listbox" aria-expanded="false">
       <button type="button" class="hps-clear" hidden>&times;</button>
       <div class="hps-dropdown" role="listbox" hidden></div>
@@ -2544,7 +2535,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
       return;
     }
     dropdown.innerHTML = filtered.map((o, i) =>
-      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${esc(o)}</div>`
+      `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${Util.escapeHtml(o)}</div>`
     ).join('');
     activeIdx = Math.max(0, filtered.indexOf(selected));
     highlight();
@@ -3399,7 +3390,7 @@ export const MasterData = (() => {
       // Validate that key columns are filled.
       const missing = keys.filter((k) => !row[k]);
       if (missing.length) {
-        Toast.show(Util.t('toast.no_plant_selected') + ': ' + missing.join(', '), 'error');
+        Toast.show(Util.t('toast.missing_required_key') + ': ' + missing.join(', '), 'error');
         return;
       }
       upserts.push(row);

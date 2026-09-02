@@ -7,11 +7,6 @@
       "expression": "NIMBUS.CalendarUI._clearLineFilter()"
     },
     {
-      "file": "calendar/calendar-admin.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}')"
-    },
-    {
       "file": "index.html",
       "attribute": "onchange",
       "expression": "NIMBUS.EditCalendar.onToggle(0,this.checked)"
@@ -489,17 +484,17 @@
     {
       "file": "insights/insights-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._gotoLine('${line}','${d}')"
+      "expression": "NIMBUS.Dashboard._gotoLine('${Util.escapeHtml(line)}','${Util.escapeHtml(d)}')"
     },
     {
       "file": "insights/insights-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')"
+      "expression": "NIMBUS.Dashboard._jumpToOrder('${Util.escapeHtml(t.id)}')"
     },
     {
       "file": "insights/insights-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"
+      "expression": "NIMBUS.Dashboard._latenessDrill('${Util.escapeHtml(line)}','${dk}')"
     },
     {
       "file": "insights/insights-ui.mjs",

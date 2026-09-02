@@ -1698,13 +1698,12 @@ const PlantSelector = {
       return;
     }
     const sel = Store.selectedPlant;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     const optHtml = (p: string, i: number): string => {
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
       const desc = (Store.masterPlant(p)?.description ?? '').trim();
       return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
-        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${esc(p)}</span>${desc ? `<span class="hps-option-desc">${esc(desc)}</span>` : ''}
+        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${Util.escapeHtml(p)}</span>${desc ? `<span class="hps-option-desc">${Util.escapeHtml(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
     };
@@ -1935,7 +1934,6 @@ const App = {
       return;
     }
     const sel = Store.selectedPlant;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     let html = '';
     filtered.forEach((p, i) => {
       if (pinned.length && i === 0) html += `<div class="hps-section">${Util.t('us.pinned_section')}</div>`;
@@ -1944,7 +1942,7 @@ const App = {
       const isPin = pinnedSet.has(p);
       const desc = (Store.masterPlant(p)?.description ?? '').trim();
       html += `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}">
-        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${esc(p)}</span>${desc ? `<span class="hps-option-desc">${esc(desc)}</span>` : ''}
+        <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${Util.escapeHtml(p)}</span>${desc ? `<span class="hps-option-desc">${Util.escapeHtml(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
     });

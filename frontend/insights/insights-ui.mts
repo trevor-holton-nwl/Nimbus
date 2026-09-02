@@ -653,10 +653,9 @@ export const Dashboard = {
     });
 
     // Data rows
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
-      html += `<div class="hm-line-label"><span class="hm-dot" style="background:${dot}"></span>${esc(line)}</div>`;
+      html += `<div class="hm-line-label"><span class="hm-dot" style="background:${dot}"></span>${Util.escapeHtml(line)}</div>`;
       days.forEach(d => {
         const pct = matrix[line][d]?.pct || 0;
         const bg  = heatBg(pct);
@@ -666,7 +665,7 @@ export const Dashboard = {
         const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
         const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
         const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
-        html += `<button type="button" class="hm-cell" data-line="${esc(line)}" data-date="${esc(d)}" style="background:${bg};color:${tc}" title="Click to view ${esc(line)} on ${esc(d)} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${esc(line)}','${esc(d)}')">${lbl}</button>`;
+        html += `<button type="button" class="hm-cell" data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(d)}" style="background:${bg};color:${tc}" title="Click to view ${Util.escapeHtml(line)} on ${Util.escapeHtml(d)} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${Util.escapeHtml(line)}','${Util.escapeHtml(d)}')">${lbl}</button>`;
       });
     });
 
@@ -740,7 +739,6 @@ export const Dashboard = {
     if (!el) return;
     const tasks = Dashboard._filteredTasks();
     const now   = new Date();
-    const esc   = (s: unknown) => String(s || '').replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
 
     const byLine: Record<string, NimbusTask[]> = {};
     for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
@@ -788,11 +786,11 @@ export const Dashboard = {
         renderFn: (d: DashboardLineStatusRow) =>
           `<div class="ls-row">` +
           `<div class="ls-dot" style="background:${d.color}"></div>` +
-          `<div class="ls-code">${esc(d.line)}</div>` +
+          `<div class="ls-code">${Util.escapeHtml(d.line)}</div>` +
           `<div class="ls-hours" title="${d.cap}h total capacity">${d.sched}/${d.effCap}h</div>` +
           `<div class="ls-bar-wrap"><div class="ls-bar${d.isOver ? ' over' : ''}" style="width:${d.barW}%;background:${d.color}"></div></div>` +
           `<div class="ls-pct${d.sev !== 'ok' ? ' ' + d.sev : ''}">${d.pct}%</div>` +
-          `<div class="ls-co">${esc(d.nxtCO)}</div></div>`,
+          `<div class="ls-co">${Util.escapeHtml(d.nxtCO)}</div></div>`,
         mountEl: el,
       });
     }
@@ -838,14 +836,12 @@ export const Dashboard = {
       : `${alerts.length} open`;
 
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
-    const _esc = (s: unknown) => String(s).replace(/[&<>"']/g, (c: string) =>
-      (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Record<string, string>)[c]));
     list.innerHTML = alerts.slice(0, 8).map(a => `
-      <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${_esc(a.id)}">
+      <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
         <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
-        <div class="msg">${_esc(a.msg)}</div>
+        <div class="msg">${Util.escapeHtml(a.msg)}</div>
         <span class="meta">${a.time ? Util.fmtDT(a.time).slice(5, 16) : ''}</span>
-        <button type="button" class="dismiss" data-alert-action="dismiss" data-alert-id="${_esc(a.id)}">×</button>
+        <button type="button" class="dismiss" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
       </div>
     `).join('');
     if (alerts.length > 8) {
@@ -971,10 +967,9 @@ export const Dashboard = {
     }
 
     // Data rows
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
-      html += `<div class="lh-line-label" title="${esc(line)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${esc(line)}</span></div>`;
+      html += `<div class="lh-line-label" title="${Util.escapeHtml(line)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${Util.escapeHtml(line)}</span></div>`;
       for (const dk of days) {
         const cell = cells[line][dk];
         const h = cell.lateHours;
@@ -988,8 +983,8 @@ export const Dashboard = {
         // keyboard access; on-plan cells stay inert divs (nothing to activate).
         const tag = h > 0 ? 'button' : 'div';
         const typeAttr = h > 0 ? ' type="button"' : '';
-        const click = h > 0 ? ` onclick="NIMBUS.Dashboard._latenessDrill('${esc(line)}','${dk}')"` : '';
-        html += `<${tag}${typeAttr} class="lh-cell" style="background:${bg};color:${tc}" title="${esc(title)}"${click}>${lbl}</${tag}>`;
+        const click = h > 0 ? ` onclick="NIMBUS.Dashboard._latenessDrill('${Util.escapeHtml(line)}','${dk}')"` : '';
+        html += `<${tag}${typeAttr} class="lh-cell" style="background:${bg};color:${tc}" title="${Util.escapeHtml(title)}"${click}>${lbl}</${tag}>`;
       }
     });
 
@@ -1027,7 +1022,6 @@ export const Dashboard = {
       drill.hidden = true; drill.innerHTML = '';
       return;
     }
-    const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     const rows = cell.tasks
       .slice()
       .sort((a, b) => Util.latenessHours(b) - Util.latenessHours(a))
@@ -1038,9 +1032,9 @@ export const Dashboard = {
         const lateLbl = days >= 1 ? `+${days.toFixed(1)}d` : `+${lh.toFixed(1)}h`;
         const due = Util.sapDueDate(t);
         const sched = Util.scheduledEnd(t);
-        return `<div class="lh-drill-row" onclick="NIMBUS.Dashboard._jumpToOrder('${esc(t.id)}')">
-          <span class="lh-drill-id">${esc(t.id).slice(0, 10)}</span>
-          <span class="lh-drill-name">${esc(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
+        return `<div class="lh-drill-row" onclick="NIMBUS.Dashboard._jumpToOrder('${Util.escapeHtml(t.id)}')">
+          <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
+          <span class="lh-drill-name">${Util.escapeHtml(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
           <span class="lh-drill-due">due ${due ? Util.fmtDT(due).slice(5, 16) : '—'}</span>
           <span class="lh-drill-sched">→ ${sched ? Util.fmtDT(sched).slice(5, 16) : '—'}</span>
           <span class="lh-drill-late">${lateLbl}</span>
@@ -1049,7 +1043,7 @@ export const Dashboard = {
     const more = cell.tasks.length > 12 ? `<div class="lh-drill-more">+${cell.tasks.length - 12} more</div>` : '';
     drill.innerHTML = `
       <div class="lh-drill-head">
-        <strong>${esc(line)}</strong> · ${esc(dateStr)} ·
+        <strong>${Util.escapeHtml(line)}</strong> · ${Util.escapeHtml(dateStr)} ·
         <span>${cell.lateCount} late order${cell.lateCount === 1 ? '' : 's'} · ${cell.lateHours.toFixed(1)}h cumulative</span>
         <button class="lh-drill-close" onclick="NIMBUS.Dashboard._latenessDrillClear()" title="Close">×</button>
       </div>
@@ -1174,9 +1168,6 @@ export const AlertsUIAdapter = {
     const dateLabel = day.toLocaleDateString('en-US',
       { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
 
-    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
-      (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
-
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
     const dayStart = Util.startOfDay(day)!;
     const dayEnd = new Date(dayStart);
@@ -1252,11 +1243,11 @@ export const AlertsUIAdapter = {
     const taskFirmed = (id: string) => { const t = Store.tasks?.[id]; return !!t && Engine.firmingStatus(t).firmed; };
 
     const renderChip = (id: string) => `
-      <span class="ac-chip ${taskFirmed(id) ? 'firmed' : ''}" title="${esc(taskPO(id))}">${esc(taskPO(id))}</span>`;
+      <span class="ac-chip ${taskFirmed(id) ? 'firmed' : ''}" title="${Util.escapeHtml(taskPO(id))}">${Util.escapeHtml(taskPO(id))}</span>`;
 
     const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
-      let headline = esc(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
+      let headline = Util.escapeHtml(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
       let num = '';
       let chipsHtml = '';
 
@@ -1294,7 +1285,7 @@ export const AlertsUIAdapter = {
       }
 
       const gotoBtn = (a.taskId || (a.line && a.time))
-        ? `<button class="btn sm" data-act="goto" data-id="${esc(a.id)}">Go to</button>` : '';
+        ? `<button class="btn sm" data-act="goto" data-id="${Util.escapeHtml(a.id)}">Go to</button>` : '';
 
       return `
         <div class="ac-card ${CALENDAR_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
@@ -1303,11 +1294,11 @@ export const AlertsUIAdapter = {
             <span>${headline}</span>
             ${num}
           </div>
-          <div class="ac-card-msg">${esc(a.msg)}</div>
+          <div class="ac-card-msg">${Util.escapeHtml(a.msg)}</div>
           ${chipsHtml}
           <div class="ac-card-actions">
             ${gotoBtn}
-            <button class="btn sm" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>
+            <button class="btn sm" data-act="dismiss" data-id="${Util.escapeHtml(a.id)}">Dismiss</button>
           </div>
         </div>`;
     };
@@ -1331,12 +1322,12 @@ export const AlertsUIAdapter = {
       <div class="ac-wrap">
         <header class="ac-head">
           <div class="ac-head-row">
-            <span class="ac-title">${esc(line)}</span>
+            <span class="ac-title">${Util.escapeHtml(line)}</span>
             <span class="ac-date">${dateLabel}</span>
             <button class="ac-x" data-act="close" aria-label="${Util.t('btn.close')}">×</button>
           </div>
           <div class="ac-verdict ac-verdict-${verdictSev}">
-            ${errCt ? '🔴' : '🟡'} ${esc(verdict)}
+            ${errCt ? '🔴' : '🟡'} ${Util.escapeHtml(verdict)}
           </div>
           <div class="ac-stats">
             <div class="ac-stat">
@@ -1408,20 +1399,18 @@ export const AlertsUIAdapter = {
   _renderAlertRow(a: NimbusAlert): string {
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) =>
-      (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
     const isCalendar = CALENDAR_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
     const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
     const override = (a.type === 'closed' || a.type === 'firmed-closed' || a.type === 'firmed-out-of-hours') && a.taskId != null;
-    return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${esc(a.id)}">` +
+    return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +
-      `<span class="alert-msg">${esc(a.msg)}</span>` +
+      `<span class="alert-msg">${Util.escapeHtml(a.msg)}</span>` +
       `<div class="alert-actions">` +
-        ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${esc(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
-        (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${esc(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
-        (override ? `<button class="btn btn-ghost sm" data-alert-action="override" data-task-id="${esc(a.taskId)}">${Util.t('btn.override')}</button>` : '') +
-        `<button class="btn btn-ghost sm" data-alert-action="dismiss" data-alert-id="${esc(a.id)}">${Util.t('btn.dismiss')}</button>` +
+        ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
+        (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
+        (override ? `<button class="btn btn-ghost sm" data-alert-action="override" data-task-id="${Util.escapeHtml(a.taskId)}">${Util.t('btn.override')}</button>` : '') +
+        `<button class="btn btn-ghost sm" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.dismiss')}</button>` +
       `</div></div>`;
   },
 

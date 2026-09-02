@@ -1751,11 +1751,15 @@ export const DependencyOverlay = {
     // Compute critical path lengths for each task (longest chain to it)
     const chainLen: Record<string, number> = {};
     const allIds = Store.tasksForSelectedPlant().map(t => String(t.id));
+    const visiting = new Set<string>();
     const getLen = (id: string): number => {
       if (chainLen[id] !== undefined) return chainLen[id];
+      if (visiting.has(id)) return 0; // cycle detected in current DFS path
+      visiting.add(id);
       const sources = deps[id] || [];
-      if (!sources.length) { chainLen[id] = 0; return 0; }
+      if (!sources.length) { chainLen[id] = 0; visiting.delete(id); return 0; }
       chainLen[id] = 1 + Math.max(...sources.map(getLen));
+      visiting.delete(id);
       return chainLen[id];
     };
     const maxLen = Math.max(0, ...allIds.map(id => { try { return getLen(id); } catch { return 0; } }));
@@ -2317,12 +2321,10 @@ export const GanttFilter = {
     }
     const q = GanttFilter._colorSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
-      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(c =>
-          `<label><input type="checkbox" value="${esc(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
-           onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${esc(c)}</label>`
+          `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
+           onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${Util.escapeHtml(c)}</label>`
         ).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
     GanttFilter._refreshColorBtn();
@@ -2367,12 +2369,10 @@ export const GanttFilter = {
     }
     const q = GanttFilter._formSearch.toLowerCase().trim();
     const visible = q ? sorted.filter(f => f.toLowerCase().includes(q)) : sorted;
-    const esc = (s: unknown) => String(s).replace(/[&<>"]/g,
-      (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]));
     drop.innerHTML = visible.length
       ? visible.map(f =>
-          `<label><input type="checkbox" value="${esc(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
-           onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${esc(f)}</label>`
+          `<label><input type="checkbox" value="${Util.escapeHtml(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
+           onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${Util.escapeHtml(f)}</label>`
         ).join('')
       : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No forms'}</div>`;
     GanttFilter._refreshFormBtn();
@@ -3060,7 +3060,6 @@ export const Interaction = {
     const renderCard = (id: string): string => {
       const t = Store.tasks[id];
       if (!t) return '';
-      const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, (c: string) => (({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' } as Record<string, string>)[c]));
       const qty = t['ORDER_QUANTITY_(GMEIN)'] ?? '—';
       const run = Util.runHours(t);
       const line = t.MACHINE || '—';
@@ -3080,14 +3079,14 @@ export const Interaction = {
         ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
 
       return `
-        <div class="hov-title">${esc(orderNo)} ${firmedBadge}</div>
-        <div class="hov-mat">${esc(matDesc)}</div>
+        <div class="hov-title">${Util.escapeHtml(orderNo)} ${firmedBadge}</div>
+        <div class="hov-mat">${Util.escapeHtml(matDesc)}</div>
         <div class="hov-grid">
-          <span>Qty</span><span>${esc(qty)}</span>
+          <span>Qty</span><span>${Util.escapeHtml(qty)}</span>
           <span>Run</span><span>${run.toFixed(2)} h</span>
-          <span>Line</span><span>${esc(line)}</span>
-          <span>Color</span><span>${esc(color)}</span>
-          <span>Form</span><span>${esc(form)}</span>
+          <span>Line</span><span>${Util.escapeHtml(line)}</span>
+          <span>Color</span><span>${Util.escapeHtml(color)}</span>
+          <span>Form</span><span>${Util.escapeHtml(form)}</span>
         </div>
         <div class="hov-dates">${startStr} → ${endStr}</div>
         ${alertsHtml}
@@ -3488,9 +3487,11 @@ export const Interaction = {
        * ---------------------------------------------------------------- */
       if (Store.isFirmed(id)) {
         const currentStart = Util.snap(new Date(v.start));
+        const currentEnd = Util.snap(new Date(v.end));
         const currentGroup = v.group || t.MACHINE;
         const noActualChange = t.start_date &&
           currentStart.getTime() === expectedItem.start.getTime() &&
+          currentEnd.getTime() === expectedItem.end.getTime() &&
           currentGroup === t.MACHINE;
 
         if (noActualChange) {

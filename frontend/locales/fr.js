@@ -117,6 +117,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.missing_key_rows':            'Toutes les {{count}} ligne(s) manquent de clé requise : {{keys}}',
   'toast.no_valid_rows':               'Aucune ligne valide à coller',
   'toast.no_plant_selected':           'Aucune usine sélectionnée',
+  'toast.missing_required_key':        'Champs obligatoires manquants',
   'toast.cascade_preview_failed':      'Impossible de vérifier l\'impact de cette suppression — réessayez.',
   'toast.bom_upload_done':             '{{inserted}} ajoutés, {{updated}} mis à jour, {{rejected}} rejetés',
   'toast.bom_upload_failed':           "Échec de l'import de la nomenclature",

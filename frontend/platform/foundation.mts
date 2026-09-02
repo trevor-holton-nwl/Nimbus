@@ -1088,7 +1088,7 @@ export const PerfMonitor = (() => {
   }
 
   function clear(): void { _buckets.clear(); _notify(); }
-  function subscribe(fn: () => void): void { _listeners.add(fn); }
+  function subscribe(fn: () => void): () => void { _listeners.add(fn); return () => _listeners.delete(fn); }
 
   function _notify(): void {
     if (_notifyTimer) return;
@@ -1471,36 +1471,53 @@ export const Toast = (function() {
      Modal.close(id)                 — hide modal with the given element ID
      Modal.confirm(msg, onOk, onCancel?) — two-button confirmation dialog
    ========================================================================== */
+// Confirm-dialog serialization: the dialog reuses one fixed set of DOM nodes
+// (#confirm-ok-btn etc.), so a second confirm() fired while one is still
+// pending must queue rather than stack a second set of listeners onto the
+// same buttons (which would double-fire both promises' resolve on either click).
+let _confirmBusy = false;
+const _confirmQueue: Array<{ opts: ModalConfirmOpts; resolve: (ok: boolean) => void }> = [];
+
+function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): void {
+  document.getElementById('confirm-title')!.textContent   = opts.title   || 'Confirm';
+  document.getElementById('confirm-message')!.textContent = opts.message || '';
+  const det = document.getElementById('confirm-detail')!;
+  if (opts.detail) { det.innerHTML = opts.detail; det.hidden = false; }
+  else             { det.textContent = ''; det.hidden = true; }
+  const okBtn = document.getElementById('confirm-ok-btn')!;
+  okBtn.textContent  = opts.confirmLabel || 'Confirm';
+  okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
+  const closeBtn = document.getElementById('confirm-close-btn')!;
+  const done = (ok: boolean): void => { cleanup(); resolve(ok); };
+  const cleanup = (): void => {
+    okBtn.removeEventListener('click', onOk);
+    document.getElementById('confirm-cancel-btn')!.removeEventListener('click', onCancel);
+    closeBtn.removeEventListener('click', onCancel);
+    Modal.close('confirm-modal');
+    const next = _confirmQueue.shift();
+    if (next) { _runConfirm(next.opts, next.resolve); }
+    else      { _confirmBusy = false; }
+  };
+  const onOk     = (): void => done(true);
+  const onCancel = (): void => done(false);
+  okBtn.addEventListener('click', onOk);
+  document.getElementById('confirm-cancel-btn')!.addEventListener('click', onCancel);
+  closeBtn.addEventListener('click', onCancel);
+  Modal.open('confirm-modal');
+}
+
 export const Modal = {
   open(id: string): void  { const el = document.getElementById(id); if (el) el.hidden = false; },
   close(id: string): void { const el = document.getElementById(id); if (el) el.hidden = true;  },
 
   // Promise-based confirmation dialog.
   // opts: { title, message, detail (HTML string), confirmLabel, tone: 'danger'|'warn' }
+  // Concurrent calls are queued (see _confirmQueue above) and served in order.
   confirm(opts: ModalConfirmOpts = {}): Promise<boolean> {
     return new Promise(resolve => {
-      document.getElementById('confirm-title')!.textContent   = opts.title   || 'Confirm';
-      document.getElementById('confirm-message')!.textContent = opts.message || '';
-      const det = document.getElementById('confirm-detail')!;
-      if (opts.detail) { det.innerHTML = opts.detail; det.hidden = false; }
-      else             { det.textContent = ''; det.hidden = true; }
-      const okBtn = document.getElementById('confirm-ok-btn')!;
-      okBtn.textContent  = opts.confirmLabel || 'Confirm';
-      okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
-      const closeBtn = document.getElementById('confirm-close-btn')!;
-      const done = (ok: boolean): void => { cleanup(); resolve(ok); };
-      const cleanup = (): void => {
-        okBtn.removeEventListener('click', onOk);
-        document.getElementById('confirm-cancel-btn')!.removeEventListener('click', onCancel);
-        closeBtn.removeEventListener('click', onCancel);
-        Modal.close('confirm-modal');
-      };
-      const onOk     = (): void => done(true);
-      const onCancel = (): void => done(false);
-      okBtn.addEventListener('click', onOk);
-      document.getElementById('confirm-cancel-btn')!.addEventListener('click', onCancel);
-      closeBtn.addEventListener('click', onCancel);
-      Modal.open('confirm-modal');
+      if (_confirmBusy) { _confirmQueue.push({ opts, resolve }); return; }
+      _confirmBusy = true;
+      _runConfirm(opts, resolve);
     });
   }
 };

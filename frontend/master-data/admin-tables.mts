@@ -133,11 +133,6 @@ let _api: NimbusVendor.AgGridApi | null = null;
 
 // -- Small utils ----------------------------------------------------------------
 
-function _esc(s: unknown): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) =>
-    (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]));
-}
-
 function _formatCell(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'object') {
@@ -190,12 +185,12 @@ function _renderRail(): void {
   rail.innerHTML = filtered.length
     ? filtered.map((t) => `
       <div class="atb-rail-row${t.table === _selectedTable ? ' atb-rail-row-sel' : ''}"
-           data-atb-table="${_esc(t.table)}" role="button" tabindex="0">
-        <div class="atb-rail-name">${_esc(t.table)}${t.internal
-          ? `<span class="atb-internal-badge">${_esc(Util.t('ui.admin_tables_internal_badge'))}</span>` : ''}</div>
-        <div class="atb-rail-meta">${_esc(Util.t('ui.admin_tables_approx_rows', { count: t.approx_row_count.toLocaleString() }))}</div>
+           data-atb-table="${Util.escapeHtml(t.table)}" role="button" tabindex="0">
+        <div class="atb-rail-name">${Util.escapeHtml(t.table)}${t.internal
+          ? `<span class="atb-internal-badge">${Util.escapeHtml(Util.t('ui.admin_tables_internal_badge'))}</span>` : ''}</div>
+        <div class="atb-rail-meta">${Util.escapeHtml(Util.t('ui.admin_tables_approx_rows', { count: t.approx_row_count.toLocaleString() }))}</div>
       </div>`).join('')
-    : `<div class="atb-rail-empty">${_esc(q ? Util.t('ui.admin_tables_no_match') : Util.t('ui.admin_tables_no_tables'))}</div>`;
+    : `<div class="atb-rail-empty">${Util.escapeHtml(q ? Util.t('ui.admin_tables_no_match') : Util.t('ui.admin_tables_no_tables'))}</div>`;
 }
 
 // -- Selected table: rows + columns -----------------------------------------------
@@ -304,32 +299,32 @@ function _renderFilterBar(): void {
   const bar = document.getElementById('atb-filterbar');
   if (!bar) return;
   if (!_filterFields.length) {
-    bar.innerHTML = `<span class="dash-filter-hint">${_esc(Util.t('ui.admin_tables_no_key_columns'))}</span>`;
+    bar.innerHTML = `<span class="dash-filter-hint">${Util.escapeHtml(Util.t('ui.admin_tables_no_key_columns'))}</span>`;
     return;
   }
   bar.innerHTML =
-    `<span class="dash-filter-label">${_esc(Util.t('ui.filter_label'))}</span>` +
+    `<span class="dash-filter-label">${Util.escapeHtml(Util.t('ui.filter_label'))}</span>` +
     _filterFields.map((field) => {
       const col = _columns.find((c) => c.name === field);
       const kind = col?.is_pk ? 'PK' : 'FK';
       return `
       <div class="dash-filter-group">
-        <button type="button" class="dash-filter-btn" data-atb-filter-toggle="${_esc(field)}">
-          <span class="atb-filter-kind">${_esc(kind)}</span>
-          <span id="atb-filter-label-${_esc(field)}"></span>
+        <button type="button" class="dash-filter-btn" data-atb-filter-toggle="${Util.escapeHtml(field)}">
+          <span class="atb-filter-kind">${Util.escapeHtml(kind)}</span>
+          <span id="atb-filter-label-${Util.escapeHtml(field)}"></span>
           <span class="dash-filter-arrow">▾</span>
         </button>
-        <div class="dash-filter-dropdown dash-filter-pomat-panel" id="atb-filter-dropdown-${_esc(field)}" hidden>
-          <textarea class="dash-filter-pomat-textarea" rows="5" id="atb-filter-textarea-${_esc(field)}"
-                    placeholder="${_esc(Util.t('ph.admin_tables_filter_values'))}"></textarea>
+        <div class="dash-filter-dropdown dash-filter-pomat-panel" id="atb-filter-dropdown-${Util.escapeHtml(field)}" hidden>
+          <textarea class="dash-filter-pomat-textarea" rows="5" id="atb-filter-textarea-${Util.escapeHtml(field)}"
+                    placeholder="${Util.escapeHtml(Util.t('ph.admin_tables_filter_values'))}"></textarea>
           <div class="dash-filter-pomat-actions">
-            <span class="dash-filter-pomat-count" id="atb-filter-count-${_esc(field)}"></span>
-            <button type="button" class="btn btn-ghost sm" data-atb-filter-clear="${_esc(field)}">${_esc(Util.t('btn.clear_pasted'))}</button>
+            <span class="dash-filter-pomat-count" id="atb-filter-count-${Util.escapeHtml(field)}"></span>
+            <button type="button" class="btn btn-ghost sm" data-atb-filter-clear="${Util.escapeHtml(field)}">${Util.escapeHtml(Util.t('btn.clear_pasted'))}</button>
           </div>
         </div>
       </div>`;
     }).join('') +
-    `<button type="button" class="dash-filter-clear" id="atb-filter-clear-all" ${_hasAnyFilter() ? '' : 'hidden'}>${_esc(Util.t('btn.clear_filters'))}</button>` +
+    `<button type="button" class="dash-filter-clear" id="atb-filter-clear-all" ${_hasAnyFilter() ? '' : 'hidden'}>${Util.escapeHtml(Util.t('btn.clear_filters'))}</button>` +
     `<span class="dash-filter-hint" id="atb-filter-hint"></span>`;
   _wireFilterBar();
   for (const f of _filterFields) _refreshFilterLabel(f);
@@ -503,9 +498,9 @@ function _renderTableMeta(): void {
   const metaEl = document.getElementById('atb-detail-meta');
   if (nameEl) nameEl.textContent = _selectedTable;
   if (metaEl) {
-    const rowsLabel = _esc(Util.t('ui.admin_tables_approx_rows', { count: (entry?.approx_row_count ?? 0).toLocaleString() }));
+    const rowsLabel = Util.escapeHtml(Util.t('ui.admin_tables_approx_rows', { count: (entry?.approx_row_count ?? 0).toLocaleString() }));
     metaEl.innerHTML = entry?.internal
-      ? `<span class="atb-internal-badge">${_esc(Util.t('ui.admin_tables_internal_badge'))}</span> ${rowsLabel}`
+      ? `<span class="atb-internal-badge">${Util.escapeHtml(Util.t('ui.admin_tables_internal_badge'))}</span> ${rowsLabel}`
       : rowsLabel;
   }
 }
@@ -518,8 +513,8 @@ function _buildSkeleton(host: HTMLElement): void {
       <div>
         <div class="atb-rail-head">
           <input type="text" class="dash-filter-paste-input" id="atb-search"
-                 placeholder="${_esc(Util.t('ph.admin_tables_search_tables'))}" autocomplete="off">
-          <button type="button" class="btn btn-ghost sm" id="atb-tables-refresh" title="${_esc(Util.t('btn.refresh'))}">↻</button>
+                 placeholder="${Util.escapeHtml(Util.t('ph.admin_tables_search_tables'))}" autocomplete="off">
+          <button type="button" class="btn btn-ghost sm" id="atb-tables-refresh" title="${Util.escapeHtml(Util.t('btn.refresh'))}">↻</button>
         </div>
         <div class="atb-rail" id="atb-rail"></div>
       </div>
@@ -530,16 +525,16 @@ function _buildSkeleton(host: HTMLElement): void {
             <span class="atb-detail-name" id="atb-detail-name"></span>
             <span class="atb-detail-meta" id="atb-detail-meta"></span>
             <div class="atb-detail-actions">
-              <button type="button" class="btn btn-ghost sm" id="atb-refresh-btn">${_esc(Util.t('btn.refresh'))}</button>
-              <button type="button" class="btn btn-ghost sm" id="atb-export-btn">${_esc(Util.t('btn.export_csv'))}</button>
+              <button type="button" class="btn btn-ghost sm" id="atb-refresh-btn">${Util.escapeHtml(Util.t('btn.refresh'))}</button>
+              <button type="button" class="btn btn-ghost sm" id="atb-export-btn">${Util.escapeHtml(Util.t('btn.export_csv'))}</button>
             </div>
           </div>
           <div class="dash-filter-bar" id="atb-filterbar"></div>
           <div id="atb-grid" class="ag-theme-quartz"></div>
           <div class="atb-pagination">
-            <button type="button" class="btn btn-ghost sm" id="atb-prev-btn" disabled>&lsaquo; ${_esc(Util.t('btn.admin_tables_prev'))}</button>
-            <button type="button" class="btn btn-ghost sm" id="atb-next-btn" disabled>${_esc(Util.t('btn.admin_tables_next'))} &rsaquo;</button>
-            <select id="atb-page-size" title="${_esc(Util.t('ui.admin_tables_page_size'))}">
+            <button type="button" class="btn btn-ghost sm" id="atb-prev-btn" disabled>&lsaquo; ${Util.escapeHtml(Util.t('btn.admin_tables_prev'))}</button>
+            <button type="button" class="btn btn-ghost sm" id="atb-next-btn" disabled>${Util.escapeHtml(Util.t('btn.admin_tables_next'))} &rsaquo;</button>
+            <select id="atb-page-size" title="${Util.escapeHtml(Util.t('ui.admin_tables_page_size'))}">
               ${PAGE_SIZES.map((n) => `<option value="${n}"${n === _meta.limit ? ' selected' : ''}>${n}</option>`).join('')}
             </select>
             <span id="atb-page-info"></span>

@@ -117,6 +117,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.missing_key_rows':            'Todas las {{count}} fila(s) carecen de clave requerida: {{keys}}',
   'toast.no_valid_rows':               'No hay filas válidas para pegar',
   'toast.no_plant_selected':           'No hay planta seleccionada',
+  'toast.missing_required_key':        'Faltan campos obligatorios',
   'toast.cascade_preview_failed':      'No se pudo verificar qué afectaría esta eliminación — inténtalo de nuevo.',
   'toast.bom_upload_done':             '{{inserted}} agregados, {{updated}} actualizados, {{rejected}} rechazados',
   'toast.bom_upload_failed':           'Error al subir la Lista de Materiales',

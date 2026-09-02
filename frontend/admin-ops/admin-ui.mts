@@ -2712,9 +2712,6 @@ export const SystemConfig = (() => {
   const API = Config.API_BASE;
   let _orderFields: Record<string, { grid?: boolean; inspector?: boolean }> = {};
 
-  const _esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c: string) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
-
   function _writeHeaders(): Record<string, string> {
     return { 'x-user-email': Session.actor(), 'content-type': 'application/json' };
   }
@@ -2734,7 +2731,7 @@ export const SystemConfig = (() => {
       _orderFields = data.orderFields ?? {};
       _paint();
     } catch (e) {
-      host.innerHTML = `<div class="empty-state">${_esc(Util.t('ui.system_config_load_failed'))}: ${_esc((e as Error).message)}</div>`;
+      host.innerHTML = `<div class="empty-state">${Util.escapeHtml(Util.t('ui.system_config_load_failed'))}: ${Util.escapeHtml((e as Error).message)}</div>`;
       ErrorLog.error('system-config', `Load system settings failed: ${(e as Error).message}`);
     }
   }
@@ -2747,28 +2744,28 @@ export const SystemConfig = (() => {
       const gridChecked = cfg.grid ?? f.gridDefault;
       const inspChecked = cfg.inspector ?? f.inspectorDefault;
       return `<tr>
-        <td class="md-th">${_esc(Util.t(f.i18nInspectorKey))}</td>
-        <td style="text-align:center"><input type="checkbox" data-sc-field="${_esc(f.key)}" data-sc-surface="grid" ${gridChecked ? 'checked' : ''}></td>
-        <td style="text-align:center"><input type="checkbox" data-sc-field="${_esc(f.key)}" data-sc-surface="inspector" ${inspChecked ? 'checked' : ''}></td>
+        <td class="md-th">${Util.escapeHtml(Util.t(f.i18nInspectorKey))}</td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="grid" ${gridChecked ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="inspector" ${inspChecked ? 'checked' : ''}></td>
       </tr>`;
     }).join('');
 
     host.innerHTML = `
       <div class="panel">
-        <h3>${_esc(Util.t('ui.system_config_title'))}</h3>
-        <p class="muted">${_esc(Util.t('ui.system_config_desc'))}</p>
+        <h3>${Util.escapeHtml(Util.t('ui.system_config_title'))}</h3>
+        <p class="muted">${Util.escapeHtml(Util.t('ui.system_config_desc'))}</p>
         <div class="md-table-wrap">
           <table class="md-table">
             <thead><tr>
-              <th class="md-th">${_esc(Util.t('ui.system_config_field'))}</th>
-              <th class="md-th">${_esc(Util.t('ui.system_config_show_grid'))}</th>
-              <th class="md-th">${_esc(Util.t('ui.system_config_show_inspector'))}</th>
+              <th class="md-th">${Util.escapeHtml(Util.t('ui.system_config_field'))}</th>
+              <th class="md-th">${Util.escapeHtml(Util.t('ui.system_config_show_grid'))}</th>
+              <th class="md-th">${Util.escapeHtml(Util.t('ui.system_config_show_inspector'))}</th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
-          <button class="btn btn-primary" id="sc-save-btn">${_esc(Util.t('btn.save'))}</button>
+          <button class="btn btn-primary" id="sc-save-btn">${Util.escapeHtml(Util.t('btn.save'))}</button>
         </div>
       </div>
     `;
@@ -2806,7 +2803,7 @@ export const SystemConfig = (() => {
       Toast.show(Util.t('toast.system_config_saved'), 'success');
     } catch (e) {
       ErrorLog.error('system-config', `Save system settings failed: ${(e as Error).message}`);
-      Toast.show(Util.t('toast.system_config_save_failed'), 'err');
+      Toast.show(Util.t('toast.system_config_save_failed'), 'error');
     }
   }
 

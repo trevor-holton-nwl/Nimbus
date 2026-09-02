@@ -117,6 +117,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.missing_key_rows':            'Allen {{count}} Zeile(n) fehlt der erforderliche Schlüssel: {{keys}}',
   'toast.no_valid_rows':               'Keine gültigen Zeilen zum Einfügen',
   'toast.no_plant_selected':           'Kein Werk ausgewählt',
+  'toast.missing_required_key':        'Erforderliche Felder fehlen',
   'toast.cascade_preview_failed':      'Konnte nicht überprüfen, was dieses Löschen betreffen würde — bitte erneut versuchen.',
   'toast.bom_upload_done':             '{{inserted}} hinzugefügt, {{updated}} aktualisiert, {{rejected}} abgelehnt',
   'toast.bom_upload_failed':           'Stücklisten-Upload fehlgeschlagen',

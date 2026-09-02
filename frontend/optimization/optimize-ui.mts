@@ -1,14 +1,14 @@
-// optimization/optimize-ui.mjs — OptimizeDialog (time-window & strategy
+﻿// optimization/optimize-ui.mjs â€” OptimizeDialog (time-window & strategy
 // picker), OptimizerPreview (before/after KPI preview + apply/discard), and
 // SandboxAdapter (What-If mode banner/buttons). Extracted verbatim from
 // schedule-workbench.mts (Phase P3 of docs/architecture/domain-refactor-plan.md,
-// which split that 10,391-line mega-module into 6 domain files) — two
+// which split that 10,391-line mega-module into 6 domain files) â€” two
 // non-contiguous source ranges combined into this one file per that phase's
 // per-domain grouping.
 //
 // `ColorWheelEntry`/`ColorWheelResponse` (originally declared in this file's
 // "OptimizeDialog/OptimizerPreview local types" header block) moved to
-// priority-lists/viewers.mjs instead — the original file's own doc comment on
+// priority-lists/viewers.mjs instead â€” the original file's own doc comment on
 // that type already said it is "Read only by ColorWheelViewer's `_load()`
 // now", so it belongs with ColorWheelViewer, not here; neither OptimizeDialog
 // nor OptimizerPreview ever referenced it.
@@ -29,32 +29,32 @@ import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
-   OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
+   OPTIMIZE DIALOG â€” time-window & strategy picker for Engine.runAndApply
    ========================================================================== */
 // -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
 //    OptimizeDialog/OptimizerPreview) ----------------------------------------
 
-/** Store.pref('optimizerDefaults') shape — the user's last-used optimizer
+/** Store.pref('optimizerDefaults') shape â€” the user's last-used optimizer
  *  settings, seeded back into the dialog on open(). Store.pref() itself
  *  returns `unknown` (an open per-user prefs bag), so this is read via an `as`
  *  cast and defensively validated at each call site (typeof / array-includes
- *  checks) — same precedent as Table's TableGridLayout / _pinnedLines casts
+ *  checks) â€” same precedent as Table's TableGridLayout / _pinnedLines casts
  *  elsewhere in this file. */
 interface OptimizerDefaults {
   mode?: string;
   preset?: string;
   respectFirmed?: boolean;
   /** @deprecated pre-rename key, still read as a fallback for presets saved
-   *  before the fixed→firmed rename — see the `?? _od.respectFixed` read. */
+   *  before the fixedâ†’firmed rename â€” see the `?? _od.respectFixed` read. */
   respectFixed?: boolean;
   respectCalendar?: boolean;
 }
 
-/** Mirrors Engine.runAndApply's opts contract (schedule-services.mts) — built by
+/** Mirrors Engine.runAndApply's opts contract (schedule-services.mts) â€” built by
  *  run() below and threaded through OptimizerPreview.runWithPreview. Engine.
  *  runAndApply itself takes `opts: Record<string, unknown>` (an open bag it
  *  reads defensively via individual `as` casts), so this needs the same index
- *  signature to stay assignable at that call site — same "known fields + open
+ *  signature to stay assignable at that call site â€” same "known fields + open
  *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
 interface OptimizationAuditDetails {
   mode: OptimizerMode;
@@ -368,8 +368,8 @@ export const OptimizeDialog = (() => {
     if (!el || !_start || !_end) return;
     const days = Math.round((_end.getTime() - _start.getTime()) / Config.MS_DAY);
     el.innerHTML =
-      `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayDate(_end)}</span>` +
-      `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
+      `<span class="opt-date-summary-range">${_displayDate(_start)} â†’ ${_displayDate(_end)}</span>` +
+      `<span class="opt-date-summary-days">&nbsp;Â· ${days} days</span>`;
   }
 
   function applyPreset(key: string) {
@@ -383,7 +383,7 @@ export const OptimizeDialog = (() => {
     if (key !== 'custom') {
       let days: number;
       if (key === 'horizon') {
-        // Store._state.masterData direct touch — deliberate, out of scope for this
+        // Store._state.masterData direct touch â€” deliberate, out of scope for this
         // task (see the file header comment above OptimizeDialog).
         const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
         const horizonMinutes = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? 20160;
@@ -420,8 +420,8 @@ export const OptimizeDialog = (() => {
   }
 
   /** Does this plant have any colorWheel ranks the optimizer could apply?
-   *  Delegates to Engine.hasPriorityRanks — the SHARED implementation, so this
-   *  and Plant → System Settings' own hints can never drift apart. Reads the
+   *  Delegates to Engine.hasPriorityRanks â€” the SHARED implementation, so this
+   *  and Plant â†’ System Settings' own hints can never drift apart. Reads the
    *  exact same Store.priorityRankMaps that Engine._sortTerms' term factory
    *  reads, and counts per-line overrides as well as the plant-wide list (Stage 3
    *  replaced the old `GET /color-wheel/{plant}` probe, which saw plant-wide
@@ -432,7 +432,7 @@ export const OptimizeDialog = (() => {
    *  Now colorWheel-specific for ONE remaining reason: the `wheel_used` field in
    *  the optimization_run audit payload, which existing audit rows are keyed on.
    *  The badge and the pre-Run confirm both moved to the all-fields
-   *  Engine.unrankedActiveFields — do not re-point either back here. */
+   *  Engine.unrankedActiveFields â€” do not re-point either back here. */
   function _hasColorRanks(): boolean {
     return Engine.hasPriorityRanks('colorWheel');
   }
@@ -455,12 +455,12 @@ export const OptimizeDialog = (() => {
       // Deliberately does NOT clear the rank cache: `_plant` is null only when
       // the dialog found no plant data at all, which says nothing about the
       // plant Store is still loaded for.
-      setBadge('none', '⚠', Util.t('ui.opt_badge_no_plant'));
+      setBadge('none', 'âš ', Util.t('ui.opt_badge_no_plant'));
       return;
     }
 
     if (_mode === 'backlog') {
-      setBadge('none', '↪', 'Remove Backlog preserves the existing sequence and does not use priority lists.');
+      setBadge('none', 'â†ª', 'Remove Backlog preserves the existing sequence and does not use priority lists.');
       return;
     }
     setBadge('loading', '', Util.t('ui.opt_badge_checking'));
@@ -469,21 +469,21 @@ export const OptimizeDialog = (() => {
     // Prefetch this plant's priority rank maps so (a) the badge reflects what
     // the optimizer will actually rank on, and (b) run() finds
     // Persistence._rankMapsPlant already fresh and needs no second round-trip
-    // on submit — the same "populated by _updatePlantBadge, consumed by run()"
-    // role the retired per-plant color→rank cache played. Safe to load into the
+    // on submit â€” the same "populated by _updatePlantBadge, consumed by run()"
+    // role the retired per-plant colorâ†’rank cache played. Safe to load into the
     // shared (non-plant-keyed) Store cache from here because `_plant` is always
     // Store.selectedPlant at this point: both callers (_buildPlantSelect and
     // selectPlant) call Store.setSelectedPlant first. Never rejects.
     Persistence.loadPriorityRankMaps(plant).then(() => {
-      if (token !== _wheelFetchToken) return; // stale response — ignore
+      if (token !== _wheelFetchToken) return; // stale response â€” ignore
       if (Persistence._rankMapsPlant !== plant) {
-        // Fetch resolved non-ok, or threw — cache is empty, not authoritative.
-        setBadge('warn', '○', Util.t('ui.opt_badge_check_failed'));
+        // Fetch resolved non-ok, or threw â€” cache is empty, not authoritative.
+        setBadge('warn', 'â—‹', Util.t('ui.opt_badge_check_failed'));
         return;
       }
       // Reports on ALL of the plant's active priority fields, not colorWheel
       // alone: on a plant that sequences by tooling this badge used to sit
-      // permanently on the ⚠ "no color wheel" state even with every PRT list
+      // permanently on the âš  "no color wheel" state even with every PRT list
       // loaded, and would now also contradict the (generalized) pre-Run confirm
       // right next to it.
       //
@@ -491,19 +491,19 @@ export const OptimizeDialog = (() => {
       // These strings were the last hardcoded UI text on this dialog: locale
       // keys for the five pre-Stage-3 wordings had in fact been authored and
       // then left unwired, so the badge was interpolating LOCALIZED field names
-      // (`constraint.<key>`, below) into an English sentence — a mixed-language
+      // (`constraint.<key>`, below) into an English sentence â€” a mixed-language
       // tooltip for every non-en user. The field-name interpolation was already
       // right and is kept as-is; only the surrounding sentence moved.
       const active   = Engine.activeConstraintKeys(plant);
       const unranked = Engine.unrankedActiveFields(plant);
       if (!active.length) {
-        setBadge('warn', '○', Util.t('ui.opt_badge_none_enabled'));
+        setBadge('warn', 'â—‹', Util.t('ui.opt_badge_none_enabled'));
       } else if (!unranked.length) {
-        setBadge('active', '✓', Util.t('ui.opt_badge_lists_loaded', {
-          fields: active.map(k => Util.t(`constraint.${k}`)).join(' → '),
+        setBadge('active', 'âœ“', Util.t('ui.opt_badge_lists_loaded', {
+          fields: active.map(k => Util.t(`constraint.${k}`)).join(' â†’ '),
         }));
       } else {
-        setBadge('warn', '○', Util.t('ui.opt_badge_lists_missing', {
+        setBadge('warn', 'â—‹', Util.t('ui.opt_badge_lists_missing', {
           fields: unranked.map(k => Util.t(`constraint.${k}`)).join(', '),
         }));
       }
@@ -529,7 +529,7 @@ export const OptimizeDialog = (() => {
     let _od: OptimizerDefaults | null = null;
     try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch {}
     // Sync option checkboxes from the Gantt toolbar's existing chk- elements.
-    // P2: dropped the dead `chk-respect-fixed` read here — no such element
+    // P2: dropped the dead `chk-respect-fixed` read here â€” no such element
     // exists in index.html (confirmed via grep), so it was always null and
     // this mirror never actually ran; the "respect firmed" checkbox is seeded
     // purely from the saved optimizer defaults below.
@@ -538,7 +538,7 @@ export const OptimizeDialog = (() => {
     const ocEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
     // Saved defaults override the toolbar mirror when present. Older saved
-    // presets used the pre-rename `respectFixed` key — fall back to it.
+    // presets used the pre-rename `respectFixed` key â€” fall back to it.
     if (_od && typeof _od === 'object') {
       const _respectFirmed = (_od.respectFirmed ?? _od.respectFixed);
       if (ofEl && typeof _respectFirmed === 'boolean')      ofEl.checked = _respectFirmed;
@@ -558,9 +558,9 @@ export const OptimizeDialog = (() => {
     _endDirty = false;
     selectMode(_seedMode);
     // Reset the Run button HTML in case a previous session left it in the
-    // "Optimizing…" state (e.g., Cancel mid-fetch).
+    // "Optimizingâ€¦" state (e.g., Cancel mid-fetch).
     const runBtn = document.getElementById('opt-run-btn');
-    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">ðŸ“ˆ</span>${Util.t('btn.run_optimization')}`;
     _updatePlantBadge();
     // Default scope to whole-plant on each open; clear stale line selection.
     _selectedLines.clear();
@@ -578,7 +578,7 @@ export const OptimizeDialog = (() => {
     inner?.classList.remove('visible');
     if (immediate) {
       // Hide the backdrop element NOW (no 230ms fade). Used when another
-      // modal is replacing this one — the heavy blur(12px) backdrop sits at
+      // modal is replacing this one â€” the heavy blur(12px) backdrop sits at
       // z=3000 and would cover the replacement until the fade completed.
       el.hidden = true;
       return;
@@ -601,7 +601,7 @@ export const OptimizeDialog = (() => {
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
-    // defaults). Self-service pref — persisted via the debounced PATCH.
+    // defaults). Self-service pref â€” persisted via the debounced PATCH.
     try {
       Session.setPref('optimizerDefaults', {
         mode: _mode, preset: _preset,
@@ -620,12 +620,12 @@ export const OptimizeDialog = (() => {
     };
     if (runBtn) {
       runBtn.disabled = true;
-      runBtn.innerHTML = `<span class="opt-run-icon">⏳</span>${Util.t('btn.optimizing')}`;
+      runBtn.innerHTML = `<span class="opt-run-icon">â³</span>${Util.t('btn.optimizing')}`;
     }
 
-    // Open the preview dialog with a spinner IMMEDIATELY — before the rank-map
+    // Open the preview dialog with a spinner IMMEDIATELY â€” before the rank-map
     // freshness fetch below and the config-modal close transition. Otherwise
-    // the user stares at a blurry frozen page for ~1–2s with no visible
+    // the user stares at a blurry frozen page for ~1â€“2s with no visible
     // response to their click.
     OptimizerPreview.showLoading(_mode, plant);
     // Hide the config modal RIGHT NOW (no 230ms fade). Its backdrop sits at
@@ -635,20 +635,20 @@ export const OptimizeDialog = (() => {
     close(true);
 
     // --- Rank-source freshness guard (Stage 3) ---------------------------
-    // The Stage 3 replacement for the retired per-plant color→rank cache and
+    // The Stage 3 replacement for the retired per-plant colorâ†’rank cache and
     // its pre-Run fallback fetch. Engine._sortTerms now resolves EVERY priority
-    // field's rank straight out of Store.priorityRankMaps, so that cache — not
-    // a single color map — is what has to be fresh for this plant before Run. It
+    // field's rank straight out of Store.priorityRankMaps, so that cache â€” not
+    // a single color map â€” is what has to be fresh for this plant before Run. It
     // normally already is (Persistence.load() fetches it on every plant
     // select, and _updatePlantBadge prefetches it on open / plant change), but
-    // a Run clicked before that resolves — or after it failed — would
+    // a Run clicked before that resolves â€” or after it failed â€” would
     // otherwise rank EVERY order 999999 on EVERY field: configured, inert and
     // silent. Awaiting here restores the guarantee the deleted fetch provided.
     // Note this replaces the old 1500 ms AbortSignal bound with a 4000 ms
     // race (Phase 2, Pkg D): back then a missing wheel still left a usable
     // ORDER_Y fallback, so cutting the fetch short was cheap; now the ranks
     // are load-bearing, so the fetch is awaited but still BOUNDED rather than
-    // waited on forever. On timeout the flow proceeds regardless —
+    // waited on forever. On timeout the flow proceeds regardless â€”
     // loadPriorityRankMaps never rejects, and either way (slow fetch or a
     // failing/non-ok response that returns promptly) the `!ranksFresh` /
     // unrankedActiveFields check and its confirm dialog right below is the
@@ -679,7 +679,7 @@ export const OptimizeDialog = (() => {
     // docs/scheduling_priority.md): since Stage 3 every field in the tree
     // contributes a real sort term, so a plant that sequences purely on
     // prt01/prt02/productionVersion can be just as silently inert as one with a
-    // missing wheel — and used to get no warning at all, including when the rank
+    // missing wheel â€” and used to get no warning at all, including when the rank
     // fetch failed outright. A field the plant has switched OFF is not active,
     // so it is not in this list: optimizing without it is intentional, don't nag.
     //
@@ -719,11 +719,11 @@ export const OptimizeDialog = (() => {
     };
 
     // Config modal was already hidden (close(true) above) before the rank-map
-    // freshness guard — no second close() needed here.
+    // freshness guard â€” no second close() needed here.
 
     // Defer the optimizer run by one frame so the modal-close paint and the
     // heavy subscriber fanout don't fight for the same main-thread tick.
-    // Route through OptimizerPreview (C4) — wraps Engine.runAndApply with
+    // Route through OptimizerPreview (C4) â€” wraps Engine.runAndApply with
     // a pre/post KPI comparison and an apply/discard step.
     requestAnimationFrame(() => setTimeout(() => {
       OptimizerPreview.runWithPreview(_mode, optsForEngine);
@@ -776,15 +776,15 @@ export const OptimizeDialog = (() => {
   return { open, close, run, applyPreset, selectMode, selectPlant, toggleDropdown, filterPlants, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
 })();
 
-/** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as
+/** Return shape of Util.scheduleKpis â€” same ReturnType<typeof ...> precedent as
  *  Hierarchy's HierarchyUtilMatrix / Dashboard's DashboardUtilMatrix (Task 4). */
 type OptimizerKpis = ReturnType<typeof Util.scheduleKpis>;
 
 /** Zero-filled fallback so pre/post KPI reads never need an intermediate
- *  `{}` — every OptimizerKpis field is a required number. */
+ *  `{}` â€” every OptimizerKpis field is a required number. */
 const EMPTY_OPTIMIZER_KPIS: OptimizerKpis = { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 };
 
-/** lowerIsBetter's four states — see the comment inside _render() for the full
+/** lowerIsBetter's four states â€” see the comment inside _render() for the full
  *  semantics of each (true/false/'soft'/null). */
 type LowerIsBetter = boolean | 'soft' | null;
 
@@ -814,7 +814,7 @@ interface PreviewExplanation {
   missingPairsTotal: number;
   unchangedLines: string[];
   /** Tally of orders actually placed in this candidate without a resolvable
-   *  setup transition (no changeover bar) — the never-freeze fallback,
+   *  setup transition (no changeover bar) â€” the never-freeze fallback,
    *  counted from the dedicated `'scheduled-without-setup'` missingEdge
    *  reason, which `placeUnknownTail` emits for a tail-placed order and (since
    *  A1) `candidateForSequence` also emits directly for a known-but-uncovered
@@ -824,16 +824,16 @@ interface PreviewExplanation {
    *  count (see `missingPairs` for the full uncovered-transition list). */
   scheduledWithoutSetup: { orders: number; lines: number };
   /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
-   *  that ended up with neither a patch nor a firmed/pinned exemption — i.e.
+   *  that ended up with neither a patch nor a firmed/pinned exemption â€” i.e.
    *  "not scheduled". Derived by set difference against `candidate.patches`,
    *  never a field threaded through CandidateResult (see runAndApply's own
    *  B3 comment in schedule-services.mts for why: the worst drops produce no
    *  diagnostic object at all, so there is nothing else to collect from). */
   unplacedOrders: { orders: number; lines: number };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
-  /** Aggregate prune tally for the whole run (§4.3 docs/archive/OPTIMIZER-PREVIEW.md), bucketed
+  /** Aggregate prune tally for the whole run (Â§4.3 docs/archive/OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
-   *  count — per-order placement/acceptance log entries (e.g. 'due-date-first-placement')
+   *  count â€” per-order placement/acceptance log entries (e.g. 'due-date-first-placement')
    *  are not prunes and are excluded, not rolled into 'other'. */
   prunes: { setup: number; firmed: number; capacity: number; other: number; total: number };
 }
@@ -847,7 +847,7 @@ interface PreviewExplanationInput {
    *  using the same plant resolution as B7) that `unplacedOrders` is diffed
    *  against. Omitted only by callers that don't want the tally (none today). */
   unplacedCandidates?: ReadonlyArray<{ id: string; line: string }>;
-  /** Firmed/pinned ids — deliberately never moved, so never counted as unplaced. */
+  /** Firmed/pinned ids â€” deliberately never moved, so never counted as unplaced. */
   firmedIds?: ReadonlySet<string> | ReadonlyArray<string>;
 }
 
@@ -855,10 +855,10 @@ const PREVIEW_REASON_LIMIT = 8;
 const PREVIEW_MISSING_PAIR_LIMIT = 12;
 
 /** Reason codes that represent a genuine exclusion (order/line left out of the
- *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
+ *  plan), keyed to the Â§4.3 prune buckets. Codes not listed here are placement
  *  successes or policy-chooser notes (e.g. 'due-date-first-placement',
  *  'firmed-incoming-setup', 'covered-firmed-boundary-fallback') and must never be
- *  tallied as prunes — see docs/archive/OPTIMIZER-PREVIEW.md §4.3 open question 2. There is
+ *  tallied as prunes â€” see docs/archive/OPTIMIZER-PREVIEW.md Â§4.3 open question 2. There is
  *  no 'color block' or 'due date' code in this engine today; only setup,
  *  firmed-boundary and capacity-deferral exclusions are ever emitted. */
 const PRUNE_BUCKET_BY_CODE: Record<string, 'setup' | 'firmed' | 'capacity' | 'other'> = {
@@ -892,10 +892,10 @@ function tallyPrunes(explanation: ReadonlyArray<CandidateReason>): PreviewExplan
   return prunes;
 }
 
-/** Target KPIs a finalist's whyNot sentence is scored against — the same three
+/** Target KPIs a finalist's whyNot sentence is scored against â€” the same three
  *  targets the verdict banner scores (changeovers, late_count, late_h); span_h
  *  and peak_util_pct are context-only, never part of a finalist's rationale.
- *  `phrase` renders the quantified delta the docs/archive/OPTIMIZER-PREVIEW.md §4.2 example
+ *  `phrase` renders the quantified delta the docs/archive/OPTIMIZER-PREVIEW.md Â§4.2 example
  *  uses ("one more late order and 65 h more slip"), not just a KPI name. */
 const FINALIST_TARGET_KEYS: ReadonlyArray<{
   key: keyof OptimizerKpis;
@@ -907,9 +907,9 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
 ];
 
 /** One-sentence rationale for why an alternate finalist wasn't applied. Compares
- *  only the scored targets against the applied plan — never fabricates a "best
+ *  only the scored targets against the applied plan â€” never fabricates a "best
  *  balance" claim, since this is a 2-wide mode-swap comparison, not a true beam
- *  (see docs/archive/OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
+ *  (see docs/archive/OPTIMIZER-PREVIEW.md Â§6 fallback-tier note). */
 function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): string {
   const worse: string[] = [];
   const better: string[] = [];
@@ -925,15 +925,10 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
 }
 
 /* =============================================================================
-   OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
+   OPTIMIZER PREVIEW (C4) â€” wraps Engine.runAndApply so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
-/** Shared HTML-attribute/text escaper for OptimizerPreview's rendered markup
- *  (module-level so both showLoading() and _render() can use one copy). */
-const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g,
-  (c: string) => (({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' } as Record<string, string>)[c]));
-
 export const OptimizerPreview = {
   // A detached pre-run copy is needed only if the planner later applies the
   // candidate and wants Ctrl+Z. It is never used to roll a trial back.
@@ -952,13 +947,13 @@ export const OptimizerPreview = {
   _auditDetails: null as OptimizationAuditDetails | null,
   _syntheticSetup: false,
   _explanation: null as PreviewExplanation | null,
-  /** KPI vectors for the applied plan and one alternate mode — populated in
+  /** KPI vectors for the applied plan and one alternate mode â€” populated in
    *  runWithPreview (now via a deferred background run, see _finalistsPending),
    *  wiped in _clear. Patches are never retained. */
   _finalists: null as Array<{ label: string; mode: OptimizerMode; kpis: OptimizerKpis; whyNot: string | null }> | null,
   /** Phase 2 (Pkg D): true from the moment runWithPreview schedules the
    *  deferred Plan B comparison run until it lands (or bails/fails) and
-   *  clears it. _render() shows a "Computing comparison…" placeholder while
+   *  clears it. _render() shows a "Computing comparisonâ€¦" placeholder while
    *  this is true. Always false when _finalists is non-null. */
   _finalistsPending: false,
   stale: false,
@@ -972,7 +967,7 @@ export const OptimizerPreview = {
   _runSeq: 0,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
-   *  the user clicks Run, before any await/fetch — gives instant feedback so
+   *  the user clicks Run, before any await/fetch â€” gives instant feedback so
    *  the user doesn't stare at a blurry frozen page during the wheel fetch
    *  + config-close transition + engine run. */
   showLoading(mode: OptimizerMode, plant: string) {
@@ -983,9 +978,9 @@ export const OptimizerPreview = {
         '<div class="cw-loading" style="justify-content:center;flex-direction:column;gap:10px;padding:40px 20px;">'
       + '  <div style="display:flex;align-items:center;gap:8px;">'
       + '    <span class="cw-spin"></span>'
-      + `    <span style="font-size:14px;color:var(--fg);">${esc(Util.t('ui.opt_pv_loading_title'))}</span>`
+      + `    <span style="font-size:14px;color:var(--fg);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_title'))}</span>`
       + '  </div>'
-      + `  <div style="font-size:12px;color:var(--fg-mute);">${esc(Util.t('ui.opt_pv_loading_sub', { mode, plant }))}</div>`
+      + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_sub', { mode, plant }))}</div>`
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
@@ -1014,7 +1009,7 @@ export const OptimizerPreview = {
     const scheduledWithoutSetupOrders = new Set<string>();
     const scheduledWithoutSetupLines = new Set<string>();
     // 'scheduled-without-setup' (F1) is the single dedicated reason for an
-    // order actually placed without a resolvable setup transition — emitted
+    // order actually placed without a resolvable setup transition â€” emitted
     // both by `placeUnknownTail` (tail placement) and, since A1, by
     // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
     // transition. Counting this reason instead of the raw
@@ -1028,7 +1023,7 @@ export const OptimizerPreview = {
       scheduledWithoutSetupLines.add(edge.line);
     }
     // B3: derive the unplaced set by difference from candidate.patches, not
-    // from a threaded CandidateResult field — see the interface comment on
+    // from a threaded CandidateResult field â€” see the interface comment on
     // PreviewExplanation.unplacedOrders for why.
     const firmedIdSet = input.firmedIds instanceof Set
       ? input.firmedIds
@@ -1070,7 +1065,7 @@ export const OptimizerPreview = {
   describeMissingPairs(candidate: CandidateResult, tasks: ReadonlyArray<NimbusTask>, setup: SetupSnapshot | null): { pairs: PreviewExplanation['missingPairs']; total: number } {
     const definition = setup?.definition;
     const byId = new Map(tasks.map(task => [String(task.id), task]));
-    const text = (state: SetupStateKey | null | undefined) => state?.map(part => part.value).join(' · ') || null;
+    const text = (state: SetupStateKey | null | undefined) => state?.map(part => part.value).join(' Â· ') || null;
     const pairs = candidate.missingEdges.slice(0, PREVIEW_MISSING_PAIR_LIMIT).map(edge => {
       const predecessor = edge.predecessorOrderId ? byId.get(String(edge.predecessorOrderId)) : undefined;
       const successor = edge.successorOrderId ? byId.get(String(edge.successorOrderId)) : undefined;
@@ -1097,7 +1092,7 @@ export const OptimizerPreview = {
 
   canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
 
-  /** Single place that decides whether Apply is clickable — always derived
+  /** Single place that decides whether Apply is clickable â€” always derived
    *  from canApply(), never poked ad hoc. Replaces three separate direct-DOM
    *  writers (showLoading's blanket disable, hideLoading's blanket enable,
    *  markSetupStale's manual disable) that could disagree with each other. */
@@ -1136,7 +1131,7 @@ export const OptimizerPreview = {
     }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
   },
 
-  /** Entry point — call this instead of Engine.runAndApply when you want
+  /** Entry point â€” call this instead of Engine.runAndApply when you want
    *  the preview UI. Mirrors Engine.runAndApply's signature. */
   runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
     // Phase 2 (Pkg D): monotonic run token, captured by the deferred Plan B
@@ -1148,7 +1143,7 @@ export const OptimizerPreview = {
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
 
     // Show the preview dialog with a loading state. If `showLoading()` already
-    // ran from OptimizeDialog.run() the dialog is already up — calling it
+    // ran from OptimizeDialog.run() the dialog is already up â€” calling it
     // again is a no-op cheap refresh, fine.
     OptimizerPreview.showLoading(mode, plant);
     const previewRoot = document.getElementById('modal-opt-preview');
@@ -1164,10 +1159,10 @@ export const OptimizerPreview = {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const _optTotalT0 = performance.now();
       try {
-        // Snapshot every task in the plant — the optimizer may touch any of
+        // Snapshot every task in the plant â€” the optimizer may touch any of
         // them transitively (auto-reflow can ripple beyond the chosen window
         // / lines), so the undo snapshot must stay unfiltered. `plant` scopes
-        // only calendars (Phase 2, Pkg D clone reduction) — every consumer of
+        // only calendars (Phase 2, Pkg D clone reduction) â€” every consumer of
         // this snapshot's `calendars` only ever looks up a line that already
         // passed this same plant's task filter (see snapshotSchedule's doc
         // comment), so no other plant's calendar entries are ever needed here.
@@ -1184,7 +1179,7 @@ export const OptimizerPreview = {
         OptimizerPreview.active = true;
         PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
-        // KPI inputs are scoped to what the user actually selected on screen 1 —
+        // KPI inputs are scoped to what the user actually selected on screen 1 â€”
         // time window and (optionally) a subset of lines. Otherwise the before/after
         // comparison drowns the user's slice in out-of-scope tasks.
         const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
@@ -1199,7 +1194,7 @@ export const OptimizerPreview = {
           return eMs >= winStart && s <= winEnd;
         };
 
-        // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+        // Pre-KPIs from the (filtered) snapshot â€” it IS the current state right now.
         const _preKpiT0 = performance.now();
         const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot);
         PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
@@ -1208,7 +1203,7 @@ export const OptimizerPreview = {
         // model. Store changes only if the planner applies this candidate.
         // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
         // once-computed `deadlineAt` rather than letting the engine derive a
-        // fresh SETUP_AWARE_DEADLINE_MS window internally — same numeric
+        // fresh SETUP_AWARE_DEADLINE_MS window internally â€” same numeric
         // budget, no behavior change, but the option now exists so the
         // (deferred) alt run below no longer inherits a full fresh one.
         const _evalPrimaryT0 = performance.now();
@@ -1242,8 +1237,8 @@ export const OptimizerPreview = {
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
         OptimizerPreview._syntheticSetup = mode === 'changeover' && !(Store.setupSnapshot && Store.setupSnapshot.plant === plant && Store.setupSnapshot.plant_active);
         // B3: the same run-scoped candidate pool used for the KPI comparison
-        // (plant, via `scopedTasks` above using the B7 line→plant fallback,
-        // plus opts.lines and excludeFromOpt) — NOT the time-windowed
+        // (plant, via `scopedTasks` above using the B7 lineâ†’plant fallback,
+        // plus opts.lines and excludeFromOpt) â€” NOT the time-windowed
         // `inScope`, since an order outside the KPI window can still be
         // legitimately "not scheduled" by this run.
         const unplacedCandidates = scopedTasks
@@ -1268,7 +1263,7 @@ export const OptimizerPreview = {
         explanation.missingPairsTotal = described.total;
         OptimizerPreview._explanation = explanation;
 
-        // Alternate-mode KPI vectors — the only data needed for the plan
+        // Alternate-mode KPI vectors â€” the only data needed for the plan
         // comparison table. Phase 2 (Pkg D): this run is now DEFERRED until
         // after the primary preview has painted (see below, after the first
         // _render() call) instead of running synchronously back-to-back with
@@ -1292,15 +1287,15 @@ export const OptimizerPreview = {
           // the just-scheduled frame; the extra setTimeout(0) yields to the
           // event loop (and therefore a paint) before this runs.
           requestAnimationFrame(() => setTimeout(() => {
-            // Race safety: bail silently — touching neither _finalists nor
-            // _finalistsPending — unless this preview is still the one the
+            // Race safety: bail silently â€” touching neither _finalists nor
+            // _finalistsPending â€” unless this preview is still the one the
             // user is looking at. `active` catches apply/discard/abandon
             // (all route through _clear(), which already resets both
             // fields); `_runSeq` catches a newer runWithPreview call already
             // in flight (whose own synchronous block already reset both
             // fields for itself) so a slow, superseded run can never
             // resurrect stale finalists or issue an orphan render. Also bail
-            // if `stale` went true between paint and this callback — a Store
+            // if `stale` went true between paint and this callback â€” a Store
             // setup write landing in that window (see markStale) would make
             // Plan B evaluate against setup data Plan A never saw, so the
             // comparison would no longer be apples-to-apples.
@@ -1313,10 +1308,10 @@ export const OptimizerPreview = {
                 startDate: opts.startDate, endDate: opts.endDate,
                 respectFirmed: opts.respectFirmed, respectCalendar: opts.respectCalendar,
                 // Controller ruling: Plan B is deferred off the click path,
-                // so background time is acceptable — give it the SAME full
+                // so background time is acceptable â€” give it the SAME full
                 // SETUP_AWARE_DEADLINE_MS window as the primary run rather
                 // than a reduced budget (previously ALT_PLAN_BUDGET_MS,
-                // removed — it silently handicapped the comparison).
+                // removed â€” it silently handicapped the comparison).
                 deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS,
               });
               PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
@@ -1328,7 +1323,7 @@ export const OptimizerPreview = {
                 { label: 'A', mode, kpis: postKpis, whyNot: null },
                 { label: 'B', mode: altMode, kpis: altKpis, whyNot: describeFinalistWhyNot(postKpis, altKpis) },
               ];
-            } catch { /* alt run failed — table stays absent */ }
+            } catch { /* alt run failed â€” table stays absent */ }
             OptimizerPreview._finalists = finalists;
             OptimizerPreview._finalistsPending = false;
             OptimizerPreview._render();
@@ -1348,8 +1343,8 @@ export const OptimizerPreview = {
         if (body) {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--err);">'
-          + `  <div style="font-size:14px;margin-bottom:8px;">${esc(Util.t('ui.opt_pv_failed_title'))}</div>`
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${esc(errMsg || 'Unknown error')}</div>`
+          + `  <div style="font-size:14px;margin-bottom:8px;">${Util.escapeHtml(Util.t('ui.opt_pv_failed_title'))}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(errMsg || 'Unknown error')}</div>`
           + '</div>';
         }
         footBtns.forEach((b) => { b.disabled = false; });
@@ -1369,13 +1364,13 @@ export const OptimizerPreview = {
     const explanation = OptimizerPreview._explanation;
 
     // Each card: { label, k, ico, fmt, lowerIsBetter, tip }.
-    // lowerIsBetter: true → decrease=better (green), increase=worse (red).
-    //                false → increase=better (green), decrease=worse (red).
-    //                'soft' → decrease=better (green, counts as KPI win),
+    // lowerIsBetter: true â†’ decrease=better (green), increase=worse (red).
+    //                false â†’ increase=better (green), decrease=worse (red).
+    //                'soft' â†’ decrease=better (green, counts as KPI win),
     //                         increase=warn (amber, no verdict penalty). Used for
     //                         span and peak utilization where shrinking is desirable
     //                         but growing shouldn't be flagged as a regression.
-    //                null → neutral in both directions.
+    //                null â†’ neutral in both directions.
     const cards: OptimizerPreviewCard[] = [
       {
         label: Util.t('ui.opt_pv_card_changeovers'), k: 'changeovers', ico: '&#8635;',
@@ -1405,7 +1400,7 @@ export const OptimizerPreview = {
     ];
 
     // Verdict: score against the three targets only (changeovers, late_count, late_h).
-    // span_h and peak_util_pct are context — they affect card color but never the verdict.
+    // span_h and peak_util_pct are context â€” they affect card color but never the verdict.
     const directional = cards.filter(c => c.lowerIsBetter === true);
     let better = 0, worse = 0;
     for (const c of directional) {
@@ -1452,12 +1447,12 @@ export const OptimizerPreview = {
       if (backlog.overlongIds.length) rows.push([Util.t('ui.opt_pv_backlog_overlong'), String(backlog.overlongIds.length)]);
       if (backlog.calendarSearchFailures.length) rows.push([Util.t('ui.opt_pv_backlog_capacity_fail'), String(backlog.calendarSearchFailures.length)]);
       const summary = backlog.backlogFound === 0 && backlog.moved === 0 && !backlog.invalidRuntimeIds.length && !backlog.missingStartIds.length
-        ? `<div class="opt-pv-backlog-empty">${esc(Util.t('ui.opt_pv_backlog_empty'))}</div>`
+        ? `<div class="opt-pv-backlog-empty">${Util.escapeHtml(Util.t('ui.opt_pv_backlog_empty'))}</div>`
         : '';
       const boundary = backlog.boundaryConflicts.length
         ? `<div class="opt-pv-backlog-warning">${Util.t('ui.opt_pv_backlog_boundary', { count: backlog.boundaryConflicts.length })}</div>`
         : '';
-      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${esc(Util.t('ui.opt_pv_backlog_title'))}</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
+      return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${Util.escapeHtml(Util.t('ui.opt_pv_backlog_title'))}</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${Util.escapeHtml(label)}</span><strong>${Util.escapeHtml(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
     })();
 
     const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
@@ -1479,47 +1474,47 @@ export const OptimizerPreview = {
       if (finalists) {
         const fmtDelta = (d: number, lb: LowerIsBetter, fmt: (v: number) => string, unit: string): string => {
           if (Math.abs(d) < 0.05) return '';
-          const sign = d < 0 ? '−' : '+';
+          const sign = d < 0 ? 'âˆ’' : '+';
           const cls = lb === true
             ? (d < 0 ? 'opt-pv-plan-delta-ok' : 'opt-pv-plan-delta-err')
             : lb === 'soft'
               ? (d < 0 ? 'opt-pv-plan-delta-ok' : 'opt-pv-plan-delta-warn')
               : 'opt-pv-plan-delta-mute';
-          return `<span class="${cls}">${sign}${esc(fmt(Math.abs(d)))}${esc(unit)}</span>`;
+          return `<span class="${cls}">${sign}${Util.escapeHtml(fmt(Math.abs(d)))}${Util.escapeHtml(unit)}</span>`;
         };
         const bodyRows = cards.map(c => {
           const preV = pre[c.k] ?? 0;
-          const currentCell = `<td class="opt-pv-plan-current">${esc(c.fmt(preV))}${esc(c.unit)}</td>`;
+          const currentCell = `<td class="opt-pv-plan-current">${Util.escapeHtml(c.fmt(preV))}${Util.escapeHtml(c.unit)}</td>`;
           const dataCells = finalists!.map((f, i) => {
             const val = f.kpis[c.k] ?? 0;
             const delta = fmtDelta(val - preV, c.lowerIsBetter, c.fmt, c.unit);
             return i === 0
-              ? `<td class="opt-pv-plan-applied-cell"><span class="opt-pv-plan-val-applied">${esc(c.fmt(val))}${esc(c.unit)}</span>${delta}</td>`
-              : `<td>${esc(c.fmt(val))}${esc(c.unit)}${delta}</td>`;
+              ? `<td class="opt-pv-plan-applied-cell"><span class="opt-pv-plan-val-applied">${Util.escapeHtml(c.fmt(val))}${Util.escapeHtml(c.unit)}</span>${delta}</td>`
+              : `<td>${Util.escapeHtml(c.fmt(val))}${Util.escapeHtml(c.unit)}${delta}</td>`;
           }).join('');
-          return `<tr><th scope="row" title="${esc(c.tip)}">${esc(c.label)}</th>${currentCell}${dataCells}</tr>`;
+          return `<tr><th scope="row" title="${Util.escapeHtml(c.tip)}">${Util.escapeHtml(c.label)}</th>${currentCell}${dataCells}</tr>`;
         }).join('');
         const headCells = finalists.map((f, i) => i === 0
-          ? `<th class="opt-pv-plan-applied-head"><div>${esc(Util.t('ui.opt_pv_plan_col_applied'))}</div><div class="opt-pv-plan-col-sub">${esc(f.mode.toUpperCase())}</div></th>`
-          : `<th><div>${esc(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${esc(f.mode.toUpperCase())}</div></th>`
+          ? `<th class="opt-pv-plan-applied-head"><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_applied'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(f.mode.toUpperCase())}</div></th>`
+          : `<th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(f.mode.toUpperCase())}</div></th>`
         ).join('');
         const verdictCells = finalists.map((f, i) => i === 0
-          ? `<td class="opt-pv-plan-applied-cell"><strong>${esc(Util.t('ui.opt_pv_plan_chosen'))}</strong> ${esc(Util.t('ui.opt_pv_plan_chosen_reason', { mode: f.mode.toUpperCase() }))}</td>`
-          : `<td><strong>${esc(Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
+          ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong> ${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen_reason', { mode: f.mode.toUpperCase() }))}</td>`
+          : `<td><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
-          <thead><tr><th></th><th><div>${esc(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${esc(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
+          <thead><tr><th></th><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
           <tbody>${bodyRows}</tbody>
-          <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${esc(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${esc(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
+          <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${Util.escapeHtml(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${Util.escapeHtml(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
         </table></div>`;
       } else if (OptimizerPreview._finalistsPending) {
         // Phase 2 (Pkg D): Plan B now computes in a deferred background run
         // (after the primary preview paints) instead of blocking the initial
-        // render — show a lightweight placeholder until it lands.
-        planTableHtml = `<p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_plan_computing'))}</p>`;
+        // render â€” show a lightweight placeholder until it lands.
+        planTableHtml = `<p class="opt-pv-section-intro">${Util.escapeHtml(Util.t('ui.opt_pv_plan_computing'))}</p>`;
       }
 
-      // §4.3 — aggregate prune tally for the whole run. Only rendered when at
+      // Â§4.3 â€” aggregate prune tally for the whole run. Only rendered when at
       // least one genuinely exclusionary reason code fired (see tallyPrunes).
       let prunesHtml = '';
       const p = explanation.prunes;
@@ -1532,29 +1527,29 @@ export const OptimizerPreview = {
         ].filter(row => row.count > 0).sort((a, b) => b.count - a.count);
         const max = Math.max(...rows.map(row => row.count), 1);
         const barsHtml = rows.map(row => `<div class="opt-pv-prune-row">
-          <span class="opt-pv-prune-label">${esc(row.label)}</span>
+          <span class="opt-pv-prune-label">${Util.escapeHtml(row.label)}</span>
           <span class="opt-pv-prune-track"><span class="opt-pv-prune-fill${row.warn ? ' warn' : ''}" style="width:${Math.round((row.count / max) * 100)}%"></span></span>
-          <span class="opt-pv-prune-count">${esc(String(row.count))}</span>
+          <span class="opt-pv-prune-count">${Util.escapeHtml(String(row.count))}</span>
         </div>`).join('');
         prunesHtml = `<div class="opt-pv-prunes">
           <div class="opt-pv-prunes-head">
-            <span class="opt-pv-prunes-title">${esc(Util.t('ui.opt_pv_prunes_title'))}</span>
-            <span class="opt-pv-prunes-total">${esc(Util.t('ui.opt_pv_prunes_total', { count: p.total }))}</span>
+            <span class="opt-pv-prunes-title">${Util.escapeHtml(Util.t('ui.opt_pv_prunes_title'))}</span>
+            <span class="opt-pv-prunes-total">${Util.escapeHtml(Util.t('ui.opt_pv_prunes_total', { count: p.total }))}</span>
           </div>
           ${barsHtml}
-          ${p.setup > 0 ? `<p class="opt-pv-prune-footnote">${esc(Util.t('ui.opt_pv_prune_footnote', { count: p.setup }))}</p>` : ''}
+          ${p.setup > 0 ? `<p class="opt-pv-prune-footnote">${Util.escapeHtml(Util.t('ui.opt_pv_prune_footnote', { count: p.setup }))}</p>` : ''}
         </div>`;
       }
 
       return `<details class="opt-pv-section" open>
-        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_why_title'))}</span></summary>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_why_title'))}</span></summary>
         <div class="opt-pv-section-body">
           ${planTableHtml}
           ${prunesHtml}
           <dl class="opt-pv-meta-list">
-            <div><dt>${esc(Util.t('ui.setup_constraints_label'))}</dt><dd>${esc(constraints)}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_lines_changed'))}</dt><dd>${unchangedCount > 0 ? esc(Util.t('ui.opt_pv_lines_unchanged_count', { count: unchangedCount })) : esc(Util.t('ui.setup_unchanged_lines_none'))}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_sequences_changed_label'))}</dt><dd>${esc(String(explanation.impact.sequences.changed))}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.setup_constraints_label'))}</dt><dd>${Util.escapeHtml(constraints)}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_lines_changed'))}</dt><dd>${unchangedCount > 0 ? Util.escapeHtml(Util.t('ui.opt_pv_lines_unchanged_count', { count: unchangedCount })) : Util.escapeHtml(Util.t('ui.setup_unchanged_lines_none'))}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_sequences_changed_label'))}</dt><dd>${Util.escapeHtml(String(explanation.impact.sequences.changed))}</dd></div>
           </dl>
         </div>
       </details>`;
@@ -1566,17 +1561,17 @@ export const OptimizerPreview = {
       const totalPairs = explanation.missingPairsTotal;
       const isTruncated = totalPairs > pairCount;
       const truncatedNote = isTruncated
-        ? `<p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_gaps_truncated', { shown: pairCount, total: totalPairs }))}</p>`
+        ? `<p class="opt-pv-section-intro">${Util.escapeHtml(Util.t('ui.opt_pv_gaps_truncated', { shown: pairCount, total: totalPairs }))}</p>`
         : '';
       const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
       const body = pairCount
-        ? `${truncatedNote}<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${esc(Util.t('ui.setup_col_line'))}</th><th>${esc(Util.t('ui.setup_col_from'))}</th><th>${esc(Util.t('ui.setup_col_to'))}</th><th>${esc(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${esc(pair.line)}</td><td>${esc(pair.fromState || '—')}</td><td>${esc(pair.toState || '—')}</td><td>${esc(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note">${canReview ? `<button class="btn btn-primary sm" data-opt-review-missing>${esc(Util.t('btn.opt_fill_setup_matrix'))}</button> ` : ''}<button class="btn btn-ghost sm" data-opt-copy-missing>${esc(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${esc(Util.t('btn.setup_export_missing'))}</button></div>`
-        : `<p class="opt-pv-section-empty">${esc(Util.t('ui.setup_missing_pairs_none'))}</p>`;
+        ? `${truncatedNote}<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${Util.escapeHtml(Util.t('ui.setup_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_from'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_to'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${Util.escapeHtml(pair.line)}</td><td>${Util.escapeHtml(pair.fromState || 'â€”')}</td><td>${Util.escapeHtml(pair.toState || 'â€”')}</td><td>${Util.escapeHtml(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note">${canReview ? `<button class="btn btn-primary sm" data-opt-review-missing>${Util.escapeHtml(Util.t('btn.opt_fill_setup_matrix'))}</button> ` : ''}<button class="btn btn-ghost sm" data-opt-copy-missing>${Util.escapeHtml(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${Util.escapeHtml(Util.t('btn.setup_export_missing'))}</button></div>`
+        : `<p class="opt-pv-section-empty">${Util.escapeHtml(Util.t('ui.setup_missing_pairs_none'))}</p>`;
       const badge = pairCount ? `<span class="opt-pv-section-badge">${isTruncated ? Util.t('ui.opt_pv_gaps_badge', { count: totalPairs }) : pairCount}</span>` : '';
       return `<details class="opt-pv-section">
-        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_gaps_title'))}</span>${badge}</summary>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_gaps_title'))}</span>${badge}</summary>
         <div class="opt-pv-section-body">
-          <p class="opt-pv-section-intro">${esc(Util.t('ui.opt_pv_gaps_intro'))}</p>
+          <p class="opt-pv-section-intro">${Util.escapeHtml(Util.t('ui.opt_pv_gaps_intro'))}</p>
           ${body}
         </div>
       </details>`;
@@ -1593,48 +1588,48 @@ export const OptimizerPreview = {
         runtime: `${explanation.search.runtimeMs.toFixed(0)} ms`,
       });
       const limitBadge = explanation.search.limitReached
-        ? `<span class="opt-pv-section-badge" title="${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}">${esc(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
+        ? `<span class="opt-pv-section-badge" title="${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached_note'))}">${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
         : '';
       const diagEvents = OptimizerPreview._previewDiagnostics.filter(e => e.level === 'error' || e.level === 'warn');
       const eventsHtml = diagEvents.length
-        ? `<ul class="opt-pv-diag-events">${diagEvents.map(e => `<li class="opt-pv-diag-event opt-pv-diag-${esc(e.level)}"><strong>${esc(e.level.toUpperCase())}</strong> ${esc(e.message)}</li>`).join('')}</ul>`
+        ? `<ul class="opt-pv-diag-events">${diagEvents.map(e => `<li class="opt-pv-diag-event opt-pv-diag-${Util.escapeHtml(e.level)}"><strong>${Util.escapeHtml(e.level.toUpperCase())}</strong> ${Util.escapeHtml(e.message)}</li>`).join('')}</ul>`
         : '';
-      // Derived, not stored on `search` — candidateCount / (runtimeMs / 1000),
+      // Derived, not stored on `search` â€” candidateCount / (runtimeMs / 1000),
       // rounded, guarded against divide-by-zero and non-finite candidateCount
       // so a zero/degenerate runtime omits the row rather than rendering
       // NaN/Infinity.
       const { candidateCount, runtimeMs } = explanation.search;
       const rateHtml = runtimeMs > 0 && Number.isFinite(candidateCount)
-        ? `<div><dt>${esc(Util.t('ui.opt_pv_diag_rate'))}</dt><dd>${esc(String(Math.round(candidateCount / (runtimeMs / 1000))))}</dd></div>`
+        ? `<div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_rate'))}</dt><dd>${Util.escapeHtml(String(Math.round(candidateCount / (runtimeMs / 1000))))}</dd></div>`
         : '';
       return `<details class="opt-pv-section">
-        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${esc(Util.t('ui.opt_pv_diag_title'))}</span><span class="opt-pv-section-summary">${esc(diagSummary)}</span>${limitBadge}</summary>
+        <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_diag_title'))}</span><span class="opt-pv-section-summary">${Util.escapeHtml(diagSummary)}</span>${limitBadge}</summary>
         <div class="opt-pv-section-body">
           <dl class="opt-pv-meta-list">
-            <div><dt>${esc(Util.t('ui.setup_search_label'))}</dt><dd>${esc(explanation.search.method)}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_diag_candidates'))}</dt><dd>${esc(String(explanation.search.candidateCount))}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${esc(explanation.search.termination)}</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
-            <div><dt>${esc(Util.t('ui.opt_pv_diag_orders_in_scope'))}</dt><dd>${esc(String(explanation.impact.production.before))} → ${esc(String(explanation.impact.production.after))}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.setup_search_label'))}</dt><dd>${Util.escapeHtml(explanation.search.method)}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_candidates'))}</dt><dd>${Util.escapeHtml(String(explanation.search.candidateCount))}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_termination'))}</dt><dd>${Util.escapeHtml(explanation.search.termination)}</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_runtime'))}</dt><dd>${explanation.search.runtimeMs.toFixed(0)} ms</dd></div>
+            <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_orders_in_scope'))}</dt><dd>${Util.escapeHtml(String(explanation.impact.production.before))} â†’ ${Util.escapeHtml(String(explanation.impact.production.after))}</dd></div>
             ${rateHtml}
           </dl>
-          ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
+          ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
           ${eventsHtml}
         </div>
       </details>`;
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-stale">${esc(Util.t('ui.opt_stale_banner'))}</div>`
+      ? `<div class="opt-pv-stale">${Util.escapeHtml(Util.t('ui.opt_stale_banner'))}</div>`
       : '';
 
-    // Never-freeze fallback banner — orders this candidate actually placed
+    // Never-freeze fallback banner â€” orders this candidate actually placed
     // without a resolvable setup transition (no changeover bar). Sits beside
     // the "Why this plan" (unchanged lines) and "Setup gaps" (missingPairs)
     // sections rather than inside either, since it summarizes what got
     // scheduled anyway, not what's still missing from the matrix.
     const scheduledWithoutSetupHtml = (explanation && explanation.scheduledWithoutSetup.orders > 0)
-      ? `<div class="opt-pv-backlog-warning">${esc(Util.t('ui.opt_pv_scheduled_without_setup', {
+      ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_scheduled_without_setup', {
           orders: explanation.scheduledWithoutSetup.orders,
           lines: explanation.scheduledWithoutSetup.lines,
         }))}</div>`
@@ -1661,17 +1656,17 @@ export const OptimizerPreview = {
       }
 
       // Delta number + percent
-      const sign = d > 0 ? '+' : (d < 0 ? '−' : '');
+      const sign = d > 0 ? '+' : (d < 0 ? 'âˆ’' : '');
       const dNum = isInt ? `${Math.abs(d)}` : absD.toFixed(1);
       const pct = (preV !== 0) ? Math.round((d / preV) * 100) : null;
       const pctStr = (pct !== null && !zero)
-        ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
+        ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : 'âˆ’'}${Math.abs(pct)}%)</span>`
         : '';
       const deltaText = zero
-        ? `<span class="opt-pv-pill-icon">●</span> ${esc(Util.t('ui.opt_pv_no_change'))}`
-        : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
+        ? `<span class="opt-pv-pill-icon">â—</span> ${Util.escapeHtml(Util.t('ui.opt_pv_no_change'))}`
+        : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? 'â–¼' : (dirCls === 'worse' || dirCls === 'warn') ? 'â–²' : 'â—†'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
 
-      // Bar — visual scale of post vs pre. For neutral/no scale, hide.
+      // Bar â€” visual scale of post vs pre. For neutral/no scale, hide.
       const maxV = Math.max(preV, postV, 0.0001);
       const preW  = Math.max(2, Math.round((preV / maxV) * 100));
       const postW = Math.max(2, Math.round((postV / maxV) * 100));
@@ -1680,20 +1675,20 @@ export const OptimizerPreview = {
         <div class="opt-pv-card opt-pv-card-${dirCls}" data-key="${c.k}">
           <div class="opt-pv-card-head">
             <span class="opt-pv-card-ico">${c.ico}</span>
-            <span class="opt-pv-card-label">${esc(c.label)}</span>
-            <span class="opt-pv-card-help" tabindex="0" aria-label="${esc(Util.t('ui.opt_pv_card_help_aria'))}">
+            <span class="opt-pv-card-label">${Util.escapeHtml(c.label)}</span>
+            <span class="opt-pv-card-help" tabindex="0" aria-label="${Util.escapeHtml(Util.t('ui.opt_pv_card_help_aria'))}">
               <span class="opt-pv-help-dot">?</span>
-              <span class="opt-pv-tip">${esc(c.tip)}</span>
+              <span class="opt-pv-tip">${Util.escapeHtml(c.tip)}</span>
             </span>
           </div>
           <div class="opt-pv-card-body">
             <div class="opt-pv-num opt-pv-num-pre">
-              <div class="opt-pv-num-lbl">${esc(Util.t('ui.opt_pv_before_label'))}</div>
+              <div class="opt-pv-num-lbl">${Util.escapeHtml(Util.t('ui.opt_pv_before_label'))}</div>
               <div class="opt-pv-num-val">${c.fmt(preV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
-            <div class="opt-pv-arrow">→</div>
+            <div class="opt-pv-arrow">â†’</div>
             <div class="opt-pv-num opt-pv-num-post">
-              <div class="opt-pv-num-lbl">${esc(Util.t('ui.opt_pv_after_label'))}</div>
+              <div class="opt-pv-num-lbl">${Util.escapeHtml(Util.t('ui.opt_pv_after_label'))}</div>
               <div class="opt-pv-num-val">${c.fmt(postV)}<span class="opt-pv-num-unit">${c.unit}</span></div>
             </div>
           </div>
@@ -1708,23 +1703,23 @@ export const OptimizerPreview = {
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
-          <div class="opt-pv-chip opt-pv-chip-mode">${esc(modeLabel)}</div>
-          <div class="opt-pv-chip opt-pv-chip-plant" title="${esc(Util.t('ui.opt_pv_chip_plant_title'))}">${esc(plant)}</div>
-          <div class="opt-pv-chip opt-pv-chip-policy" title="${esc(Util.t('ui.opt_pv_chip_policy_title'))}">${esc(splitPolicyLabel[splitPolicy])}</div>
-          <div class="opt-pv-chip opt-pv-chip-time">${esc(stamp)}</div>
+          <div class="opt-pv-chip opt-pv-chip-mode">${Util.escapeHtml(modeLabel)}</div>
+          <div class="opt-pv-chip opt-pv-chip-plant" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_plant_title'))}">${Util.escapeHtml(plant)}</div>
+          <div class="opt-pv-chip opt-pv-chip-policy" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_policy_title'))}">${Util.escapeHtml(splitPolicyLabel[splitPolicy])}</div>
+          <div class="opt-pv-chip opt-pv-chip-time">${Util.escapeHtml(stamp)}</div>
         </div>
 
         ${staleHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
-          <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
+          <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? 'âœ“' : verdictTone === 'worse' ? '!' : 'â—'}</div>
           <div class="opt-pv-verdict-text">
-            <div class="opt-pv-verdict-title">${esc(verdictTitle)}</div>
-            <div class="opt-pv-verdict-sub">${esc(verdictSub)}</div>
+            <div class="opt-pv-verdict-title">${Util.escapeHtml(verdictTitle)}</div>
+            <div class="opt-pv-verdict-sub">${Util.escapeHtml(verdictSub)}</div>
           </div>
           <div class="opt-pv-verdict-score">
             <div class="opt-pv-score-num">${better}<span class="opt-pv-score-of">/${directional.length}</span></div>
-            <div class="opt-pv-score-lbl">${esc(Util.t('ui.opt_pv_kpis_improved_label'))}</div>
+            <div class="opt-pv-score-lbl">${Util.escapeHtml(Util.t('ui.opt_pv_kpis_improved_label'))}</div>
           </div>
         </div>
 
@@ -1817,10 +1812,10 @@ export const OptimizerPreview = {
     Store.setLastOptimize(new Date(), 'engine');
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
-    UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
+    UndoStack.push(`Optimization (${mode})${plant ? ' Â· ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap));
     Toast.show(Util.t('toast.opt_applied'), 'success');
-    // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
+    // Fire warning toasts â€” matching the live Engine.runAndApply patterns from schedule-services.mts
     if (OptimizerPreview._explanation) {
       const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
@@ -1851,7 +1846,7 @@ export const OptimizerPreview = {
     // pre-apply snapshot (candidate patches never change MACHINE, so
     // pre/post-apply line membership match).
     // If any alert was dismissed before this apply, a scoped merge would
-    // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
+    // retain untouched lines' stale (dismissal-filtered) alert lists as-is â€”
     // those cleared dismissals would never re-surface until some later full
     // recompute. A pending full recompute already wins over a scoped one by
     // design, so force it whenever there was something to clear.
@@ -1897,25 +1892,25 @@ Persistence.setSetupWriteListener((plant, kind) => OptimizerPreview.markSetupSta
 
 // -- Local type declaration (originally part of CQ-1 Phase 6 Task 8's
 //    combined EditCalendar/ColorWheelViewer/AlertsUIAdapter/SandboxAdapter/
-//    Printer type block; relocated here with SandboxAdapter — the only one
+//    Printer type block; relocated here with SandboxAdapter â€” the only one
 //    of those five that uses it) --------------------------------------------
 
 /** The `sandbox:exited` event's `snapshot` payload (schedule-state.mts's
- *  `Sandbox.exit()` return value) — that module keeps `SandboxSnapshot`
+ *  `Sandbox.exit()` return value) â€” that module keeps `SandboxSnapshot`
  *  un-exported, so this derives the same shape via `ReturnType` instead of
  *  redeclaring a shadow copy, per this phase's own "no un-exported interface,
- *  use ReturnType<typeof …>" precedent. */
+ *  use ReturnType<typeof â€¦>" precedent. */
 type SandboxExitSnapshot = NonNullable<ReturnType<typeof Sandbox.exit>>;
 
 /* =============================================================================
-   SANDBOX ADAPTER — thin app.js UI/side-effect layer over the state-only
+   SANDBOX ADAPTER â€” thin app.js UI/side-effect layer over the state-only
    `Sandbox` module (state + snapshots now live in schedule-state.mjs). Owns
    the DOM banner/buttons and performs the cross-module side effects that
    used to be inline in Sandbox.exit() (Alerts recompute, Persistence save,
    CalendarSync flush/re-hydrate, Confidence snapshot/restore, Toast
    messages) by subscribing to the `sandbox:entered`/`sandbox:exited`
    (and `sandbox:reverted`, fired by the undo-a-promoted-scenario path)
-   events the state module emits. This is new code, not a move — it is the
+   events the state module emits. This is new code, not a move â€” it is the
    thin UI/cross-module layer the design's ownership map calls out as
    belonging to `schedule-workbench.mjs` eventually; for Phase 1 it stays
    here as a boot-wired adapter.
@@ -1927,7 +1922,7 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (!banner) return;
     banner.innerHTML = `
-      <span style="font-size:14px;">🔮</span>
+      <span style="font-size:14px;">ðŸ”®</span>
       <strong>${Util.t('ui.what_if_title')}</strong> ${Util.t('ui.what_if_sub')}
       <input class="sb-name" id="sb-scenario-name" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
       <div style="display:flex;gap:6px;margin-left:auto;">
@@ -1952,7 +1947,7 @@ export const SandboxAdapter = {
   _onEntered() {
     // So a discarded what-if session leaves no trace in the confidence tracker,
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
-    // Captured here (not in Sandbox.enter()) at the same logical moment as before —
+    // Captured here (not in Sandbox.enter()) at the same logical moment as before â€”
     // the state module doesn't know about the cross-file Confidence module.
     SandboxAdapter._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
 
@@ -1995,7 +1990,7 @@ export const SandboxAdapter = {
 
     // Promote is an explicit user action, so persist it (cache + backend) the same
     // way Cmd/Ctrl+S-in-sandbox already does. Runs AFTER teardown (Sandbox.active is
-    // now false) so saveAll's own Sandbox.exit(true) call no-ops — no recursion.
+    // now false) so saveAll's own Sandbox.exit(true) call no-ops â€” no recursion.
     // Without this, "Scenario applied" showed but a reload before a later unrelated
     // save lost the promoted edits (autosave is suppressed during sandbox).
     if (applied) {
@@ -2006,7 +2001,7 @@ export const SandboxAdapter = {
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
       if (Store.selectedPlant) {
         const plant = Store.selectedPlant;
-        // Store._state.blocks/.plantBlocks direct touch — deliberate, out of scope
+        // Store._state.blocks/.plantBlocks direct touch â€” deliberate, out of scope
         // for this task (see the file header comment above OptimizeDialog).
         const curLine  = new Set(Store._state.blocks.filter((b) => b.plant === plant).map((b) => b.id));
         const curPlant = new Set(Store._state.plantBlocks.filter((b) => b.plant === plant).map((b) => b.id));
@@ -2029,7 +2024,7 @@ export const SandboxAdapter = {
     }
   },
 
-  // Fired when the user undoes a PROMOTED (applied=true) scenario via UndoStack —
+  // Fired when the user undoes a PROMOTED (applied=true) scenario via UndoStack â€”
   // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/firmedIds
   // then emits this instead of calling Alerts/Toast directly (those are cross-module
   // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
@@ -2038,3 +2033,4 @@ export const SandboxAdapter = {
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
   },
 };
+
