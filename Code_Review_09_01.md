@@ -55,6 +55,18 @@ A follow-up pass (commit `700daab`) closed two items this doc's own §7/§11 had
 
 Verification: full Python suite (302 passed, 104 skipped — Postgres-gated, unchanged), `npm run build`/`typecheck`/`lint` clean (0 errors), JS module suite (459 passed, 6 failed — all pre-existing, unrelated `Engine.autoReflow`/`OptimizerPreview`/setup-scheduler failures, confirmed by file scope: none of the 6 failing tests touch any file this pass modified).
 
+### 0.3 Performance remediation pass — 2026-09-02
+
+A follow-up pass (commit `27810fe`) closed six targeted performance/scale findings identified in §6 and the original action plan, merging into `main` after full verification (`npm run build`/`typecheck`/`lint`/`test`, Python suite, `check:static-assets`/`check:legacy-surface`). All new test code was verified by direct run, not merely written — an important distinction this document has drawn for other findings.
+
+| Commit | Covers |
+|---|---|
+| `27810fe` | Upload size caps (413 on `/upload`, `/bom/upload`, `/priority-list/{plant}/{field_key}`, `/color-wheel/{plant}` — configurable `NIMBUS_MAX_UPLOAD_BYTES` env var, default 50MB); `known_material_plant_pairs()` scoped to upload-file plants; `syncLineSettings` plant-keyed `machine` cache; `/upload` call site of `capture_setup_states_before_schedule_mutation` scoped via `db.extract_upload_plants()`; two O(n²) loops in `nimbus-compute-core.js` (blackout violations, utilization matrix) now bucket/range-limit via `_indexCapacityBlocks` pattern; regression-guard test added to `compute-core.test.js`. New/updated tests: `tests/test_integration_routes.py` (2 upload-size-cap tests), `tests/test_priority_lists.py` (2 upload-size-cap tests), `tests/test_setup_data.py` (updated `test_upload_captures_observation_before_ingesting_replacement` for new scoped-capture sequence + new `test_extract_upload_plants_reads_plant_column`). All verified passing. |
+
+**Bounding `GET /setup/{plant}` matrix snapshot (P1-9, action-plan item 13) was investigated and deliberately not implemented.** Reason: `resolveSetup` (called from `frontend/scheduling/orders.mts`) consumes the full `snapshot.machine_rows`/`plant_rows` to resolve changeover minutes for each task's machine — a Gantt board displays tasks across every machine simultaneously. Truncating/paginating the matrix payload would silently produce wrong or missing changeover times for any machine outside the truncated page, with no visible error. This is a correctness regression, not a performance win. Needs real redesign (e.g., lazy per-machine matrix fetching integrated into `resolveSetup`'s index building), not a quick bound — stays open per original plan.
+
+Verification: `npm run build`/`typecheck`/`lint` clean (0 errors); Python suite 307 passed, 104 skipped (Postgres-gated, unchanged); JS suite 460 passed, 5 failed (same pre-existing `Engine.autoReflow`/`OptimizerPreview` setup-placement failures documented elsewhere in this file, confirmed unrelated by file scope — none of the 5 failing tests touch any file this pass modified); `check:static-assets`/`check:legacy-surface` both clean.
+
 ---
 
 ## 1. Executive Summary
@@ -210,14 +222,14 @@ The cross-match of ~90 backend routes against every frontend call site found **n
 
 | Finding | Location | What happens / why it matters | Worth doing |
 |---|---|---|---|
-| Setup-state capture scans all plants (P1-8) | `backend/setup/data.py:501-524` | ~3,500 sequential queries per single-plant upload at target scale | **Now** — small change, large win |
+| Setup-state capture scans all plants (P1-8) | `backend/setup/data.py:501-524` | ~3,500 sequential queries per single-plant upload at target scale | **Now** — small change, large win; ✅ RESOLVED (`27810fe`) — the `/upload` call site is now also scoped (the remaining gap from the `7012b53` partial fix) |
 | Unbounded setup snapshot/coverage (P1-9) | `setup/data.py:656-711` | O(states²) rows per request at 70+ machines/plant | Now (server-side bound) |
 | Per-row `cur.execute` in `bulk_apply` upserts | `master_data.py:823-910` | BOM ingest ("tens of thousands of rows") = one round-trip per row inside one transaction; timeout risk | Next — batch via `executemany`/multi-row VALUES |
-| `known_material_plant_pairs()` loads the whole table per BOM upload | `master_data.py:2461-2468` | Rebuild of full cross-plant set per upload; scope to plants present in the file | Next |
+| `known_material_plant_pairs()` loads the whole table per BOM upload | `master_data.py:2461-2468` | Rebuild of full cross-plant set per upload; scope to plants present in the file | Next; ✅ RESOLVED (`27810fe`) — now accepts an optional `plants=` filter, scoped at its one call site to the plants present in the uploaded file |
 | `ingest_bom_from_excel` uses `df.iterrows()` | `master_data.py:2526` | Slowest pandas iteration on the largest expected input | Later, with the batching change |
-| Full unscoped `machine` table fetch to patch one line | `frontend/master-data/admin-ui.mts:3659-3671` | Direct scale-mandate violation; 3,500+ rows for a one-field edit | Next |
-| Blackout-violation loop O(tasks×blocks); utilization loop O(tasks×horizon-days) | `nimbus-compute-core.js:483-513, 698-754` | Masked off-thread today; a ceiling at scale. Adjacent code already has the bucketing helper | Later — reuse `_indexCapacityBlocks` |
-| Excel uploads read fully into memory, no size cap | `integration/routes.py:47,97`; `priority_lists/routes.py:331,462` | Memory exhaustion risk on oversized files (admin-gated, so bounded likelihood) | Next — cheap header check |
+| Full unscoped `machine` table fetch to patch one line | `frontend/master-data/admin-ui.mts:3659-3671` | Direct scale-mandate violation; 3,500+ rows for a one-field edit | Next; ✅ RESOLVED (`27810fe`) |
+| Blackout-violation loop O(tasks×blocks); utilization loop O(tasks×horizon-days) | `nimbus-compute-core.js:483-513, 698-754` | Masked off-thread today; a ceiling at scale. Adjacent code already has the bucketing helper | Later — reuse `_indexCapacityBlocks`; ✅ RESOLVED (`27810fe`) |
+| Excel uploads read fully into memory, no size cap | `integration/routes.py:47,97`; `priority_lists/routes.py:331,462` | Memory exhaustion risk on oversized files (admin-gated, so bounded likelihood) | Next — cheap header check; ✅ RESOLVED (`27810fe`) |
 | VACUUM runs under the pool's 30s statement timeout | `db.py:1627-1652` | Admin maintenance fails on large tables at scale | Later |
 | Auth dependency = 3 sequential DB round-trips per gated request | `auth.py:502-524` | Marginal today; consolidate to one JOIN if it lands on a hot path | Later / if profiled |
 | Freeze watchdog + heap sampling run 1 Hz / 30s for every user | `app.js:513-552` | Small permanent tick cost; gate behind admin/debug | Optional |
@@ -297,7 +309,7 @@ Ranked by value; per project convention, these are targeted additions, not new s
 7. `saveAll()` in-flight lock + precise dirty-clearing; generation guard on `Persistence.load()`; staleness guards on master-data table switch and labor renders (P1-5/6 — all the same pattern, one concept applied four places). — ✅ **DONE (`28ed077`, `ed2f16d`).**
 8. Remaining XSS holes + export a shared `Util.escapeHtml()` and migrate the local helpers (P1-3 + latent traps, one change). — 🟡 **DONE for the 3 real XSS holes (`ed2f16d`); the full 14-file local-helper migration and the "latent traps" (§7's `_optTag`/`EmptyState`/BOM-scope-bar) were correctly scoped as separate P2/P3 cleanup, not attempted here.**
 9. `cascade_preview` roles branch + frontend fail-closed on preview failure (P1-11). — ✅ **DONE (`ed2f16d`).**
-10. Plant-filter `capture_setup_states_before_schedule_mutation` (P1-8). — 🟡 **PARTIAL (`7012b53`) — see P1-8 note.**
+10. Plant-filter `capture_setup_states_before_schedule_mutation` (P1-8). — ✅ **DONE (`7012b53` + `27810fe`) — both call sites (sap_sync.py and /upload) now scoped; /purge remains permanently unscoped by design.**
 11. Login hardening: 8-char minimum, throttling, constant-time unknown-user path (P1-10). — ✅ **DONE (`f305947`).**
 12. Tests 1–4 from §10 — write the RBAC test *with* items 2/5 so the fix lands guarded. — 🟡 **PARTIAL (`bc7875f`) — RBAC test written and verified passing; xmin-conflict and schema-bootstrap tests written but unverified (no local Postgres); ingest coverage (§10 item 2) not attempted.**
 
@@ -310,8 +322,8 @@ Ranked by value; per project convention, these are targeted additions, not new s
 18. ~~Uniform `require_api_key` across all admin routes~~ — ✅ **DONE (2026-09-02, see §0.2).** Single-replica constraint documented or cache externalized remains open.
 
 **Optimize afterward:**
-19. Batch `bulk_apply` upserts + scope `known_material_plant_pairs` (do together — same ingest path).
-20. Upload size caps; scoped machine fetch in `syncLineSettings`; compute-core loop bucketing.
+19. Batch `bulk_apply` upserts + scope `known_material_plant_pairs` (do together — same ingest path). — 🟡 **PARTIAL (`27810fe`) — `known_material_plant_pairs` scoping is done; `bulk_apply`'s per-row upsert batching is still open** (deliberately excluded from the 2026-09-02 performance pass as higher-risk ingest-path work needing its own test investment first — see that pass's §0.3 write-up).
+20. Upload size caps; scoped machine fetch in `syncLineSettings`; compute-core loop bucketing. — ✅ **DONE (`27810fe`, 2026-09-02).**
 
 **Optional cleanup (P3):**
 21. i18n sweep (CommandPalette first — extend the locale-completeness test to cover it so the gap can't silently regrow), dead endpoints/branches, and the stale memory/doc records about the four resolved scheduler defects. — `COLOR_WHEEL_DIR` default, bootstrap-admin username default, redundant index, and stale comments are **✅ DONE (`e9f3fa3`/`ada40ec`/`a4ddd6c`, 2026-09-02)** — see §0.1.
