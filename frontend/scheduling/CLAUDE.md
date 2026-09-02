@@ -64,6 +64,6 @@ Run: `npm run build && node --test tests/modules/scheduling/gantt.test.mjs tests
 
 ## Gotchas
 
-- `Calendar.workWindow`/`dailyCapacityHours`/`effectiveCapacityHours` are **not** in this domain — they remain in `app.js`/the platform layer, parity-pinned against `nimbus-compute-core.js` by `tests/js/compute-core.test.js`. A change to that capacity math must be mirrored there even though `gantt.mts`/`orders.mts` call it.
+- `Calendar.workWindow`/`dailyCapacityHours`/`effectiveCapacityHours` are **not** in this domain — they live in `frontend/calendar/calendar-engine.mts`, which delegates the actual union-interval math to `nimbus-compute-core.js` (as of the 2026-09 capacity-math-triplication cleanup, all of it — no independent copy remains anywhere in `calendar-engine.mts`). A change to that capacity math belongs in `nimbus-compute-core.js`, not a mirrored copy, even though `gantt.mts`/`orders.mts` call it.
 - `frontend/optimization/setup-scheduler.mts` is **not** part of this domain (it lives under `frontend/optimization/`) even though it consumes `../setup/setup-domain.mjs` — don't confuse it with anything here.
 - The `_relayDueDateCorrections`/`saveAll` comments both explicitly warn against ever passing a raw `Date` object into the wire payload — grep `Util.toLocalSeconds` before adding any new date-carrying field to either payload builder.

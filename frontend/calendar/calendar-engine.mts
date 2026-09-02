@@ -208,59 +208,31 @@ export const Calendar = {
    *  Pass the returned index as the 3rd arg of dailyCapacityHours. Cheap to build
    *  (one parse pass over Store.blocks/plantBlocks); build it once per matrix call.
    *  Distinct from _indexBlocks(plant), which builds the Engine-run _runBlocks cache. */
+  // Delegates to NimbusComputeCore (same pattern as _dayWindow/
+  // effectiveFromCapacity below) instead of duplicating the bucketing math —
+  // Core's own _indexCapacityBlocks(blocks, plantBlocks) returns the exact
+  // same {lineBlocks, globalLine, plantBlocks, globalPlant} shape.
   _indexCapacityBlocks(): CapacityBlockIndex {
-    const lineBlocks = new Map<string, CapRec[]>(), globalLine: CapRec[] = [], plantBlocks = new Map<string, PlantCapRec[]>(), globalPlant: PlantCapRec[] = [];
-    for (const b of Store.blocks) {
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      // Carry the block's plant so dailyCapacityHours can scope line:null blocks
-      // (globalLine) to their own plant; line-code reuse across plants is likewise
-      // resolved by plant, not just the line string.
-      const rec: CapRec = { s, e, plant: b.plant || null };
-      if (b.line) { let a = lineBlocks.get(b.line); if (!a) lineBlocks.set(b.line, a = []); a.push(rec); }
-      else globalLine.push(rec);
-    }
-    for (const b of Store.plantBlocks) {
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (b.plant) { let a = plantBlocks.get(b.plant); if (!a) plantBlocks.set(b.plant, a = []); a.push({ s, e }); }
-      else globalPlant.push({ s, e });
-    }
-    return { lineBlocks, globalLine, plantBlocks, globalPlant };
+    return globalThis.NimbusComputeCore!._indexCapacityBlocks(Store.blocks, Store.plantBlocks) as CapacityBlockIndex;
   },
 
+  // Delegates to NimbusComputeCore.dailyCapacityHours (same pattern as
+  // _dayWindow/effectiveFromCapacity) instead of duplicating the union-
+  // interval math a second time via Util.mergedOverlapHours — Core's version
+  // takes its inputs as explicit params rather than reading Store directly,
+  // so they're threaded through here. Deliberately reads Store.blocks/
+  // Store.plantBlocks/Store.lineSettings/Store.masterData directly (not the
+  // sourceBlocks()/sourcePlantBlocks()/sourceGetPlantForLine() candidate-
+  // snapshot-aware accessors most other functions in this file use) — this
+  // preserves this function's pre-existing behavior exactly; whether it
+  // should also read through those accessors is a separate, un-investigated
+  // question, not something this dedup pass changes.
   dailyCapacityHours(line: string, date: Date, idx?: CapacityBlockIndex): number {
-    const win = Calendar.workWindow(line, date);
-    if (!win) return 0;
-    const winHours = (win[1].getTime() - win[0].getTime()) / Config.MS_HOUR;
-
-    const plant = Store.getPlantForLine(line);
-    let intervals: Array<{ s: Date; e: Date }>;
-    if (idx) {
-      // Reuse pre-parsed, bucketed intervals (no parseDate per cell). line:null
-      // blocks (globalLine) apply only within their own plant.
-      intervals = [];
-      const lb = idx.lineBlocks.get(line); if (lb) for (const x of lb) if (!x.plant || x.plant === plant) intervals.push(x);
-      for (const x of idx.globalLine) if (!x.plant || x.plant === plant) intervals.push(x);
-      const pb = idx.plantBlocks.get(plant!); if (pb) for (const x of pb) intervals.push(x);
-      for (const x of idx.globalPlant) intervals.push(x);
-    } else {
-      intervals = [];
-      for (const b of Store.blocks) {
-        if (b.plant && b.plant !== plant) continue;
-        if (b.line && b.line !== line) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
-      }
-      for (const b of Store.plantBlocks) {
-        if (b.plant && b.plant !== plant) continue;
-        const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-        if (s && e) intervals.push({ s, e });
-      }
-    }
-
-    const consumed = Util.mergedOverlapHours(win, intervals);
-    return Math.max(0, winHours - consumed);
+    return globalThis.NimbusComputeCore!.dailyCapacityHours(
+      line, date,
+      Store.calendars as any, Store.plants as any, Store.lineSettings as any, Store.masterData as any,
+      Store.blocks, Store.plantBlocks, idx,
+    );
   },
 
   /** Maximum schedulable hours after deducting the capacity buffer.

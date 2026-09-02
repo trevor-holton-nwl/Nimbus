@@ -18,10 +18,13 @@
  * plant-scoping of line blocks (line:null blocks and reused line codes are resolved by the
  * line's plant) and the O(1) line→plant memo. tests/js/compute-core.test.js pins this.
  *
- * STILL a separate copy (reconciled + parity-pinned, not yet delegated): app.js's
- * Calendar.workWindow / dailyCapacityHours / effectiveCapacityHours remain in app.js because
- * they are coupled to the Engine's per-run cache and Store's O(1) index. They call the SAME
- * math as this module's copies; keep the two in sync until that final delegation lands.
+ * Calendar.workWindow / dailyCapacityHours / effectiveCapacityHours (post-refactor:
+ * frontend/calendar/calendar-engine.mts, not app.js) all delegate to this module's copies
+ * (_dayWindow / dailyCapacityHours / effectiveFromCapacity respectively) rather than
+ * duplicating the math — the last of the three (dailyCapacityHours, and the
+ * _indexCapacityBlocks bucketing it consumes) was migrated to delegation in the 2026-09
+ * capacity-math-triplication cleanup. calendar-engine.mts still owns the Engine-per-run-cache
+ * / Store-O(1)-index coupling around these calls; only the underlying interval math lives here.
  */
 (function (root, factory) {
   'use strict';
