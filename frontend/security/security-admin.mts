@@ -1,18 +1,18 @@
-﻿// security/security-admin.mjs â€” user accounts and role-based plant
+﻿// security/security-admin.mjs — user accounts and role-based plant
 // assignment admin sub-tab. Extracted verbatim from
 // plant-and-administration.mts (Phase P2 of
 // docs/architecture/domain-refactor-plan.md, which split that
-// 11,308-line mega-module into 9 domain files) â€” two non-contiguous
+// 11,308-line mega-module into 9 domain files) — two non-contiguous
 // source ranges combined into this one file (Security's own private
 // backend-response-shape interfaces were textually positioned just
 // ahead of SystemConfig's comment block in the original file, not
-// Security's â€” moved here with the code that actually uses them).
+// Security's — moved here with the code that actually uses them).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Session } from './session.mjs';
 import type { TopLevelTab } from '../platform/types.mjs';
 
-/** One `GET /security/users` row (`auth.list_users`) â€” username, role, and
+/** One `GET /security/users` row (`auth.list_users`) — username, role, and
  *  whether a password is set; NEVER carries the hash itself. Not part of the
  *  backend's `response_model=` scope (only the task-date-update endpoint
  *  family is), so hand-written locally, matching Interface's precedent. */
@@ -34,11 +34,11 @@ interface SecurityUsersResponse {
 }
 
 /** A row staged client-side via "Paste rows" (`_pasteUsers`), not yet POSTed
- *  to `/security/users/bulk` â€” distinct from `SecurityUser` (no
+ *  to `/security/users/bulk` — distinct from `SecurityUser` (no
  *  `has_password`; that only exists once the backend has a real row). All
  *  four fields are genuinely guaranteed present here because `_pasteUsers`
  *  always normalizes a `SecurityPastedRow` (below) through `|| ''` before
- *  pushing onto `_staged` â€” this interface describes that post-normalization
+ *  pushing onto `_staged` — this interface describes that post-normalization
  *  invariant, not the raw parse output. */
 interface SecurityStagedUser {
   username: string;
@@ -48,12 +48,12 @@ interface SecurityStagedUser {
 }
 
 /** The RAW shape of one `_parseUserPaste` row, before `_pasteUsers`
- *  normalizes it into a `SecurityStagedUser` â€” built dynamically from
+ *  normalizes it into a `SecurityStagedUser` — built dynamically from
  *  whatever header columns actually appeared in the pasted clipboard text
  *  (`headers.forEach((h, i) => { row[h] = ...; })`), so only the fields
  *  matching a detected header column exist. `username` is intentionally
  *  optional here too (a plain `Record<string, string>`'s index signature
- *  cannot prove any specific key is present) â€” `_parseUserPaste`'s trailing
+ *  cannot prove any specific key is present) — `_parseUserPaste`'s trailing
  *  `.filter((r): r is SecurityPastedRow & { username: string } => ...)` is
  *  what actually narrows it to guaranteed-present before returning. */
 interface SecurityPastedRow {
@@ -63,7 +63,7 @@ interface SecurityPastedRow {
   last_name?: string;
 }
 
-/** `POST /security/users/bulk` payload (`auth.bulk_upsert_users`) â€” role-only
+/** `POST /security/users/bulk` payload (`auth.bulk_upsert_users`) — role-only
  *  upserts never send passwords (`set_user_password` owns those separately). */
 interface SecurityUserUpsert {
   username: string;
@@ -72,10 +72,10 @@ interface SecurityUserUpsert {
   last_name?: string;
 }
 
-/** Shared bulk-write result shape â€” `auth.bulk_upsert_users` and
+/** Shared bulk-write result shape — `auth.bulk_upsert_users` and
  *  `master_data.bulk_apply` (used generically here for `roles`/`role_plants`,
  *  per the correction that those two tables belong to Security's domain, not
- *  MasterData's â€” kept as Security's own local type rather than reused from
+ *  MasterData's — kept as Security's own local type rather than reused from
  *  MasterData's `MasterDataBulkResult`, same self-contained spirit as the
  *  module's own `_esc`/`_writeHeaders` copies). */
 interface SecurityBulkResult {
@@ -85,12 +85,12 @@ interface SecurityBulkResult {
 }
 
 /** One `roles` table row (`GET /master-data/roles`, generic master_data.py
- *  read path â€” `roles`/`role_plants` are registered in `ALLOWED_TABLES` but
+ *  read path — `roles`/`role_plants` are registered in `ALLOWED_TABLES` but
  *  belong to Security's domain, not MasterData's UI). */
 interface SecurityRoleRow {
   role: string;
   description?: string | null;
-  /** roles.settings.pages â€” per-role top-level page-access toggles, attached
+  /** roles.settings.pages — per-role top-level page-access toggles, attached
    *  by master_data.py's list_rows() for the 'roles' table only (not a real
    *  registered column_metadata column, so it never shows in a plain grid). */
   pages?: Partial<Record<TopLevelTab, boolean>> | null;
@@ -103,7 +103,7 @@ interface SecurityRolePlantRow {
 }
 
 /** Generic `GET /master-data/{table}` envelope, narrowed to the two rows
- *  shapes Security reads (`roles`, `role_plants`) â€” mirrors
+ *  shapes Security reads (`roles`, `role_plants`) — mirrors
  *  `MasterDataResponse` structurally but kept local/self-contained. */
 interface SecurityMasterDataResponse<T> {
   rows: T[];
@@ -111,7 +111,7 @@ interface SecurityMasterDataResponse<T> {
 }
 
 /* =============================================================================
-   SECURITY â€” admin sub-tab: user accounts (username / role / password) and
+   SECURITY — admin sub-tab: user accounts (username / role / password) and
    role-based plant assignment (roles + role_plants). Same self-contained,
    paint-into-one-host-div idiom as Interface: private state, a public
    render() entry point, an internal 'users' | 'roles' tab, full re-render on
@@ -120,7 +120,7 @@ interface SecurityMasterDataResponse<T> {
    the server either way). Backend: /security/users(+/bulk, +/{username}/
    reset-password) for accounts (auth.py); the generic /master-data/roles
    and /master-data/role_plants (+/bulk) for roles and their plant scoping
-   (master_data.py) â€” this module only renders and posts, never touches
+   (master_data.py) — this module only renders and posts, never touches
    password hashes beyond the single write they're submitted in.
    ========================================================================== */
 export const Security = (() => {
@@ -325,7 +325,7 @@ export const Security = (() => {
       <td class="md-td">${_roleSelectHtml(u.role || '', `data-role-select-user="${Util.escapeHtml(u.username)}"`)}</td>
       <td class="md-td">${pwCell}</td>
       <td class="md-td">${Util.escapeHtml(u.last_login ? new Date(u.last_login).toLocaleString() : Util.t('sec.never'))}</td>
-      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${Util.escapeHtml(u.username)}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}">ðŸ—‘</button></td>
+      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${Util.escapeHtml(u.username)}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }
 
@@ -336,8 +336,8 @@ export const Security = (() => {
       <td class="md-td"><input type="text" class="input" data-last-name-staged="${i}" value="${Util.escapeHtml(r.last_name || '')}" maxlength="100"></td>
       <td class="md-td">${_roleSelectHtml(r.role, `data-role-select-staged="${i}"`)}</td>
       <td class="md-td">${Util.escapeHtml(Util.t('sec.password_not_set'))}</td>
-      <td class="md-td">â€”</td>
-      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}">ðŸ—‘</button></td>
+      <td class="md-td">—</td>
+      <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-staged="${i}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }
 
@@ -472,7 +472,7 @@ export const Security = (() => {
   }
 
   // Mirrors MasterData._parsePaste's header-detection idiom, scoped to a fixed
-  // username/role 2-column shape (no password column â€” passwords are never pasted).
+  // username/role 2-column shape (no password column — passwords are never pasted).
   function _parseUserPaste(rawText: string): (SecurityPastedRow & { username: string })[] {
     const lines = rawText.replace(/\r/g, '').split('\n').filter((l) => l.trim());
     if (!lines.length) return [];
@@ -504,7 +504,7 @@ export const Security = (() => {
       return row as SecurityPastedRow;
       // Single cast (not the prior `as unknown as`): every field on
       // SecurityPastedRow is optional, so a plain Record<string,string>'s
-      // index signature genuinely does overlap it â€” no bridge through
+      // index signature genuinely does overlap it — no bridge through
       // `unknown` needed. `username`'s presence is proven below, not here.
     }).filter((r): r is SecurityPastedRow & { username: string } => Boolean(r.username));
   }
@@ -541,7 +541,7 @@ export const Security = (() => {
   }
 
   // -----------------------------------------------------------------------
-  // ROLES tab â€” master-detail: role list (left) + its plant assignments (right)
+  // ROLES tab — master-detail: role list (left) + its plant assignments (right)
   // -----------------------------------------------------------------------
   async function _reloadRoles(): Promise<void> {
     const body = document.getElementById('security-tabbody');
@@ -554,7 +554,7 @@ export const Security = (() => {
       _rolePlants = rpData.rows || [];
       if (_selectedRole && !_roles.some((r) => r.role === _selectedRole)) _selectedRole = null;
       // Best-effort: knowing which roles have >=1 user lets the delete button be
-      // disabled pre-emptively. Non-fatal if this fetch fails â€” bulk_apply's FK
+      // disabled pre-emptively. Non-fatal if this fetch fails — bulk_apply's FK
       // hardening (ForeignKeyViolation -> clean 400) remains the authoritative guard.
       try {
         const usersData: SecurityUsersResponse = await Util.fetchTraced(`${API}/security/users`).then((r) => { if (!r.ok) throw new Error(); return r.json(); });
@@ -590,7 +590,7 @@ export const Security = (() => {
           style="margin-top:4px;width:100%;font-size:11.5px;padding:3px 6px">
       </div>
       <button class="btn btn-ghost sm" data-role-desc-save="${Util.escapeHtml(r.role)}">${Util.escapeHtml(Util.t('btn.save'))}</button>
-      <button class="sap-icon-btn danger" data-role-del="${Util.escapeHtml(r.role)}" ${delAttrs}>ðŸ—‘</button>
+      <button class="sap-icon-btn danger" data-role-del="${Util.escapeHtml(r.role)}" ${delAttrs}>🗑</button>
     </div>`;
   }
 
@@ -627,7 +627,7 @@ export const Security = (() => {
     _renderRolesDetail();
   }
 
-  // Nav order + labels for the Page Access toggles â€” mirrors App._firstAccessibleTab's
+  // Nav order + labels for the Page Access toggles — mirrors App._firstAccessibleTab's
   // order (application-shell.mts) and Session.DEFAULT_PAGE_ACCESS's key set
   // (schedule-data.mts); keep all three, plus master_data.py's PAGE_ACCESS_KEYS, in sync.
   function _pageAccessDefs(): Array<[TopLevelTab, string]> {
@@ -641,7 +641,7 @@ export const Security = (() => {
   }
 
   // Default when a role hasn't customized a given page yet: everything on
-  // except Admin Cockpit â€” except for the 'admin' role itself, which defaults
+  // except Admin Cockpit — except for the 'admin' role itself, which defaults
   // to Admin Cockpit on too (Session.canAccessTab never even reaches this
   // default for real admin users, since it short-circuits on isAdmin(), but
   // the Roles tab shows explicit per-role state so 'admin' needs it directly).
@@ -680,7 +680,7 @@ export const Security = (() => {
       ? `<div class="sap-help" style="margin-top:12px">${Util.escapeHtml(Util.t('sec.no_plants_yet'))}</div>`
       : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map((p) =>
           `<span class="sap-keychip">${Util.escapeHtml(p)}<button data-remove-plant="${Util.escapeHtml(p)}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}"
-             style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">âœ•</button></span>`
+             style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
         ).join('')}</div>`;
     const pageAccessHtml = !role ? '' : `
       <div class="sap-section-label" style="margin-top:20px">${Util.escapeHtml(Util.t('sec.page_access'))}</div>
@@ -704,7 +704,7 @@ export const Security = (() => {
       cb.addEventListener('change', () => _setRolePageAccess(cb.dataset.pageToggle as TopLevelTab, cb.checked)));
   }
 
-  // Type-to-filter Store.knownPlants() down to matches, click one to add it â€”
+  // Type-to-filter Store.knownPlants() down to matches, click one to add it —
   // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
   // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
   function _renderPlantDropdown(query: string): void {
@@ -747,7 +747,7 @@ export const Security = (() => {
 
   // Backend rejects role:'admin' + admin:false outright (server-side backstop
   // for the checkbox's own disabled state), so this can only ever persist a
-  // legal combination. Full-page reload isn't needed â€” patch the in-memory
+  // legal combination. Full-page reload isn't needed — patch the in-memory
   // role row on success (same "commit only once confirmed" posture as
   // Plant's constraint toggles) and repaint either way, so a failure visibly
   // reverts the checkbox to the last-confirmed state.
