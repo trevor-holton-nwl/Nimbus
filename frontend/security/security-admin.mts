@@ -423,7 +423,7 @@ export const Security = (() => {
   async function _savePassword(username: string): Promise<void> {
     const input = document.querySelector(`[data-pw-input="${CSS.escape(username)}"]`) as HTMLInputElement | null;
     const pw = input ? input.value : '';
-    if (!pw || pw.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
+    if (!pw || pw.length < 8) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
     try {
       await _postJSON(`${API}/security/users/${encodeURIComponent(username)}/reset-password`, { password: pw });
       _pwOpen.delete(username);
@@ -460,7 +460,7 @@ export const Security = (() => {
     const username = (uInput?.value || '').trim();
     if (!username) { Toast.show(Util.t('sec.username_required'), 'error'); return; }
     const password = pInput?.value || '';
-    if (password && password.length < 4) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
+    if (password && password.length < 8) { Toast.show(Util.t('sec.password_too_short'), 'error'); return; }
     const role = rSelect?.value || null;
     const first_name = (fInput?.value || '').trim();
     const last_name = (lInput?.value || '').trim();

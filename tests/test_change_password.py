@@ -28,35 +28,35 @@ class TestChangeOwnPassword:
     def test_wrong_current_password_401s(self, pg):
         auth.set_user_password(ZZ_USER_A, "correct-pw")
         with pytest.raises(HTTPException) as exc_info:
-            auth.change_own_password(ZZ_USER_A, "wrong-pw", "new-pw")
+            auth.change_own_password(ZZ_USER_A, "wrong-pw", "new-pw-12")
         assert exc_info.value.status_code == 401
         # Password must be unchanged.
         assert auth.verify_user_password(ZZ_USER_A, "correct-pw")
 
     def test_correct_current_password_changes_it(self, pg):
         auth.set_user_password(ZZ_USER_A, "correct-pw")
-        auth.change_own_password(ZZ_USER_A, "correct-pw", "new-pw")
-        assert auth.verify_user_password(ZZ_USER_A, "new-pw")
+        auth.change_own_password(ZZ_USER_A, "correct-pw", "new-pw-12")
+        assert auth.verify_user_password(ZZ_USER_A, "new-pw-12")
         assert not auth.verify_user_password(ZZ_USER_A, "correct-pw")
 
     def test_new_password_too_short_rejected(self, pg):
         auth.set_user_password(ZZ_USER_A, "correct-pw")
-        with pytest.raises(ValueError, match="at least 4 characters"):
+        with pytest.raises(ValueError, match="at least 8 characters"):
             auth.change_own_password(ZZ_USER_A, "correct-pw", "abc")
         # Original password must still be usable.
         assert auth.verify_user_password(ZZ_USER_A, "correct-pw")
 
     def test_blank_actor_401s(self, pg):
         with pytest.raises(HTTPException) as exc_info:
-            auth.change_own_password(None, "whatever", "new-pw")
+            auth.change_own_password(None, "whatever", "new-pw-12")
         assert exc_info.value.status_code == 401
 
     def test_scoped_to_caller_only(self, pg):
-        auth.set_user_password(ZZ_USER_A, "a-pw")
-        auth.set_user_password(ZZ_USER_B, "b-pw")
-        auth.change_own_password(ZZ_USER_A, "a-pw", "a-new-pw")
-        assert auth.verify_user_password(ZZ_USER_A, "a-new-pw")
-        assert auth.verify_user_password(ZZ_USER_B, "b-pw")
+        auth.set_user_password(ZZ_USER_A, "a-pw-1234")
+        auth.set_user_password(ZZ_USER_B, "b-pw-1234")
+        auth.change_own_password(ZZ_USER_A, "a-pw-1234", "a-new-pw-12")
+        assert auth.verify_user_password(ZZ_USER_A, "a-new-pw-12")
+        assert auth.verify_user_password(ZZ_USER_B, "b-pw-1234")
 
 
 @pytest.mark.pg
@@ -70,7 +70,7 @@ def test_patch_security_me_password_endpoint(client, pg):
         # Wrong current password -> 401, password unchanged.
         resp = client.patch(
             "/security/me/password",
-            json={"current_password": "wrong-pw", "new_password": "new-pw"},
+            json={"current_password": "wrong-pw", "new_password": "new-pw-12"},
             headers={"x-user-email": ZZ_USER_A},
         )
         assert resp.status_code == 401
@@ -79,16 +79,16 @@ def test_patch_security_me_password_endpoint(client, pg):
         # Correct current password -> 200, password actually changes.
         resp2 = client.patch(
             "/security/me/password",
-            json={"current_password": "correct-pw", "new_password": "new-pw"},
+            json={"current_password": "correct-pw", "new_password": "new-pw-12"},
             headers={"x-user-email": ZZ_USER_A},
         )
         assert resp2.status_code == 200
-        assert auth.verify_user_password(ZZ_USER_A, "new-pw")
+        assert auth.verify_user_password(ZZ_USER_A, "new-pw-12")
 
         # Too-short new password -> 400.
         resp3 = client.patch(
             "/security/me/password",
-            json={"current_password": "new-pw", "new_password": "ab"},
+            json={"current_password": "new-pw-12", "new_password": "ab"},
             headers={"x-user-email": ZZ_USER_A},
         )
         assert resp3.status_code == 400

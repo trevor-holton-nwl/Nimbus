@@ -17,6 +17,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 
 import psycopg
 from fastapi import Header, HTTPException, Request
@@ -291,8 +292,8 @@ def set_user_password(username: str, raw_password: str,
     username = (username or "").strip()
     if not username:
         raise ValueError("Username is required")
-    if not raw_password or len(raw_password) < 4:
-        raise ValueError("Password must be at least 4 characters")
+    if not raw_password or len(raw_password) < 8:
+        raise ValueError("Password must be at least 8 characters")
 
     password_hash = _hash_password(raw_password)
 
@@ -312,10 +313,22 @@ def set_user_password(username: str, raw_password: str,
     return {"ok": True}
 
 
+# Fixed dummy hash used to keep the unknown-username login path running through
+# the SAME constant-time PBKDF2 verify as a known user with a wrong password, so
+# response timing can't reveal whether a username exists. Generated once, at
+# import time, from an arbitrary fixed plaintext — never a real user's password
+# and never logged/returned. Uses the same _hash_password helper as every real
+# password, so it isn't a new hashing scheme.
+_DUMMY_PASSWORD_HASH = _hash_password("nimbus-dummy-timing-safe-placeholder")
+
+
 def verify_user_password(username: str, raw_password: str) -> bool:
     """Check a plaintext password against the stored hash for `username`.
     False (never raises) if the user doesn't exist or has no password set.
-    Username match is case-insensitive/trimmed, mirroring get_user_role."""
+    Username match is case-insensitive/trimmed, mirroring get_user_role.
+    Always runs the same PBKDF2 verify step whether or not the user exists
+    (against a fixed dummy hash for an unknown user) so failure timing can't
+    be used to enumerate valid usernames."""
     username = (username or "").strip()
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -323,9 +336,11 @@ def verify_user_password(username: str, raw_password: str) -> bool:
             (username,),
         )
         row = cur.fetchone()
+    stored = row[0] if row and row[0] is not None else _DUMMY_PASSWORD_HASH
+    ok = _verify_password(raw_password, stored)
     if not row or row[0] is None:
         return False
-    return _verify_password(raw_password, row[0])
+    return ok
 
 
 def change_own_password(actor_email: str | None, current_password: str, new_password: str) -> dict:
@@ -581,6 +596,53 @@ def update_own_name(actor_email: str | None, first_name: str | None, last_name: 
             raise HTTPException(status_code=404, detail="User not found")
         conn.commit()
     return {"username": row[0], "role": row[1], "first_name": first_name, "last_name": last_name}
+
+
+# =========================
+# LOGIN THROTTLING — in-process sliding window (single-container pilot; no
+# distributed/Redis-backed limiter needed — see backend/security/CLAUDE.md /
+# root CLAUDE.md's single-replica-pilot posture). Resets on process restart,
+# which is acceptable for this deployment shape.
+# =========================
+_LOGIN_THROTTLE_MAX_FAILURES = 8
+_LOGIN_THROTTLE_WINDOW_SECONDS = 5 * 60
+
+# key: (lowercased username, client ip) -> list[failure epoch timestamps]
+_login_failures: dict[tuple[str, str], list[float]] = {}
+
+
+def _throttle_key(username: str, client_ip: str) -> tuple[str, str]:
+    return ((username or "").strip().lower(), client_ip or "")
+
+
+def _check_login_throttle(username: str, client_ip: str) -> None:
+    """Raise 429 if this (username, ip) pair has exceeded the allowed number
+    of failed login attempts within the sliding window. Never blocks on a
+    successful account with no recent failures."""
+    key = _throttle_key(username, client_ip)
+    now = time.time()
+    timestamps = _login_failures.get(key)
+    if not timestamps:
+        return
+    recent = [t for t in timestamps if now - t < _LOGIN_THROTTLE_WINDOW_SECONDS]
+    _login_failures[key] = recent
+    if len(recent) >= _LOGIN_THROTTLE_MAX_FAILURES:
+        raise HTTPException(status_code=429, detail="Too many login attempts, try again later")
+
+
+def _record_login_failure(username: str, client_ip: str) -> None:
+    key = _throttle_key(username, client_ip)
+    now = time.time()
+    timestamps = _login_failures.setdefault(key, [])
+    timestamps.append(now)
+    # Opportunistically trim old entries so the dict doesn't grow unbounded
+    # across a long-running process.
+    cutoff = now - _LOGIN_THROTTLE_WINDOW_SECONDS
+    _login_failures[key] = [t for t in timestamps if t >= cutoff]
+
+
+def _reset_login_throttle(username: str, client_ip: str) -> None:
+    _login_failures.pop(_throttle_key(username, client_ip), None)
 
 
 def authenticate(username: str, password: str) -> dict | None:

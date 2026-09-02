@@ -17,11 +17,19 @@ router = APIRouter()
 
 
 @router.post("/security/login")
-def security_login(body: dict = Body(default={})):
-    """Authenticate against user_security. Never exposes the hash."""
-    result = auth.authenticate(body.get("username", ""), body.get("password", ""))
+def security_login(request: Request, body: dict = Body(default={})):
+    """Authenticate against user_security. Never exposes the hash. Throttled
+    per (username, client IP) to slow brute-force attempts (see
+    auth._check_login_throttle) — in-process only, appropriate for this
+    single-container pilot."""
+    username = body.get("username", "")
+    client_ip = request.client.host if request.client else ""
+    auth._check_login_throttle(username, client_ip)
+    result = auth.authenticate(username, body.get("password", ""))
     if not result:
+        auth._record_login_failure(username, client_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    auth._reset_login_throttle(username, client_ip)
     return result
 
 

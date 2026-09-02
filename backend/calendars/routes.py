@@ -11,12 +11,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 import master_data as md
 from backend.admin_ops.logbuffer import _set_admin_log_details
-from backend.security.auth import require_admin
+from backend.security.auth import require_admin, require_authenticated
 
 router = APIRouter()
 
 
-@router.get("/plant-calendar")
+@router.get("/plant-calendar", dependencies=[Depends(require_authenticated)])
 def plant_calendar_get(plant: str):
     """Return a plant's full calendar/blackout config for Store hydration:
     { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
