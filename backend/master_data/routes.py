@@ -255,7 +255,7 @@ def md_material_plant_grid(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/master-data/{table}")
+@router.get("/master-data/{table}", dependencies=[Depends(auth.require_authenticated)])
 def md_list(table: str,
             limit: int | None = Query(default=None, ge=1, le=100000,
                 description="Max rows to return. Omit for the full table."),
@@ -275,7 +275,14 @@ def md_list(table: str,
 
     Per-user plant scope (role_plants) is enforced for tables in
     md.PLANT_SCOPED_TABLES: an explicit ?plant= outside the caller's allowed
-    set 403s; otherwise the row set is silently bounded to the allowed set."""
+    set 403s; otherwise the row set is silently bounded to the allowed set.
+
+    require_authenticated (not require_admin): any known user, not just an
+    admin, can read master data — this route previously required zero
+    identity at all, so an anonymous request resolved to allowed_plants=None
+    (unrestricted) and could enumerate every plant's rows. Frontend callers
+    now all route through Util.fetchTraced (2026-09 fetch migration), which
+    auto-attaches the identity header this depends on."""
     if table not in md.ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
     if (allowed_plants is not None and table in md.PLANT_SCOPED_TABLES

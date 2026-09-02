@@ -204,3 +204,40 @@ def test_labor_plan_line_post_on_out_of_scope_plant_is_rejected_before_any_write
     response = scoped_client.post("/labor-plan/line", json={"subnetwork": "WTG", "plant": PLANT_B, "cells": []})
     assert response.status_code == 403
     assert calls == [], "upsert_labor_plan_machine must never be called for an out-of-scope plant"
+
+
+# ---------------------------------------------------------------------------
+# GET /master-data/{table} -- previously had NO auth dependency at all (an
+# anonymous request resolved allowed_plants=None, i.e. unrestricted, letting
+# a plant-restricted user's own scope be silently bypassed by any caller who
+# simply sent no identity header). Fixed by adding
+# Depends(auth.require_authenticated) -- these two tests pin that it's
+# actually wired, mirroring test_task_update_requires_authentication above.
+# ---------------------------------------------------------------------------
+def test_master_data_list_requires_authentication(monkeypatch):
+    calls = []
+    monkeypatch.setattr(brain.md, "list_rows", lambda *a, **k: calls.append(1), raising=False)
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=401, detail="Not signed in")
+    )
+    try:
+        response = TestClient(brain.api).get("/master-data/plants")
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 401
+    assert calls == []
+
+
+def test_master_data_list_allows_an_authenticated_caller_through_to_the_data_layer(scoped_client, monkeypatch):
+    """Positive-path companion: an authenticated, scoped caller must still
+    reach md.list_rows with its allowed_plants forwarded unmodified."""
+    calls = []
+
+    def fake_list_rows(table, limit=None, offset=None, plant=None, allowed_plants=None, material_id=None):
+        calls.append({"table": table, "allowed_plants": allowed_plants})
+        return {"rows": [], "columns": [], "meta": {"total": 0}}
+
+    monkeypatch.setattr(brain.md, "list_rows", fake_list_rows, raising=False)
+    response = scoped_client.get("/master-data/plants")
+    assert response.status_code == 200
+    assert calls == [{"table": "plants", "allowed_plants": [PLANT_A]}]

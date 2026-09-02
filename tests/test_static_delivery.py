@@ -88,10 +88,16 @@ def test_setup_route_still_reachable_for_real_plant_codes(client):
 
 
 def test_master_data_route_still_reachable_for_real_table_names(client):
-    # An unknown-but-dotless table name must still reach md_list's own
-    # not-found handling, not the static-asset short-circuit.
+    # An unknown-but-dotless table name must still reach md_list itself, not
+    # the static-asset short-circuit. GET /master-data/{table} now requires
+    # auth (2026-09 fix) -> 401 fires before md_list's own not-found check
+    # for an unknown table name, same posture as the /setup/{plant} case
+    # above -- this pins that the route is still reached at all (a static-
+    # asset-short-circuit 404 and an auth-gate 401 would be indistinguishable
+    # from a bare status code, but the setup-route sibling test establishes
+    # 401 as the "reached the real route" signal for an auth-gated path).
     r = client.get("/master-data/not-a-real-table")
-    assert r.status_code == 404
+    assert r.status_code == 401
 
 
 def test_setup_3segment_route_with_dotted_final_segment_still_reachable(client):
