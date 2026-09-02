@@ -192,6 +192,55 @@ test('Scheduling Rules density pass keys exist in all 5 locales', () => {
   }
 });
 
+test('Command Palette (cmdp.*) keys exist in all 5 locales', () => {
+  // 2026-09 i18n sweep (Code_Review_09_01.md §5/§11 item 21) — CommandPalette
+  // (frontend/nimbus-intelligence.js) previously had its chrome (aria-labels,
+  // tooltips, empty-state) routed through Util.t() but every visible command
+  // label/sub/placeholder/toast-fallback string hardcoded in English. All
+  // cmdp.* keys below are new; de/es/fr/pt currently carry the English text
+  // with a `// MISSING TRANSLATION` marker (same convention as pre-existing
+  // untranslated keys elsewhere in these files) pending real translation.
+  const REQUIRED_COMMAND_PALETTE = [
+    'cmdp.need_conflict_jump', 'cmdp.sub_scroll_to_overlap',
+    'cmdp.need_overload_inspect', 'cmdp.sub_scroll_to_overloaded_line',
+    'cmdp.need_unscheduled_review', 'cmdp.sub_switch_to_orders_table',
+    'cmdp.need_snapshot_due', 'cmdp.sub_take_checkpoint',
+    'cmdp.need_first_snapshot', 'cmdp.sub_save_first_entry',
+    'cmdp.need_blackout_risk', 'cmdp.sub_review_blackout_overlap',
+    'cmdp.need_sandbox_active', 'cmdp.sub_whatif_mode',
+    'cmdp.label_compare_snapshot', 'cmdp.sub_open_diff_viewer',
+    'cmdp.intent_freeze_label', 'cmdp.intent_freeze_sub',
+    'cmdp.intent_rush_label', 'cmdp.intent_rush_sub',
+    'cmdp.label_optimize_schedule', 'cmdp.sub_run_optimizer',
+    'cmdp.label_print_export_schedule', 'cmdp.sub_open_export_dialog',
+    'cmdp.label_take_snapshot_now',
+    'cmdp.label_jump_first_conflict', 'cmdp.sub_scroll_to_error_alert',
+    'cmdp.label_go_to_line', 'cmdp.sub_scroll_to_this_line',
+    'cmdp.label_isolate_line', 'cmdp.sub_show_only_this_line',
+    'cmdp.label_jump_first_conflict_title',
+    'cmdp.label_take_snapshot_title', 'cmdp.sub_save_manual_checkpoint',
+    'cmdp.label_print_export_title', 'cmdp.sub_open_print_export_dialog',
+    'cmdp.label_go_to_now', 'cmdp.sub_center_gantt_on_now',
+    'cmdp.label_time_machine', 'cmdp.sub_browse_schedule_history',
+    'cmdp.label_compare_schedules', 'cmdp.sub_diff_current_vs_snapshot',
+    'cmdp.label_reload_data', 'cmdp.sub_reread_excel',
+    'cmdp.index_actions_count', 'cmdp.index_lines_count',
+    'cmdp.index_orders_count', 'cmdp.index_selection_count',
+    'cmdp.search_placeholder', 'cmdp.close_button_title', 'cmdp.no_match_hint',
+    'cmdp.label_unfirm_selected', 'cmdp.label_firm_selected',
+    'cmdp.sub_make_orders_moveable', 'cmdp.sub_pin_orders_in_place',
+    'cmdp.label_push_selected', 'cmdp.sub_shift_orders_1h', 'cmdp.toast_no_orders_moveable',
+    'cmdp.label_unschedule_selected', 'cmdp.sub_remove_start_end_times', 'cmdp.toast_split_orders_whole',
+    'cmdp.label_snapshot_before_acting', 'cmdp.sub_save_checkpoint_now',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_COMMAND_PALETTE) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

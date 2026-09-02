@@ -548,8 +548,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       return [
         {
           id: 'conflict-jump',
-          label: s => `${s.errCount} conflict${s.errCount !== 1 ? 's' : ''} — jump to first`,
-          sub:   () => 'Scroll Gantt to nearest overlap or error',
+          label: s => t('cmdp.need_conflict_jump', { count: s.errCount, plural: s.errCount !== 1 ? 's' : '' }),
+          sub:   () => t('cmdp.sub_scroll_to_overlap'),
           icon:  '🚨',
           score: s => s.errCount > 0 ? 90 + Math.min(s.errCount * 2, 9) : 0,
           when:  s => s.errCount > 0 && s.hasPlant,
@@ -565,8 +565,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'overload-inspect',
-          label: s => `${s.overloadedLine} is overloaded (${Math.round(s.maxUtil * 100)}%)`,
-          sub:   () => 'Scroll Gantt to overloaded line',
+          label: s => t('cmdp.need_overload_inspect', { line: s.overloadedLine, pct: Math.round(s.maxUtil * 100) }),
+          sub:   () => t('cmdp.sub_scroll_to_overloaded_line'),
           icon:  '⚠️',
           score: s => s.maxUtil >= 1.0 ? 70 + Math.min(Math.round((s.maxUtil - 1) * 50), 20) : 0,
           when:  s => s.maxUtil >= 1.0 && s.hasPlant,
@@ -579,8 +579,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'unscheduled-review',
-          label: s => `${s.unscheduledCount} order${s.unscheduledCount !== 1 ? 's' : ''} without a time slot`,
-          sub:   () => 'Switch to Orders table to review',
+          label: s => t('cmdp.need_unscheduled_review', { count: s.unscheduledCount, plural: s.unscheduledCount !== 1 ? 's' : '' }),
+          sub:   () => t('cmdp.sub_switch_to_orders_table'),
           icon:  '📋',
           score: s => s.unscheduledCount > 0 ? 60 + Math.min(s.unscheduledCount, 15) : 0,
           when:  s => s.unscheduledCount > 0 && s.hasPlant,
@@ -588,8 +588,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'snapshot-due',
-          label: s => `Last snapshot ${s.minsSinceSnap}m ago — save now`,
-          sub:   () => 'Take a Time Machine checkpoint',
+          label: s => t('cmdp.need_snapshot_due', { mins: s.minsSinceSnap }),
+          sub:   () => t('cmdp.sub_take_checkpoint'),
           icon:  '📸',
           score: s => (s.minsSinceSnap !== null && s.minsSinceSnap >= 20)
             ? 40 + Math.min(Math.floor(s.minsSinceSnap / 5), 25) : 0,
@@ -603,8 +603,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'first-snapshot',
-          label: () => 'No snapshots yet — save a checkpoint now',
-          sub:   () => 'Save your first Time Machine entry',
+          label: () => t('cmdp.need_first_snapshot'),
+          sub:   () => t('cmdp.sub_save_first_entry'),
           icon:  '📸',
           score: s => s.snapshotCount === 0 && s.hasPlant ? 55 : 0,
           when:  s => s.snapshotCount === 0 && s.hasPlant,
@@ -617,8 +617,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'blackout-risk',
-          label: s => `${s.blackoutRisk} order${s.blackoutRisk !== 1 ? 's' : ''} near an upcoming blackout`,
-          sub:   () => 'Review orders overlapping a scheduled blackout block',
+          label: s => t('cmdp.need_blackout_risk', { count: s.blackoutRisk, plural: s.blackoutRisk !== 1 ? 's' : '' }),
+          sub:   () => t('cmdp.sub_review_blackout_overlap'),
           icon:  '🚫',
           score: s => s.blackoutRisk > 0 ? 75 : 0,
           when:  s => s.blackoutRisk > 0 && s.hasPlant,
@@ -630,8 +630,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'sandbox-active',
-          label: () => 'Sandbox is active — apply or discard',
-          sub:   () => 'You are in what-if mode',
+          label: () => t('cmdp.need_sandbox_active'),
+          sub:   () => t('cmdp.sub_whatif_mode'),
           icon:  '🔮',
           score: s => s.sandboxActive ? 85 : 0,
           when:  s => s.sandboxActive,
@@ -639,8 +639,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           id: 'diff-available',
-          label: () => 'Compare to a previous snapshot',
-          sub:   () => 'Open the schedule diff viewer',
+          label: () => t('cmdp.label_compare_snapshot'),
+          sub:   () => t('cmdp.sub_open_diff_viewer'),
           icon:  '⇄',
           score: s => s.snapshotCount > 1 && s.confDelta >= -5 ? 35 : 0,
           when:  s => s.snapshotCount > 1 && s.hasPlant,
@@ -671,8 +671,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const bank = [
         {
           keywords: ['freeze', 'lock', 'firm all', 'pin'],
-          label: 'Freeze: Firm all orders + take snapshot',
-          sub:   'Pins every order and saves a Time Machine checkpoint',
+          label: t('cmdp.intent_freeze_label'),
+          sub:   t('cmdp.intent_freeze_sub'),
           icon:  '🔒',
           run() {
             CommandPalette.close();
@@ -687,36 +687,36 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           keywords: ['compare', 'diff', 'what changed', 'changed', 'delta'],
-          label: 'Compare to a previous snapshot',
-          sub:   'Open the schedule diff viewer',
+          label: t('cmdp.label_compare_snapshot'),
+          sub:   t('cmdp.sub_open_diff_viewer'),
           icon:  '⇄',
           run()  { CommandPalette.close(); Diff.showUI(); }
         },
         {
           keywords: ['rush', 'urgent', 'emergency', 'priority', 'hot'],
-          label: 'Rush order: Enter Sandbox what-if mode',
-          sub:   'Explore changes without touching the live schedule',
+          label: t('cmdp.intent_rush_label'),
+          sub:   t('cmdp.intent_rush_sub'),
           icon:  '🔮',
           run()  { CommandPalette.close(); NIMBUS.SandboxAdapter?.enter?.(); }
         },
         {
           keywords: ['optimize', 'run optim', 'scheduler', 'reorder'],
-          label: 'Optimize Schedule',
-          sub:   'Run the NIMBUS optimizer',
+          label: t('cmdp.label_optimize_schedule'),
+          sub:   t('cmdp.sub_run_optimizer'),
           icon:  '⚙',
           run()  { CommandPalette.close(); NIMBUS.OptimizeDialog?.open?.(); }
         },
         {
           keywords: ['export', 'print', 'pdf', 'download', 'report'],
-          label: 'Print / Export schedule',
-          sub:   'Open the export dialog',
+          label: t('cmdp.label_print_export_schedule'),
+          sub:   t('cmdp.sub_open_export_dialog'),
           icon:  '🖨️',
           run()  { CommandPalette.close(); NIMBUS.Printer?.open?.(); }
         },
         {
           keywords: ['snapshot', 'save', 'checkpoint', 'backup', 'history'],
-          label: 'Take a snapshot now',
-          sub:   'Save a Time Machine checkpoint',
+          label: t('cmdp.label_take_snapshot_now'),
+          sub:   t('cmdp.sub_take_checkpoint'),
           icon:  '📸',
           run()  {
             CommandPalette.close();
@@ -727,8 +727,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         },
         {
           keywords: ['conflict', 'error', 'overlap', 'alert', 'problem'],
-          label: 'Jump to first conflict',
-          sub:   'Scroll Gantt to nearest error alert',
+          label: t('cmdp.label_jump_first_conflict'),
+          sub:   t('cmdp.sub_scroll_to_error_alert'),
           icon:  '🚨',
           run()  {
             CommandPalette.close();
@@ -831,8 +831,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           <svg class="ni-cp-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor">
             <circle cx="8.5" cy="8.5" r="5.5"/><path d="M14 14l3.5 3.5" stroke-linecap="round"/>
           </svg>
-          <input class="ni-cp-input" id="ni-cp-input" placeholder="Search commands, orders, lines…" autocomplete="off" spellcheck="false">
-          <button class="ni-cp-close-btn" id="ni-cp-close-btn" title="Close (Esc)">✕</button>
+          <input class="ni-cp-input" id="ni-cp-input" placeholder="${t('cmdp.search_placeholder')}" autocomplete="off" spellcheck="false">
+          <button class="ni-cp-close-btn" id="ni-cp-close-btn" title="${t('cmdp.close_button_title')}">✕</button>
         </div>
         <div class="ni-cp-results" id="ni-cp-results"></div>
         <div class="ni-cp-footer">
@@ -916,7 +916,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const lines = [...new Set(Store.tasksArr.map(t => t.MACHINE).filter(Boolean))];
       for (const line of lines) {
         idx.push({
-          type: 'line', label: `Go to: ${line}`, sub: 'Scroll Gantt to this line', icon: '🏭',
+          type: 'line', label: t('cmdp.label_go_to_line', { line }), sub: t('cmdp.sub_scroll_to_this_line'), icon: '🏭',
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
@@ -925,7 +925,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           }
         });
         idx.push({
-          type: 'line', label: `Isolate: ${line}`, sub: 'Show only this line in Gantt', icon: '⊕',
+          type: 'line', label: t('cmdp.label_isolate_line', { line }), sub: t('cmdp.sub_show_only_this_line'), icon: '⊕',
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
@@ -936,7 +936,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         });
       }
       idx.push(
-        { type:'action', label:'Jump to First Conflict',  sub:'Scroll Gantt to nearest error alert', icon:'🚨',
+        { type:'action', label:t('cmdp.label_jump_first_conflict_title'), sub:t('cmdp.sub_scroll_to_error_alert'), icon:'🚨',
           run(){
             CommandPalette.close();
             const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a,b) => a.time - b.time)[0];
@@ -944,19 +944,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             NIMBUS.App.gotoGanttTimeline();
             setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
           } },
-        { type:'action', label:'Take Snapshot',           sub:'Save a manual Time Machine checkpoint', icon:'📷',
+        { type:'action', label:t('cmdp.label_take_snapshot_title'), sub:t('cmdp.sub_save_manual_checkpoint'), icon:'📷',
           run(){
             CommandPalette.close();
             const label = `Manual · ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.snapshot_saved'), 'success', 1400);
           } },
-        { type:'action', label:'Print / Export',          sub:'Open the print & export dialog',       icon:'🖨️',
+        { type:'action', label:t('cmdp.label_print_export_title'), sub:t('cmdp.sub_open_print_export_dialog'), icon:'🖨️',
           run(){ CommandPalette.close(); NIMBUS.Printer?.open?.(); } },
-        { type:'action', label:'Go to Now',              sub:'Center Gantt on current time',           icon:'⊙',  run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); NIMBUS.Timeline.gotoNow?.(); } },
-        { type:'action', label:'Time Machine',           sub:'Browse schedule history',                icon:'⏱', run(){ CommandPalette.close(); TimeMachine.openUI(); } },
-        { type:'action', label:'Compare Schedules',      sub:'Diff current vs. a snapshot',           icon:'⇄',  run(){ CommandPalette.close(); Diff.showUI(); } },
-        { type:'action', label:'Reload Data',            sub:'Re-read Excel (discards in-memory edits)', icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }
+        { type:'action', label:t('cmdp.label_go_to_now'), sub:t('cmdp.sub_center_gantt_on_now'), icon:'⊙',  run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); NIMBUS.Timeline.gotoNow?.(); } },
+        { type:'action', label:t('cmdp.label_time_machine'), sub:t('cmdp.sub_browse_schedule_history'), icon:'⏱', run(){ CommandPalette.close(); TimeMachine.openUI(); } },
+        { type:'action', label:t('cmdp.label_compare_schedules'), sub:t('cmdp.sub_diff_current_vs_snapshot'), icon:'⇄',  run(){ CommandPalette.close(); Diff.showUI(); } },
+        { type:'action', label:t('cmdp.label_reload_data'), sub:t('cmdp.sub_reread_excel'), icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }
       );
       CommandPalette._index = idx;
       const actionCt = idx.filter(i => i.type === 'action').length;
@@ -965,8 +965,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const selCt    = idx.filter(i => i.type === 'selection').length;
       const countEl  = document.getElementById('ni-cp-index-count');
       if (countEl) {
-        const selPart = selCt ? ` · ${selCt} selection` : '';
-        countEl.textContent = `${actionCt} actions · ${Math.round(lineCt)} lines · ${orderCt} orders${selPart}`;
+        const selPart = selCt ? ` · ${t('cmdp.index_selection_count', { count: selCt })}` : '';
+        countEl.textContent = `${t('cmdp.index_actions_count', { count: actionCt })} · `
+          + `${t('cmdp.index_lines_count', { count: Math.round(lineCt) })} · `
+          + `${t('cmdp.index_orders_count', { count: orderCt })}${selPart}`;
       }
     },
 
@@ -993,7 +995,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           if (!CommandPalette._results.length) {
             CommandPalette._results = [{
               type: 'intent', icon: '💡',
-              label: 'No match — try: "freeze", "compare", "rush order", "conflict"',
+              label: t('cmdp.no_match_hint'),
               sub: '', run() {}
             }];
           }
@@ -1121,8 +1123,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       cmds.push({
         type: 'selection',
         icon:  allFirmed ? '🔓' : '🔒',
-        label: allFirmed ? `Unfirm selected (${n})` : `Firm selected (${n})`,
-        sub:   allFirmed ? 'Make all selected orders moveable' : 'Pin all selected orders in place',
+        label: allFirmed ? t('cmdp.label_unfirm_selected', { count: n }) : t('cmdp.label_firm_selected', { count: n }),
+        sub:   allFirmed ? t('cmdp.sub_make_orders_moveable') : t('cmdp.sub_pin_orders_in_place'),
         run() {
           CommandPalette.close();
           const newFirmed = !allFirmed;
@@ -1138,8 +1140,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       cmds.push({
         type: 'selection',
         icon:  '⏩',
-        label: `Push selected (${n}) forward 1 hour`,
-        sub:   'Shift all selected orders +1h without opening edit modal',
+        label: t('cmdp.label_push_selected', { count: n }),
+        sub:   t('cmdp.sub_shift_orders_1h'),
         run() {
           CommandPalette.close();
           NIMBUS.UndoStack?.push?.(`Push ${n} orders +1h`, () => {});
@@ -1170,7 +1172,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Alerts.scheduleRecompute();
           Toast.show(
             patches.length ? t('toast.pushed_orders', { count: patches.length }) :
-              'No selected orders could be moved into the calendar.',
+              t('cmdp.toast_no_orders_moveable'),
             patches.length ? 'success' : 'warn', patches.length ? 1400 : 3000);
         }
       });
@@ -1179,8 +1181,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       cmds.push({
         type: 'selection',
         icon:  '🗑️',
-        label: `Unschedule selected (${n})`,
-        sub:   'Remove start/end times from all selected orders',
+        label: t('cmdp.label_unschedule_selected', { count: n }),
+        sub:   t('cmdp.sub_remove_start_end_times'),
         run() {
           CommandPalette.close();
           // Clearing only a parent envelope would leave its child aggregate
@@ -1193,7 +1195,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Alerts.scheduleRecompute();
           Toast.show(
             eligibleIds.length ? t('toast.unscheduled_bulk', { count: eligibleIds.length }) :
-              'Split orders must be rescheduled as a whole.',
+              t('cmdp.toast_split_orders_whole'),
             eligibleIds.length ? 'success' : 'warn', eligibleIds.length ? 1400 : 3000);
         }
       });
@@ -1202,13 +1204,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       cmds.push({
         type: 'selection',
         icon:  '📸',
-        label: `Snapshot before acting on selection (${n})`,
-        sub:   'Save a Time Machine checkpoint now',
+        label: t('cmdp.label_snapshot_before_acting', { count: n }),
+        sub:   t('cmdp.sub_save_checkpoint_now'),
         run() {
           CommandPalette.close();
           const label = `Pre-selection · ${n} orders · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
           TimeMachine.snapshot(label);
-          Toast.show('Snapshot saved', 'success', 1400);
+          Toast.show(t('toast.snapshot_saved'), 'success', 1400);
         }
       });
 

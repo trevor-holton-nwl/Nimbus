@@ -1454,4 +1454,69 @@ window.__NIMBUS_LOCALES.es = {
   'btn.setup_replace_confirm':         'Reemplazar',
   'btn.setup_field_up':                'Subir',
   'btn.setup_field_down':              'Bajar',
+
+  // Command Palette (2026-09 i18n sweep)
+  'cmdp.need_conflict_jump':           '{{count}} conflict{{plural}} — jump to first',              // MISSING TRANSLATION
+  'cmdp.sub_scroll_to_overlap':        'Scroll Gantt to nearest overlap or error',                   // MISSING TRANSLATION
+  'cmdp.need_overload_inspect':        '{{line}} is overloaded ({{pct}}%)',                          // MISSING TRANSLATION
+  'cmdp.sub_scroll_to_overloaded_line': 'Scroll Gantt to overloaded line',                            // MISSING TRANSLATION
+  'cmdp.need_unscheduled_review':      '{{count}} order{{plural}} without a time slot',              // MISSING TRANSLATION
+  'cmdp.sub_switch_to_orders_table':   'Switch to Orders table to review',                           // MISSING TRANSLATION
+  'cmdp.need_snapshot_due':            'Last snapshot {{mins}}m ago — save now',                     // MISSING TRANSLATION
+  'cmdp.sub_take_checkpoint':          'Take a Time Machine checkpoint',                             // MISSING TRANSLATION
+  'cmdp.need_first_snapshot':          'No snapshots yet — save a checkpoint now',                   // MISSING TRANSLATION
+  'cmdp.sub_save_first_entry':         'Save your first Time Machine entry',                         // MISSING TRANSLATION
+  'cmdp.need_blackout_risk':           '{{count}} order{{plural}} near an upcoming blackout',        // MISSING TRANSLATION
+  'cmdp.sub_review_blackout_overlap':  'Review orders overlapping a scheduled blackout block',       // MISSING TRANSLATION
+  'cmdp.need_sandbox_active':          'Sandbox is active — apply or discard',                       // MISSING TRANSLATION
+  'cmdp.sub_whatif_mode':              'You are in what-if mode',                                    // MISSING TRANSLATION
+  'cmdp.label_compare_snapshot':       'Compare to a previous snapshot',                              // MISSING TRANSLATION
+  'cmdp.sub_open_diff_viewer':         'Open the schedule diff viewer',                               // MISSING TRANSLATION
+  'cmdp.intent_freeze_label':          'Freeze: Firm all orders + take snapshot',                     // MISSING TRANSLATION
+  'cmdp.intent_freeze_sub':            'Pins every order and saves a Time Machine checkpoint',       // MISSING TRANSLATION
+  'cmdp.intent_rush_label':            'Rush order: Enter Sandbox what-if mode',                     // MISSING TRANSLATION
+  'cmdp.intent_rush_sub':              'Explore changes without touching the live schedule',        // MISSING TRANSLATION
+  'cmdp.label_optimize_schedule':      'Optimize Schedule',                                          // MISSING TRANSLATION
+  'cmdp.sub_run_optimizer':            'Run the NIMBUS optimizer',                                   // MISSING TRANSLATION
+  'cmdp.label_print_export_schedule':  'Print / Export schedule',                                    // MISSING TRANSLATION
+  'cmdp.sub_open_export_dialog':       'Open the export dialog',                                      // MISSING TRANSLATION
+  'cmdp.label_take_snapshot_now':      'Take a snapshot now',                                        // MISSING TRANSLATION
+  'cmdp.label_jump_first_conflict':    'Jump to first conflict',                                     // MISSING TRANSLATION
+  'cmdp.sub_scroll_to_error_alert':    'Scroll Gantt to nearest error alert',                         // MISSING TRANSLATION
+  'cmdp.label_go_to_line':             'Go to: {{line}}',                                             // MISSING TRANSLATION
+  'cmdp.sub_scroll_to_this_line':      'Scroll Gantt to this line',                                  // MISSING TRANSLATION
+  'cmdp.label_isolate_line':           'Isolate: {{line}}',                                           // MISSING TRANSLATION
+  'cmdp.sub_show_only_this_line':      'Show only this line in Gantt',                               // MISSING TRANSLATION
+  'cmdp.label_jump_first_conflict_title': 'Jump to First Conflict',                                  // MISSING TRANSLATION
+  'cmdp.label_take_snapshot_title':    'Take Snapshot',                                              // MISSING TRANSLATION
+  'cmdp.sub_save_manual_checkpoint':   'Save a manual Time Machine checkpoint',                       // MISSING TRANSLATION
+  'cmdp.label_print_export_title':     'Print / Export',                                              // MISSING TRANSLATION
+  'cmdp.sub_open_print_export_dialog': 'Open the print & export dialog',                              // MISSING TRANSLATION
+  'cmdp.label_go_to_now':              'Go to Now',                                                   // MISSING TRANSLATION
+  'cmdp.sub_center_gantt_on_now':      'Center Gantt on current time',                                // MISSING TRANSLATION
+  'cmdp.label_time_machine':           'Time Machine',                                                // MISSING TRANSLATION
+  'cmdp.sub_browse_schedule_history':  'Browse schedule history',                                     // MISSING TRANSLATION
+  'cmdp.label_compare_schedules':      'Compare Schedules',                                           // MISSING TRANSLATION
+  'cmdp.sub_diff_current_vs_snapshot': 'Diff current vs. a snapshot',                                 // MISSING TRANSLATION
+  'cmdp.label_reload_data':            'Reload Data',                                                 // MISSING TRANSLATION
+  'cmdp.sub_reread_excel':             'Re-read Excel (discards in-memory edits)',                    // MISSING TRANSLATION
+  'cmdp.index_actions_count':          '{{count}} actions',                                           // MISSING TRANSLATION
+  'cmdp.index_lines_count':            '{{count}} lines',                                             // MISSING TRANSLATION
+  'cmdp.index_orders_count':           '{{count}} orders',                                            // MISSING TRANSLATION
+  'cmdp.index_selection_count':        '{{count}} selection',                                        // MISSING TRANSLATION
+  'cmdp.search_placeholder':           'Search commands, orders, lines…',                             // MISSING TRANSLATION
+  'cmdp.close_button_title':           'Close (Esc)',                                                 // MISSING TRANSLATION
+  'cmdp.no_match_hint':                'No match — try: "freeze", "compare", "rush order", "conflict"', // MISSING TRANSLATION
+  'cmdp.label_unfirm_selected':        'Unfirm selected ({{count}})',                                 // MISSING TRANSLATION
+  'cmdp.label_firm_selected':          'Firm selected ({{count}})',                                   // MISSING TRANSLATION
+  'cmdp.sub_make_orders_moveable':     'Make all selected orders moveable',                           // MISSING TRANSLATION
+  'cmdp.sub_pin_orders_in_place':      'Pin all selected orders in place',                            // MISSING TRANSLATION
+  'cmdp.label_push_selected':          'Push selected ({{count}}) forward 1 hour',                    // MISSING TRANSLATION
+  'cmdp.sub_shift_orders_1h':          'Shift all selected orders +1h without opening edit modal',    // MISSING TRANSLATION
+  'cmdp.toast_no_orders_moveable':     'No selected orders could be moved into the calendar.',        // MISSING TRANSLATION
+  'cmdp.label_unschedule_selected':    'Unschedule selected ({{count}})',                             // MISSING TRANSLATION
+  'cmdp.sub_remove_start_end_times':   'Remove start/end times from all selected orders',             // MISSING TRANSLATION
+  'cmdp.toast_split_orders_whole':     'Split orders must be rescheduled as a whole.',                // MISSING TRANSLATION
+  'cmdp.label_snapshot_before_acting': 'Snapshot before acting on selection ({{count}})',              // MISSING TRANSLATION
+  'cmdp.sub_save_checkpoint_now':      'Save a Time Machine checkpoint now',                          // MISSING TRANSLATION
 };
