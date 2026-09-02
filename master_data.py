@@ -670,7 +670,7 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
     """
     _assert_table(table)
     # Seed all child-table keys so a missing branch reads as 0, not "absent".
-    result = {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0}
+    result = {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0, "role_plants": 0}
     if not deletes:
         return result
 
@@ -723,6 +723,15 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
                     )
                     bom_count += int(cur.fetchone()[0])
             result["bom_items"] = bom_count
+
+        elif table == "roles":
+            # role_plants FK: role REFERENCES roles(role) ON DELETE CASCADE.
+            roles = [d.get("role") for d in deletes if d.get("role")]
+            if roles:
+                cur.execute(
+                    "SELECT COUNT(*) FROM role_plants WHERE role = ANY(%s)", (roles,)
+                )
+                result["role_plants"] = int(cur.fetchone()[0])
 
     return result
 

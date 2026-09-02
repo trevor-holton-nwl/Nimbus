@@ -392,6 +392,21 @@ export const Util = {
   // Normalise a string for case-insensitive compares.
   norm(s: unknown): string { return (s ?? '').toString().trim().toUpperCase(); },
 
+  // Escape HTML special characters to safely render untrusted values in HTML contexts.
+  // Returns empty string for null/undefined, otherwise coerces to string and escapes
+  // &, <, >, ", and ' to their respective HTML entities.
+  escapeHtml(value: unknown): string {
+    if (value == null) return '';
+    const s = String(value);
+    return s.replace(/[&<>"']/g, (c: string) => (({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    } as Record<string, string>)[c]));
+  },
+
   // User-facing order identifier. Backend task payloads expose the business
   // order number as ORDER; PRODUCTION_ORDER remains a legacy compatibility
   // field. Never fall back to the internal task ID in visible copy.

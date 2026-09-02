@@ -653,9 +653,10 @@ export const Dashboard = {
     });
 
     // Data rows
+    const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c: string) => (({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'} as Record<string, string>)[c]));
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
-      html += `<div class="hm-line-label"><span class="hm-dot" style="background:${dot}"></span>${line}</div>`;
+      html += `<div class="hm-line-label"><span class="hm-dot" style="background:${dot}"></span>${esc(line)}</div>`;
       days.forEach(d => {
         const pct = matrix[line][d]?.pct || 0;
         const bg  = heatBg(pct);
@@ -665,7 +666,7 @@ export const Dashboard = {
         const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
         const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
         const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
-        html += `<button type="button" class="hm-cell" data-line="${line}" data-date="${d}" style="background:${bg};color:${tc}" title="Click to view ${line} on ${d} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${line}','${d}')">${lbl}</button>`;
+        html += `<button type="button" class="hm-cell" data-line="${esc(line)}" data-date="${esc(d)}" style="background:${bg};color:${tc}" title="Click to view ${esc(line)} on ${esc(d)} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${esc(line)}','${esc(d)}')">${lbl}</button>`;
       });
     });
 

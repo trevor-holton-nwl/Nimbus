@@ -132,21 +132,32 @@ export const CalendarUI = {
       html += blocks.map(b => `
         <div class="block-row" style="padding-left:6px;padding-right:6px;">
           <span class="ico">■</span>
-          <span class="reason">${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>
-          <span class="line-tag">${b.line || Util.t('ui.all_lines_filter')}</span>
+          <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
+          <span class="line-tag">${Util.escapeHtml(b.line) || Util.t('ui.all_lines_filter')}</span>
           <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-          <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" onclick="NIMBUS.CalendarUI.removeBlock('${b.id}')">×</button>
+          <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" data-block-id="${Util.escapeHtml(b.id)}">×</button>
         </div>
       `).join('');
     }
 
     list.innerHTML = html;
 
+    // Wire block-filter select
     const blockSelect = document.getElementById('cal-block-filter') as HTMLSelectElement | null;
     if (blockSelect) blockSelect.onchange = () => {
       CalendarUI._blockFilter = blockSelect.value;
       CalendarUI._renderBlocks();
     };
+
+    // Wire remove-block button delegation
+    list.addEventListener('click', (e: Event) => {
+      const target = e.target as HTMLElement;
+      const btn = target.closest('button[data-block-id]') as HTMLButtonElement | null;
+      if (btn) {
+        const blockId = btn.dataset.blockId;
+        if (blockId) CalendarUI.removeBlock(blockId);
+      }
+    });
   },
 
   removeBlock(id: string): void {

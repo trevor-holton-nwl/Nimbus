@@ -1890,14 +1890,14 @@ export const AdminCockpit = {
         const node = document.createElement('div');
         node.className = `admin-db-lock-node ${cls}`;
         node.innerHTML = `<span class="admin-db-lock-pid">PID ${pid}</span>`
-          + `<span class="admin-db-lock-role">${role}</span>`
-          + `<div class="admin-db-lock-query">${(query || '—').slice(0, 90)}</div>`;
+          + `<span class="admin-db-lock-role">${Util.escapeHtml(role)}</span>`
+          + `<div class="admin-db-lock-query">${Util.escapeHtml((query || '—').slice(0, 90))}</div>`;
         return node;
       };
       chain.appendChild(mkNode(lk.blocking_pid, 'BLOCKING', lk.blocking_query, 'blocking'));
       const arrow = document.createElement('div');
       arrow.className = 'admin-db-lock-arrow';
-      arrow.innerHTML = `<span class="admin-db-lock-type">${lk.lock_type || ''}</span> ▼`;
+      arrow.innerHTML = `<span class="admin-db-lock-type">${Util.escapeHtml(lk.lock_type || '')}</span> ▼`;
       chain.appendChild(arrow);
       chain.appendChild(mkNode(lk.blocked_pid, `BLOCKED ${lk.blocked_for_s}s`, lk.blocked_query, 'blocked'));
       wrap.appendChild(chain);

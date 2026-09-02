@@ -2595,6 +2595,13 @@ export const MasterData = (() => {
   let _activeTable: MasterDataTable = 'subnetworks';
   // Per-table state: { columns, rows, dirty: Map(rowKey→patch), deleted: Set(rowKey), added: [] }
   const _cache: Partial<Record<MasterDataTable, MasterDataTableState>> = {};
+  // Bumped on every _loadAndRender call (table switch, discard, save-triggered
+  // reload, ...). A response can only mutate `_cache`/render once it belongs to
+  // the latest generation — otherwise a slow-resolving fetch for a table the
+  // user has since switched away from can overwrite the currently-selected
+  // table's grid. Mirrors Persistence.loadSetupSnapshot's `_setupSnapshotRequest`
+  // token in frontend/scheduling/persistence.mts.
+  let _loadGeneration = 0;
 
   const TABLE_LABELS: Record<MasterDataTable, string> = {
     subnetworks:      'Subnetworks',
@@ -2760,6 +2767,12 @@ export const MasterData = (() => {
     const host = document.getElementById('md-host');
     if (!host) return;
     host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
+    // Stale-response guard: capture the generation before the async fetch,
+    // and only let this call mutate `_cache`/render if it's still current
+    // once the fetch resolves. Without this, quickly switching Manage Data
+    // Tables tabs can let a slow-resolving fetch for the PREVIOUSLY selected
+    // table overwrite the currently-selected table's rendered grid.
+    const generation = ++_loadGeneration;
     const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -2781,6 +2794,7 @@ export const MasterData = (() => {
         }
         return r.json() as Promise<MasterDataResponse>;
       });
+      if (generation !== _loadGeneration) return; // a newer table switch has since started
       _cache[table] = {
         columns: data.columns,
         rows:    data.rows,
@@ -2790,8 +2804,9 @@ export const MasterData = (() => {
       };
       _renderTable(table);
     } catch (e) {
+      if (generation !== _loadGeneration) return; // a newer table switch has since started
       const err = e as MasterDataFetchError;
-      host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${err.message}</div>`;
+      host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${Util.escapeHtml(err.message)}</div>`;
       ErrorLog.error('master-data', `Load failed for ${table}: ${err.message}`,
         { reqId, table, status: err.httpStatus }, { reqId, errorCode: err.errorCode || 'http.network' });
     }
@@ -3323,7 +3338,7 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes: [deletePayload] }),
-        }).then((r) => r.json()) as MasterDataCascadePreview;
+        }).then(_okJson) as MasterDataCascadePreview;
 
         const parts: string[] = [];
         const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
@@ -3335,7 +3350,15 @@ export const MasterData = (() => {
             ? `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — delete those first.</div>`
             : `<div class="md-cascade-warn">This will also permanently delete ${parts.join(' and ')}.</div>`;
         }
-      } catch {}
+      } catch (e) {
+        // Fail closed: the true cascade impact is unknown, so never fall through to
+        // an ordinary confirm dialog — that's visually indistinguishable from "zero
+        // dependents" and could let an admin approve a delete that cascades further
+        // than they think. Block the delete entirely instead.
+        ErrorLog.error('master-data', `Cascade preview fetch failed for ${table}: ${(e as Error).message}`);
+        Toast.show(Util.t('toast.cascade_preview_failed'), 'error');
+        return;
+      }
     }
 
     const keyDisplay = keys.map((k) => row[k]).join(' / ');
@@ -3400,7 +3423,7 @@ export const MasterData = (() => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
-        }).then((r) => r.json()) as MasterDataCascadePreview;
+        }).then(_okJson) as MasterDataCascadePreview;
         const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
         const total = nPlants + nLines + nBom;
         if (total > 0) {
@@ -3424,7 +3447,15 @@ export const MasterData = (() => {
               });
           if (!ok) return;
         }
-      } catch {}
+      } catch (e) {
+        // Fail closed: this preview only guards the deletes in this bulk save, but
+        // there is no safe way to split them out of the request below — abort the
+        // whole save rather than let unverified deletes (which could look like "zero
+        // dependents" if we fell through to an ordinary confirm) reach the backend.
+        ErrorLog.error('master-data', `Cascade preview fetch failed for ${table}: ${(e as Error).message}`);
+        Toast.show(Util.t('toast.cascade_preview_failed'), 'error');
+        return;
+      }
     }
 
     try {
