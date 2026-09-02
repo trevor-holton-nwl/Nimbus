@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- `routes.py` (125 lines, 9 routes) — `POST /security/login`, `GET /security/bootstrap-status`, `GET /security/me`, `PATCH /security/me` (self-service name), `PATCH /security/me/settings` (self-service settings merge), `PATCH /security/me/password` (self-service password change), `GET /security/users`, `POST /security/users/bulk` (admin user CRUD, username+role only), `POST /security/users/{username}/reset-password`.
+- `routes.py` (8 routes) — `POST /security/login`, `GET /security/me`, `PATCH /security/me` (self-service name), `PATCH /security/me/settings` (self-service settings merge), `PATCH /security/me/password` (self-service password change), `GET /security/users`, `POST /security/users/bulk` (admin user CRUD, username+role only), `POST /security/users/{username}/reset-password`. (`GET /security/bootstrap-status` was removed 2026-09 as confirmed dead — zero frontend callers.)
 - `auth.py` (666 lines) — whole-file move, **deliberately internally untouched**. Owns the `user_security` table (username → PBKDF2-HMAC-SHA256 password hash + role), `user_settings` (per-user JSONB blob), the `roles.settings` column bootstrap, all password hashing/verification, `authenticate()`, `whoami()`, the authorization dependencies (`require_authenticated`, `require_setup_scheduler`, `require_admin`), `get_allowed_plants[_for_request]`, `_actor_email`, and the bootstrap-admin seed (`ensure_bootstrap_admin`, gated on `NIMBUS_BOOTSTRAP_ADMIN_USERNAME`/`NIMBUS_BOOTSTRAP_ADMIN_PASSWORD`). Also holds `require_api_key`/`NIMBUS_API_KEY` (moved here in Phase P5 as a licensed reading of "auth guards live in `backend/security/auth.py`" — it's a deployment-config gate, not user auth, but every domain router's `Depends(require_api_key)` needs a non-`brain.py` home that doesn't create an import cycle, and this is it).
 
 **`auth.py` is frozen pending the Entra Auth migration** — its internals (the header-trust model, the password-hash scheme, the dependency shapes) should not be restructured here. `Entra_Auth_Migration.md` (repo root) will rewrite it; don't propose incremental cleanups to the trust model in the meantime.
@@ -31,7 +31,7 @@ No deferred-split data functions to cite here — unlike priority_lists/master_d
 
 **Imported by:** every one of the other 8 domain routers imports `backend.security.auth` for `require_admin`/`require_api_key`/`get_allowed_plants_for_request` (confirmed via grep: `backend/admin_ops/routes.py`, `backend/integration/routes.py`, `backend/master_data/routes.py`, `backend/priority_lists/routes.py`, plus `backend/calendars/routes.py`, `backend/scheduling/routes.py`, `backend/setup/routes.py`, and `brain.py` itself). This makes `auth.py` one of the two most cross-domain-depended-upon files in the whole backend (the other being `backend/admin_ops/logbuffer.py`).
 
-**Endpoints:** `POST /security/login`, `GET /security/bootstrap-status`, `GET|PATCH /security/me`, `PATCH /security/me/settings`, `PATCH /security/me/password`, `GET /security/users`, `POST /security/users/bulk`, `POST /security/users/{username}/reset-password`.
+**Endpoints:** `POST /security/login`, `GET|PATCH /security/me`, `PATCH /security/me/settings`, `PATCH /security/me/password`, `GET /security/users`, `POST /security/users/bulk`, `POST /security/users/{username}/reset-password`.
 
 ## Tests
 

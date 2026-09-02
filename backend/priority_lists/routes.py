@@ -560,30 +560,3 @@ def delete_color_wheel(plant: str, request: Request,
     # Row already removed above — drop just this plant's cache entry.
     plcache._reload_one_plant_lists(plant)
     return {"status": "ok"}
-
-
-@router.get("/color-wheels")
-def list_color_wheels(
-        limit: int | None = Query(default=None, ge=1, le=100000,
-            description="Max color wheels to return. Omit for the full listing."),
-        offset: int | None = Query(default=None, ge=0,
-            description="Wheels to skip before returning (for paging).")):
-    """List plants with stored color wheels and their metadata.
-
-    Optional ?limit=/?offset= page the listing (default = full catalog). When
-    supplied, meta.total carries the full count so callers can paginate."""
-    rows, total = db.list_priority_lists_meta(field_key="colorWheel", limit=limit, offset=offset)
-    # Response shape kept identical to the old color_wheel-table version: a
-    # dict keyed by plant name (frontend/plant-and-administration.mts:270 pins this).
-    plants = {
-        r["plant"]: {
-            "uploaded_at": r["uploaded_at"],
-            "uploaded_by": r["uploaded_by"],
-            "filename": r["filename"],
-            "row_count": r["row_count"],
-        }
-        for r in rows
-    }
-    if limit is None and offset is None:
-        return {"plants": plants}
-    return {"plants": plants, "meta": {"total": total}}

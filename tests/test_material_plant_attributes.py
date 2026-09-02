@@ -141,10 +141,11 @@ def _master_data_paths():
 def test_material_grid_routes_are_registered_before_the_table_catchall():
     """FastAPI/Starlette matches routes in REGISTRATION order, not by
     specificity — a single-segment literal registered after `{table}` is
-    permanently shadowed (this is exactly what happened to `_audit` once)."""
+    permanently shadowed (this is exactly what happened to a former sibling,
+    `_audit`, once — since removed entirely as confirmed dead, 2026-09)."""
     paths = _master_data_paths()
     i_table = paths.index("/master-data/{table}")
-    for literal in ("/master-data/_audit", "/master-data/_schema-export",
+    for literal in ("/master-data/_schema-export",
                     "/master-data/_material-grid", "/master-data/_material-plant-grid"):
         assert paths.index(literal) < i_table, f"{literal} is registered after {{table}} and is shadowed"
 

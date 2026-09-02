@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- `routes.py` (561 lines, 10 routes) — the generic priority-list family (`GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`), the legacy color-wheel-shaped compat family (`POST|GET|DELETE /color-wheel/{plant}`, `GET /color-wheels`), plus the shared helpers `_resolve_priority_list_columns` (column/value/rank resolution + validation, shared by both upload paths) and `_persist_priority_list` (shared upsert+audit+cache-reload step).
+- `routes.py` (9 routes) — the generic priority-list family (`GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`), the legacy color-wheel-shaped compat family (`POST|GET|DELETE /color-wheel/{plant}`), plus the shared helpers `_resolve_priority_list_columns` (column/value/rank resolution + validation, shared by both upload paths) and `_persist_priority_list` (shared upsert+audit+cache-reload step). (`GET /color-wheels` was removed 2026-09 as confirmed dead — zero frontend callers; its own docstring cited a `frontend/plant-and-administration.mts` that no longer exists in this tree.)
 - `cache.py` (207 lines) — `PLANT_LISTS` (`{plant: {machine_or_'': {field_key: {VALUE: RANK}}}}`), `load_priority_lists()`, `_reload_one_plant_lists(plant)`, and `apply_priority_merge(df, plant=None)` + its private helper `_apply_priority_scope`. `apply_priority_merge` deliberately lives in the *same* module as `PLANT_LISTS` (not a separate reader module) because `load_priority_lists`/`_reload_one_plant_lists` **reassign** `PLANT_LISTS` wholesale — a cross-module `from ... import PLANT_LISTS` binding would go stale across a reload; every cross-module reader instead does `from backend.priority_lists import cache as plcache; plcache.PLANT_LISTS...`.
 - `audit_log.py` (59 lines) — `COLOR_WHEEL_DIR`, `_cw_audit_path()`, `_cw_append_audit()`, `_migrate_audit_log()` (JSON-array → JSON-Lines, idempotent, runs once at startup). This is the `_audit_log.json` trail shared with `master_data`'s `GET/POST /audit/log` endpoints (see `backend/master_data/CLAUDE.md`) and with `optimization_run` events posted from the frontend.
 
@@ -31,7 +31,7 @@ Deferred split: `RANKABLE_FIELDS` and `CONFIGURABLE_PRIORITY_FIELDS` — the sin
 
 **Imported by:** `backend/admin_ops/routes.py` (`from backend.priority_lists import cache as plcache`, for `POST /reload` and diagnostics color-merge stats), `backend/master_data/routes.py` (`from backend.priority_lists.audit_log import _cw_append_audit, _cw_audit_path`, for `GET/POST/POST-clear /audit/log`). `apply_priority_merge` is called once per `GET /tasks` request from `backend/scheduling/routes.py` (not vice versa — `scheduling` doesn't need a `cache` re-export, per the same-module-reader design above).
 
-**Endpoints:** `GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`, `POST|GET|DELETE /color-wheel/{plant}`, `GET /color-wheels`.
+**Endpoints:** `GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`, `POST|GET|DELETE /color-wheel/{plant}`.
 
 ## Tests
 

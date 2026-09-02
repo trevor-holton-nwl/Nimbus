@@ -13,7 +13,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 from backend.security.models import (
-    BootstrapStatusResult,
     BulkUsersResult,
     LoginResult,
     OkResult,
@@ -43,18 +42,13 @@ def security_login(request: Request, body: dict = Body(default={})):
     return result
 
 
-@router.get("/security/bootstrap-status", response_model=BootstrapStatusResult)
-def security_bootstrap_status():
-    return {"admin_exists": auth.admin_exists()}
-
-
 @router.get("/security/me", response_model=WhoAmIResult)
 def security_me(request: Request):
-    """Live identity + effective admin status for the caller. Ungated on purpose
-    (like /security/bootstrap-status): the frontend calls it to reconcile the
-    role it cached at login against backend truth, so it must be reachable even
-    when the caller is NOT an admin. Returns {username, role, is_admin,
-    first_name, last_name, allowed_plants, settings, role_settings}; no secrets."""
+    """Live identity + effective admin status for the caller. Ungated on
+    purpose: the frontend calls it to reconcile the role it cached at login
+    against backend truth, so it must be reachable even when the caller is
+    NOT an admin. Returns {username, role, is_admin, first_name, last_name,
+    allowed_plants, settings, role_settings}; no secrets."""
     return auth.whoami(request)
 
 

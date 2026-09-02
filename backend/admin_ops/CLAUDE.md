@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- `routes.py` (371 lines, 13 routes) — `GET /diagnostics`, `GET /health`, `GET /livez`, `GET /diagnostics/deep`, `POST /reload` (refreshes the priority-list cache — see `backend/priority_lists/CLAUDE.md`), `GET|POST /system-settings`, `GET /diagnostics/db`, `POST /maintenance/vacuum-analyze`, `POST /maintenance/analyze`, `GET /logs/backend`, `POST /logs/backend/clear`, `POST /logs/frontend`. Also owns the private `_diag_snapshot()`, `_truncate()`, and the `_FE_MAX_*` frontend-log-ingest size caps.
+- `routes.py` (12 routes) — `GET /health`, `GET /livez`, `GET /diagnostics/deep`, `POST /reload` (refreshes the priority-list cache — see `backend/priority_lists/CLAUDE.md`), `GET|POST /system-settings`, `GET /diagnostics/db`, `POST /maintenance/vacuum-analyze`, `POST /maintenance/analyze`, `GET /logs/backend`, `POST /logs/backend/clear`, `POST /logs/frontend`. Also owns the private `_diag_snapshot()`, `_truncate()`, and the `_FE_MAX_*` frontend-log-ingest size caps. (Plain `GET /diagnostics` was removed 2026-09 as confirmed dead — zero frontend callers, superseded by `/diagnostics/deep` and `/diagnostics/db`.)
 - `logbuffer.py` (155 lines) — `_BACKEND_LOG` (a 2000-entry `collections.deque` ring buffer), `_log_event()` (structured event → ring buffer + JSON log line), `_log_admin_action()` (admin-write audit event), `_set_admin_log_details()` (per-route safe-context accumulator read by `brain.py`'s `request_id_mw`), `_RID_CTX`/`_current_rid()` (the per-request-id `ContextVar`, shared with `brain.py`'s middleware).
 - `diagnostics_state.py` (48 lines) — `DIAGNOSTICS` (the load-metadata bag: `loaded_at`, `color_merge_misses`, `missed_colors`, `emitted_task_count`, `warnings`, etc.) and `_warn()`.
 

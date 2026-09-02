@@ -21,7 +21,7 @@
 // after both modules have finished initializing (a "lazy" ESM cycle, same
 // precedent as setup-admin.mts's Plant cycle from Phase P2).
 /* global NIMBUS */
-import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast, VirtualList } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
@@ -2608,21 +2608,6 @@ interface MarqueeState {
 /** _onKeyDown's arrow-navigation keys (Interaction._navigateSelection). */
 type ArrowKey = 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown';
 
-/** `Modal.openEdit` is guarded (`typeof ... === 'function'`) at both
- *  _onDoubleClick and _onKeyDown's Enter-to-edit branch, but does not exist
- *  anywhere in the real Modal export (application-foundation.mts's Modal has
- *  only open/close/confirm) or anywhere else in the codebase — genuinely
- *  dead/vestigial code, always false at runtime today. Typed as an optional
- *  extension (not `any`) so the existing defensive guard keeps its exact
- *  behavior under strict typing. */
-type ModalWithOpenEdit = typeof Modal & { openEdit?: (task: NimbusTask) => void };
-
-/** `ContextMenu.openCanvas` — same situation as ModalWithOpenEdit above: the
- *  real ContextMenu export (this file, Task 3) has no such method; the
- *  install() contextmenu handler's own comment calls it out as "an optional
- *  extension point" that nothing implements yet. */
-type ContextMenuWithOpenCanvas = typeof ContextMenu & { openCanvas?: (x: number, y: number) => void };
-
 /* =============================================================================
    INTERACTION — unified input pipeline for the Timeline.
 
@@ -2846,9 +2831,6 @@ export const Interaction = {
           if (ContextMenu && typeof ContextMenu.open === 'function') {
             ContextMenu.open(e.clientX, e.clientY, id);
           }
-        } else if (ContextMenu && typeof (ContextMenu as ContextMenuWithOpenCanvas).openCanvas === 'function') {
-          // Canvas context menu — optional extension point.
-          (ContextMenu as ContextMenuWithOpenCanvas).openCanvas!(e.clientX, e.clientY);
         }
       });
     }
@@ -3455,9 +3437,8 @@ export const Interaction = {
     if (!t) return;
 
     Selection.set([id]);
-    // Double-click action: focus-zoom AND open the full edit modal (if present).
+    // Double-click action: focus-zoom.
     if (typeof Timeline.focus === 'function') Timeline.focus(id);
-    if (Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') (Modal as ModalWithOpenEdit).openEdit!(t);
   },
 
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
@@ -3799,17 +3780,6 @@ export const Interaction = {
     // Escape → clear
     if (e.key === 'Escape') {
       if (Selection.size()) { e.preventDefault(); Selection.clear(); }
-      return;
-    }
-
-    // Enter → edit (if single selection)
-    if (e.key === 'Enter' && Selection.size() === 1) {
-      const id = Selection.ids()[0];
-      const t = Store.tasks[id];
-      if (t && Modal && typeof (Modal as ModalWithOpenEdit).openEdit === 'function') {
-        e.preventDefault();
-        (Modal as ModalWithOpenEdit).openEdit!(t);
-      }
       return;
     }
 

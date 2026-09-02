@@ -1483,45 +1483,6 @@ def set_plant_min_productive_segment_minutes(subnetwork: str, plant: str, value:
     return {"status": "ok", "plant": plant, "min_productive_segment_minutes": value}
 
 
-def set_plant_visibility_horizon(subnetwork: str, plant: str, visibility_horizon_days: int | None,
-                                 horizon_roll_hour_utc: int, user_email: str | None = None) -> dict:
-    """Persist the plant's C1 visibility-horizon setting: a nullable
-    whole-calendar-day window (NULL = unlimited) plus the UTC hour at which
-    that window rolls forward a day. Both fields are saved together — they
-    describe one setting, not two independent ones."""
-    if not plant:
-        raise ValueError("plant is required")
-    if visibility_horizon_days is not None and (
-        isinstance(visibility_horizon_days, bool) or not isinstance(visibility_horizon_days, int)
-        or visibility_horizon_days < 0
-    ):
-        raise ValueError("visibility_horizon_days must be a non-negative integer or null")
-    if (isinstance(horizon_roll_hour_utc, bool) or not isinstance(horizon_roll_hour_utc, int)
-            or horizon_roll_hour_utc < 0 or horizon_roll_hour_utc > 23):
-        raise ValueError("horizon_roll_hour_utc must be an integer between 0 and 23")
-
-    params: list = [visibility_horizon_days, horizon_roll_hour_utc, plant]
-    where = "plant = %s"
-    if subnetwork:
-        where += " AND subnetwork = %s"
-        params.append(subnetwork)
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE plants SET visibility_horizon_days = %s, horizon_roll_hour_utc = %s, "
-            f"updated_at = NOW() WHERE {where}",
-            params,
-        )
-        if cur.rowcount == 0:
-            raise ValueError(f"Plant {plant!r} not found")
-        cur.execute(
-            "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('plants', 'set_visibility_horizon', %s, %s)",
-            (Jsonb({"plant": plant, "visibility_horizon_days": visibility_horizon_days,
-                    "horizon_roll_hour_utc": horizon_roll_hour_utc}), user_email),
-        )
-        conn.commit()
-    return {"status": "ok", "plant": plant, "visibility_horizon_days": visibility_horizon_days,
-            "horizon_roll_hour_utc": horizon_roll_hour_utc}
 
 
 def set_plant_frozen_horizon_days(subnetwork: str, plant: str, value: int | None,
@@ -1726,28 +1687,6 @@ def upsert_system_settings(patch: dict, user_email: str | None = None) -> dict:
         conn.commit()
 
     return settings
-
-
-def list_audit(limit: int = 100) -> list[dict]:
-    """Return the most recent N admin_audit entries for the Master Data tab."""
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, table_name, action, column_name, details, user_email, occurred_at"
-            " FROM admin_audit ORDER BY occurred_at DESC LIMIT %s",
-            (limit,),
-        )
-        return [
-            {
-                "id":          r[0],
-                "table_name":  r[1],
-                "action":      r[2],
-                "column_name": r[3],
-                "details":     r[4],
-                "user_email":  r[5],
-                "occurred_at": r[6].isoformat() if r[6] else None,
-            }
-            for r in cur.fetchall()
-        ]
 
 
 def _sql_literal(value) -> str:

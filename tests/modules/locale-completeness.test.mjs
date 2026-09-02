@@ -173,8 +173,12 @@ test('Scheduling Rules density pass keys exist in all 5 locales', () => {
   // follow-up pass the same day split the form into two titled panels
   // ("Horizons" / "Order Rules") and dropped the Visibility Horizon,
   // Roll-forward hour and Setup-aware optimization rows. `ui.unit_hour_utc`
-  // stays pinned even though nothing renders it now — its POST
-  // /master-data/plants/{plant}/visibility-horizon route still exists.
+  // stays pinned even though nothing renders it now (see admin-ui.mts's own
+  // comment on RULE_HELP) — the POST /master-data/plants/{plant}/visibility-horizon
+  // route this comment used to cite was itself removed 2026-09 as confirmed
+  // dead (its only frontend caller had already been removed 2026-08-21, the
+  // same day as this rework); these keys are kept purely because this test
+  // still pins them, not because anything live still depends on them.
   const REQUIRED_SCHED_RULES = [
     'ui.more_info',
     'ui.split_policy_saved',

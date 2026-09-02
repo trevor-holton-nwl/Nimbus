@@ -28,10 +28,6 @@ class LoginResult(BaseModel):
     allowed_plants: list[str] | None = None
 
 
-class BootstrapStatusResult(BaseModel):
-    admin_exists: bool
-
-
 class WhoAmIResult(BaseModel):
     """auth.whoami()'s shape (GET /security/me)."""
     username: str | None = None

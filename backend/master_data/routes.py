@@ -36,13 +36,11 @@ from backend.master_data.models import (
     BulkApplyResult,
     CascadePreviewResult,
     GridResult,
-    MasterDataAuditResult,
     PlantConstraintsResult,
     PlantFrozenHorizonDaysResult,
     PlantMaxPullForwardDaysResult,
     PlantMinProductiveSegmentMinutesResult,
     PlantSplitOrderPolicyResult,
-    PlantVisibilityHorizonResult,
     RolePageAccessResult,
     SchemaExportResult,
     StatusOkResult,
@@ -99,23 +97,20 @@ def clear_audit_log():
 # MASTER DATA — Subnetwork / Plant / Production Line management
 # =============================================================================
 
-# NOTE: these four literal-path routes MUST be registered before the generic
+# NOTE: these literal-path routes MUST be registered before the generic
 # GET /master-data/{table} below — FastAPI/Starlette matches routes in
 # registration order, not by specificity, so a route declared after {table}
 # is permanently shadowed (a request for it just gets captured as table="...",
-# then 404s inside md_list/_assert_table). _audit was previously registered
-# after {table} and was completely unreachable in production as a result.
+# then 404s inside md_list/_assert_table). A former sibling, _audit, was once
+# registered after {table} and was completely unreachable in production as a
+# result before being moved ahead of it; _audit itself was later removed
+# entirely (2026-09, confirmed zero frontend callers) but the ordering hazard
+# it surfaced still applies to every route below.
 # (POST /master-data/material-plants/attributes lives in backend/integration/
 # routes.py and is NOT at this risk — it's a two-segment path and the default
 # `str` path converter behind {table} excludes "/", so it can never be
 # captured by {table} regardless of registration order. Only single-segment
 # literals need to precede it.)
-@router.get("/master-data/_audit", response_model=MasterDataAuditResult, dependencies=[Depends(require_admin)])
-def md_audit(limit: int = 100):
-    """Return the most recent N master-data change audit entries."""
-    return {"entries": md.list_audit(limit)}
-
-
 @router.get("/master-data/_schema-export", response_model=SchemaExportResult,
            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_schema_export():
@@ -473,27 +468,6 @@ def md_set_plant_min_productive_segment_minutes(plant: str, request: Request, bo
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             value=body.get("min_productive_segment_minutes"),
-            user_email=request.headers.get("x-user-email"),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/master-data/plants/{plant}/visibility-horizon", response_model=PlantVisibilityHorizonResult,
-            dependencies=[Depends(require_api_key), Depends(require_admin)])
-def md_set_plant_visibility_horizon(plant: str, request: Request, body: dict = Body(default={})):
-    """Persist the C1 plant visibility-horizon setting (how far into the
-    future a planner can see on the Gantt/Orders tab).
-
-    Payload: { subnetwork?, visibility_horizon_days: int|null, horizon_roll_hour_utc: int }.
-    Both fields are saved together — see master_data.set_plant_visibility_horizon.
-    """
-    try:
-        return md.set_plant_visibility_horizon(
-            subnetwork=body.get("subnetwork", ""),
-            plant=plant,
-            visibility_horizon_days=body.get("visibility_horizon_days"),
-            horizon_roll_hour_utc=body.get("horizon_roll_hour_utc"),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

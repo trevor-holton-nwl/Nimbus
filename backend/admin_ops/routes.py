@@ -27,12 +27,6 @@ from backend.security.auth import require_admin, require_api_key
 router = APIRouter()
 
 
-@router.get("/diagnostics", dependencies=[Depends(require_admin)])
-def get_diagnostics():
-    """Return diagnostics: base metadata merged with live DB counts (stateless)."""
-    return _diag_snapshot()
-
-
 @router.get("/health")
 def get_health():
     """Fast DB ping + system snapshot. Polled every 30 s by the Admin Cockpit."""

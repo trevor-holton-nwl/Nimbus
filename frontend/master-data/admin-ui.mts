@@ -93,8 +93,12 @@ interface PillFpPair {
  *  NOT NULL DEFAULT 19 (see that migration's comment on why it is deliberately
  *  left out of the grid too). Their locale keys are intentionally KEPT in
  *  frontend/locales/* — `ui.unit_hour_utc` is pinned by
- *  tests/modules/locale-completeness.test.mjs and the visibility-horizon
- *  toasts still describe a live backend route. */
+ *  tests/modules/locale-completeness.test.mjs. The visibility-horizon
+ *  toasts' backend route (POST /master-data/plants/{plant}/visibility-horizon)
+ *  was itself removed 2026-09 as confirmed dead (this same 2026-08-21 pass
+ *  had already removed its only frontend caller) — these keys are now purely
+ *  historical, kept only because the locale test still pins them, not
+ *  because anything live still depends on them. */
 const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   alertHorizon:         { title: 'ui.alert_horizon_title',          help: ['ui.alert_horizon_help'] },
   confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },

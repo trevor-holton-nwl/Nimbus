@@ -734,29 +734,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/color-wheels": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Color Wheels
-         * @description List plants with stored color wheels and their metadata.
-         *
-         *     Optional ?limit=/?offset= page the listing (default = full catalog). When
-         *     supplied, meta.total carries the full count so callers can paginate.
-         */
-        get: operations["list_color_wheels_color_wheels_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/setup/{plant}/active": {
         parameters: {
             query?: never;
@@ -1073,26 +1050,6 @@ export interface paths {
          * @description Wipe the full audit log.
          */
         post: operations["clear_audit_log_audit_log_clear_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/master-data/_audit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Md Audit
-         * @description Return the most recent N master-data change audit entries.
-         */
-        get: operations["md_audit_master_data__audit_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1471,30 +1428,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/master-data/plants/{plant}/visibility-horizon": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Md Set Plant Visibility Horizon
-         * @description Persist the C1 plant visibility-horizon setting (how far into the
-         *     future a planner can see on the Gantt/Orders tab).
-         *
-         *     Payload: { subnetwork?, visibility_horizon_days: int|null, horizon_roll_hour_utc: int }.
-         *     Both fields are saved together — see master_data.set_plant_visibility_horizon.
-         */
-        post: operations["md_set_plant_visibility_horizon_master_data_plants__plant__visibility_horizon_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/master-data/plants/{plant}/frozen-horizon-days": {
         parameters: {
             query?: never;
@@ -1565,23 +1498,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/security/bootstrap-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Security Bootstrap Status */
-        get: operations["security_bootstrap_status_security_bootstrap_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/security/me": {
         parameters: {
             query?: never;
@@ -1591,11 +1507,11 @@ export interface paths {
         };
         /**
          * Security Me
-         * @description Live identity + effective admin status for the caller. Ungated on purpose
-         *     (like /security/bootstrap-status): the frontend calls it to reconcile the
-         *     role it cached at login against backend truth, so it must be reachable even
-         *     when the caller is NOT an admin. Returns {username, role, is_admin,
-         *     first_name, last_name, allowed_plants, settings, role_settings}; no secrets.
+         * @description Live identity + effective admin status for the caller. Ungated on
+         *     purpose: the frontend calls it to reconcile the role it cached at login
+         *     against backend truth, so it must be reachable even when the caller is
+         *     NOT an admin. Returns {username, role, is_admin, first_name, last_name,
+         *     allowed_plants, settings, role_settings}; no secrets.
          */
         get: operations["security_me_security_me_get"];
         put?: never;
@@ -1868,26 +1784,6 @@ export interface paths {
          *     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }.
          */
         post: operations["plant_calendar_plant_blackouts_post_plant_calendar_plant_blackouts_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/diagnostics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Diagnostics
-         * @description Return diagnostics: base metadata merged with live DB counts (stateless).
-         */
-        get: operations["get_diagnostics_diagnostics_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2322,11 +2218,6 @@ export interface components {
             /** Rank Column */
             rank_column?: string | null;
         };
-        /** BootstrapStatusResult */
-        BootstrapStatusResult: {
-            /** Admin Exists */
-            admin_exists: boolean;
-        };
         /**
          * BulkApplyResult
          * @description master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk).
@@ -2497,31 +2388,6 @@ export interface components {
             allowed_plants?: string[] | null;
         };
         /**
-         * MasterDataAuditEntry
-         * @description One master_data.list_audit() row (GET /master-data/_audit).
-         */
-        MasterDataAuditEntry: {
-            /** Id */
-            id: number;
-            /** Table Name */
-            table_name: string;
-            /** Action */
-            action: string;
-            /** Column Name */
-            column_name?: string | null;
-            /** Details */
-            details?: unknown;
-            /** User Email */
-            user_email?: string | null;
-            /** Occurred At */
-            occurred_at?: string | null;
-        };
-        /** MasterDataAuditResult */
-        MasterDataAuditResult: {
-            /** Entries */
-            entries: components["schemas"]["MasterDataAuditEntry"][];
-        };
-        /**
          * OkResult
          * @description auth.set_user_password()'s shape -- shared by PATCH /security/me/password
          *     (via change_own_password, which returns set_user_password's own result) and
@@ -2597,17 +2463,6 @@ export interface components {
             plant: string;
             /** Split Order Policy */
             split_order_policy: string;
-        };
-        /** PlantVisibilityHorizonResult */
-        PlantVisibilityHorizonResult: {
-            /** Status */
-            status: string;
-            /** Plant */
-            plant: string;
-            /** Visibility Horizon Days */
-            visibility_horizon_days?: number | null;
-            /** Horizon Roll Hour Utc */
-            horizon_roll_hour_utc: number;
         };
         /** RolePageAccessResult */
         RolePageAccessResult: {
@@ -4118,40 +3973,6 @@ export interface operations {
             };
         };
     };
-    list_color_wheels_color_wheels_get: {
-        parameters: {
-            query?: {
-                /** @description Max color wheels to return. Omit for the full listing. */
-                limit?: number | null;
-                /** @description Wheels to skip before returning (for paging). */
-                offset?: number | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     set_setup_active_setup__plant__active_put: {
         parameters: {
             query?: never;
@@ -4813,37 +4634,6 @@ export interface operations {
             };
         };
     };
-    md_audit_master_data__audit_get: {
-        parameters: {
-            query?: {
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MasterDataAuditResult"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     md_schema_export_master_data__schema_export_get: {
         parameters: {
             query?: never;
@@ -5430,45 +5220,6 @@ export interface operations {
             };
         };
     };
-    md_set_plant_visibility_horizon_master_data_plants__plant__visibility_horizon_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path: {
-                plant: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PlantVisibilityHorizonResult"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     md_set_plant_frozen_horizon_days_master_data_plants__plant__frozen_horizon_days_post: {
         parameters: {
             query?: never;
@@ -5578,26 +5329,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    security_bootstrap_status_security_bootstrap_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BootstrapStatusResult"];
                 };
             };
         };
@@ -6151,26 +5882,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_diagnostics_diagnostics_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
         };

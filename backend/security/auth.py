@@ -462,7 +462,7 @@ def get_user_profile(username: str | None) -> dict | None:
 
 def admin_exists() -> bool:
     """True once at least one user_security row has role='admin'. Backs
-    require_admin's first-run grace and GET /security/bootstrap-status."""
+    require_admin's first-run grace."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT EXISTS(SELECT 1 FROM user_security WHERE role = 'admin')")
         return bool(cur.fetchone()[0])

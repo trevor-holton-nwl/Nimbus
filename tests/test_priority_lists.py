@@ -579,9 +579,6 @@ def test_color_wheel_endpoints_are_backed_by_priority_list(client, pg):
         assert body["plant"] == plant
         entries = {e["color"]: e["order_y"] for e in body["entries"]}
         assert entries == {"RED": 1.0, "BLUE": 999999}  # blank rank -> last, matching apply_priority_merge
-
-        r = client.get("/color-wheels")
-        assert plant in r.json()["plants"]
     finally:
         pg.delete_priority_list(plant, "colorWheel", line="")
 

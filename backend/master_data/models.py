@@ -47,21 +47,6 @@ class AuditLogResult(BaseModel):
     entries: list[AuditLogEntry]
 
 
-class MasterDataAuditEntry(BaseModel):
-    """One master_data.list_audit() row (GET /master-data/_audit)."""
-    id: int
-    table_name: str
-    action: str
-    column_name: str | None = None
-    details: Any = None
-    user_email: str | None = None
-    occurred_at: str | None = None
-
-
-class MasterDataAuditResult(BaseModel):
-    entries: list[MasterDataAuditEntry]
-
-
 class SchemaExportResult(BaseModel):
     sql: str
 
@@ -176,13 +161,6 @@ class PlantMinProductiveSegmentMinutesResult(BaseModel):
     status: str
     plant: str
     min_productive_segment_minutes: int
-
-
-class PlantVisibilityHorizonResult(BaseModel):
-    status: str
-    plant: str
-    visibility_horizon_days: int | None = None
-    horizon_roll_hour_utc: int
 
 
 class PlantFrozenHorizonDaysResult(BaseModel):
