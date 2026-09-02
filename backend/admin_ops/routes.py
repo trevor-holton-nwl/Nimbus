@@ -138,9 +138,14 @@ def get_diagnostics_deep():
 def reload_data():
     """
     Refresh the in-process priority-list cache from Postgres. In stateless mode
-    orders are never cached, so there is nothing to re-read for them — this is
-    the cross-replica hook to pick up a newly uploaded/resynced priority list
-    without a restart.
+    orders are never cached, so there is nothing to re-read for them.
+
+    Single-replica caveat: this only refreshes the process that handles THIS
+    request. On a multi-replica deployment it is not a cross-replica hook —
+    every other replica keeps serving its own last-loaded PLANT_LISTS until it
+    independently receives its own /reload call or restarts. Fine for the
+    current single-replica pilot; would need a shared cache or a fan-out call
+    to every replica before this claim would be true at scale.
     """
     try:
         plcache.load_priority_lists()
