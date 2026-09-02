@@ -829,16 +829,37 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
             deleted += cur.rowcount
 
         # --- Upserts ---
+        # Batched via executemany(..., returning=True) instead of one execute()
+        # per row (2026-09 perf pass — Code_Review_09_01.md §6/§11 item 19).
+        # ON CONFLICT needs one consistent column list per statement, so rows
+        # are grouped by their resolved column-set first — in practice this is
+        # expected to yield one group per call (a dirty-row "patch" is a full
+        # shallow copy of the baseline row, not a partial diff — see
+        # admin-ui.mts's _markDirty — so every row from one table's grid save
+        # shares that table's column set); the grouping exists as a
+        # correctness safeguard for callers that could send a mixed shape
+        # (BOM ingest, SAP sync), not because fragmentation is expected to be
+        # routine. Still one transaction, one commit — no chunking, so
+        # bulk_apply's existing all-or-nothing atomicity is unchanged.
+        groups: dict[tuple, list[dict]] = {}
+        group_order: list[tuple] = []
         for row in upserts:
             # Only pass columns actually registered as editable for this table
             # (guards against stale clients AND against list_rows' sidecar fields).
-            col_names = [c for c in row if c in allowed_cols
-                         and c not in GENERATED_COLUMNS.get(table, frozenset())]
+            col_names = tuple(c for c in row if c in allowed_cols
+                               and c not in GENERATED_COLUMNS.get(table, frozenset()))
             if not col_names:
                 continue
-            col_sql     = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)
+            if col_names not in groups:
+                groups[col_names] = []
+                group_order.append(col_names)
+            groups[col_names].append(row)
+
+        for col_names in group_order:
+            group_rows = groups[col_names]
+            col_sql      = sql.SQL(", ").join(sql.Identifier(c) for c in col_names)
             placeholders = sql.SQL(", ").join(sql.Placeholder() * len(col_names))
-            update_set  = sql.SQL(", ").join(
+            update_set   = sql.SQL(", ").join(
                 sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
                 for c in col_names if c not in keys
             )
@@ -882,16 +903,26 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
             # and surface as a raw InvalidTextRepresentation. Text-typed
             # columns keep "" as-is: an empty string is a legitimate value
             # there (e.g. materials.material_description).
-            values = []
-            for c in col_names:
-                v = row[c]
-                if isinstance(v, str) and v.strip() == "":
-                    meta = col_meta_by_name.get(c)
-                    if meta and meta["sql_type"] not in _TEXT_LIKE_SQL_TYPES:
-                        v = None
-                values.append(v)
+            values_list = []
+            for row in group_rows:
+                values = []
+                for c in col_names:
+                    v = row[c]
+                    if isinstance(v, str) and v.strip() == "":
+                        meta = col_meta_by_name.get(c)
+                        if meta and meta["sql_type"] not in _TEXT_LIKE_SQL_TYPES:
+                            v = None
+                    values.append(v)
+                values_list.append(values)
             try:
-                cur.execute(q, values)
+                cur.executemany(q, values_list, returning=True)
+                for _ in values_list:
+                    row_result = cur.fetchone()
+                    if row_result is not None and row_result[0]:
+                        inserted += 1
+                    else:
+                        updated += 1
+                    cur.nextset()
             except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
                 raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
@@ -910,13 +941,21 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                 # mistyped "25" (CheckViolation) or "abc" (InvalidTextRepresentation,
                 # for a non-blank value the coercion above never touches) are
                 # hard failures a planner has to be able to read.
+                #
+                # NOTE (batching trade-off, unverified against real Postgres —
+                # no local instance reachable in this environment; flagged
+                # rather than silently assumed): a NotNullViolation/CheckViolation/
+                # InvalidTextRepresentation now identifies which COLUMN/CONSTRAINT
+                # failed (via _bulk_apply_readable_error's parse of the exception),
+                # same as before, but no longer identifies which ROW within a
+                # multi-row batch caused it — the per-row execute() this replaces
+                # could only ever fail on the one row being executed, so the two
+                # were equivalent before batching. A future improvement could
+                # bisect the batch on failure to re-attribute the row; not done
+                # here since the readable column/constraint name is still the
+                # actionable part of the message.
                 conn.rollback()
                 raise ValueError(_bulk_apply_readable_error(table, exc)) from exc
-            row_result = cur.fetchone()
-            if row_result and row_result[0]:
-                inserted += 1
-            else:
-                updated += 1
 
         # Audit
         cur.execute(
