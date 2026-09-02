@@ -271,8 +271,8 @@ export const Persistence = {
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
       return Promise.all([
-        fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-        fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+        Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+        Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           Store.setMasterData({
@@ -342,8 +342,8 @@ export const Persistence = {
           // Fetch master-data so orderless plants/lines appear in Master Data tabs,
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
-            fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-            fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+            Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+            Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           ]).then(([pData, lData]) => {
             if (pData || lData) {
               Store.setMasterData({
@@ -472,9 +472,9 @@ export const Persistence = {
         // content directly ({"orderFields": {...}}), no wrapper envelope — see
         // master_data.get_system_settings()/GET /system-settings in brain.py.
         Promise.all([
-          fetch(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-          fetch(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-          fetch(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
+          Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
+          Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+          Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
         ]).then(([pData, lData, ssData]) => {
           if (pData || lData) {
             Store.setMasterData({

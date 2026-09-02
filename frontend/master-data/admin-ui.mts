@@ -1003,8 +1003,8 @@ export const Plant = {
       fd.append('file', file);
       if (line) fd.append('machine', line);
       Object.entries(extra).forEach(([k, v]) => fd.append(k, v));
-      return fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName!)}/${encodeURIComponent(fieldKey)}`, {
-        method: 'POST', body: fd, headers: { 'X-User': Session.actor() },
+      return Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName!)}/${encodeURIComponent(fieldKey)}`, {
+        method: 'POST', body: fd,
       }).then(r => r.json());
     };
 
@@ -1065,8 +1065,8 @@ export const Plant = {
     const ok = await Modal.confirm({ title: Util.t('modal.remove_priority_list', { plant: plantName, field: label }), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
     const qs = line ? `?machine=${encodeURIComponent(line)}` : '';
-    fetch(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName)}/${encodeURIComponent(fieldKey)}${qs}`, {
-      method: 'DELETE', headers: { 'X-User': Session.actor() },
+    Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName)}/${encodeURIComponent(fieldKey)}${qs}`, {
+      method: 'DELETE',
     })
       .then(r => r.json())
       .then(body => {
@@ -1091,9 +1091,9 @@ export const Plant = {
       tone: 'warn',
     });
     if (!ok) return;
-    fetch(`${Config.API_BASE}/master-data/resync-order-attributes`, {
+    Util.fetchTraced(`${Config.API_BASE}/master-data/resync-order-attributes`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ plant: plantName }),
     })
       // _okJson, not a bare r.json(): a 403 (not an admin / plant outside the
@@ -1317,9 +1317,9 @@ export const Plant = {
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
       try {
-        const r = await fetch(`${Config.API_BASE}/master-data/plants/bulk`, {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/master-data/plants/bulk`, {
           method:  'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+          headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ upserts: [{ subnetwork: plantRow.subnetwork, plant: plantRow.plant, ...patch }], deletes: [] }),
         });
         if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
@@ -1854,9 +1854,9 @@ export const Plant = {
       _renumberTree(consTree);
       const payload = _serializeTree(consTree);  // full tree, `children` included
       try {
-        const r = await fetch(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
+        const r = await Util.fetchTraced(`${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/constraints`, {
           method:  'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+          headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
         });
         if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
@@ -3066,7 +3066,7 @@ export const MasterData = (() => {
 
     // If source not loaded yet, fetch it.
     if (!sourceState) {
-      fetch(`${API}/master-data/${sourceTable}`).then((r) => r.json()).then((data: MasterDataResponse) => {
+      Util.fetchTraced(`${API}/master-data/${sourceTable}`).then((r) => r.json()).then((data: MasterDataResponse) => {
         _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Set(), added: [] };
         // Rebuild select options.
         while (sel.options.length > 1) sel.remove(1);
@@ -3117,7 +3117,7 @@ export const MasterData = (() => {
     if (plant && _bomComponentOptionsCache[plant]) {
       fill(_bomComponentOptionsCache[plant]);
     } else if (plant) {
-      fetch(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
+      Util.fetchTraced(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
         .then((r) => r.json())
         .then((data: MasterDataResponse<MaterialPlantRow>) => {
           const materials = (data.rows || []).map((r) => r.material_id).sort();
@@ -3330,7 +3330,7 @@ export const MasterData = (() => {
 
     if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
       try {
-        const preview = await fetch(`${API}/master-data/${table}/cascade-preview`, {
+        const preview = await Util.fetchTraced(`${API}/master-data/${table}/cascade-preview`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes: [deletePayload] }),
@@ -3391,7 +3391,11 @@ export const MasterData = (() => {
     // Build upserts from dirty + added.
     const upserts: MasterDataRow[] = [];
     state.dirty.forEach((patch, _key) => { if (!state.deleted.has(_key)) upserts.push(patch); });
-    state.added.forEach((row) => {
+    // Plain for..of (not .forEach) so `return` here genuinely aborts _save() —
+    // a .forEach callback's `return` only skipped that one row and let the save
+    // proceed with the rest, silently persisting everything except the invalid
+    // row(s) instead of rejecting the save outright as the toast wording implies.
+    for (const row of state.added) {
       // Validate that key columns are filled.
       const missing = keys.filter((k) => !row[k]);
       if (missing.length) {
@@ -3399,7 +3403,7 @@ export const MasterData = (() => {
         return;
       }
       upserts.push(row);
-    });
+    }
 
     // Build deletes.
     const deletes: MasterDataRow[] = [];
@@ -3415,7 +3419,7 @@ export const MasterData = (() => {
     // Cascade confirmation for deletes that weren't already confirmed.
     if (deletes.length && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
       try {
-        const preview = await fetch(`${API}/master-data/${table}/cascade-preview`, {
+        const preview = await Util.fetchTraced(`${API}/master-data/${table}/cascade-preview`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
@@ -3455,9 +3459,9 @@ export const MasterData = (() => {
     }
 
     try {
-      const res = await fetch(`${API}/master-data/${table}/bulk`, {
+      const res = await Util.fetchTraced(`${API}/master-data/${table}/bulk`, {
         method:  'POST',
-        headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+        headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts, deletes }),
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -3473,8 +3477,8 @@ export const MasterData = (() => {
 
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
-        fetch(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
-        fetch(`${API}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
+        Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
+        Util.fetchTraced(`${API}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
@@ -3583,9 +3587,9 @@ export const MasterData = (() => {
       Modal.close('md-addcol-modal');
 
       try {
-        await fetch(`${API}/master-data/${table}/columns`, {
+        await Util.fetchTraced(`${API}/master-data/${table}/columns`, {
           method:  'POST',
-          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+          headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
         }).then((r) => {
           if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -3613,9 +3617,8 @@ export const MasterData = (() => {
     if (!confirmed) return;
 
     try {
-      await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
+      await Util.fetchTraced(`${API}/master-data/${table}/columns/${col.column_name}`, {
         method:  'DELETE',
-        headers: { 'x-user-email': Session.actor() },
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json();
@@ -3639,9 +3642,9 @@ export const MasterData = (() => {
       if (!newLabel) return;
       Modal.close('md-renamelabel-modal');
       try {
-        await fetch(`${API}/master-data/${table}/columns/${col.column_name}`, {
+        await Util.fetchTraced(`${API}/master-data/${table}/columns/${col.column_name}`, {
           method:  'PATCH',
-          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+          headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ display_label: newLabel }),
         }).then((r) => {
           if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
@@ -3667,7 +3670,7 @@ export const MasterData = (() => {
     textEl.value = '…';
     Modal.open('md-schema-export-modal');
     try {
-      const data = await fetch(`${API}/master-data/_schema-export`).then((r) => {
+      const data = await Util.fetchTraced(`${API}/master-data/_schema-export`).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
         return r.json() as Promise<{ sql?: string }>;
       });
@@ -3689,7 +3692,7 @@ export const MasterData = (() => {
 
     if (!_lineSyncMachineCache[plant]) {
       try {
-        const data = await fetch(`${API}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
+        const data = await Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
         });
@@ -3717,9 +3720,9 @@ export const MasterData = (() => {
     state.dirty.delete(_rowKey('machine', updatedRow));
 
     try {
-      await fetch(`${API}/master-data/machine/bulk`, {
+      await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
         method:  'POST',
-        headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+        headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
